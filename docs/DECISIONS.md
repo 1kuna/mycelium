@@ -20,12 +20,17 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
 
 - **Orchestrator default (not a maintainer ruling), 2026-11-09 — Measured local admission.**
   Received by the local-runner worker after calibration: admit fulls from
-  measured per-leg CPU/RAM and live worker usage rather than fixed N=1;
+  measured per-leg CPU/RAM and live host capacity rather than fixed N=1;
   reserve all local capacity for explicitly exclusive timing runs. Basis:
   four-core native peak 7.01 GiB and passing Linux/VM peak 10.57 GiB, plus
-  measured workstation headroom. Fleet-worker jobs remain background and
-  their custody is not modified by local gates. This is an implementation
-  default, separate from Zach's MY-37 local-development ruling.
+  measured workstation headroom. Reserve the fleet worker's admitted CPU/RAM
+  allowance in full, even while idle, so later fleet growth is already covered.
+  Cache that allowance from supported host status, bound to worker process
+  identity and the opaque installed-config hash; refresh once on a changed
+  binding and retain the full previous allowance if refresh fails. Fleet-worker
+  jobs remain background and their custody is not modified by local gates.
+  This is an implementation default, separate from Zach's MY-37
+  local-development ruling.
 
 - **Implementation agent default — 2026-11-09 — Device-fault cascade protection and measured recovery (#1142).** A relayed consumer request asks that one faulting job not consume a host's last healthy accelerator of the same backend, and that proven-healthy quarantined devices return automatically. This is not a maintainer ruling. The implementation worker received the relay and applies it generically to every host and project. Queue placement uses attempt-specific fault history and current healthy capacity; worker recovery requires positive vendor evidence and a quiet window derived from observed fault-to-normal latency, local probe gaps and prior recovery evidence. Repeated-teardown escalation retains operator ownership. See [the mechanism and evidence fields](operations.md#accelerator-driver-fault-quarantine). MY-34 governs the adaptive window; no deployment-specific duration or host policy is introduced.
 

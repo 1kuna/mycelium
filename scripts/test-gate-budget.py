@@ -23,6 +23,51 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        mock = patch.object(budget.Path, 'home', return_value=Path(home.name).resolve())
+        mock.start()
+        self.addCleanup(mock.stop)
+
+    def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
+        with tempfile.TemporaryDirectory() as folder:
+            control = budget.Path.home() / '.cache/mycelium-gates/control'
+            control.mkdir(parents=True)
+            group = control / 'local-go-resource-group.custody'
+            group.write_text(json.dumps(dict(admission_protocol=2, resource_group='exclusive')))
+            actual = budget.subprocess.check_output
+            def output(args, **kwargs):
+                return folder if args[0] == 'go' else actual(args, **kwargs)
+            with patch.object(budget.subprocess, 'check_output', side_effect=output):
+                with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
+                    with self.assertRaisesRegex(RuntimeError, 'blocked'):
+                        budget.acquire_full_slot()
+                self.assertFalse(list(Path(folder).glob('*.custody')))
+                fleet = budget.Path.home() / '.local/share/mycelium/worker/state/job-files/job/source'
+                fleet.mkdir(parents=True)
+                with patch.object(budget.Path, 'cwd', return_value=fleet):
+                    slot = budget.acquire_full_slot()
+                    budget.release_full_slot(slot, True)
+                self.assertTrue(group.exists())
+                group.unlink()
+                # Reverse order: native-only/custom-cache work publishes a
+                # host-wide reservation before a resource group can enter.
+                slot = budget.acquire_full_slot()
+                try:
+                    paths = budget.full_custody_paths(slot)
+                    self.assertEqual(len(paths), 2)
+                    self.assertTrue(all(path.exists() for path in paths))
+                    spec = importlib.util.spec_from_file_location('capacity', Path(__file__).with_name('gate-capacity.py'))
+                    capacity = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(capacity)
+                    self.assertTrue(capacity.native_full_custody())
+                    budget.release_full_slot(slot, False)
+                    self.assertTrue(all(path.exists() for path in paths))
+                finally:
+                    budget.release_full_slot(slot, True)
+                self.assertFalse(any(control.glob('local-go-native-full-*.custody')))
+
     def test_host_resource_admission_replaces_legacy_count_only_for_owned_source_and_ancestor(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder).resolve()
@@ -31,10 +76,11 @@ class GateBudgetTests(unittest.TestCase):
             lane = control / 'local-go-slot-3'
             lane.mkdir()
             owner = dict(admission_protocol=2, resource_group='group', run_id='run',
+                         admission_config_sha256='f' * 64,
                          source_root=str(home), pid=os.getpid())
             (lane / 'owner.json').write_text(json.dumps(owner))
             (control / 'local-go-resource-group.custody').write_text(json.dumps(
-                dict(admission_protocol=2, resource_group='group')))
+                dict(admission_protocol=2, resource_group='group', admission_config_sha256='f' * 64)))
             for name in ('local-go-slot', 'local-go-slot-2'):
                 (control / name).mkdir()
                 (control / name / 'owner.json').write_text(json.dumps(

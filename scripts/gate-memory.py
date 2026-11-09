@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from typing import Optional
 
 
@@ -47,6 +48,83 @@ def local_worker_usage() -> Optional[dict]:
         rss_sum_bytes=sum(int(row[2]) * 1024 for row in selected),
         cpu_cores=sum(float(row[3]) / 100 for row in selected),
         accounting='OS process-tree RSS sum and ps averaged CPU; shared pages may repeat')
+
+
+def worker_allowance_from_status(status: dict) -> dict:
+    policy = status['policy']
+    workers = [row['machine'] for row in status['workers']]
+    cores = max([policy.get('cpu_budget_cores') or 0] +
+                [row.get('effective_cpu_cores', 0) for row in workers])
+    budget = policy.get('memory_budget') or {}
+    memory_bytes = max([budget.get('memory_allowance_bytes') or int(budget.get('gib', 0) * 1024 ** 3)] +
+                       [row.get('memory_allowance_bytes', 0) for row in workers])
+    if type(cores) is not int or cores <= 0 or type(memory_bytes) is not int or memory_bytes <= 0:
+        raise ValueError('local fleet worker admitted allowance is unknown')
+    return dict(cpu_cores=cores, memory_bytes=memory_bytes)
+
+
+def local_worker_allowance(control: Path, worker: Optional[dict]) -> dict:
+    """Reserve admitted allowance, not an idle worker's current consumption.
+
+    Caller holds host admission. One supported refresh per changed binding;
+    failure retains the last qualified allowance in full, with no usage credit.
+    Installed configuration is hashed as opaque bytes, never parsed or logged.
+    """
+    cache_path = control / 'worker-allowance.json'
+    if not cache_path.exists():
+        if worker and worker.get('pid'):
+            raise RuntimeError('local worker allowance requires supported host-status qualification')
+        return dict(cpu_cores=0, memory_bytes=0, refresh_status='no_installed_worker')
+    cached = json.loads(cache_path.read_text())
+    status = json.loads(evidence_bytes(cached['evidence']))
+    allowance = worker_allowance_from_status(status)
+    if allowance != {key: cached[key] for key in ('cpu_cores', 'memory_bytes')}:
+        raise ValueError('cached worker allowance does not match supported status evidence')
+    pid = (worker or {}).get('pid')
+    identity = None
+    if pid:
+        result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=,lstart='],
+                                capture_output=True, text=True, check=False)
+        fields = result.stdout.strip().split(None, 1)
+        if result.returncode not in (0, 1) or (fields and len(fields) != 2):
+            raise ValueError('local worker process identity is unknown')
+        identity = fields[1].strip() if fields and not fields[0].startswith('Z') else None
+    config = Path.home() / '.local/share/mycelium/worker/config.json'
+    config_hash = None
+    try:
+        with config.open('rb') as stream:
+            digest = hashlib.sha256()
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+            config_hash = digest.hexdigest()
+    except FileNotFoundError:
+        pass
+    binding = dict(pid=pid, process_identity=identity, installed_config_sha256=config_hash)
+    if binding == cached['binding']:
+        return dict(cached, refresh_status='cached_fully_reserved')
+    if binding == cached.get('failed_refresh_binding'):
+        return dict(cached, refresh_status='refresh_failed_fully_reserved', observed_binding=binding)
+    try:
+        result = subprocess.run(['myce', 'host', 'status', cached['host']],
+            capture_output=True, env={k: v for k, v in os.environ.items() if not k.startswith('MYCE_')})
+        if result.returncode != 0:
+            raise ValueError('supported worker allowance refresh failed')
+        observed = json.loads(result.stdout)
+        if observed['host'] != cached['host']:
+            raise ValueError('worker allowance host identity changed')
+        allowance = worker_allowance_from_status(observed)
+        evidence = control / ('worker-allowance-status-' + uuid.uuid4().hex + '.json')
+        evidence.write_bytes(result.stdout)
+        cached = dict(schema=1, host=cached['host'], **allowance, binding=binding,
+            evidence=dict(path=str(evidence), sha256=hashlib.sha256(result.stdout).hexdigest()))
+        refresh_status = 'refreshed_fully_reserved'
+    except (OSError, ValueError, KeyError, TypeError):
+        cached['failed_refresh_binding'] = binding
+        refresh_status = 'refresh_failed_fully_reserved'
+    pending = cache_path.with_suffix('.pending')
+    pending.write_text(json.dumps(cached) + '\n')
+    pending.replace(cache_path)
+    return dict(cached, refresh_status=refresh_status, observed_binding=binding)
 
 
 def snapshot():

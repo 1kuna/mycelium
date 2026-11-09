@@ -130,8 +130,12 @@ preserves unknown/abandoned ownership. Qualified hosts admit full and quick runs
 from their measured per-leg CPU/RAM and live capacity, rather than a fixed full
 count. The four-core qualification observed native peak 7.01 GiB and Linux/VM
 peak 10.57 GiB. With the measured 5.43 GiB host-memory variation reserve, single-run
-entry requirements are 12.45 GiB native and 16.01 GiB Linux. These observations
-are host qualification, not constants for other installations.
+gate-memory requirements are 12.45 GiB native and 16.01 GiB Linux. These observations
+are host qualification, not constants for other installations. Admission adds
+the installed fleet worker's full admitted RAM allowance once, even when idle.
+With an 8 GiB worker allowance, first-entry requirements become 20.45 GiB native
+and 24.01 GiB Linux. This deliberately reserves future fleet growth as well as
+the gate; live pressure and swap guards remain active throughout execution.
 Admission reserves each active run's entire measured peak on top of the new
 run's peak and shared headroom. This conservatively counts current RSS again
 to cover later growth without assuming shared pages are reclaimable. CPU budgets
@@ -140,12 +144,21 @@ Requests above the qualified CPU budget require a new measurement.
 Unqualified hosts retain two heavy lanes and one full. Frozen older helpers see
 both old lane directories reserved while the measured allocator is active;
 new helpers wait for old/unknown execution owners to finish. Protocol guards
-leave only after every admitted run has affirmative cleanup.
-The installed local fleet worker can coexist with local gates. Admission reads
-its process-tree CPU/RSS from launchd and the OS, without queue access or
-credentials, and counts live worker CPU alongside the declared local lane
-budgets and the host-qualified workstation reserve. Available RAM already
-reflects worker residency; do not subtract its RSS a second time. Installed-worker
+leave only after every admitted run has affirmative cleanup. Active resource
+custody binds the normalized capacity configuration and evidence digest;
+configuration changes refuse new admission until that group has cleaned up.
+The installed local fleet worker can coexist with local gates. Admission records
+its process-tree CPU/RSS from launchd and the OS for observation, but reserves
+its admitted CPU and RAM allowance rather than its current use. Supported
+`myce host status` supplies a cached allowance bound to worker PID/start identity
+and the installed configuration's opaque SHA-256; configuration contents and
+credentials are never parsed or printed. A changed binding triggers one supported
+refresh. A failed refresh retains the previous allowance in full, with no idle
+usage credit. Each receipt includes the allowance, evidence digest, binding and
+refresh outcome. Ordinary unchanged admission makes no queue request. The CPU
+ledger adds admitted worker cores, declared local lane budgets and the
+host-qualified workstation reserve. The memory ledger adds the full admitted
+worker budget once, without separately subtracting observed worker RSS. Installed-worker
 fleet custody is separate from local gate lanes and is never modified by local
 admission. Unknown/local native full custody remains binding; all custody still
 blocks idle cache eviction. Ordinary admission does not require an idle host.
@@ -155,15 +168,16 @@ the baseline; do not wait for the fleet worker to become idle.
 Ordinary fulls wait in FIFO order by default and print their queue position;
 no polling or relay is needed. Release and calibration fulls take priority over
 ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
-removed only after OS process identity proves it has exited. Execution slots
+removed only after OS process identity proves it has exited or is a zombie. Execution slots
 and unknown fixture custody are never removed by that queue cleanup. There is
 no queue timeout; disk, memory-pressure and measured-memory entry refusals remain
 real stops. A reserved calibration full can wait for an identified comparison
 batch to exit without entering gaps between that batch's runs.
 For comparable timings, `./scripts/gate.sh full --exclusive` (or
 `gate-local.py full --exclusive`) drains all local gate work and reserves all
-local capacity until verified cleanup. An exclusive waiter at the front also
-blocks new quick work, so it can drain. Permanent fleet jobs and other projects
+local capacity until verified cleanup. A queued exclusive waiter also blocks
+new ordinary quick work, even behind an older full, so it can drain. Higher
+priority release/calibration work retains priority. Permanent fleet jobs and other projects
 remain measured background; exclusive is not a promise of an idle workstation.
 Release waiters take the next free lane through `GATE_PRIORITY=release` for a
 gate, or the supported release command wrapper (use an absolute output path
@@ -217,7 +231,11 @@ product/test sources; both legs receive those identical helper bytes.
 Host-admitted native runs verify their canonical lane, source identity and
 admitting ancestor before replacing the legacy suite-count lock with measured
 resource custody. The admission identity is removed from fixture environments.
-Native-only legacy/fleet Mac gates retain the following custody mechanism.
+Native-only local fulls publish a host-wide custody reservation under the same
+admission lock, including when using a custom build cache. They cannot enter an
+active measured resource group; their reservation also blocks group creation.
+Fleet jobs keep their separate custody and remain background. Native-only
+legacy/fleet Mac gates retain the following custody mechanism.
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks
 for its entire lifetime, independent of package commands or test expressions. It also
 accounts for older standalone full race commands before entering a slot. The
@@ -571,13 +589,17 @@ separately from product/test sources. Compatibility predecessor archives are
 created from the actual Git root and checked for their commit and module/core
 contents before either full leg. Failed source snapshots remain for diagnosis;
 confirm fixture exit before removal. Success removes only run source/scratch.
+Explicit refs resolve once to a commit SHA before archiving. Working-tree runs
+verify captured bytes, executable modes and HEAD before testing, and mark any
+difference from the pinned commit as dirty. Inherited `MYCE_*` authority is
+removed before the first admission or measurement subprocess.
 
 Each run prints its private `.reports/local-gates/UUID` receipt directory. Retain
 `manifest.json`, `source-identity.json`, and nonce-bound `native-cleanup.json`,
 `linux-cleanup.json`, `overall-cleanup.json`. The append-only
 `.reports/gate-local.jsonl` schema 1 has a common `run_id` and `phase` of `host`,
 `native` or `linux`; rows identify `source_sha`, `source_dirty`,
-`source_archive_sha256` and `instrumentation_sha256`. A clean commit plus matching
+`source_tree_sha256`, `source_archive_sha256` and `instrumentation_sha256`. A clean commit plus matching
 archive/instrumentation digests identifies exact-head proof; HEAD alone does not.
 Rows record wall/user/system seconds, sampled RSS sum (shared pages may count
 twice), disk/cache deltas, host pressure/swap observations, all VZ process RSS and

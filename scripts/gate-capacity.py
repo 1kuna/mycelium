@@ -2,9 +2,9 @@
 """Local heavy-work admission shared across checkouts and release builds."""
 import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import json
-import math
 import os
 from pathlib import Path
 import shutil
@@ -20,14 +20,20 @@ _spec = importlib.util.spec_from_file_location('gate_memory', Path(__file__).wit
 _memory = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_memory)
 local_worker_usage = _memory.local_worker_usage
+local_worker_allowance = _memory.local_worker_allowance
 
 
 def process_identity(pid):
-    result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart='],
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=,lstart='],
                             capture_output=True, text=True, timeout=5)
     if result.returncode not in (0, 1):
         raise RuntimeError('waiting process identity is unknown')
-    return result.stdout.strip() or None
+    fields = result.stdout.strip().split(None, 1)
+    if not fields or fields[0].startswith('Z'):
+        return None  # Waiting tickets have no execution custody to retain.
+    if len(fields) != 2:
+        raise RuntimeError('waiting process identity is incomplete')
+    return fields[1].strip()
 
 
 def publish_waiting(path, text):
@@ -144,12 +150,29 @@ def resource_qualification(config):
     return qualification
 
 
+def admission_config_digest(config):
+    """Bind behavioral limits and their evidence; ignore descriptive metadata."""
+    measured = config.get('memory_measurement', {})
+    normalized = dict(resource_admission=config.get('resource_admission'),
+        memory_measurement={key: measured.get(key) for key in (
+            'native_peak_bytes', 'linux_peak_bytes', 'linux_provisional_bytes',
+            'vm_peak_bytes', 'headroom_bytes', 'evidence')},
+        workstation_cpu_reserve_cores=config.get('workstation_cpu_reserve_cores', 0),
+        worker_allowance=config.get('worker_allowance'),
+        swap_baseline=config.get('swap_baseline'))
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True,
+        separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
 def native_full_custody(*, include_fleet=False):
     """Local custody binds local admission; installed-worker custody is separate.
 
     Never alter either kind. Cache eviction asks for both kinds, since custody
     scope must not silently shrink the shared-cache idle boundary.
     """
+    control = Path.home() / '.cache/mycelium-gates/control'
+    if any(control.glob('local-go-native-full-*.custody')):
+        return True  # Host-wide reservations include custom-cache native gates.
     caches = {Path.home() / 'Library/Caches/mycelium/gates/go-build'}
     caches.add(Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip()))
     worker_files = Path.home() / '.local/share/mycelium/worker/state/job-files'
@@ -291,6 +314,15 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     checked_config = config
                 if not resources and (directory / 'local-go-resource-group.custody').exists():
                     raise RuntimeError('resource qualification removed during active custody; retained')
+                worker = local_worker_usage()
+                worker_allowance = local_worker_allowance(directory, worker)
+                effective = dict(config, worker_allowance={key: worker_allowance[key]
+                    for key in ('cpu_cores', 'memory_bytes')})
+                config_digest = admission_config_digest(effective)
+                group_path = directory / 'local-go-resource-group.custody'
+                if group_path.exists() and json.loads(group_path.read_text()).get(
+                        'admission_config_sha256') != config_digest:
+                    raise RuntimeError('capacity configuration changed during active custody; retained')
                 if resources and cores > resources['measured_cores']:
                     raise RuntimeError('requested cores exceed the measured local gate budget')
                 if exclusive and not resources:
@@ -312,6 +344,12 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      rank[priority] >= rank[front['priority']])
                 if exclusive_waiting and queue_ticket != queue[0]:
                     queue_first = False
+                if queue_ticket is None and any(
+                        row.get('exclusive') and rank[priority] >= rank[row['priority']]
+                        for row in (json.loads(path.read_text()) for path in queue)):
+                    # An earlier full can precede an exclusive ticket, but
+                    # newly arriving quick work must not keep its drain busy.
+                    queue_first = False
                 batch_done = not after_identity or process_identity(after_pid) != after_identity
                 full_marker = None
                 if not resources and mode == 'full' and not legacy and not native_full_custody():
@@ -320,13 +358,13 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if not candidate.exists():
                             full_marker = candidate
                             break
-                needed_memory = memory_requirement(config, platform)
+                gate_memory = memory_requirement(config, platform)
+                needed_memory = gate_memory + worker_allowance['memory_bytes']
                 memory_ok = available_memory() >= needed_memory
                 if not memory_ok:
                     raise RuntimeError(f'available memory below {needed_memory / GIB:.2f} GiB entry requirement; no work started')
                 lanes = legacy + execution_lanes(directory)
                 occupied = len(lanes)
-                worker = local_worker_usage()
                 reserved_cores = 0
                 reserved_memory, vm_cores, vm_memory = 0, 0, 0
                 owners = []
@@ -347,7 +385,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if row.get('platform') != 'native':
                             vm_cores += demand
                             vm_memory += peak
-                worker_cores = math.ceil((worker or {}).get('cpu_cores', 0))
+                worker_cores = worker_allowance['cpu_cores']
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
                 if reserve < 0:
                     raise ValueError('workstation CPU reserve must not be negative')
@@ -355,7 +393,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 group, resource_ok = None, True
                 if resources:
                     headroom = config['memory_measurement']['headroom_bytes']
-                    peak = needed_memory - headroom
+                    peak = gate_memory - headroom
                     group_path = directory / 'local-go-resource-group.custody'
                     existing_group = json.loads(group_path.read_text()) if group_path.exists() else {}
                     expected_fulls = {directory / ('local-go-full-' + row['run_id'] + '.custody'): row
@@ -382,7 +420,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if group_path.exists():
                             group = json.loads(group_path.read_text())
                         else:
-                            group = dict(admission_protocol=2, resource_group=uuid.uuid4().hex)
+                            group = dict(admission_protocol=2, resource_group=uuid.uuid4().hex,
+                                         admission_config_sha256=config_digest)
                             group_path.write_text(json.dumps(group) + '\n')
                             for name in ('local-go-slot', 'local-go-slot-2'):
                                 guard = directory / name
@@ -397,13 +436,17 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
                                      mode=mode, priority=priority, cores=cores,
-                                     local_worker_usage_at_entry=worker)
+                                     local_worker_usage_at_entry=worker,
+                                     worker_allowance_at_entry=worker_allowance,
+                                     workstation_cpu_reserve_cores=reserve)
                         if resources:
                             owner.update(admission_protocol=2, resource_group=group['resource_group'],
+                                         admission_config_sha256=config_digest,
                                          platform=platform, peak_bytes=peak, exclusive=exclusive,
                                          source_root=str(source_root.resolve()) if source_root else None)
                             if mode == 'full':
                                 full_marker = directory / ('local-go-full-' + owner['run_id'] + '.custody')
+                        owner = json.loads(json.dumps(owner))  # Freeze observation dictionaries too.
                         (slot / 'owner.json').write_text(json.dumps(owner) + '\n')
                         if full_marker:
                             full_marker.write_text(json.dumps(owner) + '\n')

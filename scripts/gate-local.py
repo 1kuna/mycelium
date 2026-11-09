@@ -46,6 +46,11 @@ def execute(path):
         digest.update(helper.encode() + b'\0' + data)
         (source / 'scripts' / helper).write_bytes(data)
     identity['instrumentation_sha256'] = digest.hexdigest()
+    owner = manifest.get('capacity_owner', {})
+    identity['admission'] = dict(cores=manifest['cores'], exclusive=owner.get('exclusive', False),
+        configuration_sha256=owner.get('admission_config_sha256'),
+        worker_allowance=owner.get('worker_allowance_at_entry'),
+        workstation_cpu_reserve_cores=owner.get('workstation_cpu_reserve_cores'))
     runtime = folder / 'runtime.tar'
     sources.runtime_archive(archive, runtime, source, HELPERS)
     info = folder / 'source-identity.json'
@@ -70,7 +75,7 @@ def execute(path):
         verify = folder / 'verify.tar'
         checked = sources.freeze(repo, verify, manifest.get('ref'))
         verify.unlink()
-        if checked != {k: v for k, v in identity.items() if k != 'instrumentation_sha256'}:
+        if checked != {k: v for k, v in identity.items() if k not in ('instrumentation_sha256', 'admission')}:
             raise RuntimeError('source changed during quick selection; no test started')
     started_receipts = []
     current = None
@@ -151,6 +156,11 @@ def execute(path):
 
 
 def main():
+    # Admission itself invokes OS/Git tools. Strip inherited fleet authority
+    # before even those first subprocesses, not just before the test payload.
+    for key in list(os.environ):
+        if key.startswith('MYCE_'):
+            del os.environ[key]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', nargs='?', choices=('quick', 'full'), default='quick')
     parser.add_argument('base', nargs='?')

@@ -2,6 +2,7 @@
 """Supervise gate custody and stop fixtures before removing working files."""
 import os
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -156,100 +157,134 @@ def process_start(pid):
     return None
 
 
+def full_custody_paths(slot):
+    host = getattr(slot, 'host_custody', None)
+    return ([host] if host else []) + [Path(slot.name).with_suffix('.custody')]
+
+
 def write_full_custody(slot, marker=None, scratch=None):
     record = dict(holder_pid=os.getpid(), holder_start=process_start(os.getpid()), phase='reserved')
     if not record['holder_start']:
         raise RuntimeError('cannot establish full-suite holder identity')
     if marker is not None:
         record.update(marker=marker, scratch=scratch, phase='running')
-    # Publish all-or-nothing, including the reservation before scratch exists.
-    # A crash before this rename cannot have started any fixtures; a crash after
-    # it always leaves either the reservation or the complete run identity.
-    path = Path(slot.name).with_suffix('.custody')
-    staging = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
-    try:
-        staging.write_text(json.dumps(record) + '\n')
-        staging.replace(path)
-    finally:
-        staging.unlink(missing_ok=True)
+    # Each record publishes atomically, host first, before fixtures can start.
+    # A partial publication leaves conservative host custody; complete records
+    # retain either the reservation or the run identity after supervisor death.
+    for path in full_custody_paths(slot):
+        staging = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            staging.write_text(json.dumps(record) + '\n')
+            staging.replace(path)
+        finally:
+            staging.unlink(missing_ok=True)
+    slot.custody_record = record
+
+
+def full_custody_idle(record):
+    if 'holder_pid' in record:
+        pid, birth = record['holder_pid'], record['holder_start']
+        if not isinstance(pid, int) or pid <= 0 or not isinstance(birth, str) or not birth:
+            return False
+        if (record.get('phase') not in ('reserved', 'running')
+                or (record['phase'] == 'running' and 'marker' not in record)
+                or (record['phase'] == 'reserved' and ('marker' in record or 'scratch' in record))):
+            return False
+        if process_start(pid) == birth:
+            return False
+    elif 'marker' not in record:
+        return False  # Old incomplete/unknown records need owner recovery.
+    if 'marker' in record:
+        marker, scratch = record['marker'], record['scratch']
+        if (not isinstance(marker, str) or not re.fullmatch(r'GATE_RUN_ID=[0-9a-f]{32}', marker)
+                or not isinstance(scratch, str) or not os.path.isabs(scratch)
+                or Path(scratch).name in ('', '.', '..') or not Path(scratch).name.startswith('run.')):
+            return False
+        # A cancelled job or dead supervisor may leave detached fixtures.
+        # Inventory only: reconciliation never signals another run or
+        # removes its scratch. Legacy records use the same exit proof.
+        if owned_processes(marker, scratch, {}, inspect_handles=True):
+            return False
+    return True
 
 
 def reconcile_full_custody(slot):
-    """Reclaim an unlocked abandoned record only after fixture-exit proof."""
-    path = Path(slot.name).with_suffix('.custody')
-    if not path.exists():
-        return True
+    """Reclaim both records only after proving every recorded fixture exited."""
     try:
-        record = json.loads(path.read_text())
-        if 'holder_pid' in record:
-            pid, birth = record['holder_pid'], record['holder_start']
-            if not isinstance(pid, int) or pid <= 0 or not isinstance(birth, str) or not birth:
-                return False
-            if (record.get('phase') not in ('reserved', 'running')
-                    or (record['phase'] == 'running' and 'marker' not in record)
-                    or (record['phase'] == 'reserved' and ('marker' in record or 'scratch' in record))):
-                return False
-            if process_start(pid) == birth:
-                return False
-        elif 'marker' not in record:
-            return False  # Old incomplete/unknown records need owner recovery.
-        if 'marker' in record:
-            marker, scratch = record['marker'], record['scratch']
-            if (not isinstance(marker, str) or not re.fullmatch(r'GATE_RUN_ID=[0-9a-f]{32}', marker)
-                    or not isinstance(scratch, str) or not os.path.isabs(scratch)
-                    or Path(scratch).name in ('', '.', '..') or not Path(scratch).name.startswith('run.')):
-                return False
-            # A cancelled job or dead supervisor may leave detached fixtures.
-            # Inventory only: reconciliation never signals another run or
-            # removes its scratch. Legacy records use the same exit proof.
-            if owned_processes(marker, scratch, {}, inspect_handles=True):
-                return False
-        # The caller holds both admission and slot locks. Retain the old record
-        # as evidence; age never grants admission or proves fixture exit.
-        path.rename(path.with_name(path.name + '.reconciled-' + uuid.uuid4().hex))
-        print('gate: reconciled abandoned full-suite custody', flush=True)
+        paths = [path for path in full_custody_paths(slot) if path.exists()]
+        if not all(full_custody_idle(json.loads(path.read_text())) for path in paths):
+            return False
+        # The caller holds host/cache admission and the cache-slot lock. Keep
+        # both old records as evidence; age alone never releases custody.
+        for path in paths:
+            path.rename(path.with_name(path.name + '.reconciled-' + uuid.uuid4().hex))
+        if paths:
+            print('gate: reconciled abandoned full-suite custody', flush=True)
         return True
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False  # Unknown ownership/inventory keeps the slot occupied.
 
 
+def try_full_slot(cache, control):
+    # Serialize the availability snapshot. Slot numbers do not encode how
+    # many suites are active: slot 1 can remain held after slot 0 exits.
+    with (cache / 'mycelium-full-gate-admission.lock').open('a') as admission:
+        fcntl.flock(admission, fcntl.LOCK_EX)
+        processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+        legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
+                     for line in processes.splitlines())
+        available = []
+        try:
+            # Two full suites is the repository's observed Mac safety
+            # boundary, independent of package count and CPU defaults.
+            for index in range(2):
+                handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
+                if control:
+                    key = hashlib.sha256(str(Path(handle.name).resolve()).encode()).hexdigest()
+                    handle.host_custody = control / ('local-go-native-full-' + key + '.custody')
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if not reconcile_full_custody(handle):
+                        handle.close()
+                    else:
+                        available.append(handle)
+                except BlockingIOError:
+                    handle.close()
+            occupied = 2 - len(available)
+            if available and occupied + legacy < 2:
+                handle = available[0]
+                # Persist occupancy before starting work. A supervisor exit
+                # releases flock even when its fixtures have not exited.
+                write_full_custody(handle)
+                return available.pop(0)
+        finally:
+            for handle in available:
+                handle.close()
+    return None
+
+
 def acquire_full_slot():
-    """Hold a cross-checkout slot for the whole full gate, not each package."""
+    """Legacy native fulls share host admission; fleet jobs remain background."""
     cache = Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip())
     cache.mkdir(parents=True, exist_ok=True)
+    worker_files = (Path.home() / '.local/share/mycelium/worker/state/job-files').resolve()
+    fleet = Path.cwd().resolve().is_relative_to(worker_files)
+    control = Path.home() / '.cache/mycelium-gates/control'
+    if not fleet:
+        control.mkdir(parents=True, exist_ok=True)
     announced = False
     while True:
-        # Serialize the availability snapshot. Slot numbers do not encode how
-        # many suites are active: slot 1 can remain held after slot 0 exits.
-        with (cache / 'mycelium-full-gate-admission.lock').open('a') as admission:
-            fcntl.flock(admission, fcntl.LOCK_EX)
-            processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
-            legacy = sum(bool(re.search(r'\s(?:\S*/)?go test .*?-race', line)) and '-run' not in line
-                         for line in processes.splitlines())
-            available = []
-            try:
-                # Two full suites is the repository's observed Mac safety
-                # boundary, independent of package count and CPU defaults.
-                for index in range(2):
-                    handle = (cache / f'mycelium-full-gate-{index}.lock').open('a')
-                    try:
-                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        if not reconcile_full_custody(handle):
-                            handle.close()
-                        else:
-                            available.append(handle)
-                    except BlockingIOError:
-                        handle.close()
-                occupied = 2 - len(available)
-                if available and occupied + legacy < 2:
-                    handle = available[0]
-                    # Persist occupancy before starting work. A supervisor exit
-                    # releases flock even when its fixtures have not exited.
-                    write_full_custody(handle)
-                    return available.pop(0)
-            finally:
-                for handle in available:
-                    handle.close()
+        if fleet:
+            slot = try_full_slot(cache, None)
+        else:
+            # Same lock/order as gate-capacity: a resource group cannot start
+            # between the group check and publication of native reservation.
+            with (control / 'local-go-admission.lock').open('a') as admission:
+                fcntl.flock(admission, fcntl.LOCK_EX)
+                slot = (None if (control / 'local-go-resource-group.custody').exists()
+                        else try_full_slot(cache, control))
+        if slot is not None:
+            return slot
         if not announced:
             print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
             announced = True
@@ -258,7 +293,13 @@ def acquire_full_slot():
 
 def release_full_slot(slot, stopped):
     if stopped:
-        Path(slot.name).with_suffix('.custody').unlink()
+        paths = full_custody_paths(slot)
+        expected = getattr(slot, 'custody_record', None)
+        if expected is not None and any(json.loads(path.read_text()) != expected for path in paths):
+            raise RuntimeError('native full custody changed; retained')
+        # Removing cache custody first leaves host custody binding until last.
+        for path in reversed(paths):
+            path.unlink()
     else:
         print('gate: full-suite custody unconfirmed; admission slot retained', file=sys.stderr)
     slot.close()
@@ -278,7 +319,10 @@ def local_resource_admission():
     if (lane.parent != control or not lane.name.startswith('local-go-slot-') or
             row.get('admission_protocol') != 2 or
             group.get('admission_protocol') != 2 or
+            not isinstance(group.get('admission_config_sha256'), str) or
+            len(group['admission_config_sha256']) != 64 or
             row.get('resource_group') != group.get('resource_group') or
+            row.get('admission_config_sha256') != group.get('admission_config_sha256') or
             row.get('run_id') != os.environ.get('GATE_LOCAL_SLOT_ID') or
             row.get('source_root') != str(Path.cwd().resolve()) or
             any(json.loads(p.read_text()) != expected_guard for p in guards)):

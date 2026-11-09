@@ -52,7 +52,8 @@ def qualified_config(root):
 class LocalGateTests(unittest.TestCase):
     def setUp(self):
         for name, value in [('legacy_directories', []), ('native_full_custody', False),
-                            ('check_pressure', None), ('local_worker_usage', None)]:
+                            ('check_pressure', None), ('local_worker_usage', None),
+                            ('local_worker_allowance', dict(cpu_cores=0, memory_bytes=0))]:
             mock = patch.object(capacity, name, return_value=value)
             mock.start()
             self.addCleanup(mock.stop)
@@ -161,6 +162,7 @@ class LocalGateTests(unittest.TestCase):
 p,folder=sys.argv[1:];s=importlib.util.spec_from_file_location('c',p);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 r=pathlib.Path(folder);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.check_pressure=lambda:None;c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
+c.local_worker_allowance=lambda *_:dict(cpu_cores=0,memory_bytes=0)
 def stop(*_): raise SystemExit(143)
 signal.signal(signal.SIGTERM,stop)
 slot=c.acquire(r,mode='full',exclusive=True,wait=True)
@@ -215,6 +217,78 @@ finally: slot.release()
             with self.assertRaisesRegex(ValueError, 'digest changed'):
                 capacity.resource_qualification(config)
 
+    def test_active_group_binds_admission_configuration_until_verified_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=15 * capacity.GIB)):
+                first = capacity.acquire(root, mode='full')
+                original = json.dumps(config)
+                try:
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='full')
+                    config['memory_measurement']['headroom_bytes'] = 1
+                    (root / 'gate-capacity.json').write_text(json.dumps(config))
+                    with self.assertRaisesRegex(RuntimeError, 'configuration changed'):
+                        capacity.acquire(root, mode='full')
+                    self.assertTrue(first.directory.exists())
+                    first.release(stopped=False)
+                    with self.assertRaisesRegex(RuntimeError, 'configuration changed'):
+                        capacity.acquire(root)
+                finally:
+                    (root / 'gate-capacity.json').write_text(original)
+                    first.release()
+                config['memory_measurement']['headroom_bytes'] = 1
+                (root / 'gate-capacity.json').write_text(json.dumps(config))
+                replacement = capacity.acquire(root, mode='full')
+                replacement.release()
+
+    def test_queued_exclusive_behind_older_full_still_drains_new_quick_work(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            qualified_config(root)
+            record = dict(pid=os.getpid(), process_identity=capacity.process_identity(os.getpid()),
+                          priority='normal', sequence=1, exclusive=False)
+            older = root / 'local-go-wait-older.json'
+            older.write_text(json.dumps(record))
+            exclusive = root / 'local-go-wait-exclusive.json'
+            exclusive.write_text(json.dumps(dict(record, sequence=2, exclusive=True)))
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                self.assertEqual(capacity.full_waiters(root), [older, exclusive])
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root)
+                release = capacity.acquire(root, priority='release')
+                release.release()
+                self.assertTrue(older.exists())
+                self.assertTrue(exclusive.exists())
+
+    def test_zombie_waiter_is_dead_but_execution_custody_remains(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(.2)'])
+            try:
+                identity = subprocess.check_output(['ps', '-p', str(child.pid), '-o', 'lstart='], text=True).strip()
+                deadline = time.monotonic() + 5
+                while True:
+                    state = subprocess.check_output(['ps', '-p', str(child.pid), '-o', 'stat='], text=True).strip()
+                    if state.startswith('Z'): break
+                    if time.monotonic() > deadline: self.fail('own waiter did not become zombie')
+                    time.sleep(.01)
+                self.assertIsNone(child.returncode)  # Deliberately not reaped yet.
+                record = dict(pid=child.pid, process_identity=identity, priority='release', sequence=1)
+                ticket = root / 'local-go-wait-zombie.json'
+                ticket.write_text(json.dumps(record))
+                reservation = root / 'local-go-release-wait-zombie'
+                reservation.write_text(json.dumps(record))
+                custody = root / 'local-go-full-unknown.custody'
+                custody.write_text(json.dumps(record))
+                self.assertEqual(capacity.full_waiters(root), [])
+                self.assertFalse(capacity.priority_waiting(root, 'release'))
+                self.assertTrue(custody.exists())
+            finally: child.wait(timeout=5)
+
     def test_release_waiter_gets_next_lane_before_normal_work(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -261,6 +335,7 @@ s=importlib.util.spec_from_file_location('cap',p);m=importlib.util.module_from_s
 r=pathlib.Path(folder)
 m.root=lambda _:r;m.legacy_directories=lambda _:[];m.native_full_custody=lambda:False
 m.available_memory=lambda:64*m.GIB;m.check_pressure=lambda:None
+m.local_worker_allowance=lambda *_:dict(cpu_cores=0,memory_bytes=0)
 slot=m.acquire(r,mode='full',wait=True)
 with (r/'order').open('a') as out:out.write(label+'\\n')
 slot.release()
@@ -303,6 +378,7 @@ s=importlib.util.spec_from_file_location('local',p);m=importlib.util.module_from
 r=pathlib.Path(folder);c=m.capacity
 c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
+c.local_worker_allowance=lambda *_:dict(cpu_cores=0,memory_bytes=0)
 sys.argv=[p,'full','--platform','native','--repo',str(r)]
 sys.exit(m.main())
 """
@@ -386,6 +462,62 @@ sys.exit(m.main())
                 with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                     capacity.acquire(b, mode='full')
                 first.release()
+
+    def test_source_identity_pins_moving_refs_and_verifies_clean_snapshot_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            repo = root / 'repo'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            product = repo / 'product.txt'
+            def commit(data):
+                product.write_text(data)
+                subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture', '-c',
+                    'user.email=fixture@example.invalid', 'commit', '-qm', data], check=True)
+                return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+            old = commit('old')
+            new = commit('new')
+            self.assertFalse(local.sources.freeze(repo, root / 'clean.tar')['source_dirty'])
+            product.chmod(0o755)
+            self.assertTrue(local.sources.freeze(repo, root / 'executable.tar')['source_dirty'])
+            product.chmod(0o644)
+            subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/heads/moving', old], check=True)
+            original_run = subprocess.run
+            def move_after_archive(args, **kwargs):
+                result = original_run(args, **kwargs)
+                if 'archive' in args:
+                    original_run(['git', '-C', str(repo), 'update-ref', 'refs/heads/moving', new], check=True)
+                return result
+            archive = root / 'moving.tar'
+            with patch.object(local.sources.subprocess, 'run', side_effect=move_after_archive):
+                identity = local.sources.freeze(repo, archive, 'moving')
+            self.assertEqual(identity['source_sha'], old)
+            with tarfile.open(archive) as tar:
+                self.assertEqual(tar.extractfile('product.txt').read(), b'old')
+            original_output = subprocess.check_output
+            reads = 0
+            def edit_after_names(args, **kwargs):
+                nonlocal reads
+                result = original_output(args, **kwargs)
+                if 'ls-files' in args and '--cached' in args:
+                    reads += 1
+                    product.write_text('edit after clean check')
+                return result
+            with patch.object(local.sources.subprocess, 'check_output', side_effect=edit_after_names):
+                identity = local.sources.freeze(repo, root / 'dirty.tar')
+            self.assertTrue(identity['source_dirty'])
+            self.assertNotEqual(reads, 0)
+            reads = 0
+            def edit_during_verification(args, **kwargs):
+                nonlocal reads
+                result = original_output(args, **kwargs)
+                if 'ls-files' in args and '--cached' in args:
+                    reads += 1
+                    if reads == 2: product.write_text('intervening edit')
+                return result
+            with patch.object(local.sources.subprocess, 'check_output', side_effect=edit_during_verification):
+                with self.assertRaisesRegex(RuntimeError, 'source changed'):
+                    local.sources.freeze(repo, root / 'unstable.tar')
 
     def test_source_archive_identifies_dirty_bytes_and_freezes_both_legs(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -677,6 +809,7 @@ sys.exit(m.main())
             slot.owner = {}
             output = root / 'release-binary'
             def supervised(command, **kwargs):
+                self.assertFalse('MYCE_TOKEN' in kwargs['env'], 'gate inherited forbidden authority variable')
                 manifest_path = Path(command[-1])
                 manifest = json.loads(manifest_path.read_text())
                 self.assertEqual(manifest['command'], ['go', 'build', '-o', str(output)])
@@ -688,7 +821,9 @@ sys.exit(m.main())
                 return child
             with (patch.object(sys, 'argv', ['gate-local.py', '--repo', str(root), '--priority',
                     'release', '--command', 'go', 'build', '-o', str(output)]),
-                  patch.object(local.capacity, 'acquire', return_value=slot) as admission,
+                  patch.dict(os.environ, MYCE_TOKEN='nonsecret-fixture'),
+                  patch.object(local.capacity, 'acquire', side_effect=lambda *a, **kw:
+                      (self.assertFalse('MYCE_TOKEN' in os.environ, 'admission inherited forbidden authority variable'), slot)[1]) as admission,
                   patch.object(local.capacity, 'root', return_value=root / 'control'),
                   patch.object(local.capacity, 'legacy_directories', return_value=[]),
                   patch.object(local.capacity, 'native_full_custody', return_value=False),
@@ -768,17 +903,25 @@ sys.exit(m.main())
     def test_local_fleet_worker_usage_shares_capacity_without_requiring_idle(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / 'gate-capacity.json').write_text(json.dumps(dict(workstation_cpu_reserve_cores=6)))
-            worker = dict(pid=661, cpu_cores=8, rss_sum_bytes=8 * capacity.GIB)
+            qualified_config(root)
+            worker = dict(pid=661, cpu_cores=0, rss_sum_bytes=capacity.GIB)
+            allowance = dict(cpu_cores=8, memory_bytes=8 * capacity.GIB)
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
-                  patch.object(capacity, 'local_worker_usage', return_value=worker)):
+                  patch.object(capacity, 'local_worker_usage', return_value=worker),
+                  patch.object(capacity, 'local_worker_allowance', return_value=allowance)):
                 slot = capacity.acquire(root, mode='full', cores=4)
                 self.assertEqual(slot.owner['local_worker_usage_at_entry'], worker)
-                slot.release()
-                worker['cpu_cores'] = 9
-                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                    capacity.acquire(root, mode='full', cores=4)
+                self.assertEqual(slot.owner['worker_allowance_at_entry'], allowance)
+                try:
+                    for usage in (0, 8):
+                        worker['cpu_cores'] = usage
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode='full', cores=4)
+                finally: slot.release()
+                with patch.object(capacity, 'available_memory', return_value=19 * capacity.GIB):
+                    with self.assertRaisesRegex(RuntimeError, 'entry requirement'):
+                        capacity.acquire(root, mode='full')
 
     def test_worker_usage_counts_only_installed_worker_process_tree(self):
         memory = measurement.memory
@@ -790,6 +933,59 @@ sys.exit(m.main())
         self.assertEqual(usage['rss_sum_bytes'], 600 * 1024)
         self.assertEqual(usage['process_count'], 3)
         self.assertAlmostEqual(usage['cpu_cores'], 2.405)
+
+    def test_worker_allowance_binding_refreshes_once_and_failed_refresh_reserves_full_budget(self):
+        memory = measurement.memory
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder).resolve()
+            control = home / '.cache/mycelium-gates/control'
+            control.mkdir(parents=True)
+            config = home / '.local/share/mycelium/worker/config.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('opaque bytes; deliberately not JSON')
+            status = dict(host='fixture-host', policy=dict(cpu_budget_cores=4,
+                memory_budget=dict(memory_allowance_bytes=8 * capacity.GIB)), workers=[])
+            evidence = control / 'status.json'
+            evidence.write_text(json.dumps(status))
+            identity = capacity.process_identity(os.getpid())
+            binding = dict(pid=os.getpid(), process_identity=identity,
+                           installed_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest())
+            cached = dict(schema=1, host='fixture-host', cpu_cores=4, memory_bytes=8 * capacity.GIB,
+                binding=binding, evidence=dict(path=str(evidence), sha256=hashlib.sha256(evidence.read_bytes()).hexdigest()))
+            cache = control / 'worker-allowance.json'
+            cache.write_text(json.dumps(cached))
+            original = subprocess.run
+            refreshes = []
+            succeeding = False
+            def run(args, **kwargs):
+                if args[0] != 'myce': return original(args, **kwargs)
+                refreshes.append(args)
+                self.assertFalse('MYCE_TOKEN' in kwargs['env'], 'gate inherited forbidden authority variable')
+                return subprocess.CompletedProcess(args, 0 if succeeding else 1,
+                                                   json.dumps(status).encode(), b'')
+            worker = dict(pid=os.getpid(), cpu_cores=0, rss_sum_bytes=0)
+            with (patch.object(memory.Path, 'home', return_value=home),
+                  patch.object(memory.subprocess, 'run', side_effect=run),
+                  patch.dict(os.environ, MYCE_TOKEN='nonsecret-fixture')):
+                self.assertEqual(memory.local_worker_allowance(control, worker)['cpu_cores'], 4)
+                self.assertFalse(refreshes)
+                config.write_text('changed opaque installation')
+                for _ in range(2):
+                    allowance = memory.local_worker_allowance(control, worker)
+                    self.assertEqual(allowance['cpu_cores'], 4)
+                    self.assertEqual(allowance['memory_bytes'], 8 * capacity.GIB)
+                    self.assertEqual(allowance['refresh_status'], 'refresh_failed_fully_reserved')
+                self.assertEqual(len(refreshes), 1)
+                succeeding = True
+                saved = json.loads(cache.read_text())
+                saved['binding']['process_identity'] = 'old process'
+                saved.pop('failed_refresh_binding')
+                cache.write_text(json.dumps(saved))
+                allowance = memory.local_worker_allowance(control, worker)
+                self.assertEqual(allowance['refresh_status'], 'refreshed_fully_reserved')
+                self.assertEqual(len(refreshes), 2)
+                memory.local_worker_allowance(control, worker)
+                self.assertEqual(len(refreshes), 2)
 
     def test_fleet_custody_is_separate_but_still_prevents_cache_eviction(self):
         with tempfile.TemporaryDirectory() as folder:
