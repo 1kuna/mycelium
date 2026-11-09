@@ -312,19 +312,39 @@ func (q *Queue) publishReadRuntime() {
 	}
 	value := copyObservation(observationState{Calls: q.calls, Unreported: q.unreported})
 	q.readRuntime = &value
-	q.publishedReads.Store(&publishedReadIndex{root: q.readRoot, calls: value.Calls})
 	q.readGeneration = &readGeneration{root: q.readRoot}
 	q.readSamples = make(map[string]map[attemptKey]hostMemorySample, len(q.hostMemorySamples))
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
 	}
+	published := &publishedReadIndex{root: q.readRoot, calls: value.Calls, capture: q.freezeReadCapture()}
+	// Cache lookups/removal and capture publication share this short fence.
+	// Projection and metadata copying remain outside it; unchanged commits keep
+	// their entries. An in-flight old response may finish but cannot repopulate
+	// a cache entry after the matching new generation is published.
+	q.jobSnapshotsMu.Lock()
+	for id := range q.readInvalidations {
+		delete(q.jobSnapshots, id)
+	}
+	if q.readDependenciesInvalid {
+		for id, entry := range q.jobSnapshots {
+			if entry.dependsOnJobs {
+				delete(q.jobSnapshots, id)
+			}
+		}
+	}
+	q.publishedReads.Store(published)
+	q.jobSnapshotsMu.Unlock()
+	q.readInvalidations = nil
+	q.readDependenciesInvalid = false
 }
 
 // Prefix resolution needs only immutable committed identities. A cache hit
 // must not queue behind the writer merely to resolve the same job again.
 type publishedReadIndex struct {
-	root  *readNode
-	calls map[string]*ModelCall
+	root    *readNode
+	calls   map[string]*ModelCall
+	capture *committedReadCapture
 }
 
 // A generation materializes the immutable input maps once, off the writer path.
@@ -512,44 +532,84 @@ func (g *readGeneration) jobInputs(ctx context.Context, id string) (state, *queu
 	return g.liveState, nil, ctx.Err()
 }
 
-// Reference walks, cancellation, capacity scans and recursive copying run on
-// an immutable private source after releasing the live queue mutex.
-func (q *Queue) captureReadObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
-	ctx := requestContext(contexts)
-	started := readWallStart(q.observeRead)
-	unlock, err := requestObservationLock(ctx, &q.mu)
-	if err != nil {
-		return nil, fileStoreObservation{}, err
-	}
-	locked := readWallStart(q.observeRead)
-	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+// A commit publishes the complete observation context with its immutable root.
+// Readers never combine committed records with mutable metadata from a writer.
+type readFreshness struct {
+	lastSeen   time.Time
+	unreported bool
+}
+type committedReadCapture struct {
+	generation   *readGeneration
+	models       *ModelConfig
+	environments *EnvironmentCatalog
+	runtime      *observationState
+	source       *Queue
+	ledgers      map[string]observationMachineLedger
+	fresh        map[string]readFreshness
+}
+
+func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
 	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
-	type freshness struct {
-		lastSeen   time.Time
-		unreported bool
-	}
-	fresh := make(map[string]freshness, len(q.s.Machines))
+	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		ledgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
 			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
-		fresh[key] = freshness{m.LastSeen, q.unreported[key]}
+		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
 	}
 	q.freezeContactView(source)
-	unlock()
-	observeRead(q.observeRead, id, started, locked)
+	return &committedReadCapture{generation: generation, models: models, environments: environments, runtime: runtime, source: source, ledgers: ledgers, fresh: fresh}
+}
+
+// Reference walks, cancellation, capacity scans and recursive copying run on
+// an immutable private source after releasing the live queue mutex.
+func (q *Queue) captureReadObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
+	ctx := requestContext(contexts)
+	started := readWallStart(q.observeRead)
+	var capture *committedReadCapture
+	if id != "" {
+		if published := q.publishedReads.Load(); published != nil {
+			capture = published.capture
+		}
+	}
+	// Offline imports may install unpublished records. Inspect that path only
+	// if the writer is immediately available; a committed read never queues.
+	imported := false
+	if capture != nil && q.mu.TryLock() {
+		imported = q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+		q.mu.Unlock()
+	}
+	if capture == nil {
+		unlock, err := requestObservationLock(ctx, &q.mu)
+		if err != nil {
+			return nil, fileStoreObservation{}, err
+		}
+		imported = q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+		capture = q.freezeReadCapture()
+		unlock()
+	}
+	observeRead(q.observeRead, id, started, started)
 	if err := ctx.Err(); err != nil {
 		return nil, fileStoreObservation{}, err
 	}
-	// Offline imports can install uncommitted state directly. Durable API writes
-	// always publish their matching generation inside the transaction lock.
-	if imported || generation == nil {
+	if imported || capture.generation == nil {
 		return q.captureStatusObservation(id, options, ctx)
 	}
+	base := capture.source
+	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
+		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
+		restartUntil: base.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
+		contacts: base.contacts, detachedRead: true}
+	if base.mu.control != nil {
+		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: base.controlNow()}
+	}
+	generation, models, environments, runtime := capture.generation, capture.models, capture.environments, capture.runtime
+	ledgers, fresh := capture.ledgers, capture.fresh
+	var err error
 	if id == "" {
 		source.s, source.records, err = generation.inputs(ctx)
 	} else {
