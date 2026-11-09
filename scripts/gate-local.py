@@ -24,7 +24,7 @@ def module(name):
 capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
 trim_cache = module('gate-cache').trim_cache
 HELPERS = ('gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
-           'gate-cache.py', 'gate-measure.py', 'gate-memory.py')
+           'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 
 def execute(path):
@@ -46,6 +46,8 @@ def execute(path):
         digest.update(helper.encode() + b'\0' + data)
         (source / 'scripts' / helper).write_bytes(data)
     identity['instrumentation_sha256'] = digest.hexdigest()
+    runtime = folder / 'runtime.tar'
+    sources.runtime_archive(archive, runtime, source, HELPERS)
     info = folder / 'source-identity.json'
     info.write_text(json.dumps(identity) + '\n')
     cache = Path(manifest['cache'])
@@ -103,7 +105,7 @@ def execute(path):
                 return status
         linux_id = uuid.uuid4().hex
         linux_receipt = folder / 'linux-cleanup.json'
-        linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(archive),
+        linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(runtime),
                  '--report', str(report), '--cleanup-receipt', str(linux_receipt),
                  '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
                  '--input', str(info) + '=source-identity.json']
@@ -151,7 +153,8 @@ def main():
         return execute(args.execute)
     repo = args.repo.resolve()
     slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
-                            wait=args.priority == 'release')
+                            wait=args.priority == 'release',
+                            platform=args.platform or ('native' if args.command else 'both'))
     cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
     cache.mkdir(parents=True, exist_ok=True)
     identity = uuid.uuid4().hex
@@ -182,6 +185,7 @@ def main():
         if confirmed and result.returncode == 0:
             shutil.rmtree(folder / 'source')
             (folder / 'source.tar').unlink()
+            (folder / 'runtime.tar').unlink()
         return result.returncode if confirmed else 125
     finally:
         slot.release(stopped=receipts.confirmed(folder / 'overall-cleanup.json', identity))

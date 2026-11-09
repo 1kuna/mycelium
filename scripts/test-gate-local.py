@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import sys
 import tarfile
+import signal
+import threading
+import shutil
 import unittest
 from unittest.mock import patch, Mock
 
@@ -85,6 +88,17 @@ class LocalGateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'entry floor'):
                     capacity.acquire(root)
             self.assertFalse(any(root.glob('local-go-slot*')))
+
+    def test_measured_native_and_linux_memory_replace_initial_guard(self):
+        config = dict(memory_measurement=dict(native_peak_bytes=4919132160,
+            vm_peak_bytes=315785216, headroom_bytes=5835636736,
+            linux_provisional_bytes=6 * capacity.GIB, linux_peak_bytes=None,
+            evidence=['completed native receipt and host observation sidecar']))
+        self.assertEqual(capacity.memory_requirement(config, 'native'), 10754768896)
+        self.assertEqual(capacity.memory_requirement(config, 'both'), 12593872896)
+        config['memory_measurement']['linux_peak_bytes'] = 7 * capacity.GIB
+        self.assertEqual(capacity.memory_requirement(config, 'linux'),
+                         7 * capacity.GIB + 315785216 + 5835636736)
 
     def test_trim_removes_only_old_rebuildable_go_objects(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -193,6 +207,7 @@ class LocalGateTests(unittest.TestCase):
                 child.poll.return_value = code
                 with (patch.object(local.sources, 'freeze', return_value={'source_sha': 'test'}),
                       patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
+                      patch.object(local.sources, 'runtime_archive'),
                       patch.object(local.subprocess, 'Popen', return_value=child) as launch):
                     self.assertEqual(local.execute(path), 125)
                 self.assertEqual(launch.call_count, 1)
@@ -204,16 +219,94 @@ class LocalGateTests(unittest.TestCase):
             archive = root / 'source.tar'
             with tarfile.open(archive, 'w'): pass
             receipt = root / 'cleanup.json'
-            child = Mock()
-            child.wait.return_value = 255
             with (patch.object(sys, 'argv', ['gate-linux.py', '--archive', str(archive),
                     '--cleanup-receipt', str(receipt), '--cleanup-id', 'nonce', '--', 'true']),
-                  patch.object(linux, 'shell') as remote,
-                  patch.object(linux.subprocess, 'run'),
-                  patch.object(linux.subprocess, 'Popen', return_value=child)):
+                  patch.object(linux.Transport, 'run', side_effect=[0, 0, 255]) as launch):
                 self.assertEqual(linux.main(), 125)
             self.assertFalse(receipt.exists())
-            self.assertEqual(remote.call_count, 1)  # staging only; no success inference.
+            self.assertEqual(launch.call_count, 3)  # start, stage, run; no success inference.
+
+    def test_linux_staging_has_cancellation_custody_before_first_side_effect(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder) / 'source.tar'
+            with tarfile.open(archive, 'w'): pass
+            calls = []
+            def run(transport, command, **kwargs):
+                calls.append(command)
+                handler = signal.getsignal(signal.SIGTERM)
+                self.assertEqual(handler.__self__, transport)
+                if len(calls) == 2:
+                    handler(signal.SIGTERM, None)
+                    raise linux.Cancelled()
+                return 0
+            with (patch.object(sys, 'argv', ['gate-linux.py', '--archive', str(archive), '--', 'true']),
+                  patch.object(linux.Transport, 'run', run)):
+                self.assertEqual(linux.main(), 125)
+            self.assertEqual(len(calls), 2)  # Never launches a guest after cancelled staging.
+        transport = linux.Transport('vm', 'remote', 'nonce')
+        timer = threading.Timer(.2, lambda: transport.stop(signal.SIGTERM, None))
+        timer.start()
+        try:
+            with self.assertRaises(linux.Cancelled):
+                transport.run([sys.executable, '-c', 'import time; time.sleep(60)'])
+            self.assertIsNone(transport.current)  # Owned local child was reaped.
+        finally:
+            timer.join()
+
+    def test_linux_receives_frozen_helpers_even_after_live_helper_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            frozen = root / 'native'
+            (frozen / 'scripts').mkdir(parents=True)
+            helper = frozen / 'scripts/frozen.py'
+            helper.write_text('frozen bytes')
+            archive = root / 'source.tar'
+            with tarfile.open(archive, 'w'): pass
+            runtime = root / 'runtime.tar'
+            local.sources.runtime_archive(archive, runtime, frozen, ['frozen.py'])
+            helper.write_text('later live bytes')
+            def run(transport, command, **kwargs):
+                if 'stdin' in kwargs:
+                    with tarfile.open(fileobj=kwargs['stdin']) as tar:
+                        self.assertEqual(tar.extractfile('scripts/frozen.py').read(), b'frozen bytes')
+                return 255 if kwargs.get('heartbeat') else 0
+            with (patch.object(sys, 'argv', ['gate-linux.py', '--archive', str(runtime), '--', 'true']),
+                  patch.object(linux.Transport, 'run', run)):
+                self.assertEqual(linux.main(), 125)
+
+    def test_guest_eof_prevents_payload_and_unknown_cache_marker_prevents_eviction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            for name in ('gate-guest.py', 'gate-receipt.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
+            (scripts / 'gate-cache.py').write_text('def trim_cache(path): raise RuntimeError("evicted active cache")\n')
+            (scripts / 'gate-budget.py').write_text(
+                'import json,os,pathlib\npathlib.Path("payload").touch()\n'
+                'pathlib.Path(os.environ["GATE_CLEANUP_RECEIPT"]).write_text(json.dumps(dict('
+                'schema=1,identity=os.environ["GATE_CLEANUP_ID"],stopped=True,status=0)))\n')
+            active = root / '.cache/mycelium-gates/active'
+            active.mkdir(parents=True)
+            (active / 'dead-supervisor').write_text('unknown old cache user')
+            command = [sys.executable, str(scripts / 'gate-guest.py'), 'nonce', '4', 'true']
+            env = dict(os.environ, HOME=str(root))
+            first = subprocess.run(command, input=b'', cwd=root, env=env, capture_output=True, timeout=5)
+            self.assertEqual(first.returncode, 143, first.stderr)
+            self.assertFalse((root / 'payload').exists())
+            child = subprocess.Popen(command, stdin=subprocess.PIPE, cwd=root, env=env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                child.stdin.write(b'.'); child.stdin.flush()
+                self.assertEqual(child.wait(timeout=5), 0, child.stderr.read())
+            finally:
+                child.stdin.close()
+                if child.poll() is None:
+                    child.kill(); child.wait()
+                child.stdout.close(); child.stderr.close()
+            self.assertTrue((root / 'payload').exists())
+            self.assertTrue((active / 'dead-supervisor').exists())
+            self.assertFalse((active / 'nonce').exists())
 
     def test_native_receipt_cannot_hide_a_missing_linux_cleanup_receipt(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -235,6 +328,7 @@ class LocalGateTests(unittest.TestCase):
                 return child
             with (patch.object(local.sources, 'freeze', return_value={'source_sha': 'test'}),
                   patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
+                      patch.object(local.sources, 'runtime_archive'),
                   patch.object(local.sources, 'predecessors', return_value=[]),
                   patch.object(local.subprocess, 'Popen', side_effect=launch)):
                 self.assertEqual(local.execute(path), 125)

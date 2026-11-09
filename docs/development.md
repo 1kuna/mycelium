@@ -148,12 +148,23 @@ Darwin development uses a gate-owned Go build cache shared across checkouts.
 Only idle gate-owned build objects are automatically evicted above 12 GiB;
 module downloads, compatibility sources and timing history are retained. Linux
 uses persistent guest build/module caches and the same idle eviction policy.
-No other project's cache is trimmed. The initial 22 GiB available-memory entry
-threshold (16 GiB workstation reserve plus the profile-declared 6 GiB gate need)
-is an unmeasured starting value, pending four-core native/Linux peak calibration;
-it must not be described as a measured execution envelope. Compressed pages are
-not counted as free. The ceiling is an initial storage budget,
-not a measured per-run peak; `.reports/gate-local.jsonl` records actual growth.
+No other project's cache is trimmed. Qualified hosts use a private
+`gate-capacity.json` memory measurement: native sampled peak plus observed
+available-memory variation as headroom; Linux/both use the larger leg peak plus
+VM residency and the same headroom. Keep the evidence paths/digests private.
+A profile-declared Linux need is explicitly provisional until a real four-core
+Linux measurement replaces it. Unqualified hosts retain the initial 22 GiB
+entry value (16 GiB starting reserve plus profile-declared 6 GiB); that fallback
+is not a measured execution envelope. Compressed pages receive no free-memory
+credit. The 12 GiB build-cache ceiling is an initial storage budget;
+`.reports/gate-local.jsonl` records actual growth.
+
+The guest guardian publishes custody before cache readiness, and channel EOF
+revokes its owned work, including when the host transport dies. Guest cache use
+also has a durable nonce marker: supervisor death cannot make cache users look
+idle merely by releasing a descriptor. An unknown marker prevents automatic
+trimming until its exact cleanup is reconciled. Helpers are frozen once with
+product/test sources; both legs receive those identical helper bytes.
 
 Native-only legacy/fleet Mac gates retain the following custody mechanism.
 On macOS, the full supervisor holds one of two cross-checkout filesystem locks

@@ -87,7 +87,24 @@ def admission_lock(directory):
         yield
 
 
-def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False):
+def memory_requirement(config, platform):
+    measured = config.get('memory_measurement')
+    if not measured:
+        return 22 * GIB  # Unqualified hosts retain the initial conservative value.
+    if not measured.get('evidence'):
+        raise RuntimeError('memory qualification is missing its evidence')
+    native = int(measured['native_peak_bytes'])
+    headroom = int(measured['headroom_bytes'])
+    if native <= 0 or headroom <= 0:
+        raise RuntimeError('memory qualification has invalid peak/headroom')
+    if platform == 'native':
+        return native + headroom
+    linux = int(measured.get('linux_peak_bytes') or measured['linux_provisional_bytes'])
+    vm = int(measured['vm_peak_bytes'])
+    return max(native, linux + vm) + headroom
+
+
+def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platform='native'):
     """Conservative initial 2 heavy/1 full slots; legacy mkdir owners still bind.
 
     Increasing full concurrency requires a recorded measurement in gate-capacity.json.
@@ -119,9 +136,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False):
                         if not candidate.exists():
                             full_marker = candidate
                             break
-                # Unmeasured starting values: 16 GiB reserve + profile-declared
-                # 6 GiB gate need. Replace after the requested host calibration.
-                memory_ok = available_memory() >= (16 + 6) * GIB
+                needed_memory = memory_requirement(config, platform)
+                memory_ok = available_memory() >= needed_memory
                 occupied = len(legacy) + len(occupied_lanes(directory))
                 if (not pending_release and memory_ok and occupied < slots
                         and (mode != 'full' or full_marker)):
@@ -138,7 +154,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False):
                             full_marker.write_text(json.dumps(owner) + '\n')
                         return Slot(slot, owner, full_marker)
             if not wait:
-                reason = 'available memory below 22 GiB' if not memory_ok else 'capacity busy or reserved for release'
+                reason = (f'available memory below {needed_memory / GIB:.2f} GiB measured entry requirement'
+                          if not memory_ok else 'capacity busy or reserved for release')
                 raise RuntimeError('local ' + reason + '; no work started')
             if not announced:
                 print('gate: waiting for local capacity (release waiters first)', flush=True)

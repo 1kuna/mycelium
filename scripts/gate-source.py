@@ -10,6 +10,15 @@ import subprocess
 import tarfile
 
 
+def runtime_archive(archive, destination, source, helpers):
+    """Overlay only frozen helper bytes; transport never rereads a live checkout."""
+    import shutil
+    shutil.copyfile(archive, destination)
+    with tarfile.open(destination, 'a') as tar:
+        for helper in helpers:
+            tar.add(source / 'scripts' / helper, arcname='scripts/' + helper)
+
+
 def freeze(repo, archive, ref=None):
     repo, archive = Path(repo), Path(archive)
     if ref:
