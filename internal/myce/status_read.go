@@ -20,13 +20,17 @@ type jobSnapshotCache struct {
 	refresh       sync.Mutex // Never acquired by a queue writer or a cache hit.
 	data          string     // Immutable public JSON; each caller decodes its own copy.
 	expires       time.Time
-	dependsOnJobs bool // q.mu; queued guidance and descendant custody use other jobs.
+	dependsOnJobs bool // jobSnapshotsMu; queued guidance and descendant custody use other jobs.
 }
 
+// q.mu is held. Defer cache removal until the matching immutable capture is
+// published, so a reader cannot refill a freshly invalidated entry from the
+// previous generation in the gap between durable commit and publication.
 func (q *Queue) invalidateJobSnapshot(id string) {
-	q.jobSnapshotsMu.Lock()
-	delete(q.jobSnapshots, id)
-	q.jobSnapshotsMu.Unlock()
+	if q.readInvalidations == nil {
+		q.readInvalidations = map[string]bool{}
+	}
+	q.readInvalidations[id] = true
 }
 
 // Calls are ephemeral rather than persisted job records. Match their existing
@@ -53,13 +57,7 @@ func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
 // q.mu is held. Both calls and batch jobs contribute to project caps and
 // pending receipts; unchanged transactions leave their cached views intact.
 func (q *Queue) invalidateDependentSnapshots() {
-	q.jobSnapshotsMu.Lock()
-	defer q.jobSnapshotsMu.Unlock()
-	for id, entry := range q.jobSnapshots {
-		if entry.dependsOnJobs {
-			delete(q.jobSnapshots, id)
-		}
-	}
+	q.readDependenciesInvalid = true
 }
 
 func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {

@@ -140,6 +140,37 @@ func TestJobSnapshotCacheCommitDuringRefresh(t *testing.T) {
 	}
 }
 
+// Incident #1052 review: a reader can start after persistence has recorded the
+// final job invalidation but before publishReadRuntime publishes the capture.
+func TestJobSnapshotCacheReadBetweenInvalidationAndPublication(t *testing.T) {
+	q, _ := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	persisted, resume := make(chan struct{}), make(chan struct{})
+	q.observePersistence = func(queuePersistenceTiming) {
+		close(persisted)
+		<-resume
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- q.update(func() error { q.touchJob(j.ID).State = "paused"; return nil })
+	}()
+	<-persisted
+	// No cache existed before invalidation. This read creates one using the
+	// old committed capture while the writer is paused before publication.
+	got, readErr := q.jobSnapshot(j.ID)
+	close(resume)
+	commitErr := <-done
+	if readErr != nil || got == nil || got.State != "queued" {
+		t.Fatal("publication-gap read lost its committed view", got, readErr)
+	}
+	if commitErr != nil {
+		t.Fatal(commitErr)
+	}
+	if got, err := q.jobSnapshot(j.ID); err != nil || got.State != "paused" {
+		t.Fatal("old capture repopulated cache after invalidation", got, err)
+	}
+}
+
 func TestJobSnapshotCacheCallDependsOnBatchCommit(t *testing.T) {
 	q, _, _ := modelFixture(t)
 	call := addModelCall(t, q, "experiment")

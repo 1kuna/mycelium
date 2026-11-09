@@ -317,7 +317,26 @@ func (q *Queue) publishReadRuntime() {
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
 	}
-	q.publishedReads.Store(&publishedReadIndex{root: q.readRoot, calls: value.Calls, capture: q.freezeReadCapture()})
+	published := &publishedReadIndex{root: q.readRoot, calls: value.Calls, capture: q.freezeReadCapture()}
+	// Cache lookups/removal and capture publication share this short fence.
+	// Projection and metadata copying remain outside it; unchanged commits keep
+	// their entries. An in-flight old response may finish but cannot repopulate
+	// a cache entry after the matching new generation is published.
+	q.jobSnapshotsMu.Lock()
+	for id := range q.readInvalidations {
+		delete(q.jobSnapshots, id)
+	}
+	if q.readDependenciesInvalid {
+		for id, entry := range q.jobSnapshots {
+			if entry.dependsOnJobs {
+				delete(q.jobSnapshots, id)
+			}
+		}
+	}
+	q.publishedReads.Store(published)
+	q.jobSnapshotsMu.Unlock()
+	q.readInvalidations = nil
+	q.readDependenciesInvalid = false
 }
 
 // Prefix resolution needs only immutable committed identities. A cache hit

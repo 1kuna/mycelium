@@ -122,6 +122,9 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
+	readDependenciesInvalid bool
+
 	readGeneration       *readGeneration
 	publishedReads       atomic.Pointer[publishedReadIndex]
 	readRoot             *readNode // q.mu; immutable committed input generations.
