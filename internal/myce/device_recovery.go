@@ -107,6 +107,7 @@ type deviceHealthDue struct {
 }
 
 func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[string]deviceHealthObservation {
+	root.deviceHealthBusy.Store(w.vendorGPUActive)
 	for key, h := range w.faultHealth {
 		f := w.faults.Devices[key]
 		if f.Reason == "" || f.RepeatedTeardown || h.event != f.Event {
@@ -141,7 +142,9 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 		for _, d := range devices {
 			key := deviceFaultKey(d)
 			f := faults[key]
-			if f.Reason == "" || f.RepeatedTeardown {
+			// A prior query may have outlived collection while another card
+			// acquired custody. Recheck before every vendor initialization.
+			if f.Reason == "" || f.RepeatedTeardown || d.Platform == "xpu" && root.deviceHealthBusy.Load() {
 				continue
 			}
 			normal, err := probe(ctx, d)

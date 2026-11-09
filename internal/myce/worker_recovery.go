@@ -90,6 +90,7 @@ type workerStore struct {
 	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	deviceHealth          checkpointIO[map[string]deviceHealthObservation]
+	deviceHealthBusy      atomic.Bool // Live custody fence for already-pending health batches.
 	stateName             string
 	environmentLogs       checkpointIO[bool]
 	inventory             checkpointIO[[]MachineDevice]

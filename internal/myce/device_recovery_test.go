@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -215,4 +216,68 @@ func TestQuarantineHealthMeasuredInvocationCount(t *testing.T) {
 	if calls != 4 {
 		t.Fatal("new fault inherited old probe delay", calls)
 	}
+}
+
+func TestQuarantinePendingHealthDoesNotProbeBusySibling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls, scans atomic.Int32
+		release := make(chan struct{})
+		w := Worker{Clock: RealClock{}, Interval: time.Second,
+			Machine: Machine{Devices: []MachineDevice{
+				{ID: "0", Platform: "xpu", Identity: "card-0"},
+				{ID: "1", Platform: "xpu", Identity: "card-1"},
+				{ID: "2", Platform: "xpu", Identity: "card-2"},
+			}},
+			DeviceFaultSource: func(context.Context, time.Time) (KernelLogSnapshot, error) {
+				scans.Add(1)
+				return KernelLogSnapshot{BootID: "boot"}, nil
+			},
+			DeviceHealthProbe: func(context.Context, MachineDevice) (bool, error) {
+				if calls.Add(1) == 1 {
+					<-release // Outlast the asynchronous collection budget.
+				}
+				return true, nil
+			}}
+		root := &workerStore{dir: t.TempDir()}
+		if err := w.initDeviceFaults(t.Context(), root); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range w.Machine.Devices[:2] {
+			w.faults.Devices[deviceFaultKey(d)] = deviceFault{Reason: "device_fault_xe", Event: d.Identity, At: w.Clock.Now().Add(-time.Second)}
+		}
+		scan := func() {
+			t.Helper()
+			if err := w.refreshDeviceFaults(t.Context(), root); err != nil {
+				t.Fatal(err)
+			}
+		}
+		scan()
+		if calls.Load() != 1 {
+			t.Fatal("first health query did not remain pending", calls.Load())
+		}
+		// A healthy sibling takes accelerator/model custody while the first
+		// query is pending. A later control observation must fence that batch.
+		w.vendorGPUActive = true
+		before := scans.Load()
+		scan()
+		if scans.Load() <= before {
+			t.Fatal("pending health blocked kernel monitoring")
+		}
+		close(release)
+		synctest.Wait()
+		if calls.Load() != 1 {
+			t.Fatal("pending batch initialized a busy sibling", calls.Load())
+		}
+		w.vendorGPUActive = false
+		for range 30 {
+			scan()
+			<-time.After(time.Second)
+			synctest.Wait()
+		}
+		for _, d := range w.Machine.Devices[:2] {
+			if d.Reason != "" || d.Recovery == nil {
+				t.Fatal("quiescent recovery did not resume", d)
+			}
+		}
+	})
 }

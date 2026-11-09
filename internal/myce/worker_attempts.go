@@ -1006,6 +1006,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	recovering := len(stores) > 0
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
+		if !j.Spec.Needs.cpuOnly() {
+			root.deviceHealthBusy.Store(true)
+		}
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
 		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
 		actors[jobKey(j)] = a
@@ -1508,6 +1511,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				rt.batchSupervisors = maps.Clone(actors)
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
+				if slices.ContainsFunc(reply.ModelPlan, func(s ModelSlot) bool { return s.State == "loading" }) {
+					root.deviceHealthBusy.Store(true)
+				}
 				rt.sync(reply.ModelPlan)
 				if leaving && !leaveSent {
 					err = w.Client.Call(observeCtx, "POST", "/api/workers/"+m.ID+"/leave", map[string]bool{"now": false}, nil)
