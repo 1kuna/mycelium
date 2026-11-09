@@ -240,6 +240,12 @@ arbitrary local Unix-socket `DOCKER_HOST` may be undiscoverable from current
 contexts and standard sockets. The orchestrator extended the legacy default on
 2026-11-09 only with a further positive bound: a complete, whole-table `ps`
 command/argv inventory must account for every live Docker-API daemon/runtime.
+Classification uses each process's real executable identity, resolved through
+`proc_pidpath` on Darwin and `/proc/PID/exe` on Linux, including parent/child
+checks. An argv basename or symlink alias is never executable proof. Unresolved
+identities refuse; Darwin retains only the reviewed sealed-system EPERM rule.
+A process that exits after the snapshot may be omitted only after a new `ps`
+positively confirms that PID is absent; an unresolvable live process still refuses.
 `dockerd` hosts and daemon configuration must all resolve to inventoried endpoints;
 socket activation also requires a matching service PID and socket-unit binding.
 Docker Desktop's backend/service/fork group must expose an inventoried Unix
@@ -259,6 +265,16 @@ no `DOCKER_*` environment at about 19:00Z, and gate entrypoints do not set
 Host and guest both apply the discovery and process bound. New runs use their
 journaled effective and fixture endpoints instead. Recovery never changes a
 daemon, runtime configuration or another project's resources.
+
+Guest executable attestation is a further orchestrator agent default received
+2026-11-09. Linux kernel threads are excluded only with positive PF_KTHREAD
+(`0x00200000`) evidence from `/proc/PID/stat` field9, never from a missing exe
+link. A missing exe for a non-kernel process refuses. Only inside the configured,
+gate-owned Lima guest, inaccessible root-owned executable identities may use
+read-only `sudo -n readlink /proc/PID/exe` (and `sudo -n cat /proc/PID/stat` when
+needed). Each use, success or failure is recorded in the receipt. Unavailable or
+failed non-interactive attestation refuses. This does not authorize sudo on the
+development host, prompting, signals or any guest mutation.
 
 Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
 platform-protected processes even under the same UID. Gate binaries, Python,

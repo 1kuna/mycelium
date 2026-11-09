@@ -9,6 +9,8 @@ import stat
 import subprocess
 import sys
 import shlex
+import importlib.util
+import errno
 
 
 def docker_snapshot(endpoint=None):
@@ -165,7 +167,90 @@ def native_socket_paths(pids):
     return paths
 
 
-def daemon_process_inventory(endpoints):
+def process_executable(pid, guest=False, evidence=None):
+    """Kernel executable identity, never argv[0] (which can be an alias)."""
+    evidence = evidence if evidence is not None else []
+    def guest_read(command, path):
+        if not guest or not sys.platform.startswith('linux'):
+            raise RuntimeError('guest executable attestation is unavailable')
+        row = dict(pid=pid, operation=command, guest_sudo_noninteractive=True, status='requested')
+        evidence.append(row)
+        try:
+            result = subprocess.check_output(['sudo', '-n', command, path], text=True, timeout=5).strip()
+            row['status'] = 'verified'
+            return result
+        except Exception as error:
+            row['status'] = 'failed'
+            error.guest_attestation_failed = True
+            raise
+    try:
+        if sys.platform.startswith('linux'):
+            path = '/proc/' + str(pid)
+            try:
+                record = Path(path + '/stat').read_text()
+            except PermissionError:
+                record = guest_read('cat', path + '/stat')
+            fields = record[record.rfind(')') + 2:].split()
+            if not record.startswith(str(pid) + ' (') or len(fields) < 7:
+                raise RuntimeError('process stat identity is malformed')
+            flags = int(fields[6])  # /proc/PID/stat field9, after comm/state.
+            if flags & 0x00200000:  # PF_KTHREAD; missing exe alone proves nothing.
+                evidence.append(dict(pid=pid, excluded='positive PF_KTHREAD', flags=flags))
+                return None
+            try:
+                executable = os.readlink(path + '/exe')
+            except PermissionError:
+                executable = guest_read('readlink', path + '/exe')
+            if executable.endswith(' (deleted)'):
+                executable = executable[:-10]
+        elif sys.platform == 'darwin':
+            import ctypes as c
+            lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+            lib.proc_pidpath.argtypes = [c.c_int, c.c_void_p, c.c_uint32]
+            buffer = c.create_string_buffer(4096)
+            count = lib.proc_pidpath(pid, buffer, len(buffer))
+            if count <= 0:
+                error = c.get_errno()
+                if error != errno.EPERM:
+                    raise OSError(error, 'process executable identity unavailable')
+                spec = importlib.util.spec_from_file_location('gate_handles', Path(__file__).with_name('gate-handles.py'))
+                handles = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(handles)
+                exclusion = handles.protected_process(pid, '/.reports/local-gates/', set())
+                evidence.append(dict(excluded='reviewed EPERM sealed-system proof', **exclusion))
+                executable = exclusion['executable']
+            else:
+                executable = os.fsdecode(buffer.value)
+        else:
+            raise RuntimeError('process executable identity is unsupported')
+        if not executable.startswith('/') or '\n' in executable:
+            raise RuntimeError('process executable identity is malformed')
+        return os.path.realpath(executable)
+    except Exception as error:
+        if (isinstance(error, OSError) and error.errno in (errno.ESRCH, errno.ENOENT)
+                and not getattr(error, 'guest_attestation_failed', False)):
+            # ps itself and other short-lived processes can exit after the
+            # whole-table snapshot. Only positive PID absence can omit them.
+            check = subprocess.run(['ps', '-p', str(pid), '-o', 'pid='],
+                                   capture_output=True, text=True, timeout=5)
+            if check.returncode == 1 and not check.stdout.strip():
+                evidence.append(dict(pid=pid, excluded='positive PID absence after snapshot'))
+                return None
+        evidence.append(dict(pid=pid, status='refused', reason=str(error)))
+        error.runtime_evidence = dict(executable_observations=evidence)
+        raise
+
+
+def daemon_process_inventory(endpoints, guest=False):
+    evidence = []
+    try:
+        return _daemon_process_inventory(endpoints, guest, evidence)
+    except Exception as error:
+        error.runtime_evidence = dict(executable_observations=evidence)
+        raise
+
+
+def _daemon_process_inventory(endpoints, guest, executable_evidence):
     """Legacy bound: every live API runtime needs an inventoried endpoint."""
     selection = '-eo' if sys.platform.startswith('linux') else '-axo'
     output = subprocess.check_output(['ps', '-ww', selection, 'pid=,ppid=,command='],
@@ -175,12 +260,9 @@ def daemon_process_inventory(endpoints):
         fields = line.split(None, 2)
         if len(fields) != 3:
             raise RuntimeError('Docker daemon process inventory incomplete')
-        argv = shlex.split(fields[2])
-        # ps does not quote executable paths with spaces. These application
-        # bundles otherwise become an unrecognized truncated argv[0].
-        if re.match(r'^/Applications/Rancher Desktop\.app/', fields[2]):
-            argv[0] = 'rancher-desktop'
-        rows[int(fields[0])] = (int(fields[1]), argv)
+        pid = int(fields[0])
+        executable = process_executable(pid, guest, executable_evidence)
+        rows[pid] = (int(fields[1]), shlex.split(fields[2]), executable)
     known = {os.path.realpath(e[7:]): e for e in endpoints if e.startswith('unix://')}
     proof, covered, lima = [], set(), None
     def require(pid, kind, candidates, **extra):
@@ -188,10 +270,10 @@ def daemon_process_inventory(endpoints):
         if not candidates or not candidates <= set(endpoints):
             raise RuntimeError('unresolved Docker-API daemon process: ' + str(pid) + ' (' + kind + ')')
         proof.append(dict(pid=pid, kind=kind, endpoints=sorted(candidates), **extra))
-    for pid, (parent, argv) in rows.items():
-        if not argv or pid in covered:
+    for pid, (parent, argv, executable) in rows.items():
+        if not argv or executable is None or pid in covered:
             continue
-        name = Path(argv[0]).name.lower()
+        name = Path(executable).name.lower()
         if name == 'dockerd':
             hosts, config = [], Path('/etc/docker/daemon.json')
             for index, arg in enumerate(argv[1:], 1):
@@ -235,7 +317,7 @@ def daemon_process_inventory(endpoints):
             proof.append(dict(pid=pid, kind=name, docker_forwarding=False,
                               configuration='positive limactl hostAgentPID/config observation'))
         elif name in ('com.docker.backend', 'vpnkit', 'colima', 'orbstack',
-                      'rancher-desktop', 'buildkitd', 'gvproxy', 'docker-proxy') or name.startswith('dockerd-') or (name == 'rootlesskit' and
+                      'rancher-desktop', 'rancher desktop', 'buildkitd', 'gvproxy', 'docker-proxy') or name.startswith('dockerd-') or (name == 'rootlesskit' and
                       any('dockerd' in a for a in argv[1:])) or (name == 'podman' and
                       ('machine' in argv or 'service' in argv)) or (name == 'nerdctl' and
                       any(a in argv for a in ('daemon', 'serve'))):
@@ -251,16 +333,16 @@ def daemon_process_inventory(endpoints):
                 require(pid, name, [])  # Other runtime bindings need positive support.
             # Docker Desktop's backend/service/fork processes expose one VM's
             # engine. Do not inspect unrelated UI processes in that ancestry.
-            api_group = {p for p in group if Path(rows[p][1][0]).name in ('com.docker.backend', 'vpnkit')}
+            api_group = {p for p in group if rows[p][2] and Path(rows[p][2]).name in ('com.docker.backend', 'vpnkit')}
             sockets = native_socket_paths(api_group)
             matched = {known[os.path.realpath(p)] for p in sockets if os.path.realpath(p) in known}
             require(pid, name, matched, process_group=sorted(group))
             covered.update(api_group)
-        elif name == 'containerd' and parent in rows and Path(rows[parent][1][0]).name == 'dockerd':
+        elif name == 'containerd' and parent in rows and rows[parent][2] and Path(rows[parent][2]).name == 'dockerd':
             # Its Docker parent is checked independently; containerd alone is
             # not a Docker API endpoint.
             proof.append(dict(pid=pid, kind=name, docker_parent=parent))
-    return dict(process_count=len(rows), runtimes=proof,
+    return dict(process_count=len(rows), runtimes=proof, executable_observations=executable_evidence,
                 historical_launcher_observation='Orchestrator checked no DOCKER_* in launcher environment, 2026-11-09 about 19:00Z; gate entrypoints do not set DOCKER_HOST.',
                 residual_risk='Historical remote/TCP or arbitrary local Unix-socket DOCKER_HOST is not reconstructable. A historical daemon that has since exited cannot be inventoried; accepted orchestrator legacy default, 2026-11-09.')
 
@@ -300,7 +382,7 @@ def legacy_endpoints():
                           interpretation='orchestrator agent default, 2026-11-09')
 
 
-def docker_inventory(marker, entry=None, used=()):
+def docker_inventory(marker, entry=None, used=(), guest=False):
     """Never remove resources: an unresolved daemon retains the reservation."""
     if not isinstance(marker, str) or not re.fullmatch('[0-9a-f]{32}', marker):
         raise RuntimeError('Docker gate identity is malformed')
@@ -365,11 +447,11 @@ def docker_inventory(marker, entry=None, used=()):
         proof.append(row)
         daemons[observation['daemon_identity']] = row
     if discovery is not None:
-        discovery['daemon_process_inventory'] = daemon_process_inventory(endpoints)
+        discovery['daemon_process_inventory'] = daemon_process_inventory(endpoints, guest)
     return proof
 
 
-def runtime_cleanup(directory, marker):
+def runtime_cleanup(directory, marker, guest=False):
     directory = Path(directory)
     entry_path, used_path = directory / 'docker-entry.json', directory / 'docker-used.jsonl'
     if directory.is_symlink() or entry_path.is_symlink() or used_path.is_symlink():
@@ -378,10 +460,10 @@ def runtime_cleanup(directory, marker):
         raise RuntimeError('runtime custody evidence is incomplete')
     entry = json.loads(entry_path.read_text()) if entry_path.exists() else None
     used = [json.loads(line) for line in used_path.read_text().splitlines()] if used_path.exists() else []
-    return docker_inventory(marker, entry, used)
+    return docker_inventory(marker, entry, used, guest)
 
 
-def source_cleanup(source, fallback_marker):
+def source_cleanup(source, fallback_marker, guest=False):
     source = Path(source)
     root = source / '.reports/gate-runtime'
     if root.is_symlink() or root.parent.is_symlink():
@@ -391,5 +473,5 @@ def source_cleanup(source, fallback_marker):
     directories = list(root.iterdir()) if root.exists() else []
     proof = []
     for directory in directories or [root / fallback_marker]:
-        proof.extend(runtime_cleanup(directory, directory.name))
+        proof.extend(runtime_cleanup(directory, directory.name, guest))
     return proof

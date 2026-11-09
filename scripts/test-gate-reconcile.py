@@ -180,8 +180,13 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_daemon_uncertainty_retains_all_bindings(self):
         self.add_run()
-        self.source_cleanup.side_effect = RuntimeError('Docker daemon cleanup is unknown')
+        error = RuntimeError('Docker daemon cleanup is unknown')
+        error.runtime_evidence = dict(executable_observations=[dict(
+            pid=23, guest_sudo_noninteractive=True, operation='readlink', status='failed')])
+        self.source_cleanup.side_effect = error
         self.assert_refused('Docker daemon cleanup is unknown')
+        decision = json.loads(next(self.control.glob('reconcile-*.json')).read_text())
+        self.assertEqual(decision['evidence']['runtime_failure'], error.runtime_evidence)
 
     def test_guest_probe_requires_empty_markers_nonce_and_positive_cleanup(self):
         # Exercise the actual parser, not the reconcile-level guest stub.
@@ -205,6 +210,7 @@ class ReconciliationTests(unittest.TestCase):
             with patch.object(parser.uuid, 'uuid4') as nonce, patch.object(parser.subprocess, 'run') as run:
                 nonce.return_value.hex = 'd' * 32
                 run.return_value.stdout = json.dumps(row)
+                run.return_value.returncode = 0
                 if index == 0:
                     self.assertEqual(parser.guest_inventory('test-vm', [request]), good)
                 else:
@@ -223,18 +229,18 @@ class ReconciliationTests(unittest.TestCase):
         receipt = dict(schema=1, identity='b' * 32, stopped=True, status=143)
         write(scratch / '.reports/cleanup.json', receipt)
         request = dict(run_id='a' * 32, nonce='b' * 32, source_info=source)
-        prefix = """def source_cleanup(*args): return [dict(stopped=True)]
+        prefix = """def source_cleanup(*args, **kwargs): return [dict(stopped=True)]
 def host_inventory(): return {}
 def scratch_processes(*args, **kwargs): return set()
 """
         # Substitute only guest fixture roots; replacing pathlib.Path itself is
         # incompatible with its different construction paths on Python 3.9/3.12.
-        probe = recovery.GUEST_PROBE.replace("pathlib.Path.home()", "pathlib.Path(sys.argv[4])")
+        probe = recovery.GUEST_PROBE.replace("pathlib.Path.home()", "pathlib.Path(sys.argv[5])")
         probe = probe.replace("pathlib.Path('/tmp/mycelium-gate-'+nonce)",
-                              "pathlib.Path(sys.argv[3])/('mycelium-gate-'+nonce)")
-        probe = probe.replace("pathlib.Path('/tmp').glob", "pathlib.Path(sys.argv[3]).glob")
+                              "pathlib.Path(sys.argv[4])/('mycelium-gate-'+nonce)")
+        probe = probe.replace("pathlib.Path('/tmp').glob", "pathlib.Path(sys.argv[4]).glob")
         command = [sys.executable, '-c', prefix + probe,
-                   json.dumps([request]), 'challenge', str(scratch.parent), str(home)]
+                   json.dumps([request]), 'challenge', 'false', str(scratch.parent), str(home)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['cleanups'][0]['receipt'], receipt)

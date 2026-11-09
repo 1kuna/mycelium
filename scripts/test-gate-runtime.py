@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import socket
 import sys
+import errno
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -155,6 +156,8 @@ class RuntimeTests(unittest.TestCase):
                     paths = REAL_LOCAL_SOCKET_PATHS()
                 self.assertTrue({home / name for name in names} <= set(paths))
                 self.assertIn(Path('/var/run/docker.sock'), paths)
+                self.assertIn(home / 'Library/Containers/com.docker.docker/Data/docker.raw.sock', paths)
+                self.assertIn(Path('/run/user') / str(os.getuid()) / 'docker.sock', paths)
                 if sys.platform == 'darwin':
                     self.assertTrue({str(home / name) for name in names} <= runtime.native_socket_paths({os.getpid()}))
                 with patch.object(runtime, 'local_socket_paths', return_value=paths):
@@ -177,12 +180,20 @@ class RuntimeTests(unittest.TestCase):
                     sock.close()
 
     def test_unresolved_daemon_or_process_inventory_failure_refuses(self):
-        rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H unix:///unknown/engine.sock\n'
-        with patch.object(runtime.subprocess, 'check_output', return_value=rows):
-            with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon'):
+        rows = '1 0 /sbin/init\n20 1 /fixture/engine-alias -H unix:///unknown/engine.sock\n'
+        identities = {1: '/sbin/init', 20: '/usr/bin/dockerd', 21: '/usr/bin/containerd'}
+        def identity(pid, guest, evidence):
+            if pid == 20:
+                evidence.append(dict(pid=pid, guest_sudo_noninteractive=True, status='verified'))
+            return identities[pid]
+        with patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+                patch.object(runtime, 'process_executable', side_effect=identity):
+            with self.assertRaisesRegex(RuntimeError, 'unresolved Docker-API daemon') as failure:
                 REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
+            self.assertEqual(failure.exception.runtime_evidence['executable_observations'][0]['pid'], 20)
         rows = '1 0 /sbin/init\n20 1 /usr/bin/dockerd -H ' + self.endpoint + '\n21 20 /usr/bin/containerd\n'
-        with patch.object(runtime.subprocess, 'check_output', return_value=rows):
+        with patch.object(runtime.subprocess, 'check_output', return_value=rows), \
+                patch.object(runtime, 'process_executable', side_effect=identity):
             proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
             self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
             self.assertEqual(proof['runtimes'][1]['docker_parent'], 20)
@@ -197,7 +208,11 @@ class RuntimeTests(unittest.TestCase):
         config = dict(hostAgentPID=30, config=dict(portForwards=None))
         def observe(args, **kwargs):
             return json.dumps(config) if args[0] == 'limactl' else rows
+        identities = {1: '/sbin/init', 20: '/Applications/Docker.app/com.docker.backend',
+                      21: '/Applications/Docker.app/com.docker.backend', 30: '/bin/limactl',
+                      40: '/usr/bin/dockerd'}
         with patch.object(runtime.sys, 'platform', 'darwin'), \
+                patch.object(runtime, 'process_executable', side_effect=lambda pid, *args: identities[pid]), \
                 patch.object(runtime.subprocess, 'check_output', side_effect=observe), \
                 patch.object(runtime, 'native_socket_paths', return_value={self.endpoint[7:]}):
             proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
@@ -215,9 +230,66 @@ class RuntimeTests(unittest.TestCase):
             if args[0] == 'ps':
                 return rows
             return '20' if args[2] == 'docker.service' else self.endpoint[7:] + ' (Stream)'
-        with patch.object(runtime.subprocess, 'check_output', side_effect=socket_activated):
+        with patch.object(runtime.subprocess, 'check_output', side_effect=socket_activated), \
+                patch.object(runtime, 'process_executable', side_effect=lambda pid, *args: '/sbin/init' if pid == 1 else '/usr/bin/dockerd'):
             proof = REAL_DAEMON_PROCESS_INVENTORY({self.endpoint})
             self.assertEqual(proof['runtimes'][0]['endpoints'], [self.endpoint])
+
+    def test_executable_identity_resolves_a_real_alias(self):
+        with tempfile.TemporaryDirectory() as folder:
+            alias = Path(folder) / 'engine-alias'
+            alias.symlink_to(sys.executable)
+            child = subprocess.Popen([str(alias), '-c', 'print("ready", flush=True); input()'],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), 'ready')
+                executable = runtime.process_executable(child.pid)
+                self.assertNotEqual(executable, str(alias))
+                # Framework Python can re-exec its app binary after launch.
+                self.assertEqual(executable, runtime.process_executable(os.getpid()))
+            finally:
+                child.communicate('\n', timeout=5)
+
+    def test_kernel_thread_requires_positive_flag_and_guest_sudo_is_read_only(self):
+        pid = 23
+        def stat(flags):
+            return f'{pid} (fixture) S 1 0 0 0 0 {flags} 0 0\n'
+        with patch.object(runtime.sys, 'platform', 'linux'), \
+                patch.object(runtime.Path, 'read_text', return_value=stat(0x00200000)), \
+                patch.object(runtime.os, 'readlink', side_effect=FileNotFoundError()) as link:
+            evidence = []
+            self.assertIsNone(runtime.process_executable(pid, evidence=evidence))
+            self.assertEqual(evidence[0]['excluded'], 'positive PF_KTHREAD')
+            link.assert_not_called()
+        with patch.object(runtime.sys, 'platform', 'linux'), \
+                patch.object(runtime.Path, 'read_text', return_value=stat(0)), \
+                patch.object(runtime.os, 'readlink', side_effect=FileNotFoundError(errno.ENOENT, 'missing exe')), \
+                patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, str(pid))):
+            with self.assertRaises(FileNotFoundError):
+                runtime.process_executable(pid)
+        with patch.object(runtime.sys, 'platform', 'linux'), \
+                patch.object(runtime.Path, 'read_text', side_effect=FileNotFoundError(errno.ENOENT, 'gone')), \
+                patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '')):
+            evidence = []
+            self.assertIsNone(runtime.process_executable(pid, evidence=evidence))
+            self.assertEqual(evidence[0]['excluded'], 'positive PID absence after snapshot')
+        with patch.object(runtime.sys, 'platform', 'linux'), \
+                patch.object(runtime.Path, 'read_text', return_value=stat(0)), \
+                patch.object(runtime.os, 'readlink', side_effect=PermissionError()), \
+                patch.object(runtime.subprocess, 'check_output', return_value='/usr/bin/dockerd') as sudo:
+            evidence = []
+            self.assertEqual(runtime.process_executable(pid, guest=True, evidence=evidence), '/usr/bin/dockerd')
+            sudo.assert_called_once_with(['sudo', '-n', 'readlink', '/proc/23/exe'], text=True, timeout=5)
+            self.assertEqual(evidence[0]['status'], 'verified')
+            sudo.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'guest executable attestation is unavailable'):
+                runtime.process_executable(pid, guest=False)
+            sudo.assert_not_called()
+            sudo.side_effect = FileNotFoundError('sudo unavailable')
+            evidence = []
+            with self.assertRaises(FileNotFoundError) as failure:
+                runtime.process_executable(pid, guest=True, evidence=evidence)
+            self.assertEqual(failure.exception.runtime_evidence['executable_observations'][0]['status'], 'failed')
 
     def test_readable_launch_override_refuses_and_unreadable_environment_is_recorded(self):
         lines = f'{os.getpid()} 1 {os.getuid()} python HOME=/fixture\n1 0 0 launchd'

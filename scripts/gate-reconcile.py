@@ -71,6 +71,7 @@ GUEST_PROBE = r'''
 import json, pathlib, sys, os, re
 requests = json.loads(sys.argv[1])
 challenge = sys.argv[2]
+allow_root_attestation = json.loads(sys.argv[3])
 active = pathlib.Path.home()/'.cache/mycelium-gates/active'
 if not active.is_dir(): raise RuntimeError('guest custody directory unavailable')
 markers = [p.name for p in active.iterdir()]
@@ -102,7 +103,12 @@ for request in requests:
     candidates = {pid for pid, p in processes.items() if p['uid'] == os.getuid()}
     if scratch_processes(str(path), candidates, all_handles=True):
         raise RuntimeError('guest source handles or mappings remain')
-    runtime_proof = source_cleanup(path, request['run_id'])
+    try:
+        runtime_proof = source_cleanup(path, request['run_id'], guest=allow_root_attestation)
+    except Exception as error:
+        print(json.dumps(dict(challenge=challenge, error=str(error),
+                              runtime_evidence=getattr(error, 'runtime_evidence', None))))
+        raise SystemExit(125)
     cleanups.append(dict(run_id=request['run_id'], receipt=row, docker=runtime_proof))
 print(json.dumps(dict(markers=markers, cleanups=cleanups, challenge=challenge, stopped=not markers)))
 '''
@@ -111,9 +117,14 @@ print(json.dumps(dict(markers=markers, cleanups=cleanups, challenge=challenge, s
 def guest_inventory(vm, requests):
     challenge = uuid.uuid4().hex
     result = subprocess.run(['limactl', 'shell', '--workdir=/', vm, '--', 'python3', '-c',
-                             Path(runtime.__file__).read_text() + '\n' + inspect.getsource(budget.scratch_processes) + '\n' + inspect.getsource(host_inventory) + '\n' + GUEST_PROBE, json.dumps(requests), challenge], capture_output=True, text=True,
-                            check=True, timeout=20)
+                             Path(runtime.__file__).read_text() + '\n' + inspect.getsource(budget.scratch_processes) + '\n' + inspect.getsource(host_inventory) + '\n' + GUEST_PROBE, json.dumps(requests), challenge,
+                             json.dumps(vm == os.environ.get('GATE_VM', 'mycelium-gates'))], capture_output=True, text=True,
+                            check=False, timeout=20)
     row = json.loads(result.stdout)
+    if result.returncode:
+        error = RuntimeError('guest cleanup inventory refused: ' + str(row.get('error')))
+        error.runtime_evidence = dict(guest=row)
+        raise error
     if not isinstance(row, dict) or row.get('markers') != [] or row.get('stopped') is not True or row.get('challenge') != challenge or not isinstance(row.get('cleanups'), list):
         raise RuntimeError('guest markers or inventory are unconfirmed')
     if sorted(r['run_id'] for r in row['cleanups']) != sorted(r['run_id'] for r in requests):
@@ -311,6 +322,8 @@ def reconcile(folders, repo):
             decision['status'] = 'reconciled'
             return decision
         except Exception as error:
+            if hasattr(error, 'runtime_evidence'):
+                decision['evidence']['runtime_failure'] = error.runtime_evidence
             if decision['status'] == 'verified':
                 decision['status'] = 'archive-incomplete'
             decision['reason'] = str(error)
