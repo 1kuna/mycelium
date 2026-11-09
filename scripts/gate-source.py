@@ -27,6 +27,8 @@ def freeze(repo, archive, ref=None):
         sha = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', ref], text=True).strip()
         dirty = False
     else:
+        if subprocess.check_output(['git', '-C', str(repo), 'ls-files', '-u', '-z']):
+            raise RuntimeError('source has unresolved merge entries; no snapshot created')
         sha = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
         dirty = bool(subprocess.check_output(['git', '-C', str(repo), 'status', '--porcelain',
                                               '--untracked-files=all']))

@@ -6,7 +6,7 @@ import sys
 
 
 def trim_cache(cache, limit=12 * 1024 ** 3):
-    """Only gate-owned Go build objects; the caller holds both heavy lanes.
+    """Only gate-owned Go build objects; caller verifies idle under admission lock.
 
     Keep timing/compatibility records and module downloads. Go transparently
     rebuilds evicted objects. Never scan or trim another project's normal cache.
