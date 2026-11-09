@@ -224,7 +224,11 @@ healthy releases the guard after an operator clear as well as automatic recovery
 Automatic quarantine clearance additionally needs the supporting worker release and its
 vendor health tool; unsupported/unknown health keeps quarantine. Status
 `devices[].quarantine_recovery` records the fault event, healthy interval,
-measured observation window and clear evidence. Repeated-fault escalation still
+measured observation window and clear evidence. With `device-health-v1`,
+`devices[].quarantine_recovery_blocked` explains the last rejected proof with a
+sanitized code and component or probe exit status. Unknown required memory
+health still retains quarantine, even if other fields are healthy or the vendor
+command exits successfully. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
 

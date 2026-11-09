@@ -260,3 +260,27 @@ The template's README contains installation, direct sysfs/journal verification,
 prior-value (or explicit 640000) rollback, uninstall and laptop fake-sysfs tests.
 The live sysfs bound names and validation follow Linux 7.0's
 [`xe_hw_engine_class_sysfs.c`](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/xe/xe_hw_engine_class_sysfs.c).
+
+## Quarantine health proof diagnostics (#1185)
+
+XPU recovery reads the native `xpu-smi health` JSON fields `core_temperature`,
+`power_health` and `memory_health`; all must explicitly report `OK`.
+Warnings on other components prevent clearance;
+unsupported optional components do not prove or disprove the required health.
+The command runner keeps stdout JSON separate from stderr diagnostics. A MEI
+initialization warning cannot replace the component results, and successful exit
+alone is insufficient.
+
+Rejected proofs publish sanitized `quarantine_recovery_blocked` status after
+`device-health-v1` negotiation, with the failed component or command exit status.
+It describes the last rejected observation, not a current health guarantee.
+New healthy evidence removes it but still needs the existing uninterrupted
+kernel observation and measured recovery window. Logs record changed rejection
+classifications rather than raw vendor text. This does not change the probe
+cadence; independent pacing is tracked in #1168/#1171.
+
+The native diagnosis found unknown memory health even as root and both MEI and
+PMT access denials for the worker. It does not establish an MEI-only dependency.
+No device permission is installed by this parser/status change. A future
+installer permission change needs an isolated access dependency and a sufficient
+positive memory-health witness; native auto-clear acceptance remains in #1185.

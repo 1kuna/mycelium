@@ -73,6 +73,7 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	w.faultRecovery = map[string]deviceRecoveryObservation{}
 	w.faultHealth = map[string]deviceHealthObservation{}
 	w.faultHealthDue = map[string]deviceHealthDue{}
+	w.faultRejected = map[string]deviceHealthObservation{}
 	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
@@ -109,6 +110,7 @@ func (w *Worker) applyDeviceQuarantine() {
 	for i := range w.Machine.Devices {
 		d := &w.Machine.Devices[i]
 		d.Recovery = nil
+		d.RecoveryBlocked = nil
 		if recovery, ok := w.faults.Cleared[deviceFaultKey(*d)]; ok {
 			copy := recovery
 			d.Recovery = &copy
@@ -116,6 +118,11 @@ func (w *Worker) applyDeviceQuarantine() {
 		d.RepeatedTeardownFault = w.faults.Devices[deviceFaultKey(*d)].RepeatedTeardown
 		if fault := w.faults.Devices[deviceFaultKey(*d)]; fault.Reason != "" {
 			d.Reason, d.FreeMemoryGB = fault.Reason, 0
+			if h := w.faultRejected[deviceFaultKey(*d)]; !fault.RepeatedTeardown && h.event == fault.Event && h.failure != nil {
+				failure := *h.failure
+				failure.ObservedAt = h.at
+				d.RecoveryBlocked = &failure
+			}
 		} else if deviceFaultReason(d.Reason) {
 			// Capacity returns only with the next successful inventory probe.
 			d.Reason = ""

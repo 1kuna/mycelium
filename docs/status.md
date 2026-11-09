@@ -651,6 +651,13 @@ An unsupported, multiplexed, incomplete or nonadvancing counter remains unknown.
 Sensor ages are rebased onto queue time; cached inventory cannot refresh them.
 Strict older queues receive the existing inventory shape after negotiation.
 
+With `device-health-v1` support (#1185),
+`devices[].quarantine_recovery_blocked` reports the last rejected health proof:
+`code`, optional `component` or `exit_status`, and worker `observed_at`.
+Only sanitized classifications are reported, never raw probe text or paths.
+A healthy reading clears this diagnostic but must still establish the recovery
+window. Unsupported/unknown required health retains quarantine.
+
 With `device-recovery-v1` support (#1142), `devices[].quarantine_recovery`
 records an automatic clear's fault hash, healthy interval, observation window,
 vendor probe and queue-owned transition receipt (`observed_at`). Older queues

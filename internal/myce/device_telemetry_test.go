@@ -75,8 +75,8 @@ func TestDeviceTelemetryAndHostProbeAdvertisement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply.DeviceTelemetryProtocol != deviceTelemetryProtocol || reply.HostProbeProtocol != hostProbeProtocol || reply.DeviceRecoveryProtocol != deviceRecoveryProtocol {
-		t.Fatal("check-in did not advertise both independent telemetry protocols", reply)
+	if reply.DeviceTelemetryProtocol != deviceTelemetryProtocol || reply.HostProbeProtocol != hostProbeProtocol || reply.DeviceRecoveryProtocol != deviceRecoveryProtocol || reply.DeviceHealthProtocol != deviceHealthProtocol {
+		t.Fatal("check-in did not advertise independent health/telemetry protocols", reply)
 	}
 }
 
@@ -100,6 +100,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 		if !strict {
 			reply.DeviceTelemetryProtocol = deviceTelemetryProtocol
 			reply.DeviceRecoveryProtocol = deviceRecoveryProtocol
+			reply.DeviceHealthProtocol = deviceHealthProtocol
 		}
 		_ = json.NewEncoder(rw).Encode(reply)
 	}))
@@ -109,6 +110,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	s := &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}
 	m.Devices[0].Telemetry = s
 	m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: "synthetic"}
+	m.Devices[0].RecoveryBlocked = &DeviceHealthFailure{Code: "health_component_unknown", Component: "memory"}
 	w := Worker{Clock: clock, Client: Client{URL: server.URL}, unifiedMemoryWire: &workerUnifiedMemoryWire{}}
 	send := func() {
 		t.Helper()
@@ -120,9 +122,17 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	send()
 	clock.Advance(deviceMemorySampleFreshFor)
 	send()
-	if hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
+	if reports[0].Machine.Devices[0].RecoveryBlocked != nil || reports[1].Machine.Devices[0].RecoveryBlocked == nil || hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
 		t.Fatal("telemetry did not negotiate independently")
 	}
+	// Recovery v1 queues still receive clear receipts, without the newer
+	// health diagnostic field. Both adaptations leave local status intact.
+	w.unifiedMemoryWire.healthSupported = false
+	legacy := w.deviceRecoveryCheckin(Checkin{Machine: m})
+	if legacy.Machine.Devices[0].Recovery == nil || legacy.Machine.Devices[0].RecoveryBlocked != nil || m.Devices[0].RecoveryBlocked == nil {
+		t.Fatal("health negotiation changed v1 recovery or local status")
+	}
+	w.unifiedMemoryWire.healthSupported = true
 	// A delayed inventory result carries its original sensor age. Rebase it
 	// onto a queue clock with a different epoch; it must remain stale.
 	c := receivedDeviceTelemetry(reports[1], clock.Now().Add(24*time.Hour))
@@ -132,7 +142,7 @@ func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
 	strict = true
 	send()
 	send()
-	if len(reports) != 5 || !hasDeviceTelemetry(reports[2]) || hasDeviceTelemetry(reports[3]) || hasDeviceTelemetry(reports[4]) || hasDeviceRecovery(reports[3]) || hasDeviceRecovery(reports[4]) || m.Devices[0].Recovery == nil || s.AgeSeconds != 0 {
+	if len(reports) != 5 || !hasDeviceTelemetry(reports[2]) || hasDeviceTelemetry(reports[3]) || hasDeviceTelemetry(reports[4]) || hasDeviceRecovery(reports[3]) || hasDeviceRecovery(reports[4]) || m.Devices[0].RecoveryBlocked == nil || m.Devices[0].Recovery == nil || s.AgeSeconds != 0 {
 		t.Fatal("downgrade failed or mutated the original sensor evidence")
 	}
 }

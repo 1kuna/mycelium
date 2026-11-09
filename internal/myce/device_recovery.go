@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"log"
 	"maps"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -15,24 +19,97 @@ import (
 type DeviceHealthProbe func(context.Context, MachineDevice) (bool, error)
 
 const deviceRecoveryProtocol = "device-recovery-v1"
+const deviceHealthProtocol = "device-health-v1"
+
+// DeviceHealthFailure contains only worker-owned classifications, never vendor
+// output, error strings or paths. ObservedAt identifies the last rejected proof.
+type DeviceHealthFailure struct {
+	Code       string    `json:"code"`
+	Component  string    `json:"component,omitempty"`
+	ExitStatus *int      `json:"exit_status,omitempty"`
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+}
+
+func (f *DeviceHealthFailure) Error() string {
+	s := f.Code
+	if f.Component != "" {
+		s += ": " + f.Component
+	}
+	if f.ExitStatus != nil {
+		s += fmt.Sprintf(": exit_status=%d", *f.ExitStatus)
+	}
+	return s
+}
+
+func deviceHealthFailure(normal bool, err error) *DeviceHealthFailure {
+	if normal && err == nil {
+		return nil
+	}
+	var failure *DeviceHealthFailure
+	if errors.As(err, &failure) && failure != nil {
+		// Even injected probes cannot publish arbitrary labels or error text.
+		switch failure.Code {
+		case "health_component_missing", "health_component_unknown", "health_component_failed":
+			switch failure.Component {
+			case "core_temperature", "power", "memory", "memory_temperature", "frequency", "fabric_port", "optional":
+				return &DeviceHealthFailure{Code: failure.Code, Component: failure.Component}
+			}
+		case "health_probe_invalid_output", "health_probe_error", "health_probe_identity_unavailable", "health_probe_identity_mismatch", "health_probe_unsupported", "health_probe_permission_denied", "health_probe_unavailable", "health_probe_cancelled", "health_probe_failed", "health_probe_unhealthy":
+			return &DeviceHealthFailure{Code: failure.Code}
+		case "health_probe_exit":
+			if failure.ExitStatus != nil {
+				status := *failure.ExitStatus
+				return &DeviceHealthFailure{Code: failure.Code, ExitStatus: &status}
+			}
+		}
+	}
+	code := "health_probe_unhealthy"
+	switch {
+	case errors.Is(err, os.ErrPermission):
+		code = "health_probe_permission_denied"
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, os.ErrNotExist):
+		code = "health_probe_unavailable"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		code = "health_probe_cancelled"
+	case err != nil:
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			status := exit.ExitCode()
+			return &DeviceHealthFailure{Code: "health_probe_exit", ExitStatus: &status}
+		}
+		code = "health_probe_failed"
+	}
+	return &DeviceHealthFailure{Code: code}
+}
 
 func legacyDeviceRecoveryCheckin(c Checkin) Checkin {
 	c.Machine.Devices = slices.Clone(c.Machine.Devices)
 	for i := range c.Machine.Devices {
 		c.Machine.Devices[i].Recovery = nil
+		c.Machine.Devices[i].RecoveryBlocked = nil
 	}
 	return c
 }
 
 func hasDeviceRecovery(c Checkin) bool {
-	return slices.ContainsFunc(c.Machine.Devices, func(d MachineDevice) bool { return d.Recovery != nil })
+	return slices.ContainsFunc(c.Machine.Devices, func(d MachineDevice) bool { return d.Recovery != nil || d.RecoveryBlocked != nil })
 }
 
 func (w Worker) deviceRecoveryCheckin(c Checkin) Checkin {
-	if r := w.unifiedMemoryWire; r != nil && r.recoverySupported && r.machine == c.Machine.ID && r.session == c.Machine.Session {
-		return c
+	r := w.unifiedMemoryWire
+	if r == nil || r.machine != c.Machine.ID || r.session != c.Machine.Session {
+		return legacyDeviceRecoveryCheckin(c)
 	}
-	return legacyDeviceRecoveryCheckin(c)
+	c.Machine.Devices = slices.Clone(c.Machine.Devices)
+	for i := range c.Machine.Devices {
+		if !r.recoverySupported {
+			c.Machine.Devices[i].Recovery = nil
+		}
+		if !r.healthSupported {
+			c.Machine.Devices[i].RecoveryBlocked = nil
+		}
+	}
+	return c
 }
 
 type DeviceRecovery struct {
@@ -90,9 +167,10 @@ func (q *Queue) receiveDeviceRecovery(m, old *Machine) {
 }
 
 type deviceHealthObservation struct {
-	event  string
-	at     time.Time
-	normal bool
+	event   string
+	at      time.Time
+	normal  bool
+	failure *DeviceHealthFailure
 }
 
 type deviceRecoveryObservation struct {
@@ -143,7 +221,7 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 				continue
 			}
 			normal, err := probe(ctx, d)
-			out[key] = deviceHealthObservation{f.Event, clock.Now(), normal && err == nil}
+			out[key] = deviceHealthObservation{event: f.Event, at: clock.Now(), normal: normal && err == nil, failure: deviceHealthFailure(normal, err)}
 		}
 		return out, nil
 	}
@@ -172,6 +250,24 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 			window = max(window, r.window)
 		}
 		w.faultHealthDue[key] = deviceHealthDue{event: h.event, at: h.at.Add(window)}
+	}
+	for key, h := range health {
+		f := w.faults.Devices[key]
+		if f.Reason == "" || f.RepeatedTeardown || f.Event != h.event || h.at.Before(w.faultHealthAfter) {
+			continue
+		}
+		previous := w.faultRejected[key]
+		if h.failure == nil {
+			delete(w.faultRejected, key)
+			continue
+		}
+		if w.faultRejected == nil {
+			w.faultRejected = map[string]deviceHealthObservation{}
+		}
+		w.faultRejected[key] = h
+		if previous.event != h.event || previous.failure == nil || previous.failure.Error() != h.failure.Error() {
+			log.Printf("device recovery proof rejected: device=%s reason=%s", key, h.failure)
+		}
 	}
 	return w.faultHealth
 }
@@ -254,47 +350,66 @@ func deviceHealthProbeName(platform string) string {
 // tools/fields, malformed output and unknown health retain quarantine.
 func (p MachineProbe) DeviceHealth(ctx context.Context, d MachineDevice) (bool, error) {
 	if p.Command == nil {
-		return false, errors.New("device health probe unavailable")
+		return false, exec.ErrNotFound
 	}
 	switch d.Platform {
 	case "xpu":
 		if d.pciAddress == "" {
-			return false, errors.New("device health identity unavailable")
+			return false, &DeviceHealthFailure{Code: "health_probe_identity_unavailable"}
 		}
 		data, err := p.Command(ctx, "xpu-smi", "health", "-d", d.pciAddress, "-j")
 		if err != nil {
-			return false, err
+			return false, deviceHealthFailure(false, err)
 		}
 		var health map[string]json.RawMessage
 		if err := json.Unmarshal(data, &health); err != nil {
-			return false, err
+			return false, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
 		}
 		if _, failed := health["error"]; failed {
-			return false, nil
+			return false, &DeviceHealthFailure{Code: "health_probe_error"}
 		}
-		for _, component := range []string{"core_temperature", "power", "memory"} {
+		for _, component := range []struct{ field, name string }{
+			{"core_temperature", "core_temperature"}, {"power_health", "power"}, {"memory_health", "memory"},
+		} {
+			data, ok := health[component.field]
+			if !ok {
+				return false, &DeviceHealthFailure{Code: "health_component_missing", Component: component.name}
+			}
 			var reading struct {
 				Status string `json:"status"`
 			}
-			if json.Unmarshal(health[component], &reading) != nil || reading.Status != "OK" {
-				return false, nil
+			if json.Unmarshal(data, &reading) != nil || reading.Status == "" || reading.Status == "Unknown" {
+				return false, &DeviceHealthFailure{Code: "health_component_unknown", Component: component.name}
+			}
+			if reading.Status != "OK" {
+				return false, &DeviceHealthFailure{Code: "health_component_failed", Component: component.name}
 			}
 		}
 		// Optional components can be unsupported, but an explicit warning or
 		// critical result on any component prevents clearance.
-		for _, data := range health {
+		for _, field := range slices.Sorted(maps.Keys(health)) {
+			data := health[field]
 			var reading struct {
 				Status string `json:"status"`
 			}
 			if json.Unmarshal(data, &reading) == nil && reading.Status != "" && reading.Status != "OK" && reading.Status != "Unknown" {
-				return false, nil
+				component := "optional"
+				switch field {
+				case "memory_temperature":
+					component = field
+				case "frequency_health":
+					component = "frequency"
+				case "fabric_port_health":
+					component = "fabric_port"
+				}
+				return false, &DeviceHealthFailure{Code: "health_component_failed", Component: component}
 			}
 		}
 		return true, nil
 	case "cuda":
 		data, err := p.Command(ctx, "nvidia-smi", "-q", "-x", "-i", d.Identity)
 		if err != nil {
-			return false, err
+			return false, deviceHealthFailure(false, err)
 		}
 		var report struct {
 			GPUs []struct {
@@ -303,10 +418,13 @@ func (p MachineProbe) DeviceHealth(ctx context.Context, d MachineDevice) (bool, 
 			} `xml:"gpu"`
 		}
 		if err := xml.Unmarshal(data, &report); err != nil {
-			return false, err
+			return false, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
 		}
-		return len(report.GPUs) == 1 && report.GPUs[0].UUID == d.Identity && strings.TrimSpace(report.GPUs[0].Recovery) == "None", nil
+		if len(report.GPUs) != 1 || report.GPUs[0].UUID != d.Identity {
+			return false, &DeviceHealthFailure{Code: "health_probe_identity_mismatch"}
+		}
+		return strings.TrimSpace(report.GPUs[0].Recovery) == "None", nil
 	default:
-		return false, errors.New("device health probe unsupported")
+		return false, &DeviceHealthFailure{Code: "health_probe_unsupported"}
 	}
 }

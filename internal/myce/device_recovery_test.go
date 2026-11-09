@@ -1,10 +1,14 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,15 +18,24 @@ import (
 )
 
 func TestDeviceFaultAutoClear(t *testing.T) {
-	for _, scenario := range []string{"healthy", "new fault", "monitor gap", "escalated"} {
+	for _, scenario := range []string{"healthy", "new fault", "monitor gap", "escalated", "unknown core", "unknown memory", "permission denied", "probe exit"} {
 		t.Run(scenario, func(t *testing.T) {
-			_, clock := fixture(t)
+			q, clock := fixture(t)
+			var journal bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&journal)
+			t.Cleanup(func() { log.SetOutput(previous) })
 			m := m3Machine()
+			m.Devices[0].Platform = "xpu"
+			body := xpuHealthyHealth
+			var probeErr error
+			p := MachineProbe{Command: func(context.Context, string, ...string) ([]byte, error) { return []byte(body), probeErr }}
 			m.Devices[0].pciAddress = "0000:03:00.0"
 			w := Worker{Machine: m, Clock: clock, Interval: 2 * time.Second,
-				DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault},
-				DeviceHealthProbe:   func(context.Context, MachineDevice) (bool, error) { return true, nil }}
+				DeviceFaultMatchers: map[string]DeviceFaultMatcher{"xpu": intelKernelFault},
+				DeviceHealthProbe:   p.DeviceHealth}
 			root := &workerStore{dir: t.TempDir()}
+			root.deviceHealth.timeout, root.deviceFaults.timeout = -1, -1
 			var lines []KernelLogLine
 			var logErr error
 			w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
@@ -45,6 +58,22 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 				f.RepeatedTeardown = true
 				w.faults.Devices[key] = f
 			}
+			wantRejection := ""
+			switch scenario {
+			case "unknown core":
+				body = strings.Replace(body, `"core_temperature":{"status":"OK"}`, `"core_temperature":{"status":"Unknown"}`, 1)
+				wantRejection = "health_component_unknown: core_temperature"
+			case "unknown memory":
+				body = strings.Replace(body, `"memory_health":{"status":"OK"}`, `"memory_health":{"status":"Unknown"}`, 1)
+				wantRejection = "health_component_unknown: memory"
+			case "permission denied":
+				probeErr = &os.PathError{Op: "open", Path: "/private/vendor-sensitive", Err: os.ErrPermission}
+				wantRejection = "health_probe_permission_denied"
+			case "probe exit":
+				cmd := exec.Command("sh", "-c", "exit 7")
+				probeErr = cmd.Run()
+				wantRejection = "health_probe_exit: exit_status=7"
+			}
 			clock.Advance(8 * time.Second)
 			lines = nil
 			scan() // First normal probe: ten seconds after the actual fault.
@@ -65,6 +94,34 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 			if scenario != "healthy" {
 				if w.Machine.Devices[0].Reason == "" {
 					t.Fatal("cleared without uninterrupted healthy proof")
+				}
+				if wantRejection != "" {
+					failure := w.Machine.Devices[0].RecoveryBlocked
+					if failure == nil || failure.Error() != wantRejection || failure.ObservedAt.IsZero() {
+						t.Fatal("missing typed rejection", failure)
+					}
+					if _, err := q.Checkin(Checkin{Machine: w.Machine}); err != nil {
+						t.Fatal(err)
+					}
+					snapshot, err := q.statusSnapshot()
+					if err != nil {
+						t.Fatal(err)
+					}
+					status, err := json.Marshal(snapshot)
+					if err != nil || !bytes.Contains(status, []byte(failure.Code)) || strings.Contains(string(status)+journal.String(), "vendor-sensitive") {
+						t.Fatal("status missing rejection or leaked raw error", string(status), err)
+					}
+					if strings.Count(journal.String(), "device recovery proof rejected:") != 1 || !strings.Contains(journal.String(), wantRejection) {
+						t.Fatal("missing or repeated rejection log", journal.String())
+					}
+					// A new healthy sample retires the rejection but still must
+					// establish the original measured recovery interval.
+					body, probeErr = xpuHealthyHealth, nil
+					clock.Advance(2 * time.Second)
+					scan()
+					if w.Machine.Devices[0].RecoveryBlocked != nil || w.Machine.Devices[0].Reason == "" {
+						t.Fatal("healthy reading did not reset rejection/streak")
+					}
 				}
 				return
 			}
@@ -141,19 +198,29 @@ func TestDeviceFaultSlowObservation(t *testing.T) {
 	})
 }
 
+// Native xpu-smi schema. Diagnostic warnings are outside stdout in the real
+// runner, so command success alone never replaces these required readings.
+const xpuHealthyHealth = `{"core_temperature":{"status":"OK"},"power_health":{"status":"OK"},"memory_health":{"status":"OK"},"memory_temperature":{"status":"Unknown"},"frequency_health":{"status":"OK"},"unsupported_item_health":{"status":"Unknown"},"device_id":0}`
+
 func TestDeviceHealthVendorEvidence(t *testing.T) {
 	for _, tc := range []struct {
-		platform, body string
-		normal         bool
+		platform, body, failure string
 	}{
-		{"xpu", `{"core_temperature":{"status":"OK"},"power":{"status":"OK"},"memory":{"status":"OK"}}`, true},
-		{"xpu", `{"core_temperature":{"status":"OK"},"power":{"status":"OK"},"memory":{"status":"Warning"}}`, false},
-		{"xpu", `{}`, false},
-		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-test</uuid><gpu_recovery_action>None</gpu_recovery_action></gpu></nvidia_smi_log>`, true},
-		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-test</uuid><gpu_recovery_action>Reset</gpu_recovery_action></gpu></nvidia_smi_log>`, false},
-		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-other</uuid><gpu_recovery_action>None</gpu_recovery_action></gpu></nvidia_smi_log>`, false},
+		{"xpu", xpuHealthyHealth, ""},
+		{"xpu", `{"core_temperature":{"status":"OK"},"power_health":{"status":"OK"},"memory_health":{"status":"Unknown"}}`, "health_component_unknown: memory"},
+		{"xpu", `{"core_temperature":{"status":"Unknown"},"power_health":{"status":"OK"},"memory_health":{"status":"Unknown"}}`, "health_component_unknown: core_temperature"},
+		{"xpu", `{"core_temperature":{"status":"OK"},"power_health":{"status":"OK"},"memory_health":{"status":"Warning"}}`, "health_component_failed: memory"},
+		{"xpu", `{"core_temperature":{"status":"OK"},"power_health":{"status":"Unknown"},"memory_health":{"status":"OK"}}`, "health_component_unknown: power"},
+		{"xpu", strings.Replace(xpuHealthyHealth, `"frequency_health":{"status":"OK"}`, `"frequency_health":{"status":"Warning"}`, 1), "health_component_failed: frequency"},
+		{"xpu", `{}`, "health_component_missing: core_temperature"},
+		{"xpu", `{"core_temperature":{"status":"OK"},"memory_health":{"status":"OK"}}`, "health_component_missing: power"},
+		{"xpu", `{"error":"private diagnostic"}`, "health_probe_error"},
+		{"xpu", `not json`, "health_probe_invalid_output"},
+		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-test</uuid><gpu_recovery_action>None</gpu_recovery_action></gpu></nvidia_smi_log>`, ""},
+		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-test</uuid><gpu_recovery_action>Reset</gpu_recovery_action></gpu></nvidia_smi_log>`, "health_probe_unhealthy"},
+		{"cuda", `<nvidia_smi_log><gpu><uuid>GPU-other</uuid><gpu_recovery_action>None</gpu_recovery_action></gpu></nvidia_smi_log>`, "health_probe_identity_mismatch"},
 	} {
-		t.Run(fmt.Sprint(tc.platform, "/", tc.normal, "/", tc.body), func(t *testing.T) {
+		t.Run(fmt.Sprint(tc.platform, "/", tc.body), func(t *testing.T) {
 			p := MachineProbe{Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 				want := "nvidia-smi -q -x -i GPU-test"
 				if tc.platform == "xpu" {
@@ -165,8 +232,13 @@ func TestDeviceHealthVendorEvidence(t *testing.T) {
 				return []byte(tc.body), nil
 			}}
 			normal, err := p.DeviceHealth(context.Background(), MachineDevice{Platform: tc.platform, Identity: "GPU-test", pciAddress: "0000:03:00.0"})
-			if err != nil || normal != tc.normal {
-				t.Fatal(normal, err)
+			failure := deviceHealthFailure(normal, err)
+			if tc.failure == "" {
+				if !normal || err != nil || failure != nil {
+					t.Fatal(normal, err, failure)
+				}
+			} else if normal || failure == nil || failure.Error() != tc.failure {
+				t.Fatal(normal, err, failure)
 			}
 		})
 	}

@@ -2455,11 +2455,36 @@ still requires new health-proven recovery or another healthy device/host.
 From the worker release containing #1142, non-escalated quarantine also clears
 automatically after positive vendor health evidence and uninterrupted kernel
 observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power
-and memory must report `OK`, and no supported component may report a warning or
+and memory (native JSON keys `core_temperature`, `power_health`,
+`memory_health`) must report `OK`, and no supported component may report a warning or
 critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
 must explicitly report recovery action `None`. Missing tools, unsupported fields,
 unknown required health and failed reads keep quarantine. Other backends can
 supply the injectable health probe; unsupported backends do not auto-clear.
+
+With `device-health-v1` negotiation, the last rejected proof appears in
+`devices[].quarantine_recovery_blocked`: a typed `code`, optional `component`
+or `exit_status`, and the worker's `observed_at`. Examples are
+`health_component_unknown` with `component: memory`,
+`health_component_missing` with `component: power`,
+`health_probe_permission_denied`, and `health_probe_exit` with `exit_status`.
+The worker logs a rejection when its classification or fault changes; repeated
+identical rejections update status without flooding the log. Raw vendor output,
+paths and error strings are never included. A new healthy reading removes the
+last rejection; it does not bypass the recovery window. Older queues receive
+no additive diagnostic field, while recovery-v1 clear receipts remain compatible.
+
+A read-only native check of xpu-smi 2.2.0 found temperature unknown for the
+worker and OK for root, but memory health unknown for both. The worker was denied
+both MEI read/write opens and Intel PMT telemetry reads. This does not isolate
+MEI as the required temperature permission; granting MEI access alone cannot
+supply the missing memory proof. This change installs no speculative udev rule,
+group membership or elevated health command. A supported installer permission
+change requires isolating the necessary read access and qualifying positive
+memory health during an authorized maintenance window. Unknown memory health
+continues to withhold automatic clearance; an idle device or quiet kernel log
+is not a substitute. Track that remaining native acceptance in #1185.
+
 Vendor probes have a separate single-flight lane, so a slow tool cannot stop
 kernel scanning or create a probe backlog.
 Completed health readings remain pending until a subsequent kernel scan can

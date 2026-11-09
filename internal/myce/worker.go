@@ -56,6 +56,7 @@ type Worker struct {
 	faultTeardowns      map[string][]time.Time
 	faultRecovery       map[string]deviceRecoveryObservation
 	faultHealth         map[string]deviceHealthObservation
+	faultRejected       map[string]deviceHealthObservation
 	faultHealthAfter    time.Time // A monitoring gap invalidates older in-flight health readings.
 	faultHealthDue      map[string]deviceHealthDue
 	InventoryProbe      func(context.Context) ([]MachineDevice, error)
