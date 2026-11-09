@@ -250,6 +250,37 @@ func TestStorageFaultSharedInputStagingOwnsObservation(t *testing.T) {
 	if err == nil || storageTestFault(m.mounts["checkpoint"]) == nil || storageTestFault(m.mounts["checkpoint"]).Generation != 1 {
 		t.Fatal("staging did not publish one exact owned fault", err, storageTestFault(m.mounts["checkpoint"]))
 	}
+	t.Run("sequential-copy-recovery", func(t *testing.T) {
+		nas, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := sharedFixtureFile(t, nas, "asset", "verified source")
+		source := filepath.Join(nas, "asset")
+		var observed []*os.PathError
+		ctx := context.WithValue(context.Background(), storageFaultContextKey{}, func(err error) {
+			storageErrorLeaves(err, func(err error) {
+				if fault, _, ok := storageIOFault(err); ok {
+					observed = append(observed, fault)
+				}
+			})
+		})
+		client := Client{Clock: clock, Pause: func(_ context.Context, delay time.Duration) error {
+			clock.Advance(delay)
+			return nil
+		}}
+		reads := 0
+		err = copyNASInput(ctx, client, source, filepath.Join(t.TempDir(), "local"), &ref, func(f *os.File, p []byte) (int, error) {
+			reads++
+			if reads == 1 {
+				return 0, io.EOF
+			}
+			return f.Read(p)
+		})
+		if err != nil || len(observed) != 1 || observed[0].Path != source || observed[0].Op != "read" || !errors.Is(observed[0], io.ErrUnexpectedEOF) {
+			t.Fatalf("sequential recovery lost exact source fault: %v, %+v", err, observed)
+		}
+	})
 }
 
 func TestStorageFaultReadOnlyReopenRequiresConsistentData(t *testing.T) {

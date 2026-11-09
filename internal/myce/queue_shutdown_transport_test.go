@@ -55,7 +55,7 @@ func TestQueueShutdownInterruptsSocketIO(t *testing.T) {
 			observed := &shutdownObservedConn{Conn: conn}
 			listener := &shutdownPipeListener{conn: observed, closed: make(chan struct{})}
 			defer listener.Close()
-			server := &http.Server{Handler: q.shutdownRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := &http.Server{ConnContext: QueueConnectionContext, Handler: q.shutdownRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if phase == "body" {
 					close(entered)
 					_, _ = io.Copy(io.Discard, r.Body)

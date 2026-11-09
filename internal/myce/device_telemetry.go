@@ -2,10 +2,7 @@ package myce
 
 import (
 	"context"
-	"encoding/csv"
-	"errors"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -80,47 +77,81 @@ func receivedDeviceTelemetry(c Checkin, now time.Time) Checkin {
 }
 
 func deviceTelemetryReady(s *DeviceTelemetry, now time.Time) bool {
-	return validDeviceTelemetry(s) && s != nil && s.FreeGB != nil && s.ActivePercent != nil &&
-		!now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
+	return deviceTelemetryFresh(s, now) && s.FreeGB != nil && s.ActivePercent != nil
 }
 
-// Use the installed CLI's supported single-shot query, with the PCI identity
-// rather than a runtime ordinal. The old XPUM stats schema is not this tool's
-// output. A missing/unsupported query leaves its telemetry counter unknown.
-func xpuFreeMemory(ctx context.Context, p MachineProbe, pci string) (float64, error) {
-	b, err := p.Command(ctx, "xpu-smi", "--id="+pci, "--query-gpu=pci.bus_id,memory.free", "--format=csv,noheader,nounits")
+func deviceTelemetryFresh(s *DeviceTelemetry, now time.Time) bool {
+	return validDeviceTelemetry(s) && s != nil && !now.Before(s.At) && now.Sub(s.At) < deviceMemorySampleFreshFor
+}
+
+// The optional broker exposes privileged kernel usage counters without Level
+// Zero initialization. Old GTT-only brokers supply no VRAM evidence. Neither
+// their host storage nor censored/missing counters can become device headroom.
+func (w Worker) xpuFreeMemory(ctx context.Context) (map[string]float64, error) {
+	free := map[string]float64{}
+	if w.Clock == nil {
+		w.Clock = RealClock{}
+	}
+	s, err := readGPUTelemetrySnapshot(ctx, w.Clock, w.GPUTelemetryHelper)
 	if err != nil {
-		return 0, err
+		return free, err
 	}
-	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
-	if err != nil || len(rows) != 1 || len(rows[0]) != 2 || normalizePCIAddress(strings.TrimSpace(rows[0][0])) != normalizePCIAddress(pci) {
-		return 0, errors.New("XPU free-memory identity unavailable")
-	}
-	n, err := strconv.ParseFloat(strings.TrimSpace(rows[0][1]), 64)
-	if err != nil || !validMemoryValue(n) {
-		return 0, errors.New("XPU free-memory counter unavailable")
-	}
-	return n / 1024, nil
+	return xpuSnapshotFreeMemory(s), nil
 }
 
-func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, d *MachineDevice) {
-	if p.OS != "linux" || d.Platform != "xpu" || d.UnifiedMemory || d.pciAddress == "" {
+func xpuSnapshotFreeMemory(s *gpuTelemetrySnapshot) map[string]float64 {
+	free := map[string]float64{}
+	seen := map[string]bool{}
+	for identity, memory := range s.VRAM {
+		pci := normalizePCIAddress(strings.TrimSpace(identity))
+		if seen[pci] {
+			delete(free, pci)
+			continue
+		}
+		seen[pci] = true
+		if hostTelemetryPCI.MatchString(pci) && memory.TotalBytes != nil && memory.UsedBytes != nil && *memory.TotalBytes > 0 && *memory.UsedBytes <= *memory.TotalBytes {
+			free[pci] = float64(*memory.TotalBytes-*memory.UsedBytes) / (1 << 30)
+		}
+	}
+	return free
+}
+
+func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices []MachineDevice) {
+	if p.OS != "linux" {
+		return
+	}
+	eligible := func(d MachineDevice) bool {
+		return d.Platform == "xpu" && !d.UnifiedMemory && d.pciAddress != "" && d.Reason == ""
+	}
+	if !slices.ContainsFunc(devices, eligible) {
 		return
 	}
 	clock := w.Clock
 	if clock == nil {
 		clock = RealClock{}
 	}
-	s := &DeviceTelemetry{At: clock.Now(), Source: "xpu-smi memory; Xe PMU busiest hardware engine"}
-	if free, err := xpuFreeMemory(ctx, p, d.pciAddress); err == nil {
-		free = max(0, free-d.ReserveMemoryGB)
-		s.FreeGB = &free
-		d.FreeMemoryGB = min(d.FreeMemoryGB, free)
+	at := clock.Now()
+	var freeByPCI map[string]float64
+	if p.XPUFreeMemory != nil {
+		freeByPCI, _ = p.XPUFreeMemory(ctx)
+	} else {
+		freeByPCI, _ = w.xpuFreeMemory(ctx)
 	}
-	if p.XeActivity != nil {
-		if active, err := p.XeActivity(ctx, d.pciAddress); err == nil && validMemoryValue(active) && active <= 100 {
-			s.ActivePercent = &active
+	for i := range devices {
+		d := &devices[i]
+		if !eligible(*d) {
+			continue
 		}
+		s := &DeviceTelemetry{At: at, Source: "read-only Xe broker VRAM; Xe PMU busiest hardware engine"}
+		if free, ok := freeByPCI[normalizePCIAddress(d.pciAddress)]; ok {
+			free = max(0, free-d.ReserveMemoryGB)
+			s.FreeGB = &free
+		}
+		if p.XeActivity != nil {
+			if active, err := p.XeActivity(ctx, d.pciAddress); err == nil && validMemoryValue(active) && active <= 100 {
+				s.ActivePercent = &active
+			}
+		}
+		d.Telemetry = s
 	}
-	d.Telemetry = s
 }

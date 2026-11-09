@@ -48,13 +48,10 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 		t.Fatalf("blocker=%q reason=%q", waiting.Efficiency.Blocker, q.waitReason(waiting))
 	}
 	c.Advance(3 * time.Hour)
-	if err := q.update(func() error {
-		q.s.Machines["large"].LastSeen = c.Now()
-		q.s.Machines["idle"].LastSeen = c.Now()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// Refresh accepted reports, including the original exact running custody.
+	// Writing LastSeen alone is not evidence of a received check-in.
+	check(t, q, m, running)
+	check(t, q, idle, nil)
 	if err := q.updateEfficiencyDiagnostics(context.Background()); err != nil {
 		t.Fatal(err)
 	}

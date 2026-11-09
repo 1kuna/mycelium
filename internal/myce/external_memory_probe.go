@@ -110,7 +110,7 @@ func (w Worker) hostMemoryObservation(ctx context.Context, m Machine, available 
 	if err != nil || rss > used {
 		return nil
 	}
-	return &HostMemoryObservation{TotalGB: total, UsedGB: used, MyceliumGB: rss}
+	return &HostMemoryObservation{TotalGB: total, UsedGB: used, MyceliumGB: rss, ReserveGB: w.HostMemoryReserveGB, BaselineVersion: 1}
 }
 
 // Preserve raw reclaimable RAM before the admission-only reserve/clamp. Explicit

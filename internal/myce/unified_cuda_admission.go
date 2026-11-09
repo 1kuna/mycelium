@@ -43,8 +43,10 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 }
 
 // Host anon/current cannot establish overlap with CUDA allocations (#424).
-// Credit at most the host vector; the full device vector remains growth even
-// when the cgroup is larger. Complete device peaks are not current ownership.
+// Per-process device counters can themselves count shared allocations more
+// than once, so neither their sum nor an RSS estimate proves unique physical
+// residency. Credit only the uniquely charged host vector; retain the full
+// device floor until device residency/overlap can be independently established.
 func remainingAllocationGrowth(m *Machine, device, reservation float64, sample hostMemorySample, now time.Time) float64 {
 	growth := remainingHostGrowth(reservation, sample, now)
 	if unifiedCUDA(m) {
@@ -67,7 +69,11 @@ func (q *Queue) unifiedCUDAHostRoom(m *Machine, room, growth float64) float64 {
 		o := sibling.MemoryObservation
 		floor, ok := unifiedCUDAFloor(sibling)
 		now := q.clock.Now()
-		if !ok || !validHostMemoryObservation(o) || sibling.LastSeen.After(now) || now.Sub(sibling.LastSeen) >= hostMemorySampleFreshFor {
+		// Physical RAM is sampled for each accepted check-in. Reuse that
+		// session's adaptive contact and frozen host-health delivery evidence;
+		// an unrelated fixed age must not turn healthy slow control into debt.
+		// Continuing contact still cannot renew expired/failed sensor evidence.
+		if !ok || !validHostMemoryObservation(o) || !q.workerFresh(sibling, now) || !q.hostHealthEvidenceValid(sibling, now) {
 			return min(room, -growth)
 		}
 		room = min(room, o.TotalGB-o.UsedGB-floor-growth)
@@ -117,7 +123,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 				}
 				if hostID(target) != host {
 					now := q.clock.Now()
-					if q.unreported[target.ID] || target.LastSeen.After(now) || now.Sub(target.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+					if q.unreported[target.ID] || !q.workerFresh(target, now) {
 						continue
 					}
 					// Reuse #401's immediate-admission proof, forecasting only the

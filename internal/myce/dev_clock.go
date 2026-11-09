@@ -67,6 +67,14 @@ func (a API) registerDevClock(mux *requestMux) {
 			var err error
 			now, err = clock.advance(request.Seconds)
 			if err == nil {
+				// This explicit dev fast-forward simulates idle service time.
+				// The mutex serializes the offset change; it does not represent
+				// a queue stall lasting the requested virtual interval.
+				if control := a.Queue.mu.control; control != nil {
+					control.mu.Lock()
+					control.opportunity += time.Duration(request.Seconds * float64(time.Second))
+					control.mu.Unlock()
+				}
 				// Preserve Tick's observation window up to the last heartbeat's
 				// loss deadline before applying the advanced-time decisions.
 				a.Queue.accountUsage(now)

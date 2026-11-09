@@ -22,7 +22,7 @@ func maintenanceCLIWorker(id string) myce.Machine {
 
 func TestHostMaintenancePlacementCLI(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
-	if _, err := q.Checkin(myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
@@ -60,7 +60,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	a, b := maintenanceCLIWorker("gpu0"), maintenanceCLIWorker("gpu1")
 	submitted := waitSubmit(t, q)
-	reply, err := q.Checkin(myce.Checkin{Machine: a})
+	reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: a})
 	if err != nil || reply.Job == nil {
 		t.Fatal(reply, err)
 	}
@@ -68,7 +68,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	if err = q.Started(execution); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.Checkin(myce.Checkin{Machine: b}); err != nil {
+	if _, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: b}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
@@ -96,7 +96,7 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []myce.Machine{a, b} {
-		if _, err = q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		if _, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -200,11 +200,11 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 }
 
 func TestHostMaintenanceBudgetDryRun(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.HostMemoryBudgetGB = 6.5
 	m.MemoryObservation = &myce.HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := q.HostMaintenanceStatus("host")
@@ -219,7 +219,8 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	var s myce.HostBudgetSuggestion
-	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 20 || s.HeadroomGB != 0 || !s.DryRun || s.History.Samples != 1 {
+	// Both accepted legacy arrivals carry a real memory observation.
+	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 20 || s.HeadroomGB != 0 || !s.DryRun || s.History.Samples != 2 {
 		t.Fatal(out.String(), err)
 	}
 	after, err := q.HostMaintenanceStatus("host")
@@ -240,10 +241,10 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 }
 
 func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.CPUBudgetCores, m.HostMemoryBudgetGB = 2, 8
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
@@ -276,5 +277,29 @@ func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
 	status, err = q.HostMaintenanceStatus("host")
 	if err != nil || status.Policy.SharedHost != nil || status.Policy.Mode != "drained" || !status.Policy.LastResort {
 		t.Fatal(status, err)
+	}
+}
+
+func TestHostMaintenanceMeasuredMemoryCLI(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	m := maintenanceCLIWorker("worker")
+	m.HostMemoryBudgetGB = 12
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test-only")
+	for _, args := range [][]string{{"drain", "host"}, {"budget", "host", "--memory-budget-measured=true"}} {
+		if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := q.HostMaintenanceStatus("host")
+	if err != nil || !status.Policy.MemoryBudget.Measured || status.Policy.MemoryBudget.GiB != 12 {
+		t.Fatal(status, err)
+	}
+	if err := hostMaintenanceCommand(t.Context(), []string{"status", "host", "--memory-budget-measured=true"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("status accepted a mode mutation")
 	}
 }

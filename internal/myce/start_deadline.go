@@ -11,9 +11,16 @@ import (
 // and 15s for reporting and replacement launch; grace never extends StartBy.
 const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 
-// A startup availability budget may cover contended preparation, but must not
-// silently turn production admission into an unbounded capacity wait.
+// Bound unavailable-route and stuck-preparation detection. Qualified capacity
+// waiting is separate from this relative startup budget.
 const MaxProductionStartWindow = time.Hour
+
+func startCapacityBudget(j *Job) time.Duration {
+	if j.StartCapacityBudget != nil {
+		return *j.StartCapacityBudget
+	}
+	return j.StartWindow
+}
 
 func productionStartWindow(s Spec) time.Duration {
 	if s.StartWindow != "" {
@@ -28,11 +35,15 @@ func productionStartWindow(s Spec) time.Duration {
 func initializeStartDeadline(j *Job, since time.Time) {
 	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
 		// Reuse the startup fence without promoting qualification to production.
-		// One hour bounds unavailable-capacity/preparation waits at the existing
-		// maximum start window, independently of the execution budget.
+		// One hour bounds unavailable-route/preparation waits at the existing
+		// maximum start window. Capacity waiting pauses this startup budget,
+		// independently of the execution budget.
 		if j.Spec.StartBy == nil {
-			deadline := since.Add(MaxProductionStartWindow)
+			j.StartWindow = MaxProductionStartWindow
+			deadline := since.Add(j.StartWindow)
 			j.Spec.StartBy = &deadline
+		} else if j.StartWindow == 0 {
+			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
 		return
 	}
@@ -71,14 +82,22 @@ func (q *Queue) startupPending(j *Job) bool {
 			}
 		}
 	}
+	if q.startCapacityPaused(j) {
+		return false // Capacity is not failed startup; absolute cutoffs still bind.
+	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
+}
+
+func (q *Queue) startCapacityPaused(j *Job) bool {
+	return j.Spec.StartBy != nil && !absoluteStartBy(j) && !terminal(j.State) && !cancelled(j) &&
+		(q.launchCapacityPending(j) || j.State == "queued" && (j.StartCapacityWaiting || j.DeviceFaultStartWait != nil))
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
 		return reason
 	}
-	machines := q.plannerMachines()
+	machines := q.planningMachines(scans...)
 	for _, m := range machines {
 		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
@@ -121,6 +140,34 @@ func (q *Queue) maintainStartDeadlines() {
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
+		}
+	}
+	// Resolve the backlog in one immutable planning pass. Deadline transitions
+	// below can change jobs, so discard this evidence cache before applying them.
+	type capacityStatus struct{ waiting, ready bool }
+	capacity := func() map[*Job]capacityStatus {
+		previous := q.memoryPlanning
+		q.memoryPlanning = newMemoryPlanningCache()
+		defer func() { q.memoryPlanning = previous }()
+		status := map[*Job]capacityStatus{}
+		for _, j := range q.liveJobs() {
+			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
+				waiting, ready := q.queuedCapacityStatus(j)
+				status[j] = capacityStatus{waiting, ready}
+			}
+		}
+		return status
+	}()
+	for _, j := range q.liveJobs() {
+		faultWaiting := q.maintainDeviceFaultStartWait(j)
+		if status, ok := capacity[j]; ok && !faultWaiting {
+			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
+				// Capacity recovered before dispatch. Restore startup time without
+				// hiding a later unavailable/disabled-route diagnosis.
+				deadline := now.Add(startCapacityBudget(j))
+				j.Spec.StartBy = &deadline
+			}
+			j.StartCapacityWaiting = status.waiting
 		}
 		// Disabled-host rejection is an admission decision, independent of the
 		// relative timeout exemption for logical fan-out capacity waits.
@@ -167,6 +214,11 @@ func (q *Queue) maintainStartDeadlines() {
 		if disabled && (!pending || !expired(j.Spec.StartBy, now)) {
 			j.Reason = "production cannot start: no eligible host is enabled; " + reason
 		}
+		if disabled {
+			j.DiagnosticCode = "host_unavailable"
+			j.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "host_unavailable", Predicate: "no_eligible_host_enabled"}
+			j.ExecutionEvidence = unstartedExecution(0)
+		}
 		j.FinishedAt = &now
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
@@ -202,7 +254,19 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 	return detail
 }
 
+func pausedStartBudget(j *Job) string {
+	if wait := j.DeviceFaultStartWait; wait != nil {
+		return fmt.Sprintf("%.0fs left to start (paused for device recovery)", wait.Remaining.Seconds())
+	}
+	return fmt.Sprintf("%.0fs left to start (paused for capacity)", startCapacityBudget(j).Seconds())
+}
+
 func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
+	if q.startCapacityPaused(j) {
+		// Assignment restores the saved relative budget. The old saved
+		// cutoff is suspended, so subtracting wall time would report zero.
+		return q.startWaitingReason(j, scans...) + "; " + pausedStartBudget(j)
+	}
 	return q.startWaitingReason(j, scans...) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 }
 
@@ -242,6 +306,9 @@ func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementReje
 // startPlacementRejection names the failed start-fence predicate, or "". The
 // names are fixed labels, safe to log without host, path or volume detail.
 func (q *Queue) startPlacementRejection(j *Job) string {
+	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
+		return deviceFaultRetryHold
+	}
 	if parkedStorage(j) {
 		return "storage_protection_parked"
 	}

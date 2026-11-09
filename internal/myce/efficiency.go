@@ -316,6 +316,7 @@ func efficiencyBasis(j *Job) string {
 	return "unknown"
 }
 func (q *Queue) refreshEfficiency() {
+	defer q.bodyPhaseFinish("efficiency", q.bodyPhaseStart())
 	now := q.clock.Now()
 	releases := map[string][]HostRelease{}
 	for _, r := range q.s.HostReleases {
@@ -471,9 +472,9 @@ func (q *Queue) efficiencySample(rate *efficiencyRate, machine string, key attem
 		gb := sample.deviceGB
 		rate.MeasuredDeviceGB, rate.DeviceValidUntil = &gb, sample.deviceAt.Add(deviceMemorySampleFreshFor)
 	}
-	if !sample.at.IsZero() && now.Before(sample.at.Add(hostMemorySampleFreshFor)) {
+	if !sample.at.IsZero() && now.Before(sample.at.Add(sample.freshFor())) {
 		gb := sample.gb
-		rate.MeasuredMemoryGB, rate.ValidUntil = &gb, sample.at.Add(hostMemorySampleFreshFor)
+		rate.MeasuredMemoryGB, rate.ValidUntil = &gb, sample.at.Add(sample.freshFor())
 	}
 }
 

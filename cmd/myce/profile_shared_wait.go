@@ -94,7 +94,8 @@ func startSharedObserver(ctx context.Context, executable, root string, lock *os.
 	defer ready.Close()
 	defer writeReady.Close()
 	cmd := exec.Command(executable, "wait", "--observer-dir", root, "--detached")
-	cmd.Env = append(notifierEnvironment(), "MYCE_SHARED_OBSERVER=1")
+	cmd.Env = append(observerEnvironment(), "MYCE_SHARED_OBSERVER=1")
+	cmd.Dir = "/"
 	output, err := os.OpenFile(filepath.Join(root, "observer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -144,6 +145,7 @@ type sharedProfileGroup struct {
 	next          time.Time
 	pace          myce.ClientPace
 	after         map[string]uint64
+	terminal      map[string]bool
 	pending       bool
 	cancel        context.CancelFunc
 	retrying      bool
@@ -157,6 +159,20 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	syscall.CloseOnExec(3)
 	lock := os.NewFile(3, "observer.lock")
 	defer lock.Close()
+	ready := os.NewFile(4, "ready")
+	defer ready.Close()
+	err := serveSharedProfiles(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
+	if err != nil && ctx.Err() == nil {
+		_ = (&observerLogWriter{root: root}).event(struct {
+			At    time.Time `json:"at"`
+			Event string    `json:"event"`
+		}{time.Now(), "observer_start_failed"})
+	}
+	return err
+}
+
+func serveSharedProfiles(ctx context.Context, root string, lock *os.File, ready func() error) error {
+	log.SetOutput(&observerLogWriter{root: root})
 	// The lifetime lock proves any old socket belongs to an inactive observer.
 	socketPath, socketErr := sharedProfileSocket(root)
 	if socketErr != nil {
@@ -204,9 +220,7 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 			return nil
 		}
 	}
-	ready := os.NewFile(4, "ready")
-	defer ready.Close()
-	return runSharedProfileLoopStarted(ctx, root, lock, myce.RealClock{}, adaptivePause, func() error { _, err := ready.Write([]byte{1}); return err }, wakes)
+	return runSharedProfileLoopStarted(ctx, root, lock, myce.RealClock{}, adaptivePause, ready, wakes)
 }
 
 type sharedProfileFinish struct {
@@ -521,6 +535,10 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 			for id, revision := range group.after {
 				state.after[id] = revision
 			}
+			state.terminal = make(map[string]bool, len(group.terminal))
+			for id := range group.terminal {
+				state.terminal[id] = true
+			}
 			requestCtx, stop := context.WithCancel(readerCtx)
 			group.pending = true
 			group.cancel = stop
@@ -632,12 +650,76 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 	if e != nil {
 		trace.phase("authority_failed", "", e)
 		group.pace.Observe(clock.Now().Sub(started), false)
-		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, e, nil))
+		group.next = clock.Now().Add(group.pace.ServiceDelay(e, nil))
 		group.retrying = true
 		return
 	}
 	c = c.WithoutRetries()
 	c.Clock = clock
+	if c.HTTP != nil {
+		defer c.HTTP.CloseIdleConnections()
+	}
+	group.retrying = false
+	if group.terminal == nil {
+		group.terminal = map[string]bool{}
+	}
+	// Terminal details are a separate outstanding request. Under pressure the
+	// next available request must finish that demand, rather than spending its
+	// credit re-reading the already-known batch state (#919).
+	readTerminal := func(entry string) (finished, retry bool) {
+		id := watches[entry].receipt.JobID
+		finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
+		trace.phase("terminal_read", id, nil)
+		j, finalErr := c.GetJobForWait(finalCtx, id)
+		cancel()
+		if finalErr != nil {
+			trace.phase("terminal_read_failed", id, finalErr)
+			if myce.RetryStatusRead(finalErr) {
+				group.pace.Observe(clock.Now().Sub(started), false)
+				group.next = clock.Now().Add(group.pace.ServiceDelay(finalErr, nil))
+				group.retrying = true
+				return false, true
+			}
+			delete(group.terminal, id)
+			finish(entry, nil, finalErr)
+			return true, false
+		}
+		trace.phase("terminal_read_complete", id, nil)
+		delete(group.terminal, id)
+		if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
+			finish(entry, j, nil)
+			return true, false
+		}
+		return false, false
+	}
+	live := map[string]bool{}
+	for _, entry := range entries {
+		live[watches[entry].receipt.JobID] = true
+	}
+	for id := range group.terminal {
+		if !live[id] {
+			delete(group.terminal, id)
+		}
+	}
+	active := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if group.terminal[watches[entry].receipt.JobID] {
+			finished, retry := readTerminal(entry)
+			if retry {
+				return
+			}
+			if finished {
+				continue
+			}
+		}
+		active = append(active, entry)
+	}
+	entries = active
+	if len(entries) == 0 {
+		group.pace.Observe(clock.Now().Sub(started), true)
+		group.next = clock.Now().Add(group.pace.ServiceDelay(nil, nil))
+		return
+	}
 batchLoop:
 	for start := 0; start < len(entries); start += 256 {
 		batch := entries[start:min(start+256, len(entries))]
@@ -686,7 +768,7 @@ batchLoop:
 						finish(entry, nil, jobErr)
 					} else {
 						group.pace.Observe(clock.Now().Sub(started), false)
-						group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, jobErr, nil))
+						group.next = clock.Now().Add(group.pace.ServiceDelay(jobErr, nil))
 						group.retrying = true
 						break batchLoop
 					}
@@ -701,7 +783,7 @@ batchLoop:
 				}
 			}
 			group.pace.Observe(clock.Now().Sub(started), false)
-			group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, readErr, nil))
+			group.next = clock.Now().Add(group.pace.ServiceDelay(readErr, nil))
 			group.retrying = true
 			break
 		}
@@ -712,41 +794,26 @@ batchLoop:
 			changed = changed || group.after[state.ID] != state.Revision
 		}
 		group.pace.Observe(clock.Now().Sub(started), changed)
-		group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, nil, nil))
+		group.next = clock.Now().Add(group.pace.ServiceDelay(nil, nil))
 		// A negotiated long-poll already paces unchanged jobs and wakes on a
 		// revision. Re-enter it without an additional growing sleep.
 		if seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0 {
 			group.next = clock.Now()
 		}
-		for i, state := range reply.Jobs {
+		// Retain all terminal demand before attempting any full detail read.
+		for _, state := range reply.Jobs {
 			group.after[state.ID] = state.Revision
-			if state.State != "succeeded" && state.State != "failed" && state.State != "cancelled" {
-				continue
-			}
-			entry := batch[i]
-			finalCtx, cancel := sharedProfileReadContext(ctx, []string{entry}, watches, clock)
-			trace.phase("terminal_read", state.ID, nil)
-			j, finalErr := c.GetJobForWait(finalCtx, state.ID)
-			cancel()
-			if finalErr != nil {
-				trace.phase("terminal_read_failed", state.ID, finalErr)
-				if !myce.RetryStatusRead(finalErr) {
-					finish(entry, nil, finalErr)
-				} else {
-					group.pace.Observe(clock.Now().Sub(started), false)
-					group.next = clock.Now().Add(group.pace.Delay(clock.Now(), time.Time{}, finalErr, nil))
-					group.retrying = true
-					break batchLoop
-				}
-				continue
-			}
-			if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
-				finish(entry, j, nil)
+			if state.State == "succeeded" || state.State == "failed" || state.State == "cancelled" {
+				group.terminal[state.ID] = true
 			}
 		}
-	}
-	if c.HTTP != nil {
-		c.HTTP.CloseIdleConnections()
+		for i, state := range reply.Jobs {
+			if group.terminal[state.ID] {
+				if _, retry := readTerminal(batch[i]); retry {
+					break batchLoop
+				}
+			}
+		}
 	}
 	return
 }

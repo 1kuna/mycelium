@@ -320,7 +320,7 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 			}
 			if m.LastSeen.IsZero() || machineTarget(target).OS == "" || machineTarget(target).Arch == "" {
 				h.Freshness = "unknown"
-			} else if m.Gone || q.clock.Now().Before(m.LastSeen) || q.clock.Now().Sub(m.LastSeen) > q.machineLossTimeout(id) {
+			} else if !q.workerFresh(m, q.clock.Now()) {
 				h.Freshness = "stale"
 			}
 			if h.Freshness == "fresh" {

@@ -22,6 +22,8 @@ type HostHealthReading struct {
 	Pressure    float64 `json:"pressure"`
 	SwapBytes   float64 `json:"swap_bytes"`
 	WakeSeconds float64 `json:"wake_seconds"`
+	// Local source semantics; persisted/wire pressure keeps its raw OS units.
+	pressurePSI bool
 }
 
 type HostHealthSample struct {
@@ -55,18 +57,21 @@ type ForeignConsumer struct {
 }
 
 type HostHealth struct {
-	Probe            *ProbeObservation  `json:"probe,omitempty"`
-	DiskRecovery     map[string]float64 `json:"disk_recovery,omitempty"`
-	PersistenceError string             `json:"persistence_error,omitempty"`
-	History          []HostHealthSample `json:"history"`
-	Baseline         []HostHealthSample `json:"baseline"`
-	DrainReason      string             `json:"drain_reason,omitempty"`
-	Candidate        string             `json:"candidate,omitempty"`
-	Consecutive      int                `json:"consecutive,omitempty"`
-	Foreign          []ForeignConsumer  `json:"foreign,omitempty"`
-	ForeignError     string             `json:"foreign_error,omitempty"`
-	ForeignAt        time.Time          `json:"foreign_at,omitempty"`
-	AgeSeconds       float64            `json:"age_seconds"`
+	delivery *hostHealthDelivery // Queue-owned immutable receipt; never accepted from the wire.
+	// Queue-owned explanation; workers omit it, including on strict older peers.
+	PressureEvaluation *HostPressureEvaluation `json:"pressure_evaluation,omitempty"`
+	Probe              *ProbeObservation       `json:"probe,omitempty"`
+	DiskRecovery       map[string]float64      `json:"disk_recovery,omitempty"`
+	PersistenceError   string                  `json:"persistence_error,omitempty"`
+	History            []HostHealthSample      `json:"history"`
+	Baseline           []HostHealthSample      `json:"baseline"`
+	DrainReason        string                  `json:"drain_reason,omitempty"`
+	Candidate          string                  `json:"candidate,omitempty"`
+	Consecutive        int                     `json:"consecutive,omitempty"`
+	Foreign            []ForeignConsumer       `json:"foreign,omitempty"`
+	ForeignError       string                  `json:"foreign_error,omitempty"`
+	ForeignAt          time.Time               `json:"foreign_at,omitempty"`
+	AgeSeconds         float64                 `json:"age_seconds"`
 }
 
 // A robust prediction band is learned separately on every host. The widest
@@ -101,10 +106,17 @@ func (h *HostHealth) observe(s HostHealthSample) {
 	reason := ""
 	if s.Error == "" && len(h.Baseline) >= hostHealthWarmup {
 		high := func(f func(HostHealthSample) float64) bool { _, hi := healthBand(h.Baseline, f); return f(s) > hi }
-		pressure := high(func(s HostHealthSample) float64 { return s.Pressure })
+		_, pressureLimit := healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.Pressure })
 		swap := high(func(s HostHealthSample) float64 { return s.SwapGrowth })
 		latency := high(func(s HostHealthSample) float64 { return s.WakeSeconds })
 		heartbeat := s.HeartbeatSeconds > 0 && high(func(s HostHealthSample) float64 { return s.HeartbeatSeconds })
+		pressure := s.Pressure > pressureLimit
+		if s.pressurePSI {
+			// An idle reference can be positive, too. PSI is time spent
+			// stalled, not proof of harmful pressure; corroborate against
+			// this host's swap/wake bands at every baseline, not just zero.
+			pressure = pressure && latency || s.Pressure > 0 && swap
+		}
 		switch {
 		case pressure:
 			reason = "host_memory_pressure"
@@ -292,6 +304,13 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		return 0
 	})
 	m.projectStorageFaults(&s)
+	if observation.valid() {
+		// The sensor lane runs independently of check-ins. Freeze the measured
+		// report-path allowance into this new completion, never a cached one.
+		completed := *observation
+		completed.ValidSeconds += m.timing.delivery.upper()
+		observation = &completed
+	}
 	m.health.Probe = observation
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
@@ -319,6 +338,22 @@ func (m *hostHealthMonitor) snapshot(disks []DiskVolume) *HostHealth {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.snapshotLocked(disks)
+}
+
+// report is called once at send time. Local admission snapshots must not train
+// report cadence or erase preparation time from the advertised sensor age.
+func (m *hostHealthMonitor) report(disks []DiskVolume) *HostHealth {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.timing.noteReport(m.clock.Now())
+	return m.snapshotLocked(disks)
+}
+
+func (m *hostHealthMonitor) snapshotLocked(disks []DiskVolume) *HostHealth {
 	m.disks = map[string]float64{}
 	for _, v := range disks {
 		if v.Error == "" && !v.Retained && (len(v.Roots) > 1 || !slices.Contains(v.Roots, "checkpoint")) {
@@ -442,12 +477,12 @@ func hostHygieneReason(m *Machine) string {
 func (q *Queue) hostHygieneReason(m *Machine) string {
 	for _, other := range q.s.Machines {
 		if hostID(other) == hostID(m) && other.Replacement == nil && !other.Gone && !q.unreported[other.ID] {
-			if reason := hostHygieneReasonAt(other, q.clock.Now()); reason != "" {
+			if reason := q.hostHygieneReasonAt(other, q.clock.Now()); reason != "" {
 				return reason
 			}
 		}
 	}
-	return hostHygieneReasonAt(m, q.clock.Now())
+	return q.hostHygieneReasonAt(m, q.clock.Now())
 }
 
 func hostHealthEvidenceValid(h *HostHealth, elapsed time.Duration) bool {
@@ -455,13 +490,15 @@ func hostHealthEvidenceValid(h *HostHealth, elapsed time.Duration) bool {
 		return true
 	} // Legacy evidence has no new timing fields.
 	return h.Probe.valid() && validMemoryValue(h.AgeSeconds) && elapsed >= 0 &&
-		elapsed.Seconds()+h.AgeSeconds < h.Probe.freshness().Seconds() && len(h.History) > 0 && h.History[len(h.History)-1].Error == ""
+		h.AgeSeconds < h.Probe.freshness().Seconds() &&
+		elapsed < h.Probe.freshness()-time.Duration(h.AgeSeconds*float64(time.Second)) &&
+		len(h.History) > 0 && h.History[len(h.History)-1].Error == ""
 }
-func hostHygieneReasonAt(m *Machine, now time.Time) string {
+func (q *Queue) hostHygieneReasonAt(m *Machine, now time.Time) string {
 	if reason := hostHygieneReason(m); reason != "" {
 		return reason
 	}
-	if m != nil && !hostHealthEvidenceValid(m.HostHealth, now.Sub(m.LastSeen)) {
+	if m != nil && !q.hostHealthEvidenceValid(m, now) {
 		return "host_probe_unknown"
 	}
 	return ""

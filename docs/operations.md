@@ -437,19 +437,36 @@ only before the first policy is stored. After first boot, the persisted SQLite
 policy is authoritative. Editing the config and restarting or reinstalling the
 queue no longer changes live policy or advances its revision.
 
-From the release containing #890, read-only `myce policy get` resolves installed
-worker authority, then queue authority, as `myce status` does. No `MYCE_TOKEN`
-environment setting is needed and no credential is printed; `--config` selects
-an explicit installed configuration. Policy writes retain owner-token requirements.
+`myce policy get` resolves installed worker authority, then queue authority.
+From the release containing #1079, policy and model writes use the same
+installed-authority resolver and preserve its certificate pin, including when
+legacy endpoint/credential environment variables are present.
 
-For a deliberate change, export the current policy, edit its `projects` mapping,
+The supported owner-write route is on the queue host, using the installed queue
+configuration. Run as the account allowed to read that configuration and its
+credential references. Export the current policy, edit its `projects` mapping,
 and import it using the revision printed by the export:
 
 ```sh
-myce policy get --yaml > policy.yaml
+myce policy get --yaml --config <installed-queue-config> > policy.yaml
 # Edit policy.yaml, then replace N with the exported revision.
-myce policy set policy.yaml --if-revision N
+myce policy set policy.yaml --if-revision N --config <installed-queue-config>
 ```
+
+The CLI reads the credential reference internally; the operator handles no
+credentials. The configured queue endpoint is retained (including a queue's
+installed HTTP endpoint); an installed joining authority retains its HTTPS pin.
+An HTTPS owner write without provisioned trust refuses with
+`owner_authority_unpinned`; missing or unreadable authority refuses with
+`owner_authority_unavailable`. Ask the installation owner to restore authority.
+Never source env files or set `MYCE_TOKEN` by hand, and never extract a joining
+token into environment variables. These are not supported operator workarounds.
+
+Other owner-scoped writes use the same `--config <installed-queue-config>` route,
+for example `myce model sync MODEL --to all --config <installed-queue-config>`
+and `myce host drain HOST --config <installed-queue-config>`. Enrollment still
+uses provisional shared authority; this CLI route does not introduce separate
+server-side roles or grant authority to an unenrolled machine.
 
 The same file carries the optional `models` mapping (permitted repository
 patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
@@ -491,7 +508,9 @@ live policy; a different startup file is refused, so edit host policy with
 
 All commands use the authenticated queue and run as an ordinary account.
 On an enrolled machine they read installed authority and keep its certificate
-pin, like `myce status` and `myce cancel`, so no token is needed. Explicit
+pin, like `myce status` and `myce cancel`, so no operator token handling is needed.
+For owner writes, use the queue-host `--config <installed-queue-config>` route
+above. Never source env files or set `MYCE_TOKEN` by hand. Explicit
 `--queue`/`--token`, `MYCE_QUEUE`/`MYCE_TOKEN`, `--config` and `--joining-file`
 still select the endpoint or authority.
 Use the physical host ID shared by all device workers:
@@ -689,21 +708,43 @@ The line contains no worker identity, payload, filesystem path or transport erro
 it is written after releasing the queue lock. These timings are diagnostic wall
 time, independent of the injected scheduling clock.
 
-`event=slow_queue_mutex_hold` identifies sampled holds of at least 250 ms in
-queue updates (including Tick, check-ins and scheduling), status projection and
-batch-log retention. `operation` names the code operation, `duration_ms` measures
-time holding the lock (excluding acquisition), and `sample_every=16` means one
-in sixteen holds at each boundary is measured. Fast holds stay silent; unsampled
-holds do no clock reads. Logging and operation-name resolution happen after
-unlocking, without request identifiers. Sampling can miss an isolated slow hold;
-absence of a line does not rule out contention. These measurements also use
-diagnostic wall time, never the scheduling clock.
+`event=slow_queue_mutex_hold` identifies expensive queue updates (including Tick,
+check-ins and scheduling), status projection and batch-log retention. Every hold
+is measured; the local service distribution controls which diagnostics are
+emitted (`sample_every=1`). `operation` names the code operation and
+`duration_ms` excludes acquisition. Logging and operation-name resolution happen
+after unlocking without request identifiers. Absence of a line does not rule out
+contention. These measurements use diagnostic wall time, never the scheduling
+clock.
 
 Update holds also report `records_snapshot_ms` (undo records and in-memory
 snapshots), `usage_accounting_ms`, `fn_body_ms` (mutation plus health/maintenance),
 `persist_commit_ms` (usage writes, state serialization and SQLite commit), and
 `notify_ms` (wake notification and final commit/rollback bookkeeping). These
-non-overlapping phases cover the sampled hold, including failed updates.
+non-overlapping phases cover the measured hold, including failed updates.
+Persistence additionally reports `persist_marshal_ms` (encoding, detached-value
+comparison and fragment preparation), `persist_sql_ms` (transaction setup/usage
+writes and state statements), and `persist_sync_commit_ms` (SQLite commit with
+FULL synchronization, not isolated fsync). `persist_payload_bytes` and
+`persist_records` count changed state payloads/rows submitted to SQL; they exclude
+usage payloads, SQL keys, WAL page overhead and later checkpoint writes. Failed
+transactions can report attempted writes. These subphases do not include every
+comparison or post-commit bookkeeping step in `persist_commit_ms`.
+
+From the incremental-persistence release, normalized state v2 separates fields
+larger than the database's own page size from small control fields. Unchanged
+payload fields remain in place; keyed live answers reference their committed job
+and retain a complete answer when that job is removed. All fields, removals and
+the format marker commit atomically in the existing FULL-synchronous transaction.
+Startup reads whole-state and normalized-v1 databases and converts them once;
+older readers refuse v2 instead of silently losing fields. Preserve a compatible
+binary with the backup when planning recovery; do not open v2 with an older binary.
+
+`BenchmarkCheckinPersistence` reports control-hold and persistence phases,
+changed payload bytes and private-fixture WAL growth for retained-history and
+768-input-manifest workloads. It uses real SQLite commits and an injected queue
+clock. WAL recycling is disabled only for that disposable measurement; neither
+benchmark timings nor WAL growth establish live physical write rate or freshness.
 
 ### Opt-in live queue profiling
 
@@ -1151,6 +1192,11 @@ reporting infrastructure interruptions. Installed shutdown also stops
 non-resumable CPU attempts; an interactive `join` still lets those finish.
 After 45 seconds systemd retains a final group-wide KILL, including delegated
 attempt cgroups. Payload failures observed before worker stop remain failures.
+From the next release (#1081), installed TERM cancels GPU inventory, host
+observations and pending queue I/O immediately. After local attempt cleanup is
+durable, exit does not require a queue reply or a remote model plan; unacknowledged
+results retain their exact attempt identity for startup replay. Interactive leave
+continues to use the existing graceful queue handshake.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -1183,6 +1229,27 @@ drop-ins that override execution, credentials or containment block activation,
 except queue `ExecStart` overrides: these are preserved with a warning so their
 settings can be migrated before removal. Consumer files are preserved. Check
 health and exact cleanup before resuming.
+
+From the next release (#1081), Linux installer stop/start/restart waits read the
+unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, including
+drop-ins. Starts/restarts allow both a pending stop and the start phase, plus two
+measured manager round trips for dispatch/completion. Zero/infinite manager
+timeouts retain operator cancellation without an artificial client deadline.
+Unreadable, missing or malformed timeouts log a warning and also leave the wait
+to systemd, retaining caller cancellation without a guessed client deadline.
+An unavailable manager deadline can therefore leave the installer waiting until
+systemd completes the job or the operator cancels it. This fallback is Linux-only;
+launchd stop waits read the loaded job's effective `exit timeout` from
+`launchctl print`, including the system-defined default when the plist omits
+`ExitTimeOut`. Bootout and subsequent label-removal observation share that exit
+allowance, two measured manager round trips and one observation tick. Unknown
+or infinite exit timeouts leave the wait to launchd with caller cancellation;
+unknown values log a warning. Other launchd commands retain their ordinary
+setup probe allowance. Recovery ignores the
+failed install's cancellation, gives each command its own fresh allowance, and
+inspects final manager state with an unexpired context. A failed manager itself
+can still prevent inspection; that error is reported rather than claiming a
+known state.
 
 For a signed-release deployment, installing the queue/worker bytes alone leaves
 the default onboarding approval unchanged. After verifying the updated queue,
@@ -1684,7 +1751,7 @@ The broker contract is:
    collection window. Do not serve a cached or periodically refreshed
    snapshot and do not timestamp old data as fresh.
 
-The exact JSON schema is:
+The required JSON fields are:
 
 ```json
 {
@@ -1700,6 +1767,15 @@ The exact JSON schema is:
 host clock as the worker. `gtt_mm` maps each full lowercase PCI address to its
 unmodified debugfs text. Include every card an attempt can use: the worker
 requires its selected card and every other card present in its DRM clients.
+The reference broker also supplies optional `vram` entries keyed by the same PCI
+identities, each with unsigned `total_bytes` and `used_bytes`. These come from a
+read-only Xe memory-regions query with uncensored usage evidence;
+GTT storage is never used as VRAM. Missing, censored or invalid entries withhold
+telemetry-dependent sharing and never trigger vendor-tool fallback. Ordinary
+configured-budget admission is unchanged. The [broker installation guide](../deploy/gpu-telemetry/README.md)
+describes the read-only DRM policy and older-kernel accounting limitations of
+this additive source. Existing GTT-only brokers remain usable for host RAM accounting.
+
 The helper forwards the broker's timestamp and text unchanged. A timestamp
 before the current helper invocation or after it finishes is rejected, so a
 cached snapshot is not accepted even when recent. A malformed, absent or stale
@@ -1815,6 +1891,55 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   with `host budget HOST --memory-budget-gb GiB` while drained/disabled.
   Both cards receive it through checkin and must agree before new starts.
   Retain all attempt/model charges, slack and unconfirmed releases.
+
+- `--host-memory-budget-measured`: opt in to a measured allowance (next
+  supporting queue and worker release). Keep a positive `--host-memory-budget-gb`
+  as the authored fallback. Zero keeps its legacy uncapped meaning when this
+  mode is off. On an existing host, queue policy remains authoritative: drain
+  and confirm idle custody, then use
+  `myce host budget HOST --memory-budget-measured=true` to retain the existing
+  positive budget as fallback. `--memory-budget-measured=false` restores that
+  fixed fallback. A numeric `--memory-budget-gb` sets a fixed budget unless
+  measured mode is also explicitly selected in the same command.
+
+  Update saved configuration only through the supported installer overlay:
+  `myce install worker --config WORKER_CONFIG --host-memory-budget-gb FALLBACK_GIB --host-memory-budget-measured=true --dry-run`,
+  inspect the plan, then repeat without `--dry-run` during an authorized idle
+  restart. Preserve version pins, reserves, device maintenance and quarantine.
+  Changing saved configuration alone never overrides existing queue policy.
+
+  The measured allowance is detected physical RAM minus the seven-day maximum
+  qualified idle physical usage minus a reserve. The reserve is the larger of
+  the worker's existing host reserve and observed idle peak-to-typical variation.
+  Raw availability already excludes unavailable OS pages: Linux `MemAvailable`
+  preserves kernel low watermarks; Darwin excludes active, wired and compressed
+  pages. Idle usage includes Mycelium control overhead, so RSS subtraction cannot
+  double-credit shared pages. This deliberately leaves observed burst room
+  unused, while preserving the operator's protection floor and live pressure,
+  growth, execution-ceiling and release-custody guards. It does not bound unseen
+  future external demand or make sampled Darwin containment a kernel guarantee.
+  Idle histogram quantiles use each bin's minimum as a conservative lower bound;
+  exact observed maxima remain intact. Quantization may enlarge the variation
+  reserve, but cannot erase variation within one bin, including after compaction.
+
+  Only new `external_memory.quiescent_v1` history qualifies. The worker must
+  report no local attempts (including cleanup), models or preparation, and the
+  queue must reconcile zero whole-host obligations and no live sibling worker.
+  Existing RSS-residual history cannot establish ownership of GPU/driver pages,
+  detached processes or multiply counted shared pages; it remains diagnostic.
+  Its old peaks and histograms cannot reconstruct historical idle-window counts.
+  The new `24h`/`7d` summaries report qualified sample and observed window counts;
+  a window starts on an observed idle transition or after lost contact, not at
+  every heartbeat. Their absence means unknown coverage, not no historical idle.
+
+  While qualified history or the current versioned physical observation is
+  unavailable (including history expiry), the existing authored budget remains
+  active; learning never requires stopping admission to force an idle window.
+  `host_memory_derivation` in machine JSON names `authored_fallback` and its
+  reason, or `quiescent_v1` with baseline, reserve, allowance and coverage.
+  A genuinely derived zero means exhausted capacity, never uncapped. Queue and
+  worker must acknowledge the effective allowance before new starts. Existing
+  work retains custody if a new observation tightens the allowance.
 
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
   `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified
@@ -2114,21 +2239,22 @@ semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
 
 ## File and shared-input cache capacity
 
-From s072, omitted `--file-cache-bytes` (or `0`) selects automatic sizing at
-worker startup, using the local cache filesystem's nearest existing ancestor.
-It reuses the environment policy: `min(max(free/4, 4 GiB), 80 GiB, free-20 GiB)`;
-less than 24 GiB free refuses automatic startup. These are ceilings for **each**
-of the private file and shared-input caches, not allocations or reservations.
-The quarter fraction leaves room for both caches, environments and active work;
-the existing physical free-space floor also applies at admission. This sampled
-policy is not the native disk-isolation guarantee parked under #504/#506.
+From the release containing #1061, omitted `--file-cache-bytes` (or `0`)
+selects automatic sizing from **current** local filesystem headroom. Admission
+and the existing worker retention sweep refresh it without restarting the worker.
+The effective allowance adds occupied cache blocks to measured usable free
+space, so eviction exchanges occupied and free bytes without shrinking the
+allowance. The existing floor leaves 1% of the filesystem, at least 256 MiB,
+for filesystem metadata, logs and control state. Other caches, active work and
+external writers already reduce measured free space; concurrent shared stages
+reserve their unwritten bytes. Cache allocation is not a reservation against
+unmanaged external writers or the native disk-isolation guarantee parked under
+#504/#506. Staging rechecks current headroom and reports required/available bytes.
 
-Read-only measurements for this change found approximately 152 GiB and
-1,085 GiB free on two worker filesystems. The reused formula yields about
-38 GiB and 80 GiB, respectively, enough for the incident's 16.5 + 3.4 GiB
-file inputs. The old 10 GiB default could never hold that pair. The 80 GiB
-ceiling preserves the existing bounded environment-cache policy; this change
-does not invent a fleet-wide storage allocator or reserve disk from other writers.
+The startup-only policy in s072 through releases before #1061 used quarter-free,
+4–80 GiB ceilings and a 20 GiB reserve. Its fixed ceiling could remain too small
+after disk reclamation; #1060 records that incident. Input caches no longer use
+those startup caps. Environment and model caches keep their separate policies.
 
 `myce install worker --config CONFIG --file-cache-bytes 34359738368` retains an
 explicit 32 GiB ceiling across reinstall and signed upgrade. Saved distinct positive
@@ -2137,7 +2263,7 @@ default in an older configuration migrates to automatic mode: older settings did
 not record whether that value was explicit. New explicit settings persist that
 intent, including an explicit 10 GiB. An omitted field selects automatic mode; reinstall with `--file-cache-bytes 0`
 clears a saved override. No installer writes a machine-specific automatic size:
-the worker recomputes it from its actual filesystem at each startup.
+the worker refreshes it from its actual filesystem during admission and retention.
 
 Workers report shared-input capacity, free and evictable bytes without cache
 scans in check-in. Discovery and accounting run at startup and cache changes,
@@ -2178,7 +2304,8 @@ An indefinitely blocked CIFS call therefore refuses after 30 seconds, while
 completed operations taking at least 10 seconds report `NAS slow`, their operation
 and elapsed seconds. These incident samples are not a supported-load percentile
 or latency qualification. Mount inventory retains its
-5-second bound, and installer subprocesses retain a 15-second bound per command.
+5-second bound, and ordinary installer subprocesses retain a 15-second bound per
+command; systemd lifecycle waits use the effective unit timeouts described above.
 Cancellation remains active throughout setup. Logs report operation and root
 progress with elapsed time, without paths or mount credentials. A stalled syscall
 stays owned until it returns, so retries cannot start overlapping NAS sequences;
@@ -2284,6 +2411,86 @@ attempt under the same job ID. This transition does not expose `stopping` or a
 terminal job state when a retry remains available. Infrastructure exhaustion
 still follows the existing terminal policy. Stale results cannot publish.
 
+From the queue release containing #1142, a job's device-fault loss records
+`attempt_history[].device_fault` (physical host, backend, stable device identities
+and queue time). A retry cannot consume that host's last healthy accelerator of
+the same backend. Occupied healthy cards still count; quarantined, unavailable
+or administratively excluded cards do not. Another host or a card with a healthy
+spare remains eligible. A group cannot consume all surviving cards. The queued
+job reports `blocker.code: device_fault_last_healthy` and waits on the same job ID
+and submission key. This protection is queue-side and works with older workers;
+it does not require new recovery fields. Existing pre-upgrade fault history is
+recognized when its retained copy identifies the backend on that worker.
+
+The typed last-healthy hold pauses a relative production start or recovery
+budget without spending more infrastructure retries. It saves the time remaining
+at entry and resumes that amount when an eligible route returns; status keeps
+`device_fault_last_healthy` and shows `paused for device recovery`. The original
+`start_window` remains unchanged for a later started-attempt loss. Explicit
+absolute `start_by` and queued-only `give_up_at` still bind.
+The saved amount survives any capacity wait after clearance and queue restart;
+capacity recovery cannot refund startup time spent before the device-fault hold.
+
+An unrecoverable quarantine must not strand a job forever. The hold expires one
+`MaxProductionStartWindow` (the existing one-hour maximum availability window)
+after the latest queue-recorded device-fault loss, including across queue
+restarts. It fails with `diagnostic_code: device_fault_recovery_timeout` and a
+launch timeout even when the first report after the bound clears quarantine;
+an active hold expires before its budget can resume. The timeout is a sanitized
+launch cause with the same predicate. This bounds withheld capacity and
+caller latency when recovery never arrives; its cost is giving up on a recovery
+that takes longer than the existing maximum start window. Earlier caller
+cutoffs win. This bound applies to held jobs of every priority and never clears
+quarantine or releases old attempt custody. If the route disappears altogether,
+ordinary unavailable-route startup accounting resumes.
+
+After an operator clear, fresh inventory reporting both cards usable releases
+the two-card guard and either card can run the retry. An operator request alone
+is not health evidence and cannot authorize a sole surviving card; that case
+still requires new health-proven recovery or another healthy device/host.
+
+From the worker release containing #1142, non-escalated quarantine also clears
+automatically after positive vendor health evidence and uninterrupted kernel
+observation. Intel uses `xpu-smi health -d PCI-BDF -j`: core temperature, power
+and memory must report `OK`, and no supported component may report a warning or
+critical state. NVIDIA uses UUID-selected `nvidia-smi -q -x`; the matching device
+must explicitly report recovery action `None`. Missing tools, unsupported fields,
+unknown required health and failed reads keep quarantine. Other backends can
+supply the injectable health probe; unsupported backends do not auto-clear.
+Vendor probes have a separate single-flight lane, so a slow tool cannot stop
+kernel scanning or create a probe backlog.
+Completed health readings remain pending until a subsequent kernel scan can
+validate them; exceeding the heartbeat's collection budget does not discard proof.
+
+The observation window is an **agent default**, implementing the relayed consumer
+request, not a maintainer ruling. Following MY-34, it is the largest of the
+observed fault-to-first-normal delay, the local control/probe gap, the existing
+one-second teardown attribution interval, and that device's previous successful
+clear window. At least two distinct normal observations must span it. The first
+normal delay is an observed upper bound on recovery, not the exact instant of
+hardware recovery. A matching new fault (including one awaiting teardown
+classification), an unhealthy probe, a kernel-monitor gap or a worker restart
+discards the current healthy streak. Kernel evidence must follow the health
+reading. Repeated-teardown escalation still requires an operator clear; normal
+vendor health alone cannot erase it. The cost of the window is temporarily
+withheld capacity, in exchange for observing a complete local recovery interval.
+
+Clear evidence persists in `devices[].quarantine_recovery`: `fault_event`,
+`healthy_since`, `cleared_at`, `observation_seconds` and `probe`. The queue adds
+`observed_at` when it observes the quarantined-to-healthy transition; replaying
+the same proof does not refresh that queue timestamp, including across reports
+that omit the optional field during negotiation or downgrade. A new worker-side
+fault retires the previous clear proof; its historical observation window remains
+calibration evidence and an operator clear does not restore the retired proof.
+Retained queue receipts are historical: compare their queue time with the job's
+latest fault loss, and check the current device reason. Such a transition after
+the job's loss allows a retry even on a sole recovered card. Worker wall time
+never orders queue admission. Capacity still requires a successful inventory
+refresh, and old attempts still require exact cleanup. Auto-clear requires a
+worker upgrade; a queue-only release provides the cascade protection alone.
+Recovery evidence is negotiated with `device-recovery-v1`; newer workers omit
+the additive field for older strict-decoding queues, including after downgrade.
+
 Quarantine persists in the local worker spool across worker restarts. A changed
 Linux boot ID clears old quarantine; faults in the new boot can quarantine again.
 After repairing a device, an operator can request a clear without stopping the
@@ -2319,11 +2526,16 @@ unchanged pending measured native shutdown evidence (#889); laptop cancellation
 tests do not qualify a native stop duration.
 
 Tested fixes deploy without a separate task, bundled one release at a time; roll
-back if the queue is not healthy. Do not patch during a successful production
-run. Fixing a run failing because of Mycelium is allowed and expected. Keep the
+back if the queue is not healthy. Critical updates may deploy during a production
+consumer's run (MY-39); patch time is weighed and is being made quick, but it is
+not a precondition. Ordinary updates wait during a successful run. Fixing a run failing because of Mycelium is allowed and expected.
+Orchestrator application: announce rollouts to consumer orchestrators and prefer
+quick rolling updates through existing supported paths that preserve running
+attempts and resumable checkpoints. This authority does not bypass custody,
+health checks or the supported rollout's current idle waits. Keep the
 fleet on a healthy, tested release before each scheduled production window. There is
 no pre-production freeze, consumer canary deploy gate, or need to ask about
-deploy timing (MY-33).
+deploy timing (MY-33, amended by MY-39).
 
 > **Before deploying bounded status (#439), migrate preservation checks.**
 > Default `GET /api/status` includes active/cleanup-pending jobs and only the
@@ -2343,7 +2555,7 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
-For a queue hotfix, use
+For a queue hotfix that should wait for production to finish, use
 `myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
 `--queue-only` selects only the queue service, including when workers share its
 host or installed binary. It still drains that host and waits for fresh exact
@@ -3969,6 +4181,28 @@ use job GET times and the paginated job ledger described in [status](status.md).
 ## Completion observer upgrade and recovery (next release)
 
 Managed observers adopt all armed registrations in their private user registry.
+From the release containing #1160, caller-started shared owners have their own
+session/process group and start from `/`, so starter exit and process-group
+cleanup do not remove unrelated callers' observation. Their environment is an
+allowlist: HOME/USER/LOGNAME, XDG config/cache/data paths, TLS certificate paths,
+the starter's PATH and locale, and explicit dev/managed-attempt custody markers.
+Runner tracking identities, job-scoped variables, inherited temporary directories,
+unrelated secrets and MYCE_TOKEN are excluded. An allowlist also excludes future
+CI providers' tracking variables without needing a provider-specific denylist.
+Notifier delivery retains its separately saved caller environment with MYCE_TOKEN
+removed; legacy registrations without that snapshot keep the owner's PATH/locale
+fallback. Dev sessions and managed attempts retain their existing cleanup custody.
+
+There is no automatic supervisor in this release. A dead owner is recovered by
+the next ordinary keyed command, which adopts retained armed registrations.
+[Canonical per-user CLI supervision](https://github.com/1kuna/mycelium/issues/1166)
+is a separate follow-up; this release installs no observer unit/plist, publishes
+no independent client image and adds no observer service install/uninstall path.
+Ordinary startup and cooperative handoff hold startup.lock through socket
+replacement/readiness; old-owner cleanup serializes its identity check and unlink
+under the same lock. Broken owner startup records a bounded
+`observer_start_failed` event in `observer.log` without raw errors or authority.
+
 An ordinary keyed profile/adapter command starts one when the lifetime lock is
 free. Updating a CLI symlink does not change the image of an existing process.
 Supporting newer clients write a versioned upgrade request when arming or
@@ -3988,6 +4222,16 @@ notifier targets, environment/authority values or private paths. Count bindings
 without exposing values. Establish job terminal states with the installed CLI,
 not the queue database. A stale phase is the last boundary reached; an unavailable
 live frame remains unknown.
+
+From the release containing #919’s recurrence fix, next-read spacing uses measured
+observation service cost and the current Retry-After signal, with failure jitter
+spread over one measured service period. Unchanged long-poll history is used only
+to select the protocol hold; it cannot amplify the next-read timer. This trades
+unbounded read suppression for continued observation at the measured service
+rate; the queue can still shed reads with its explicit pressure signal.
+Terminal-detail requests survive those pressure passes and resume before another
+batch read, so learning a terminal state cannot repeatedly consume the credit
+needed to retrieve its result reference.
 
 A legacy owner has neither upgrade support nor diagnostics. Recovery of a shared
 owner requires the owner's authorization and consideration of the wake volume:
@@ -4016,3 +4260,35 @@ measurement is notifier runtime, not downstream agent-turn runtime. Use a distin
 notifier executable path per thread, as required by the binding contract.
 Receipt acknowledgement prevents ordinary replay duplicates; exactly-once
 external effects across crashes require receiver deduplication by `delivery_id`.
+
+
+### Completion and health delivery acceptance
+
+Check component support on the actual installed CLI, running observer, queue
+and workers; merged source alone is not rollout evidence. Preserve each original
+job/key/arm and stable delivery identity. Verify computation and accepted result,
+local terminal receipt, notifier invocation/result, transport acceptance,
+supported durable receiving-thread arrival and owner disposition as separate
+boundaries. An armed receipt, held owner lock, successful hook, HTTP acceptance
+or wake alone does not prove the complete chain. Report an unsupported receiver
+boundary to its runtime owner; do not invent a parallel receipt service.
+
+Before cleanup, distinguish parent-bound foreground waits from intentional
+managed shared observers. Reuse exact executable/birth/session and attempt or
+fixture ownership evidence; a PID or old age is insufficient. Only its owner
+stops a scoped helper, verifies exit and free locks, then removes disposable
+fixture state. Preserve survivors, registrations and receipts and stop the
+cleanup if custody is uncertain. A legacy shared owner follows the recovery
+steps above; consumer scripts never kill all waits or edit registry files.
+After a permitted lifecycle transition, verify the exact owned helpers are gone,
+legitimate shared observers remain, and jobs/receipts are still recoverable.
+
+Queue health delivery is independent of job completion. Confirm the running
+queue's health hook is configured for the installation's intended private
+receiver before claiming alert delivery. Diagnostic-only mode remains supported.
+Keep receiver/executable configuration private. Trace one safe episode's stable
+delivery ID through the real hook, durable queue acknowledgement, receiving
+state and owner action; configuration presence or `--check` is insufficient.
+Plan backlog delivery with its owner; keep all undelivered identities and receiver
+deduplication across retries/restart. Never clear history or fake acknowledgement
+to make status healthy. Respect current production-run and rollout authority.

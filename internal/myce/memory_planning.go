@@ -6,37 +6,53 @@ import "time"
 // Never retained across placements, inventory changes, or transaction boundaries.
 type memoryPlanningCache struct {
 	observations *memoryObservationCatalog
-	transfers    map[memoryTransferKey]memoryTransferResult
 	history      *memoryHistoryCache
 	constrained  map[constrainedMemoryKey]float64
+	components   map[memoryComponentKey]*Machine
 }
 
-// Only retained execution evidence is shared with permanent-capacity views.
-// Admission-dependent estimates stay in each view's own planning cache.
-type memoryHistoryCache struct {
-	jobs  map[memoryHistoryKey][]*Job
-	lower map[memoryLowerKey]memoryConstraintEvidence
+type memoryComponentKey struct {
+	owner  *Machine
+	device string
+	cpu    bool
 }
 
-// Retained constrained executions used to be scanned once per distinct work
-// key, even with memoized answers. Index work/OS once in the same
-// immutable pass. Borrow jobs only for that pass; reader-side freshness,
-// ownership, qualification and exact-attempt fences remain authoritative.
-func (c *memoryPlanningCache) retainedMemoryJobs(q *Queue, key memoryLowerKey) []*Job {
-	if c.history.jobs == nil {
-		c.history.jobs = map[memoryHistoryKey][]*Job{}
-		for _, j := range q.memoryHistory().s.Jobs {
-			if j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
-				continue
-			}
-			k := j.Timing.Key
-			id := memoryHistoryKey{k.Work, k.Target.OS}
-			c.history.jobs[id] = append(c.history.jobs[id], j)
+// Observation identity reads inventory, not projected free room. Component
+// copies are private to this immutable pass, including permanent-capacity views.
+func (q *Queue) memoryObservationMachine(j *Job, owner *Machine) *Machine {
+	key := memoryComponentKey{owner: owner, cpu: j.Spec.Needs.cpuOnly()}
+	if len(j.AllocatedDevices) == 1 {
+		key.device = j.AllocatedDevices[0]
+	}
+	cache := q.memoryPlanning
+	if cache != nil && len(j.AllocatedDevices) <= 1 {
+		if m := cache.components[key]; m != nil {
+			return m
 		}
 	}
-	return c.history.jobs[memoryHistoryKey{key.work.work, key.os}]
+	m := allocationMachine(owner, j.AllocatedDevices)
+	if key.cpu && owner.Devices != nil {
+		m = cpuMachineView(owner)
+	}
+	if cache != nil && len(j.AllocatedDevices) <= 1 {
+		if cache.components == nil {
+			cache.components = map[memoryComponentKey]*Machine{}
+		}
+		cache.components[key] = m
+	}
+	return m
 }
 
+// Permanent-capacity views share retained execution evidence and the origin's
+// observation catalog. Admission-dependent caches stay private to each view.
+type memoryHistoryCache struct {
+	index  retainedMemoryIndex
+	owners map[retainedMemoryOwner]*Machine
+	lower  map[memoryLowerKey]memoryConstraintEvidence
+}
+
+// Keys separate the full comparable work/configuration and target OS.
+// Raw cold facts may be reused; lower bounds and owner views belong to a pass.
 type memoryHistoryKey struct{ work, os string }
 
 type memoryLowerKey struct {

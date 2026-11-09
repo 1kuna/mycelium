@@ -31,6 +31,10 @@ type SharedHostPressure struct {
 
 const sharedHostPressureCause = "shared_host_pressure"
 
+// Compatibility only for legacy pressure reports with no frozen probe validity.
+// This does not control worker freshness or loss; host-probe-v1 uses its sample.
+const legacyPressureDeliveryAllowance = 30 * time.Second
+
 type sharedPressureLearning struct {
 	Wake probeEstimate `json:"wake"`
 	PSI  probeEstimate `json:"psi"`
@@ -114,7 +118,7 @@ func (q *Queue) sharedPressureFresh(m *Machine) bool {
 	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
 	contact := maxTime(reportAt, q.lastContact(m, now))
 	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < p.Probe.freshness() &&
-		now.Sub(p.ReceivedAt) < p.Probe.freshness()+pendingCheckinContactLimit
+		now.Sub(p.ReceivedAt) < p.Probe.freshness()+legacyPressureDeliveryAllowance
 }
 
 // hostPressureReason is the first owner-pressure reason among m's host
@@ -223,27 +227,20 @@ func sharedMemoryPSI(b []byte) (float64, error) {
 // consumption of a completed probe or the next refresh. A stuck source retains
 // its original sample age; a completed failure immediately removes the sample.
 type sharedPressureMonitor struct {
-	mu       sync.Mutex
-	clock    Clock
-	source   func(context.Context) (SharedHostPressure, error)
-	enabled  bool
-	current  *SharedHostPressure
-	lane     hostProbeLane[SharedHostPressure]
-	reported time.Time
+	mu      sync.Mutex
+	clock   Clock
+	source  func(context.Context) (SharedHostPressure, error)
+	enabled bool
+	current *SharedHostPressure
+	lane    hostProbeLane[SharedHostPressure]
 }
 
 func (m *sharedPressureMonitor) snapshot(enabled bool) *SharedHostPressure {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.clock.Now()
-	if !m.reported.IsZero() && now.After(m.reported) {
-		// The gap includes the preceding check-in/queue round trip and the
-		// next report's preparation. Learn even before profile activation.
-		// Only future completed probes receive this prediction; a slow
-		// consumer must never extend the current observation's frozen expiry.
-		m.lane.timing.delivery.observe(now.Sub(m.reported).Seconds())
-	}
-	m.reported = now
+	// Learn even before profile activation, without renewing current evidence.
+	m.lane.timing.noteReport(now)
 	if m.enabled != enabled {
 		m.enabled = enabled
 		m.current = nil

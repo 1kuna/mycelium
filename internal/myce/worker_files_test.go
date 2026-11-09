@@ -95,6 +95,14 @@ func TestSharedInputsRemainProtectedUntilCleanupRetrySucceeds(t *testing.T) {
 
 func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 	state := t.TempDir()
+	// Cache entries are read-only. Register removal before a failed operation
+	// can skip it, so testing's TempDir cleanup can also remove the state tree.
+	cacheRoot := filepath.Join(state, "workers", "fake-1", "file-cache", "shared-inputs")
+	t.Cleanup(func() {
+		if err := removeSharedEntry(cacheRoot); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := PrepareStateRoots(state); err != nil {
 		t.Fatal(err)
 	}
@@ -193,8 +201,6 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 			}
 		}
 	}
-	cacheRoot := filepath.Join(state, "workers", "fake-1", "file-cache", "shared-inputs")
-	t.Cleanup(func() { _ = removeSharedEntry(cacheRoot) })
 }
 
 // A cancelled running attempt keeps its local work for the recovery grace.

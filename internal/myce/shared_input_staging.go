@@ -42,10 +42,18 @@ func sharedInputPath(ctx context.Context, root, relative string) (string, error)
 // bounds detached work by the attempts already admitted, without serializing I/O.
 // Publication belongs only to the caller; no process runs in a detached writer.
 func (c *SharedInputCache) stageInput(parent context.Context, populate func(context.Context, string) error, publish func(string) error) error {
+	return c.stageInputNamed(parent, "", populate, publish)
+}
+
+func (c *SharedInputCache) stageInputNamed(parent context.Context, key string, populate func(context.Context, string) error, publish func(string) error) (stageErr error) {
 	if err := parent.Err(); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if ctx.Value(sharedInputTraceKey{}) == nil {
+		ctx = context.WithValue(ctx, sharedInputTraceKey{}, &sharedInputTrace{detail: StagingCause{Operation: "shared_input", Stage: "prepare", PathClass: "cache"}})
+	}
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
 	c.mu.Lock()
 	for pending := range c.staging {
 		select {
@@ -72,13 +80,20 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 		b.withdrawn = true
 		cancel()
 		c.mu.Unlock()
+		if c.afterStageCancel != nil {
+			c.afterStageCancel()
+		}
 	}()
 	progress := func() { b.progress.Store(c.cache.Clock.Now().UnixNano()) }
 	progress()
 	ctx = context.WithValue(ctx, ioProgressKey{}, progress)
-	// A random build key uses the existing orphan-partial cleanup protocol.
-	// Its lock protects only disposable scratch, never execution admission.
+	// Named stages retain resumable immutable prefixes. Anonymous test/scratch
+	// stages keep the original disposable lifecycle. Each writer owns its build
+	// lock through detached cancellation tails, independently of execution.
 	stageKey := identityHash(ID())
+	if key != "" {
+		stageKey = identityHash("input-stage:" + key)
+	}
 	stage := filepath.Join(c.cache.Root, stageKey+".partial")
 	result, consumed := make(chan error), make(chan struct{})
 	completed := false
@@ -94,16 +109,28 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 		// detached cancellation tails. A copied heartbeat must not retain a
 		// reservation whose writer has already exited.
 		defer c.refreshCapacityIfTracked()
-		defer os.Remove(filepath.Join(c.cache.Root, "locks", stageKey+".build"))
+		if key == "" {
+			defer os.Remove(filepath.Join(c.cache.Root, "locks", stageKey+".build"))
+		}
 		lock, err := c.cache.lock(ctx, stageKey+".build", syscall.LOCK_EX)
 		if err == nil {
 			defer unlockEnvironment(lock)
-			defer removeSharedEntry(stage)
-			err = os.Mkdir(stage, 0700)
+			defer func() {
+				// Retain interrupted/space-refused prefixes for a later owner retry.
+				// Integrity/invalid-source failures cannot become reusable identity.
+				if key == "" || err != nil && contains([]string{"identity_mismatch", "invalid_source", "invalid_cache_entry", "invalid_input"}, stagingErrorName(err)) {
+					_ = removeSharedEntry(stage)
+				}
+			}()
+			err = os.MkdirAll(stage, 0700)
+			if err == nil && key != "" {
+				err = os.WriteFile(filepath.Join(stage, "resume"), []byte(key), 0600)
+			}
 			if err == nil {
 				err = populate(ctx, stage)
 			}
 		}
+		err = tracedSharedError(ctx, err)
 		select {
 		case result <- err:
 			// Publication/cleanup must finish before the writer removes scratch.
@@ -127,10 +154,11 @@ func (c *SharedInputCache) stageInput(parent context.Context, populate func(cont
 			if err != nil {
 				return err
 			}
+			traceSharedInput(ctx, "publish", "cache")
 			return publish(stage)
 		case <-tick.C:
 			if c.cache.Clock.Now().Sub(time.Unix(0, b.progress.Load())) >= checkpointAvailabilityStallBudget {
-				return errCheckpointIOTimeout
+				return tracedSharedError(ctx, errCheckpointIOTimeout)
 			}
 		}
 	}

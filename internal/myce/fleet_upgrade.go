@@ -278,7 +278,7 @@ func (q *Queue) fleetProofFresh(p *FleetRuntimeProof) bool {
 	}
 	now := q.clock.Now()
 	age := now.Sub(p.ObservedAt)
-	return age >= 0 && age < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
+	return age >= 0 && age < fleetRuntimeFreshFor
 }
 
 // Match the existing enrollment stability window. It catches service crash loops

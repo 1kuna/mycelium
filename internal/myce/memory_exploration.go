@@ -3,10 +3,11 @@ package myce
 import (
 	"iter"
 	"maps"
-	"slices"
 	"strings"
 	"time"
 )
+
+const boundedMemoryCapacityWait = "bounded memory exploration needs the largest eligible host allowance free"
 
 const boundedMemoryExploration = "bounded cross-OS exploration"
 const boundedGPUExploration = "bounded cross-family GPU exploration"
@@ -55,6 +56,14 @@ func (q *Queue) memoryHistory() *Queue {
 	return q
 }
 
+func (q *Queue) memoryHistoryJobs(indexed bool) map[string]*Job {
+	history := q.memoryHistory()
+	if history.observeMemoryHistory != nil {
+		history.observeMemoryHistory(len(history.s.Jobs), indexed)
+	}
+	return history.s.Jobs
+}
+
 // Diagnostic lower bounds may justify one measurement, never an upper bound.
 // Require the exact retained execution, fresh comparable configuration, and
 // unchanged target identity; a small unrelated/old sample cannot open a probe.
@@ -84,14 +93,14 @@ func (q *Queue) memoryConstraintEvidenceAfter(key ObservationKey, configuration 
 		if lower, ok := cache.history.lower[id]; ok {
 			return lower
 		}
-		lower := q.memoryConstraintEvidenceFrom(key, configuration, slices.Values(cache.retainedMemoryJobs(q, id)), discrete, after)
+		lower := cache.retainedMemoryEvidence(q, id)
 		cache.history.lower[id] = lower
 		return lower
 	}
-	return q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), discrete, after)
+	return q.memoryConstraintEvidenceFrom(key, configuration, maps.Values(q.memoryHistoryJobs(false)), discrete, after)
 }
 func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration string) float64 {
-	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistory().s.Jobs), false)
+	return q.sameOSMemoryLowerBoundFrom(key, configuration, maps.Values(q.memoryHistoryJobs(false)), false)
 }
 
 func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool) float64 {
@@ -246,7 +255,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	}
 	room, why := q.exploratoryMemory(j, m)
 	if why == "" && room < budget {
-		why = "bounded memory exploration needs the largest eligible host allowance free"
+		why = boundedMemoryCapacityWait
 	}
 	return budget, why, true
 }

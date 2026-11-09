@@ -182,6 +182,7 @@ type placementScan struct {
 	memoryIdentities map[*Job]string
 	memory           *memoryPlanningCache
 	hostBackfill     map[string]*hostBackfillDemand
+	unreleasableCPU  map[batchCPUKey]int
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
@@ -192,6 +193,15 @@ func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
 		return scan
 	}
 	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}, memoryIdentities: q.checkinMemoryIdentities}
+}
+
+// A supplied scan already owns this inventory for its immutable pass. Reason
+// readers must not rebuild every component/group view for every queued job.
+func (q *Queue) planningMachines(scans ...*placementScan) []*Machine {
+	if len(scans) > 0 {
+		return scans[0].machines
+	}
+	return q.plannerMachines()
 }
 
 func (q *Queue) placementValues(scan *placementScan) map[string]*hostValue {
@@ -216,7 +226,7 @@ func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
 	timeouts := map[string]time.Duration{}
 	add := func(id, priority string) {
 		d := q.lossTimeouts[min(2, legacyRank(priority))]
-		if old := timeouts[id]; old == 0 || d < old {
+		if old, known := timeouts[id]; !known || d < old {
 			timeouts[id] = d
 		}
 	}
@@ -238,11 +248,15 @@ func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
 	scan.live = map[string]bool{}
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		d := timeouts[m.ID]
-		if d == 0 {
+		d, known := timeouts[m.ID]
+		if !known {
 			d = q.lossTimeouts[2]
 		}
-		scan.live[m.ID] = !m.Gone && !m.Leaving && now.Sub(m.LastSeen) < d
+		d = max(d, q.workerLossAllowance(m))
+		if d == 0 {
+			d = time.Duration(1<<63 - 1)
+		}
+		scan.live[m.ID] = !m.Gone && !m.Leaving && !q.workerSuspect(m, now) && !now.Before(m.LastSeen) && now.Sub(q.lastContact(m, now)) < d
 	}
 	return scan.live
 }
@@ -305,7 +319,7 @@ func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, s
 		}
 		// Background copies yield to foreground commands in the existing worker.
 		// Builds and stopping preparations still fence admission.
-		if immediate && (q.preemptionReleasesPending(winner) || !scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
+		if immediate && (q.launchCapacityBlocked(winner, set.m) || q.preemptionReleasesPending(winner) || !scan.live[set.m.ID] || !q.batchSlotFree(set.m, winner) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
 			continue
 		}
 		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {

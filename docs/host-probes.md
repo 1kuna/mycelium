@@ -27,12 +27,16 @@ kernel-journal deadline.
 
 `probe.period_seconds`, `cost_seconds`, and `valid_seconds` describe the completed
 observation. Validity is the period plus the measured service-cost prediction
-(mean plus four absolute-deviation estimates). Shared-pressure reports also
-include the prediction of their observed control/report gap: the preceding
+(mean plus four absolute-deviation estimates). Host-health and shared-pressure reports also
+include the same prediction of their observed control/report gap: the preceding
 queue round trip plus the next report's preparation. Cheap OS sensing does not
 imply cheap delivery to a launch fence. This gap trains before profile activation
 and affects only newly completed probes; later slow reports cannot renew old
-evidence. Pressure age is captured at send time, after report preparation.
+evidence. Both ages are captured at send time, after report preparation. Local
+health admission reads do not train report cadence. During initial learning,
+evidence can still expire: contact alone never proves that a sensor is healthy. A stopped sensor expires at its last completed
+observation's frozen period, cost prediction and learned report-gap prediction,
+even if the worker continues checking in.
 The prediction uses RFC 6298's
 1/8 mean and 1/4 deviation smoothing. These dimensionless coefficients supply
 statistical memory and a jitter allowance; they are not fleet latency thresholds.
@@ -43,6 +47,50 @@ A slow pending scan never extends the previous observation. A completed failure
 removes it immediately. Inventory retains stable device identity, but stale or
 failed capacity cannot qualify work; partial driver failures preserve fresh
 healthy siblings. Direct launch ownership/identity checks remain mandatory.
+Inventory compares hardware, topology, configuration and health, excluding
+telemetry timestamps, activity counters, free memory and a unified device's
+live uncapped budget. Workload activity cannot reset discovery backoff.
+Unchanged failed-family classifications also back off; failed devices remain
+unknown and partial observations retain their original expiry. Each
+pass reuses its device enumeration for XPU qualification fingerprints and
+shares identical fingerprint commands across cards; fingerprint bytes remain
+compatible with existing qualification records.
+
+Discrete XPU telemetry has its own demand-driven observation lane. Only active
+opt-in fan-out sharing consumes physical card headroom. Idle, CPU-only and
+exclusive-device heartbeats do not request these counters. Sharing reuses one
+sample throughout its existing ten-second freshness window, without renewing
+its timestamp; measured probe cost can slow subsequent observations. Missing or
+expired evidence withholds additional sharing. Ordinary configured-budget
+admission and exact-attempt DRM fdinfo sampling remain independent.
+
+Memory comes from the optional read-only GPU telemetry broker's PCI-keyed
+`vram` counters. The worker never falls back to `xpu-smi`: starting that tool can
+initialize the vendor runtime on every card, including busy siblings. The
+reference broker uses only `DRM_IOCTL_XE_DEVICE_QUERY` with `MEM_REGIONS`; it
+creates no GPU objects or execution contexts. Older kernels silently censor usage to zero without `CAP_PERFMON` or
+`CAP_SYS_ADMIN`; newer kernels expose it without privilege. The broker accepts
+positive usage without extra privilege, but treats a zero as unknown unless
+accounting capability is present. The template adds read-only DRM access with
+no capability expansion.
+A GTT-only broker remains valid for host-backed storage but supplies unknown
+VRAM. Upgrade and qualify the broker separately to retain opportunistic sharing;
+missing counters never become free device memory. Xe PMU activity remains per
+PCI device. Samples merge only into matching device/driver, selector, topology
+and reserve observations, with their original age.
+
+Quarantine recovery is separate from inventory telemetry. A completed health
+reading is reused until the recovery decision's existing quiet window: the greatest of
+fault-to-reading latency, previously measured recovery, and the existing kernel
+teardown-attribution resolution. Failed readings lengthen that interval from
+observed failure duration. A new fault event starts a new decision. This avoids
+repeated vendor initialization while a quiet-window decision cannot yet change;
+the cost is later recovery detection within the measured window. No new fixed
+retry rate is introduced. Health work remains asynchronous, so a stalled tool
+does not block worker control or kernel scans. This pacing does not exclude
+vendor health starts during accelerator/model custody; that guarantee requires
+a separate design and review.
+
 For an already assigned attempt, a fresh direct launch probe can establish
 recovery from a cached `device_probe_unavailable` observation. The direct probe
 must still succeed, identify exactly the assigned device and report healthy
@@ -50,9 +98,44 @@ capacity; saved identity and policy fences remain binding. This does not renew
 the background observation or restore its advertised queue capacity.
 
 The queue translates worker-local age at request receipt to its own injected
-clock and includes preparation/transaction waiting time. New observations expire
-at their frozen validity even while check-in contact remains healthy. Owner age
-is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
+clock and includes preparation/transaction waiting time in diagnostic age.
+For host health, admission and degradation use that original worker-local age
+plus available queue service opportunity since acceptance. Incoming request
+processing and queue mutex occupancy cannot consume the opportunity to accept
+a replacement report. This uses the same mutex service clock as adaptive worker
+contact, without treating contact as sensor evidence. This also covers the first
+fresh report of a restarted worker before any report gap is learned: only actual
+queue delay is excluded, and the remaining frozen validity bounds available
+service after processing. Already stale or failed reports still refuse immediately. A newer fresh health report currently being
+prepared outside the mutex pauses only its own session's prior service age at
+receipt. It cannot revive already expired evidence, and stale or failed input
+cannot obtain this credit. The marker spans preparation, reply hydration, HTTP
+NAS instructions and response encoding, including the first report of a session. Successful return retains only that
+receipt's actual queue processing credit; rejection or cancellation removes the
+marker without retaining credit. After return a silent sensor has its remaining
+frozen validity in available service time. Unrelated workers keep aging. Owner and pressure age rules are unchanged.
+
+A silent sensor expires after its remaining frozen validity in available queue
+service time. A reporting worker whose sensor stops expires when its growing
+worker-local age reaches frozen validity and that report is processed. Under
+normal service this is at most the frozen validity plus the next report delivery;
+a measured queue stall adds its actual duration, not a new fixed timeout.
+Continuous queue unavailability, including an indefinitely pending check-in
+preparation for that session, has no finite trustworthy wall-time expiry bound. Queue restart discards service credit and uses conservative physical
+wall age until another report arrives. Status snapshots freeze both clocks;
+reported `age_seconds` remains physical diagnostic age, so it can exceed
+`valid_seconds` while excluded queue service accounts for the difference.
+
+Unified-CUDA physical host admission uses the accepted check-in's adaptive
+worker freshness and the same frozen host-health evidence validity. It has no
+separate fixed check-in age cutoff. Invalid physical RAM measurements, expired
+or failed health observations and stale worker sessions still withhold room;
+physical reserves and outstanding allocation growth are subtracted unchanged.
+A completed failure and explicit drain still withhold immediately. Overlapping
+check-ins retain the newest accepted queue receipt in the same worker session;
+an older delayed success cannot clear a newer refusal or reset its age.
+
+Owner age is carried explicitly; worker wall-clock skew cannot renew it. Older pressure
 reports without timing evidence retain the existing bounded contact policy.
 
 ## Owner availability and interference
@@ -127,3 +210,53 @@ These are laptop proofs. Native daemon, GPU driver stress, thermal cycles,
 Windows session bridge, OS hang reproduction and representative daily-owner
 latency under load require a separately authorized maintenance run. No native
 hang-cause attribution, fleet change or deployment is implied.
+
+`TestInventoryHelperLaunchMeasurement` measures an instrumented two-card fake
+inventory for one simulated minute, with a one-second heartbeat, 250ms scan
+cost and two CPU cores. The former per-card fingerprint/query path launches
+174 enumeration and 116 memory helpers; #1040 reduced this to 35 and 12, while
+intentionally retaining the five-second host-memory lane. The demand regression
+now simulates one minute each without demand, with sharing demand and after
+withdrawal: zero, six and zero additional broker memory reads, and zero vendor
+initializations throughout.
+This compares launch counts, not native driver overhead or throughput. No
+production GPU or compute workload is exercised.
+
+After an authorized deploy, the operator can compare equal-duration kernel-log
+windows before and after worker activation: count peer-to-peer DMA warnings per
+elapsed minute and record helper launches, observation cost/period, sample age,
+workload occupancy and driver errors. Use existing logs and read-only process
+observations; do not start GPU stress or extra driver probes on a production
+host. Exclude the activation window from steady-state rates and compare similar
+occupancy. Expected evidence is fewer enumeration/memory helpers and fewer
+warnings without stale data granting sharing. A warning-rate reduction alone
+does not establish the cause of compute timeouts; track those independently.
+
+## Optional xe CCS preemption timeout
+
+The optional [host template](../deploy/xe-preempt-timeout/README.md) persists an
+explicitly configured CCS `preempt_timeout_us` across boot and xe device adds,
+using a metadata-only udev rule that requests a bounded per-card systemd
+oneshot, plus an independent boot oneshot. Udev launches no helper and does no
+sysfs/state I/O; it does not wait for application to finish. The boot
+unit is wanted by `multi-user.target`, has its own start timeout, and has no
+ordering/dependency against the worker. Nothing is added to worker startup:
+the setting matters when GPU jobs create execution queues, well after boot.
+Failures/timeouts affect the optional operation; mismatches log an explicit
+status for the operator. Uninterruptible kernel stalls cannot be cured by a
+process timeout. The template is disabled by default (no writes), is installed
+manually, and can restore recorded prior values and be removed. It never
+changes job timeouts or timeslices.
+
+Evidence status: raising 640000 to 1280000 microseconds is a **diagnostic trial**
+for observed GuC preemption timeouts/engine resets on Intel Arc Pro B70 with xe
+and Linux 7.0, not a vendor-validated setting or established fix. Confirmation
+batch results and native boot/hotplug proof are still required before separate
+authorization to apply it. A hung context can take up to an extra **0.64 seconds**
+to reset, delaying recovery. Newly created GPU execution queues inherit the
+value; existing queues retain their old value, including during rollback.
+
+The template's README contains installation, direct sysfs/journal verification,
+prior-value (or explicit 640000) rollback, uninstall and laptop fake-sysfs tests.
+The live sysfs bound names and validation follow Linux 7.0's
+[`xe_hw_engine_class_sysfs.c`](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/xe/xe_hw_engine_class_sysfs.c).

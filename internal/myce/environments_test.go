@@ -46,7 +46,7 @@ func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
 	var finishOnce sync.Once
 	var calls atomic.Int32
 	rt := &environmentRuntime{dir: t.TempDir(), cache: cache, reports: map[string]EnvironmentReport{}}
-	rt.authorize = func(l HostLaunch) error {
+	rt.authorize = func(_ context.Context, l HostLaunch) error {
 		if calls.Add(1) == 1 {
 			err := q.AuthorizeLaunch(l)
 			close(entered)
@@ -371,11 +371,17 @@ func TestEnvironmentFailedBuildLogs(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "worker", Session: "session", GPU: "fake", FreeMemoryGB: 64, EnvironmentBuilder: true, EnvironmentReports: []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}}})
+	report := Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "worker", Session: "session", GPU: "fake", FreeMemoryGB: 64, EnvironmentBuilder: true, EnvironmentReports: []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}}}
+	_, e = q.Checkin(report)
 	if e != nil {
 		t.Fatal(e)
 	}
-	_ = clock
+	// This headerless worker becomes an eligible build target on its second
+	// accepted arrival. Keep the failed report present across qualification.
+	clock.Advance(time.Second)
+	if _, e = q.Checkin(report); e != nil {
+		t.Fatal(e)
+	}
 	logs, e := q.Logs(j.ID, 0)
 	if e != nil || len(logs) != 1 || !strings.Contains(logs[0].Text, "compiler output") {
 		t.Fatalf("logs %v %v", logs, e)

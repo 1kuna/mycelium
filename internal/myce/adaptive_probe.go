@@ -56,9 +56,19 @@ type probeTiming struct {
 	cores      int
 	cost       probeEstimate
 	delivery   probeEstimate // Measured consumer/report gap, when the lane crosses that path.
+	reported   time.Time
 	lastChange time.Time
 	change     probeEstimate
 	next       time.Time
+}
+
+func (p *probeTiming) noteReport(now time.Time) {
+	if !p.reported.IsZero() && now.After(p.reported) {
+		// Includes the previous queue round trip and this report's preparation.
+		// Only subsequently completed observations may use the prediction.
+		p.delivery.observe(now.Sub(p.reported).Seconds())
+	}
+	p.reported = now
 }
 
 func (p *probeTiming) controlPeriod() time.Duration {
@@ -118,9 +128,16 @@ type hostProbeLane[T any] struct {
 	known       bool
 	at          time.Time
 	observation *ProbeObservation
+	equal       func(T, error, T, error) bool // Semantic observations include failure classification.
 }
 
 func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context) (T, error)) (bool, error) {
+	return p.stepWhen(ctx, source, true)
+}
+
+// A demand-driven consumer must collect completed work after withdrawal
+// without allowing collection itself to launch the next probe.
+func (p *hostProbeLane[T]) stepWhen(ctx context.Context, source func(context.Context) (T, error), demand bool) (bool, error) {
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
@@ -135,13 +152,19 @@ func (p *hostProbeLane[T]) step(ctx context.Context, source func(context.Context
 				p.known = false
 				return false, nil
 			}
-			p.observation = p.timing.observe(r.start, r.end, !p.known || !reflect.DeepEqual(r.value, p.value) || r.err != nil)
+			var changed bool
+			if p.equal != nil {
+				changed = p.observation == nil || !p.equal(r.value, r.err, p.value, p.err)
+			} else {
+				changed = !p.known || !reflect.DeepEqual(r.value, p.value) || r.err != nil
+			}
+			p.observation = p.timing.observe(r.start, r.end, changed)
 			p.known = r.err == nil && !r.end.Before(r.start)
 			p.value, p.at, p.err = r.value, r.start, r.err
 		default:
 		}
 	}
-	if p.pending == nil && !p.clock.Now().Before(p.timing.next) {
+	if demand && p.pending == nil && !p.clock.Now().Before(p.timing.next) {
 		out := make(chan hostProbeResult[T], 1)
 		done := make(chan struct{})
 		p.done = done

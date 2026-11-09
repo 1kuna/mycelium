@@ -99,6 +99,11 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
+			// #1011 requires changed capacity before another launch offer.
+			if got := check(t, q, m, nil).Job; got != nil {
+				t.Fatal("unchanged refusal re-offered", got)
+			}
+			m.HostAvailableMemoryGB++
 			next := check(t, q, m, nil).Job
 			if next == nil || next.Attempt != 2 {
 				t.Fatal("no retry", next)
@@ -172,5 +177,12 @@ func TestAdmissionDiagnosticUnavailableAndPrivacy(t *testing.T) {
 		if safeAdmissionDetail(&bad) != nil {
 			t.Fatal("invalid diagnostic accepted")
 		}
+	}
+	private := &AdmissionDetail{Subcheck: "live_host_growth", Unit: "GiB", Required: 1, Contributors: []HostGrowthContributor{
+		{ID: "private-secret/path", Kind: "attempt", Attempt: 1, PendingGB: 1},
+		{Kind: "private-secret/path", PendingGB: 1},
+	}}
+	if got := safeAdmissionDetail(private); len(got.Contributors) != 0 {
+		t.Fatal("untrusted contributor identity leaked", got)
 	}
 }

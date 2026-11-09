@@ -63,6 +63,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 	if len(phases) != 0 {
 		p := phases[0]
 		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
+		detail += fmt.Sprintf(" persist_marshal_ms=%.3f persist_sql_ms=%.3f persist_sync_commit_ms=%.3f persist_payload_bytes=%d persist_records=%d", holdMS(p.persistence.Marshal), holdMS(p.persistence.SQL), holdMS(p.persistence.Commit), p.persistence.Bytes, p.persistence.Records)
 	}
 	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=1%s", operation, holdMS(duration), detail)
 }
@@ -78,6 +79,18 @@ type queueUpdateTiming struct {
 	// Instruction polls opt in to distinguish pool acquisition from work.
 	measureWriter bool
 	writerWait    time.Duration
+	persistence   queuePersistenceTiming
+}
+
+// Observational timings only. Commit includes SQLite's synchronous=FULL sync;
+// it is not an isolated filesystem fsync measurement. Bytes counts changed
+// queue-state payloads submitted to SQL, excluding usage rows and WAL overhead.
+type queuePersistenceTiming struct {
+	Marshal time.Duration
+	SQL     time.Duration
+	Commit  time.Duration
+	Bytes   int64
+	Records int64
 }
 
 func (t *queueUpdateTiming) writer(db *sql.DB, clock Clock) (*sql.Conn, error) {
@@ -151,6 +164,7 @@ func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 // Sampled timestamps only; queue decisions always use q.clock. The optional
 // telemetry clock permits deterministic slow-update tests without sleeping.
 type queueHoldPhases struct {
+	persistence   queuePersistenceTiming
 	clock         Clock
 	started, last time.Time
 	active        int
@@ -164,6 +178,48 @@ func holdNow(clock Clock) time.Time {
 	return time.Now()
 }
 func holdMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+const (
+	adviceCapture = iota
+	adviceWaitReason
+	adviceStatusReason
+	adviceDeadline
+)
+
+// Submission advice is a separate post-commit phase, absent from update holds.
+// Wall timestamps are telemetry only, never scheduling inputs. Log after unlock
+// using the same measured diagnostic budget as transaction telemetry.
+type submissionAdviceTiming struct {
+	started, last time.Time
+	active        int
+	phases        [4]time.Duration
+}
+
+func newSubmissionAdviceTiming() submissionAdviceTiming {
+	now := time.Now()
+	return submissionAdviceTiming{started: now, last: now}
+}
+
+func (t *submissionAdviceTiming) next(phase int) {
+	now := time.Now()
+	t.phases[t.active] += now.Sub(t.last)
+	t.last, t.active = now, phase
+}
+
+func (t *submissionAdviceTiming) finish(observer func(submissionAdviceTiming)) {
+	t.next(t.active)
+	if observer != nil {
+		observer(*t)
+	}
+	duration := t.last.Sub(t.started)
+	budget := holdTelemetry("submission_advice")
+	if !budget.admit(duration) {
+		return
+	}
+	started := time.Now()
+	defer func() { budget.spent(time.Since(started)) }()
+	log.Printf("event=submission_advice duration_ms=%.3f capture_ms=%.3f wait_reason_ms=%.3f status_waiting_reason_ms=%.3f deadline_guidance_ms=%.3f", holdMS(duration), holdMS(t.phases[adviceCapture]), holdMS(t.phases[adviceWaitReason]), holdMS(t.phases[adviceStatusReason]), holdMS(t.phases[adviceDeadline]))
+}
 
 const (
 	holdRecords = iota
@@ -190,4 +246,17 @@ func (p *queueHoldPhases) finish() time.Duration {
 	}
 	p.next(p.active)
 	return p.last.Sub(p.started)
+}
+
+// Body timers are opt-in diagnostics. Their wall clock never controls scheduling.
+func (q *Queue) bodyPhaseStart() time.Time {
+	if q.observeBodyPhase == nil {
+		return time.Time{}
+	}
+	return holdNow(q.holdClock)
+}
+func (q *Queue) bodyPhaseFinish(name string, started time.Time) {
+	if !started.IsZero() {
+		q.observeBodyPhase(name, holdNow(q.holdClock).Sub(started))
+	}
 }

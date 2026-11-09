@@ -44,10 +44,11 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
-	StorageDirectory string     `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
-	Preparation      string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
-	CustodyID        string     `json:"custody_id,omitempty"`
-	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
+	StorageDirectory   string     `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
+	Preparation        string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
+	CustodyID          string     `json:"custody_id,omitempty"`
+	InputWriterPending bool       `json:"input_writer_pending,omitempty"` // In-process staging only; never process/container custody.
+	IsolationWarning   *Execution `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
 	// released publication. Survives a restart before scratch retention runs.
 	PublishedAttempt *Execution `json:"published_attempt,omitempty"`
@@ -79,11 +80,16 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	inputTransferRecovering atomic.Bool // Written by detached staging; read by its attempt actor.
+
+	liveEvidence          *ExecutionEvidence // Monotonic only while this exact attempt is observed.
+	liveEvidenceKey       attemptKey
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
 	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
 	faultTiming           probeTiming
 	deviceFaults          checkpointIO[KernelLogSnapshot]
+	deviceHealth          checkpointIO[map[string]deviceHealthObservation]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
 	inventory             checkpointIO[[]MachineDevice]
@@ -225,6 +231,9 @@ func (s *workerStore) matchesResult(r Result, machine string) bool {
 func (s *workerStore) recoverResult(machine string) error {
 	if s.state.Result != nil && !s.matchesResult(*s.state.Result, machine) {
 		return errors.New("mismatched saved worker result")
+	}
+	if s.state.Identity == "" {
+		return nil // Unlaunched Docker has only its exact attempt-state receipt.
 	}
 	var r Result
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
@@ -418,6 +427,13 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 	return s.cleanupOrphanCustody(clock, false, memoryFiles...)
 }
 
+func (s *workerStore) inputWriterOnly() bool {
+	return s.state.InputWriterPending && s.state.Job != nil &&
+		s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending &&
+		len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == "" &&
+		(!s.state.Job.Spec.Run.Docker || s.state.Identity == "")
+}
+
 // A preparation helper has an explicit outstanding release obligation. Unlike
 // an unrelated reused PID in ordinary orphan discovery, a live unidentifiable
 // helper group cannot be treated as proof of exit.
@@ -428,6 +444,14 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 			cleanupErr = s.releaseSharedInputPins()
 		}
 	}()
+	if s.inputWriterOnly() {
+		if s.extensionFiles.inFlight() {
+			return errWorkerReleasePending
+		}
+		// The live actor witnessed its writer finish, or this store was
+		// reopened after process exit destroyed that in-process writer.
+		return nil
+	}
 	if s.state.Preparation != "" {
 		return s.cleanupPreparation(clock)
 	}

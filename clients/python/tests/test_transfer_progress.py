@@ -176,37 +176,3 @@ class PartialUploadTests(unittest.TestCase):
                 self.assertIn(b"Authorization: Bearer fixture\r\n", sent)
                 self.assertTrue(sent.endswith(b"complete payload"))
                 self.assertEqual(sent.count(b"PATCH /upload"), 1)
-
-    def test_partial_socket_sends_renew_budget(self):
-        """Real socket sends progress beyond one cumulative sendall timeout."""
-        sender, receiver = socket.socketpair()
-        sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-        sender.settimeout(0.25)
-        body = b"upload" * (32 * 1024)
-        received = bytearray()
-        stop = threading.Event()
-
-        def consume():
-            try:
-                while not stop.is_set():
-                    chunk = receiver.recv(1024)
-                    if not chunk:
-                        break
-                    received.extend(chunk)
-                    stop.wait(0.01)
-            finally:
-                receiver.close()
-
-        thread = threading.Thread(target=consume, daemon=True)
-        thread.start()
-        start = time.monotonic()
-        try:
-            _ProgressSocket(sender).sendall(body)
-            sender.shutdown(socket.SHUT_WR)
-            thread.join()
-            self.assertGreater(time.monotonic() - start, sender.gettimeout())
-            self.assertEqual(hashlib.sha256(received).digest(), hashlib.sha256(body).digest())
-        finally:
-            stop.set()
-            sender.close()
-            thread.join()

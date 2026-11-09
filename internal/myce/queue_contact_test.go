@@ -21,6 +21,7 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
+	arrived := c.Now()
 
 	q.mu.Lock() // A slow update holds the queue lock for 6 s.
 	done := make(chan error, 1)
@@ -46,11 +47,22 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 	requireState(t, q, j.ID, "running")
 
-	c.Advance(ProductionLossAfter)
+	// The completed six-second response also teaches wall delivery cost. Real
+	// silence must miss that arrival prediction AND the service allowance.
+	m := q.s.Machines[worker.ID]
+	opportunity, wall := q.machineLossTimeout(worker.ID), q.workerArrivalAllowance(m)
+	remaining := max(opportunity, arrived.Add(wall).Sub(c.Now()))
+	t.Logf("post-stall loss: opportunity=%s wall=%s remaining=%s", opportunity, wall, remaining)
+	advanceReportingPeer(t, q, c, peer, remaining-time.Nanosecond)
+	requireState(t, q, j.ID, "running")
+	if got := job(t, q, j.ID); got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatal("loss charged before the measured silence bound", got)
+	}
+	c.Advance(time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
-	if !q.s.Machines[worker.ID].Gone {
-		t.Fatal("quiet worker stayed joined after its last processed check-in")
+	if got := job(t, q, j.ID); !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
+		t.Fatal("quiet worker escaped exact loss/retry at the measured bound", got)
 	}
 }
 
@@ -67,14 +79,15 @@ func TestCheckinAbandonedContactExpires(t *testing.T) {
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
 	q.beginCheckin(worker.ID, worker.Session) // Abandoned: never calls settle.
-	c.Advance(29 * time.Second)
+	allowance := q.machineLossTimeout(worker.ID)
+	c.Advance(allowance - time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "running")
-	c.Advance(time.Second) // Exactly arrival + 30 s: no more pending credit.
+	c.Advance(time.Nanosecond) // No remaining arrival allowance.
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
 	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("abandoned check-in hid a dead worker after 30 s")
+		t.Fatal("abandoned check-in hid a dead worker after its measured allowance")
 	}
 }
 
@@ -93,7 +106,7 @@ func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {
 	last := q.s.Machines[worker.ID].LastSeen
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
-	arrived := c.Now()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	q.mu.Lock()
@@ -121,16 +134,16 @@ func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {
 	if !q.s.Machines[worker.ID].LastSeen.Equal(last) {
 		t.Fatal("cancelled check-in refreshed LastSeen")
 	}
-	// Even after the cancelled handler has returned, keep the original window
-	// for its retry to arrive. Never grant a fresh 30 s from cancellation.
-	c.Advance(arrived.Add(pendingCheckinContactLimit - time.Nanosecond).Sub(c.Now()))
+	// After server completion, allow the measured reconnect opportunity.
+	// This does not refresh the accepted LastSeen timestamp.
+	c.Advance(q.machineLossTimeout(worker.ID) - time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "running")
 	c.Advance(time.Nanosecond)
 	check(t, q, peer, nil)
 	requireState(t, q, j.ID, "queued")
 	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("cancelled arrival hid a dead worker beyond its original 30 s bound")
+		t.Fatal("cancelled arrival hid a dead worker beyond its measured opportunity allowance")
 	}
 }
 

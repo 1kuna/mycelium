@@ -96,7 +96,7 @@ func (q *Queue) validatePieceSource(s Spec) error {
 			return errors.New("after output is not declared by the parent")
 		}
 	}
-	if !cancelled(p) && p.FilesExpired {
+	if p.FilesExpired && (p.State == "succeeded" || !cancelled(p)) {
 		return resultExpired()
 	}
 	// Stored inputs and NAS inputs already have mutually exclusive staging rules.
@@ -113,8 +113,16 @@ func (q *Queue) maintainPieceDependencies() {
 		}
 		a := j.Spec.After
 		p := q.retainedJob(a.Job)
-		if p != nil && cancelled(p) {
+		if j.DiagnosticCode == "upstream_cancelled" && j.Reason == "cancel requested" {
+			j.Reason = "upstream parent cancelled"
+		}
+		// A later cancellation intent excludes new producer attempts, but
+		// does not invalidate outputs from a succeeded producer.
+		if p != nil && p.State != "succeeded" && cancelled(p) {
 			q.cancelJob(j)
+			if j.Reason == "cancel requested" {
+				j.DiagnosticCode, j.Reason = "upstream_cancelled", "upstream parent cancelled"
+			}
 			continue
 		}
 		if terminal(j.State) || cancelled(j) || j.Dependency != nil && j.Dependency.ReadyAt != nil {

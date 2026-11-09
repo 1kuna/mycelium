@@ -5,6 +5,15 @@
         "available": {
           "type": "number"
         },
+        "contributors": {
+          "items": {
+            "$ref": "#/$defs/HostGrowthContributor"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "envelope_device_gb": {
           "type": "number"
         },
@@ -196,6 +205,38 @@
       ],
       "type": "object"
     },
+    "AttemptHostMemoryCharge": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "gib": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "observed_gb": {
+          "type": "number"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "sample_id": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "gib"
+      ],
+      "type": "object"
+    },
     "AttemptIO": {
       "properties": {
         "pressure": {
@@ -356,6 +397,9 @@
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause"
         },
+        "device_fault": {
+          "$ref": "#/$defs/DeviceFaultLoss"
+        },
         "diagnostics": {
           "$ref": "#/$defs/AttemptDiagnostics"
         },
@@ -365,6 +409,9 @@
         },
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
         },
         "forced": {
           "type": "boolean"
@@ -753,6 +800,9 @@
     },
     "CancellationMember": {
       "properties": {
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
         "job_id": {
           "type": "string"
         },
@@ -981,6 +1031,52 @@
         "example",
         "next_action",
         "message"
+      ],
+      "type": "object"
+    },
+    "DeviceFaultLoss": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "platform",
+        "devices",
+        "at"
+      ],
+      "type": "object"
+    },
+    "DeviceFaultStartWait": {
+      "properties": {
+        "remaining": {
+          "type": "integer"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "remaining"
       ],
       "type": "object"
     },
@@ -1217,6 +1313,9 @@
     },
     "Environment": {
       "properties": {
+        "backend": {
+          "type": "string"
+        },
         "lock_file": {
           "type": "string"
         },
@@ -1326,6 +1425,29 @@
       "required": [
         "id",
         "attempt"
+      ],
+      "type": "object"
+    },
+    "ExecutionEvidence": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "environment_preparation": {
+          "type": "string"
+        },
+        "main": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "main",
+        "sidecars",
+        "environment_preparation"
       ],
       "type": "object"
     },
@@ -1978,6 +2100,41 @@
       },
       "type": "object"
     },
+    "HostGrowthContributor": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "charge_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "launching": {
+          "type": "boolean"
+        },
+        "pending_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "charge_gb",
+        "pending_gb",
+        "sample_fresh"
+      ],
+      "type": "object"
+    },
     "HostLaunch": {
       "properties": {
         "attempt": {
@@ -2028,6 +2185,104 @@
         "kind",
         "key",
         "attempt"
+      ],
+      "type": "object"
+    },
+    "HostMemoryLedger": {
+      "properties": {
+        "allowance_gb": {
+          "type": "number"
+        },
+        "available_gb": {
+          "type": "number"
+        },
+        "available_known": {
+          "type": "boolean"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "debt_gb": {
+          "type": "number"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "owners": {
+          "items": {
+            "$ref": "#/$defs/HostMemoryOwner"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reserved_gb": {
+          "type": "number"
+        },
+        "signed_room_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "captured_at",
+        "observed_at",
+        "available_known",
+        "available_gb",
+        "allowance_gb",
+        "reserved_gb",
+        "growth_gb",
+        "signed_room_gb",
+        "debt_gb",
+        "free_gb",
+        "owners"
+      ],
+      "type": "object"
+    },
+    "HostMemoryOwner": {
+      "properties": {
+        "charge_gb": {
+          "type": "number"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_attempt": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "machine",
+        "session",
+        "charge_gb",
+        "growth_gb"
       ],
       "type": "object"
     },
@@ -2154,6 +2409,10 @@
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
         },
+        "device_fault_start_wait": {
+          "$ref": "#/$defs/DeviceFaultStartWait",
+          "x-contract": "diagnostic"
+        },
         "device_memory_floor_gb": {
           "type": "number",
           "x-contract": "diagnostic"
@@ -2206,6 +2465,10 @@
         },
         "execution_cause": {
           "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence",
           "x-contract": "diagnostic"
         },
         "extension": {
@@ -2262,6 +2525,10 @@
           "$ref": "#/$defs/AlertRecovery",
           "x-contract": "diagnostic"
         },
+        "host_memory_charge": {
+          "$ref": "#/$defs/AttemptHostMemoryCharge",
+          "x-contract": "diagnostic"
+        },
         "id": {
           "minLength": 1,
           "type": "string",
@@ -2287,8 +2554,23 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "last_memory_admission": {
+          "$ref": "#/$defs/MemoryAdmissionSnapshot",
+          "description": "Last changed blocking host-memory target comparison in this waiting episode, retained through startup failure and restart. Canonical exact-owner charges, growth and reservation pending state; historical diagnostic, not live usage or proof RAM is the only blocker. Absence is unknown. A retry clears it.",
+          "x-contract": "diagnostic"
+        },
         "last_stop_outcome": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "launch_capacity_wait": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LaunchCapacityWait"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "ledger": {
@@ -2575,6 +2857,14 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "start_capacity_budget": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_waiting": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "start_latency_seconds": {
           "type": "number",
           "x-contract": "diagnostic"
@@ -2770,6 +3060,9 @@
     },
     "JobMemoryEnvelope": {
       "properties": {
+        "available_host_gb": {
+          "type": "number"
+        },
         "basis": {
           "type": "string"
         },
@@ -2786,6 +3079,9 @@
           "type": "integer"
         },
         "host_gb": {
+          "type": "number"
+        },
+        "launch_drift_gb": {
           "type": "number"
         },
         "learned": {
@@ -2939,6 +3235,32 @@
       ],
       "type": "object"
     },
+    "LaunchCapacityWait": {
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "attempt",
+        "evidence"
+      ],
+      "type": "object"
+    },
     "LearnedMemory": {
       "properties": {
         "device_gb": {
@@ -3002,6 +3324,113 @@
       "required": [
         "binary",
         "library"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionReservation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "job": {
+          "type": "string"
+        },
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pending_known": {
+          "type": "boolean"
+        },
+        "pending_observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "job",
+        "state",
+        "pending_known",
+        "pending"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionSnapshot": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "drift_reserve_gb": {
+          "type": "number"
+        },
+        "envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope"
+        },
+        "host": {
+          "type": "string"
+        },
+        "ledger": {
+          "$ref": "#/$defs/HostMemoryLedger"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reservations": {
+          "items": {
+            "$ref": "#/$defs/MemoryAdmissionReservation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "waiting_since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "captured_at",
+        "waiting_since",
+        "attempt",
+        "machine",
+        "session",
+        "host",
+        "target",
+        "envelope",
+        "drift_reserve_gb",
+        "reason",
+        "ledger",
+        "reservations"
       ],
       "type": "object"
     },
@@ -4831,11 +5260,20 @@
         "blob": {
           "type": "string"
         },
+        "bytes_copied": {
+          "type": "integer"
+        },
         "capacity": {
           "type": "string"
         },
+        "errno": {
+          "type": "integer"
+        },
         "error": {
           "type": "string"
+        },
+        "expected_bytes": {
+          "type": "integer"
         },
         "input": {
           "type": "string"
@@ -4846,8 +5284,14 @@
         "operation": {
           "type": "string"
         },
+        "path_class": {
+          "type": "string"
+        },
         "required_bytes": {
           "type": "integer"
+        },
+        "stage": {
+          "type": "string"
         },
         "status": {
           "type": "integer"

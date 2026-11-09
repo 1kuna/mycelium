@@ -186,6 +186,7 @@ func (q *Queue) retainRelease(j *Job) {
 		r.Until = *j.StopAt
 	}
 	old := q.s.HostReleases[releaseKey(r)]
+	r.HostChargeGB = max(r.HostChargeGB, q.hostJobCharge(j), retainedHostCharge(j), old.HostChargeGB)
 	r.CleanupFailed = old.CleanupFailed
 	r.CleanupSince = old.CleanupSince
 	r.EscalatedAt = old.EscalatedAt
@@ -228,7 +229,19 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
+	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+		return false
+	}
 	return (j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID])) && q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+}
+
+// Started preparation retains demand while contact is suspect. Resource,
+// reservation and policy fences still apply; this cannot grant a new assignment.
+func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
+	if j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m) {
+		return false
+	}
+	return q.yieldPlacementAllows(j, m) && (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.reservationAllows(j, m) && q.placementDemandPolicy(j, m, false)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
@@ -238,6 +251,15 @@ func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
+	if q.workerSuspect(m, q.clock.Now()) && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping")) {
+		return false
+	}
+	return q.placementDemandPolicy(j, m, resident)
+}
+
+// Useful demand survives temporary contact suspicion. This predicate grants no
+// assignment or preparation authority; those paths still require fresh contact.
+func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if q.variantParityReason(j, m) != "" {
 		return false
 	}
@@ -259,7 +281,7 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 		}
 	}
 
-	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
+	if availabilityBlocked(m) || (q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
@@ -483,7 +505,7 @@ func (q *Queue) productionSpilloverTarget(j *Job) string {
 	var best *Machine
 	now := q.clock.Now()
 	for _, m := range scan.machines {
-		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || !q.workerFresh(m, now) {
 			continue
 		}
 		candidate := q.batchCandidateWithResources(&copy, m, nil)
@@ -584,19 +606,27 @@ func (q *Queue) maintainHolds() {
 	for _, h := range q.s.Hosts {
 		enabled = enabled || h.Policy.hostWide()
 	}
-	if !enabled {
-		return
-	}
 	now := q.clock.Now()
 	demand := map[string]bool{}
 	jobs := []*Job{}
 	for _, j := range q.liveJobs() {
+		// Live owner policy also fences bindings saved by older releases.
+		// Only queued demand moves; existing execution/release custody stays.
+		if j.State == "queued" && j.ProductionHost != "" && (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil && !q.productionParityHostAllowed(j, j.ProductionHost) {
+			j.ProductionHost = ""
+		}
+		if !enabled {
+			continue
+		}
 		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
 			continue
 		}
 		if dependencyReady(j) && j.Spec.Priority == "production" && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}
+	}
+	if !enabled {
+		return
 	}
 	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {

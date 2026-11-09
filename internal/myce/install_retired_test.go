@@ -62,6 +62,12 @@ func TestInstallRetiresObsoleteHostUnits(t *testing.T) {
 				return nil
 			}
 			runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if strings.Contains(strings.Join(args, " "), "--property=TimeoutStopUSec") {
+					if strings.Contains(strings.Join(args, " "), ".timer") {
+						t.Fatal("timer has no service timeout properties")
+					}
+					return []byte("TimeoutStopUSec=45s\nTimeoutStartUSec=1min 30s\n"), nil
+				}
 				out, err := f.manager.run(ctx, name, args...)
 				if name != "systemctl" || err != nil {
 					return out, err
@@ -120,7 +126,7 @@ func TestInstallRetiresObsoleteHostUnits(t *testing.T) {
 				}
 				return fail(point)
 			}}
-			err := installWithFiles(context.Background(), f.c, f.source, "fixture", runner, files)
+			err := installWithFiles(context.Background(), f.c, f.source, "fixture", BoundSetupCommand(runner), files)
 			if failure != "" {
 				if err == nil || !fired {
 					t.Fatal("fault not exercised", err)

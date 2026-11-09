@@ -20,9 +20,11 @@ func TestProductionHoldParitySpillover(t *testing.T) {
 				t.Fatal(err)
 			}
 			policy := q.PriorityPolicy()
-			approved := []string{"other-host"}
+			// The initial host must also be approved now that the work list
+			// bounds all production placement, not just occupancy spillover.
+			approved := []string{"hold-host", "other-host"}
 			if strings.HasPrefix(mode, "unapproved") {
-				approved = nil
+				approved = []string{"hold-host"}
 			}
 			work := "kind:sample"
 			if mode == "other work approval" {
@@ -84,10 +86,18 @@ func TestProductionHoldParitySpillover(t *testing.T) {
 				// Register without admitting work, then make its snapshot stale.
 				other.ExtensionReports = nil
 				check(t, q, other, nil)
+				// Keep the home workers reporting while only the alternative
+				// ages past its actual allowance; fleet silence means an outage.
+				for delay := q.machineLossTimeout(other.ID); delay > 0; {
+					step := min(time.Second, delay)
+					c.Advance(step)
+					check(t, q, a, running)
+					check(t, q, b, nil)
+					delay -= step
+				}
 				q.mu.Lock()
 				q.s.Machines[other.ID].ExtensionReports = a.ExtensionReports
 				q.mu.Unlock()
-				c.Advance(6 * time.Second)
 			}
 			var assigned *Job
 			if mode == "stale alternative" {

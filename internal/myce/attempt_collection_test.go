@@ -11,7 +11,7 @@ func TestAttemptProtocolCollectionReports(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("collection", "fake")
 			submit(t, q, spec("experiment"))
-			c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+			c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second}
 			reply, err := q.Checkin(c)
 			if err != nil {
 				t.Fatal(err)
@@ -112,7 +112,7 @@ func TestAttemptProtocolCollectionRecoveryAdmission(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second, Attempts: []AttemptReport{
 		{Execution: Execution{ID: first.ID, Attempt: 1}, Session: m.Session},
 		{Execution: Execution{ID: second.ID, Attempt: 1}, Session: m.Session},
 	}}
@@ -131,7 +131,7 @@ func TestAttemptProtocolCollectionValidationAtomic(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("atomic", "fake")
 	submit(t, q, spec("experiment"))
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second}
 	reply, err := q.Checkin(c)
 	if err != nil {
 		t.Fatal(err)

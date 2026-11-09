@@ -277,7 +277,11 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 				if open {
 					deferWork = true
 				} else {
-					apply = func() { delete(q.s.WorkObservations, id); q.memoryObservationIndex = nil }
+					apply = func() {
+						delete(q.s.WorkObservations, id)
+						q.evidenceGeneration++
+						q.memoryObservationIndex = nil
+					}
 					drift = true
 				}
 			}
@@ -430,48 +434,60 @@ func compactExternalEvidence(r *externalMemoryRing, now time.Time, budget uint64
 		}
 		start := b.Start.Truncate(width)
 		index := int(start.UnixNano() / int64(width) % int64(slots+1))
-		a := buckets[index]
-		if a == nil {
-			copy := *b
-			a = &copy
-			// The writer identifies buckets by their aligned start. Keeping an
-			// old subdivision's start would replace this summary on the next sample.
-			a.Start = start
-			a.Counts = maps.Clone(b.Counts)
-			a.Values = maps.Clone(b.Values)
-			a.ByteCounts = maps.Clone(b.ByteCounts)
-			a.ByteMax = maps.Clone(b.ByteMax)
-			buckets[index] = a
-			continue
-		}
-		a.Start = minTime(a.Start, b.Start)
-		a.End = maxTime(maxTime(a.End, a.Start), maxTime(b.End, b.Start))
-		if a.ByteCounts == nil {
-			a.ByteCounts = map[uint8]uint64{}
-			a.ByteMax = map[uint8]float64{}
-		}
-		for bin, n := range b.ByteCounts {
-			a.ByteCounts[bin] += n
-			a.ByteMax[bin] = max(a.ByteMax[bin], b.ByteMax[bin])
-		}
-		// Legacy quantization remains readable; new recordings use byte bins.
-		for bin, n := range b.Counts {
-			value := externalBinUpper(int(bin))
-			byteBin := uint8(bits.Len64(uint64(math.Ceil(value * (1 << 30)))))
-			a.ByteCounts[byteBin] += uint64(n)
-			a.ByteMax[byteBin] = max(a.ByteMax[byteBin], value)
-		}
-		for encoded, n := range b.Values {
-			value := math.Float64frombits(encoded)
-			byteBin := uint8(bits.Len64(uint64(math.Ceil(value * (1 << 30)))))
-			a.ByteCounts[byteBin] += n
-			a.ByteMax[byteBin] = max(a.ByteMax[byteBin], value)
-		}
-		if b.MaxGB > a.MaxGB {
-			a.MaxGB, a.PeakAt = b.MaxGB, b.PeakAt
-		}
+		buckets[index] = mergeExternalMemoryBucket(buckets[index], b)
+		buckets[index].Start = start
 	}
 	r.Buckets = buckets
 	after, _ := json.Marshal(r)
 	return !bytes.Equal(before, after)
+}
+
+// Merge immutable histogram generations, including separately qualified idle facts.
+func mergeExternalMemoryBucket(a, b *externalMemoryBucket) *externalMemoryBucket {
+	if b == nil {
+		return a
+	}
+	if a == nil {
+		copy := *b
+		copy.Counts, copy.Values = maps.Clone(b.Counts), maps.Clone(b.Values)
+		copy.ByteCounts, copy.ByteMax = maps.Clone(b.ByteCounts), maps.Clone(b.ByteMax)
+		copy.ByteMin = maps.Clone(b.ByteMin)
+		copy.Quiescent = mergeExternalMemoryBucket(nil, b.Quiescent)
+		return &copy
+	}
+	a.Start = minTime(a.Start, b.Start)
+	a.End = maxTime(maxTime(a.End, a.Start), maxTime(b.End, b.Start))
+	a.Windows += b.Windows
+	a.Quiescent = mergeExternalMemoryBucket(a.Quiescent, b.Quiescent)
+	if a.ByteCounts == nil {
+		a.ByteCounts, a.ByteMax = map[uint8]uint64{}, map[uint8]float64{}
+	}
+	for bin, n := range b.ByteCounts {
+		if lower, ok := b.ByteMin[bin]; ok {
+			if a.ByteMin == nil {
+				a.ByteMin = map[uint8]float64{}
+			}
+			if prior, exists := a.ByteMin[bin]; !exists || lower < prior {
+				a.ByteMin[bin] = lower
+			}
+		}
+		a.ByteCounts[bin] += n
+		a.ByteMax[bin] = max(a.ByteMax[bin], b.ByteMax[bin])
+	}
+	for bin, n := range b.Counts {
+		value := externalBinUpper(int(bin))
+		byteBin := uint8(bits.Len64(uint64(math.Ceil(value * (1 << 30)))))
+		a.ByteCounts[byteBin] += uint64(n)
+		a.ByteMax[byteBin] = max(a.ByteMax[byteBin], value)
+	}
+	for encoded, n := range b.Values {
+		value := math.Float64frombits(encoded)
+		byteBin := uint8(bits.Len64(uint64(math.Ceil(value * (1 << 30)))))
+		a.ByteCounts[byteBin] += n
+		a.ByteMax[byteBin] = max(a.ByteMax[byteBin], value)
+	}
+	if b.MaxGB > a.MaxGB {
+		a.MaxGB, a.PeakAt = b.MaxGB, b.PeakAt
+	}
+	return a
 }

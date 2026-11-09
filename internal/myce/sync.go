@@ -98,6 +98,7 @@ func (q *Queue) modelScores(m *Machine) map[string]int {
 	return scores
 }
 func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
+	defer q.bodyPhaseFinish("copy_plan", q.bodyPhaseStart())
 	if q.maintenanceBlocked(hostID(m)) || m.Leaving || availabilityBlocked(m) || q.machineLimitReason(m) != "" {
 		return nil, nil, nil
 	}
@@ -210,7 +211,7 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	return float64(remaining) / speed
 }
 func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
-	if !q.batchSlotFree(m, demand) || q.untrackedPreparations(m) > 0 {
+	if q.launchCapacityBlocked(demand, m) || !q.batchSlotFree(m, demand) || q.untrackedPreparations(m) > 0 {
 		return false
 	}
 	for _, l := range q.s.PreparationPlans {

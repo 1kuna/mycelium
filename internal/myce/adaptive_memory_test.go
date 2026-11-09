@@ -63,11 +63,11 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := job(t, q, next.ID)
-			if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != next.Spec.Needs.HostMemoryGB*1.25 || got.MemoryOOMFloor.MemoryGB != 0 || got.OOMRetries != 1 {
+			if got.MemoryOOMFloor == nil || got.MemoryOOMFloor.HostMemoryGB != next.Spec.Needs.HostMemoryGB+minimumHostMemoryGB || got.MemoryOOMFloor.MemoryGB != 0 || got.OOMRetries != 1 {
 				t.Fatalf("OOM floor lost: %+v", got.MemoryOOMFloor)
 			}
-			// More physical room permits the existing one retry. A second OOM
-			// must still terminate, without erasing the original requirement.
+			// More physical room permits another probe. An OOM at the full
+			// physical ceiling must terminate without a count-based limit.
 			m.HostAvailableMemoryGB = tc.ram
 			retry := check(t, q, m, nil).Job
 			if retry == nil || retry.ID != next.ID || retry.Spec.Needs.HostMemoryGB < got.MemoryOOMFloor.HostMemoryGB {
@@ -79,11 +79,13 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			clock.Advance(time.Second)
 			r = result(retry, false)
 			r.OutOfMemory = true
+			peak := tc.ram
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if final := job(t, q, retry.ID); final.State != "failed" || final.OOMRetries != 1 {
-				t.Fatal("physical probe bypassed the existing retry limit", final.State, final.OOMRetries)
+			if final := job(t, q, retry.ID); final.State != "failed" || final.OOMRetries != 2 {
+				t.Fatal("physical probe bypassed capacity refusal", final.State, final.OOMRetries)
 			}
 		})
 	}
@@ -175,8 +177,9 @@ func TestAdaptiveMemoryGrowthUsesClockAndLiveCredit(t *testing.T) {
 		t.Fatal("delayed sensor did not expand horizon", n)
 	}
 	sample := hostMemorySample{gb: .25, growthGB: .125, at: clock.Now()}
-	if remainingHostGrowth(.5, sample, clock.Now()) != .375 {
-		t.Fatal("growth not retained in live admission")
+	// The .125 forecast is already covered by the .25 unreached envelope.
+	if remainingHostGrowth(.5, sample, clock.Now()) != .25 {
+		t.Fatal("growth counted again inside the unreached envelope")
 	}
 	clock.Advance(hostMemorySampleFreshFor)
 	if remainingHostGrowth(.5, sample, clock.Now()) != .5 {

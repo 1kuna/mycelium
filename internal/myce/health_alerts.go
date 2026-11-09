@@ -120,6 +120,7 @@ func (q *Queue) pruneHealthEvents() {
 }
 
 func (q *Queue) detectHealth() {
+	defer q.bodyPhaseFinish("health", q.bodyPhaseStart())
 	q.detectHostHygiene()
 	q.detectReadinessHealth()
 	// Job-specific pressure conditions follow live demand, rather than growing
@@ -149,14 +150,17 @@ func (q *Queue) detectHealth() {
 		host := hostID(m)
 		maintenance := q.s.HostMaintenance[host].Mode
 		intentional := m.Leaving || maintenance == "disabled" || maintenance == "drained" || maintenance == "draining"
-		stale := m.Gone || now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID)
-		if q.unreported[m.ID] && now.Before(q.restartUntil) {
+		stale := !q.workerFresh(m, now)
+		if q.unreported[m.ID] && q.inRestartGrace(now) {
 			stale = false
 		}
 		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		cause := "host_health_unavailable"
 		if stale {
 			cause = "host_silent"
+			if q.workerSuspect(m, now) {
+				cause = "worker_suspect"
+			}
 		}
 		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host, Reason: cause})
 		checkpointRootMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })

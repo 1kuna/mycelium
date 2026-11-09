@@ -200,7 +200,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		if err != nil {
 			return withStagingCause(name, FileRef{}, "nas_read", err)
 		}
-		return withStagingCause(name, FileRef{}, "copy", copyJobFileContext(ctx, p, filepath.Join(staged, name)))
+		return withStagingCause(name, FileRef{}, "copy", copyNASInput(ctx, w.Client, p, filepath.Join(staged, name), nil, nil))
 	}); err != nil {
 		return err
 	}
@@ -504,12 +504,16 @@ func readExtensionCheckOutputAt(directory, relative string) ([]byte, error) {
 		f.Close()
 		return nil, errors.Join(err, errors.New("check output must be a regular file beneath its attempt directory"))
 	}
-	actual, err := io.ReadAll(io.LimitReader(f, int64(extensionByteLimit())+1))
+	limit, err := extensionByteLimit()
+	if err != nil {
+		return nil, errors.Join(err, f.Close())
+	}
+	actual, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	err = errors.Join(err, f.Close())
 	if err != nil {
 		return nil, err
 	}
-	if len(actual) > extensionByteLimit() {
+	if len(actual) > limit {
 		return nil, errors.New("check output too large")
 	}
 	return actual, nil

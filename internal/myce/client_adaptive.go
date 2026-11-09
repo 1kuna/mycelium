@@ -14,14 +14,31 @@ import (
 	"time"
 )
 
-// ClientPace learns the cost of an observation. Unchanged observations and
-// failed attempts double the spacing, without an installation-specific ceiling.
+// ClientPace learns the cost of an observation. Unchanged observations double
+// the spacing, without an installation-specific ceiling.
 // A change resets it to the measured service cost. Event times and owner
-// deadlines can shorten healthy spacing; they never override Retry-After.
+// deadlines can shorten healthy spacing. Failures use the current Retry-After
+// or measured service cost with the transport recovery floor, independently
+// of unchanged-observation history.
 // The factors express exponential search and randomized contention avoidance,
 // not a duration calibrated to one installation.
 type ClientPace struct {
 	cost, delay time.Duration
+}
+
+// RFC 6298 sections 2.1 and 2.4 specify a one-second initial/minimum TCP
+// retransmission timeout. A fast refusal is not evidence that the failed
+// service can recover in that RTT. Without a server signal, allow at least
+// one transport recovery period; the cost is up to one second before probing
+// a fast recovery. Slower measured service still extends it, without a cap.
+const clientRecoveryPeriod = time.Second
+
+func (p *ClientPace) recoveryDelay(failure error) time.Duration {
+	var api *HTTPError
+	if errors.As(failure, &api) && api.RetryAfter > 0 {
+		return api.RetryAfter // The current server signal remains authoritative.
+	}
+	return max(p.cost, clientRecoveryPeriod)
 }
 
 func growDuration(d time.Duration) time.Duration {
@@ -50,16 +67,40 @@ func (p *ClientPace) Delay(now time.Time, event time.Time, failure error, jitter
 	}
 	// Positive jitter never retries before the server's not-before signal.
 	if failure != nil {
-		var api *HTTPError
-		if errors.As(failure, &api) {
-			delay = max(delay, api.RetryAfter)
-		}
+		delay = p.recoveryDelay(failure)
 		delay = time.Duration(min(float64(math.MaxInt64), float64(delay)*(1+jitter())))
 	} else if !event.IsZero() && event.After(now) {
 		// Approach an expected event geometrically, down to the measured read cost.
 		delay = min(delay, max(p.cost, event.Sub(now)/2))
 	}
 	return max(delay, time.Nanosecond)
+}
+
+// ServiceDelay bounds a shared observer's next read by measured service cost,
+// the current server signal, or the no-signal transport recovery period.
+// Unchanged long-polls can accumulate
+// exponential search history for choosing a protocol hold, but that history is
+// not evidence of pressure and must never become a retry or scalar-read timer.
+func (p *ClientPace) ServiceDelay(failure error, jitter func() float64) time.Duration {
+	cost := max(p.cost, time.Nanosecond)
+	delay := cost
+	if failure != nil {
+		delay = p.recoveryDelay(failure)
+		jitterPeriod := cost
+		var api *HTTPError
+		if !errors.As(failure, &api) || api.RetryAfter <= 0 {
+			// No-signal retries also spread across the recovery period.
+			jitterPeriod = max(cost, clientRecoveryPeriod)
+		}
+		if jitter == nil {
+			jitter = rand.Float64
+		}
+		// Spread contenders over one measured service period, never over the
+		// accumulated failure count. Integer headroom prevents jitter overflow.
+		extra := time.Duration(float64(jitterPeriod) * min(1, max(0, jitter())))
+		delay += min(max(0, extra), time.Duration(math.MaxInt64)-delay)
+	}
+	return delay
 }
 
 // Seconds is the existing batch-v1 protocol's whole-second, at-most-20s hold.
@@ -86,10 +127,34 @@ func (c Client) clock() Clock {
 	return RealClock{}
 }
 func (c Client) pause(ctx context.Context, d time.Duration) error {
-	if c.Pause != nil {
-		return c.Pause(ctx, d)
+	if err := c.ownerError(ctx); err != nil {
+		return err
 	}
-	return waitStatusPause(ctx, d)
+	if end, ok := ctx.Deadline(); ok {
+		d = min(d, max(0, end.Sub(c.clock().Now())))
+	}
+	var err error
+	if c.Pause != nil {
+		err = c.Pause(ctx, d)
+	} else {
+		err = waitStatusPause(ctx, d)
+	}
+	if err != nil {
+		return err
+	}
+	return c.ownerError(ctx)
+}
+
+func (c Client) ownerError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Pause and owner timers can become ready together. Consult the injected
+	// clock as well, so a shortened pause stops instead of retrying early.
+	if end, ok := ctx.Deadline(); ok && !c.clock().Now().Before(end) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // An explicit HTTP timeout belongs to the API operation, including overload
@@ -116,19 +181,8 @@ func (c Client) RetryTransient(ctx context.Context, operation func(context.Conte
 	pace := ClientPace{}
 	one := c.WithoutRetries()
 	var last error
-	ownerError := func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// A pause timer and owner timer can become ready together. Do not
-		// start another attempt before context cancellation is scheduled.
-		if end, ok := ctx.Deadline(); ok && !c.clock().Now().Before(end) {
-			return context.DeadlineExceeded
-		}
-		return nil
-	}
 	for {
-		if err := ownerError(); err != nil {
+		if err := c.ownerError(ctx); err != nil {
 			if last != nil {
 				return &clientRetryStopped{last, err}
 			}
@@ -142,7 +196,7 @@ func (c Client) RetryTransient(ctx context.Context, operation func(context.Conte
 		if retryTransient(err) {
 			last = err
 		}
-		if stopped := ownerError(); stopped != nil {
+		if stopped := c.ownerError(ctx); stopped != nil {
 			if last != nil {
 				return &clientRetryStopped{last, stopped}
 			}
@@ -188,7 +242,10 @@ func retryTransient(err error) bool {
 		return false
 	}
 	var network net.Error
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, errFileTransferStalled) ||
+	// Concurrent HTTP read/write shutdown can surface the closed socket's
+	// deadline error instead of the timeout that caused it. Replay-safe callers
+	// retry; upload callers first reconcile the server's accepted offset.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, errFileTransferStalled) ||
 		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.ETIMEDOUT) || errors.As(err, &network) && (network.Timeout() || network.Temporary())
 }

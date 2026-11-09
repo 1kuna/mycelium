@@ -22,6 +22,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var errEnvironmentInputTooLarge = errors.New("environment input exceeds 1 MiB")
+
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
@@ -133,6 +135,9 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 		}
 		for _, n := range names {
 			b, e := os.ReadFile(filepath.Join(filepath.Dir(r.LockFile), n))
+			if e == nil && len(b) > 1<<20 {
+				e = errEnvironmentInputTooLarge
+			}
 			if e != nil {
 				field, authored, companion := "environment.lock_file", r.LockFile, ""
 				if n != name {
@@ -145,9 +150,6 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 					field = "environment.manifest"
 				}
 				return r, PathReadError(field, "queue", authored, base, companion, e)
-			}
-			if len(b) > 1<<20 {
-				return r, errors.New("environment input exceeds 1 MiB")
 			}
 			r.Files[n] = b
 		}
@@ -227,7 +229,7 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}
-		r, err := snapshotEnvironment(EnvironmentRecipe{LockFile: e.LockFile, Python: e.Python}, p)
+		r, err := snapshotEnvironment(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p)
 		if err != nil {
 			return nil, err
 		}
@@ -395,6 +397,7 @@ func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
+	defer q.bodyPhaseFinish("environment_plan", q.bodyPhaseStart())
 	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return nil
 	}
@@ -1187,7 +1190,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 }
 
 type environmentRuntime struct {
-	authorize func(HostLaunch) error
+	authorize func(context.Context, HostLaunch) error
 	dir       string
 	cache     *EnvironmentCache
 	prepare   func(context.Context, EnvironmentRecipe) error
@@ -1236,11 +1239,11 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	prepare := rt.prepare
 	ctx, cancel := context.WithCancel(context.Background())
 	if rt.authorize != nil {
-		ctx = withLaunchGate(ctx, func() error {
+		ctx = withLaunchGate(ctx, func(ctx context.Context) error {
 			if r.Launch == nil {
 				return ErrStale
 			}
-			return rt.authorize(*r.Launch)
+			return rt.authorize(ctx, *r.Launch)
 		})
 	}
 	rt.cancel = cancel

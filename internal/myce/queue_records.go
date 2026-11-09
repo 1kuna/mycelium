@@ -86,6 +86,9 @@ func mutableJob(j *Job) bool {
 	return deliveryPending(j) || !terminal(j.State) || attemptReleasePending(j)
 }
 func (q *Queue) indexJob(id string, j *Job) {
+	if j == nil || q.records.live[id] == nil || !mutableJob(j) {
+		q.invalidateRetainedMemory()
+	}
 	if q.evidenceLearned == nil {
 		q.evidenceLearned = map[string]bool{}
 		q.evidenceLedgerCounts = map[string]int{}
@@ -174,6 +177,7 @@ func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 	q.records.keys.set(id, at)
 }
 func (q *Queue) rebuildRecords() {
+	q.invalidateRetainedMemory()
 	q.records = &queueRecords{catalog: map[string]bool{}, logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
 	for id, j := range q.s.Jobs {
 		q.indexJob(id, j)
@@ -205,6 +209,9 @@ func (q *Queue) liveJobs() map[string]*Job {
 }
 func (q *Queue) touchJob(id string) *Job {
 	j := q.s.Jobs[id]
+	if q.records != nil && q.records.live[id] == nil {
+		q.invalidateRetainedMemory()
+	}
 	if q.records != nil && q.records.updating {
 		if _, ok := q.records.jobs[id]; !ok {
 			var old *Job
@@ -329,13 +336,20 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 	for id := range q.records.removed {
 		q.touchSubmission(q.records.bindings[id])
 	}
+	healthDeliveries := make(map[string]*hostHealthDelivery, len(q.s.Machines))
 	inventories := make(map[string]*toolInventory, len(q.s.Machines))
 	for id, m := range q.s.Machines {
 		inventories[id] = m.toolInventory
+		if m.HostHealth != nil {
+			healthDeliveries[id] = m.HostHealth.delivery
+		}
 	}
-	return recordUndo{base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
+	return recordUndo{healthDeliveries: healthDeliveries, base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
+	q.evidenceGeneration++
+	q.memoryObservationIndex = nil
+	q.invalidateRetainedMemory()
 	jobs, submissions := q.s.Jobs, q.s.Submissions
 	var base state
 	_ = json.Unmarshal(old.base, &base)
@@ -347,6 +361,9 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	q.s = base
 	for id, m := range q.s.Machines {
 		m.toolInventory = old.inventories[id]
+		if m.HostHealth != nil {
+			m.HostHealth.delivery = old.healthDeliveries[id]
+		}
 	}
 	for id, j := range q.records.jobs {
 		if j == nil {

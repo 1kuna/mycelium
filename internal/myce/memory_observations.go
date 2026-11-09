@@ -1,5 +1,7 @@
 package myce
 
+import "time"
+
 // Exactly sameMemoryWork's comparability boundary. Target, host, identity and
 // freshness remain reader-side fences.
 type memoryWorkKey struct {
@@ -14,9 +16,35 @@ func memoryWorkIdentity(k ObservationKey, configuration string) memoryWorkKey {
 }
 
 type memoryObservationCatalog struct {
-	targets map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation
-	work    map[memoryWorkKey][]*WorkObservation
-	family  map[similarMemoryKey][]*WorkObservation
+	generation uint64
+	extensions map[string][]*WorkObservation
+	targets    map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation
+	work       map[memoryWorkKey][]*WorkObservation
+	family     map[similarMemoryKey][]*WorkObservation
+
+	// Calibration depends only on these immutable observations and whether a
+	// recorded time has arrived, never on a view's occupancy or admission room.
+	transfers             map[memoryTransferKey]memoryTransferResult
+	sizing                map[memorySizingKey]memorySizingFacts
+	validFrom, validUntil time.Time
+}
+
+func (c *memoryObservationCatalog) prepareDerivations(now time.Time) {
+	if c.transfers == nil || now.Before(c.validFrom) || !c.validUntil.IsZero() && !now.Before(c.validUntil) {
+		c.transfers = map[memoryTransferKey]memoryTransferResult{}
+		c.sizing = nil
+		c.validFrom, c.validUntil = now, time.Time{}
+		for _, points := range c.work {
+			for _, p := range points {
+				if p.MemoryRecordedAt.After(now) && (c.validUntil.IsZero() || p.MemoryRecordedAt.Before(c.validUntil)) {
+					c.validUntil = p.MemoryRecordedAt
+				}
+				if prior := p.MemoryEscalation; prior != nil && prior.RecordedAt.After(now) && (c.validUntil.IsZero() || prior.RecordedAt.Before(c.validUntil)) {
+					c.validUntil = prior.RecordedAt
+				}
+			}
+		}
+	}
 }
 
 // Copy each aggregate once, then lend immutable pointers to both readers. Only
@@ -27,12 +55,14 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 		return q.memoryOrigin.memoryObservationCatalog()
 	}
 	index := q.memoryObservationIndex
-	if index == nil && q.memoryPlanning != nil {
+	if index == nil && q.memoryPlanning != nil && q.memoryPlanning.observations != nil && q.memoryPlanning.observations.generation == q.evidenceGeneration {
 		index = q.memoryPlanning.observations
 	}
 	if index == nil {
-		index = &memoryObservationCatalog{targets: map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation{}, work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
+		index = &memoryObservationCatalog{generation: q.evidenceGeneration, targets: map[memoryTransferTarget]map[memoryWorkKey][]*WorkObservation{}, work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
+		index.extensions = map[string][]*WorkObservation{}
 		for _, point := range q.s.WorkObservations {
+			index.extensions[point.Key.ExtensionDigest] = append(index.extensions[point.Key.ExtensionDigest], &point)
 			if point.MemoryConfiguration != "" {
 				key := memoryWorkIdentity(point.Key, point.MemoryConfiguration)
 				index.work[key] = append(index.work[key], &point)

@@ -182,7 +182,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 			heartbeat := func() Reply {
 				t.Helper()
 				reports, _ := rt.report()
-				reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports})
+				reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports, period: time.Second})
 				if err != nil {
 					t.Fatal(err)
 				}

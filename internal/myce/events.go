@@ -165,6 +165,7 @@ func (c *processControl) apply() {
 	now := c.clock.Now()
 	for key, p := range c.processes {
 		if c.availability != nil && !c.availability.snapshot().Available {
+			p.cancelStarting()
 			if p.stopAdmission != nil {
 				p.stopAdmission()
 			}
@@ -189,6 +190,7 @@ func (c *processControl) apply() {
 			}
 		}
 		if event, ok := c.pendingEvents[key]; ok {
+			p.cancelStarting()
 			// Publish before receipt persistence or signaling can wait on p.mu.
 			if p.stopAdmission != nil {
 				p.stopAdmission()

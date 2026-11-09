@@ -5,6 +5,7 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func deliveryJob(t *testing.T, q *Queue) (*Job, EnvironmentRecipe) {
@@ -22,7 +23,7 @@ func deliveryJob(t *testing.T, q *Queue) (*Job, EnvironmentRecipe) {
 func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
 	for _, protocol := range []string{"", keyedAttemptProtocol} {
 		t.Run("protocol="+protocol, func(t *testing.T) {
-			q, _ := fixture(t)
+			q, clock := fixture(t)
 			j, r := deliveryJob(t, q)
 			ref := q.s.Jobs[j.ID].EnvironmentRecipes["fake"].FilesRef
 			path := q.files.blob(*ref)
@@ -36,6 +37,13 @@ func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
 			m := machine("delivery", "fake")
 			m.Environments = []string{r.Key}
 			c := Checkin{Machine: m, AttemptProtocol: protocol}
+			// Keep both old-wire variants headerless. Their first response is
+			// safely idle; the next send establishes cadence before assignment.
+			first, err := q.Checkin(c)
+			if err != nil || first.Job != nil || len(first.Attempts) != 0 {
+				t.Fatal("cold legacy response did not stay idle", first, err)
+			}
+			clock.Advance(time.Second)
 			reply, err := q.Checkin(c)
 			if err != nil {
 				t.Fatal("committed check-in turned into HTTP error", err)
@@ -80,7 +88,7 @@ func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
 }
 
 func TestBlobDeliveryPreparationFailurePreservesControl(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	j, _ := deliveryJob(t, q)
 	ref := q.s.Jobs[j.ID].EnvironmentRecipes["fake"].FilesRef
 	path := q.files.blob(*ref)
@@ -93,6 +101,13 @@ func TestBlobDeliveryPreparationFailurePreservesControl(t *testing.T) {
 	}
 	m := machine("builder", "fake")
 	m.EnvironmentBuilder = true
+	// Establish the old sender's cadence before the faulted preparation.
+	// The missing blob stays missing through the qualified second report.
+	first, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
+	if err != nil || len(first.EnvironmentPlan) != 0 || first.Job != nil || len(first.Attempts) != 0 {
+		t.Fatal("cold legacy response did not stay idle", first, err)
+	}
+	clock.Advance(time.Second)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "stale", Attempt: 1}, Session: m.Session}}}
 	reply, err := q.Checkin(c)
 	if err != nil {

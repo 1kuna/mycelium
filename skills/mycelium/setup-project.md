@@ -1,5 +1,11 @@
 # Set up project offload
 
+Before using an optional contract below, check its installed components against
+[capability evidence](references/release-behavior.md#capability-evidence).
+“Next release” describes source intent, not installed availability; a dependency
+lock does not establish application compatibility or production output parity.
+
+
 For new reusable work, follow [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md):
 one `.mycelium/adapter.yaml`, verified targets or managed CPU discovery, deliberately selected source, result checks,
 and submit/wait/verified retrieval. Keep this package's [SKILL.md](SKILL.md) and

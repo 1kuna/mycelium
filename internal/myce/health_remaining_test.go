@@ -21,8 +21,10 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 					peer := cpuMachine(fmt.Sprintf("peer-%d", i), fmt.Sprintf("peer-%d", i), "cpu", 4, 16)
 					peer.LastSeen = c.Now()
 					q.s.Machines[peer.ID] = &peer
+					q.acceptContactPeriod(&peer, time.Second, nil) // Accepted synthetic current-worker inventory.
 				}
 				q.s.Machines[m.ID] = &m
+				q.acceptContactPeriod(&m, time.Second, nil)
 				return nil
 			}); err != nil {
 				t.Fatal(err)

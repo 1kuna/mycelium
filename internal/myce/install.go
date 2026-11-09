@@ -44,6 +44,9 @@ type MachineProbe struct {
 	ReadFile   func(string) ([]byte, error)
 	// XeActivity reads every enumerated hardware engine without changing GPU settings.
 	XeActivity func(context.Context, string) (float64, error)
+	// XPUFreeMemory is a read-only, PCI-keyed kernel/broker source. It must
+	// never initialize a vendor runtime; nil means unsupported, not fallback.
+	XPUFreeMemory func(context.Context) (map[string]float64, error)
 }
 
 func LocalMachineProbe() MachineProbe {
@@ -153,17 +156,18 @@ type ServiceConfig struct {
 	MemoryMax             string         `json:"memory_max"`
 	TasksMax              string         `json:"tasks_max"`
 
-	RequireMemoryCeilings bool    `json:"require_memory_ceilings"`
-	RequireMountedNAS     bool    `json:"require_mounted_nas"`
-	Force                 bool    `json:"-"`
-	CPUReserveCores       int     `json:"cpu_reserve_cores"`
-	CPUBudgetCores        int     `json:"cpu_budget_cores"`
-	HostMemoryBudgetGB    float64 `json:"host_memory_budget_gb"`
-	MemoryCeilingSlackGB  float64 `json:"memory_ceiling_slack_gb"`
-	MemorySwapMaxBytes    int64   `json:"memory_swap_max_bytes"`
-	GPUTelemetryHelper    string  `json:"gpu_telemetry_helper,omitempty"`
-	AllowDeviceless       bool    `json:"allow_deviceless"`
-	Device                string  `json:"device"`
+	RequireMemoryCeilings    bool    `json:"require_memory_ceilings"`
+	RequireMountedNAS        bool    `json:"require_mounted_nas"`
+	Force                    bool    `json:"-"`
+	CPUReserveCores          int     `json:"cpu_reserve_cores"`
+	CPUBudgetCores           int     `json:"cpu_budget_cores"`
+	HostMemoryBudgetGB       float64 `json:"host_memory_budget_gb"`
+	HostMemoryBudgetMeasured bool    `json:"host_memory_budget_measured,omitempty"`
+	MemoryCeilingSlackGB     float64 `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes       int64   `json:"memory_swap_max_bytes"`
+	GPUTelemetryHelper       string  `json:"gpu_telemetry_helper,omitempty"`
+	AllowDeviceless          bool    `json:"allow_deviceless"`
+	Device                   string  `json:"device"`
 
 	NativeReadRoots    []string `json:"native_read_roots"`
 	NativeExecuteRoots []string `json:"native_execute_roots"`
@@ -252,6 +256,8 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.FileStoreBytes = 100 << 30
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
+	// Worker configs retain these unused schema values so older installers can
+	// validate a saved worker config on rollback. Only queues decide worker loss.
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
@@ -260,6 +266,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.CPUReserveCores = 0
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
+		c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = 0, 0, 0
 		// Control transactions and heartbeats must not share job politeness limits.
 		c.Nice, c.CPUQuota, c.MemoryMax = 0, "", "infinity"
 	}
@@ -652,7 +659,7 @@ func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(cont
 	if c.Detection.OS == "linux" {
 		_, e = command(ctx, "systemctl", "--user", "disable", "--now", filepath.Base(c.Service))
 	} else {
-		_, e = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+		e = (installManager{os: "darwin", command: command}).stop(ctx, installUnit{path: c.Service, label: "local.mycelium." + c.Role})
 	}
 	if e != nil {
 		return fmt.Errorf("stop service before removing setup: %w", e)
@@ -906,6 +913,9 @@ func (c ServiceConfig) Args() []string {
 			args = append(args, "--joining-file", c.JoiningFile)
 		} else if c.EnvironmentFile == "" {
 			args = append(args, "--queue", c.Queue)
+		}
+		if c.HostMemoryBudgetMeasured {
+			args = append(args, "--host-memory-budget-measured")
 		}
 		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())
 		if c.RequireMemoryCeilings {

@@ -241,6 +241,8 @@ func runtimeErrorFor(operation string, err error) error {
 	var rejection *rejectionError
 	var response *HTTPError
 	switch {
+	case errors.Is(err, errWorkerControlUnreachable):
+		c.Class = "control_unreachable"
 	case (c.Operation == "start_authorization" || c.Operation == "start_handoff") && errors.As(err, &response) && response.Status == 409 && response.Code == "request_stale":
 		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
@@ -314,10 +316,12 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	operations["execution"], classes[wallTimeLimit] = true, true
 	classes["tools_missing"] = true
+	classes["host_unavailable"] = c.Operation == "launch"
 	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
 	classes[rssLimitExceeded] = true
 	classes["input_unavailable"], classes["invalid_input"] = true, true
+	classes["control_unreachable"] = c.Operation == "start_authorization" || c.Operation == "start_handoff"
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true

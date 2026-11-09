@@ -38,7 +38,7 @@ func discreteFanOutFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
 
 func discreteFanOutCheck(t *testing.T, q *Queue, m Machine, runs ...*Job) Reply {
 	t.Helper()
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second} // Current worker cadence.
 	for _, j := range runs {
 		gb, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session,

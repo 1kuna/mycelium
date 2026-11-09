@@ -384,7 +384,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 				}
 			}
 		}
-		if m.Gone || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+		if q.unreported[m.ID] || !q.workerFresh(m, now) {
 			pending = append(pending, "worker evidence unavailable: "+m.ID)
 		}
 		ownDocker := bound != nil && bound.Spec.Run.Docker && bound.Machine == m.ID && bound.Session == m.Session && bound.State == "running" && dockerStartingOrRunning(m.DockerCleanup)
@@ -395,6 +395,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 	if !present {
 		pending = append(pending, "reserved component absent from inventory")
 	}
+	q.observeReservationPending(r, pending)
 	return pending
 }
 
@@ -434,7 +435,11 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 			continue
 		}
 		matches := r.Target.matchesTarget(m)
-		if bound && (!matches || len(q.reservationPending(r)) > 0) || !bound && matches {
+		// Acquiring a hold must not revoke its own existing assignment, even
+		// between custody and Started. Readiness gates new assignments; other
+		// reservations and independent launch/priority fences still apply.
+		assigned := bound && j.Machine == m.ID && (j.State == "running" || j.State == "stopping")
+		if bound && (!matches || !assigned && len(q.reservationPending(r)) > 0) || !bound && matches {
 			return false
 		}
 	}

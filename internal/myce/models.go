@@ -602,7 +602,7 @@ func (q *Queue) maintainModels() {
 	candidates := map[string]*candidateSet{}
 	for {
 		var j *Job
-		for _, m := range q.plannerMachines() {
+		for _, m := range scan.machines {
 			if planned[targetKey(m)] {
 				continue
 			}
@@ -684,6 +684,7 @@ func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
 }
 
 func (q *Queue) modelPlan(machine string) []ModelSlot {
+	defer q.bodyPhaseFinish("model_plan", q.bodyPhaseStart())
 	out := []ModelSlot{}
 	for _, s := range q.s.ModelSlots {
 		if s.Machine == machine {
@@ -1218,7 +1219,7 @@ func modelConfigHash(c ModelConfig) string {
 func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidates map[string]*candidateSet, scan *placementScan) string {
 	var best *placementPlan
 	var selected *Job
-	for _, m := range q.plannerMachines() {
+	for _, m := range scan.machines {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[targetKey(m)] {
 			continue
 		}

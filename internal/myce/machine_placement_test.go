@@ -19,7 +19,7 @@ func m3Machine() Machine {
 func machineCheck(t *testing.T, q *Queue, m Machine, jobs ...*Job) Reply {
 	t.Helper()
 	m.Devices = slices.Clone(m.Devices)
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol} // Current worker timing header.
 	for _, j := range jobs {
 		// This helper already models each reservation as resident in the card's
 		// free counter below. Supply the matching per-attempt sensor evidence;

@@ -76,7 +76,9 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		for i := range m.Devices {
 			m.Devices[i].Reason = deviceReasonDiagnostic(m.Devices[i].Reason)
 		}
-		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
+		if m.FileTransferError != inputTransferRecoveringReason {
+			m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
+		}
 		m.FaultMonitorError = diagnostic(m.FaultMonitorError, "kernel log not readable")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
 		m.DockerCause = safeRuntimeCause(m.DockerCause)
@@ -222,6 +224,10 @@ func statusJobValue(job *Job) Job {
 			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
 		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":
 			// Fixed queue-owned execution timeout, with no worker error suffix.
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "host_unavailable" && strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
+			j.Reason = "production cannot start: no eligible host is enabled"
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "host_unavailable" && strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
+			j.Reason = "production start deadline exceeded"
 		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Class == machoLibraryMissing || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.Reason == "command failed: "+execFormatMessage || j.Reason == "native check failed: "+execFormatMessage:

@@ -144,8 +144,12 @@ func TestHostMemoryWorkerRefusesLatePressure(t *testing.T) {
 	w := Worker{HostMemorySource: func(context.Context) (float64, error) { return 3, nil }, Machine: Machine{}}
 	j := Job{Spec: spec("experiment")}
 	j.Spec.Needs.HostMemoryGB = 10
-	if _, err := w.start(nil, j); err == nil || !strings.Contains(err.Error(), "RAM") {
+	_, err := w.start(nil, j)
+	if err == nil || !strings.Contains(err.Error(), "RAM") {
 		t.Fatalf("%v", err)
+	}
+	if e := startFailureOutcome(Result{}, err).ExecutionEvidence; e != nil {
+		t.Fatalf("refusal without attempt custody invented execution proof: %+v", e)
 	}
 }
 
@@ -181,7 +185,7 @@ func TestHostMemoryRestartReconciliation(t *testing.T) {
 	submit(t, q, s)
 	running := check(t, q, a, nil).Job
 	a.Session = "new-session"
-	r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: running.Session})
+	r, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: running.Session, period: time.Second})
 	if err != nil || r.Job == nil {
 		t.Fatalf("%+v %v", r, err)
 	}

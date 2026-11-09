@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -216,10 +217,10 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Myce-Wait", "batch-v1")
-		jobGets.record(r.UserAgent(), r.URL.Query().Get("view") == "wait")
 		var j *Job
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
+			jobGets.record(r.UserAgent(), true)
 			states, _, _, readErr := waitStates.readContext(r.Context(), WaitRequest{IDs: []string{r.PathValue("id")}})
 			err = readErr
 			if err == nil {
@@ -239,6 +240,10 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			}
 		} else {
 			j, err = a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
+			var refusal *HTTPError
+			if !errors.As(err, &refusal) || refusal.Code != "client_rate_limited" {
+				jobGets.record(r.UserAgent(), false)
+			}
 		}
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
@@ -290,10 +295,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				return
 			}
 		}
-		j, err := a.Queue.SubmitContext(r.Context(), request.Spec)
-		if j != nil && err == nil {
-			a.Queue.submissionDeadlineGuidance(j, r.Context())
-		}
+		j, err := a.Queue.submitWithDeadlineGuidance(r.Context(), request.Spec)
 		if j != nil {
 			j.LedgerEntries = nil
 		}
@@ -357,11 +359,25 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &c) {
 			return
 		}
-		v, err := a.Queue.CheckinContext(r.Context(), c)
-		if err == nil {
-			v.NASPathChecks = nas.checkin(c)
+		if value := r.Header.Get(checkinPeriodHeader); value != "" {
+			period, err := time.ParseDuration(value)
+			if err != nil || period <= 0 || period > time.Duration(1<<63-1)/2 {
+				respondOperation(w, nil, errors.New("invalid worker check-in period"), "worker_checkin_invalid")
+				return
+			}
+			c.period = period
 		}
-		respondOperation(w, v, err, "worker_checkin_invalid")
+		accepted := false
+		contact, settle := a.Queue.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, r.Context())
+		c.contact = contact
+		defer func() { settle(accepted) }()
+		_, _ = a.Queue.checkinResponseContext(r.Context(), c, func(v Reply, err error) {
+			accepted = err == nil
+			if err == nil {
+				v.NASPathChecks = nas.checkin(c)
+			}
+			respondOperation(w, v, err, "worker_checkin_invalid")
+		})
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
 		var l HostLaunch
@@ -454,6 +470,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			return
 		}
 		if workerProtocolEndpoint(r.URL.Path) {
+			w.Header().Set(executionEvidenceProtocolHeader, executionEvidenceProtocol)
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
 			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 		}
@@ -465,6 +482,17 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			return
 		}
 		defer finishBudget()
+		if deferredObservationProjection(r) {
+			projection := &observationProjection{limit: observationLimit, request: r, rejected: func() { jobGets.recordRejection(r) }}
+			defer func() {
+				if projection.finish != nil {
+					projection.finish()
+				}
+			}()
+			r = r.WithContext(context.WithValue(r.Context(), observationProjectionKey{}, projection))
+			mux.ServeHTTP(w, r)
+			return
+		}
 		finishObservation, admitted := observationLimit.admit(w, r)
 		if !admitted {
 			jobGets.recordRejection(r)
@@ -523,6 +551,11 @@ func knownServerRefusal(code string) bool {
 
 func respond(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
+	// Transport cancellation is unavailable observation, never invalid input.
+	// Preserve a retryable public cause without exposing the private error.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		err = &HTTPError{Status: http.StatusServiceUnavailable, Code: "status_unavailable"}
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrStale) {
@@ -539,6 +572,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) && (apiError.Status < 500 || knownServerRefusal(apiError.Code)) {
+			if apiError.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.FormatInt(max(1, int64(math.Ceil(apiError.RetryAfter.Seconds()))), 10))
+			}
 			if apiError.Status >= 400 {
 				status = apiError.Status
 			}
@@ -603,6 +639,7 @@ type Client struct {
 	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
+	uploadTiming  *uploadTiming
 	Clock         Clock // Optional observation clock.
 	Pause         func(context.Context, time.Duration) error
 	Jitter        func() float64
@@ -614,7 +651,9 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	defer cancel()
 	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
 	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
+	in, evidenceFields := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
 	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
+	withoutContributors, contributorFields := withoutAdmissionContributors(in)
 	clock := c.clock()
 	pace := ClientPace{}
 	var last error
@@ -622,14 +661,16 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
 		var api *HTTPError
-		if resourceFields && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
+		if (resourceFields || evidenceFields || contributorFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
 			// Strict JSON rejection occurs before mutation. Retry only once, with
 			// additive telemetry removed; retain the original durable local result.
 			if c.resourceWire != nil {
 				c.resourceWire.supported.Store(false)
 				c.resourceWire.cpuPressure.Store(false)
+				c.resourceWire.executionEvidence.Store(false)
 			}
-			legacy, _ := resourceWireInput(in, false)
+			legacy, _ := executionEvidenceWireInput(withoutContributors, false)
+			legacy, _ = resourceWireInput(legacy, false)
 			return c.callOnce(ctx, method, path, legacy, out)
 		}
 		safe := method == "GET" || method == "HEAD"
@@ -664,6 +705,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
+	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" && checkin.period > 0 {
+		req.Header.Set(checkinPeriodHeader, checkin.period.String())
+	}
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
@@ -677,6 +721,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	defer res.Body.Close()
 	if c.resourceWire != nil && workerProtocolEndpoint(path) {
+		c.resourceWire.executionEvidence.Store(res.Header.Get(executionEvidenceProtocolHeader) == executionEvidenceProtocol)
 		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
 		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
 	}

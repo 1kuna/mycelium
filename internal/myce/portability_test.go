@@ -206,10 +206,9 @@ func TestPortabilityLocksAndCPUChecks(t *testing.T) {
 }
 
 func TestPortabilityAPIReadOnlyAndPrivate(t *testing.T) {
-	q, clock := fixture(t)
+	q, _ := fixture(t)
 	m := machine("private-api-worker", "cpu")
-	m.LastSeen = clock.Now()
-	q.s.Machines[m.ID] = &m
+	check(t, q, m, nil)
 	server := httptest.NewServer(API{Queue: q, Token: "private-test-token"}.Handler())
 	defer server.Close()
 	resp, err := http.Get(server.URL + "/api/portability")
@@ -280,7 +279,7 @@ func TestPortabilityPlainCatalogPreparation(t *testing.T) {
 	m.HostMemoryMeasured = true
 	m.FreeHostMemoryGB = 16
 	m.HostAvailableMemoryGB = 16
-	if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	s := Spec{Project: "test", Run: RunSpec{Command: []string{"echo", "advice must not execute this"}}, Targets: []ExecutionTarget{{"linux", "amd64", "cpu"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}, Environment: Environment{Name: "tools"}}

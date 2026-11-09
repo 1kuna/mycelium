@@ -42,13 +42,16 @@ type deviceQuarantine struct {
 	Seen    map[string]bool        `json:"seen"`
 	Devices map[string]deviceFault `json:"devices"`
 	// Last fault per device attributed to teardown rather than quarantined.
-	Teardowns map[string]deviceFault `json:"teardowns,omitempty"`
+	Teardowns       map[string]deviceFault    `json:"teardowns,omitempty"`
+	Cleared         map[string]DeviceRecovery `json:"cleared,omitempty"`
+	RecoveryWindows map[string]float64        `json:"recovery_windows,omitempty"` // Historical calibration, never current clear authority.
 }
 
 type deviceFault struct {
-	Reason           string `json:"reason"`
-	Event            string `json:"event"`
-	RepeatedTeardown bool   `json:"repeated_teardown,omitempty"`
+	At               time.Time `json:"at,omitempty"`
+	Reason           string    `json:"reason"`
+	Event            string    `json:"event"`
+	RepeatedTeardown bool      `json:"repeated_teardown,omitempty"`
 }
 type deviceFaultClear struct {
 	Device string `json:"device"`
@@ -67,6 +70,10 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	// ran are not replayed; quarantine already recorded persists below.
 	w.faultSince = w.Clock.Now()
 	w.faultTeardowns = map[string][]time.Time{}
+	w.faultRecovery = map[string]deviceRecoveryObservation{}
+	w.faultHealth = map[string]deviceHealthObservation{}
+	w.faultHealthDue = map[string]deviceHealthDue{}
+	w.faultHealthAfter = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
 		err = decodeWorkerJSON(data, w.faults)
@@ -79,6 +86,13 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	}
 	if w.DeviceFaultSource == nil {
 		w.DeviceFaultSource = workerDeviceFaultSource()
+	}
+	if w.DeviceHealthProbe == nil {
+		// Resolve host discovery only when a health check runs (#1152): a
+		// worker without a fault source never consults the platform probe.
+		w.DeviceHealthProbe = func(ctx context.Context, d MachineDevice) (bool, error) {
+			return workerMachineProbe().DeviceHealth(ctx, d)
+		}
 	}
 	// Establish the first cursor before offering inventory. Cancellation owns
 	// startup; no fixed deadline assumes how long this host's journal takes.
@@ -94,6 +108,11 @@ func (w *Worker) applyDeviceQuarantine() {
 	}
 	for i := range w.Machine.Devices {
 		d := &w.Machine.Devices[i]
+		d.Recovery = nil
+		if recovery, ok := w.faults.Cleared[deviceFaultKey(*d)]; ok {
+			copy := recovery
+			d.Recovery = &copy
+		}
 		d.RepeatedTeardownFault = w.faults.Devices[deviceFaultKey(*d)].RepeatedTeardown
 		if fault := w.faults.Devices[deviceFaultKey(*d)]; fault.Reason != "" {
 			d.Reason, d.FreeMemoryGB = fault.Reason, 0
@@ -113,6 +132,9 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		return nil
 	} // Apple has no cheap qualified source.
 	root.faultTiming.base, root.faultTiming.cores = w.Interval, w.Machine.EffectiveCPUCores
+	// Health work has its own single-flight lane: a stuck vendor tool cannot
+	// prevent kernel fault detection on the other cards or block heartbeats.
+	health := w.quarantineHealth(ctx, root)
 	source, since, clock := w.DeviceFaultSource, w.faultSince, w.Clock
 	read := func() (KernelLogSnapshot, error) {
 		started := clock.Now()
@@ -137,6 +159,9 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		return nil
 	}
 	if err != nil || snapshot.BootID == "" {
+		clear(w.faultRecovery) // A monitoring gap cannot prove a quiet window.
+		clear(w.faultHealth)
+		w.faultHealthAfter = w.Clock.Now()
 		// Status shows the gap; optional observation cannot disable unrelated devices.
 		if w.Machine.FaultMonitorError == "" {
 			log.Print("accelerator fault monitor unavailable: kernel log not readable")
@@ -148,13 +173,22 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		log.Print("accelerator fault monitor recovered")
 	}
 	w.Machine.FaultMonitorError = ""
-	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}}
+	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}}
 	lines := snapshot.Lines
 	if w.faults.BootID == snapshot.BootID {
 		maps.Copy(next.Seen, w.faults.Seen)
 		maps.Copy(next.Devices, w.faults.Devices)
 		maps.Copy(next.Teardowns, w.faults.Teardowns)
+		maps.Copy(next.Cleared, w.faults.Cleared)
+		maps.Copy(next.RecoveryWindows, w.faults.RecoveryWindows)
+		for key, clear := range next.Cleared {
+			next.RecoveryWindows[key] = max(next.RecoveryWindows[key], clear.ObservationSeconds)
+		}
 		lines = append(w.faultPending, lines...)
+	} else {
+		clear(w.faultRecovery)
+		clear(w.faultHealth)
+		w.faultHealthAfter = w.Clock.Now()
 	}
 	w.faultPending = nil
 	changed := next.BootID != w.faults.BootID
@@ -179,7 +213,12 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 				w.faultPending = append(w.faultPending, line)
 				break
 			}
-			fault := deviceFault{Reason: reason, Event: key}
+			fault := deviceFault{Reason: reason, Event: key, At: line.At}
+			if fault.At.IsZero() || fault.At.After(now) {
+				fault.At = now
+			}
+			delete(w.faultRecovery, deviceFaultKey(d))
+			delete(health, deviceFaultKey(d)) // Even teardown is a new matching fault.
 			next.Seen[key], changed = true, true
 			if !line.At.IsZero() && w.control.teardownNear(d.ID, line.At) {
 				if next.Devices[deviceFaultKey(d)].Reason != "" || !w.repeatedTeardownFault(deviceFaultKey(d), line.At) {
@@ -193,7 +232,12 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			// Further lines from the same reset must retain the escalation fact.
 			fault.RepeatedTeardown = fault.RepeatedTeardown || next.Devices[deviceFaultKey(d)].RepeatedTeardown
 			next.Devices[deviceFaultKey(d)] = fault
+			delete(next.Cleared, deviceFaultKey(d)) // A newer fault invalidates the previous clear.
+			delete(w.faultRecovery, deviceFaultKey(d))
 		}
+	}
+	if w.autoClearDeviceFaults(&next, health, snapshot, root.faultTiming.controlPeriod()) {
+		changed = true
 	}
 	// Consume clear requests only after observing the log. Seen hashes retain
 	// acknowledged historical faults so a restart/fallback cannot replay them.
@@ -443,11 +487,35 @@ func (q *Queue) quarantineDeviceAttempts(m *Machine) {
 			continue
 		}
 		q.retainRelease(j)
+		if q.launchCapacityPending(j) {
+			// Diagnostic verification may still be outside the queue lock. A
+			// later device fault cannot turn its known refusal into a loss.
+			for i := range j.Copies {
+				j.Copies[i].Recoverable = false
+			}
+			continue
+		}
 		j.Losses++
 		q.chargeLoss(j)
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
+		losses := []DeviceFaultLoss{}
+		for _, d := range m.Devices {
+			if deviceFaultReason(d.Reason) && slices.Contains(j.AllocatedDevices, d.ID) {
+				losses = append(losses, DeviceFaultLoss{Host: hostID(m), Platform: d.Platform, Devices: []string{d.Identity}, At: q.clock.Now()})
+			}
+		}
+		attempt := j.Attempt
 		q.requeue(j, "accelerator driver fault; device quarantined", true)
+		for i := range j.AttemptHistory {
+			if h := &j.AttemptHistory[i]; h.Attempt == attempt && h.Machine == m.ID && h.Session == m.Session && len(losses) > 0 {
+				loss := losses[0] // One execution target has one backend.
+				for _, other := range losses[1:] {
+					loss.Devices = append(loss.Devices, other.Devices...)
+				}
+				h.DeviceFault = &loss
+			}
+		}
 	}
 }

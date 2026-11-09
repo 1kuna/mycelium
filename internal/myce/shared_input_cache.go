@@ -23,19 +23,25 @@ import (
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
-	cache         EnvironmentCache
-	Client        Client
-	mu            sync.Mutex
-	verified      map[string]string
-	staging       map[*sharedInputStaging]struct{}
-	beforeStage   func(context.Context)
-	resolveNAS    func(root, relative string) (string, error)
-	beforePublish func()
-	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
-	hits          uint64
-	misses        uint64
-	nasBytes      uint64
-	capacity      *SharedInputCapacity
+	cache                  EnvironmentCache
+	automatic              bool
+	readNAS                func(*os.File, []byte) (int, error)
+	diskProbe              func(string) (DiskReading, error)
+	Client                 Client
+	mu                     sync.Mutex
+	verified               map[string]string
+	staging                map[*sharedInputStaging]struct{}
+	beforeStage            func(context.Context)
+	resolveNAS             func(root, relative string) (string, error)
+	beforePublish          func()
+	beforeVerify           func() // Test hook: a full re-hash of a cached entry starts.
+	beforeAdmissionMeasure func() // Test hook: reservations counted, before disk measurement.
+	afterArchiveReset      func() // Test hook: interrupted extraction removed.
+	afterStageCancel       func() // Test hook: withdrawal cancellation has reached its writer.
+	hits                   uint64
+	misses                 uint64
+	nasBytes               uint64
+	capacity               *SharedInputCapacity
 }
 
 // sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
@@ -67,6 +73,7 @@ func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative st
 	if err := sharedInputProgress(ctx); err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "resolve", "source")
 	path, err := c.nasPath(root, relative)
 	if err != nil {
 		// Keep the source boundary, never the expanded worker mount path.
@@ -161,7 +168,10 @@ func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot s
 	}
 	return path, release, nil
 }
-func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot string) (string, error) {
+func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot string) (_ string, stageErr error) {
+	ctx = context.WithValue(ctx, sharedInputTraceKey{}, &sharedInputTrace{detail: StagingCause{Operation: "shared_input", Stage: "prepare", PathClass: "cache"}})
+	traceSharedFile(ctx, s.ref())
+	defer func() { stageErr = tracedSharedError(ctx, stageErr) }()
 	key := s.key()
 	root := filepath.Join(c.cache.Root, key)
 	payload := filepath.Join(root, "data")
@@ -180,6 +190,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		}
 	}()
 	if _, err = os.Lstat(root); err == nil {
+		traceSharedInput(ctx, "metadata", "cache")
 		var record sharedEntry
 		b, e := os.ReadFile(filepath.Join(root, "ready.json"))
 		if e != nil {
@@ -214,6 +225,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			if c.beforeVerify != nil {
 				c.beforeVerify()
 			}
+			traceSharedInput(ctx, "verify", "cache")
 			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
 				return "", e
 			}
@@ -242,19 +254,60 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		}
 		need += s.SizeBytes
 	}
-	err = c.stageInput(ctx, func(ctx context.Context, stage string) error {
-		// The writer owns this random stage's build lock before reserving space.
+	err = c.stageInputNamed(ctx, key, func(ctx context.Context, stage string) error {
+		// The stage build lock protects this local verification, without holding
+		// admission while hashing. Completed archives no longer need transfer space.
+		complete, e := completedSharedStage(ctx, stage)
+		if e != nil {
+			return e
+		}
+		stageNeed := need
+		if complete {
+			stageNeed = 0
+		}
+		traceSharedInput(ctx, "admission", "cache")
+		// The writer owns this stage's build lock before reserving space.
 		// Matching reservation/partial names reuse existing remaining-byte accounting.
 		gate, e := c.cache.lock(ctx, "admission", syscall.LOCK_EX)
 		if e != nil {
 			return e
 		}
-		if e = removeSharedEntry(root + ".partial"); e == nil {
-			e = c.admit(ctx, key, need)
-		}
 		reservation := strings.TrimSuffix(stage, ".partial") + ".reservation"
+		// We own this persistent stage's build lock. A reservation left by its
+		// crashed writer belongs to us, never to another in-flight transfer.
+		if e = os.Remove(reservation); os.IsNotExist(e) {
+			e = nil
+		}
 		if e == nil {
-			e = os.WriteFile(reservation, []byte(strconv.FormatInt(need, 10)), 0600)
+			e = removeSharedEntry(root + ".partial")
+		}
+		if e == nil && !complete && s.Archive != "" {
+			// Rebuilding an extracted tree shrinks staged bytes. Serialize that
+			// reset with all accounting, then reserve its full expansion again.
+			// Once admission is unlocked, this stage must only grow.
+			e = removeSharedEntry(filepath.Join(stage, "data"))
+			if e == nil && c.afterArchiveReset != nil {
+				c.afterArchiveReset()
+			}
+		}
+		if e == nil {
+			// Retained local prefixes already occupy cache/free bytes. Reserve
+			// only the remainder for this stage, without double charging it.
+			var written int64
+			for _, part := range []string{"data", "archive"} {
+				n, err := environmentSize(filepath.Join(stage, part))
+				if err != nil && !os.IsNotExist(err) {
+					e = err
+					break
+				}
+				written += n
+			}
+			if e == nil {
+				e = c.admit(ctx, key, max(0, stageNeed-written))
+			}
+		}
+		if e == nil {
+			e = os.WriteFile(reservation, []byte(strconv.FormatInt(stageNeed, 10)), 0600)
 		}
 		c.mu.Lock()
 		tracked := c.capacity != nil
@@ -275,8 +328,10 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				unlockEnvironment(gate)
 			}
 		}()
-		if e = c.populateInput(ctx, s, nasRoot, stage); e != nil {
-			return e
+		if !complete {
+			if e = c.populateInput(ctx, s, nasRoot, stage); e != nil {
+				return e
+			}
 		}
 		if c.beforePublish != nil {
 			c.beforePublish()
@@ -299,9 +354,11 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	if err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "sync", "cache")
 	if err = syncWorkerDir(c.cache.Root); err != nil {
 		return "", err
 	}
+	traceSharedInput(ctx, "metadata", "cache")
 	signature, err := sharedSignature(payload)
 	if err == nil {
 		err = recordSharedVerification(root, signature)
@@ -332,6 +389,31 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	return payload, nil
 }
 
+// Called under the stage build lock, before reserving any further transfer.
+// Invalid unpublished metadata from an older interrupted writer is replaceable;
+// payload verification failures still refuse publication.
+func completedSharedStage(ctx context.Context, stage string) (bool, error) {
+	if b, err := os.ReadFile(filepath.Join(stage, "ready.json")); err == nil {
+		traceSharedInput(ctx, "verify", "cache")
+		var record sharedEntry
+		if err := json.Unmarshal(b, &record); err != nil {
+			return false, os.Remove(filepath.Join(stage, "ready.json"))
+		}
+		if err := verifySharedEntry(ctx, filepath.Join(stage, "data"), record.Files); err != nil {
+			return false, err
+		}
+		// An interruption after publishing ready.json may retain the archive.
+		// Only a verified durable completion record makes it redundant.
+		if err := os.Remove(filepath.Join(stage, "archive")); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		return true, ctx.Err()
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	return false, nil
+}
+
 // Only the calling attempt may publish. This detached work writes exclusively
 // into its unique unpublished directory and cannot touch another build's data.
 func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nasRoot, stage string) (err error) {
@@ -339,6 +421,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if c.beforeStage != nil {
 		c.beforeStage(ctx)
 	}
+	traceSharedFile(ctx, s.ref())
 	if err := sharedInputProgress(ctx); err != nil {
 		return err
 	}
@@ -347,13 +430,16 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "verify", "source")
 		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "open", "source")
 		f, e := os.Open(manifestPath)
 		if e != nil {
 			return e
 		}
+		traceSharedInput(ctx, "read", "source")
 		b, e := io.ReadAll(io.LimitReader(contextReader{ctx, f}, s.SizeBytes+1))
 		e = errors.Join(e, f.Close())
 		if e != nil {
@@ -363,6 +449,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 		if int64(len(b)) != s.SizeBytes || digestBytes(b) != s.SHA256 {
 			return errors.New("shared manifest changed")
 		}
+		traceSharedInput(ctx, "manifest", "source")
 		if e = json.Unmarshal(b, &s.Manifest); e != nil {
 			return e
 		}
@@ -379,7 +466,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	dst := filepath.Join(stage, "data")
 	files := FileManifest{}
 	if len(s.Manifest) > 0 {
-		if err = os.Mkdir(dst, 0700); err != nil {
+		if err = os.MkdirAll(dst, 0700); err != nil {
 			return err
 		}
 		for name, ref := range s.Manifest {
@@ -395,35 +482,45 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				}
 			}
 			target := filepath.Join(dst, name)
-			if e := copySharedFile(ctx, source, target, ref); e != nil {
+			if e := copyNASInput(ctx, c.Client, source, target, &ref, c.readNAS); e != nil {
 				return e
 			}
 			files[name] = ref
 		}
 	} else {
 		target := dst
+		archiveReady := false
 		if s.Archive != "" {
 			target = filepath.Join(stage, "archive")
+			if info, e := os.Lstat(target); e == nil && info.Mode().IsRegular() && info.Size() == s.SizeBytes {
+				traceSharedInput(ctx, "verify", "cache")
+				if e = verifyFile(ctx, target, s.ref()); e != nil {
+					return e
+				}
+				archiveReady = true
+			}
 		}
-		if s.NAS != "" {
+		if archiveReady {
+			// A verified retained archive needs no source resolution or transfer.
+		} else if s.NAS != "" {
 			source, e := c.nasPathContext(ctx, nasRoot, s.NAS)
 			if e != nil {
 				return e
 			}
-			if err = copySharedFile(ctx, source, target, s.ref()); err != nil {
+			if err = copyNASInput(ctx, c.Client, source, target, inputRef(s), c.readNAS); err != nil {
 				return err
 			}
 		} else {
-			err = c.Client.DownloadFile(ctx, s.ref(), target)
+			err = c.Client.recoverInputTransfer(ctx, s.ref(), "shared_input", func(one Client) error { return one.DownloadFile(ctx, s.ref(), target) })
 			if err != nil {
 				return err
 			}
 		}
 		if s.Archive != "" {
+			traceSharedInput(ctx, "extract", "cache")
+			// Admission already reset any interrupted extraction under its lock.
+			// Reuse the verified local archive and only grow the reserved tree.
 			if err = unpackSharedArchive(ctx, target, dst, s.Archive, s.UnpackedBytes); err != nil {
-				return err
-			}
-			if err = os.Remove(target); err != nil {
 				return err
 			}
 			err = filepath.WalkDir(dst, func(p string, d os.DirEntry, e error) error {
@@ -453,6 +550,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			files["."] = s.ref()
 		}
 	}
+	traceSharedInput(ctx, "permissions", "cache")
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
@@ -460,67 +558,60 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(stage, "ready.json"), b, 0400); err != nil {
+	// Persist the payload before atomically declaring it complete. Until then
+	// retain the verified archive, so an interrupted extraction can rebuild locally.
+	traceSharedInput(ctx, "sync", "cache")
+	if err = syncModelDirectoryContext(ctx, stage); err != nil {
 		return err
 	}
-	return syncModelDirectoryContext(ctx, stage)
+	if err = writeSharedReady(ctx, stage, b); err != nil {
+		return errors.Join(errFileTransferLocal, err)
+	}
+	if s.Archive != "" {
+		traceSharedInput(ctx, "metadata", "cache")
+		if err = os.Remove(filepath.Join(stage, "archive")); err != nil {
+			return err
+		}
+	}
+	traceSharedInput(ctx, "sync", "cache")
+	return syncWorkerDir(stage)
 }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) (err error) {
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	if err := noModelSymlinks(source, false); err != nil {
-		return err
-	}
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	in, err := os.Open(source)
+func writeSharedReady(ctx context.Context, stage string, b []byte) error {
+	traceSharedInput(ctx, "manifest", "cache")
+	f, err := os.CreateTemp(stage, "ready.*.tmp")
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
+	defer os.Remove(f.Name())
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(0400)
 	}
-	info, err := in.Stat()
-	if err != nil {
-		return err
+	if err == nil {
+		traceSharedInput(ctx, "sync", "cache")
+		err = f.Sync()
 	}
-	if err := sharedInputProgress(ctx); err != nil {
-		return err
+	// Snapshot a sync failure before tracing the subsequent close boundary.
+	err = tracedSharedError(ctx, err)
+	traceSharedInput(ctx, "close", "cache")
+	err = errors.Join(err, tracedSharedError(ctx, f.Close()))
+	if err == nil {
+		traceSharedInput(ctx, "manifest", "cache")
+		err = os.Rename(f.Name(), filepath.Join(stage, "ready.json"))
 	}
-	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
-		return errors.New("shared NAS file size/type differs from manifest")
+	if err == nil {
+		traceSharedInput(ctx, "sync", "cache")
+		err = syncWorkerDir(stage)
 	}
-	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
-		return err
-	}
-	// On the same copy-on-write volume, a clone shares blocks until either side
-	// writes, so a later write to the source cannot reach the verified copy.
-	// Hard links would share the inode itself and are never used.
-	if !cloneSharedFile(in, target) {
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
-		if err != nil {
-			return err
-		}
-		// A changing NAS original cannot consume more than its admitted bytes.
-		_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			observeStorageContext(ctx, &os.PathError{Op: "read", Path: source, Err: io.ErrUnexpectedEOF})
-		}
-		err = errors.Join(err, out.Sync(), out.Close())
-		if err != nil {
-			return err
-		}
-	} else if err = sharedInputProgress(ctx); err != nil {
-		return err
-	}
-	if err = os.Chmod(target, 0400|info.Mode().Perm()&0111); err != nil {
-		return err
-	}
-	return verifyFile(ctx, target, ref)
+	return err
+}
+
+func inputRef(s SharedInput) *FileRef { ref := s.ref(); return &ref }
+
+func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
+	return copyNASInput(ctx, Client{}, source, target, &ref, nil)
+
 }
 
 func makeSharedReadOnly(root string) error {
@@ -689,7 +780,12 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 				return e
 			}
 			if lock != nil {
-				e = removeSharedEntry(filepath.Join(c.cache.Root, d.Name()))
+				partial := filepath.Join(c.cache.Root, d.Name())
+				if info, resumeErr := os.Lstat(filepath.Join(partial, "resume")); resumeErr == nil && info.Mode().IsRegular() {
+					victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
+				} else {
+					e = removeSharedEntry(partial)
+				}
 				unlockEnvironment(lock)
 				if e != nil {
 					return e
@@ -707,27 +803,31 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		victims = append(victims, victim{d.Name(), info.ModTime().UnixNano()})
 	}
 	sort.Slice(victims, func(i, j int) bool { return victims[i].used < victims[j].used })
-	var cacheAvailable, diskAvailable int64
+	var cacheAvailable, diskAvailable, limit int64
 	enough := func() (bool, error) {
+		if c.beforeAdmissionMeasure != nil {
+			c.beforeAdmissionMeasure()
+		}
 		used, e := c.cache.DiskUsage()
 		if e != nil {
 			return false, e
 		}
-		disk, e := workerDiskProbe(c.cache.Root)
+		explicit := c.cache.Limit
+		if c.automatic {
+			explicit = 0
+		}
+		var free int64
+		limit, free, e = inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe)
 		if e != nil {
 			return false, e
 		}
-		floor := diskFreeFloor(disk.TotalBytes)
 		if reserved > int64(^uint64(0)>>1)-need {
 			return false, nil
 		}
 		projected := need + reserved
-		cacheAvailable = max(0, c.cache.Limit-used-reserved)
-		diskAvailable = 0
-		if disk.FreeBytes >= floor {
-			diskAvailable = int64(min(uint64(^uint64(0)>>1), disk.FreeBytes-floor))
-		}
-		return projected <= c.cache.Limit-used && disk.FreeBytes >= floor && uint64(projected) <= disk.FreeBytes-floor, nil
+		cacheAvailable = max(0, limit-used-reserved)
+		diskAvailable = free
+		return projected <= limit-used && projected <= free, nil
 	}
 	for _, v := range victims {
 		ok, e := enough()
@@ -740,7 +840,13 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 		if e = ctx.Err(); e != nil {
 			return e
 		}
-		use, e := c.cache.tryLock(v.name + ".use")
+		// A retained partial is protected by its writer's build lock, not a
+		// published-entry use lock. Never unlink a detached writer's files.
+		lockKey := v.name + ".use"
+		if strings.HasSuffix(v.name, ".partial") {
+			lockKey = strings.TrimSuffix(v.name, ".partial") + ".build"
+		}
+		use, e := c.cache.tryLock(lockKey)
 		if e != nil {
 			return e
 		}
@@ -770,7 +876,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 	}
 	if !ok {
 		if need > cacheAvailable {
-			return &stagingCapacityError{required: need, available: cacheAvailable, limit: c.cache.Limit, capacity: "shared_input_cache"}
+			return &stagingCapacityError{required: need, available: min(cacheAvailable, max(0, diskAvailable-reserved)), limit: limit, capacity: "shared_input_cache"}
 		}
 		return &stagingCapacityError{required: need, available: max(0, diskAvailable-reserved), capacity: "disk_free_floor"}
 	}

@@ -48,7 +48,7 @@ func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 			heartbeat := func() Reply {
 				t.Helper()
 				reports, _ := rt.report()
-				reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports})
+				reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports, period: time.Second})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -80,8 +80,7 @@ func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 			if err := q.SetLossTimeouts(5*time.Second, 5*time.Second, 5*time.Second); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(5 * time.Second)
-			check(t, q, other, nil)
+			advanceReportingPeer(t, q, clock, other, q.machineLossTimeout(m.ID))
 			if !q.s.Machines[m.ID].Gone {
 				t.Fatal("not gone")
 			}

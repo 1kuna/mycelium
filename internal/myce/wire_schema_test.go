@@ -79,6 +79,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["last_memory_admission"].(map[string]any)["description"] = "Last changed blocking host-memory target comparison in this waiting episode, retained through startup failure and restart. Canonical exact-owner charges, growth and reservation pending state; historical diagnostic, not live usage or proof RAM is the only blocker. Absence is unknown. A retry clears it."
 	job["recovered_results"].(map[string]any)["description"] = "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at."
 	recovered := defs["RecoveredResult"].(map[string]any)["properties"].(map[string]any)
 	recovered["kind"].(map[string]any)["const"] = "recovered"

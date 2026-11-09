@@ -300,6 +300,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	cpuReserve := f.Int("reserve-cpu-cores", 0, "logical cores reserved for the owner")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "initial host CPU allowance; zero uses logical cores minus reserve")
 	hostBudget := f.Float64("host-memory-budget-gb", 0, "initial host RAM allowance in GiB; change with myce host budget while drained or disabled")
+	hostBudgetMeasured := f.Bool("host-memory-budget-measured", false, "derive host RAM allowance from qualified idle observations; positive budget is the fallback")
 	memorySlack := f.Float64("memory-ceiling-slack-gb", 0, "extra GiB per declared RAM ceiling (counts against host budget)")
 	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup unless per-attempt cgroup v2 memory ceilings are enforceable; require host_memory_gb")
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per memory ceiling in bytes")
@@ -307,9 +308,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	hostReserve := f.Float64("reserve-host-memory-gb", 0, "host RAM reserve in GiB (unified uses the larger GPU/host reserve once)")
 	reserve := f.Float64("reserve-memory-gb", 0, "GPU memory to keep outside Mycelium")
 	productionRetries := f.Int("production-infrastructure-retries", myce.DefaultProductionInfrastructureRetries, "maximum infrastructure requeues per production job")
-	productionLoss := f.Duration("production-loss-timeout", myce.ProductionLossAfter, "quiet timeout for production work")
-	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
-	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
+	productionLoss := f.Duration("production-loss-timeout", 0, "minimum production silence allowance; zero learns check-in timing")
+	deadlineLoss := f.Duration("deadline-loss-timeout", 0, "minimum deadline silence allowance; zero learns check-in timing")
+	experimentLoss := f.Duration("experiment-loss-timeout", 0, "minimum experiment silence allowance; zero learns check-in timing")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
@@ -670,7 +671,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
 		}
-		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second, ConnContext: myce.QueueConnectionContext}
 		queueServers = append(queueServers, server)
 		errs := make(chan error, 3)
 		if debugListener != nil {
@@ -759,7 +760,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *curveMaxConcurrency < 0 || *curveMaxConcurrency > 64 || *curveMaxConcurrency > 0 && !*onboardingBenchmark {
 			return errors.New("curve-max-concurrency requires onboarding-benchmark and a bound from 1 to 64")
 		}
-		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {
@@ -960,6 +961,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if page := s.JobsPage; page != nil && page.NextBefore != "" {
+		fmt.Printf("jobs: %d of %d retained jobs shown; use status JOB_ID for a known job or status --history for all history\n", page.Returned, page.Total)
+	}
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
 	}

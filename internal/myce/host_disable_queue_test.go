@@ -19,8 +19,7 @@ func TestAttemptHistoryLateRefund(t *testing.T) {
 			t.Fatal("missing attempt")
 		}
 		attempts = append(attempts, a)
-		clock.Advance(LossAfter)
-		check(t, q, observer(), nil)
+		advanceReportingPeer(t, q, clock, observer(), LossAfter)
 	}
 	before := job(t, q, j.ID)
 	if before.State != "failed" || len(before.AttemptHistory) != 3 {

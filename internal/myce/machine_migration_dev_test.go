@@ -91,6 +91,10 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		j := submitAPI(s)
 		var reply Reply
 		// Storage availability is injected; assignment needs no filesystem retry.
+		// Model the legacy sender's default send interval. Its first report above
+		// and this second arrival must not share the same frozen fake instant:
+		// the old wire format needs this observed cadence before new work.
+		clock.Advance(time.Second)
 		reply = checkAPI(m)
 		if reply.Job == nil || reply.Job.ID != j.ID {
 			d.Queue.mu.Lock()
@@ -142,6 +146,13 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		return job(t, d.Queue, j.ID)
 	}
 	oldJob := runLegacy(legacy(src[0].Name), src[0].State)
+	// The same elapsed send interval applies to the other legacy sources.
+	// Conversion requires their own qualified live reports, not just this job's
+	// completed worker; keep the old-wire freshness prerequisite exercised.
+	for _, s := range src[1:] {
+		checkAPI(legacy(s.Name))
+	}
+	checkAPI(spark)
 	for _, host := range []string{"host", "spark"} {
 		if _, err := d.Queue.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
 			t.Fatal(err)

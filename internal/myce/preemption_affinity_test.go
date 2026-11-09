@@ -228,8 +228,12 @@ func TestPreemptionPlacementDoesNotReviveAfterLoss(t *testing.T) {
 	if stop := priorityStop(job(t, q, victim.ID)); stop == nil || stop.Demand != demand.ID {
 		t.Fatal("missing stop", stop)
 	}
-	clock.Advance(LossAfter + time.Second)
-	machineCheck(t, q, b, busy)
+	for remaining := LossAfter + time.Second; remaining > 0; {
+		step := min(time.Second, remaining)
+		clock.Advance(step)
+		machineCheck(t, q, b, busy)
+		remaining -= step
+	}
 	if !q.s.Machines[a.ID].Gone {
 		t.Fatal("victim host not declared lost")
 	}

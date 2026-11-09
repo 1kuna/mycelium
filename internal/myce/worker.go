@@ -48,11 +48,16 @@ type Worker struct {
 	fleet         *workerFleetRuntime
 
 	DeviceFaultSource   DeviceFaultSource
+	DeviceHealthProbe   DeviceHealthProbe
 	DeviceFaultMatchers map[string]DeviceFaultMatcher
 	faults              *deviceQuarantine
 	faultSince          time.Time       // Kernel records before worker start are not read (#595).
 	faultPending        []KernelLogLine // Matched faults too recent to rule out teardown.
 	faultTeardowns      map[string][]time.Time
+	faultRecovery       map[string]deviceRecoveryObservation
+	faultHealth         map[string]deviceHealthObservation
+	faultHealthAfter    time.Time // A monitoring gap invalidates older in-flight health readings.
+	faultHealthDue      map[string]deviceHealthDue
 	InventoryProbe      func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe   func(context.Context) error
 	cpuRuntimeProbe     *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
@@ -104,6 +109,10 @@ type Worker struct {
 
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
+	cancelStart           context.CancelFunc
+	controlLatency        *workerControlLatency
+	launchCtx             context.Context // Exact attempt/preparation owner; cancels handshake waits.
+	serviceStop           context.Context // Installed TERM cancels observation/I/O, not durable cleanup.
 	batchAdmission        func(context.Context, HostLaunch) error
 	stopAdmission         func()
 	DeviceBinding         string
@@ -149,6 +158,7 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	cancelStart      context.CancelFunc // Immutable; cancel before taking a launch-held mutex.
 	stopAdmission    func()
 	resources        *resourceObserver
 	saveStopIntent   func(*time.Time, bool) error
@@ -219,10 +229,17 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 	return nil
 }
 
+func (p *process) cancelStarting() {
+	if p.cancelStart != nil {
+		p.cancelStart()
+	}
+}
+
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
 func (p *process) stopService(now time.Time, grace time.Duration) {
+	p.cancelStarting()
 	if p.stopAdmission != nil {
 		p.stopAdmission()
 	}
@@ -241,6 +258,7 @@ func (p *process) stopService(now time.Time, grace time.Duration) {
 	p.stopLocked(now, grace, false)
 }
 func (p *process) stopDirective(now time.Time, grace time.Duration, kill, userCancel bool) {
+	p.cancelStarting()
 	if p.stopAdmission != nil {
 		p.stopAdmission()
 	}
@@ -404,7 +422,24 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
 
-func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
+	launchCtx, cancel := context.WithCancel(ctx)
+	w.launchCtx, w.cancelStart = launchCtx, cancel
+	// Input/checkpoint copies outlive a pending start observation. Their ctx
+	// remains the preparation owner's; only this call's handshakes are retired
+	// when it returns without a process.
+	defer func() {
+		if startedProcess == nil {
+			cancel()
+		}
+	}()
+	// Start preparation can pause and retry without advancing the attempt.
+	j.ExecutionEvidence = s.startExecutionEvidence(j)
+	defer func() {
+		if startErr != nil {
+			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -448,7 +483,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := s.warnNativeIsolation(&j); err != nil {
 		return nil, err
 	}
-	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(ctx, sharedInputOwnerKey{}, s), j)
+	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(context.WithValue(ctx, sharedInputOwnerKey{}, s), inputTransferRecoveryKey{}, &s.inputTransferRecovering), j)
 	if sharedErr != nil {
 		if errors.Is(sharedErr, errCheckpointIOPending) {
 			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
@@ -479,7 +514,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 				defer s.inputStaging.Store(false)
 			}
 			return captureStagedInputs(w.Clock, func() (string, error) {
-				err := w.prepareExtensionFilesContext(ctx, &value, s.dir)
+				transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
+				err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
 				return value.Spec.Run.Workdir, err
 			})
 		}, false)
@@ -575,8 +611,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		r.readyOnly = j.CommandDiscovery != nil || j.Spec.extensionJob() || w.Machine.SharedHost != nil
 		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
-		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
-			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		j.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
+		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func(ctx context.Context) error {
+			return w.authorizeLaunchContext(ctx, HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
 		if err != nil {
 			return nil, s.startFailure(j, environmentFailed, err)
@@ -597,6 +634,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			return nil, err
 		}
 		environmentRelease := release
+		// Docker recovery/daemon boundaries are not observed by this native proof.
+		j.ExecutionEvidence.Main, j.ExecutionEvidence.Sidecars = executionUnknown, executionUnknown
 		p, e := w.startDocker(s, j, checkpoint, func() {
 			if environmentRelease != nil {
 				environmentRelease()
@@ -797,7 +836,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	cmd.Stderr = output
 	// Record intent before creating even the gated process. It cannot execute
 	// the command until its group identity has been durably recorded.
-	s.state.Job = &j
+	assigned := j
+	assigned.ExecutionEvidence = nil
+	s.state.Job = &assigned
 	s.state.Identity = identity
 	s.state.Log = logName
 	s.state.Offset = 0
@@ -880,7 +921,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
 		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
-	p := &process{job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
+	p := &process{cancelStart: w.cancelStart, job: j, stopAdmission: w.stopAdmission, stopGrace: w.AcceleratorStopGrace, cmd: cmd, birth: custody.Groups[cmd.Process.Pid][cmd.Process.Pid], done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
 	var savedStopAt *time.Time
 	var savedUserCancel bool
 	p.saveStopIntent = func(deadline *time.Time, userCancel bool) error {
@@ -910,6 +951,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}
 	payloadPossible = true
+	if readyReader == nil {
+		j.ExecutionEvidence.Main = executionMayHaveRun
+	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		return nil, abort(err)
 	}
@@ -924,6 +968,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if err == nil {
 			// Queue waiting must not consume the local exec-receipt I/O budget.
 			_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
+			j.ExecutionEvidence.Main = executionMayHaveRun
 			_, err = approvalWriter.Write([]byte("S"))
 		}
 		approvalWriter.Close()
@@ -948,7 +993,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			p.mu.Unlock()
 		}
 	}
-	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true
@@ -1003,6 +1048,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			result.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
 		} else if launchErr != nil {
 			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", launchErr))
+			if errors.Is(launchErr, errWorkerMemory) {
+				// Started authorizes the exec gate; a later local comparison can
+				// still refuse without main ever running. Match early/group starts.
+				result.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+			}
 		} else if waitErr != nil {
 			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", waitErr))
 		}
@@ -1096,6 +1146,11 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.launchCtx = stop
+	if w.ServiceConfig != nil {
+		w.serviceStop = stop
+	}
+	w.controlLatency = &workerControlLatency{}
 	w.Client.resourceWire = &resourceWire{}
 	w.hygieneWire = &workerHygieneWire{}
 	w.unifiedMemoryWire = &workerUnifiedMemoryWire{}
@@ -1160,7 +1215,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
-	environments := &environmentRuntime{authorize: w.authorizeLaunch, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
+	environments := &environmentRuntime{authorize: w.authorizeLaunchContext, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {
 		return err
 	}
@@ -1240,7 +1295,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.LogRetention < 0 {
 		return errors.New("log-retention must be positive")
 	}
-	retentionCtx, retentionCancel := context.WithCancel(context.Background())
+	retentionCtx, retentionCancel := context.WithCancel(stop)
 	type retentionRequest struct {
 		active string
 		now    time.Time
@@ -1282,6 +1337,10 @@ func (w Worker) Run(stop context.Context) error {
 	}
 
 	availabilityCtx, availabilityCancel := context.WithCancel(context.Background())
+	if w.serviceStop != nil {
+		stopAvailability := context.AfterFunc(w.serviceStop, availabilityCancel)
+		defer stopAvailability()
+	}
 	availabilityDone := make(chan struct{})
 	availabilityWake := make(chan struct{}, 1)
 	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop, w.Desktop)
@@ -1320,7 +1379,7 @@ func (w Worker) Run(stop context.Context) error {
 	// Payload policy protects the actual listener port, including a configured
 	// non-loopback alias and an ephemeral ModelListen port.
 	w.ModelListen = strings.TrimPrefix(rt.url, "http://")
-	rt.authorize = w.authorizeLaunch
+	rt.authorize = w.authorizeLaunchContext
 	modelAvailabilityDone := make(chan struct{})
 	go func() {
 		defer close(modelAvailabilityDone)
@@ -1367,11 +1426,11 @@ func (w Worker) Run(stop context.Context) error {
 	if w.ExtensionRoot == "" {
 		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
 	}
-	probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	probeCtx, cancel := context.WithTimeout(stop, 15*time.Second)
 	w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
 	cancel()
 	w.Machine.ExtensionFingerprint = w.extensionFingerprint
-	probeCtx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+	probeCtx, cancel = context.WithTimeout(stop, 15*time.Second)
 	w.Machine.CPUExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, "cpu", "")
 	cancel()
 	w.environmentCache.Fetch = w.fileCache.copyTo

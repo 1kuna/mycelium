@@ -29,30 +29,24 @@ func policyCommand(args []string, out io.Writer) error {
 		rest = rest[1:]
 	}
 	f := flag.NewFlagSet("policy "+args[0], flag.ContinueOnError)
-	queue := f.String("queue", os.Getenv("MYCE_QUEUE"), "queue address")
-	token := f.String("token", env("MYCE_TOKEN", ""), "queue owner token (prefer MYCE_TOKEN)")
-	f.Lookup("token").DefValue = ""
-	config := f.String("config", "", "installed config (default: installed worker, then queue)")
+	authority := installedClientFlags(f)
 	asYAML := f.Bool("yaml", false, "export policy YAML (revision is printed to stderr)")
 	revision := f.String("if-revision", "", "required current policy revision")
 	if err := f.Parse(rest); err != nil {
 		return err
 	}
-	if args[0] != "get" && *token == "" {
-		return errors.New("set MYCE_TOKEN")
-	}
-	client := myce.Client{URL: *queue, Token: *token}
+	var client myce.Client
+	var err error
 	if args[0] == "get" {
-		var err error
-		client, err = runClient(*config, "", *queue, *token)
-		if err != nil {
-			return err
-		}
-		if client.HTTP != nil {
-			defer client.HTTP.CloseIdleConnections()
-		}
-	} else if client.URL == "" {
-		client.URL = "http://127.0.0.1:7331"
+		client, err = authority.client()
+	} else {
+		client, err = authority.ownerClient()
+	}
+	if err != nil {
+		return err
+	}
+	if client.HTTP != nil {
+		defer client.HTTP.CloseIdleConnections()
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

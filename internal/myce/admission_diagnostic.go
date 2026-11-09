@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,14 +11,65 @@ import (
 // Available is absent when the probe/configuration was unavailable, never a
 // fabricated zero. Memory quantities are GiB; counts use the indicated unit.
 type AdmissionDetail struct {
-	Subcheck         string   `json:"subcheck"`
-	Unit             string   `json:"unit"`
-	Required         float64  `json:"required"`
-	Available        *float64 `json:"available,omitempty"`
-	Unavailable      bool     `json:"unavailable,omitempty"`
-	EnvelopeSource   string   `json:"envelope_source,omitempty"`
-	EnvelopeHostGB   float64  `json:"envelope_host_gb"`
-	EnvelopeDeviceGB float64  `json:"envelope_device_gb"`
+	Subcheck         string                  `json:"subcheck"`
+	Unit             string                  `json:"unit"`
+	Required         float64                 `json:"required"`
+	Available        *float64                `json:"available,omitempty"`
+	Unavailable      bool                    `json:"unavailable,omitempty"`
+	EnvelopeSource   string                  `json:"envelope_source,omitempty"`
+	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
+	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
+	Contributors     []HostGrowthContributor `json:"contributors,omitempty"`
+}
+
+// These are the terms of the failed physical-growth sum, not memory attributed
+// to the launching job. Model terms have no execution or resident sample.
+type HostGrowthContributor struct {
+	ID               string   `json:"id,omitempty"`
+	Attempt          int      `json:"attempt,omitempty"`
+	Kind             string   `json:"kind"`
+	Launching        bool     `json:"launching,omitempty"`
+	ChargeGB         float64  `json:"charge_gb"`
+	PendingGB        float64  `json:"pending_gb"`
+	SampleAgeSeconds *float64 `json:"sample_age_seconds,omitempty"`
+	SampleFresh      bool     `json:"sample_fresh"`
+}
+
+// A strict predecessor queue can reject this additive diagnostic after a
+// rollback. Strip only the wire copy: local outcome/release replay must keep
+// its complete evidence, including through saved-result and saved-log delivery.
+func withoutAdmissionContributors(in any) (any, bool) {
+	result := func(r Result) (Result, bool) {
+		changed := false
+		cause := func(c *RuntimeCause) *RuntimeCause {
+			if c == nil || c.Admission == nil || len(c.Admission.Contributors) == 0 {
+				return c
+			}
+			copy, detail := *c, *c.Admission
+			detail.Contributors = nil
+			copy.Admission, changed = &detail, true
+			return &copy
+		}
+		r.ExecutionCause, r.CleanupCause = cause(r.ExecutionCause), cause(r.CleanupCause)
+		return r, changed
+	}
+	switch v := in.(type) {
+	case *Result:
+		if v != nil {
+			return result(*v)
+		}
+	case Result:
+		return result(v)
+	case *LogChunk:
+		if v != nil {
+			return withoutAdmissionContributors(*v)
+		}
+	case LogChunk:
+		var changed bool
+		v.Result, changed = result(v.Result)
+		return v, changed
+	}
+	return in, false
 }
 
 type admissionError struct{ detail AdmissionDetail }
@@ -35,8 +87,8 @@ func (e *admissionError) Error() string {
 }
 func (e *admissionError) Unwrap() error { return errWorkerMemory }
 
-func refuseAdmission(subcheck, unit string, required, available float64, unavailable bool) error {
-	d := AdmissionDetail{Subcheck: subcheck, Unit: unit, Required: required, Unavailable: unavailable || !validMemoryValue(available)}
+func refuseAdmission(subcheck, unit string, required, available float64, unavailable bool, contributors ...HostGrowthContributor) error {
+	d := AdmissionDetail{Subcheck: subcheck, Unit: unit, Required: required, Unavailable: unavailable || !validMemoryValue(available), Contributors: contributors}
 	if !d.Unavailable {
 		d.Available = &available
 	}
@@ -73,6 +125,32 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		return nil
 	}
 	out := *d
+	out.Contributors = nil
+	if d.Subcheck == "live_host_growth" {
+		for _, c := range d.Contributors {
+			if !validMemoryValue(c.ChargeGB) || !validMemoryValue(c.PendingGB) {
+				continue
+			}
+			if c.Kind == "attempt" {
+				if len(c.ID) != 32 || c.Attempt < 1 {
+					continue
+				}
+				if _, err := hex.DecodeString(c.ID); err != nil {
+					continue
+				}
+			} else if c.Kind != "model" || c.ID != "" || c.Attempt != 0 {
+				continue
+			}
+			if c.SampleAgeSeconds != nil {
+				age := *c.SampleAgeSeconds
+				if !validMemoryValue(age) {
+					continue
+				}
+				c.SampleAgeSeconds = &age
+			}
+			out.Contributors = append(out.Contributors, c)
+		}
+	}
 	out.Available = nil
 	if d.Available != nil && !d.Unavailable && validMemoryValue(*d.Available) {
 		v := *d.Available
@@ -84,6 +162,8 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	// their fixed components, including the optional sizing floors.
 	parts := strings.Split(d.EnvelopeSource, "; ")
 	allowed := map[string]bool{
+		measuredOOMRecoverySource: true, priorVersionMemorySource: true,
+		"exploratory OOM recovery": true, "measured peak + growth": true, "physical headroom": true,
 		"declared": true, "submitter hint": true, "exploratory host": true,
 		"exploratory first run": true, "exploratory (previous peak constrained)": true,
 		"accepted peak × 1.25": true, "accepted peak + measured uncertainty": true, "cross-machine estimate": true,

@@ -59,6 +59,12 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 	return l
 }
 func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
+	return q.hostSessionLaunchAllowed(m, session) && !q.workerSuspect(m, q.clock.Now())
+}
+
+// An already assigned batch retains its authorization/custody across suspicion.
+// New preparation launches still require live arrival evidence.
+func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && q.hostHygieneReason(m) == "" && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
@@ -91,7 +97,17 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				return nil
 			}
 		}
-		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
+		m := q.s.Machines[l.Machine]
+		allowed := q.hostLaunchAllowed(m, l.Session)
+		p := q.s.PreparationPlans[l.Attempt]
+		// Repeated gates within an already started preparation retain its exact
+		// custody, just as an assigned batch does. Suspicion blocks new starts;
+		// the current session, stop and preparation fences still apply below.
+		continuing := p.Started && p.Machine == l.Machine && p.Session == l.Session && p.Kind == l.Kind && p.Key == l.Key
+		if l.Kind == "batch" || continuing {
+			allowed = q.hostSessionLaunchAllowed(m, l.Session)
+		}
+		if !allowed {
 			reject("host_launch")
 			return nil
 		}
@@ -146,12 +162,17 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("preparation_custody")
 			return nil
 		}
-		m := q.s.Machines[l.Machine]
 		if j := q.s.Jobs[p.Demand]; p.Kind == "environment" && j != nil && j.CommandDiscovery != nil {
 			target := allocationMachine(m, []string{p.Device})
+			var allowed bool
+			if p.Started {
+				allowed = q.placementDemandAllowed(j, target)
+			} else {
+				allowed = q.placementAllowed(j, target)
+			}
 			// A delayed offer must retain live demand for this exact frozen
 			// target/recipe, even before another heartbeat withdraws it.
-			if j.State != "queued" || cancelled(j) || j.Pause != nil || !q.placementAllowed(j, target) || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
+			if j.State != "queued" || cancelled(j) || j.Pause != nil || !allowed || !commandDiscoveryAllows(j, target) || !slices.ContainsFunc(commandEnvironmentRecipes(j, target), func(r EnvironmentRecipe) bool { return r.Key == p.Key }) {
 				reject("discovery_demand")
 				return nil
 			}
@@ -232,18 +253,19 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 	}
 }
 func (w Worker) authorizeLaunch(l HostLaunch) error {
+	return w.authorizeLaunchContext(w.launchContext(), l)
+}
+
+func (w Worker) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
+	w.launchCtx = ctx
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	// Queue contention must fit the normal control-request budget, independently
-	// of heartbeat cadence. A timeout still cannot authorize a payload (#225).
-	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
-	defer cancel()
 	var reply struct {
 		OK        bool   `json:"ok"`
 		StartGate string `json:"start_gate"`
 	}
-	if err := w.Client.Call(ctx, "POST", "/api/workers/launch", l, &reply); err != nil {
+	if _, err := w.controlHandshake("/api/workers/launch", l, &reply); err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
@@ -254,22 +276,33 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return w.checkAvailability()
 }
 
 type launchGateKey struct{}
 
-func withLaunchGate(ctx context.Context, gate func() error) context.Context {
+func withLaunchGate(ctx context.Context, gate func(context.Context) error) context.Context {
 	return context.WithValue(ctx, launchGateKey{}, gate)
 }
+
+// Wrappers capture the prior gate before installing their own, but pass the
+// invoking operation's context through it. A build/readiness child may stop
+// while its enclosing preparation still owns the same offer.
+func launchGateFrom(ctx context.Context) func(context.Context) error {
+	if gate, ok := ctx.Value(launchGateKey{}).(func(context.Context) error); ok {
+		return gate
+	}
+	return func(context.Context) error { return nil }
+}
+
 func checkLaunchGate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if gate, ok := ctx.Value(launchGateKey{}).(func() error); ok {
-		return gate()
-	}
-	return nil
+	return launchGateFrom(ctx)(ctx)
 }
 
 func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {

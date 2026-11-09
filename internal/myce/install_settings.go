@@ -204,6 +204,12 @@ func InstallSettings() []InstallSetting {
 			return err
 		}),
 		installSetting("memory-ceiling-slack-gb", "MemoryCeilingSlackGB", "extra GiB per declared RAM ceiling", func(c *ServiceConfig) *float64 { return &c.MemoryCeilingSlackGB }, installNonnegative),
+		installContext(installSetting("host-memory-budget-measured", "HostMemoryBudgetMeasured", "derive RAM allowance from qualified idle observations; retain positive authored fallback", func(c *ServiceConfig) *bool { return &c.HostMemoryBudgetMeasured }, installAny[bool]), func(c ServiceConfig) error {
+			if c.HostMemoryBudgetMeasured && c.HostMemoryBudgetGB <= 0 {
+				return errors.New("measured host allowance requires a positive authored fallback")
+			}
+			return nil
+		}),
 		installSetting("memory-swap-max-bytes", "MemorySwapMaxBytes", "swap allowance per ceiling", func(c *ServiceConfig) *int64 { return &c.MemorySwapMaxBytes }, func(v int64) error {
 			if v < 0 {
 				return errors.New("must be nonnegative")
@@ -271,9 +277,9 @@ func InstallSettings() []InstallSetting {
 			}
 			return nil
 		}),
-		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installPositiveDuration),
-		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installPositiveDuration),
-		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installPositiveDuration),
+		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installNonnegativeDuration),
+		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installNonnegativeDuration),
+		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installNonnegativeDuration),
 		installEnvironmentFileSetting(),
 		installContext(installSetting("private-devices", "PrivateDevices", "queue private device namespace", func(c *ServiceConfig) *bool { return &c.PrivateDevices }, installAny[bool]), func(c ServiceConfig) error {
 			if c.Detection.OS == "linux" && c.Role == "queue" && c.PrivateDevices {

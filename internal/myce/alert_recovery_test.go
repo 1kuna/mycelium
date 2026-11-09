@@ -39,6 +39,8 @@ func twoRAMRefusals(t *testing.T, q *Queue, m Machine, co, j *Job) *Job {
 	if err := q.Complete(refusedRAM(j, 3)); err != nil {
 		t.Fatal(err)
 	}
+	// Repeated refusal findings require distinct capacity evidence (#1011).
+	m.HostAvailableMemoryGB++
 	next := assignedJob(machineCheck(t, q, m, co))
 	if next == nil {
 		t.Fatal("missing second attempt")
@@ -77,6 +79,7 @@ func TestAlertRecoveryRecordedRefusalsNeedOwner(t *testing.T) {
 					t.Fatal(err)
 				}
 				if i == 0 {
+					m.HostAvailableMemoryGB++
 					j = assignedJob(machineCheck(t, q, m, co))
 				}
 			}
@@ -84,7 +87,7 @@ func TestAlertRecoveryRecordedRefusalsNeedOwner(t *testing.T) {
 			if r.State != "owner_required" || r.Action != "none" || r.Cause != "live_host_growth" || r.Admission == nil || r.Admission.Required != tc.comparisons[1][0] || r.Admission.Available == nil || *r.Admission.Available != tc.comparisons[1][1] || r.Admission.EnvelopeHostGB != tc.needs || !strings.Contains(r.NextStep, "forecast bounds") {
 				t.Fatal("recorded refusal lacks exact evidence and immediate owner finding", r)
 			}
-			if q.s.Machines[m.ID].HostAvailableMemoryGB != 128 || r.JobID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
+			if q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB || r.JobID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
 				t.Fatal("finding changed capacity or lost execution identity", r)
 			}
 			stored := q.s.Jobs[j.ID]
@@ -108,9 +111,10 @@ func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
 	if err := q.Complete(refusedRAM(j, 3)); err != nil {
 		t.Fatal(err)
 	}
+	m.HostAvailableMemoryGB++
 	healthy := assignedJob(machineCheck(t, q, m, co))
 	finish(t, q, healthy, true)
-	if len(alertsOf(q, "infrastructure_loss_streak")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != 128 {
+	if len(alertsOf(q, "infrastructure_loss_streak")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
 		t.Fatal("healthy history triggered a finding or changed capacity")
 	}
 	for _, unsupported := range []bool{false, true} {
@@ -119,6 +123,8 @@ func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
 			if err := q.Complete(refusedRAM(j, 3)); err != nil {
 				t.Fatal(err)
 			}
+			// Repeated refusal findings require distinct capacity evidence (#1011).
+			m.HostAvailableMemoryGB++
 			next := assignedJob(machineCheck(t, q, m, co))
 			r := refusedRAM(next, 3)
 			if unsupported {
@@ -128,7 +134,7 @@ func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			receipt := recoveryReceipt(t, q)
-			if receipt.State != "owner_required" || receipt.Action != "none" || receipt.NextStep == "" || q.s.Machines[m.ID].HostAvailableMemoryGB != 128 {
+			if receipt.State != "owner_required" || receipt.Action != "none" || receipt.NextStep == "" || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
 				t.Fatal("unsupported evidence acted or lacks owner finding", receipt)
 			}
 			for range 4 {
@@ -217,6 +223,8 @@ func TestAlertRecoveryFindingPreservesNewerObservation(t *testing.T) {
 	if err := q.Complete(refusedRAM(j, 3)); err != nil {
 		t.Fatal(err)
 	}
+	// Repeated refusal findings require distinct capacity evidence (#1011).
+	m.HostAvailableMemoryGB++
 	next := assignedJob(machineCheck(t, q, m, co))
 	// A fresher same-clock-timestamp check-in remains authoritative. The old
 	// refusal can retain its comparison but cannot correct the newer snapshot.

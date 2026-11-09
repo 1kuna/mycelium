@@ -94,8 +94,8 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 	// Conversely, a sustained allocation grows the history with actual service.
 	submit(t, q, projectSpec("solo"))
 	run = check(t, q, m, nil).Job
-	for range 4 {
-		clock.Advance(10 * time.Second)
+	for range 40 {
+		clock.Advance(time.Second)
 		check(t, q, m, run)
 	}
 	if u := q.s.FairUsage[key]; u.HorizonSeconds != 40 || u.ServiceSeconds != 40 {

@@ -187,7 +187,12 @@ func TestMachineCompletionPlanningCreditBound(t *testing.T) {
 				t.Fatal(err)
 			}
 			bound := job(t, q, a.ID).StopAt.Add(q.preemptionGrace())
-			clock.Advance(bound.Sub(clock.Now()) - time.Second)
+			for remaining := bound.Sub(clock.Now()) - time.Second; remaining > 0; {
+				step := min(time.Second, remaining)
+				clock.Advance(step)
+				machineCheck(t, q, m, a, b)
+				remaining -= step
+			}
 			finishInterrupted(t, q, a)
 			r, ok := q.s.BatchReleases[m.ID+"/0"]
 			if !ok || !r.Until.Equal(bound) {

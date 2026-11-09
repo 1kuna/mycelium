@@ -131,14 +131,14 @@ One measured physical-host memory allowance covers simultaneous production deman
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
 - **Planned leave** (`myce leave`, or Ctrl-C on the worker). The machine stops taking new jobs at once. Resumable jobs get the stop signal, save to the NAS, and go back to the front of their line. For jobs that can't be resumed, `myce leave` asks whether to wait for them to finish or to stop them now and put them back in the queue. `myce leave --now` skips the question and stops everything.
-- **Sudden loss** (unplugged, asleep, network drop): without a check-in, the queue marks the machine gone after 5 seconds for production work, 20 seconds for deadline work, or 60 seconds for experiments (defaults based on the machine's active job priority). Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over. Experiments and deadline jobs fail loudly after three counted infrastructure losses; their planned stops to make room or leave do not count. Production uses the bounded infrastructure retry budget below, including planned host release or leave. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
+- **Sudden loss** (unplugged, asleep, network drop): without a check-in, the queue marks the machine gone after its measured check-in allowance has elapsed in control-service opportunity time (see adaptive loss below). Queue delay alone never charges a loss or retry, for any class. Its running jobs go back in the queue. Resumable jobs continue from their last checkpoint. Others start over. Experiments and deadline jobs fail loudly after three counted infrastructure losses; their planned stops to make room or leave do not count. Production uses the bounded infrastructure retry budget below, including planned host release or leave. Model calls that were in flight are retried on another machine, and models loaded there are marked as gone.
 - **Late return.** A network split can briefly leave the same job running on two machines. When contact returns, the queue keeps the resumable copy with the newest complete checkpoint, or the current attempt when there is no newer checkpoint, and tells the other copy to stop. Jobs must make output writes safe to repeat.
 - **Jobs no remaining machine can run.** These are jobs pinned to the machine that left, or jobs that need a GPU type no current machine has (for example, Apple-only work when every Mac is away). They stay in the queue, and `myce status` says plainly why each one is waiting: "no machine in the fleet can run this right now (needs metal)". A job can set a give-up time, after which it is marked failed instead of waiting forever.
 
 **Power and network loss are normal, not rare.** Every part must survive them without losing durable intent or treating uncertainty as release.
 
 - **The queue machine loses power.** The database is written safely (every change is fully saved to disk before it's confirmed), so a power cut never corrupts it or loses a submitted job. The queue starts automatically when the machine boots. After a restart it does *not* immediately declare every job lost. It waits a few minutes for workers to reconnect and report what they're still running or have finished, and only then puts back in line the jobs nobody reported.
-- **A worker machine loses power.** This is handled as a sudden loss: its jobs go back in line after the priority-based timeout above (5, 20, or 60 seconds). On the always-on machines, the worker starts automatically at boot. On startup it cleans up any job processes left over from before the power cut, and then reports in fresh.
+- **A worker machine loses power.** This is handled as a sudden loss: its jobs go back in line after the measured opportunity allowance above. On the always-on machines, the worker starts automatically at boot. On startup it cleans up any job processes left over from before the power cut, and then reports in fresh.
 - **A worker loses network but keeps power.** It keeps running its current jobs, saves their logs and results locally, and keeps trying to reconnect. It does not start new jobs. When it reconnects it sends everything it saved. If the queue already gave a job to another machine, the queue reconciles the overlapping copies: the resumable copy with the newest complete checkpoint keeps running, otherwise the current attempt does, and the other stops. Output writes must be safe to repeat.
 - **The local network drops, or the queue machine loses network.** If a strict majority of workers (including all of them) go quiet at once, the problem is almost certainly the network, not every machine at the same time. So the queue does not put everything back in line. It waits until machines reconnect, or until it can confirm specific machines are really gone.
 - **Configured storage is unreachable.** NAS-backed resumable jobs wait for their checkpoint folder; file-store-backed jobs require their declared inputs and durable checkpoint transfers. Non-resumable production with local inputs starts with local scratch and does not require a NAS. NAS probes and checkpoint reads/preparation have short bounded waits outside the queue lock. A displaced experiment that cannot save within its grace is force-stopped and reported interrupted; production proceeds after memory release, and the experiment later resumes its last durable save. Running jobs otherwise keep going and retry their saves. Status explains the storage failure; local-only progress never masquerades as portable progress.
@@ -151,7 +151,7 @@ One measured physical-host memory allowance covers simultaneous production deman
 
 Classification uses Mycelium-recorded facts for native, native-group and Docker attempts. Infrastructure evidence is a durably recorded stop or kill delivered to that member before its exit was observed; loss of observation; a Mycelium-side pre-execution or launch refusal/failure (including authorization, exec/spawn or environment preparation infrastructure failure); or Mycelium's own probe proving that an allocated readiness port belongs to a process outside this group when readiness fails. Exit codes, payload stderr, stop intent and signals recorded after exit observation are never infrastructure evidence. Independent member exits, OOM (including an extension job), and readiness timeouts without such evidence fail production immediately without an infrastructure retry. A successful terminal outcome is preserved. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
 
-A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
+A production attempt with a relative start window that had started gets its original-length start window from interruption detection, including a worker interruption/release. An explicit absolute `start_by` never renews. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
 Production batch jobs and adapter entries may declare `start_window: 600s`, a
 positive Go duration no greater than `1h`; omission retains the `150s` default.
@@ -164,6 +164,18 @@ the deadline minus original submission time. Job GET exposes the declaration in
 `spec.start_window` and the effective original length in top-level `start_window`
 (nanoseconds), including before startup. Experiments omit the fields and have no
 start deadline. Loss recovery retains that original effective length.
+
+A typed `device_fault_last_healthy` hold pauses the remaining relative startup
+or recovery budget. Recovery and subsequent capacity waits retain that saved
+amount, including across restart; caller-owned absolute
+`start_by` and queued-only `give_up_at` still bind. A hold with no eligible
+recovery terminates at the existing one-hour maximum start window measured from
+the latest queue-recorded device-fault loss, with typed reason
+`device_fault_recovery_timeout`. Restart and heartbeats never renew that bound.
+An active hold checks expiry before resuming, including when a late report clears
+quarantine after the bound.
+This limits an unrecoverable wait without shortening the worker's measured
+health-proof window or releasing exact-attempt custody.
 
 ## Queue-owned host maintenance
 
@@ -1069,8 +1081,8 @@ Service stop intentionally contains all descendants (`Delegate=memory`,
 `KillMode=mixed`). Unsupported platforms remain admission-only and
 required ceilings refuse them. Core reservations do not enforce CPU time.
 
-One machine heartbeat uses the shortest active loss timeout: production 5 s,
-deadline 20 s, experiment 60 s. A stall affects every owned attempt independently,
+One machine heartbeat uses its session's adaptive contact evidence for every
+active class. A genuine worker loss affects every owned attempt independently,
 including each production retry counter (at most two infrastructure requeues).
 Unknown release stays charged; a timeout cannot authorize overlap. A single
 attempt's failure does not mark its neighbors lost. Control/heartbeats and bulk
@@ -2468,7 +2480,12 @@ and restart, so one measured digest cannot authorize an unmeasured alternative.
 Evidence is
 immutable recipe metadata, not an evaluation runner or native qualification.
 The hold and owner action appear in eligibility/status. Approval is eligibility,
-not a job host pin.
+not a job host pin. When owner policy contains an exact work entry, its
+`production_parity_hosts` list constrains every production assignment and
+retarget, including historical registrations and measured variants. Measurements
+cannot authorize an unlisted host; the owner must explicitly add it. An empty
+list admits no host for that production work. Checks and experiments remain
+available for gathering evidence.
 
 Host-pin adoption is measured read-only over retained jobs submitted in an explicit
 time window, grouped by project and production/non-production: an explicit
@@ -2606,3 +2623,80 @@ no infrastructure or loss retries. There is no migration daemon, new cooldown,
 capacity reservation or live process transfer. CPU dev proof uses simulated
 inventory and real commands, file-store generations, native sidecars and one
 verified accepted artifact; native hardware qualification remains separate.
+
+
+## Adaptive worker loss (#661; MY-31/MY-34)
+
+Loss uses the current session's send interval and observed arrival/path variation,
+measured with the injected queue Clock. Workers advertise their actual interval
+through an optional header compatible with older strict JSON decoders. An older
+worker without that header first establishes cadence from successive accepted
+wall-time arrivals; queue occupancy cannot compress its expected send period.
+The second accepted arrival learns cadence before admission, so a headerless
+worker waits at most one observed send interval plus actual control-path delay
+for its first offer after a queue cutover. Startup recovery reports can supply
+these samples before ordinary admission. An empty keyed reply is idle, with no
+assignment to launch; existing attempts continue reporting and retain custody.
+Retained engines receive retention-only plans and their existing cleanup
+deadlines during cold qualification; those plans cannot start a missing engine.
+Until then automatic loss is unknown and capacity is suspect, even with a saved
+operator minimum, so no new attempt can acquire an unbounded unknown loss
+allowance. The allowance is at least two send intervals (the
+expected arrival and one missed-arrival confirmation), extended by the shared
+RFC 6298 mean/variation estimator. It has no class-specific default duration.
+Explicit old timeout settings remain minimums, never permission to count queue
+delay as silence; zero selects automatic timing. Existing saved settings survive.
+Each accepted transaction also saves its session's frozen contact allowance for
+offline conversion. That stopped-queue observation expires against the original
+accepted wall timestamp; opening a queue does not renew it. An older database
+without this evidence needs the existing verified-empty drain path. Running
+queues still require live contact and startup reconciliation.
+
+The queue accounts the union of all queue-mutex occupancy, including readers,
+with constant-size local counters. This time is unavailable control service and
+is excluded from silence. A newly slow transaction is protected immediately,
+without first training a latency percentile. A current-session check-in protects
+that worker while the server processes or writes its response, including work
+outside the mutex; it cannot protect a dead peer. Rejection removes that credit.
+Cancellation retains a reconnect opportunity following the worker's existing
+retry schedule, without changing accepted LastSeen. Unsettled synthetic arrivals
+expire after the measured allowance. Stale sessions cannot renew current contact.
+
+For a normally responding queue and an ordinary one-second worker, detection
+takes roughly two seconds of service opportunity, plus learned variation and the
+next maintenance turn. An observed first one-second gap initially gives three
+seconds under the estimator; further steady samples converge to the two-interval
+floor. Under overload the wall duration additionally includes actual queue
+occupancy. For example, a 31-second blocked transaction adds 31 seconds, not a
+charged infrastructure failure. Suspicion uses wall time since the last current-session arrival, with an
+allowance of at least two observed wall arrival intervals plus measured variation.
+That wall cadence includes delivered queue service cost even for a worker that
+advertises a shorter send interval. It remains separate from the opportunity
+allowance for confirmed loss; otherwise a healthy slow control path could
+withhold every new offer. Before the second arrival, the completed response's
+measured wall cost extends the advertised interval. Recovery inference excludes
+late pending arrivals but retains this completed delivery evidence, so normal
+slow delivery can establish cadence instead of repeatedly resetting it.
+Confirmed loss requires both a missed wall arrival and the opportunity
+allowance: available service alone cannot make an expected arrival overdue.
+Pending NAS inspection delivery uses the same wall
+allowance, including in detached status/resolve views. Even during continuous mutex saturation, a dead sender
+becomes **suspect** after that allowance plus the next maintenance/observation
+turn. An old in-flight request cannot suppress suspicion. Suspect workers are
+never shown as healthy, receive no new attempts or preparation launches, and
+raise an owner-attention health alert. New arrival evidence clears suspicion.
+Suspicion never interrupts an existing attempt or charges loss/retry.
+
+Continuous saturation or a wholly unreachable fleet has no finite trustworthy
+**confirmed-loss** bound: retain custody until control service or connectivity
+supplies evidence. If even maintenance cannot execute, neither diagnostic
+publication nor a useful relaunch can have a finite execution bound. Suspicion
+is computed at every subsequent observation; its elapsed-time threshold does
+not stop with the control clock. The explicit startup recovery grace also excludes blocked queue service so
+workers can reconcile before it expires. Genuine loss preserves exact
+attempt fencing and the existing retry budgets, and never proves release.
+
+Fleet, maintenance, placement, inventory and stale-host diagnostics use the same
+confirmed-contact and suspicion calculations, frozen at status capture time. LastSeen remains an actual
+accepted queue timestamp. Physical memory/disk/pressure/probe sample validity
+still ages independently; liveness never manufactures fresh sensor evidence.

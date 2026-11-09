@@ -87,9 +87,8 @@ func (q *Queue) detectIncidentHealth() {
 		intentional := m.Leaving || mode == "disabled" || mode == "drained" || mode == "draining"
 		key := "stale-flaps/" + m.ID
 		seen[key] = true
-		freshness := min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
-		stale := m.Gone || now.Sub(q.lastContact(m, now)) >= freshness
-		cold := q.unreported[m.ID] && now.Before(q.restartUntil)
+		stale := !q.workerFresh(m, now)
+		cold := q.unreported[m.ID] && q.inRestartGrace(now)
 		c := q.s.Health.Conditions[key]
 		id := ""
 		if intentional || cold {
@@ -180,7 +179,13 @@ func (q *Queue) learnedEnvelopeOversized(j *Job) bool {
 			// Assignment's existing comparison excludes declared member caps,
 			// hints and retry floors. Only accepted learning is this incident.
 			learnedProbe := *candidate
-			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
+			capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
+			if q.memoryPlanning != nil {
+				// This view removes occupancy, but retained evidence still uses
+				// the enclosing immutable pass's origin and identity fences.
+				// Keep admission-dependent estimates private to this view.
+				capacity.memoryPlanning.history = q.memoryPlanning.history
+			}
 			capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 			capacity.s.Machines = map[string]*Machine{m.ID: m}
 			capacity.recordLearnedMemory(&learnedProbe, m)
