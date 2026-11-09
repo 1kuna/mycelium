@@ -30,7 +30,8 @@ func TestEnrollmentPreflightsBeforeDrain(t *testing.T) {
 			record := func(value string) { mu.Lock(); defer mu.Unlock(); operations = append(operations, value) }
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				record(r.Method + " queue")
-				http.Error(w, "stop after preflights", http.StatusServiceUnavailable)
+				// This ordering fixture stops here; transient retry timing is covered separately.
+				http.Error(w, "stop after preflights", http.StatusBadRequest)
 			}))
 			defer server.Close()
 			c, err := myce.PlanInstall("worker", home, "", home, server.URL, "hypha", myce.Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "fixed", MemoryGB: 8, ReserveGB: 1})
