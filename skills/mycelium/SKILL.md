@@ -171,6 +171,15 @@ measured observation window and clear evidence. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
 devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
 
+From the queue release containing #1162, inline jobs accept
+`environment: {backend: pixi, lock_file: /queue/shared/project/pixi.lock, platforms: [cpu]}`.
+The queue must read both `pixi.lock` and adjacent `pixi.toml` at submission;
+`python` is optional. Each input is limited to 1 MiB; oversized Python/Pixi inputs report
+`path_diagnostic.cause: too_large`, naming any required companion. Profile inputs/source do
+not upload these files. Workers build the frozen snapshots through Pixi.
+See [project lock files](../../docs/environments.md#project-lock-files) for
+queue-relative paths and typed read diagnostics.
+
 ## Read for the relevant branch
 
 - **One-off commands, GPU/memory, variants, models, checkpoints or NAS inputs:**

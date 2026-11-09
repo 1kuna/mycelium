@@ -1313,6 +1313,9 @@
     },
     "Environment": {
       "properties": {
+        "backend": {
+          "type": "string"
+        },
         "lock_file": {
           "type": "string"
         },
