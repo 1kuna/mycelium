@@ -75,6 +75,47 @@ shared_inputs:
 	if err = runProfile(context.Background(), path, nil, nil, "shared", "", "", "", server.URL, "test", &out, io.Discard); exitCode(err) != 69 {
 		t.Fatal(err)
 	}
+	{
+		source := filepath.Join(root, "source")
+		if err := os.WriteFile(filepath.Join(source, "tool"), []byte("source helper"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "replacement"), []byte("explicit replacement"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		profile := `name: fixture
+project: test
+class: experiment
+source: {directory: source}
+inputs: {tool: replacement}
+run: {command: [sh, tool]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: darwin, arch: arm64, platform: cpu}]
+check: [true]
+`
+		file := filepath.Join(dir, "fixture.yaml")
+		if err := os.WriteFile(file, []byte(profile), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err := runProfile(context.Background(), file, nil, nil, "legacy-prelaunch", "", "", "", server.URL, "fixture", &out, io.Discard)
+		if exitCode(err) != 69 {
+			t.Fatal(err, out.String())
+		}
+		var receipt profileReceipt
+		if err := json.Unmarshal(out.Bytes(), &receipt); err != nil {
+			t.Fatal(err)
+		}
+		if !receipt.Spec.PrepareSource || strings.Contains(strings.Join(receipt.Spec.Run.Command, " "), "tar -xf") {
+			t.Fatal("source hidden until payload launch", receipt.Spec.Run)
+		}
+		if _, ok := receipt.Spec.Files["tool"]; !ok {
+			t.Fatal("explicit input lost its replacement destination", receipt.Spec.Files)
+		}
+		if _, ok := receipt.Uploads["files/tool"]; !ok {
+			t.Fatal("input upload not bound to destination", receipt.Uploads)
+		}
+	}
 }
 
 func TestProfileSharedInputsComposeWithPerItemIdentity(t *testing.T) {

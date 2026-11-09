@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,36 +61,37 @@ func TestLogsFollowUsesOnlyJobReadsAndDrainsFinalLogs(t *testing.T) {
 // Exercise the same Client.Call used by installed status/log reads: the server
 // controls the retry interval and the caller controls when recovery stops.
 func TestLogsShedRetryAndResume(t *testing.T) {
+	var pageReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/jobs/job" {
+			fmt.Fprint(w, `{"id":"job","state":"succeeded"}`)
+			return
+		}
+		after := r.URL.Query().Get("after")
+		if after == "0" {
+			chunks := make([]myce.Log, 256)
+			for i := range chunks {
+				chunks[i] = myce.Log{Seq: int64(i + 1), Text: "prefix\n"}
+			}
+			_ = json.NewEncoder(w).Encode(chunks)
+			return
+		}
+		if after != "256" {
+			t.Errorf("lost cursor: %s", after)
+		}
+		read := pageReads.Add(1)
+		if read == 1 {
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"code":"client_rate_limited","error":"fleet-wide control pressure"}`)
+			return
+		}
+		fmt.Fprint(w, `[{"seq":257,"text":"tail\n"}]`)
+	}))
+	defer server.Close()
 	for _, interrupt := range []bool{false, true} {
 		t.Run(fmt.Sprint(interrupt), func(t *testing.T) {
-			pageReads := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/jobs/job" {
-					fmt.Fprint(w, `{"id":"job","state":"succeeded"}`)
-					return
-				}
-				after := r.URL.Query().Get("after")
-				if after == "0" {
-					chunks := make([]myce.Log, 256)
-					for i := range chunks {
-						chunks[i] = myce.Log{Seq: int64(i + 1), Text: "prefix\n"}
-					}
-					_ = json.NewEncoder(w).Encode(chunks)
-					return
-				}
-				if after != "256" {
-					t.Errorf("lost cursor: %s", after)
-				}
-				pageReads++
-				if pageReads == 1 {
-					w.Header().Set("Retry-After", "7")
-					w.WriteHeader(429)
-					fmt.Fprint(w, `{"code":"client_rate_limited","error":"fleet-wide control pressure"}`)
-					return
-				}
-				fmt.Fprint(w, `[{"seq":257,"text":"tail\n"}]`)
-			}))
-			defer server.Close()
+			pageReads.Store(0)
 			pauses := 0
 			client := myce.Client{URL: server.URL, Token: "fixture", Jitter: func() float64 { return .5 }, Pause: func(_ context.Context, d time.Duration) error {
 				pauses++

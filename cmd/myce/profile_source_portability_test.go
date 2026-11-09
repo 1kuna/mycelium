@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,5 +26,82 @@ func TestProfileScopedSourceRefusesInputStagingAlias(t *testing.T) {
 	source := profileSource{Git: "HEAD", Paths: []string{".MYCE-INPUTS"}}
 	if _, err := freezeProfileSource(context.Background(), root, source, filepath.Join(t.TempDir(), "source.tar")); err == nil {
 		t.Fatal("scoped source can replace a verified item through a reserved-name alias")
+	}
+
+	// Remove the reserved alias only after its refusal assertion.
+	profileGit(t, root, "rm", "-r", ".MYCE-INPUTS")
+
+	ctx := context.Background()
+	git := func(args ...string) { t.Helper(); profileGit(t, root, args...) }
+	if err := os.WriteFile(filepath.Join(root, "script"), []byte("source"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".mycelium"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(root, ".mycelium", "adapter.yaml")
+	if err := os.WriteFile(adapter, []byte("first authored entries"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{".gitattributes": "omitted export-ignore\n", "omitted": "excluded source bytes"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", ".")
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture")
+	source = profileSource{Git: "HEAD", AdapterFile: ".mycelium/adapter.yaml"}
+	one, id, err := identifyProfileSource(ctx, root, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := freezeProfileSource(ctx, root, one, filepath.Join(t.TempDir(), "source.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unscoped adapter sources retain git archive export-ignore behavior while
+	// excluding only the instruction file; selected-path sources use raw blobs.
+	checkArchive := filepath.Join(t.TempDir(), "export.tar")
+	if _, err := freezeProfileSource(ctx, root, one, checkArchive); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(checkArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(f)
+	for {
+		h, e := tr.Next()
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+		if h.Name == "omitted" || h.Name == ".mycelium/adapter.yaml" {
+			t.Fatal("excluded source was transferred", h.Name)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(adapter, []byte("unrelated entry edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = identifyProfileSource(ctx, root, source); err != nil {
+		t.Fatal("uncommitted instruction file contaminated source", err)
+	}
+	git("add", ".")
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "other entry")
+	two, id2, err := identifyProfileSource(ctx, root, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := freezeProfileSource(ctx, root, two, filepath.Join(t.TempDir(), "source.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != id2 || first != second {
+		t.Fatal("unrelated entry changed source or its frozen identity")
 	}
 }

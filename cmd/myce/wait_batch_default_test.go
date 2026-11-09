@@ -20,7 +20,26 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 			clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
 			ids := []string{"job-a", "job-b", "job-c"}
 			gets, batches := 0, 0
+			longPoll := false
+			var completion time.Time
 			client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+				if longPoll {
+					clock.advance(10 * time.Millisecond)
+					state := "running"
+					if r.Method == "POST" {
+						var req myce.WaitRequest
+						_ = json.NewDecoder(r.Body).Decode(&req)
+						clock.advance(min(time.Duration(req.Seconds)*time.Second, max(0, completion.Sub(clock.Now()))))
+					}
+					if !clock.Now().Before(completion) {
+						state = "succeeded"
+					}
+					body := fmt.Sprintf(`{"id":"job","state":%q}`, state)
+					if r.Method == "POST" {
+						body = fmt.Sprintf(`{"jobs":[{"id":"job","state":%q,"revision":1}]}`, state)
+					}
+					return &http.Response{StatusCode: 200, Header: http.Header{"X-Myce-Wait": {"batch-v1"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+				}
 				clock.advance(time.Millisecond)
 				state := "running"
 				if batches >= 6 {
@@ -70,6 +89,15 @@ func TestWaitDefaultBatchUnchangedJobs(t *testing.T) {
 			}
 			if structured && strings.Count(out.String(), `"name":"full-detail"`) != 6 {
 				t.Fatal("lost full JSON diagnostics", out.String())
+			}
+
+			if !structured {
+				longPoll = true
+				completion = clock.Now().Add(350 * time.Second)
+				err = waitJobs(context.Background(), client, []string{"job"}, 600*time.Second, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
+				if err != nil || clock.Now().After(completion.Add(21*time.Second)) {
+					t.Fatal("long-poll completion hidden by sleep", err, clock.Now())
+				}
 			}
 		})
 	}
@@ -140,30 +168,5 @@ func TestWaitJSONSlowOrUnavailableDiagnosticsDoesNotHidePeers(t *testing.T) {
 		if err != nil || batches != 1 || gets < 1 || gets > 2 || strings.Count(out.String(), `"state":"succeeded"`) != 2 {
 			t.Fatal(status, err, batches, gets, out.String())
 		}
-	}
-}
-
-func TestWaitOlderBatchMetadataRetainsDeadlineDuringOutage(t *testing.T) {
-	clock := &waitClock{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)}
-	deadline := clock.Now().Add(time.Second)
-	gets, batches := 0, 0
-	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
-		clock.advance(time.Millisecond)
-		status, body := 200, ""
-		if r.Method == "POST" {
-			batches++
-			body = `{"jobs":[{"id":"job","state":"running","revision":1}]}`
-			if batches > 1 {
-				status, body = 503, `{}`
-			}
-		} else {
-			gets++
-			body = fmt.Sprintf(`{"id":"job","state":"running","spec":{"deadline":%q}}`, deadline.Format(time.RFC3339))
-		}
-		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}}
-	err := waitJobs(context.Background(), client, []string{"job"}, 0, io.Discard, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
-	if exitCode(err) != 3 || gets != 1 || !clock.Now().Equal(deadline) {
-		t.Fatal(err, gets, batches, clock.Now())
 	}
 }

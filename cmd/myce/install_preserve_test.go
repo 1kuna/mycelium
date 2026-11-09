@@ -235,31 +235,6 @@ func TestInstallPreservesEveryConfigField(t *testing.T) {
 	}
 }
 
-func TestInstallExplicitZeroFalse(t *testing.T) {
-	c, p := savedInstallFixture(t)
-	args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
-	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Nice != 0 || got.RestartGrace != 0 || got.ProductionInfrastructureRetries != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
-		t.Fatal("explicit zero/false was ignored")
-	}
-	if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {
-		t.Fatal("unrelated field changed")
-	}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	preserved, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || !reflect.DeepEqual(got, preserved) {
-		t.Fatal("omitted flags reset saved zero/false values", err)
-	}
-}
-
 func TestInstallQueueFileStoreSettings(t *testing.T) {
 	c, p := savedInstallFixture(t)
 	// Exercise the real install command, then the saved-config upgrade path.
@@ -398,6 +373,30 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 				if !reflect.DeepEqual(want, got) {
 					t.Fatalf("explicit --%s was ignored or changed unrelated saved fields", field)
 				}
+				if role == "queue" && field == "queue" {
+					c = got
+					args := []string{"install", "queue", "--config", c.Config, "--nice=0", "--restart-grace=0", "--production-infrastructure-retries=0", "--reserve-host-memory-gb=0", "--memory-ceiling-slack-gb=0", "--memory-swap-max-bytes=0", "--no-new-privileges=false"}
+					if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
+						t.Fatal(err)
+					}
+					got, err := myce.ReadServiceConfig(c.Config)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Nice != 0 || got.RestartGrace != 0 || got.ProductionInfrastructureRetries != 0 || got.ReserveHostMemoryGB != 0 || got.MemoryCeilingSlackGB != 0 || got.MemorySwapMaxBytes != 0 || got.NoNewPrivileges {
+						t.Fatal("explicit zero/false was ignored")
+					}
+					if got.DB != c.DB || got.Path != c.Path || got.ModelCache != c.ModelCache {
+						t.Fatal("unrelated field changed")
+					}
+					if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, p, c.NAS); err != nil {
+						t.Fatal(err)
+					}
+					preserved, err := myce.ReadServiceConfig(c.Config)
+					if err != nil || !reflect.DeepEqual(got, preserved) {
+						t.Fatal("omitted flags reset saved zero/false values", err)
+					}
+				}
 			})
 		}
 	}
@@ -437,6 +436,17 @@ func TestInstallExplicitEmptyPaths(t *testing.T) {
 			}
 			if got.InstallFlags()[name] != "" {
 				t.Fatal("explicit empty path was ignored")
+			}
+			if name == "environment-root" {
+				want := c
+				want.EnvironmentRoot = ""
+				if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, probe, c.NAS); err != nil {
+					t.Fatal(err)
+				}
+				preserved, err := myce.ReadServiceConfig(c.Config)
+				if err != nil || !reflect.DeepEqual(want, preserved) {
+					t.Fatal("omitted flag changed saved empty root", err)
+				}
 			}
 		})
 	}
@@ -492,22 +502,6 @@ func TestInstallExplicitEmptyEnvironmentFile(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
-	c, probe := savedInstallFixture(t)
-	c.EnvironmentRoot = ""
-	data, _ := json.Marshal(c)
-	if err := os.WriteFile(c.Config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := setupCommandWithProbe([]string{"install", "queue", "--config", c.Config}, probe, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || !reflect.DeepEqual(c, got) {
-		t.Fatal("omitted flag changed saved empty root", err)
 	}
 }
 

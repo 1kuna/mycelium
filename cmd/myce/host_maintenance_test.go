@@ -120,6 +120,19 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	if err = hostMaintenanceCommand(context.Background(), []string{"status", "unknown", "--queue", server.URL}, &out); err == nil || !strings.Contains(out.String(), `"healthy":false`) {
 		t.Fatal("unknown worker health passed", out.String(), err)
 	}
+	m := maintenanceCLIWorker("machine")
+	m.Devices, m.MemoryError, m.InventoryReason = []myce.MachineDevice{}, "device_probe_unavailable", "device_probe_unavailable"
+	if _, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := hostMaintenanceCommand(context.Background(), []string{"disable", "host", "--stop", "--wait", "--timeout", "100ms", "--queue", server.URL}, &out); err != nil {
+		t.Fatalf("zero-custody disable wait failed: %v %s", err, out.String())
+	}
+	status = myce.HostMaintenanceStatus{}
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || !status.Quiescent || status.Healthy || status.Policy.Mode != "disabled" || status.Policy.StopAt == nil {
+		t.Fatalf("unexpected status: %+v %v", status, err)
+	}
 	server.Close()
 	if _, err = waitHostMaintenance(context.Background(), client, "host", time.Second, clock, func(context.Context, time.Duration) error { t.Fatal("queue outage was ignored"); return nil }); err == nil {
 		t.Fatal("queue outage passed wait")

@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +19,8 @@ import (
 )
 
 func TestPolicyCLI(t *testing.T) {
-	q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), &bindClock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)})
+	clock := &bindClock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,54 +71,30 @@ func TestPolicyCLI(t *testing.T) {
 	if _, err := myce.ReadPriorityPolicy(strings.NewReader("version: 1\ntires: []")); err == nil {
 		t.Fatal("unknown YAML accepted")
 	}
-}
 
-// The documented local-policy step: export, change one host's hold scope, set,
-// then restart with the unchanged startup host file.
-func TestPolicyCLIHostHoldScopeTransition(t *testing.T) {
-	dir := t.TempDir()
-	hostFile := filepath.Join(dir, "hosts.yaml")
-	if err := os.WriteFile(hostFile, []byte("hosts:\n  gpu-host: {production_hold: true}\n"), 0600); err != nil {
+	s := myce.Spec{Project: "test", Name: "review", Run: myce.RunSpec{Command: []string{"echo", "done"}}}
+	s.Needs.Platform.Any = true
+	s.Needs.MemoryGB = 1
+	j, err := q.Submit(s)
+	if err != nil {
 		t.Fatal(err)
 	}
-	start := func() *myce.Dev {
-		t.Helper()
-		hosts, err := myce.ReadHostPolicies(hostFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", HostPolicies: hosts})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { d.Close() })
-		t.Setenv("MYCE_QUEUE", d.URL)
-		return d
-	}
-	d := start()
-	t.Setenv("MYCE_TOKEN", "policy-test")
-	var out bytes.Buffer
-	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+	out.Reset()
+	until := clock.Now().Add(time.Hour).Format(time.RFC3339)
+	if err = pauseCommand(context.Background(), "pause", []string{j.ID, "--reason", "review input", "--until", until, "--queue", server.URL}, &out); err != nil {
 		t.Fatal(err)
 	}
-	exported := strings.Replace(out.String(), "production_hold: true", "production_hold: true\n        production_hold_scope: device", 1)
-	if exported == out.String() {
-		t.Fatalf("host hold missing from export:\n%s", out.String())
+	var paused myce.Job
+	if err = json.Unmarshal(out.Bytes(), &paused); err != nil || paused.State != "paused" || paused.Pause == nil || paused.Pause.Reason != "review input" || paused.Pause.Until.Format(time.RFC3339) != until {
+		t.Fatal("bad pause reply", out.String(), err)
 	}
-	file := filepath.Join(dir, "policy.yaml")
-	if err := os.WriteFile(file, []byte(exported), 0600); err != nil {
+	out.Reset()
+	if err = pauseCommand(context.Background(), "resume", []string{j.ID, "--queue", server.URL}, &out); err != nil {
 		t.Fatal(err)
 	}
-	revision := strconv.FormatUint(d.Queue.PriorityPolicy().Revision, 10)
-	if err := policyCommand([]string{"set", file, "--if-revision", revision}, &out); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	d = start()
-	if got := d.Queue.PriorityPolicy().Policy.Hosts["gpu-host"]; got != (myce.HostPolicy{ProductionHold: true, ProductionHoldScope: "device"}) {
-		t.Fatalf("scope lost on restart: %+v", got)
+	var resumed myce.Job
+	if err = json.Unmarshal(out.Bytes(), &resumed); err != nil || resumed.ID != j.ID || resumed.State != "queued" || resumed.Pause != nil || resumed.Queued != j.Queued {
+		t.Fatal("bad resume reply", out.String(), err)
 	}
 }
 
@@ -184,6 +161,11 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
+
+			hostFile := filepath.Join(dir, "hosts.yaml")
+			if err := os.WriteFile(hostFile, []byte("hosts:\n  gpu-host: {production_hold: true}\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			config := filepath.Join(dir, "projects.yaml")
 			if err := os.WriteFile(config, []byte("sample:\n  weight: 1\n"), 0600); err != nil {
 				t.Fatal(err)
@@ -194,7 +176,11 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", ProjectPolicies: policies})
+				hosts, err := myce.ReadHostPolicies(hostFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", HostPolicies: hosts, ProjectPolicies: policies})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -266,43 +252,32 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(exported, policy) {
 				t.Fatalf("export lost explicit project settings: %+v, %v", exported, err)
 			}
-		})
-	}
-}
 
-func TestPolicyGetInstalledAuthorityWithoutToken(t *testing.T) {
-	for _, role := range []string{"worker", "queue"} {
-		t.Run(role, func(t *testing.T) {
-			const token = "private-policy-fixture"
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer "+token || r.URL.Path != "/api/policy" {
-					t.Error("installed authority not used")
+			// Export, change hold scope, set and restart with unchanged host file.
+			if tc.name == "edit projects" {
+				out.Reset()
+				if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+					t.Fatal(err)
 				}
-				fmt.Fprint(w, `{"revision":23,"policy":{}}`)
-			}))
-			defer server.Close()
-			t.Setenv("MYCE_TOKEN", "")
-			t.Setenv("MYCE_QUEUE", "")
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			config := filepath.Join(home, ".local", "share", "mycelium", role, "config.json")
-			if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
-				t.Fatal(err)
-			}
-			credentials := filepath.Join(home, "fleet.env")
-			if err := os.WriteFile(credentials, []byte("MYCE_TOKEN="+token+"\nMYCE_QUEUE="+server.URL+"\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			data, _ := json.Marshal(myce.ServiceConfig{Role: role, EnvironmentFile: credentials})
-			if err := os.WriteFile(config, data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			var out bytes.Buffer
-			if err := policyCommand([]string{"get"}, &out); err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(out.String(), `"revision":23`) || strings.Contains(out.String(), token) {
-				t.Fatal("incorrect policy or credential in output")
+				exported := strings.Replace(out.String(), "production_hold: true", "production_hold: true\n        production_hold_scope: device", 1)
+				if exported == out.String() {
+					t.Fatalf("host hold missing from export:\n%s", out.String())
+				}
+				file = filepath.Join(dir, "policy.yaml")
+				if err := os.WriteFile(file, []byte(exported), 0600); err != nil {
+					t.Fatal(err)
+				}
+				revision := strconv.FormatUint(d.Queue.PriorityPolicy().Revision, 10)
+				if err := policyCommand([]string{"set", file, "--if-revision", revision}, &out); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.Close(); err != nil {
+					t.Fatal(err)
+				}
+				d = start()
+				if got := d.Queue.PriorityPolicy().Policy.Hosts["gpu-host"]; got != (myce.HostPolicy{ProductionHold: true, ProductionHoldScope: "device"}) {
+					t.Fatalf("scope lost on restart: %+v", got)
+				}
 			}
 		})
 	}

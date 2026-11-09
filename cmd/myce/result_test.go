@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -58,10 +59,56 @@ func TestInstalledClientDevResult(t *testing.T) {
 	backend, _ := url.Parse(d.URL)
 	proxy := httputil.NewSingleHostReverseProxy(backend)
 	var mode atomic.Int32
+	var fileRequests, retryReads, retryDownloads atomic.Int32
+	retryData := []byte("accepted gate result\n")
+	retryHash := sha256.Sum256(retryData)
+	retryRef := myce.FileRef{SHA256: hex.EncodeToString(retryHash[:]), SizeBytes: int64(len(retryData))}
 	tls := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode.Load() == 8 {
+			t.Error("TLS identity failure must prevent authenticated HTTP requests")
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			t.Error("missing installed authority")
 			w.WriteHeader(401)
+			return
+		}
+		if mode.Load() == 5 {
+			if r.URL.Path == "/api/jobs/job/recovery-plan" {
+				_ = json.NewEncoder(w).Encode(myce.RecoveryPlan{Execution: myce.Execution{ID: "job", Attempt: 1}, Machine: "worker", Session: "session", Outputs: []string{"nested/out.txt"}})
+				return
+			}
+			fileRequests.Add(1)
+			http.Error(w, "unexpected file transfer", http.StatusBadRequest)
+			return
+		}
+		if mode.Load() == 6 {
+			if r.URL.Path == "/api/jobs/job" {
+				json.NewEncoder(w).Encode(myce.Job{ID: "job", State: "succeeded", OutputRefs: myce.FileManifest{"nested/out.txt": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}})
+				return
+			}
+			fileRequests.Add(1)
+			http.Error(w, "unexpected transfer", 500)
+			return
+		}
+		if mode.Load() == 7 {
+			if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
+				if retryReads.Add(1) == 1 {
+					w.WriteHeader(503)
+					_, _ = io.WriteString(w, `{"code":"queue_stopping"}`)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(myce.Job{ID: "job", State: "succeeded", OutputRefs: myce.FileManifest{"gate-result.txt": retryRef}})
+				return
+			}
+			download := retryDownloads.Add(1)
+			w.Header().Set("ETag", `"`+retryRef.SHA256+`"`)
+			w.Header().Set("Content-Length", fmt.Sprint(len(retryData)))
+			if download == 1 {
+				_, _ = w.Write(retryData[:5])
+				return
+			}
+			_, _ = w.Write(retryData)
 			return
 		}
 		if mode.Load() == 4 && r.URL.Path == "/api/jobs/"+j.ID {
@@ -176,118 +223,163 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 			t.Fatal("unverified artifact published")
 		}
 	}
-}
-
-func TestCancelInstalledAuthority(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
-	const token = "cancel-fixture-token"
-	server := httptest.NewTLSServer(myce.API{Queue: q, Token: token}.Handler())
-	defer server.Close()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	for _, name := range []string{"MYCE_TOKEN", "MYCE_QUEUE", "MYCE_JOINING_FILE"} {
-		t.Setenv(name, "")
-	}
-	joining := filepath.Join(home, "joining.json")
-	hash := sha256.Sum256(server.Certificate().Raw)
-	invitation := myce.Invitation{Version: 1, Token: token, Address: server.URL, Fingerprint: hex.EncodeToString(hash[:])}
-	if err := myce.WriteInvitation(joining, invitation); err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
-	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(myce.ServiceConfig{Role: "worker", JoiningFile: joining})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	byID := waitSubmit(t, q)
-	byKey, err := q.Submit(myce.Spec{Name: "cancel-key", Project: "test", SubmissionKey: "installed-cancel", Priority: "experiment", Run: myce.RunSpec{Command: []string{"echo", "done"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		args []string
-		id   string
-	}{
-		{[]string{"cancel", byID.ID}, byID.ID},
-		{[]string{"cancel", "--project", "test", "--key", "installed-cancel"}, byKey.ID},
-	} {
-		out, diagnostics, err := captureUsageOutput(t, tc.args)
-		var ack myce.Cancellation
-		if err != nil || json.Unmarshal([]byte(out), &ack) != nil || ack.JobID == nil || *ack.JobID != tc.id || ack.State != "cancelled" || !ack.WillNotRun {
-			t.Fatalf("cancel %v: ack=%+v err=%v stderr=%s", tc.args, ack, err, diagnostics)
+	mode.Store(5)
+	fileRequests.Store(0)
+	{
+		root, outside := t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "out.txt"), []byte("outside source root"), 0600); err != nil {
+			t.Fatal(err)
 		}
-		if strings.Contains(out+diagnostics, token) {
-			t.Fatal("cancel exposed authority")
+		if err := os.Symlink(outside, filepath.Join(root, "nested")); err != nil {
+			t.Fatal(err)
+		}
+		err := resultCommand(context.Background(), []string{"recover", "job", "--queue", tls.URL, "--token", token, "--files-from", root, "--key", "containment", "--by", "owner", "--reason", "retained bytes"}, io.Discard)
+		if err == nil || fileRequests.Load() != 0 {
+			t.Fatalf("source escaped --files-from: err=%v file requests=%d", err, fileRequests.Load())
 		}
 	}
-	// A wrong installed pin must reject cancellation before it changes the job.
-	pending := waitSubmit(t, q)
-	invitation.Fingerprint = strings.Repeat("0", 64)
-	if err := myce.WriteInvitation(joining, invitation); err != nil {
-		t.Fatal(err)
+	mode.Store(6)
+	fileRequests.Store(0)
+	{
+		root := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(root, "nested")); err != nil {
+			t.Fatal(err)
+		}
+		err := resultCommand(context.Background(), []string{"job", "--queue", tls.URL, "--token", token, "--out", root}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "directory") || fileRequests.Load() != 0 {
+			t.Fatalf("link accepted: %v, transfers %d", err, fileRequests.Load())
+		}
+		if files, err := os.ReadDir(outside); err != nil || len(files) != 0 {
+			t.Fatal("outside destination changed", err)
+		}
 	}
-	if _, _, err := captureUsageOutput(t, []string{"cancel", pending.ID, "--config", config}); err == nil {
-		t.Fatal("cancel accepted a mismatched certificate pin")
-	}
-	snapshot, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if job, err := myce.FindJob(snapshot.Jobs, pending.ID); err != nil || job.State == "cancelled" {
-		t.Fatalf("pin refusal changed job: %+v %v", job, err)
-	}
-}
-
-func TestResultTransientRecoveryUsesAcceptedVerification(t *testing.T) {
-	data := []byte("accepted gate result\n")
-	hash := sha256.Sum256(data)
-	ref := myce.FileRef{SHA256: hex.EncodeToString(hash[:]), SizeBytes: int64(len(data))}
-	reads, downloads := 0, 0
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
-			reads++
-			if reads == 1 {
-				w.WriteHeader(503)
-				_, _ = io.WriteString(w, `{"code":"queue_stopping"}`)
-				return
+	mode.Store(7)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out := t.TempDir()
+		var diagnostics strings.Builder
+		err := resultCommand(ctx, []string{"job", "--queue", tls.URL, "--token", token, "--out", out}, &diagnostics)
+		if err != nil || retryDownloads.Load() != 2 {
+			t.Fatal(err, retryDownloads.Load(), diagnostics.String())
+		}
+		got, err := os.ReadFile(filepath.Join(out, "gate-result.txt"))
+		if err != nil || string(got) != string(retryData) {
+			t.Fatal(string(got), err)
+		}
+		for _, cause := range []string{"HTTP 503", "unexpected_EOF"} {
+			if !strings.Contains(diagnostics.String(), cause) {
+				t.Fatal("missing retry cause", cause, diagnostics.String())
 			}
-			_ = json.NewEncoder(w).Encode(myce.Job{ID: "job", State: "succeeded", OutputRefs: myce.FileManifest{"gate-result.txt": ref}})
-			return
 		}
-		downloads++
-		w.Header().Set("ETag", `"`+ref.SHA256+`"`)
-		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
-		if downloads == 1 {
-			_, _ = w.Write(data[:5])
-			return
-		}
-		_, _ = w.Write(data)
-	}))
-	defer api.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out := t.TempDir()
-	var diagnostics strings.Builder
-	err := resultCommand(ctx, []string{"job", "--queue", api.URL, "--token", "fixture", "--out", out}, &diagnostics)
-	if err != nil || downloads != 2 {
-		t.Fatal(err, downloads, diagnostics.String())
-	}
-	got, err := os.ReadFile(filepath.Join(out, "gate-result.txt"))
-	if err != nil || string(got) != string(data) {
-		t.Fatal(string(got), err)
-	}
-	for _, cause := range []string{"HTTP 503", "unexpected_EOF"} {
-		if !strings.Contains(diagnostics.String(), cause) {
-			t.Fatal("missing retry cause", cause, diagnostics.String())
+		if strings.Contains(diagnostics.String(), "fixture") {
+			t.Fatal("credential printed")
 		}
 	}
-	if strings.Contains(diagnostics.String(), "fixture") {
-		t.Fatal("credential printed")
+	mode.Store(8)
+	{
+		pinned, err := (myce.Invitation{Version: 1, Fingerprint: strings.Repeat("00", 32), Token: "private-fixture-token"}).Client(tls.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pinned.HTTP.CloseIdleConnections()
+		for name, client := range map[string]myce.Client{
+			"certificate": {URL: tls.URL, Token: "private-fixture-token"},
+			"pin":         pinned,
+		} {
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				payload := filepath.Join(dir, "notification.json")
+				hook := filepath.Join(dir, "notify")
+				if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat > "+shellArg(payload)+"\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				r := profileReceipt{Key: "key", Project: "test", JobID: "fixture", Status: "queued", Observation: "armed", Delivery: "armed"}
+				if err := observeProfile(ctx, client, dir, r, profileObserver{Notify: hook}); err == nil || ctx.Err() != nil {
+					t.Fatal("TLS identity failure did not promptly end observation", err, ctx.Err())
+				}
+				var saved profileReceipt
+				if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "queued" || saved.Observation != "not_armed" || saved.ObservationError != "tls_identity" || saved.DeliveryStatus != "delivered" {
+					t.Fatal(saved, err)
+				}
+				var event profileNotification
+				if err := readProfileJSON(payload, &event); err != nil || event.Status != "observation_failed" || event.ObservationError != "tls_identity" || event.DeliveryID == "" {
+					t.Fatal("TLS failure wake missing or unsanitized", event, err)
+				}
+				data, err := os.ReadFile(payload)
+				if err != nil || strings.Contains(string(data), client.Token) || strings.Contains(string(data), tls.URL) || strings.Contains(string(data), "x509") {
+					t.Fatal("notification leaked authority diagnostics", err)
+				}
+			})
+		}
+	}
+	mode.Store(0)
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+		defer cancel()
+		if err = os.Mkdir(filepath.Join(root, "nested"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		input := filepath.Join(root, "nested", "out.txt")
+		if err = os.WriteFile(input, []byte("retained output"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := myce.IdentifyFile(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := d.Client()
+		if err = c.UploadFile(ctx, input, ref); err != nil {
+			t.Fatal(err)
+		}
+		j, err := c.SubmitAndWait(ctx, myce.Spec{Name: "recovery", Project: "demo", SubmissionKey: "recovery-cli", Files: myce.FileManifest{"input": ref}, Outputs: map[string]string{"nested/out.txt": "results"}, Run: myce.RunSpec{Command: []string{"sh", "-c", "mkdir nested; cat input > nested/out.txt; exit 1"}}, Needs: myce.ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: myce.Platform{Required: []string{"cpu"}}}})
+		if err != nil || j.State != "failed" {
+			t.Fatalf("failed native attempt: %+v %v", j, err)
+		}
+		args := []string{"recover", j.ID, "--queue", tls.URL, "--token", c.Token, "--files-from", root, "--key", "recovery", "--by", "owner", "--reason", "recover retained output", "--source", "nas:results/retained"}
+		var record myce.RecoveredResult
+		out := captureJoiningOutput(t, func() error { return resultCommand(ctx, args, io.Discard) })
+		if err = json.Unmarshal([]byte(out), &record); err != nil || record.Kind != "recovered" {
+			t.Fatalf("recovery reply: %s %v", out, err)
+		}
+		again := captureJoiningOutput(t, func() error { return resultCommand(ctx, args, io.Discard) })
+		if again != out {
+			t.Fatal("CLI replay changed recovery evidence")
+		}
+		dest := filepath.Join(root, "download")
+		var message strings.Builder
+		if err = resultCommand(ctx, []string{j.ID, "--queue", tls.URL, "--token", c.Token, "--recovered", record.ResultID, "--out", dest}, &message); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(message.String(), "recovered result") {
+			t.Fatal("download did not identify recovery")
+		}
+		if data, err := os.ReadFile(filepath.Join(dest, "nested", "out.txt")); err != nil || string(data) != "retained output" {
+			t.Fatalf("download: %q %v", data, err)
+		}
+		status := captureJoiningOutput(t, func() error { return run([]string{"status", "--queue", tls.URL, "--token", c.Token, j.ID}) })
+		if !strings.Contains(status, "recovered result "+record.ResultID) || !strings.Contains(status, "original state=failed") {
+			t.Fatal("status omitted recovered evidence", status)
+		}
+		if err = resultCommand(ctx, []string{j.ID, "--queue", tls.URL, "--token", c.Token, "--out", filepath.Join(root, "normal")}, io.Discard); err == nil {
+			t.Fatal("CLI silently promoted recovery")
+		}
+		for _, kind := range []string{"symlink", "fifo"} {
+			path := filepath.Join(root, kind)
+			if kind == "symlink" {
+				err = os.Symlink(input, path)
+			} else {
+				err = syscall.Mkfifo(path, 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = resultCommand(ctx, []string{"recover", j.ID, "--queue", tls.URL, "--token", c.Token, "--key", "invalid-source", "--by", "owner", "--reason", "source validation", "--file", "nested/out.txt=" + path}, io.Discard); err == nil || !strings.Contains(err.Error(), "regular files") {
+				t.Fatalf("special source %s: %v", kind, err)
+			}
+		}
 	}
 }

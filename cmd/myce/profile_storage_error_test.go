@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,11 +48,12 @@ func TestProfileStorageFailureCause(t *testing.T) {
 					}
 					p.Adapter = adapter
 					const secret = "fixture-secret-never-print"
-					var reached atomic.Bool
+					var reached, preflightDone atomic.Bool
 					release := make(chan struct{})
 					var server *httptest.Server
 					server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if operation == "upload" && r.URL.Path == "/api/files/preflight" {
+							preflightDone.Store(true)
 							w.WriteHeader(200)
 							return
 						}
@@ -103,9 +105,23 @@ func TestProfileStorageFailureCause(t *testing.T) {
 						}
 					}
 					ctx, cancel := context.WithCancel(t.Context())
-					if failure == "timeout" {
+					if failure == "timeout" && operation == "preflight" {
 						cancel()
 						ctx, cancel = context.WithTimeout(t.Context(), 150*time.Millisecond)
+					}
+
+					if failure == "timeout" && operation == "upload" {
+						cancel()
+						ctx, cancel = context.WithTimeout(t.Context(), devTestTimeout)
+						// The upload phase begins with an input-claim request. Staging
+						// and successful preflight must not spend its 150ms budget.
+						ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
+							if preflightDone.Load() {
+								if err := info.Conn.SetDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+									t.Error(err)
+								}
+							}
+						}})
 					}
 					defer cancel()
 					want := map[string]string{"503": "HTTP 503 code=request_failed", "429": "HTTP 429 code=request_failed", "401": "HTTP 401 code=request_failed", "timeout": "timeout", "refused": "ECONNREFUSED", "reset": "ECONNRESET"}[failure]
@@ -134,7 +150,7 @@ func TestProfileStorageFailureCause(t *testing.T) {
 					if exitCode(err) != 69 {
 						t.Fatalf("exit=%d err=%v", exitCode(err), err)
 					}
-					transient := failure != "401" && failure != "timeout"
+					transient := failure != "401" && (failure != "timeout" || operation == "upload")
 					if transient && reports == 0 || !transient && reports != 0 {
 						t.Fatalf("transient=%v, retry reports=%d", transient, reports)
 					}
