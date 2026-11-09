@@ -75,6 +75,10 @@ func TestDevCommandQuickstart(t *testing.T) {
 	}
 	env := append(os.Environ(), "GOMAXPROCS=2")
 	run(origin, env, "git", "init", "-q")
+	// The local clone copies loose objects: commit-triggered background repack
+	// must not remove them while this immutable fixture origin is being cloned.
+	run(origin, env, "git", "config", "maintenance.auto", "false")
+	run(origin, env, "git", "config", "gc.auto", "0")
 	run(origin, env, "git", "add", ".")
 	run(origin, env, "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
 	env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+origin+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/1kuna/mycelium.git",
