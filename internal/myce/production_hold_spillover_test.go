@@ -20,9 +20,11 @@ func TestProductionHoldParitySpillover(t *testing.T) {
 				t.Fatal(err)
 			}
 			policy := q.PriorityPolicy()
-			approved := []string{"other-host"}
+			// The initial host must also be approved now that the work list
+			// bounds all production placement, not just occupancy spillover.
+			approved := []string{"hold-host", "other-host"}
 			if strings.HasPrefix(mode, "unapproved") {
-				approved = nil
+				approved = []string{"hold-host"}
 			}
 			work := "kind:sample"
 			if mode == "other work approval" {

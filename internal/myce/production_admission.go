@@ -88,7 +88,19 @@ func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
 	}
 	soonest, id := setup, ""
 	for _, demand := range q.liveJobs() {
-		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 || !q.jobAllowsMachine(demand, m.ID) || !q.reservationAllows(demand, m) || demand.ProductionHost != "" && demand.ProductionHost != host || !fitsWithoutHostMemory(demand, m, m.TotalMemoryGB) {
+		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 || !q.jobAllowsMachine(demand, m.ID) || !q.reservationAllows(demand, m) || demand.ProductionHost != "" && demand.ProductionHost != host {
+			continue
+		}
+		// Forecast only a qualified recipe that can actually run on this host.
+		// Parity-held demand must not withhold another project's preparation.
+		eligible := false
+		for _, candidate := range extensionJobs(demand, m, true) {
+			if q.variantParityReason(candidate, m) == "" && fitsResources(candidate, m, m.TotalMemoryGB) {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
 			continue
 		}
 		// A fan-out parent with every piece launched has no new local demand.

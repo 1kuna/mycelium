@@ -856,7 +856,10 @@ work that holds the card, memory or preparation it needs. It starts after
 those exact attempts confirm release; elapsed grace still proves nothing.
 Device scope emits no `production_hold` status entry, binds no new
 production job to the host, and does not pause model copies. A queued
-production job that a host-scope hold already bound keeps that host.
+production job that a host-scope hold already bound keeps that host while
+the current work's production parity policy allows it. A binding excluded
+by an explicit parity list is cleared and placed again; running execution
+and release custody remain with the current attempt.
 
 The startup file only seeds host policy. Change a live host's scope with
 `myce policy` ([live policy](operations.md#change-live-project-policy)).
