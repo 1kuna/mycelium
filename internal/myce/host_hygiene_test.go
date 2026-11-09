@@ -145,8 +145,10 @@ func TestHostHygieneZeroPressureBaseline(t *testing.T) {
 			for range hostHealthConfirmation {
 				sample(HostHealthReading{Load: 2, Pressure: 6, SwapBytes: swap, WakeSeconds: idle.WakeSeconds})
 			}
-			if m.health.DrainReason != "host_memory_pressure" {
-				t.Fatal("pressure outlier against learned workload reference did not drain", m.health.DrainReason)
+			// #1110 establishes that a positive learned reference is no more
+			// evidence of harm than a zero one: PSI alone must stay eligible.
+			if m.health.DrainReason != "" {
+				t.Fatal("uncorroborated pressure outlier drained", m.health.DrainReason)
 			}
 		})
 	}

@@ -10,6 +10,11 @@ func acceptHostHygiene(m *Machine) {
 	if m.HostHealth == nil {
 		return
 	}
+	// The incoming report may still be referenced by its caller or a read
+	// snapshot. Only the queue's copy receives the effective classification.
+	h := *m.HostHealth
+	m.HostHealth = &h
+	h.PressureEvaluation = nil
 	if !validHostDrainReason(m.HostHealth.DrainReason) {
 		m.HostHealth.DrainReason = ""
 	}
@@ -19,6 +24,7 @@ func acceptHostHygiene(m *Machine) {
 	if len(m.HostHealth.Baseline) > hostHealthHistorySize {
 		m.HostHealth.Baseline = m.HostHealth.Baseline[len(m.HostHealth.Baseline)-hostHealthHistorySize:]
 	}
+	evaluateHostPressure(m)
 }
 
 func (q *Queue) detectHostHygiene() {

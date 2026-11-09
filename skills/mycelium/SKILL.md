@@ -584,10 +584,18 @@ thread wake. Older releases omit configuration; do not infer a cause from false.
 Machine status `host_health` explains automatic admission drains with typed
 causes, persisted recent samples and the host's own healthy baseline. Mycelium
 resumes after measured recovery; an operator drain remains independent. Running
-attempts retain custody. From the worker release with the zero-pressure-baseline
-correction, an all-zero idle PSI reference learns ordinary workload variation
-while swap/local-wake signals remain within their learned bands; corroborated
-pressure still drains the host. From the next release, `mount_probe_slow` is advisory:
+attempts retain custody. From the queue release containing #1110, Linux PSI above its learned band
+alone no longer blocks admission, production included. The queue re-evaluates
+older workers' memory-pressure drains: three distinct healthy swap/wake samples
+clear the effective drain under sustained ordinary work without a worker
+restart. Corroborated swap-growth or local wake-latency deterioration still
+protects the host; stale/unknown evidence and operator drains still bind.
+Read `host_health.pressure_evaluation` for `pressure_limit`, `baseline_samples`,
+`corroboration`, `recovery_samples` and the original `reported_drain_reason`;
+`host_health.drain_reason` is the effective queue admission reason. Fewer than
+eight baseline samples leaves the limit uncalibrated and retains the reported
+drain. A later worker upgrade also prevents the false local PSI latch.
+From the next release, `mount_probe_slow` is advisory:
 successful or progressing slow metadata operations preserve admission, with
 measured evidence in `host_mount_degraded` alerts. Failed operations and
 `mount_probe_stalled` still withhold dependent work; the latter uses the unchanged
