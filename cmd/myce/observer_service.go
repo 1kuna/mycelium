@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"html"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -22,11 +24,14 @@ import (
 // An allowlist also excludes future CI tracking variables and unrelated secrets.
 // Notifiers retain their separately saved caller environment/absolute executable.
 func observerEnvironment() []string {
-	env := []string{"PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
-	for _, key := range []string{"HOME", "USER", "LOGNAME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR"} {
+	var env []string
+	for _, key := range []string{"PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "HOME", "USER", "LOGNAME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR"} {
 		if value, ok := os.LookupEnv(key); ok {
 			env = append(env, key+"="+value)
 		}
+	}
+	if _, ok := os.LookupEnv("PATH"); !ok {
+		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	}
 	// These are explicit internal custody contracts, never job identity. Preserve
 	// them across upgrade handoff; a managed attempt must not escape cleanup.
@@ -124,15 +129,37 @@ func observerServiceCommand(args []string) error {
 		if err := os.MkdirAll(root, 0700); err != nil {
 			return err
 		}
-		lock, err := supervisedObserverLock(ctx, filepath.Join(root, "observer.lock"))
-		if err != nil {
-			return err
+		log.SetOutput(&observerLogWriter{root: root})
+		err := runSupervisedObserver(ctx, root)
+		if err != nil && ctx.Err() == nil {
+			// Never overwrite a live fallback owner's status from a contender.
+			// A safe bounded event also survives systemd's start-limit suppression.
+			_ = (&observerLogWriter{root: root}).event(struct {
+				At    time.Time `json:"at"`
+				Event string    `json:"event"`
+			}{time.Now(), "supervisor_start_failed"})
 		}
-		defer lock.Close()
-		return serveSharedProfiles(ctx, root, lock, nil)
+		return err
 	default:
 		return errors.New("usage: myce service observer install|run")
 	}
+}
+
+func runSupervisedObserver(ctx context.Context, root string) error {
+	lock, err := supervisedObserverLock(ctx, filepath.Join(root, "observer.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	// Never wait for lifetime ownership while holding startup.lock: idle exit
+	// needs startup.lock to release that ownership. Once acquired, serialize
+	// socket replacement with the old owner's complete identity-check/unlink.
+	startup, err := sharedProfileLock(ctx, filepath.Join(root, "startup.lock"))
+	if err != nil {
+		return err
+	}
+	defer startup.Close()
+	return serveSharedProfiles(ctx, root, lock, startup.Close)
 }
 
 // Wait in the kernel for an existing fallback/handoff owner. Its death releases
@@ -180,7 +207,11 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		for _, arg := range append(append([]string{"/usr/bin/env", "-i"}, env...), executable, "service", "observer", "run", "--root", root) {
 			args += "<string>" + html.EscapeString(arg) + "</string>"
 		}
-		definition = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>" + observerServiceLabel + "</string><key>ProgramArguments</key><array>" + args + "</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>AbandonProcessGroup</key><true/><key>WorkingDirectory</key><string>/</string></dict></plist>\n"
+		// Retain native crash-spawn admission (MY-34): protects the shared user
+		// manager from broken-start storms, at the cost of delayed/withheld restart.
+		// In-process failures also emit a bounded safe event; pre-exec failures
+		// go to the manager log below (systemd uses its native journal).
+		definition = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>" + observerServiceLabel + "</string><key>ProgramArguments</key><array>" + args + "</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>AbandonProcessGroup</key><true/><key>WorkingDirectory</key><string>/</string><key>StandardOutPath</key><string>" + html.EscapeString(filepath.Join(root, "observer-supervisor.log")) + "</string><key>StandardErrorPath</key><string>" + html.EscapeString(filepath.Join(root, "observer-supervisor.log")) + "</string></dict></plist>\n"
 	case "linux":
 		if err := command(ctx, "systemctl", "--user", "show-environment"); err != nil {
 			return errors.New("observer_supervision_unavailable: systemd user manager unavailable; keyed commands retain on-demand recovery")
@@ -196,9 +227,12 @@ func installObserverService(ctx context.Context, platform, home, executable, roo
 		}
 		// ':' disables systemd's dollar expansion; argv is literal, not a shell.
 		// KillMode=process/AbandonProcessGroup preserve cooperative lock handoff.
-		definition = "[Unit]\nDescription=Mycelium completion observer\n\n[Service]\nExecStart=:" + strings.Join(argv, " ") + "\nWorkingDirectory=/\nRestart=always\nKillMode=process\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		definition = "[Unit]\nDescription=Mycelium completion observer\n\n[Service]\nExecStart=:" + strings.Join(argv, " ") + "\nWorkingDirectory=/\nRestart=always\nKillMode=process\nStandardOutput=journal\nStandardError=journal\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	default:
 		return errors.New("observer_supervision_unavailable: supported managers are launchd and systemd user")
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err

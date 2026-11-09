@@ -136,13 +136,13 @@ func TestObserverServiceInstall(t *testing.T) {
 			}
 			text := string(data)
 			if platform == "darwin" {
-				for _, part := range []string{"<key>KeepAlive</key><true/>", "<key>AbandonProcessGroup</key><true/>", "<string>/usr/bin/env</string><string>-i</string>", html.EscapeString(binary), "bootstrap gui/"} {
+				for _, part := range []string{"<key>KeepAlive</key><true/>", "<key>AbandonProcessGroup</key><true/>", "<key>StandardErrorPath</key>", "<string>/usr/bin/env</string><string>-i</string>", html.EscapeString(binary), "bootstrap gui/"} {
 					if !strings.Contains(text+strings.Join(calls, "\n"), part) {
 						t.Fatalf("missing service behavior %s", part)
 					}
 				}
 			} else {
-				for _, part := range []string{"Restart=always", "KillMode=process", "ExecStart=:\"/usr/bin/env\" \"-i\"", "$literal%%", "enable --now myce-observer.service"} {
+				for _, part := range []string{"Restart=always", "KillMode=process", "StandardError=journal", "ExecStart=:\"/usr/bin/env\" \"-i\"", "$literal%%", "enable --now myce-observer.service"} {
 					if !strings.Contains(text+strings.Join(calls, "\n"), part) {
 						t.Fatalf("missing service behavior %s", part)
 					}
@@ -321,5 +321,86 @@ func TestObserverServiceWaitsForExistingOwner(t *testing.T) {
 		t.Fatal(err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("supervisor did not adopt a released lifetime lock")
+	}
+}
+
+func TestObserverLegacyBindingKeepsPathAndLocale(t *testing.T) {
+	binary := devTestBinary(t)
+	root := t.TempDir()
+	tools := filepath.Join(root, "bin")
+	if err := os.Mkdir(tools, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "observer-legacy-tool"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+":"+os.Getenv("PATH"))
+	t.Setenv("LANG", "C")
+	t.Setenv("LC_ALL", "C")
+	events := filepath.Join(root, "events")
+	hook := filepath.Join(root, "notify")
+	script := "#!/bin/sh\n[ \"$LANG\" = C ] && [ \"$LC_ALL\" = C ] || exit 1\nobserver-legacy-tool || exit 1\n[ \"${1:-}\" = --check ] && exit 0\ncat > " + shellArg(events) + "\n"
+	if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := profileNotifier(ctx, hook); err != nil {
+		t.Fatal("notifier preflight failed", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/wait" {
+			fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"job","state":"succeeded"}`)
+	}))
+	defer server.Close()
+	dir, entry, lock := sharedWatchFixture(t, root, server.URL, &waitClock{now: time.Now()})
+	var reg sharedProfileRegistration
+	if err := readProfileJSON(entry, &reg); err != nil {
+		t.Fatal(err)
+	}
+	reg.Observer.Notify = hook
+	if err := saveProfileJSON(entry, reg); err != nil { // notify_env deliberately absent, as in durable legacy registrations.
+		t.Fatal(err)
+	}
+	lock.Close()
+	cmd := exec.CommandContext(ctx, binary, "service", "observer", "run", "--root", root)
+	cmd.Env = observerEnvironment()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	var receipt profileReceipt
+	wait(t, ctx, func() bool {
+		return readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt) == nil && receipt.DeliveryStatus != ""
+	})
+	if receipt.DeliveryStatus != "delivered" || receipt.Observation != "not_armed" {
+		t.Fatal("legacy binding lost preflight PATH/locale during adoption")
+	}
+	var notification profileNotification
+	if err := readProfileJSON(events, &notification); err != nil || notification.JobID != "job" {
+		t.Fatal("legacy notification was not received", err)
+	}
+}
+
+func TestObserverServiceBrokenStartupIsLogged(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "observer.lock"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(devTestBinary(t), "service", "observer", "run", "--root", root)
+	cmd.Env = observerEnvironment()
+	if err := cmd.Run(); err == nil {
+		t.Fatal("invalid lifetime-lock configuration started an owner")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "observer.log"))
+	if err != nil || !strings.Contains(string(data), `"event":"supervisor_start_failed"`) {
+		t.Fatal("broken startup has no retained diagnostic", err)
+	}
+	if strings.Contains(string(data), root) {
+		t.Fatal("startup log retained private raw error text")
 	}
 }

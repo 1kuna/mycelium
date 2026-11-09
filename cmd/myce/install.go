@@ -554,6 +554,11 @@ func serviceCommandWithObserver(args []string, ensureObserver func(context.Conte
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
 	}
+	if c.Path != "" {
+		if e = os.Setenv("PATH", c.Path); e != nil {
+			return e
+		}
+	}
 	// Every supported installer and fleet upgrade starts this entry point from
 	// the durable installed slot. Existing hosts acquire supervision on their
 	// first upgraded start, without relying on the old installer/helper version.
@@ -574,11 +579,6 @@ func serviceCommandWithObserver(args []string, ensureObserver func(context.Conte
 		return e
 	}
 	// Keep credentials out of argv. run/worker removes MYCE_TOKEN from jobs/builds.
-	if c.Path != "" {
-		if e = os.Setenv("PATH", c.Path); e != nil {
-			return e
-		}
-	}
 	if e = os.Setenv("MYCE_TOKEN", token); e != nil {
 		return e
 	}
