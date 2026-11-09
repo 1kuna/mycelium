@@ -7,30 +7,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func examplePriorityPolicy() PriorityPolicy {
 	return PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "urgent", Selectors: []string{"verso/production"}}, {Name: "shared", Selectors: []string{"atlas/*", "verso/experiment"}}, {Name: "other", Selectors: []string{"*/*"}}}}
-}
-
-func TestPriorityPolicyDefaultAndSelectors(t *testing.T) {
-	q, _ := fixture(t)
-	for _, tc := range []struct{ project, class, tier, selector string }{{"a", "production", "production", "*/production"}, {"a", "deadline", "deadline", "*/deadline"}, {"a", "experiment", "experiment", "*/*"}, {"a", "preview", "experiment", "*/*"}} {
-		got := q.priorityMatch(Spec{Project: tc.project, Class: tc.class})
-		if got.Tier != tc.tier || got.Selector != tc.selector || got.Revision != 0 {
-			t.Fatalf("default: %+v", got)
-		}
-	}
-	p := examplePriorityPolicy()
-	p.Tiers[0].Selectors = append(p.Tiers[0].Selectors, "v[ae]r?o/prod*")
-	if _, err := q.SetPriorityPolicy(0, p); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ project, class, tier string }{{"verso", "production", "urgent"}, {"varso", "production", "urgent"}, {"atlas", "production", "shared"}, {"verso", "experiment", "shared"}, {"third", "training", "other"}} {
-		if got := q.priorityMatch(Spec{Project: tc.project, Class: tc.class}); got.Tier != tc.tier || got.Revision != 1 {
-			t.Fatalf("%+v: %+v", tc, got)
-		}
-	}
 }
 
 func TestPriorityPolicyCASReopenReplay(t *testing.T) {
@@ -129,113 +110,95 @@ func TestPriorityPolicyPlacement(t *testing.T) {
 	}
 }
 
-func TestPriorityPolicyClassNormalization(t *testing.T) {
-	q, _ := fixture(t)
-	for _, class := range []string{"", "experiment", "production", "preview"} {
-		s := spec("experiment")
-		s.Priority = ""
-		s.Class = class
-		j := submit(t, q, s)
-		want := class
-		if want == "" {
-			want = "experiment"
-		}
-		if j.Spec.Class != want {
-			t.Fatalf("class = %q", j.Spec.Class)
-		}
-		if err := j.Spec.Validate(); err != nil {
-			t.Fatalf("normalized spec invalid: %v", err)
-		}
-	}
-	for _, s := range []Spec{func() Spec { s := spec("production"); s.Class = "experiment"; return s }(), func() Spec { s := spec("experiment"); s.Class = "bad/class"; return s }(), func() Spec { s := spec("experiment"); s.Project = "bad/project"; return s }(), func() Spec { s := spec("deadline"); s.Deadline = nil; return s }()} {
-		if _, err := q.Submit(s); err == nil {
-			t.Fatal("invalid class/legacy input accepted")
-		}
-	}
-}
-
-func TestPriorityPolicyValidation(t *testing.T) {
-	q, _ := fixture(t)
-	for _, change := range []func(*PriorityPolicy){func(p *PriorityPolicy) { p.Version = 2 }, func(p *PriorityPolicy) { p.Tiers[2].Selectors = []string{"third/*"} }, func(p *PriorityPolicy) { p.Tiers[0].Selectors = []string{"bad"} }, func(p *PriorityPolicy) { p.Tiers[0].Selectors = []string{"*/"} }, func(p *PriorityPolicy) { p.Tiers[0].Selectors = []string{"[bad/*"} }, func(p *PriorityPolicy) { p.Tiers[0].Name = "shared" }, func(p *PriorityPolicy) { p.Projects = map[string]ProjectPolicy{"x": {Weight: -1}} }} {
-		p := examplePriorityPolicy()
-		change(&p)
-		if _, err := q.SetPriorityPolicy(0, p); err == nil {
-			t.Fatal("invalid policy accepted")
-		}
-		if q.PriorityPolicy().Revision != 0 {
-			t.Fatal("invalid update mutated revision")
-		}
-	}
-	p := examplePriorityPolicy()
-	p.Tiers[0].Selectors = append(p.Tiers[0].Selectors, "*/*")
-	record, err := q.SetPriorityPolicy(0, p)
-	if err != nil || len(record.Warnings) != 3 {
-		t.Fatalf("shadow warnings: %+v %v", record, err)
-	}
-}
-
-func TestPriorityPolicyReplacesPreemptionRank(t *testing.T) {
-	q, _ := fixture(t)
-	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("production")
-	s.Project = "atlas"
-	a := submit(t, q, s)
-	m := machine("one", "fake")
-	running := check(t, q, m, nil).Job
-	if running == nil || running.ID != a.ID {
-		t.Fatal("atlas not assigned")
-	}
-	s.Project = "verso"
-	p := submit(t, q, s)
-	if job(t, q, a.ID).State != "stopping" {
-		t.Fatal("legacy equal priority overrode tier preemption")
-	}
-	if job(t, q, p.ID).PriorityPolicy.Tier != "urgent" {
-		t.Fatal("wrong tier")
-	}
-	// A live policy update changes current rank without rewriting the immutable class.
-	policy := examplePriorityPolicy()
-	policy.Tiers[0].Selectors = []string{"atlas/*"}
-	if _, err := q.SetPriorityPolicy(1, policy); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, a.ID); got.Spec.Class != "production" || got.PriorityPolicy.Tier != "urgent" || got.PriorityPolicy.Revision != 2 {
-		t.Fatalf("stale projection: %+v", got.PriorityPolicy)
-	}
-}
-
 func TestPriorityPolicyAPI(t *testing.T) {
-	q, _ := fixture(t)
-	handler := API{Queue: q, Token: "test-owner"}.Handler()
-	request := func(method, body, token string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(method, "/api/policy", strings.NewReader(body))
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		handler := API{Queue: q, Token: "test-owner"}.Handler()
+		request := func(method, body, token string) *httptest.ResponseRecorder {
+			r := httptest.NewRequest(method, "/api/policy", strings.NewReader(body))
+			if token != "" {
+				r.Header.Set("Authorization", "Bearer "+token)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			return w
 		}
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		return w
-	}
-	if w := request("GET", "", "wrong"); w.Code != 401 {
-		t.Fatalf("unauthorized: %d", w.Code)
-	}
-	body, _ := json.Marshal(map[string]any{"expected_revision": 0, "policy": examplePriorityPolicy()})
-	if w := request("PUT", string(body), "test-owner"); w.Code != 200 {
-		t.Fatalf("set: %d %s", w.Code, w.Body)
-	}
-	if w := request("PUT", string(body), "test-owner"); w.Code != 409 || !strings.Contains(w.Body.String(), "policy_revision_conflict") {
-		t.Fatalf("CAS: %d %s", w.Code, w.Body)
-	}
-	if w := request("PUT", `{"policy":{"version":1}}`, "test-owner"); w.Code != 400 {
-		t.Fatalf("missing revision: %d", w.Code)
-	}
-	w := request("GET", "", "test-owner")
-	var record PriorityPolicyRecord
-	if err := json.Unmarshal(w.Body.Bytes(), &record); err != nil || record.Revision != 1 {
-		t.Fatalf("get: %+v %v", record, err)
-	}
+		if w := request("GET", "", "wrong"); w.Code != 401 {
+			t.Fatalf("unauthorized: %d", w.Code)
+		}
+		body, _ := json.Marshal(map[string]any{"expected_revision": 0, "policy": examplePriorityPolicy()})
+		if w := request("PUT", string(body), "test-owner"); w.Code != 200 {
+			t.Fatalf("set: %d %s", w.Code, w.Body)
+		}
+		if w := request("PUT", string(body), "test-owner"); w.Code != 409 || !strings.Contains(w.Body.String(), "policy_revision_conflict") {
+			t.Fatalf("CAS: %d %s", w.Code, w.Body)
+		}
+		if w := request("PUT", `{"policy":{"version":1}}`, "test-owner"); w.Code != 400 {
+			t.Fatalf("missing revision: %d", w.Code)
+		}
+		w := request("GET", "", "test-owner")
+		var record PriorityPolicyRecord
+		if err := json.Unmarshal(w.Body.Bytes(), &record); err != nil || record.Revision != 1 {
+			t.Fatalf("get: %+v %v", record, err)
+		}
+
+	})
+
+	t.Run("SchedulingOrder", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		cases := []struct {
+			name          string
+			first, second Spec
+			models, envs  []string
+			wantSecond    bool
+		}{
+			{name: "production before deadline", first: spec("deadline"), second: spec("production"), wantSecond: true},
+			{name: "deadline before experiment", first: spec("experiment"), second: spec("deadline"), wantSecond: true},
+			{name: "production before loaded experiment", first: spec("experiment"), second: spec("production"), models: []string{"loaded"}, wantSecond: true},
+			{name: "loaded model before waiting age", first: spec("experiment"), second: spec("experiment"), models: []string{"loaded"}, wantSecond: true},
+			{name: "ready environment before waiting age", first: spec("experiment"), second: spec("experiment"), envs: []string{"ready"}, wantSecond: true},
+			{name: "earliest deadline", first: spec("deadline"), second: spec("deadline"), wantSecond: true},
+			{name: "longest waiting", first: spec("experiment"), second: spec("experiment")},
+			{name: "readiness before earliest deadline", first: spec("deadline"), second: spec("deadline"), models: []string{"loaded"}, wantSecond: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				q, c := fixture(t)
+				if strings.Contains(tc.name, "loaded experiment") {
+					tc.first.Needs.Model = "loaded"
+				}
+				if strings.Contains(tc.name, "model") || strings.Contains(tc.name, "readiness") {
+					tc.second.Needs.Model = "loaded"
+				}
+				if strings.Contains(tc.name, "environment") {
+					tc.second.Environment.Name = "ready"
+				}
+				if tc.name == "earliest deadline" {
+					d := tc.first.Deadline.Add(-time.Hour)
+					tc.second.Deadline = &d
+				}
+				if strings.Contains(tc.name, "readiness") {
+					d := tc.second.Deadline.Add(time.Hour)
+					tc.second.Deadline = &d
+				}
+				a := submit(t, q, tc.first)
+				c.Advance(time.Second)
+				b := submit(t, q, tc.second)
+				m := machine("one", "fake")
+				m.Models = tc.models
+				m.Environments = tc.envs
+				got := check(t, q, m, nil).Job
+				want := a.ID
+				if tc.wantSecond {
+					want = b.ID
+				}
+				if got == nil || got.ID != want {
+					t.Fatalf("got %+v want %s", got, want)
+				}
+			})
+		}
+
+	})
 }
 
 func TestPriorityPolicyStatus(t *testing.T) {
@@ -384,46 +347,82 @@ func TestPriorityPolicyRejectsSlashProject(t *testing.T) {
 }
 
 func TestPriorityPolicyChangeReclaimsAssignedAttemptBeforeStarted(t *testing.T) {
-	q, _ := fixture(t)
-	policy := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "top", Selectors: []string{"alpha/production"}}, {Name: "rest", Selectors: []string{"*/*"}}}}
-	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("production")
-	s.Project = "alpha"
-	alpha := submit(t, q, s)
-	assigned := check(t, q, machine("one", "fake"), nil).Job
-	if assigned == nil || assigned.ID != alpha.ID || assigned.StartedAt != nil || assigned.PriorityPolicy.Revision != 1 {
-		t.Fatalf("expected unstarted revision-1 assignment: %+v", assigned)
-	}
-	s.Project = "beta"
-	waiting := submit(t, q, s)
-	policy.Tiers[0].Selectors = []string{"beta/production"}
-	if _, err := q.SetPriorityPolicy(1, policy); err != nil {
-		t.Fatal(err)
-	}
-	if q.comparePriority(waiting.Spec, assigned.Spec) >= 0 {
-		t.Fatal("waiting job must now outrank assigned attempt")
-	}
-	if err := q.Started(result(assigned, true)); err != ErrStale {
-		t.Fatalf("stale lower-tier assignment started: %v", err)
-	}
-	started := q.s.Jobs[assigned.ID]
-	if started.State != "stopping" || started.StartedAt != nil || priorityStop(started) == nil || priorityStop(started).Policy.Revision != 2 {
-		t.Fatalf("assigned attempt not reclaimed with current policy: %+v", started)
-	}
-	if got := q.s.Jobs[waiting.ID]; got.State != "queued" {
-		t.Fatalf("higher-tier job should still wait: %+v", got)
-	}
-	// The demand keeps the host it selected for preemption (#662), even if
-	// another worker joins before exact release. Future placement on that
-	// selected host must still use the new policy.
-	if next := check(t, q, machine("two", "fake"), nil).Job; next != nil && next.ID == waiting.ID {
-		t.Fatal("demand escaped its selected preemption host")
-	}
-	finishInterrupted(t, q, assigned)
-	next := check(t, q, machine("one", "fake"), nil).Job
-	if next == nil || next.ID != waiting.ID || next.PriorityPolicy.Revision != 2 {
-		t.Fatalf("future placement did not use new policy: %+v", next)
-	}
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		policy := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "top", Selectors: []string{"alpha/production"}}, {Name: "rest", Selectors: []string{"*/*"}}}}
+		if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+			t.Fatal(err)
+		}
+		s := spec("production")
+		s.Project = "alpha"
+		alpha := submit(t, q, s)
+		assigned := check(t, q, machine("one", "fake"), nil).Job
+		if assigned == nil || assigned.ID != alpha.ID || assigned.StartedAt != nil || assigned.PriorityPolicy.Revision != 1 {
+			t.Fatalf("expected unstarted revision-1 assignment: %+v", assigned)
+		}
+		s.Project = "beta"
+		waiting := submit(t, q, s)
+		policy.Tiers[0].Selectors = []string{"beta/production"}
+		if _, err := q.SetPriorityPolicy(1, policy); err != nil {
+			t.Fatal(err)
+		}
+		if q.comparePriority(waiting.Spec, assigned.Spec) >= 0 {
+			t.Fatal("waiting job must now outrank assigned attempt")
+		}
+		if err := q.Started(result(assigned, true)); err != ErrStale {
+			t.Fatalf("stale lower-tier assignment started: %v", err)
+		}
+		started := q.s.Jobs[assigned.ID]
+		if started.State != "stopping" || started.StartedAt != nil || priorityStop(started) == nil || priorityStop(started).Policy.Revision != 2 {
+			t.Fatalf("assigned attempt not reclaimed with current policy: %+v", started)
+		}
+		if got := q.s.Jobs[waiting.ID]; got.State != "queued" {
+			t.Fatalf("higher-tier job should still wait: %+v", got)
+		}
+		// The demand keeps the host it selected for preemption (#662), even if
+		// another worker joins before exact release. Future placement on that
+		// selected host must still use the new policy.
+		if next := check(t, q, machine("two", "fake"), nil).Job; next != nil && next.ID == waiting.ID {
+			t.Fatal("demand escaped its selected preemption host")
+		}
+		finishInterrupted(t, q, assigned)
+		next := check(t, q, machine("one", "fake"), nil).Job
+		if next == nil || next.ID != waiting.ID || next.PriorityPolicy.Revision != 2 {
+			t.Fatalf("future placement did not use new policy: %+v", next)
+		}
+
+	})
+
+	t.Run("PriorityPolicyReplacesPreemptionRank", func(t *testing.T) {
+		q, _ := fixture(t)
+		if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
+			t.Fatal(err)
+		}
+		s := spec("production")
+		s.Project = "atlas"
+		a := submit(t, q, s)
+		m := machine("one", "fake")
+		running := check(t, q, m, nil).Job
+		if running == nil || running.ID != a.ID {
+			t.Fatal("atlas not assigned")
+		}
+		s.Project = "verso"
+		p := submit(t, q, s)
+		if job(t, q, a.ID).State != "stopping" {
+			t.Fatal("legacy equal priority overrode tier preemption")
+		}
+		if job(t, q, p.ID).PriorityPolicy.Tier != "urgent" {
+			t.Fatal("wrong tier")
+		}
+		// A live policy update changes current rank without rewriting the immutable class.
+		policy := examplePriorityPolicy()
+		policy.Tiers[0].Selectors = []string{"atlas/*"}
+		if _, err := q.SetPriorityPolicy(1, policy); err != nil {
+			t.Fatal(err)
+		}
+		if got := job(t, q, a.ID); got.Spec.Class != "production" || got.PriorityPolicy.Tier != "urgent" || got.PriorityPolicy.Revision != 2 {
+			t.Fatalf("stale projection: %+v", got.PriorityPolicy)
+		}
+
+	})
 }

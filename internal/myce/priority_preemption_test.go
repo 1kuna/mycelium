@@ -117,77 +117,106 @@ func preemptionPolicy(t *testing.T, q *Queue) {
 	}
 }
 func TestPriorityPreemptionModelsAndPins(t *testing.T) {
-	for _, kind := range []string{"call", "load", "idle", "pin"} {
-		for _, higher := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/higher=%v", kind, higher), func(t *testing.T) {
-				q, _, m := modelFixture(t)
-				preemptionPolicy(t, q)
-				var c *ModelCall
-				if kind == "pin" {
-					if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-						t.Fatal(err)
+	t.Run("contract", func(t *testing.T) {
+		for _, kind := range []string{"call", "load", "idle", "pin"} {
+			for _, higher := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/higher=%v", kind, higher), func(t *testing.T) {
+					q, _, m := modelFixture(t)
+					preemptionPolicy(t, q)
+					var c *ModelCall
+					if kind == "pin" {
+						if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						c = addModelCall(t, q, "experiment")
 					}
-				} else {
-					c = addModelCall(t, q, "experiment")
-				}
-				if kind != "load" {
-					reportModel(t, q, m, "ready")
-				}
-				if kind == "idle" {
-					if err := q.finishCall(c.ID); err != nil {
-						t.Fatal(err)
+					if kind != "load" {
+						reportModel(t, q, m, "ready")
 					}
-				}
-				s := q.s.ModelSlots[slotKey(m.ID, "test")]
-				demand := spec("experiment")
-				if higher {
-					demand.Project = "urgent"
-				}
-				high := submit(t, q, demand)
-				if higher {
-					if s.PriorityStop == nil || s.PriorityStop.Demand != high.ID || s.PriorityStop.Policy.Revision != 1 {
-						t.Fatal("missing typed engine stop", s)
-					}
-					if (s.State != "unloading" && s.State != "draining") || s.StopAt == nil {
-						t.Fatal("engine not interrupted", s)
-					}
-					if kind == "call" && (c.Error != priorityPreemptionCause || c.PriorityStop == nil || q.callAttemptLive(c)) {
-						t.Fatal("active call not interrupted", c)
-					}
-					if check(t, q, m, nil).Job != nil {
-						t.Fatal("replacement before engine cleanup")
-					}
-					if kind == "call" {
+					if kind == "idle" {
 						if err := q.finishCall(c.ID); err != nil {
 							t.Fatal(err)
 						}
 					}
-					if kind == "pin" && len(q.s.Pins) != 1 {
-						t.Fatal("pin intent lost")
+					s := q.s.ModelSlots[slotKey(m.ID, "test")]
+					demand := spec("experiment")
+					if higher {
+						demand.Project = "urgent"
 					}
-					if kind == "load" && c.Error != "" {
-						t.Fatal("queued load caller lost", c)
+					high := submit(t, q, demand)
+					if higher {
+						if s.PriorityStop == nil || s.PriorityStop.Demand != high.ID || s.PriorityStop.Policy.Revision != 1 {
+							t.Fatal("missing typed engine stop", s)
+						}
+						if (s.State != "unloading" && s.State != "draining") || s.StopAt == nil {
+							t.Fatal("engine not interrupted", s)
+						}
+						if kind == "call" && (c.Error != priorityPreemptionCause || c.PriorityStop == nil || q.callAttemptLive(c)) {
+							t.Fatal("active call not interrupted", c)
+						}
+						if check(t, q, m, nil).Job != nil {
+							t.Fatal("replacement before engine cleanup")
+						}
+						if kind == "call" {
+							if err := q.finishCall(c.ID); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if kind == "pin" && len(q.s.Pins) != 1 {
+							t.Fatal("pin intent lost")
+						}
+						if kind == "load" && c.Error != "" {
+							t.Fatal("queued load caller lost", c)
+						}
+						r := recoveryReport(t, q, m, s, "unloaded")
+						if r.Job == nil || r.Job.ID != high.ID {
+							t.Fatal("no replacement after exact cleanup", r)
+						}
+						finish(t, q, r.Job, true)
+						check(t, q, m, nil)
+						if kind == "pin" && q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+							t.Fatal("pin did not return")
+						}
+					} else {
+						if s.PriorityStop != nil || kind == "call" && c.Error != "" {
+							t.Fatal("same tier preempted")
+						}
+						if kind != "idle" && s.State != "ready" && s.State != "loading" {
+							t.Fatal("same tier interrupted", s)
+						}
 					}
-					r := recoveryReport(t, q, m, s, "unloaded")
-					if r.Job == nil || r.Job.ID != high.ID {
-						t.Fatal("no replacement after exact cleanup", r)
-					}
-					finish(t, q, r.Job, true)
-					check(t, q, m, nil)
-					if kind == "pin" && q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
-						t.Fatal("pin did not return")
-					}
-				} else {
-					if s.PriorityStop != nil || kind == "call" && c.Error != "" {
-						t.Fatal("same tier preempted")
-					}
-					if kind != "idle" && s.State != "ready" && s.State != "loading" {
-						t.Fatal("same tier interrupted", s)
-					}
-				}
-			})
+				})
+			}
 		}
-	}
+
+	})
+
+	t.Run("PriorityPreemptionRetainsEngineCleanup", func(t *testing.T) {
+		q, _, m := modelFixture(t)
+		preemptionPolicy(t, q)
+		addModelCall(t, q, "experiment")
+		slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+		d := spec("experiment")
+		d.Project = "urgent"
+		demand := submit(t, q, d)
+		if slot.State != "unloading" {
+			t.Fatal("load stop not planned", slot)
+		}
+		for i := 0; i < 3; i++ {
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if slot.State != "unloading" {
+				t.Fatal("cleanup rewritten", slot)
+			}
+		}
+		r := recoveryReport(t, q, m, slot, "unloaded")
+		if r.Job == nil || r.Job.ID != demand.ID {
+			t.Fatal("retained cleanup did not release", r)
+		}
+
+	})
 }
 
 func TestPriorityPreemptionEnvironmentBuild(t *testing.T) {
@@ -648,30 +677,5 @@ func TestPriorityPreemptionInheritsSharedBuild(t *testing.T) {
 	l := q.s.PreparationPlans[launch.Attempt]
 	if l.PriorityStop != nil || l.Spec == nil || l.Spec.Project != "urgent" || l.Demand != demand.ID || reply.Job != nil || len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch.Attempt != launch.Attempt {
 		t.Fatal("shared useful build was interrupted", reply, l)
-	}
-}
-
-func TestPriorityPreemptionRetainsEngineCleanup(t *testing.T) {
-	q, _, m := modelFixture(t)
-	preemptionPolicy(t, q)
-	addModelCall(t, q, "experiment")
-	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
-	d := spec("experiment")
-	d.Project = "urgent"
-	demand := submit(t, q, d)
-	if slot.State != "unloading" {
-		t.Fatal("load stop not planned", slot)
-	}
-	for i := 0; i < 3; i++ {
-		if err := q.Tick(); err != nil {
-			t.Fatal(err)
-		}
-		if slot.State != "unloading" {
-			t.Fatal("cleanup rewritten", slot)
-		}
-	}
-	r := recoveryReport(t, q, m, slot, "unloaded")
-	if r.Job == nil || r.Job.ID != demand.ID {
-		t.Fatal("retained cleanup did not release", r)
 	}
 }

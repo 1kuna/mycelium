@@ -61,92 +61,88 @@ func recoveryReceipt(t *testing.T, q *Queue) *AlertRecovery {
 }
 
 func TestAlertRecoveryRecordedRefusalsNeedOwner(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		needs       float64
-		comparisons [2][2]float64
-	}{
-		{"original-868-attempts-5-6", 4, [2][2]float64{{17.106637954711914, 17.005722045898438}, {16.86988639831543, 16.814495086669922}}},
-		{"unbounded-forecast-868-909", 4.125, [2][2]float64{{89.83, 89.68}, {89.83, 89.68}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, _, m, co, j := alertRecoveryFixture(t, tc.needs)
-			for i, comparison := range tc.comparisons {
-				r := refusedRAM(j, comparison[1])
-				r.ExecutionCause.Admission.Subcheck = "live_host_growth"
-				r.ExecutionCause.Admission.Required = comparison[0]
+	t.Run("contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			needs       float64
+			comparisons [2][2]float64
+		}{
+			{"original-868-attempts-5-6", 4, [2][2]float64{{17.106637954711914, 17.005722045898438}, {16.86988639831543, 16.814495086669922}}},
+			{"unbounded-forecast-868-909", 4.125, [2][2]float64{{89.83, 89.68}, {89.83, 89.68}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				q, _, m, co, j := alertRecoveryFixture(t, tc.needs)
+				for i, comparison := range tc.comparisons {
+					r := refusedRAM(j, comparison[1])
+					r.ExecutionCause.Admission.Subcheck = "live_host_growth"
+					r.ExecutionCause.Admission.Required = comparison[0]
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+					if i == 0 {
+						m.HostAvailableMemoryGB++
+						j = assignedJob(machineCheck(t, q, m, co))
+					}
+				}
+				r := recoveryReceipt(t, q)
+				if r.State != "owner_required" || r.Action != "none" || r.Cause != "live_host_growth" || r.Admission == nil || r.Admission.Required != tc.comparisons[1][0] || r.Admission.Available == nil || *r.Admission.Available != tc.comparisons[1][1] || r.Admission.EnvelopeHostGB != tc.needs || !strings.Contains(r.NextStep, "forecast bounds") {
+					t.Fatal("recorded refusal lacks exact evidence and immediate owner finding", r)
+				}
+				if q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB || r.JobID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
+					t.Fatal("finding changed capacity or lost execution identity", r)
+				}
+				stored := q.s.Jobs[j.ID]
+				if stored.Spec.Needs.HostMemoryGB != tc.needs || stored.Losses != 0 || stored.InfrastructureRetries != 0 || !stored.ReleaseConfirmed {
+					t.Fatal("finding changed attempt contract", stored)
+				}
+				payload, err := json.Marshal(alertsOf(q, "infrastructure_loss_streak")[0])
+				if err != nil || !strings.Contains(string(payload), "forecast bounds") || !strings.Contains(string(payload), "live_host_growth") {
+					t.Fatal("existing notifier payload lacks evidence/next step", err)
+				}
+				public, err := q.jobSnapshot(j.ID)
+				if err != nil || !strings.Contains(JobReason(public), "forecast bounds") {
+					t.Fatal("job finding omitted the next step", public, err)
+				}
+			})
+		}
+
+	})
+
+	t.Run("AlertRecoveryHealthyAndUnsupportedHistory", func(t *testing.T) {
+		q, _, m, co, j := alertRecoveryFixture(t, 4)
+		if err := q.Complete(refusedRAM(j, 3)); err != nil {
+			t.Fatal(err)
+		}
+		m.HostAvailableMemoryGB++
+		healthy := assignedJob(machineCheck(t, q, m, co))
+		finish(t, q, healthy, true)
+		if len(alertsOf(q, "infrastructure_loss_streak")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
+			t.Fatal("healthy history triggered a finding or changed capacity")
+		}
+		for _, unsupported := range []bool{false} {
+			t.Run(map[bool]string{false: "direct-ram", true: "command-start"}[unsupported], func(t *testing.T) {
+				q, _, m, co, j := alertRecoveryFixture(t, 4)
+				if err := q.Complete(refusedRAM(j, 3)); err != nil {
+					t.Fatal(err)
+				}
+				// Repeated refusal findings require distinct capacity evidence (#1011).
+				m.HostAvailableMemoryGB++
+				next := assignedJob(machineCheck(t, q, m, co))
+				r := refusedRAM(next, 3)
+				if unsupported {
+					r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "io_error", Predicate: "command_start"}
+				}
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-				if i == 0 {
-					m.HostAvailableMemoryGB++
-					j = assignedJob(machineCheck(t, q, m, co))
+				receipt := recoveryReceipt(t, q)
+				if receipt.State != "owner_required" || receipt.Action != "none" || receipt.NextStep == "" || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
+					t.Fatal("unsupported evidence acted or lacks owner finding", receipt)
 				}
-			}
-			r := recoveryReceipt(t, q)
-			if r.State != "owner_required" || r.Action != "none" || r.Cause != "live_host_growth" || r.Admission == nil || r.Admission.Required != tc.comparisons[1][0] || r.Admission.Available == nil || *r.Admission.Available != tc.comparisons[1][1] || r.Admission.EnvelopeHostGB != tc.needs || !strings.Contains(r.NextStep, "forecast bounds") {
-				t.Fatal("recorded refusal lacks exact evidence and immediate owner finding", r)
-			}
-			if q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB || r.JobID != j.ID || r.Attempt != j.Attempt || r.Session != j.Session {
-				t.Fatal("finding changed capacity or lost execution identity", r)
-			}
-			stored := q.s.Jobs[j.ID]
-			if stored.Spec.Needs.HostMemoryGB != tc.needs || stored.Losses != 0 || stored.InfrastructureRetries != 0 || !stored.ReleaseConfirmed {
-				t.Fatal("finding changed attempt contract", stored)
-			}
-			payload, err := json.Marshal(alertsOf(q, "infrastructure_loss_streak")[0])
-			if err != nil || !strings.Contains(string(payload), "forecast bounds") || !strings.Contains(string(payload), "live_host_growth") {
-				t.Fatal("existing notifier payload lacks evidence/next step", err)
-			}
-			public, err := q.jobSnapshot(j.ID)
-			if err != nil || !strings.Contains(JobReason(public), "forecast bounds") {
-				t.Fatal("job finding omitted the next step", public, err)
-			}
-		})
-	}
-}
+			})
+		}
 
-func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
-	q, _, m, co, j := alertRecoveryFixture(t, 4)
-	if err := q.Complete(refusedRAM(j, 3)); err != nil {
-		t.Fatal(err)
-	}
-	m.HostAvailableMemoryGB++
-	healthy := assignedJob(machineCheck(t, q, m, co))
-	finish(t, q, healthy, true)
-	if len(alertsOf(q, "infrastructure_loss_streak")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
-		t.Fatal("healthy history triggered a finding or changed capacity")
-	}
-	for _, unsupported := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct-ram", true: "command-start"}[unsupported], func(t *testing.T) {
-			q, _, m, co, j := alertRecoveryFixture(t, 4)
-			if err := q.Complete(refusedRAM(j, 3)); err != nil {
-				t.Fatal(err)
-			}
-			// Repeated refusal findings require distinct capacity evidence (#1011).
-			m.HostAvailableMemoryGB++
-			next := assignedJob(machineCheck(t, q, m, co))
-			r := refusedRAM(next, 3)
-			if unsupported {
-				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "io_error", Predicate: "command_start"}
-			}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			receipt := recoveryReceipt(t, q)
-			if receipt.State != "owner_required" || receipt.Action != "none" || receipt.NextStep == "" || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
-				t.Fatal("unsupported evidence acted or lacks owner finding", receipt)
-			}
-			for range 4 {
-				if err := q.update(func() error { return nil }); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if len(alertsOf(q, "infrastructure_loss_streak")) != 1 {
-				t.Fatal("unsupported finding repeated")
-			}
-		})
-	}
+	})
 }
 
 func TestAlertRecoveryFindingConcurrentDeliveryAndRestart(t *testing.T) {

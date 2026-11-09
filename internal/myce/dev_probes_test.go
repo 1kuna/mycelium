@@ -241,68 +241,112 @@ func (c probeConsumer) publish(execution Execution) bool {
 // A process restart keeps durable queue admission disabled. Fresh reports from
 // the restarted worker restore health without a local registry or rest proof.
 func TestDevProbeRebootResume(t *testing.T) {
-	root := newTestStateRoot(t)
-	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "reboot-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	d, err := StartDev(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if d != nil {
+	t.Run("contract", func(t *testing.T) {
+		root := newTestStateRoot(t)
+		c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "reboot-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		d, err := StartDev(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if d != nil {
+				if err := d.Close(); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+		probeWait(t, ctx, func() bool { s, err := d.Queue.HostMaintenanceStatus("dev-host"); return err == nil && s.Healthy })
+		before, err := d.Queue.HostMaintenanceStatus("dev-host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = d.Queue.ChangeHostMaintenance("dev-host", HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err = d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d = nil
+		// Inspect the durable record before any restarted worker can check in.
+		q, err := Open(c.Database, c.Checkpoints, RealClock{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved, err := q.HostMaintenanceStatus("dev-host")
+		closeErr := q.Close()
+		if err != nil || closeErr != nil || saved.Policy.Mode != "disabled" || saved.Healthy || saved.Quiescent {
+			t.Fatal("restart inferred healthy release", saved, err, closeErr)
+		}
+		d, err = StartDev(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probeWait(t, ctx, func() bool {
+			s, err := d.Queue.HostMaintenanceStatus("dev-host")
+			return err == nil && s.Healthy && s.Quiescent
+		})
+		after, err := d.Queue.HostMaintenanceStatus("dev-host")
+		if err != nil || after.Policy.Mode != "disabled" || len(after.Workers) != 1 || !after.Workers[0].Fresh || after.Workers[0].Machine.Session == before.Workers[0].Machine.Session {
+			t.Fatal("fresh session did not restore disabled host", after, err)
+		}
+		s := spec("experiment")
+		s.Resumable = false
+		s.Run.Command = []string{"sh", "-c", "exit 0"}
+		var submitted Job
+		if err = d.Client().Call(ctx, "POST", "/api/jobs", s, &submitted); err != nil {
+			t.Fatal(err)
+		}
+		current := job(t, d.Queue, submitted.ID)
+		if current.Attempt != 0 || current.State != "queued" {
+			t.Fatal("disabled restart admitted work", current)
+		}
+		if _, err = d.Queue.ChangeHostMaintenance("dev-host", HostMaintenanceRequest{Action: "resume"}); err != nil {
+			t.Fatal(err)
+		}
+		probeWait(t, ctx, func() bool { j := job(t, d.Queue, submitted.ID); return j.State == "succeeded" && j.ReleaseConfirmed })
+
+	})
+
+	t.Run("DevClockRestartReset", func(t *testing.T) {
+		root := t.TempDir()
+		config := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}
+		d, err := StartDev(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock, ok := d.Queue.clock.(*devClock)
+		if !ok {
+			t.Fatal("StartDev did not install its private clock")
+		}
+		response := clockRequest(API{Queue: d.Queue, Token: "test"}.Handler(), `{"seconds":3600}`, "test")
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != 200 {
+			t.Fatal(response.Code, response.Body.String())
+		}
+		// Reopen the same SQLite queue at the same queue endpoint.
+		config.Address = strings.TrimPrefix(d.URL, "http://")
+		before := RealClock{}.Now()
+		d, err = StartDev(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
 			if err := d.Close(); err != nil {
 				t.Error(err)
 			}
+		}()
+		restarted, ok := d.Queue.clock.(*devClock)
+		if !ok || restarted == clock {
+			t.Fatal("restart did not install a fresh private clock")
 		}
-	}()
-	probeWait(t, ctx, func() bool { s, err := d.Queue.HostMaintenanceStatus("dev-host"); return err == nil && s.Healthy })
-	before, err := d.Queue.HostMaintenanceStatus("dev-host")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = d.Queue.ChangeHostMaintenance("dev-host", HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err = d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	d = nil
-	// Inspect the durable record before any restarted worker can check in.
-	q, err := Open(c.Database, c.Checkpoints, RealClock{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved, err := q.HostMaintenanceStatus("dev-host")
-	closeErr := q.Close()
-	if err != nil || closeErr != nil || saved.Policy.Mode != "disabled" || saved.Healthy || saved.Quiescent {
-		t.Fatal("restart inferred healthy release", saved, err, closeErr)
-	}
-	d, err = StartDev(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	probeWait(t, ctx, func() bool {
-		s, err := d.Queue.HostMaintenanceStatus("dev-host")
-		return err == nil && s.Healthy && s.Quiescent
+		now := restarted.Now()
+		if now.Before(before) || now.After(RealClock{}.Now()) {
+			t.Fatal("restart retained the dev offset")
+		}
+
 	})
-	after, err := d.Queue.HostMaintenanceStatus("dev-host")
-	if err != nil || after.Policy.Mode != "disabled" || len(after.Workers) != 1 || !after.Workers[0].Fresh || after.Workers[0].Machine.Session == before.Workers[0].Machine.Session {
-		t.Fatal("fresh session did not restore disabled host", after, err)
-	}
-	s := spec("experiment")
-	s.Resumable = false
-	s.Run.Command = []string{"sh", "-c", "exit 0"}
-	var submitted Job
-	if err = d.Client().Call(ctx, "POST", "/api/jobs", s, &submitted); err != nil {
-		t.Fatal(err)
-	}
-	current := job(t, d.Queue, submitted.ID)
-	if current.Attempt != 0 || current.State != "queued" {
-		t.Fatal("disabled restart admitted work", current)
-	}
-	if _, err = d.Queue.ChangeHostMaintenance("dev-host", HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	probeWait(t, ctx, func() bool { j := job(t, d.Queue, submitted.ID); return j.State == "succeeded" && j.ReleaseConfirmed })
 }

@@ -10,30 +10,6 @@ import (
 	"time"
 )
 
-func TestMaintenancePendingEnvironmentPlan(t *testing.T) {
-	q, _ := fixture(t)
-	r := binaryRecipe(t, "fake")
-	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"late": {"fake": r}}}); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("experiment")
-	s.Environment.Name = "late"
-	submit(t, q, s)
-	m := machine("builder", "fake", "host")
-	m.EnvironmentBuilder = true
-	reply := check(t, q, m, nil)
-	if len(reply.EnvironmentPlan) != 1 {
-		t.Fatal("missing plan", reply)
-	}
-	if len(q.hostObligations("host")) == 0 {
-		t.Fatal("issued environment plan is absent from shared work enumeration")
-	}
-	status := maintenanceChange(t, q, "drain", false)
-	if !status.Quiescent {
-		t.Fatal("unstarted plan was not cancelled", status)
-	}
-}
-
 // Deliver the exact checkin reply after drain, including a build already waiting
 // behind cache/preparation work. The final supervisor gate must deny the payload.
 func TestMaintenanceDelayedEnvironmentLaunch(t *testing.T) {

@@ -56,119 +56,194 @@ func TestAttemptProtocolLegacyWorkerNewQueue(t *testing.T) {
 }
 
 func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
-	q, clock := fixture(t)
-	server := httptest.NewServer(API{q, "test"}.Handler())
-	defer server.Close()
-	w := Worker{Clock: clock, Machine: machine("keyed", "fake"), Client: Client{URL: server.URL, Token: "test"}}
-	submit(t, q, spec("experiment"))
-	c := Checkin{Machine: w.Machine}
-	reply, err := w.checkin(context.Background(), c)
-	if err != nil || reply.Job == nil || reply.Job.Session != c.Machine.Session {
-		t.Fatalf("keyed assignment: %+v %v", reply, err)
-	}
-	j := reply.Job
-	submit(t, q, spec("experiment"))
-	clock.Advance(time.Second)
-	c.Running = &Execution{ID: j.ID, Attempt: j.Attempt, Progress: 9}
-	c.Started = true
-	reply, err = w.checkin(context.Background(), c)
-	if err != nil || reply.Stop || reply.Job != nil || job(t, q, j.ID).Progress != 9 || job(t, q, j.ID).StartedAt == nil {
-		t.Fatalf("keyed heartbeat admitted a neighbor or lost progress: %+v %v", reply, err)
-	}
-	// An idle report re-delivers the same assignment, never a second attempt.
-	idle := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: c.Machine}
-	wire := attemptWire(t, w.Client, idle)
-	if wire.Job != nil || wire.Stop || len(wire.Attempts) != 1 || wire.Attempts[0].Job.ID != j.ID || wire.Attempts[0].Session != j.Session {
-		t.Fatalf("wire lost assignment identity: %+v", wire)
-	}
-	submit(t, q, spec("production"))
-	reply, err = w.checkin(context.Background(), c)
-	if err != nil || !reply.Stop || reply.PriorityStop == nil || reply.GraceSeconds != 10 {
-		t.Fatalf("keyed P3 stop: %+v %v", reply, err)
-	}
-	// Omission is not an exact release acknowledgement, even after grace.
-	clock.Advance(11 * time.Second)
-	wire = attemptWire(t, w.Client, idle)
-	if len(wire.Attempts) != 1 || !wire.Attempts[0].Kill || wire.Attempts[0].ID != j.ID || wire.Attempts[0].Attempt != j.Attempt || job(t, q, j.ID).ReleaseConfirmed {
-		t.Fatalf("omitted attempt discharged custody: %+v", wire)
-	}
-	wrong := result(j, false)
-	wrong.ReleaseOnly, wrong.Attempt = true, j.Attempt+1
-	if err := q.Complete(wrong); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.ReleaseConfirmed || got.State != "stopping" {
-		t.Fatal("wrong release key discharged the stopping attempt")
-	}
-	finishInterrupted(t, q, j)
-	if got := job(t, q, j.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
-		t.Fatalf("keyed planned stop charged retries: %+v", got)
-	}
-}
+	t.Run("contract", func(t *testing.T) {
+		q, clock := fixture(t)
+		server := httptest.NewServer(API{q, "test"}.Handler())
+		defer server.Close()
+		w := Worker{Clock: clock, Machine: machine("keyed", "fake"), Client: Client{URL: server.URL, Token: "test"}}
+		submit(t, q, spec("experiment"))
+		c := Checkin{Machine: w.Machine}
+		reply, err := w.checkin(context.Background(), c)
+		if err != nil || reply.Job == nil || reply.Job.Session != c.Machine.Session {
+			t.Fatalf("keyed assignment: %+v %v", reply, err)
+		}
+		j := reply.Job
+		submit(t, q, spec("experiment"))
+		clock.Advance(time.Second)
+		c.Running = &Execution{ID: j.ID, Attempt: j.Attempt, Progress: 9}
+		c.Started = true
+		reply, err = w.checkin(context.Background(), c)
+		if err != nil || reply.Stop || reply.Job != nil || job(t, q, j.ID).Progress != 9 || job(t, q, j.ID).StartedAt == nil {
+			t.Fatalf("keyed heartbeat admitted a neighbor or lost progress: %+v %v", reply, err)
+		}
+		// An idle report re-delivers the same assignment, never a second attempt.
+		idle := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: c.Machine}
+		wire := attemptWire(t, w.Client, idle)
+		if wire.Job != nil || wire.Stop || len(wire.Attempts) != 1 || wire.Attempts[0].Job.ID != j.ID || wire.Attempts[0].Session != j.Session {
+			t.Fatalf("wire lost assignment identity: %+v", wire)
+		}
+		submit(t, q, spec("production"))
+		reply, err = w.checkin(context.Background(), c)
+		if err != nil || !reply.Stop || reply.PriorityStop == nil || reply.GraceSeconds != 10 {
+			t.Fatalf("keyed P3 stop: %+v %v", reply, err)
+		}
+		// Omission is not an exact release acknowledgement, even after grace.
+		clock.Advance(11 * time.Second)
+		wire = attemptWire(t, w.Client, idle)
+		if len(wire.Attempts) != 1 || !wire.Attempts[0].Kill || wire.Attempts[0].ID != j.ID || wire.Attempts[0].Attempt != j.Attempt || job(t, q, j.ID).ReleaseConfirmed {
+			t.Fatalf("omitted attempt discharged custody: %+v", wire)
+		}
+		wrong := result(j, false)
+		wrong.ReleaseOnly, wrong.Attempt = true, j.Attempt+1
+		if err := q.Complete(wrong); err != nil {
+			t.Fatal(err)
+		}
+		if got := job(t, q, j.ID); got.ReleaseConfirmed || got.State != "stopping" {
+			t.Fatal("wrong release key discharged the stopping attempt")
+		}
+		finishInterrupted(t, q, j)
+		if got := job(t, q, j.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+			t.Fatalf("keyed planned stop charged retries: %+v", got)
+		}
 
-func TestAttemptProtocolOldQueueRefused(t *testing.T) {
-	for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusUpgradeRequired} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-				rw.WriteHeader(status)
-				// The b5fe3e3 queue rejects unknown keyed fields with request_invalid.
-				if status == http.StatusBadRequest {
-					_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-					return
+	})
+
+	t.Run("AttemptProtocolStopEventKey", func(t *testing.T) {
+		q, clock := fixture(t)
+		server := httptest.NewServer(API{q, "test"}.Handler())
+		defer server.Close()
+		client := Client{URL: server.URL, Token: "test"}
+		m := machine("events", "fake")
+		submit(t, q, spec("experiment"))
+		wire := attemptWire(t, client, Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second})
+		if len(wire.Attempts) != 1 || wire.Attempts[0].Job == nil {
+			t.Fatalf("missing assignment: %+v", wire)
+		}
+		j := wire.Attempts[0].Job
+		if err := q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		var event WorkerEvent
+		if err := client.Call(context.Background(), "GET", "/api/workers/"+m.ID+"/events?session="+m.Session, nil, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.ID != j.ID || event.Attempt != j.Attempt || event.Session != j.Session || event.StopAt == nil || !event.StopAt.Equal(clock.Now().Add(StopGrace)) {
+			t.Fatalf("stop event lost key or deadline: %+v", event)
+		}
+
+	})
+
+	t.Run("AttemptProtocolExactNativeReleaseAck", func(t *testing.T) {
+		for _, cancelJob := range []bool{false, true} {
+			t.Run(map[bool]string{false: "priority", true: "cancel"}[cancelJob], func(t *testing.T) {
+				q, clock := fixture(t)
+				m := machine("release", "fake")
+				submit(t, q, spec("experiment"))
+				c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second}
+				reply, err := q.Checkin(c)
+				if err != nil {
+					t.Fatal(err)
 				}
-				_ = json.NewEncoder(rw).Encode(Reply{Stop: true, Kill: true})
-			}))
-			defer server.Close()
-			w := Worker{Machine: machine("new", "fake"), Client: Client{URL: server.URL, Token: "test"}}
-			reply, err := w.checkin(context.Background(), Checkin{Machine: w.Machine})
-			var he *HTTPError
-			if !errors.As(err, &he) || he.Status != 426 || he.Code != "worker_protocol_invalid" || reply.Stop || reply.Job != nil {
-				t.Fatalf("old queue not clearly refused: %+v %v", reply, err)
-			}
-		})
-	}
+				j := reply.Attempts[0].Job
+				if cancelJob {
+					if err := q.Cancel(j.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					submit(t, q, spec("production"))
+				}
+				c.Attempts = []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: m.Session}}
+				clock.Advance(StopGrace)
+				reply, err = q.Checkin(c)
+				if err != nil || len(reply.Attempts) != 1 || !reply.Attempts[0].Kill {
+					t.Fatalf("missing kill-time stop: %+v %v", reply, err)
+				}
+				r := result(j, false)
+				r.ReleaseOnly = true
+				if err = q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				want := "queued"
+				if cancelJob {
+					want = "cancelled"
+				}
+				got := job(t, q, j.ID)
+				if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("exact native acknowledgement left custody stopping: state=%s want=%s", got.State, want)
+				}
+			})
+		}
+
+	})
 }
 
 func TestAttemptProtocolOldQueueWorkerRetainsCustody(t *testing.T) {
-	q, clock := fixture(t)
-	submit(t, q, spec("experiment"))
-	m := machine("saved", "fake")
-	j := check(t, q, m, nil).Job
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(rw).Encode(Reply{}) // no keyed revision echo
-	}))
-	defer server.Close()
-	w := Worker{EnvironmentLimit: 1 << 20, Machine: m, Clock: clock, StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}}
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := result(j, true)
-	store.state.Session, store.state.Job, store.state.Result = j.Session, j, &r
-	if err = store.save(); err != nil {
-		t.Fatal(err)
-	}
-	store.close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err = w.Run(ctx)
-	var he *HTTPError
-	if !errors.As(err, &he) || he.Status != 426 || he.Code != "worker_protocol_invalid" {
-		t.Fatalf("worker did not exit clearly on old queue: %v", err)
-	}
-	store, err = w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	stores, e := store.attemptStores()
-	if e != nil || len(stores) != 1 {
-		t.Fatalf("retained collection: %v", e)
-	}
-	saved := stores[0]
-	if saved.state.Session != j.Session || saved.state.Result == nil || !saved.matchesResult(*saved.state.Result, m.ID) {
-		t.Fatal("old queue refusal discarded buffered custody")
-	}
+	t.Run("contract", func(t *testing.T) {
+		q, clock := fixture(t)
+		submit(t, q, spec("experiment"))
+		m := machine("saved", "fake")
+		j := check(t, q, m, nil).Job
+		server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(rw).Encode(Reply{}) // no keyed revision echo
+		}))
+		defer server.Close()
+		w := Worker{EnvironmentLimit: 1 << 20, Machine: m, Clock: clock, StateDir: t.TempDir(), Client: Client{URL: server.URL, Token: "test"}}
+		store, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := result(j, true)
+		store.state.Session, store.state.Job, store.state.Result = j.Session, j, &r
+		if err = store.save(); err != nil {
+			t.Fatal(err)
+		}
+		store.close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = w.Run(ctx)
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != 426 || he.Code != "worker_protocol_invalid" {
+			t.Fatalf("worker did not exit clearly on old queue: %v", err)
+		}
+		store, err = w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		stores, e := store.attemptStores()
+		if e != nil || len(stores) != 1 {
+			t.Fatalf("retained collection: %v", e)
+		}
+		saved := stores[0]
+		if saved.state.Session != j.Session || saved.state.Result == nil || !saved.matchesResult(*saved.state.Result, m.ID) {
+			t.Fatal("old queue refusal discarded buffered custody")
+		}
+
+	})
+
+	t.Run("AttemptProtocolOldQueueRefused", func(t *testing.T) {
+		for _, status := range []int{http.StatusOK, http.StatusBadRequest, http.StatusUpgradeRequired} {
+			t.Run(http.StatusText(status), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					rw.WriteHeader(status)
+					// The b5fe3e3 queue rejects unknown keyed fields with request_invalid.
+					if status == http.StatusBadRequest {
+						_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
+						return
+					}
+					_ = json.NewEncoder(rw).Encode(Reply{Stop: true, Kill: true})
+				}))
+				defer server.Close()
+				w := Worker{Machine: machine("new", "fake"), Client: Client{URL: server.URL, Token: "test"}}
+				reply, err := w.checkin(context.Background(), Checkin{Machine: w.Machine})
+				var he *HTTPError
+				if !errors.As(err, &he) || he.Status != 426 || he.Code != "worker_protocol_invalid" || reply.Stop || reply.Job != nil {
+					t.Fatalf("old queue not clearly refused: %+v %v", reply, err)
+				}
+			})
+		}
+
+	})
 }
 
 func TestAttemptProtocolInvalidReports(t *testing.T) {
@@ -267,30 +342,6 @@ func TestAttemptProtocolWrongStopIgnored(t *testing.T) {
 	}
 }
 
-func TestAttemptProtocolStopEventKey(t *testing.T) {
-	q, clock := fixture(t)
-	server := httptest.NewServer(API{q, "test"}.Handler())
-	defer server.Close()
-	client := Client{URL: server.URL, Token: "test"}
-	m := machine("events", "fake")
-	submit(t, q, spec("experiment"))
-	wire := attemptWire(t, client, Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second})
-	if len(wire.Attempts) != 1 || wire.Attempts[0].Job == nil {
-		t.Fatalf("missing assignment: %+v", wire)
-	}
-	j := wire.Attempts[0].Job
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	var event WorkerEvent
-	if err := client.Call(context.Background(), "GET", "/api/workers/"+m.ID+"/events?session="+m.Session, nil, &event); err != nil {
-		t.Fatal(err)
-	}
-	if event.ID != j.ID || event.Attempt != j.Attempt || event.Session != j.Session || event.StopAt == nil || !event.StopAt.Equal(clock.Now().Add(StopGrace)) {
-		t.Fatalf("stop event lost key or deadline: %+v", event)
-	}
-}
-
 func TestAttemptProtocolRestartCustody(t *testing.T) {
 	path, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)}
@@ -352,47 +403,5 @@ func TestAttemptProtocolRestartCustody(t *testing.T) {
 	var saved workerState
 	if err != nil || json.Unmarshal(data, &saved) != nil || saved.Session != j.Session {
 		t.Fatal("recovery changed session before acknowledgement")
-	}
-}
-
-func TestAttemptProtocolExactNativeReleaseAck(t *testing.T) {
-	for _, cancelJob := range []bool{false, true} {
-		t.Run(map[bool]string{false: "priority", true: "cancel"}[cancelJob], func(t *testing.T) {
-			q, clock := fixture(t)
-			m := machine("release", "fake")
-			submit(t, q, spec("experiment"))
-			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, period: time.Second}
-			reply, err := q.Checkin(c)
-			if err != nil {
-				t.Fatal(err)
-			}
-			j := reply.Attempts[0].Job
-			if cancelJob {
-				if err := q.Cancel(j.ID); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				submit(t, q, spec("production"))
-			}
-			c.Attempts = []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: m.Session}}
-			clock.Advance(StopGrace)
-			reply, err = q.Checkin(c)
-			if err != nil || len(reply.Attempts) != 1 || !reply.Attempts[0].Kill {
-				t.Fatalf("missing kill-time stop: %+v %v", reply, err)
-			}
-			r := result(j, false)
-			r.ReleaseOnly = true
-			if err = q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			want := "queued"
-			if cancelJob {
-				want = "cancelled"
-			}
-			got := job(t, q, j.ID)
-			if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
-				t.Fatalf("exact native acknowledgement left custody stopping: state=%s want=%s", got.State, want)
-			}
-		})
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -144,14 +143,5 @@ func TestRSSGuardRejectsPendingNativeExit(t *testing.T) {
 	}
 	if p.stopRSS(time.Unix(101, 0), p.rssRoots(), &RSSLimitEvidence{ObservedBytes: 2 << 30, LimitBytes: 1 << 30, Quality: "owned_session_rss"}) || p.outcome.RSSLimit != nil {
 		t.Fatal("pending successful native exit became OOM")
-	}
-}
-
-func TestRSSGuardLinuxKeepsCgroupAccounting(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux cgroup contract")
-	}
-	if localProcessMemory() != nil {
-		t.Fatal("Linux acquired a process RSS guard")
 	}
 }

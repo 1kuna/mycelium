@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestJoiningListenPersistsAndFallsBack(t *testing.T) {
@@ -122,66 +121,137 @@ func joiningTestServer(t *testing.T, handler http.Handler) (*httptest.Server, In
 	return server, Invitation{Version: 1, Token: "throwaway-test-only", Fingerprint: identity.Fingerprint(), Address: server.URL}
 }
 func TestJoiningAuthenticatesBeforeSendingCredential(t *testing.T) {
-	var received atomic.Int32
-	evil, _ := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { received.Add(1) }))
-	good, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
-			t.Error("missing credential")
-			w.WriteHeader(401)
+	t.Run("contract", func(t *testing.T) {
+		var received atomic.Int32
+		evil, _ := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { received.Add(1) }))
+		good, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
+				t.Error("missing credential")
+				w.WriteHeader(401)
+			}
+		}))
+		d := &fakeDiscovery{addresses: []string{evil.URL, good.URL}}
+		invitation.Address = ""
+		client, err := ResolveJoining(context.Background(), invitation, "", d)
+		if err != nil || client.URL != good.URL || received.Load() != 0 {
+			t.Fatalf("selection=%s err=%v untrusted requests=%d", client.URL, err, received.Load())
 		}
-	}))
-	d := &fakeDiscovery{addresses: []string{evil.URL, good.URL}}
-	invitation.Address = ""
-	client, err := ResolveJoining(context.Background(), invitation, "", d)
-	if err != nil || client.URL != good.URL || received.Load() != 0 {
-		t.Fatalf("selection=%s err=%v untrusted requests=%d", client.URL, err, received.Load())
-	}
-	client.HTTP.CloseIdleConnections()
-	d = &fakeDiscovery{addresses: []string{evil.URL}}
-	if _, err = ResolveJoining(context.Background(), invitation, "", d); err == nil {
-		t.Fatal("untrusted discovery admitted")
-	}
-	if received.Load() != 0 {
-		t.Fatal("credential leaked to impersonating endpoint")
-	}
-}
-func TestJoiningFallbackExplicitAndWrongCredential(t *testing.T) {
-	server, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
-			w.WriteHeader(401)
+		client.HTTP.CloseIdleConnections()
+		d = &fakeDiscovery{addresses: []string{evil.URL}}
+		if _, err = ResolveJoining(context.Background(), invitation, "", d); err == nil {
+			t.Fatal("untrusted discovery admitted")
 		}
-	}))
-	for _, d := range []*fakeDiscovery{{}, {err: errors.New("multicast blocked")}, {addresses: []string{"http://untrusted.invalid"}}} {
-		c, err := ResolveJoining(context.Background(), i, "", d)
-		if err != nil || c.URL != server.URL {
-			t.Fatal(c.URL, err)
+		if received.Load() != 0 {
+			t.Fatal("credential leaked to impersonating endpoint")
+		}
+
+	})
+
+	t.Run("JoiningFallbackExplicitAndWrongCredential", func(t *testing.T) {
+		server, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
+				w.WriteHeader(401)
+			}
+		}))
+		for _, d := range []*fakeDiscovery{{}, {err: errors.New("multicast blocked")}, {addresses: []string{"http://untrusted.invalid"}}} {
+			c, err := ResolveJoining(context.Background(), i, "", d)
+			if err != nil || c.URL != server.URL {
+				t.Fatal(c.URL, err)
+			}
+			c.HTTP.CloseIdleConnections()
+		}
+		d := &fakeDiscovery{}
+		c, err := ResolveJoining(context.Background(), i, server.URL, d)
+		if err != nil || d.calls != 0 {
+			t.Fatal(err, d.calls)
 		}
 		c.HTTP.CloseIdleConnections()
-	}
-	d := &fakeDiscovery{}
-	c, err := ResolveJoining(context.Background(), i, server.URL, d)
-	if err != nil || d.calls != 0 {
-		t.Fatal(err, d.calls)
-	}
-	c.HTTP.CloseIdleConnections()
-	i.Token = "wrong"
-	if _, err = ResolveJoining(context.Background(), i, "", d); err == nil {
-		t.Fatal("wrong credential accepted")
-	}
-	i.Token = ""
-	if _, err = ResolveJoining(context.Background(), i, "", d); err == nil {
-		t.Fatal("discovery granted trust")
-	}
+		i.Token = "wrong"
+		if _, err = ResolveJoining(context.Background(), i, "", d); err == nil {
+			t.Fatal("wrong credential accepted")
+		}
+		i.Token = ""
+		if _, err = ResolveJoining(context.Background(), i, "", d); err == nil {
+			t.Fatal("discovery granted trust")
+		}
+
+	})
+
+	t.Run("JoiningNeverFollowsRedirects", func(t *testing.T) {
+		var leaked atomic.Bool
+		evil := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Store(true) }))
+		defer evil.Close()
+		_, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, evil.URL, 307) }))
+		if _, err := ResolveJoining(context.Background(), i, "", &fakeDiscovery{}); err == nil || leaked.Load() {
+			t.Fatal("redirect admitted or followed")
+		}
+
+	})
+
+	t.Run("JoiningFailureIdentifiesStage", func(t *testing.T) {
+		_, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+		invitation.Address = ""
+		evil, _ := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("untrusted request") }))
+		tests := []struct {
+			name, want string
+			discovery  *fakeDiscovery
+		}{
+			{"empty", "mDNS browse returned no compatible addresses", &fakeDiscovery{}},
+			{"transport", "mDNS browse failed", &fakeDiscovery{err: errors.New("private diagnostic")}},
+			{"pin", "identity verification rejected", &fakeDiscovery{addresses: []string{evil.URL}}},
+			{"credential", "credential rejected", &fakeDiscovery{addresses: []string{"placeholder"}}},
+			{"connect", "connection failed", &fakeDiscovery{addresses: []string{"https://127.0.0.1:1"}}},
+		}
+		server, valid := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				i := invitation
+				if tc.name == "credential" {
+					i = valid
+					i.Address = ""
+					tc.discovery.addresses = []string{server.URL}
+				}
+				_, err := ResolveJoining(context.Background(), i, "", tc.discovery)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("want %q, got %v", tc.want, err)
+				}
+				if strings.Contains(err.Error(), "private diagnostic") || strings.Contains(err.Error(), i.Token) {
+					t.Fatal("private data in error")
+				}
+			})
+		}
+
+	})
+
+	t.Run("JoiningProbeForbiddenStatusRejectsCredential", func(t *testing.T) {
+		var pings, statuses, requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			if r.URL.Path == "/api/ping" {
+				pings.Add(1)
+			}
+			if r.URL.Path == "/api/status" {
+				statuses.Add(1)
+			}
+			if r.Header.Get("Authorization") != "Bearer wrong" {
+				t.Error("probe changed credential")
+			}
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+		client := Client{URL: server.URL, Token: "wrong", HTTP: server.Client()}
+		err := client.probeJoining(context.Background())
+		var rejected *HTTPError
+		if !errors.As(err, &rejected) || rejected.Status != http.StatusForbidden {
+			t.Fatalf("forbidden status accepted: %v", err)
+		}
+		if requests.Load() != 2 || pings.Load() != 1 || statuses.Load() != 1 {
+			t.Fatalf("requests=%d ping=%d status=%d", requests.Load(), pings.Load(), statuses.Load())
+		}
+
+	})
 }
-func TestJoiningNeverFollowsRedirects(t *testing.T) {
-	var leaked atomic.Bool
-	evil := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Store(true) }))
-	defer evil.Close()
-	_, i := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, evil.URL, 307) }))
-	if _, err := ResolveJoining(context.Background(), i, "", &fakeDiscovery{}); err == nil || leaked.Load() {
-		t.Fatal("redirect admitted or followed")
-	}
-}
+
 func TestInvitationPrivacyAndIdentityPersistence(t *testing.T) {
 	dir := t.TempDir()
 	a, err := LoadJoiningIdentity(dir)
@@ -221,57 +291,5 @@ func TestInvitationPrivacyAndIdentityPersistence(t *testing.T) {
 		if _, err = i.Client(address); err == nil {
 			t.Fatal("unsafe endpoint accepted")
 		}
-	}
-}
-func TestProfileCheckinAndPersistence(t *testing.T) {
-	q, _ := fixture(t)
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	m := machine("profile-test", "fake")
-	m.CapabilityProfile = &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", Onboarding: "hardware-facts-only; throughput pending", MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, LogicalCPUs: 8, RecordedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	var reply Reply
-	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, Fresh: true}, &reply); err != nil {
-		t.Fatal(err)
-	}
-	var snapshot Snapshot
-	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Machines) != 1 || snapshot.Machines[0].CapabilityProfile == nil || !strings.Contains(snapshot.Machines[0].CapabilityProfile.Summary(), "unified") {
-		t.Fatal("profile missing from status")
-	}
-}
-
-func TestJoiningFailureIdentifiesStage(t *testing.T) {
-	_, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
-	invitation.Address = ""
-	evil, _ := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("untrusted request") }))
-	tests := []struct {
-		name, want string
-		discovery  *fakeDiscovery
-	}{
-		{"empty", "mDNS browse returned no compatible addresses", &fakeDiscovery{}},
-		{"transport", "mDNS browse failed", &fakeDiscovery{err: errors.New("private diagnostic")}},
-		{"pin", "identity verification rejected", &fakeDiscovery{addresses: []string{evil.URL}}},
-		{"credential", "credential rejected", &fakeDiscovery{addresses: []string{"placeholder"}}},
-		{"connect", "connection failed", &fakeDiscovery{addresses: []string{"https://127.0.0.1:1"}}},
-	}
-	server, valid := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			i := invitation
-			if tc.name == "credential" {
-				i = valid
-				i.Address = ""
-				tc.discovery.addresses = []string{server.URL}
-			}
-			_, err := ResolveJoining(context.Background(), i, "", tc.discovery)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("want %q, got %v", tc.want, err)
-			}
-			if strings.Contains(err.Error(), "private diagnostic") || strings.Contains(err.Error(), i.Token) {
-				t.Fatal("private data in error")
-			}
-		})
 	}
 }

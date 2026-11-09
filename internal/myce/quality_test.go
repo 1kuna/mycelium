@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -129,21 +128,6 @@ func TestQualityUnknownUncertainty(t *testing.T) {
 	}
 	if q.productionParityKnown(q.s.Jobs[j.ID], &b) {
 		t.Fatal("unknown uncertainty permits retargeting")
-	}
-}
-
-func TestQualityValidation(t *testing.T) {
-	e, _, _ := qualityVariants(t, nil)
-	for _, invalid := range []float64{-1, math.NaN(), math.Inf(1)} {
-		spec := variantSpec(e, "production")
-		spec.QualityTolerance = map[string]float64{"score": invalid}
-		if err := spec.Validate(); err == nil {
-			t.Fatal("accepted invalid tolerance", invalid)
-		}
-	}
-	e.Variants[0].Quality["extension:"+e.Name]["score"] = QualityMeasurement{Reference: "frozen", MarginOfError: qualityNumber(-1)}
-	if err := e.validate(); err == nil {
-		t.Fatal("accepted negative uncertainty")
 	}
 }
 

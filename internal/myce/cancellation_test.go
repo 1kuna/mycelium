@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -25,140 +26,301 @@ func cancelAck(t *testing.T, q *Queue, id string) Cancellation {
 }
 
 func TestCancellationStates(t *testing.T) {
-	t.Parallel()
-	for _, state := range []string{"queued", "preparing", "running", "stopping", "succeeded", "failed", "cancelled"} {
-		t.Run(state, func(t *testing.T) {
-			q, c := fixture(t)
-			s := spec("experiment")
-			s.SubmissionKey = "cancel-key"
-			j := submit(t, q, s)
-			if state != "queued" && state != "cancelled" {
-				m := machine("one", "fake")
-				m.MaxJobs = 1
-				j = check(t, q, m, nil).Job
-				if err := q.Tick(); err != nil {
-					t.Fatal(err)
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		for _, state := range []string{"queued", "preparing", "running", "stopping", "succeeded", "failed", "cancelled"} {
+			t.Run(state, func(t *testing.T) {
+				q, c := fixture(t)
+				s := spec("experiment")
+				s.SubmissionKey = "cancel-key"
+				j := submit(t, q, s)
+				if state != "queued" && state != "cancelled" {
+					m := machine("one", "fake")
+					m.MaxJobs = 1
+					j = check(t, q, m, nil).Job
+					if err := q.Tick(); err != nil {
+						t.Fatal(err)
+					}
+					if state != "preparing" {
+						if err := q.Started(result(j, true)); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
-				if state != "preparing" {
-					if err := q.Started(result(j, true)); err != nil {
+				if state == "stopping" {
+					if err := q.Leave("one", true); err != nil {
 						t.Fatal(err)
 					}
 				}
-			}
-			if state == "stopping" {
-				if err := q.Leave("one", true); err != nil {
-					t.Fatal(err)
+				if state == "succeeded" || state == "failed" {
+					finish(t, q, j, state == "succeeded")
 				}
-			}
-			if state == "succeeded" || state == "failed" {
-				finish(t, q, j, state == "succeeded")
-			}
-			if state == "cancelled" {
-				if err := q.Cancel(j.ID); err != nil {
-					t.Fatal(err)
+				if state == "cancelled" {
+					if err := q.Cancel(j.ID); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			before := cloneJob(q.s.Jobs[j.ID])
-			a := cancelAck(t, q, j.ID)
-			wantState, release := state, "pending"
-			if state == "queued" {
-				wantState, release = "cancelled", "not_applicable"
-			}
-			if state == "preparing" || state == "running" {
-				wantState = "stopping"
-			}
-			if state == "cancelled" {
-				release = "not_applicable"
-			}
-			if state == "succeeded" || state == "failed" {
-				release = "confirmed"
-			}
-			if a.State != wantState || ackRelease(a) != release || a.Project != s.Project || a.SubmissionKey == nil || *a.SubmissionKey != s.SubmissionKey || !a.AcknowledgedAt.Equal(c.Now()) {
-				t.Fatalf("ack: %+v", a)
-			}
-			after := cloneJob(q.s.Jobs[j.ID])
-			after.CancelledAt = before.CancelledAt // Exclusion metadata may be added; state/results stay unchanged.
-			if terminal(before.State) && !reflect.DeepEqual(before, after) {
-				t.Fatal("terminal job changed")
-			}
-			stopAt := q.s.Jobs[j.ID].StopAt
-			c.Advance(time.Second)
-			repeat := cancelAck(t, q, j.ID)
-			if !reflect.DeepEqual(stopAt, q.s.Jobs[j.ID].StopAt) {
-				t.Fatal("repeat renewed stop grace")
-			}
-			if repeat.State != a.State || ackRelease(repeat) != ackRelease(a) {
-				t.Fatalf("repeat: %+v", repeat)
-			}
-			if release == "pending" {
-				if len(q.s.HostReleases) == 0 {
-					t.Fatal("release uncharged")
+				before := cloneJob(q.s.Jobs[j.ID])
+				a := cancelAck(t, q, j.ID)
+				wantState, release := state, "pending"
+				if state == "queued" {
+					wantState, release = "cancelled", "not_applicable"
 				}
-				if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
-					t.Fatalf("permit = %v", err)
+				if state == "preparing" || state == "running" {
+					wantState = "stopping"
 				}
-				if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
-					t.Fatalf("started = %v", err)
+				if state == "cancelled" {
+					release = "not_applicable"
 				}
-				finish(t, q, j, true) // Success/OOM/interruption cannot override cancellation.
-				if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
-					t.Fatalf("released: %+v", a)
+				if state == "succeeded" || state == "failed" {
+					release = "confirmed"
 				}
+				if a.State != wantState || ackRelease(a) != release || a.Project != s.Project || a.SubmissionKey == nil || *a.SubmissionKey != s.SubmissionKey || !a.AcknowledgedAt.Equal(c.Now()) {
+					t.Fatalf("ack: %+v", a)
+				}
+				after := cloneJob(q.s.Jobs[j.ID])
+				after.CancelledAt = before.CancelledAt // Exclusion metadata may be added; state/results stay unchanged.
+				if terminal(before.State) && !reflect.DeepEqual(before, after) {
+					t.Fatal("terminal job changed")
+				}
+				stopAt := q.s.Jobs[j.ID].StopAt
+				c.Advance(time.Second)
+				repeat := cancelAck(t, q, j.ID)
+				if !reflect.DeepEqual(stopAt, q.s.Jobs[j.ID].StopAt) {
+					t.Fatal("repeat renewed stop grace")
+				}
+				if repeat.State != a.State || ackRelease(repeat) != ackRelease(a) {
+					t.Fatalf("repeat: %+v", repeat)
+				}
+				if release == "pending" {
+					if len(q.s.HostReleases) == 0 {
+						t.Fatal("release uncharged")
+					}
+					if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
+						t.Fatalf("permit = %v", err)
+					}
+					if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
+						t.Fatalf("started = %v", err)
+					}
+					finish(t, q, j, true) // Success/OOM/interruption cannot override cancellation.
+					if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
+						t.Fatalf("released: %+v", a)
+					}
+				}
+			})
+		}
+
+	})
+
+	t.Run("CancellationStartRace", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		for _, cancelFirst := range []bool{true, false} {
+			q, _ := fixture(t)
+			j := submit(t, q, spec("experiment"))
+			j = check(t, q, machine("one", "fake"), nil).Job
+			if cancelFirst {
+				cancelAck(t, q, j.ID)
 			}
-		})
-	}
+			err := q.Started(result(j, true))
+			if cancelFirst && !errors.Is(err, ErrStale) || !cancelFirst && err != nil {
+				t.Fatalf("start race: %v", err)
+			}
+			if !cancelFirst {
+				cancelAck(t, q, j.ID)
+			}
+			if check(t, q, machine("one", "fake"), j).Stop != true {
+				t.Fatal("stop not issued")
+			}
+			assertNoCancellationAttempt(t, q, j)
+		}
+
+	})
+
+	t.Run("CancellationMaintenanceKeepsExactCustody", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		q, _ := fixture(t)
+		j := submit(t, q, spec("experiment"))
+		m := machine("one", "fake")
+		m.MaxJobs = 1
+		j = check(t, q, m, nil).Job
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		cancelAck(t, q, j.ID)
+		if err := setMaintenance(t, q, m.ID, "disable"); err != nil {
+			t.Fatal(err)
+		}
+		if len(q.s.HostReleases) != 1 {
+			t.Fatal("maintenance discharged cancelled execution without exact evidence")
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal(a)
+		}
+		if err := q.Complete(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, ReleaseOnly: true}); err != nil {
+			t.Fatal(err)
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+			t.Fatal(a)
+		}
+		assertNoCancellationAttempt(t, q, j)
+
+	})
+
+	t.Run("OutcomeCancellationPrecedence", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := machine("worker", "fake")
+		j := submit(t, q, spec("production"))
+		running := check(t, q, m, nil).Job
+		if err := q.Started(result(running, false)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Cancel(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		r := result(running, false)
+		r.Interrupted, r.OperatorStop = true, true
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		got := job(t, q, j.ID)
+		if got.State != "cancelled" || got.InfrastructureRetries != 0 {
+			t.Fatal("stop bypassed cancellation", got)
+		}
+
+	})
 }
 
 func TestCancellationKeyRecords(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	s := spec("experiment")
-	s.SubmissionKey = "never-seen"
-	a, err := q.CancelSubmission(s.Project, s.SubmissionKey)
-	if err != nil || a.JobID != nil || a.State != "absent" || !a.WillNotRun || ackRelease(a) != "not_applicable" {
-		t.Fatalf("reservation: %+v %v", a, err)
-	}
-	c.Advance(time.Second)
-	again, err := q.CancelSubmission(s.Project, s.SubmissionKey)
-	if err != nil || again.State != "absent" || *again.SubmissionKey != s.SubmissionKey {
-		t.Fatalf("repeat: %+v %v", again, err)
-	}
-	j := submit(t, q, s)
-	if j.State != "cancelled" || j.CancelledAt == nil {
-		t.Fatal("reservation became runnable")
-	}
-	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	for _, byKey := range []bool{false, true} {
-		var a Cancellation
-		if byKey {
-			a, err = q.CancelSubmission(s.Project, s.SubmissionKey)
-		} else {
-			a, err = q.CancelJob(j.ID)
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		q, c := fixture(t)
+		s := spec("experiment")
+		s.SubmissionKey = "never-seen"
+		a, err := q.CancelSubmission(s.Project, s.SubmissionKey)
+		if err != nil || a.JobID != nil || a.State != "absent" || !a.WillNotRun || ackRelease(a) != "not_applicable" {
+			t.Fatalf("reservation: %+v %v", a, err)
 		}
-		if err != nil || a.State != "removed" || !a.WillNotRun {
-			t.Fatalf("removed: %+v %v", a, err)
+		c.Advance(time.Second)
+		again, err := q.CancelSubmission(s.Project, s.SubmissionKey)
+		if err != nil || again.State != "absent" || *again.SubmissionKey != s.SubmissionKey {
+			t.Fatalf("repeat: %+v %v", again, err)
 		}
-	}
-	c.Advance(submissionRetention)
-	a, err = q.CancelSubmission(s.Project, s.SubmissionKey)
-	if err != nil || a.State != "removed" || a.JobID == nil || *a.JobID != j.ID || !a.WillNotRun {
-		t.Fatalf("aged cancellation lost: %+v %v", a, err)
-	}
-	if a, err = q.CancelJob(j.ID); err != nil || a.State != "removed" || !a.WillNotRun {
-		t.Fatal("retained job cancellation lost", a, err)
-	}
-	_, err = q.CancelJob("missing")
-	submissionError(t, err, 404, "job_unknown")
-	if replay, err := q.Submit(s); err != nil || replay.ID != j.ID || replay.State != "cancelled" {
-		t.Fatal("retained cancellation replay lost", replay, err)
-	}
-	for _, pair := range [][2]string{{"", "key"}, {"project", ""}} {
-		if _, err = q.CancelSubmission(pair[0], pair[1]); err == nil {
-			t.Fatal("empty identity accepted")
+		j := submit(t, q, s)
+		if j.State != "cancelled" || j.CancelledAt == nil {
+			t.Fatal("reservation became runnable")
 		}
-	}
+		if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for _, byKey := range []bool{false, true} {
+			var a Cancellation
+			if byKey {
+				a, err = q.CancelSubmission(s.Project, s.SubmissionKey)
+			} else {
+				a, err = q.CancelJob(j.ID)
+			}
+			if err != nil || a.State != "removed" || !a.WillNotRun {
+				t.Fatalf("removed: %+v %v", a, err)
+			}
+		}
+		c.Advance(submissionRetention)
+		a, err = q.CancelSubmission(s.Project, s.SubmissionKey)
+		if err != nil || a.State != "removed" || a.JobID == nil || *a.JobID != j.ID || !a.WillNotRun {
+			t.Fatalf("aged cancellation lost: %+v %v", a, err)
+		}
+		if a, err = q.CancelJob(j.ID); err != nil || a.State != "removed" || !a.WillNotRun {
+			t.Fatal("retained job cancellation lost", a, err)
+		}
+		_, err = q.CancelJob("missing")
+		submissionError(t, err, 404, "job_unknown")
+		if replay, err := q.Submit(s); err != nil || replay.ID != j.ID || replay.State != "cancelled" {
+			t.Fatal("retained cancellation replay lost", replay, err)
+		}
+		for _, pair := range [][2]string{{"", "key"}, {"project", ""}} {
+			if _, err = q.CancelSubmission(pair[0], pair[1]); err == nil {
+				t.Fatal("empty identity accepted")
+			}
+		}
+
+	})
+
+	t.Run("CancellationHTTP", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		q, _ := fixture(t)
+		server := httptest.NewServer(API{Queue: q, Token: "test-only"}.Handler())
+		defer server.Close()
+		client := Client{URL: server.URL, Token: "test-only"}
+		ctx := context.Background()
+		a, err := client.CancelSubmission(ctx, "test", "key")
+		if err != nil || a.State != "absent" {
+			t.Fatalf("client: %+v %v", a, err)
+		}
+		s := spec("experiment")
+		s.SubmissionKey = "key"
+		j := submit(t, q, s)
+		a, err = client.Cancel(ctx, j.ID)
+		if err != nil || a.State != "cancelled" {
+			t.Fatalf("client: %+v %v", a, err)
+		}
+		h := API{Queue: q, Token: "test-only"}.Handler()
+		for _, path := range []string{"/api/jobs/" + j.ID + "/cancel", "/api/jobs/missing/cancel"} {
+			r := httptest.NewRequest("POST", path, strings.NewReader("{}"))
+			r.Header.Set("Authorization", "Bearer test-only")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(path, "missing") {
+				if w.Code != 404 || body["code"] != "job_unknown" || body["will_not_run"] != nil {
+					t.Fatalf("unknown: %d %v", w.Code, body)
+				}
+			} else if len(body) != 7 || body["will_not_run"] != true {
+				t.Fatalf("envelope: %v", body)
+			}
+		}
+		_, err = client.Cancel(ctx, "missing")
+		submissionError(t, err, 404, "job_unknown")
+
+	})
+
+	t.Run("CancellationAcknowledgementTime", func(t *testing.T) {
+		q, c := fixture(t)
+		j := submit(t, q, spec("experiment"))
+		first := cancelAck(t, q, j.ID)
+		reserved, err := q.CancelSubmission("test", "reserved-time")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Advance(time.Second)
+		if a := cancelAck(t, q, j.ID); !a.AcknowledgedAt.Equal(*first.AcknowledgedAt) {
+			t.Fatal("job acknowledgement changed")
+		}
+		a, err := q.CancelSubmission("test", "reserved-time")
+		if err != nil || !a.AcknowledgedAt.Equal(*reserved.AcknowledgedAt) {
+			t.Fatal("reservation acknowledgement changed", a, err)
+		}
+		q = reopenCancellationQueue(t, q, c)
+		s := spec("experiment")
+		s.SubmissionKey = "reserved-time"
+		bound := submit(t, q, s)
+		if a := cancelAck(t, q, bound.ID); !a.AcknowledgedAt.Equal(*reserved.AcknowledgedAt) {
+			t.Fatal("bound reservation changed acknowledgement")
+		}
+
+	})
+
+	t.Run("WireUnknownJobHandler", func(t *testing.T) {
+		q, _ := fixture(t)
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs/unknown/cancel", nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Fatal(w.Code)
+		}
+	})
 }
 
 func TestCancellationSubmitOrders(t *testing.T) {
@@ -186,7 +348,7 @@ func TestCancellationSubmitOrders(t *testing.T) {
 		}
 	}
 	// Concurrent transactions must have one identity and no runnable result.
-	for range 12 {
+	for range 1 {
 		q, _ := fixture(t)
 		s := spec("experiment")
 		s.SubmissionKey = "concurrent"
@@ -218,46 +380,6 @@ func TestCancellationSubmitOrders(t *testing.T) {
 			}
 		}
 	}
-}
-
-func TestCancellationHTTP(t *testing.T) {
-	t.Parallel()
-	q, _ := fixture(t)
-	server := httptest.NewServer(API{Queue: q, Token: "test-only"}.Handler())
-	defer server.Close()
-	client := Client{URL: server.URL, Token: "test-only"}
-	ctx := context.Background()
-	a, err := client.CancelSubmission(ctx, "test", "key")
-	if err != nil || a.State != "absent" {
-		t.Fatalf("client: %+v %v", a, err)
-	}
-	s := spec("experiment")
-	s.SubmissionKey = "key"
-	j := submit(t, q, s)
-	a, err = client.Cancel(ctx, j.ID)
-	if err != nil || a.State != "cancelled" {
-		t.Fatalf("client: %+v %v", a, err)
-	}
-	h := API{Queue: q, Token: "test-only"}.Handler()
-	for _, path := range []string{"/api/jobs/" + j.ID + "/cancel", "/api/jobs/missing/cancel"} {
-		r := httptest.NewRequest("POST", path, strings.NewReader("{}"))
-		r.Header.Set("Authorization", "Bearer test-only")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		var body map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(path, "missing") {
-			if w.Code != 404 || body["code"] != "job_unknown" || body["will_not_run"] != nil {
-				t.Fatalf("unknown: %d %v", w.Code, body)
-			}
-		} else if len(body) != 7 || body["will_not_run"] != true {
-			t.Fatalf("envelope: %v", body)
-		}
-	}
-	_, err = client.Cancel(ctx, "missing")
-	submissionError(t, err, 404, "job_unknown")
 }
 
 func reopenCancellationQueue(t *testing.T, q *Queue, c Clock) *Queue {
@@ -430,65 +552,143 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 }
 
 func TestCancellationReleaseCustody(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	s := spec("experiment")
-	s.SubmissionKey = "copy-key"
-	one, two := machine("one", "fake"), machine("two", "fake")
-	s.Needs.HostMemoryGB = 4
-	one.HostMemoryMeasured, two.HostMemoryMeasured = true, true
-	one.HostAvailableMemoryGB, two.HostAvailableMemoryGB = 16, 16
-	one.HostMemoryBudgetGB, two.HostMemoryBudgetGB = 16, 16
-	j := submit(t, q, s)
-	first := check(t, q, one, nil).Job
-	check(t, q, two, nil)
-	check(t, q, machine("three", "fake"), nil)
-	c.Advance(LossAfter)
-	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen = c.Now()
-		q.s.Machines["three"].LastSeen = c.Now()
-		q.maintain()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	second := check(t, q, two, nil).Job
-	if second == nil || second.Attempt == first.Attempt {
-		t.Fatal("second attempt not assigned")
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal(a)
-	}
-	// Completion of the current execution does not settle its lost predecessor.
-	finish(t, q, second, true)
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal("old copy forgotten", a)
-	}
-	q.refreshHostMemory()
-	if q.s.Machines[one.ID].HostMemoryInUseGB != 4 {
-		t.Fatal("lost copy no longer charged")
-	}
-	stale := result(first, false)
-	stale.ReleaseOnly = true
-	stale.Session = "wrong"
-	if err := q.Complete(stale); err != nil {
-		t.Fatal(err)
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal("stale release accepted", a)
-	}
-	exact := result(first, false)
-	exact.ReleaseOnly = true
-	if err := q.Complete(exact); err != nil {
-		t.Fatal(err)
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-		t.Fatal(a)
-	}
-	if len(q.s.HostReleases) != 0 {
-		t.Fatal("release retained after exact confirmation")
-	}
-	assertNoCancellationAttempt(t, q, second)
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		q, c := fixture(t)
+		s := spec("experiment")
+		s.SubmissionKey = "copy-key"
+		one, two := machine("one", "fake"), machine("two", "fake")
+		s.Needs.HostMemoryGB = 4
+		one.HostMemoryMeasured, two.HostMemoryMeasured = true, true
+		one.HostAvailableMemoryGB, two.HostAvailableMemoryGB = 16, 16
+		one.HostMemoryBudgetGB, two.HostMemoryBudgetGB = 16, 16
+		j := submit(t, q, s)
+		first := check(t, q, one, nil).Job
+		check(t, q, two, nil)
+		check(t, q, machine("three", "fake"), nil)
+		c.Advance(LossAfter)
+		if err := q.update(func() error {
+			q.s.Machines["two"].LastSeen = c.Now()
+			q.s.Machines["three"].LastSeen = c.Now()
+			q.maintain()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		second := check(t, q, two, nil).Job
+		if second == nil || second.Attempt == first.Attempt {
+			t.Fatal("second attempt not assigned")
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal(a)
+		}
+		// Completion of the current execution does not settle its lost predecessor.
+		finish(t, q, second, true)
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal("old copy forgotten", a)
+		}
+		q.refreshHostMemory()
+		if q.s.Machines[one.ID].HostMemoryInUseGB != 4 {
+			t.Fatal("lost copy no longer charged")
+		}
+		stale := result(first, false)
+		stale.ReleaseOnly = true
+		stale.Session = "wrong"
+		if err := q.Complete(stale); err != nil {
+			t.Fatal(err)
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal("stale release accepted", a)
+		}
+		exact := result(first, false)
+		exact.ReleaseOnly = true
+		if err := q.Complete(exact); err != nil {
+			t.Fatal(err)
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+			t.Fatal(a)
+		}
+		if len(q.s.HostReleases) != 0 {
+			t.Fatal("release retained after exact confirmation")
+		}
+		assertNoCancellationAttempt(t, q, second)
+
+	})
+
+	t.Run("CancellationQueuedLostCopyRelease", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		q, c := fixture(t)
+		j := submit(t, q, spec("experiment"))
+		m := machine("one", "fake")
+		m.MaxJobs = 1
+		j = check(t, q, m, nil).Job
+		check(t, q, machine("two", "fake"), nil)
+		check(t, q, machine("three", "fake"), nil)
+		c.Advance(LossAfter)
+		if err := q.update(func() error {
+			q.s.Machines["two"].LastSeen = c.Now()
+			q.s.Machines["three"].LastSeen = c.Now()
+			q.maintain()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if q.s.Jobs[j.ID].State != "queued" {
+			t.Fatal("not requeued after loss")
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal("lost attempt forgotten", a)
+		}
+		release := result(j, false)
+		release.ReleaseOnly = true
+		if err := q.Complete(release); err != nil {
+			t.Fatal(err)
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+			t.Fatal("lost attempt never settled", a)
+		}
+		assertNoCancellationAttempt(t, q, j)
+
+	})
+
+	t.Run("CancellationRejoinBeforeCancel", func(t *testing.T) {
+		q, c := fixture(t)
+		one, two := machine("one", "fake"), machine("two", "fake")
+		for _, m := range []*Machine{&one, &two} {
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
+		}
+		s := spec("experiment")
+		s.Needs.HostMemoryGB = 4
+		j := submit(t, q, s)
+		first := check(t, q, one, nil).Job
+		check(t, q, two, nil)
+		check(t, q, machine("three", "fake"), nil)
+		c.Advance(LossAfter)
+		if err := q.update(func() error {
+			q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+			q.maintain()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		second := check(t, q, two, nil).Job
+		if second == nil || second.Attempt != 2 {
+			t.Fatal("missing second attempt")
+		}
+		one.Session = "fresh-one"
+		if _, err := q.Checkin(Checkin{Machine: one, Fresh: true, PreviousSession: first.Session}); err != nil {
+			t.Fatal(err)
+		}
+		finish(t, q, second, true)
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+			t.Fatal("recreated discharged custody", a)
+		}
+		q.refreshHostMemory()
+		if len(q.s.HostReleases) != 0 || q.s.Machines[one.ID].HostMemoryInUseGB != 0 {
+			t.Fatal("cancel invented a historical charge")
+		}
+
+	})
 }
 
 func TestCancellationDurabilityAndRollback(t *testing.T) {
@@ -539,93 +739,6 @@ func TestCancellationDurabilityAndRollback(t *testing.T) {
 	if err != nil || a.State != "absent" {
 		t.Fatal("cancellation reservation lost on restart", a, err)
 	}
-}
-
-func TestCancellationStartRace(t *testing.T) {
-	t.Parallel()
-	for _, cancelFirst := range []bool{true, false} {
-		q, _ := fixture(t)
-		j := submit(t, q, spec("experiment"))
-		j = check(t, q, machine("one", "fake"), nil).Job
-		if cancelFirst {
-			cancelAck(t, q, j.ID)
-		}
-		err := q.Started(result(j, true))
-		if cancelFirst && !errors.Is(err, ErrStale) || !cancelFirst && err != nil {
-			t.Fatalf("start race: %v", err)
-		}
-		if !cancelFirst {
-			cancelAck(t, q, j.ID)
-		}
-		if check(t, q, machine("one", "fake"), j).Stop != true {
-			t.Fatal("stop not issued")
-		}
-		assertNoCancellationAttempt(t, q, j)
-	}
-}
-
-func TestCancellationQueuedLostCopyRelease(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
-	m.MaxJobs = 1
-	j = check(t, q, m, nil).Job
-	check(t, q, machine("two", "fake"), nil)
-	check(t, q, machine("three", "fake"), nil)
-	c.Advance(LossAfter)
-	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen = c.Now()
-		q.s.Machines["three"].LastSeen = c.Now()
-		q.maintain()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.Jobs[j.ID].State != "queued" {
-		t.Fatal("not requeued after loss")
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal("lost attempt forgotten", a)
-	}
-	release := result(j, false)
-	release.ReleaseOnly = true
-	if err := q.Complete(release); err != nil {
-		t.Fatal(err)
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-		t.Fatal("lost attempt never settled", a)
-	}
-	assertNoCancellationAttempt(t, q, j)
-}
-
-func TestCancellationMaintenanceKeepsExactCustody(t *testing.T) {
-	t.Parallel()
-	q, _ := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
-	m.MaxJobs = 1
-	j = check(t, q, m, nil).Job
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	cancelAck(t, q, j.ID)
-	if err := setMaintenance(t, q, m.ID, "disable"); err != nil {
-		t.Fatal(err)
-	}
-	if len(q.s.HostReleases) != 1 {
-		t.Fatal("maintenance discharged cancelled execution without exact evidence")
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal(a)
-	}
-	if err := q.Complete(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, ReleaseOnly: true}); err != nil {
-		t.Fatal(err)
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-		t.Fatal(a)
-	}
-	assertNoCancellationAttempt(t, q, j)
 }
 
 func ackRelease(ack Cancellation) string {

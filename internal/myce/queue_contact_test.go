@@ -66,85 +66,89 @@ func TestCheckinWaitingOnQueueLockIsNotWorkerSilence(t *testing.T) {
 	}
 }
 
-func TestCheckinAbandonedContactExpires(t *testing.T) {
-	q, c := fixture(t)
-	worker, peer := machine("worker", "fake"), machine("peer", "fake")
-	s := spec("production")
-	s.AllowedMachines = []string{worker.ID}
-	j := submit(t, q, s)
-	assigned := check(t, q, worker, nil).Job
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(4 * time.Second)
-	check(t, q, peer, nil)
-	q.beginCheckin(worker.ID, worker.Session) // Abandoned: never calls settle.
-	allowance := q.machineLossTimeout(worker.ID)
-	c.Advance(allowance - time.Nanosecond)
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "running")
-	c.Advance(time.Nanosecond) // No remaining arrival allowance.
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "queued")
-	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("abandoned check-in hid a dead worker after its measured allowance")
-	}
-}
-
 // #343: a client deadline after 10 s behind the queue mutex must not remove
 // arrival protection and retroactively turn queue time into worker silence.
 func TestCheckinCancelledWhileWaitingRetainsBoundedContact(t *testing.T) {
-	q, c := fixture(t)
-	worker, peer := machine("worker", "fake"), machine("peer", "fake")
-	s := spec("production")
-	s.AllowedMachines = []string{worker.ID}
-	j := submit(t, q, s)
-	assigned := check(t, q, worker, nil).Job
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatal(err)
-	}
-	last := q.s.Machines[worker.ID].LastSeen
-	c.Advance(4 * time.Second)
-	check(t, q, peer, nil)
+	t.Run("contract", func(t *testing.T) {
+		q, c := fixture(t)
+		worker, peer := machine("worker", "fake"), machine("peer", "fake")
+		s := spec("production")
+		s.AllowedMachines = []string{worker.ID}
+		j := submit(t, q, s)
+		assigned := check(t, q, worker, nil).Job
+		if err := q.Started(result(assigned, true)); err != nil {
+			t.Fatal(err)
+		}
+		last := q.s.Machines[worker.ID].LastSeen
+		c.Advance(4 * time.Second)
+		check(t, q, peer, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	q.mu.Lock()
-	done := make(chan error, 1)
-	go func() {
-		_, err := q.CheckinContext(ctx, Checkin{Machine: worker})
-		done <- err
-	}()
-	await(t, func() bool {
-		q.contactMu.Lock()
-		defer q.contactMu.Unlock()
-		return len(q.contacts[worker.ID].pending) == 1
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		q.mu.Lock()
+		done := make(chan error, 1)
+		go func() {
+			_, err := q.CheckinContext(ctx, Checkin{Machine: worker})
+			done <- err
+		}()
+		await(t, func() bool {
+			q.contactMu.Lock()
+			defer q.contactMu.Unlock()
+			return len(q.contacts[worker.ID].pending) == 1
+		})
+		c.Advance(12 * time.Second)
+		cancel()
+		q.maintain()
+		gone, state := q.s.Machines[worker.ID].Gone, q.s.Jobs[j.ID].State
+		q.mu.Unlock()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled check-in: %v", err)
+		}
+		if gone || state != "running" {
+			t.Fatalf("cancelled queue wait became worker silence: gone=%v state=%s", gone, state)
+		}
+		if !q.s.Machines[worker.ID].LastSeen.Equal(last) {
+			t.Fatal("cancelled check-in refreshed LastSeen")
+		}
+		// After server completion, allow the measured reconnect opportunity.
+		// This does not refresh the accepted LastSeen timestamp.
+		c.Advance(q.machineLossTimeout(worker.ID) - time.Nanosecond)
+		check(t, q, peer, nil)
+		requireState(t, q, j.ID, "running")
+		c.Advance(time.Nanosecond)
+		check(t, q, peer, nil)
+		requireState(t, q, j.ID, "queued")
+		if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
+			t.Fatal("cancelled arrival hid a dead worker beyond its measured opportunity allowance")
+		}
+
 	})
-	c.Advance(12 * time.Second)
-	cancel()
-	q.maintain()
-	gone, state := q.s.Machines[worker.ID].Gone, q.s.Jobs[j.ID].State
-	q.mu.Unlock()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled check-in: %v", err)
-	}
-	if gone || state != "running" {
-		t.Fatalf("cancelled queue wait became worker silence: gone=%v state=%s", gone, state)
-	}
-	if !q.s.Machines[worker.ID].LastSeen.Equal(last) {
-		t.Fatal("cancelled check-in refreshed LastSeen")
-	}
-	// After server completion, allow the measured reconnect opportunity.
-	// This does not refresh the accepted LastSeen timestamp.
-	c.Advance(q.machineLossTimeout(worker.ID) - time.Nanosecond)
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "running")
-	c.Advance(time.Nanosecond)
-	check(t, q, peer, nil)
-	requireState(t, q, j.ID, "queued")
-	if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
-		t.Fatal("cancelled arrival hid a dead worker beyond its measured opportunity allowance")
-	}
+
+	t.Run("CheckinAbandonedContactExpires", func(t *testing.T) {
+		q, c := fixture(t)
+		worker, peer := machine("worker", "fake"), machine("peer", "fake")
+		s := spec("production")
+		s.AllowedMachines = []string{worker.ID}
+		j := submit(t, q, s)
+		assigned := check(t, q, worker, nil).Job
+		if err := q.Started(result(assigned, true)); err != nil {
+			t.Fatal(err)
+		}
+		c.Advance(4 * time.Second)
+		check(t, q, peer, nil)
+		q.beginCheckin(worker.ID, worker.Session) // Abandoned: never calls settle.
+		allowance := q.machineLossTimeout(worker.ID)
+		c.Advance(allowance - time.Nanosecond)
+		check(t, q, peer, nil)
+		requireState(t, q, j.ID, "running")
+		c.Advance(time.Nanosecond) // No remaining arrival allowance.
+		check(t, q, peer, nil)
+		requireState(t, q, j.ID, "queued")
+		if !q.s.Machines[worker.ID].Gone || job(t, q, j.ID).Losses != 1 {
+			t.Fatal("abandoned check-in hid a dead worker after its measured allowance")
+		}
+
+	})
 }
 
 func TestCheckinRejectedReportDoesNotRefreshContact(t *testing.T) {

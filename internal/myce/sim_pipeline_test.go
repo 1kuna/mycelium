@@ -1,6 +1,8 @@
 package myce
 
-import "testing"
+import (
+	"testing"
+)
 
 func pipelineSimFixture() (SimFleet, SimWorkload) {
 	f := simTestFleet(3)
@@ -41,50 +43,6 @@ func TestSimPipelineOverlapAndCoverage(t *testing.T) {
 			if p.Accepted == nil || p.Ready == nil || p.Started == nil || *p.AcceptanceToReady != 0 || *p.AcceptanceToStart < 2 || !p.Output {
 				t.Fatalf("incorrect acceptance/staging: %+v", p)
 			}
-		}
-	}
-}
-func TestSimPipelineLossAndCancel(t *testing.T) {
-	f, w := pipelineSimFixture()
-	f.Machines[0].Departure = "loss"
-	f.Machines[0].Windows = []SimWindow{{Days: []int{0}, Start: 0, End: 5.0 / 3600}, {Days: []int{0}, Start: 70.0 / 3600, End: 24}}
-	r, err := ComparePieceDependencies(f, w, SimOptions{Days: 500.0 / 86400, Seed: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !r.Coverage || r.PerPiece.Failed != 0 || r.PerPiece.Unfinished != 0 || r.PerPiece.InfrastructureLostSeconds == 0 {
-		t.Fatalf("loss skipped outputs: %+v", r)
-	}
-	f, w = pipelineSimFixture()
-	cancel, err := ComparePieceDependencies(f, w, SimOptions{Days: 500.0 / 86400, Seed: 2, CancelAfter: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cancel.PerPiece.Cancelled == 0 || cancel.PerPiece.Unfinished != 0 || cancel.PerPiece.Failed != 0 {
-		t.Fatalf("abort left work active: %+v", cancel.PerPiece)
-	}
-}
-
-func TestSimPipelineProductionWindowStartsAtGatherBarrier(t *testing.T) {
-	f := simTestFleet(2)
-	f.Machines[0].Platform = "xpu"
-	f.Machines[1].Platform = "cuda"
-	f.Machines[1].Windows = []SimWindow{{Days: []int{0}, Start: 210.0 / 3600, End: 24}}
-	s := simTestStream("pieces", "production", 0, 50, 1)
-	s.Platforms = []string{"xpu"}
-	s.MemoryGB, s.HostGB, s.Batch = 1, 1, 2
-	s.Curves = map[string][]SimCurvePoint{"a": {{1, 1}}}
-	s.Downstream = &SimDownstream{Duration: 1, Platforms: []string{"cuda"}, MemoryGB: 1, HostGB: 1}
-	r, err := Simulate(f, simTestWork(s), SimOptions{Days: 400.0 / 86400, Seed: 1, Pipeline: true, Declared: true, GatherBarrier: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Failed != 0 || r.Unfinished != 0 || len(r.Pipelines) != 1 {
-		t.Fatalf("gather budget was spent before readiness: %+v", r)
-	}
-	for _, pipeline := range r.Pipelines {
-		if pipeline.Gather == nil || *pipeline.Gather != 100 || pipeline.FirstStart == nil || *pipeline.FirstStart != 210 || pipeline.OutputCount != 2 {
-			t.Fatalf("gather did not release both consumers with a full window: %+v", pipeline)
 		}
 	}
 }

@@ -3,13 +3,12 @@ package myce
 import (
 	"context"
 	"fmt"
+	"mycelium/internal/probeguard"
 	"os"
 	"runtime"
 	"sort"
 	"testing"
 	"time"
-
-	"mycelium/internal/probeguard"
 )
 
 // Opt-in native proof; ordinary gates retain injected probes and laptop safety.

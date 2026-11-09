@@ -11,180 +11,209 @@ import (
 )
 
 func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
-	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	client := Client{URL: d.URL, Token: "resolve-nas-fixture"}
-	await(t, func() bool {
-		snap, err := d.Queue.Snapshot()
-		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
-	})
-	s := cpuResolveSpec()
-	s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/missing", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
-	var report ResolveReport
-	request := ResolveRequest{Spec: s, InspectNAS: true}
-	await(t, func() bool {
-		report = ResolveReport{}
-		if err := client.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
-			t.Fatal(err)
-		}
-		return resolveFinding(report, "shared_inputs.movie.nas") != nil
-	})
-	if len(report.Targets) != 1 || report.Targets[0].Eligible || report.Targets[0].NASInputs[0].State != "missing" || report.Targets[0].NASInputs[0].ObservedAt.IsZero() {
-		t.Fatalf("missing source appeared ready: %+v", report)
-	}
-	d.Queue.mu.Lock()
-	jobs, reservations := len(d.Queue.s.Jobs), len(d.Queue.s.Reservations)
-	d.Queue.mu.Unlock()
-	if jobs+reservations != 0 {
-		t.Fatal("inspection submitted or reserved work")
-	}
-	client.Token = "wrong"
-	if err := client.Call(context.Background(), "POST", "/api/resolve", request, nil); err == nil {
-		t.Fatal("inspection unauthenticated")
-	}
-}
-
-func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.SetLossTimeouts(3*time.Minute, 3*time.Minute, 3*time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	m := cacheCapacityMachine("worker", 1<<20)
-	m.GPU = "cpu"
-	m.Session = "one"
-	m.LastSeen = clock.Now()
-	m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
-	check(t, q, m, nil)
-	req := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
-	req.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "data/input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
-	cache := newResolveNASCache(clock)
-	resolve := func() ResolveReport {
-		r, err := q.Resolve(req)
+	t.Run("contract", func(t *testing.T) {
+		root := t.TempDir()
+		d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
 		if err != nil {
 			t.Fatal(err)
 		}
-		cache.resolve(req, &r)
-		return r
-	}
-	before := string(wireJSON(t, q.s))
-	r := resolve()
-	if r.Targets[0].NASInputs[0].State != "pending" {
-		t.Fatal(r)
-	}
-	checks := cache.checkin(Checkin{Machine: m})
-	if len(checks) != 1 {
-		t.Fatal(checks)
-	}
-	foreign := m
-	foreign.Session = "other"
-	report := NASPathReport{ID: checks[0].ID, State: "present"}
-	cache.checkin(Checkin{Machine: foreign, NASPathReports: []NASPathReport{report}})
-	if resolve().Targets[0].NASInputs[0].State != "pending" {
-		t.Fatal("foreign session supplied evidence")
-	}
-	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{report}})
-	r = resolve()
-	if r.Targets[0].NASInputs[0].State != "present" {
-		t.Fatal(r)
-	}
-	if after := string(wireJSON(t, q.s)); before != after {
-		t.Fatal("diagnostics changed durable queue state")
-	}
-	observed := r.Targets[0].NASInputs[0].ObservedAt
-	clock.Advance(30 * time.Second)
-	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{report}})
-	if !resolve().Targets[0].NASInputs[0].ObservedAt.Equal(observed) {
-		t.Fatal("duplicate report renewed evidence")
-	}
-	clock.Advance(31 * time.Second)
-	check(t, q, m, nil)
-	if got := resolve().Targets[0].NASInputs[0]; got.State != "present" || !got.ObservedAt.Equal(observed) {
-		t.Fatal("session-fresh evidence disappeared at a fixed minute", got)
-	}
-	clock.Advance(2 * time.Minute)
-	check(t, q, m, nil)
-	if resolve().Targets[0].NASInputs[0].State != "pending" {
-		t.Fatal("expired signal reused")
-	}
-}
-
-func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "input"), []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ path, state string }{{"input", "present"}, {"missing", "missing"}, {"escape/missing", "unverified"}, {"../outside", "unverified"}} {
-		if got := inspectNASPath(root, tc.path); got != tc.state {
-			t.Errorf("%s: %s", tc.path, got)
-		}
-	}
-	_, clock := fixture(t)
-	w := Worker{Clock: clock}
-	checks := []NASPathCheck{{ID: "input", Path: "input"}}
-	w.inspectNASPaths(checks, root)
-	reports := w.nasPathReports()
-	if len(reports) != 1 || reports[0].State != "present" {
-		t.Fatal(reports)
-	}
-	clock.Advance(10 * time.Second)
-	if reports = w.nasPathReports(); reports[0].AgeSeconds != 10 {
-		t.Fatal("old sample was renewed", reports)
-	}
-}
-
-func TestResolveNASInspectionSharedAcrossListeners(t *testing.T) {
-	q, clock := fixture(t)
-	m := cacheCapacityMachine("worker", 16<<30)
-	m.GPU, m.Session = "cpu", "session"
-	m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
-	machineCheck(t, q, m)
-	api := API{Queue: q, Token: "test"}
-	joining := httptest.NewServer(api.HandlerWithJoiningIdentity("test-pin"))
-	defer joining.Close()
-	control := httptest.NewServer(api.Handler())
-	defer control.Close()
-	observer := Client{URL: joining.URL, Token: "test"}
-	worker := Client{URL: control.URL, Token: "test"}
-	request := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
-	request.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "shared/input", SHA256: strings.Repeat("a", 64), SizeBytes: 8 << 30}}
-	resolve := func() ResolveNASInput {
-		t.Helper()
+		defer d.Close()
+		client := Client{URL: d.URL, Token: "resolve-nas-fixture"}
+		await(t, func() bool {
+			snap, err := d.Queue.Snapshot()
+			return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
+		})
+		s := cpuResolveSpec()
+		s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/missing", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
 		var report ResolveReport
-		if err := observer.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
+		request := ResolveRequest{Spec: s, InspectNAS: true}
+		await(t, func() bool {
+			report = ResolveReport{}
+			if err := client.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
+				t.Fatal(err)
+			}
+			return resolveFinding(report, "shared_inputs.movie.nas") != nil
+		})
+		if len(report.Targets) != 1 || report.Targets[0].Eligible || report.Targets[0].NASInputs[0].State != "missing" || report.Targets[0].NASInputs[0].ObservedAt.IsZero() {
+			t.Fatalf("missing source appeared ready: %+v", report)
+		}
+		d.Queue.mu.Lock()
+		jobs, reservations := len(d.Queue.s.Jobs), len(d.Queue.s.Reservations)
+		d.Queue.mu.Unlock()
+		if jobs+reservations != 0 {
+			t.Fatal("inspection submitted or reserved work")
+		}
+		client.Token = "wrong"
+		if err := client.Call(context.Background(), "POST", "/api/resolve", request, nil); err == nil {
+			t.Fatal("inspection unauthenticated")
+		}
+
+	})
+
+	t.Run("ResolveNASCacheFreshnessAndSession", func(t *testing.T) {
+		q, clock := fixture(t)
+		if err := q.SetLossTimeouts(3*time.Minute, 3*time.Minute, 3*time.Minute); err != nil {
 			t.Fatal(err)
 		}
-		if len(report.Targets) != 1 || len(report.Targets[0].NASInputs) != 1 {
-			t.Fatal(report)
+		m := cacheCapacityMachine("worker", 1<<20)
+		m.GPU = "cpu"
+		m.Session = "one"
+		m.LastSeen = clock.Now()
+		m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
+		check(t, q, m, nil)
+		req := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
+		req.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "data/input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
+		cache := newResolveNASCache(clock)
+		resolve := func() ResolveReport {
+			r, err := q.Resolve(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache.resolve(req, &r)
+			return r
 		}
-		return report.Targets[0].NASInputs[0]
-	}
-	if got := resolve(); got.State != "pending" || !got.ObservedAt.IsZero() {
-		t.Fatal("inspection did not start pending", got)
-	}
-	clock.Advance(time.Second)
-	var reply Reply
-	if err := worker.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if len(reply.NASPathChecks) != 1 || reply.NASPathChecks[0].Path != "shared/input" {
-		t.Fatal("joining listener inspection never reached control listener heartbeat", reply.NASPathChecks)
-	}
-	clock.Advance(time.Second)
-	report := NASPathReport{ID: reply.NASPathChecks[0].ID, State: "present"}
-	if err := worker.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, NASPathReports: []NASPathReport{report}}, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if got := resolve(); got.State != "present" || !got.ObservedAt.Equal(clock.Now()) {
-		t.Fatal("control listener result did not reach joining listener resolve", got)
-	}
-	if len(q.s.Jobs) != 0 || len(q.s.Reservations) != 0 {
-		t.Fatal("NAS inspection submitted or reserved work")
-	}
+		before := string(wireJSON(t, q.s))
+		r := resolve()
+		if r.Targets[0].NASInputs[0].State != "pending" {
+			t.Fatal(r)
+		}
+		checks := cache.checkin(Checkin{Machine: m})
+		if len(checks) != 1 {
+			t.Fatal(checks)
+		}
+		foreign := m
+		foreign.Session = "other"
+		report := NASPathReport{ID: checks[0].ID, State: "present"}
+		cache.checkin(Checkin{Machine: foreign, NASPathReports: []NASPathReport{report}})
+		if resolve().Targets[0].NASInputs[0].State != "pending" {
+			t.Fatal("foreign session supplied evidence")
+		}
+		cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{report}})
+		r = resolve()
+		if r.Targets[0].NASInputs[0].State != "present" {
+			t.Fatal(r)
+		}
+		if after := string(wireJSON(t, q.s)); before != after {
+			t.Fatal("diagnostics changed durable queue state")
+		}
+		observed := r.Targets[0].NASInputs[0].ObservedAt
+		clock.Advance(30 * time.Second)
+		cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{report}})
+		if !resolve().Targets[0].NASInputs[0].ObservedAt.Equal(observed) {
+			t.Fatal("duplicate report renewed evidence")
+		}
+		clock.Advance(31 * time.Second)
+		check(t, q, m, nil)
+		if got := resolve().Targets[0].NASInputs[0]; got.State != "present" || !got.ObservedAt.Equal(observed) {
+			t.Fatal("session-fresh evidence disappeared at a fixed minute", got)
+		}
+		clock.Advance(2 * time.Minute)
+		check(t, q, m, nil)
+		if resolve().Targets[0].NASInputs[0].State != "pending" {
+			t.Fatal("expired signal reused")
+		}
+
+	})
+
+	t.Run("ResolveNASWorkerChecksAreConfinedAndCached", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "input"), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), filepath.Join(root, "escape")); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ path, state string }{{"input", "present"}, {"missing", "missing"}, {"escape/missing", "unverified"}, {"../outside", "unverified"}} {
+			if got := inspectNASPath(root, tc.path); got != tc.state {
+				t.Errorf("%s: %s", tc.path, got)
+			}
+		}
+		_, clock := fixture(t)
+		w := Worker{Clock: clock}
+		checks := []NASPathCheck{{ID: "input", Path: "input"}}
+		w.inspectNASPaths(checks, root)
+		reports := w.nasPathReports()
+		if len(reports) != 1 || reports[0].State != "present" {
+			t.Fatal(reports)
+		}
+		clock.Advance(10 * time.Second)
+		if reports = w.nasPathReports(); reports[0].AgeSeconds != 10 {
+			t.Fatal("old sample was renewed", reports)
+		}
+
+	})
+
+	t.Run("ResolveNASInspectionSharedAcrossListeners", func(t *testing.T) {
+		q, clock := fixture(t)
+		m := cacheCapacityMachine("worker", 16<<30)
+		m.GPU, m.Session = "cpu", "session"
+		m.Capabilities = append(m.Capabilities, "nas_inspection_v1")
+		machineCheck(t, q, m)
+		api := API{Queue: q, Token: "test"}
+		joining := httptest.NewServer(api.HandlerWithJoiningIdentity("test-pin"))
+		defer joining.Close()
+		control := httptest.NewServer(api.Handler())
+		defer control.Close()
+		observer := Client{URL: joining.URL, Token: "test"}
+		worker := Client{URL: control.URL, Token: "test"}
+		request := ResolveRequest{Spec: cpuResolveSpec(), InspectNAS: true}
+		request.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "shared/input", SHA256: strings.Repeat("a", 64), SizeBytes: 8 << 30}}
+		resolve := func() ResolveNASInput {
+			t.Helper()
+			var report ResolveReport
+			if err := observer.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Targets) != 1 || len(report.Targets[0].NASInputs) != 1 {
+				t.Fatal(report)
+			}
+			return report.Targets[0].NASInputs[0]
+		}
+		if got := resolve(); got.State != "pending" || !got.ObservedAt.IsZero() {
+			t.Fatal("inspection did not start pending", got)
+		}
+		clock.Advance(time.Second)
+		var reply Reply
+		if err := worker.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if len(reply.NASPathChecks) != 1 || reply.NASPathChecks[0].Path != "shared/input" {
+			t.Fatal("joining listener inspection never reached control listener heartbeat", reply.NASPathChecks)
+		}
+		clock.Advance(time.Second)
+		report := NASPathReport{ID: reply.NASPathChecks[0].ID, State: "present"}
+		if err := worker.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, NASPathReports: []NASPathReport{report}}, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolve(); got.State != "present" || !got.ObservedAt.Equal(clock.Now()) {
+			t.Fatal("control listener result did not reach joining listener resolve", got)
+		}
+		if len(q.s.Jobs) != 0 || len(q.s.Reservations) != 0 {
+			t.Fatal("NAS inspection submitted or reserved work")
+		}
+
+	})
+
+	t.Run("ResolveNASSharedInputReadsRemainUnverified", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := cacheCapacityMachine("reader", 1<<20)
+		m.GPU = "cpu"
+		check(t, q, m, nil)
+		s := cpuResolveSpec()
+		s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/movie", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
+		r, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		notes := strings.Join(r.Notes, " ")
+		for _, want := range []string{"shared_inputs.movie.nas", "worker NAS reads are unverified", "--checkpoint-root", "does not check their existence or bytes", "profile local:", "myce file put"} {
+			if !strings.Contains(notes, want) {
+				t.Fatalf("resolve omitted %q: %s", want, notes)
+			}
+		}
+		if len(r.Findings) != 0 {
+			t.Fatalf("unknown NAS visibility became a proven missing input: %+v", r.Findings)
+		}
+
+	})
 }

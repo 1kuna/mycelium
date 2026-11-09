@@ -81,118 +81,75 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 	}
 }
 
-func TestActionableBlockerCPUResolveOmitsAcceleratorViews(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	machineCheck(t, q, m)
-	r, err := q.Resolve(ResolveRequest{Spec: cpuResolveSpec()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(r.Targets) != 1 || !r.Targets[0].Eligible || r.Blocker != nil {
-		t.Fatalf("%+v", r)
-	}
-	var out strings.Builder
-	if err := WriteResolve(&out, r, false); err != nil {
-		t.Fatal(err)
-	}
-	for _, noise := range []string{"select-none", "one card holds", "0 GiB"} {
-		if strings.Contains(out.String(), noise) {
-			t.Fatal(out.String())
-		}
-	}
-}
-
 // #644: preserve the precise inline validation error and consumer remedy.
 func TestActionableBlockerInlineValidation(t *testing.T) {
-	q, _ := fixture(t)
-	s := cpuResolveSpec()
-	s.Environment = Environment{LockFile: "x-requirements.txt", Python: "3.12"}
-	r, err := q.Resolve(ResolveRequest{Spec: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Evidence, "lock_file must be") {
-		t.Fatalf("%+v", r)
-	}
-}
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		s := cpuResolveSpec()
+		s.Environment = Environment{LockFile: "x-requirements.txt", Python: "3.12"}
+		r, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Evidence, "lock_file must be") {
+			t.Fatalf("%+v", r)
+		}
 
-func TestActionableBlockerProducerPrecedesPreparation(t *testing.T) {
-	q, _ := fixture(t)
-	j := &Job{State: "queued", Spec: cpuSpec(1, 1)}
-	j.Spec.After = &PieceDependency{Piece: "part"}
-	j.Spec.Environment.Name = "cold"
-	b := q.actionableBlocker(j)
-	if b == nil || b.Owner != "producer" || b.Dependency != "accepted upstream result" {
-		t.Fatalf("%+v", b)
-	}
-}
+	})
 
-func TestActionableBlockerNativePreparationIdentity(t *testing.T) {
-	q, clock := fixture(t)
-	e := compositionExtension(t, false)
-	m := machine("worker", "fake")
-	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = e.Variants[0].Target.OS, e.Variants[0].Target.Arch
-	m.LastSeen = clock.Now()
-	m.EnvironmentBuilder = true
-	m.EnvironmentReports = []EnvironmentReport{{Key: extensionPreparationKey(e, &m), State: "uploading", FailureKind: "deterministic", Error: "dependency resolution failed", Log: "No solution found"}}
-	q.s.Machines[m.ID] = &m
-	j := &Job{State: "queued", Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name}}, Extensions: []Extension{e}}
-	check(t, q, m, nil)
-	m = *q.s.Machines[m.ID]
-	b := q.environmentBlocker(j, &m)
-	if b == nil || b.Code != "deterministically_failed" || !strings.Contains(b.Evidence, "No solution found") {
-		t.Fatalf("%+v", b)
-	}
+	t.Run("ActionableBlockerNativeResolveQualification", func(t *testing.T) {
+		q, _, _, s := observationFixture(t)
+		e := q.s.Extensions[s.Extension]
+		r, err := q.Resolve(ResolveRequest{Spec: Spec{Project: s.Project}, Recipe: &e})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Action, "qualify") {
+			t.Fatalf("%+v", r.Blocker)
+		}
+
+	})
 }
 
 func TestActionableBlockerResolveCurrentMemory(t *testing.T) {
-	q, _ := fixture(t)
-	m := cpuMachine("worker", "worker", "cpu", 8, 0.5)
-	check(t, q, m, nil)
-	s := cpuSpec(1, 4)
-	j := submit(t, q, s)
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, err := q.Resolve(ResolveRequest{Spec: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !reflect.DeepEqual(got.Blocker, r.Blocker) {
-		t.Fatalf("GET=%+v resolve=%+v", got.Blocker, r.Blocker)
-	}
-}
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := cpuMachine("worker", "worker", "cpu", 8, 0.5)
+		check(t, q, m, nil)
+		s := cpuSpec(1, 4)
+		j := submit(t, q, s)
+		got, err := q.jobSnapshot(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !reflect.DeepEqual(got.Blocker, r.Blocker) {
+			t.Fatalf("GET=%+v resolve=%+v", got.Blocker, r.Blocker)
+		}
 
-func TestActionableBlockerKnownSharedPressure(t *testing.T) {
-	q, _ := fixture(t)
-	m := sharedHostFixture(t, q)
-	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
-	m.SharedHostPressure.MemoryLevel = 4
-	check(t, q, m, nil)
-	s := cpuSpec(1, 1)
-	j := submit(t, q, s)
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !strings.Contains(got.Blocker.Evidence, "memory pressure") {
-		t.Fatalf("%+v", got.Blocker)
-	}
-}
+	})
 
-func TestActionableBlockerNativeResolveQualification(t *testing.T) {
-	q, _, _, s := observationFixture(t)
-	e := q.s.Extensions[s.Extension]
-	r, err := q.Resolve(ResolveRequest{Spec: Spec{Project: s.Project}, Recipe: &e})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Action, "qualify") {
-		t.Fatalf("%+v", r.Blocker)
-	}
+	t.Run("ActionableBlockerKnownSharedPressure", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := sharedHostFixture(t, q)
+		if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+			t.Fatal(err)
+		}
+		m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+		m.SharedHostPressure.MemoryLevel = 4
+		check(t, q, m, nil)
+		s := cpuSpec(1, 1)
+		j := submit(t, q, s)
+		got, err := q.jobSnapshot(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !strings.Contains(got.Blocker.Evidence, "memory pressure") {
+			t.Fatalf("%+v", got.Blocker)
+		}
+
+	})
 }

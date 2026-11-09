@@ -82,14 +82,3 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 		t.Fatalf("status copied retained payload: %s", result.MemString())
 	}
 }
-
-func BenchmarkQueueStatusRetainedHistory(b *testing.B) {
-	q := retainedStatusQueue(b)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		if _, err := q.publicSnapshot(); err != nil {
-			b.Fatal(err)
-		}
-	}
-}

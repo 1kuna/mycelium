@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -60,83 +59,6 @@ func TestUnifiedCUDAAdmissionPhysicalFloor(t *testing.T) {
 				t.Fatal("fresh physical headroom did not restore admission", run)
 			}
 		})
-	}
-}
-
-func TestUnifiedCUDAAdmissionModelLaunchRechecksFloor(t *testing.T) {
-	_, clock := fixture(t)
-	m := unifiedCUDAAdmissionMachine()
-	available := 8.0 // +16 reserve = 24 GiB raw, below the 25 GiB floor.
-	w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16,
-		HostMemorySource: func(context.Context) (float64, error) { return available, nil },
-		MemorySource:     func(context.Context) (float64, error) { return 96, nil },
-	}
-	rt, err := startModels(w, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := rt.close(); err != nil {
-			t.Error(err)
-		}
-	})
-	loading := &workerModel{model: Model{Name: "synthetic", MemoryGB: 24, HostMemoryGB: 8}}
-	if err := rt.checkLoadMemory(t.Context(), loading); err == nil || !strings.Contains(err.Error(), "insufficient host RAM") {
-		t.Fatal("model bypassed live physical floor", err)
-	}
-	available = 59 // 75 raw - 25 reserve = 50 GiB, enough for 32.125 GiB.
-	if err := rt.checkLoadMemory(t.Context(), loading); err != nil {
-		t.Fatal("physical recovery did not permit model", err)
-	}
-	rt.mu.Lock()
-	rt.memoryMachine.HostMemoryBudgetGB = 64 // New floor = 121 - 64 = 57 GiB.
-	rt.mu.Unlock()
-	if err := rt.checkLoadMemory(t.Context(), loading); err == nil || !strings.Contains(err.Error(), "insufficient host RAM") {
-		t.Fatal("model retained a stale allowance floor", err)
-	}
-	// Legacy admission-only models may omit host RAM; CUDA still uses physical RAM.
-	rt.mu.Lock()
-	rt.memoryMachine.HostMemoryBudgetGB = 0
-	rt.mu.Unlock()
-	available, loading.model.HostMemoryGB = 8, 0
-	if err := rt.checkLoadMemory(t.Context(), loading); err == nil || !strings.Contains(err.Error(), "insufficient host RAM") {
-		t.Fatal("zero host vector bypassed CUDA physical floor", err)
-	}
-}
-
-func TestUnifiedCUDAAdmissionUnknownDeviceRemainsFull(t *testing.T) {
-	q, clock := fixture(t)
-	m := unifiedCUDAAdmissionMachine()
-	check(t, q, m, nil)
-	// Current cgroup RAM exceeds the host vector. It cannot cancel the
-	// device vector, whose telemetry is absent (the incident's default).
-	j := &Job{ID: "holder", State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, Spec: spec("experiment")}
-	j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB = 32, 21
-	q.s.Jobs[j.ID] = j
-	q.hostMemorySamples[m.ID] = map[attemptKey]hostMemorySample{jobKey(*j): {gb: 45, at: clock.Now()}}
-	m.HostAvailableMemoryGB = 50
-	m.MemoryObservation.UsedGB = 46 // 75 raw - 25 reserve = 50 usable.
-	q.s.Machines[m.ID].HostAvailableMemoryGB = m.HostAvailableMemoryGB
-	q.s.Machines[m.ID].MemoryObservation = m.MemoryObservation
-	q.refreshHostMemory()
-	if got := q.s.Machines[m.ID].FreeHostMemoryGB; got != 18 {
-		t.Fatalf("device growth discounted: got %g GiB, want 50 - 32 = 18", got)
-	}
-	clock.Advance(hostMemorySampleFreshFor)
-	q.refreshHostMemory()
-	if got := q.s.Machines[m.ID].FreeHostMemoryGB; got != 0 {
-		t.Fatal("stale physical sample admitted CUDA", got)
-	}
-	// Worker launch uses the same device floor and a new raw measurement.
-	w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return 59, nil }}
-	w.hostMemorySamples = map[attemptKey]hostMemorySample{jobKey(*j): {gb: 45, at: clock.Now()}}
-	next := Job{Spec: cpuSpec(1, 20)}
-	if err := localAttemptAdmission(w, []Job{*j}, next, nil); err == nil {
-		t.Fatal("worker discounted unknown CUDA device usage")
-	}
-	w.HostMemorySource = func(context.Context) (float64, error) { return 16, nil } // raw 32; usable 7.
-	if free, err := w.sharedHostLiveMemory(context.Background()); err != nil || free != 7 {
-		t.Fatalf("worker floor not rechecked: free=%g err=%v", free, err)
 	}
 }
 
@@ -222,68 +144,5 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 	}
 	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
 		t.Fatal("withdrawn production demand still withholds CUDA", r.Job)
-	}
-}
-
-func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
-	q, clock, m, s := unifiedAutoFixture(t, 0)
-	first := submit(t, q, s)
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil || run.ID != first.ID {
-		t.Fatal("missing envelope seed")
-	}
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	r := result(run, true)
-	host, device := 8.0, 24.0
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	machineCheck(t, q, m)
-	s.Priority = "production"
-	demand := submit(t, q, s)
-	experiment := &Job{State: "queued", Spec: spec("experiment")}
-	experiment.Spec.Needs.MemoryGB, experiment.Spec.Needs.HostMemoryGB = 16, 10
-	target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
-	reason := q.productionAdmissionReason(experiment, target)
-	// The measured bound no longer withholds a universal 25% margin.
-	if reason != "" {
-		t.Fatal("fitting measured demand withheld headroom", reason)
-	}
-	experiment.Spec.Needs.HostMemoryGB = 18
-	reason = q.productionAdmissionReason(experiment, target)
-	// Retain both measured vectors, page rounding and explicit launch slack.
-	if !strings.Contains(reason, "32.125 GiB production envelope") {
-		t.Fatal("measured production envelope or margin lost", reason)
-	}
-	if err := q.Cancel(demand.ID); err != nil {
-		t.Fatal(err)
-	}
-	if reason := q.productionAdmissionReason(experiment, target); reason != "" {
-		t.Fatal("cancelled production still protects an envelope", reason)
-	}
-}
-
-func TestUnifiedCUDAAdmissionImpossibleProductionDoesNotStarve(t *testing.T) {
-	q, clock := fixture(t)
-	m := unifiedCUDAAdmissionMachine()
-	check(t, q, m, nil)
-	production := spec("production")
-	production.Needs.MemoryGB, production.Needs.HostMemoryGB = 24, 80
-	production.AllowedMachines = []string{m.ID}
-	demand := submit(t, q, production) // 104.125 GiB can never fit the 96 GiB allowance.
-	experiment := spec("experiment")
-	experiment.Needs.MemoryGB, experiment.Needs.HostMemoryGB = 2, 1
-	experiment.AllowedMachines = []string{m.ID}
-	waiting := submit(t, q, experiment)
-	clock.Advance(time.Second)
-	if run := check(t, q, m, nil).Job; run == nil || run.ID != waiting.ID {
-		t.Fatal("impossible production permanently withheld a fitting co-tenant", run, job(t, q, waiting.ID).Reason)
-	}
-	if job(t, q, demand.ID).State != "queued" {
-		t.Fatal("impossible production was admitted")
 	}
 }

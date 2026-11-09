@@ -161,315 +161,488 @@ func (e *auditedModelEngine) Load(ctx context.Context, m Model) error {
 // restart/partition, pin custody, production progress during blocked NAS I/O and
 // verification before Engine.Load. These are not covered by the command smoke.
 func TestPreDeployModelCopyFaults(t *testing.T) {
-	t.Parallel()
-	base := newTestStateRoot(t)
-	nas, state := filepath.Join(base, "nas"), filepath.Join(base, "worker")
-	checkpoints := filepath.Join(base, "checkpoints")
-	cache := filepath.Join(state, "model-cache")
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	must(os.Mkdir(nas, 0700))
-	must(os.Mkdir(checkpoints, 0700))
-	makeModel := func(name string, bytes int) Model {
-		data := []byte(strings.Repeat(name[:1], bytes))
-		must(os.WriteFile(filepath.Join(nas, name), data, 0600))
-		return Model{Name: name, Path: name, Engine: "fake", Platforms: []string{"fake"}, MemoryGB: 1,
-			SizeBytes: int64(bytes), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
-	}
-	pin := makeModel("pin", 1024)
-	restart := makeModel("restart", 3*1024*1024)
-	network := makeModel("network", 3*1024*1024)
-	urgent := makeModel("urgent", 3*1024*1024)
-	bad := makeModel("bad", 1024)
-	bad.SHA256 = strings.Repeat("0", 64)
-	cfg := ModelConfig{Idle: time.Second, Wait: testWaitTimeout, Models: []Model{pin, restart, network, urgent, bad}}
-	clock := &manualWorkerClock{now: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
-	open := func() *Queue {
-		q, err := Open(filepath.Join(base, "queue.db"), nas, clock)
-		must(err)
-		must(q.ConfigureModels(cfg))
-		q.SetRestartGrace(time.Minute)
-		return q
-	}
-	q := open()
-	var apiMu sync.RWMutex
-	handler := API{Queue: q, Token: "copy-fault-test"}.Handler()
-	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiMu.RLock()
-		defer apiMu.RUnlock()
-		handler.ServeHTTP(w, r)
-	}))
-	client := Client{URL: server.URL, Token: "copy-fault-test", HTTP: &http.Client{Timeout: testWaitTimeout}}
-	call := func(method, path string, in, out any) {
-		t.Helper()
-		must(client.Call(context.Background(), method, path, in, out))
-	}
-	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/inspection", nil, &s); return s }
-	wait := func(label string, condition func() bool) {
-		t.Helper()
-		deadline := time.NewTimer(testWaitTimeout)
-		defer deadline.Stop()
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			if condition() {
-				return
-			}
-			select {
-			case <-deadline.C:
-				t.Fatalf("%s: timed out: %+v", label, snapshot())
-			case <-tick.C:
-				clock.Advance(5 * time.Millisecond)
-			}
-		}
-	}
-	var gateMu sync.Mutex
-	var entered, release, cancelled chan struct{}
-	chunks := 0
-	arm := func() {
-		gateMu.Lock()
-		defer gateMu.Unlock()
-		entered, release, cancelled = make(chan struct{}), make(chan struct{}), make(chan struct{})
-		chunks = 0
-	}
-	hook := func(ctx context.Context) {
-		gateMu.Lock()
-		chunks++
-		if entered == nil || chunks != 2 {
-			gateMu.Unlock()
-			return
-		}
-		a, b, c := entered, release, cancelled
-		gateMu.Unlock()
-		close(a)
-		select {
-		case <-b:
-		case <-ctx.Done():
-			close(c)
-		}
-	}
-	waitChannel := func(label string, ch <-chan struct{}) {
-		t.Helper()
-		wait(label, func() bool {
-			select {
-			case <-ch:
-				return true
-			default:
-				return false
-			}
-		})
-	}
-	var loads, invalid sync.Map
-	transport := &partitionTransport{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
-		Machine: machine("copy-worker", "fake"), CheckpointRoot: checkpoints, ModelRoot: nas, StateDir: state,
-		CacheLimit: 4 * 1024 * 1024, Clock: RealClock{}, Interval: 5 * time.Millisecond, ModelConfig: cfg,
-		beforeModelCopy: hook, modelEngine: func(Model) Engine { return &auditedModelEngine{root: cache, loads: &loads, invalid: &invalid} }}
-	go func() { done <- w.Run(ctx) }()
-	finish := filepath.Join(base, "finish")
-	t.Cleanup(func() {
-		transport.down.Store(false)
-		gateMu.Lock()
-		if release != nil {
-			select {
-			case <-release:
-			default:
-				close(release)
-			}
-		}
-		gateMu.Unlock()
-		_ = os.WriteFile(finish, nil, 0600)
-		cancel()
-		select {
-		case err := <-done:
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		base := newTestStateRoot(t)
+		nas, state := filepath.Join(base, "nas"), filepath.Join(base, "worker")
+		checkpoints := filepath.Join(base, "checkpoints")
+		cache := filepath.Join(state, "model-cache")
+		must := func(err error) {
+			t.Helper()
 			if err != nil {
-				t.Error(err)
-			}
-		case <-time.After(testWaitTimeout):
-			t.Error("copy worker did not stop")
-		}
-		server.Close()
-		if err := q.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	call("POST", "/api/models/pin", ModelPin{Model: pin.Name, Project: "fault", Machine: w.Machine.ID}, nil)
-	pinReady := func() bool {
-		for _, s := range snapshot().LoadedModels {
-			if s.Model == pin.Name && s.State == "ready" {
-				return true
+				t.Fatal(err)
 			}
 		}
-		return false
-	}
-	wait("verified pin warmup", pinReady)
-	assertPin := func() {
-		t.Helper()
-		if !pinReady() {
-			t.Fatal("pin lost its loaded engine")
+		must(os.Mkdir(nas, 0700))
+		must(os.Mkdir(checkpoints, 0700))
+		makeModel := func(name string, bytes int) Model {
+			data := []byte(strings.Repeat(name[:1], bytes))
+			must(os.WriteFile(filepath.Join(nas, name), data, 0600))
+			return Model{Name: name, Path: name, Engine: "fake", Platforms: []string{"fake"}, MemoryGB: 1,
+				SizeBytes: int64(bytes), SHA256: fmt.Sprintf("%x", sha256.Sum256(data))}
 		}
-		count, ok := loads.Load(pin.Name)
-		if !ok || count.(*atomic.Int32).Load() != 1 {
-			t.Fatal("pin was unloaded/reloaded")
+		pin := makeModel("pin", 1024)
+		restart := makeModel("restart", 3*1024*1024)
+		network := makeModel("network", 3*1024*1024)
+		urgent := makeModel("urgent", 3*1024*1024)
+		bad := makeModel("bad", 1024)
+		bad.SHA256 = strings.Repeat("0", 64)
+		cfg := ModelConfig{Idle: time.Second, Wait: testWaitTimeout, Models: []Model{pin, restart, network, urgent, bad}}
+		clock := &manualWorkerClock{now: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+		open := func() *Queue {
+			q, err := Open(filepath.Join(base, "queue.db"), nas, clock)
+			must(err)
+			must(q.ConfigureModels(cfg))
+			q.SetRestartGrace(time.Minute)
+			return q
 		}
-		must(verifyModel(filepath.Join(cache, cacheKey(pin)), pin))
-	}
-	syncModel := func(m Model, stop bool) {
-		call("POST", "/api/models/sync", SyncRequest{Model: m.Name, To: "all", Cancel: stop}, nil)
-	}
-	cached := func(m Model) bool {
-		for _, worker := range snapshot().Machines {
-			if contains(worker.CachedModels, m.Name) {
-				return true
-			}
+		q := open()
+		var apiMu sync.RWMutex
+		handler := API{Queue: q, Token: "copy-fault-test"}.Handler()
+		server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			apiMu.RLock()
+			defer apiMu.RUnlock()
+			handler.ServeHTTP(w, r)
+		}))
+		client := Client{URL: server.URL, Token: "copy-fault-test", HTTP: &http.Client{Timeout: testWaitTimeout}}
+		call := func(method, path string, in, out any) {
+			t.Helper()
+			must(client.Call(context.Background(), method, path, in, out))
 		}
-		return false
-	}
-	assertPartial := func(m Model) {
-		t.Helper()
-		if cached(m) {
-			t.Fatal("partial reported as cached")
-		}
-		st, err := os.Stat(filepath.Join(cache, cacheKey(m)+".partial"))
-		must(err)
-		if st.Size() != 1024*1024 {
-			t.Fatalf("durable prefix=%d", st.Size())
-		}
-		if _, err := os.Stat(filepath.Join(cache, cacheKey(m))); !os.IsNotExist(err) {
-			t.Fatal("partial published", err)
-		}
-		if _, ok := loads.Load(m.Name); ok {
-			t.Fatal("engine loaded partial copy")
-		}
-	}
-	// Queue restart mid-copy keeps the same pin process and persistent sync.
-	arm()
-	syncModel(restart, false)
-	waitChannel("queue restart copy gate", entered)
-	assertPartial(restart)
-	apiMu.Lock()
-	must(q.Close())
-	q = open()
-	handler = API{Queue: q, Token: client.Token}.Handler()
-	apiMu.Unlock()
-	if len(snapshot().SyncRequests) != 1 || len(snapshot().Pins) != 1 {
-		t.Fatal("restart lost sync/pin")
-	}
-	close(release)
-	wait("copy across queue restart", func() bool { return cached(restart) })
-	must(verifyModel(filepath.Join(cache, cacheKey(restart)), restart))
-	assertPin()
-	clock.Advance(2 * time.Minute)
-	wait("pin survives idle expiry", pinReady)
-	assertPin()
-	// Isolated API network loss pauses the copy even while the NAS is readable.
-	arm()
-	syncModel(network, false)
-	waitChannel("network copy gate", entered)
-	assertPartial(network)
-	syncModel(restart, true) // avoid recopying an explicitly evicted completed target
-	transport.down.Store(true)
-	waitChannel("network failure cancels background I/O", cancelled)
-	assertPartial(network)
-	assertPin()
-	syncModel(network, true)
-	transport.down.Store(false)
-	wait("reconnect with paused prefix", func() bool {
-		for _, m := range snapshot().Machines {
-			for _, r := range m.CopyReports {
-				if r.Model == network.Name && r.State == "paused" && r.Bytes == 1024*1024 {
-					return true
+		snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/inspection", nil, &s); return s }
+		wait := func(label string, condition func() bool) {
+			t.Helper()
+			deadline := time.NewTimer(testWaitTimeout)
+			defer deadline.Stop()
+			tick := time.NewTicker(5 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				if condition() {
+					return
+				}
+				select {
+				case <-deadline.C:
+					t.Fatalf("%s: timed out: %+v", label, snapshot())
+				case <-tick.C:
+					clock.Advance(5 * time.Millisecond)
 				}
 			}
 		}
-		return false
-	})
-	close(release)
-	syncModel(network, false)
-	wait("network copy resumes", func() bool { return cached(network) })
-	must(verifyModel(filepath.Join(cache, cacheKey(network)), network))
-	assertPin()
-	// Production starts while an unrelated NAS syscall is still at the gate.
-	arm()
-	syncModel(network, true)
-	syncModel(urgent, false)
-	waitChannel("production copy gate", entered)
-	assertPartial(urgent)
-	s := spec("production")
-	s.Needs.MemoryGB = 1
-	s.AllowedMachines = []string{w.Machine.ID}
-	s.Run.Command = []string{"sh", "-c", `echo START; while [ ! -f "$FINISH" ]; do sleep 0.01; done; echo FINISHED`}
-	s.Run.Env = map[string]string{"FINISH": finish}
-	var job Job
-	call("POST", "/api/jobs", s, &job)
-	waitChannel("production pauses copy", cancelled)
-	wait("production starts once", func() bool {
+		var gateMu sync.Mutex
+		var entered, release, cancelled chan struct{}
+		chunks := 0
+		arm := func() {
+			gateMu.Lock()
+			defer gateMu.Unlock()
+			entered, release, cancelled = make(chan struct{}), make(chan struct{}), make(chan struct{})
+			chunks = 0
+		}
+		hook := func(ctx context.Context) {
+			gateMu.Lock()
+			chunks++
+			if entered == nil || chunks != 2 {
+				gateMu.Unlock()
+				return
+			}
+			a, b, c := entered, release, cancelled
+			gateMu.Unlock()
+			close(a)
+			select {
+			case <-b:
+			case <-ctx.Done():
+				close(c)
+			}
+		}
+		waitChannel := func(label string, ch <-chan struct{}) {
+			t.Helper()
+			wait(label, func() bool {
+				select {
+				case <-ch:
+					return true
+				default:
+					return false
+				}
+			})
+		}
+		var loads, invalid sync.Map
+		transport := &partitionTransport{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		w := Worker{EnvironmentLimit: 1 << 30, Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
+			Machine: machine("copy-worker", "fake"), CheckpointRoot: checkpoints, ModelRoot: nas, StateDir: state,
+			CacheLimit: 4 * 1024 * 1024, Clock: RealClock{}, Interval: 5 * time.Millisecond, ModelConfig: cfg,
+			beforeModelCopy: hook, modelEngine: func(Model) Engine { return &auditedModelEngine{root: cache, loads: &loads, invalid: &invalid} }}
+		go func() { done <- w.Run(ctx) }()
+		finish := filepath.Join(base, "finish")
+		t.Cleanup(func() {
+			transport.down.Store(false)
+			gateMu.Lock()
+			if release != nil {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}
+			gateMu.Unlock()
+			_ = os.WriteFile(finish, nil, 0600)
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-time.After(testWaitTimeout):
+				t.Error("copy worker did not stop")
+			}
+			server.Close()
+			if err := q.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		call("POST", "/api/models/pin", ModelPin{Model: pin.Name, Project: "fault", Machine: w.Machine.ID}, nil)
+		pinReady := func() bool {
+			for _, s := range snapshot().LoadedModels {
+				if s.Model == pin.Name && s.State == "ready" {
+					return true
+				}
+			}
+			return false
+		}
+		wait("verified pin warmup", pinReady)
+		assertPin := func() {
+			t.Helper()
+			if !pinReady() {
+				t.Fatal("pin lost its loaded engine")
+			}
+			count, ok := loads.Load(pin.Name)
+			if !ok || count.(*atomic.Int32).Load() != 1 {
+				t.Fatal("pin was unloaded/reloaded")
+			}
+			must(verifyModel(filepath.Join(cache, cacheKey(pin)), pin))
+		}
+		syncModel := func(m Model, stop bool) {
+			call("POST", "/api/models/sync", SyncRequest{Model: m.Name, To: "all", Cancel: stop}, nil)
+		}
+		cached := func(m Model) bool {
+			for _, worker := range snapshot().Machines {
+				if contains(worker.CachedModels, m.Name) {
+					return true
+				}
+			}
+			return false
+		}
+		assertPartial := func(m Model) {
+			t.Helper()
+			if cached(m) {
+				t.Fatal("partial reported as cached")
+			}
+			st, err := os.Stat(filepath.Join(cache, cacheKey(m)+".partial"))
+			must(err)
+			if st.Size() != 1024*1024 {
+				t.Fatalf("durable prefix=%d", st.Size())
+			}
+			if _, err := os.Stat(filepath.Join(cache, cacheKey(m))); !os.IsNotExist(err) {
+				t.Fatal("partial published", err)
+			}
+			if _, ok := loads.Load(m.Name); ok {
+				t.Fatal("engine loaded partial copy")
+			}
+		}
+		// Queue restart mid-copy keeps the same pin process and persistent sync.
+		arm()
+		syncModel(restart, false)
+		waitChannel("queue restart copy gate", entered)
+		assertPartial(restart)
+		apiMu.Lock()
+		must(q.Close())
+		q = open()
+		handler = API{Queue: q, Token: client.Token}.Handler()
+		apiMu.Unlock()
+		if len(snapshot().SyncRequests) != 1 || len(snapshot().Pins) != 1 {
+			t.Fatal("restart lost sync/pin")
+		}
+		close(release)
+		wait("copy across queue restart", func() bool { return cached(restart) })
+		must(verifyModel(filepath.Join(cache, cacheKey(restart)), restart))
+		assertPin()
+		clock.Advance(2 * time.Minute)
+		wait("pin survives idle expiry", pinReady)
+		assertPin()
+		// Isolated API network loss pauses the copy even while the NAS is readable.
+		arm()
+		syncModel(network, false)
+		waitChannel("network copy gate", entered)
+		assertPartial(network)
+		syncModel(restart, true) // avoid recopying an explicitly evicted completed target
+		transport.down.Store(true)
+		waitChannel("network failure cancels background I/O", cancelled)
+		assertPartial(network)
+		assertPin()
+		syncModel(network, true)
+		transport.down.Store(false)
+		wait("reconnect with paused prefix", func() bool {
+			for _, m := range snapshot().Machines {
+				for _, r := range m.CopyReports {
+					if r.Model == network.Name && r.State == "paused" && r.Bytes == 1024*1024 {
+						return true
+					}
+				}
+			}
+			return false
+		})
+		close(release)
+		syncModel(network, false)
+		wait("network copy resumes", func() bool { return cached(network) })
+		must(verifyModel(filepath.Join(cache, cacheKey(network)), network))
+		assertPin()
+		// Production starts while an unrelated NAS syscall is still at the gate.
+		arm()
+		syncModel(network, true)
+		syncModel(urgent, false)
+		waitChannel("production copy gate", entered)
+		assertPartial(urgent)
+		s := spec("production")
+		s.Needs.MemoryGB = 1
+		s.AllowedMachines = []string{w.Machine.ID}
+		s.Run.Command = []string{"sh", "-c", `echo START; while [ ! -f "$FINISH" ]; do sleep 0.01; done; echo FINISHED`}
+		s.Run.Env = map[string]string{"FINISH": finish}
+		var job Job
+		call("POST", "/api/jobs", s, &job)
+		waitChannel("production pauses copy", cancelled)
+		wait("production starts once", func() bool {
+			var logs []LogChunk
+			call("GET", "/api/jobs/"+job.ID+"/logs", nil, &logs)
+			for _, l := range logs {
+				if strings.Contains(l.Text, "START") {
+					return true
+				}
+			}
+			return false
+		})
+		assertPartial(urgent)
+		assertPin()
+		must(os.WriteFile(finish, nil, 0600))
+		wait("production succeeds once", func() bool {
+			for _, j := range snapshot().Jobs {
+				if j.ID == job.ID {
+					return j.State == "succeeded" && j.Attempt == 1 && j.Starts == 1
+				}
+			}
+			return false
+		})
+		close(release)
+		wait("idle copy resumes after production", func() bool { return cached(urgent) })
+		must(verifyModel(filepath.Join(cache, cacheKey(urgent)), urgent))
+		assertPin()
+		// A real call loads only the verified local publication. Bad master bytes
+		// must fail before Engine.Load, rather than merely returning fake success.
+		modelCall := func(m Model) int {
+			request, err := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"test"}]}`, m.Name)))
+			must(err)
+			request.Header.Set("Authorization", "Bearer "+client.Token)
+			request.Header.Set("X-Myce-Project", "fault")
+			request.Header.Set("X-Myce-Priority", "production")
+			response, err := (&http.Client{Timeout: testWaitTimeout}).Do(request)
+			must(err)
+			defer response.Body.Close()
+			_, err = io.Copy(io.Discard, response.Body)
+			must(err)
+			return response.StatusCode
+		}
+		if code := modelCall(urgent); code != 200 {
+			t.Fatal("verified model call failed", code)
+		}
+		if code := modelCall(bad); code < 400 {
+			t.Fatal("corrupt model call succeeded", code)
+		}
+		if _, ok := loads.Load(bad.Name); ok {
+			t.Fatal("unverified master reached Engine.Load")
+		}
+		invalid.Range(func(name, err any) bool { t.Errorf("invalid engine load %s: %s", name, err); return true })
+		assertPin()
 		var logs []LogChunk
 		call("GET", "/api/jobs/"+job.ID+"/logs", nil, &logs)
+		var text strings.Builder
 		for _, l := range logs {
-			if strings.Contains(l.Text, "START") {
-				return true
+			text.WriteString(l.Text)
+		}
+		if strings.Count(text.String(), "START") != 1 || strings.Count(text.String(), "FINISHED") != 1 || len(snapshot().Jobs) != 1 {
+			t.Fatal("lost/duplicate job", text.String())
+		}
+		t.Log("queue restart mid-copy, worker partition mid-copy, production during pre-copy; pin loaded once; verified local engine paths; one job completed once; bad master never loaded")
+
+	})
+
+	t.Run("PinsPrecopyEveryLandingMachineOutsideWindow", func(t *testing.T) {
+		q, _, m := syncFixture(t)
+		p := ModelPin{Project: "atlas", Model: "a", Platform: "fake", Start: "01:00", End: "02:00", Timezone: "UTC"}
+		if e := q.Pin(p); e != nil {
+			t.Fatal(e)
+		}
+		for _, id := range []string{"one", "two"} {
+			m.ID = id
+			m.Session = "session-" + id
+			reply := check(t, q, m, nil)
+			if len(reply.CopyPlan) != 1 || !contains(reply.CachePins, "a") {
+				t.Fatal("standby not warmed/protected", reply)
 			}
 		}
-		return false
+		m.ID = "cuda"
+		m.GPU = "cuda"
+		m.Session = "cuda-session"
+		if len(check(t, q, m, nil).CopyPlan) != 0 {
+			t.Fatal("pin copied onto wrong platform")
+		}
+
 	})
-	assertPartial(urgent)
-	assertPin()
-	must(os.WriteFile(finish, nil, 0600))
-	wait("production succeeds once", func() bool {
-		for _, j := range snapshot().Jobs {
-			if j.ID == job.ID {
-				return j.State == "succeeded" && j.Attempt == 1 && j.Starts == 1
+
+	t.Run("CacheResumeSpeedAndVerifiedPublication", func(t *testing.T) {
+		c, model := cacheFixture(t)
+		c.Limit = 4 * 1024 * 1024
+		c.Free = func(string) (int64, error) { return 10 * 1024 * 1024, nil }
+		m := model("big", strings.Repeat("x", 3*1024*1024))
+		ctx, cancel := context.WithCancel(context.Background())
+		chunks := 0
+		c.beforeChunk = func(context.Context) {
+			chunks++
+			c.Clock.(*fakeClock).Advance(time.Second)
+			if chunks == 2 {
+				cancel()
 			}
 		}
-		return false
+		if _, e := c.Precopy(ctx, m, 1); e == nil {
+			t.Fatal("copy not interrupted")
+		}
+		reports, speed := c.CopyReports()
+		if len(reports) != 1 || reports[0].State != "paused" || reports[0].Bytes != 1024*1024 || speed != 524288 {
+			t.Fatal(reports, speed)
+		}
+		if names, _, _ := c.Report([]Model{m}); len(names) != 0 {
+			t.Fatal("partial reported as cached")
+		}
+		restarted := &ModelCache{Root: c.Root, NASRoot: c.NASRoot, Limit: c.Limit, Clock: c.Clock, Free: c.Free}
+		if e := restarted.init(); e != nil {
+			t.Fatal(e)
+		}
+		restarted.beforeChunk = func(context.Context) { c.Clock.(*fakeClock).Advance(time.Second) }
+		path, e := restarted.Precopy(context.Background(), m, 1)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = verifyModel(path, m); e != nil {
+			t.Fatal(e)
+		}
+		reports, speed = restarted.CopyReports()
+		if reports[0].Bytes != m.SizeBytes || reports[0].State != "ready" || speed != float64(2*1024*1024)/3 {
+			t.Fatal(reports, speed)
+		}
+
 	})
-	close(release)
-	wait("idle copy resumes after production", func() bool { return cached(urgent) })
-	must(verifyModel(filepath.Join(cache, cacheKey(urgent)), urgent))
-	assertPin()
-	// A real call loads only the verified local publication. Bad master bytes
-	// must fail before Engine.Load, rather than merely returning fake success.
-	modelCall := func(m Model) int {
-		request, err := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"test"}]}`, m.Name)))
-		must(err)
-		request.Header.Set("Authorization", "Bearer "+client.Token)
-		request.Header.Set("X-Myce-Project", "fault")
-		request.Header.Set("X-Myce-Priority", "production")
-		response, err := (&http.Client{Timeout: testWaitTimeout}).Do(request)
-		must(err)
-		defer response.Body.Close()
-		_, err = io.Copy(io.Discard, response.Body)
-		must(err)
-		return response.StatusCode
-	}
-	if code := modelCall(urgent); code != 200 {
-		t.Fatal("verified model call failed", code)
-	}
-	if code := modelCall(bad); code < 400 {
-		t.Fatal("corrupt model call succeeded", code)
-	}
-	if _, ok := loads.Load(bad.Name); ok {
-		t.Fatal("unverified master reached Engine.Load")
-	}
-	invalid.Range(func(name, err any) bool { t.Errorf("invalid engine load %s: %s", name, err); return true })
-	assertPin()
-	var logs []LogChunk
-	call("GET", "/api/jobs/"+job.ID+"/logs", nil, &logs)
-	var text strings.Builder
-	for _, l := range logs {
-		text.WriteString(l.Text)
-	}
-	if strings.Count(text.String(), "START") != 1 || strings.Count(text.String(), "FINISHED") != 1 || len(snapshot().Jobs) != 1 {
-		t.Fatal("lost/duplicate job", text.String())
-	}
-	t.Log("queue restart mid-copy, worker partition mid-copy, production during pre-copy; pin loaded once; verified local engine paths; one job completed once; bad master never loaded")
+
+	t.Run("CacheDoesNotTrustUnverifiedSameSizeCopy", func(t *testing.T) {
+		c, model := cacheFixture(t)
+		m := model("m", "good")
+		if e := os.WriteFile(filepath.Join(c.Root, cacheKey(m)), []byte("evil"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		c.ValidateInventory([]Model{m})
+		if names, _, _ := c.Report([]Model{m}); len(names) != 0 {
+			t.Fatal("unverified file advertised")
+		}
+		path, e := c.Prepare(context.Background(), m)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = verifyModel(path, m); e != nil {
+			t.Fatal("corrupt cache used", e)
+		}
+
+	})
+
+	t.Run("WorkerPausesCopyBeforeRealWork", func(t *testing.T) {
+		for _, kind := range []string{"assignment", "model-call"} {
+			t.Run(kind, func(t *testing.T) {
+				c, model := cacheFixture(t)
+				c.Limit = 4 * 1024 * 1024
+				c.Free = func(string) (int64, error) { return 10 * 1024 * 1024, nil }
+				m := model("m", strings.Repeat("x", 3*1024*1024))
+				entered, release := make(chan struct{}), make(chan struct{})
+				chunks := 0
+				c.beforeChunk = func(context.Context) {
+					chunks++
+					if chunks == 2 {
+						close(entered)
+						<-release
+					}
+				}
+				rt := &modelRuntime{cache: c, models: map[string]*workerModel{}, copies: map[string]*workerCopy{}, copyParallel: 1, config: ModelConfig{Models: []Model{m}}}
+				rt.syncCopies([]CopyTask{{Model: "m", Score: 1}}, nil, nil, false)
+				<-entered
+				if kind == "assignment" {
+					rt.syncCopies(nil, nil, nil, true)
+				} else {
+					rt.token = "test"
+					rt.session = "test-session"
+					rt.models["ready"] = &workerModel{state: "ready", engine: &FakeEngine{Model: "ready"}}
+					req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"ready"}`))
+					req.Header.Set("Authorization", "Bearer test")
+					req.Header.Set("X-Myce-Session", rt.session)
+					response := httptest.NewRecorder()
+					rt.serve(response, req)
+					if response.Code != 200 {
+						t.Fatal(response.Code, response.Body.String())
+					}
+				}
+				close(release)
+				rt.pauseCopies()
+				reports, _ := c.CopyReports()
+				if len(reports) != 1 || reports[0].State != "paused" || reports[0].Bytes != 1024*1024 {
+					t.Fatal(reports)
+				}
+				rt.wg.Wait()
+			})
+		}
+
+	})
+
+	t.Run("ResumeRejectsCorruptPrefix", func(t *testing.T) {
+		c, model := cacheFixture(t)
+		m := model("m", "good")
+		os.WriteFile(filepath.Join(c.Root, cacheKey(m)+".partial"), []byte("ev"), 0600)
+		if _, e := c.Precopy(context.Background(), m, 1); e == nil {
+			t.Fatal("corrupt prefix published")
+		}
+		if names, _, _ := c.Report([]Model{m}); len(names) > 0 {
+			t.Fatal(names)
+		}
+		p, e := c.Prepare(context.Background(), m)
+		if e != nil {
+			t.Fatal(e)
+		}
+		data, _ := os.ReadFile(p)
+		if fmt.Sprintf("%x", sha256.Sum256(data)) != m.SHA256 {
+			t.Fatal("bad resumed hash")
+		}
+
+	})
+
+	t.Run("OversizedMasterNeverExceedsCopyReservation", func(t *testing.T) {
+		c, model := cacheFixture(t)
+		m := model("m", strings.Repeat("x", 1024))
+		m.SizeBytes = 8
+		if _, e := c.Prepare(context.Background(), m); e == nil {
+			t.Fatal("oversize accepted")
+		}
+		trash, _ := filepath.Glob(filepath.Join(c.NASRoot, ".Trash", "myce-model-cache", "*"))
+		for _, path := range trash {
+			st, e := os.Stat(path)
+			if e != nil || st.Size() > m.SizeBytes {
+				t.Fatal("copy wrote beyond reservation", e)
+			}
+		}
+
+	})
 }
 
 // Environment restart fault extends the acceptance suite with real binary

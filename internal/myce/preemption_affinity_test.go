@@ -3,106 +3,148 @@ package myce
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestCPUPreemptionPrefersIdleHost(t *testing.T) {
-	q, clock := fixture(t)
-	a := m3Machine()
-	a.ID, a.HostID = "host-a", "host-a"
-	a.GPU, a.CapabilityProfile.Accelerators[0].Type = "xpu", "xpu"
-	a.Devices[0].Platform, a.Devices[1].Platform = "xpu", "xpu"
-	low := spec("experiment")
-	low.Needs.CPUCores, low.Needs.HostMemoryGB = 8, 1
-	victim := submit(t, q, low)
-	run := assignedJob(machineCheck(t, q, a))
-	if run == nil || run.ID != victim.ID {
-		t.Fatal("missing XPU attempt", run, job(t, q, victim.ID).Reason)
-	}
-	if err := q.Started(result(run, false)); err != nil {
-		t.Fatal(err)
-	}
-	b := cpuMachine("host-b", "host-b", "cpu", 8, 32)
-	b.Devices = []MachineDevice{}
-	machineCheck(t, q, b)
-	clock.Advance(time.Second)
-	s := cpuSpec(8, 1)
-	s.Priority = "production"
-	demand := submit(t, q, s)
-	if got := job(t, q, victim.ID); got.State != "running" || priorityStop(got) != nil {
-		t.Fatal("preempted XPU work despite fitting idle host", got.State, priorityStop(got))
-	}
-	if next := assignedJob(machineCheck(t, q, b)); next == nil || next.ID != demand.ID {
-		t.Fatal("idle host did not receive production CPU demand", next)
-	}
-}
-
 func TestCPUPreemptionKeepsSelectedHostAfterRelease(t *testing.T) {
-	for _, restart := range []bool{false, true} {
-		t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
-			q, clock := fixture(t)
-			a := m3Machine()
-			a.ID, a.HostID = "host-a", "host-a"
-			a.GPU, a.CapabilityProfile.Accelerators[0].Type = "xpu", "xpu"
-			a.Devices[0].Platform, a.Devices[1].Platform = "xpu", "xpu"
-			low := spec("experiment")
-			low.Needs.CPUCores, low.Needs.HostMemoryGB = 8, 1
-			victim := submit(t, q, low)
-			run := assignedJob(machineCheck(t, q, a))
-			if run == nil || run.ID != victim.ID {
-				t.Fatal("missing XPU attempt", run, job(t, q, victim.ID).Reason)
-			}
-			if err := q.Started(result(run, false)); err != nil {
-				t.Fatal(err)
-			}
-			s := cpuSpec(8, 1)
-			s.Priority = "production"
-			demand := submit(t, q, s)
-			if got := job(t, q, victim.ID); got.State != "stopping" || priorityStop(got) == nil || priorityStop(got).Demand != demand.ID {
-				t.Fatal("required host preemption missing", got.State, priorityStop(got))
-			}
-			if restart {
-				var path string
-				if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+	t.Run("contract", func(t *testing.T) {
+		for _, restart := range []bool{false, true} {
+			t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
+				q, clock := fixture(t)
+				a := m3Machine()
+				a.ID, a.HostID = "host-a", "host-a"
+				a.GPU, a.CapabilityProfile.Accelerators[0].Type = "xpu", "xpu"
+				a.Devices[0].Platform, a.Devices[1].Platform = "xpu", "xpu"
+				low := spec("experiment")
+				low.Needs.CPUCores, low.Needs.HostMemoryGB = 8, 1
+				victim := submit(t, q, low)
+				run := assignedJob(machineCheck(t, q, a))
+				if run == nil || run.ID != victim.ID {
+					t.Fatal("missing XPU attempt", run, job(t, q, victim.ID).Reason)
+				}
+				if err := q.Started(result(run, false)); err != nil {
 					t.Fatal(err)
 				}
-				root := q.root
-				if err := q.Close(); err != nil {
-					t.Fatal(err)
+				s := cpuSpec(8, 1)
+				s.Priority = "production"
+				demand := submit(t, q, s)
+				if got := job(t, q, victim.ID); got.State != "stopping" || priorityStop(got) == nil || priorityStop(got).Demand != demand.ID {
+					t.Fatal("required host preemption missing", got.State, priorityStop(got))
 				}
-				var err error
-				q, err = Open(path, root, clock)
-				if err != nil {
-					t.Fatal(err)
+				if restart {
+					var path string
+					if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+						t.Fatal(err)
+					}
+					root := q.root
+					if err := q.Close(); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					q, err = Open(path, root, clock)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer q.Close()
+					fakeCheckpointAvailability(t, q, true)
+					machineCheck(t, q, a, run)
 				}
-				defer q.Close()
-				fakeCheckpointAvailability(t, q, true)
-				machineCheck(t, q, a, run)
-			}
 
-			clock.Advance(time.Second)
-			b := cpuMachine("host-b", "host-b", "cpu", 8, 32)
-			b.Devices = []MachineDevice{}
-			if next := assignedJob(machineCheck(t, q, b)); next != nil && next.ID == demand.ID {
-				t.Fatal("demand escaped to another host before victim release")
+				clock.Advance(time.Second)
+				b := cpuMachine("host-b", "host-b", "cpu", 8, 32)
+				b.Devices = []MachineDevice{}
+				if next := assignedJob(machineCheck(t, q, b)); next != nil && next.ID == demand.ID {
+					t.Fatal("demand escaped to another host before victim release")
+				}
+				if next := assignedJob(machineCheck(t, q, a, run)); next != nil && next.ID == demand.ID {
+					t.Fatal("demand started before exact release")
+				}
+				finishInterrupted(t, q, run)
+				if next := assignedJob(machineCheck(t, q, b)); next != nil && next.ID == demand.ID {
+					t.Fatal("demand escaped to another host after victim release")
+				}
+				next := assignedJob(machineCheck(t, q, a))
+				if next == nil || next.ID != demand.ID || next.Machine != a.ID {
+					t.Fatal("demand did not use the host it preempted", next)
+				}
+				if err := q.Started(result(next, false)); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+
+	})
+
+	t.Run("VariantStatusCommittedPreemptionTarget", func(t *testing.T) {
+		q, clock := fixture(t)
+		e, a, b := variantsFixture(t, true)
+		if err := q.AddExtension(e); err != nil {
+			t.Fatal(err)
+		}
+		check(t, q, a, nil)
+		check(t, q, b, nil)
+		j := submit(t, q, variantSpec(e, "experiment"))
+		// Exact releases have completed, but assignment to the paid-for target has
+		// not happened yet. That commitment still excludes other idle targets.
+		if err := q.update(func() error {
+			q.touchJob(j.ID).PreemptionPlacement = &PreemptionPlacement{Machine: a.ID, Session: a.Session, Device: a.Device}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := q.jobSnapshot(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range got.VariantEligibility {
+			if r.Host == hostID(&b) && r.Variant == r.Target && (r.Eligible || !strings.Contains(strings.Join(r.Reasons, " "), "committed preemption target")) {
+				t.Fatal("uncommitted alternative advertised eligible", r)
 			}
-			if next := assignedJob(machineCheck(t, q, a, run)); next != nil && next.ID == demand.ID {
-				t.Fatal("demand started before exact release")
-			}
-			finishInterrupted(t, q, run)
-			if next := assignedJob(machineCheck(t, q, b)); next != nil && next.ID == demand.ID {
-				t.Fatal("demand escaped to another host after victim release")
-			}
-			next := assignedJob(machineCheck(t, q, a))
-			if next == nil || next.ID != demand.ID || next.Machine != a.ID {
-				t.Fatal("demand did not use the host it preempted", next)
-			}
-			if err := q.Started(result(next, false)); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
+		}
+		if run := check(t, q, b, nil).Job; run != nil {
+			t.Fatal("uncommitted alternative assigned", run)
+		}
+		clock.Advance(time.Second)
+		if run := check(t, q, a, nil).Job; run == nil || run.ID != j.ID {
+			t.Fatal("committed target did not assign", run)
+		}
+
+	})
+
+	t.Run("ProductionPreemptionAcknowledgementDoesNotStopSecondCard", func(t *testing.T) {
+		q, c := fixture(t)
+		a, b := machine("a", "fake"), machine("b", "fake")
+		submit(t, q, spec("experiment"))
+		first := check(t, q, a, nil).Job
+		submit(t, q, spec("experiment"))
+		second := check(t, q, b, nil).Job
+		prod := submit(t, q, spec("production"))
+		if !check(t, q, a, first).Stop || check(t, q, b, second).Stop {
+			t.Fatal("one production job must stop exactly one experiment")
+		}
+		c.Advance(time.Second)
+		finishInterrupted(t, q, first)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if check(t, q, b, second).Stop {
+			t.Fatal("acknowledged release must count while its memory report is pending")
+		}
+		assigned := check(t, q, a, nil).Job
+		if assigned == nil || assigned.ID != prod.ID {
+			t.Fatal("production must start on the first free report", assigned)
+		}
+		if err := q.Started(result(assigned, true)); err != nil {
+			t.Fatal(err)
+		}
+		if got := job(t, q, prod.ID); got.StartLatencySeconds != 1 {
+			t.Fatal("production was delayed", got.StartLatencySeconds)
+		}
+		requireState(t, q, second.ID, "running")
+
+	})
 }
 
 func TestGPUPreemptionKeepsSelectedCards(t *testing.T) {

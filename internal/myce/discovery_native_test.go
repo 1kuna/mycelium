@@ -12,27 +12,6 @@ import (
 	"time"
 )
 
-func TestDiscoveryUsesResidentDaemon(t *testing.T) {
-	for _, tc := range []struct {
-		platform string
-		running  bool
-		probeErr error
-		backend  string
-		wantErr  bool
-	}{
-		{"darwin", false, errors.New("must not probe Avahi"), "bonjour", false},
-		{"linux", true, nil, "avahi", false},
-		{"linux", false, nil, "", false},
-		{"linux", false, errors.New("permission denied"), "", true},
-		{"windows", false, nil, "", false},
-	} {
-		got, err := discoveryBackend(tc.platform, func() (bool, error) { return tc.running, tc.probeErr })
-		if got != tc.backend || (err != nil) != tc.wantErr {
-			t.Fatalf("%s: backend=%s err=%v", tc.platform, got, err)
-		}
-	}
-}
-
 func TestNativeBrowseResolvesCompatibleAddresses(t *testing.T) {
 	for _, backend := range []string{"bonjour", "avahi"} {
 		t.Run(backend, func(t *testing.T) {
@@ -84,59 +63,63 @@ func TestNativeBrowseResolvesCompatibleAddresses(t *testing.T) {
 }
 
 func TestNativeAdvertisementRegistrationAndCleanup(t *testing.T) {
-	for _, backend := range []string{"bonjour", "avahi"} {
-		t.Run(backend, func(t *testing.T) {
-			var starts, stops atomic.Int32
-			run := func(ctx context.Context, command string, args []string, line func(string)) error {
-				starts.Add(1)
-				joined := strings.Join(args, " ")
-				if !strings.Contains(joined, "myce-0123456789abcdef-1") || strings.Contains(joined, "private-token") {
-					t.Error(joined)
-				}
-				if backend == "bonjour" {
-					if command != "/usr/bin/dns-sd" || args[0] != "-lo" || !strings.Contains(joined, "-P") {
-						t.Error(command, args)
+	t.Run("contract", func(t *testing.T) {
+		for _, backend := range []string{"bonjour", "avahi"} {
+			t.Run(backend, func(t *testing.T) {
+				var starts, stops atomic.Int32
+				run := func(ctx context.Context, command string, args []string, line func(string)) error {
+					starts.Add(1)
+					joined := strings.Join(args, " ")
+					if !strings.Contains(joined, "myce-0123456789abcdef-1") || strings.Contains(joined, "private-token") {
+						t.Error(joined)
 					}
-					line("Got a reply for service myce-opaque: Name now registered and active")
-				} else {
-					line("Established under name 'myce-opaque'")
+					if backend == "bonjour" {
+						if command != "/usr/bin/dns-sd" || args[0] != "-lo" || !strings.Contains(joined, "-P") {
+							t.Error(command, args)
+						}
+						line("Got a reply for service myce-opaque: Name now registered and active")
+					} else {
+						line("Established under name 'myce-opaque'")
+					}
+					<-ctx.Done()
+					stops.Add(1)
+					return nil
 				}
-				<-ctx.Done()
-				stops.Add(1)
-				return nil
-			}
-			withdraw, err := advertiseNative(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 17342}, "0123456789abcdef0123456789abcdef", backend, run)
-			if err != nil {
-				t.Fatal(err)
-			}
-			withdraw()
-			withdraw()
-			want := int32(1)
-			if backend == "avahi" {
-				want = 2
-			}
-			if starts.Load() != want || stops.Load() != want {
-				t.Fatal(starts.Load(), stops.Load())
-			}
-		})
-	}
-}
-
-func TestNativeAdvertisementRollsBackPartialRegistration(t *testing.T) {
-	var stopped atomic.Bool
-	run := func(ctx context.Context, command string, args []string, line func(string)) error {
-		if command == "avahi-publish-service" {
-			return errors.New("registration rejected")
+				withdraw, err := advertiseNative(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 17342}, "0123456789abcdef0123456789abcdef", backend, run)
+				if err != nil {
+					t.Fatal(err)
+				}
+				withdraw()
+				withdraw()
+				want := int32(1)
+				if backend == "avahi" {
+					want = 2
+				}
+				if starts.Load() != want || stops.Load() != want {
+					t.Fatal(starts.Load(), stops.Load())
+				}
+			})
 		}
-		line("Established under name 'myce-opaque'")
-		<-ctx.Done()
-		stopped.Store(true)
-		return nil
-	}
-	_, err := advertiseNative(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 17342}, "0123456789abcdef0123456789abcdef", "avahi", run)
-	if err == nil || !stopped.Load() {
-		t.Fatal(err, stopped.Load())
-	}
+
+	})
+
+	t.Run("NativeAdvertisementRollsBackPartialRegistration", func(t *testing.T) {
+		var stopped atomic.Bool
+		run := func(ctx context.Context, command string, args []string, line func(string)) error {
+			if command == "avahi-publish-service" {
+				return errors.New("registration rejected")
+			}
+			line("Established under name 'myce-opaque'")
+			<-ctx.Done()
+			stopped.Store(true)
+			return nil
+		}
+		_, err := advertiseNative(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 17342}, "0123456789abcdef0123456789abcdef", "avahi", run)
+		if err == nil || !stopped.Load() {
+			t.Fatal(err, stopped.Load())
+		}
+
+	})
 }
 
 func TestDiscoveryCommandCancellationAndCredentialIsolation(t *testing.T) {

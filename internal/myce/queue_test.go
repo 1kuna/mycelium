@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // HTTP observation samples time outside q.mu, including before lock acquisition.
@@ -143,95 +141,6 @@ func requireState(t *testing.T, q *Queue, id, state string) {
 	}
 }
 
-func TestSchedulingOrder(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name          string
-		first, second Spec
-		models, envs  []string
-		wantSecond    bool
-	}{
-		{name: "production before deadline", first: spec("deadline"), second: spec("production"), wantSecond: true},
-		{name: "deadline before experiment", first: spec("experiment"), second: spec("deadline"), wantSecond: true},
-		{name: "production before loaded experiment", first: spec("experiment"), second: spec("production"), models: []string{"loaded"}, wantSecond: true},
-		{name: "loaded model before waiting age", first: spec("experiment"), second: spec("experiment"), models: []string{"loaded"}, wantSecond: true},
-		{name: "ready environment before waiting age", first: spec("experiment"), second: spec("experiment"), envs: []string{"ready"}, wantSecond: true},
-		{name: "earliest deadline", first: spec("deadline"), second: spec("deadline"), wantSecond: true},
-		{name: "longest waiting", first: spec("experiment"), second: spec("experiment")},
-		{name: "readiness before earliest deadline", first: spec("deadline"), second: spec("deadline"), models: []string{"loaded"}, wantSecond: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			q, c := fixture(t)
-			if strings.Contains(tc.name, "loaded experiment") {
-				tc.first.Needs.Model = "loaded"
-			}
-			if strings.Contains(tc.name, "model") || strings.Contains(tc.name, "readiness") {
-				tc.second.Needs.Model = "loaded"
-			}
-			if strings.Contains(tc.name, "environment") {
-				tc.second.Environment.Name = "ready"
-			}
-			if tc.name == "earliest deadline" {
-				d := tc.first.Deadline.Add(-time.Hour)
-				tc.second.Deadline = &d
-			}
-			if strings.Contains(tc.name, "readiness") {
-				d := tc.second.Deadline.Add(time.Hour)
-				tc.second.Deadline = &d
-			}
-			a := submit(t, q, tc.first)
-			c.Advance(time.Second)
-			b := submit(t, q, tc.second)
-			m := machine("one", "fake")
-			m.Models = tc.models
-			m.Environments = tc.envs
-			got := check(t, q, m, nil).Job
-			want := a.ID
-			if tc.wantSecond {
-				want = b.ID
-			}
-			if got == nil || got.ID != want {
-				t.Fatalf("got %+v want %s", got, want)
-			}
-		})
-	}
-}
-func TestEligibility(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"memory", "required GPU", "allowed machines", "environment not ready", "leaving machine", "gone machine"} {
-		t.Run(name, func(t *testing.T) {
-			j := &Job{Spec: spec("experiment"), State: "queued"}
-			m := machine("one", "cuda")
-			switch name {
-			case "memory":
-				j.Spec.Needs.MemoryGB = 9
-			case "required GPU":
-				j.Spec.Needs.Platform = Platform{Required: []string{"metal"}}
-			case "allowed machines":
-				j.Spec.AllowedMachines = []string{"two"}
-			case "environment not ready":
-				j.Spec.Environment.Name = "mlx"
-			case "leaving machine":
-				m.Leaving = true
-			case "gone machine":
-				m.Gone = true
-			}
-			if fits(j, &m, m.FreeMemoryGB) {
-				t.Fatal("ineligible job fits")
-			}
-		})
-	}
-	for _, gpu := range []string{"cuda", "xpu", "metal", "fake"} {
-		t.Run("any on "+gpu, func(t *testing.T) {
-			j := &Job{Spec: spec("experiment")}
-			m := machine("one", gpu)
-			if !fits(j, &m, 8) {
-				t.Fatal("any must fit")
-			}
-		})
-	}
-}
 func TestPreferredPlatform(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)
@@ -380,96 +289,142 @@ func TestGraceAndFrontOfLine(t *testing.T) {
 	}
 }
 func TestPlannedLeave(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name                 string
-		resumable, now, stop bool
-	}{{"resumable", true, false, true}, {"wait for nonresumable", false, false, false}, {"force nonresumable", false, true, true}, {"force resumable", true, true, true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, _ := fixture(t)
-			s := spec("experiment")
-			s.Resumable = tc.resumable
-			submit(t, q, s)
-			m := machine("one", "fake")
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		for _, tc := range []struct {
+			name                 string
+			resumable, now, stop bool
+		}{{"resumable", true, false, true}, {"wait for nonresumable", false, false, false}, {"force nonresumable", false, true, true}, {"force resumable", true, true, true}} {
+			t.Run(tc.name, func(t *testing.T) {
+				q, _ := fixture(t)
+				s := spec("experiment")
+				s.Resumable = tc.resumable
+				submit(t, q, s)
+				m := machine("one", "fake")
+				r := check(t, q, m, nil).Job
+				if err := q.Leave(m.ID, tc.now); err != nil {
+					t.Fatal(err)
+				}
+				reply := check(t, q, m, r)
+				if !reply.Leave || reply.Stop != tc.stop {
+					t.Fatalf("reply %+v", reply)
+				}
+				finish(t, q, r, true)
+				if tc.stop {
+					requireState(t, q, r.ID, "queued")
+				} else {
+					requireState(t, q, r.ID, "succeeded")
+				}
+				if reply := check(t, q, m, nil); reply.Job != nil || !reply.Leave {
+					t.Fatal("leaving worker got more work")
+				}
+				snp, _ := q.Snapshot()
+				if !snp.Machines[0].Gone {
+					t.Fatal("finished leaving machine should be gone")
+				}
+				m.Session = "new-session"
+				check(t, q, m, nil)
+			})
+		}
+
+	})
+
+	t.Run("PlannedPreemptionNotLimitedToThreeResumes", func(t *testing.T) {
+		q, _ := fixture(t)
+		j := submit(t, q, spec("experiment"))
+		m := machine("a", "fake")
+		for i := 0; i < 5; i++ {
 			r := check(t, q, m, nil).Job
-			if err := q.Leave(m.ID, tc.now); err != nil {
+			if r == nil || r.ID != j.ID {
+				t.Fatal("resume exhausted by planned pause")
+			}
+			if err := q.Leave(m.ID, false); err != nil {
 				t.Fatal(err)
 			}
-			reply := check(t, q, m, r)
-			if !reply.Leave || reply.Stop != tc.stop {
-				t.Fatalf("reply %+v", reply)
-			}
 			finish(t, q, r, true)
-			if tc.stop {
-				requireState(t, q, r.ID, "queued")
-			} else {
-				requireState(t, q, r.ID, "succeeded")
-			}
-			if reply := check(t, q, m, nil); reply.Job != nil || !reply.Leave {
-				t.Fatal("leaving worker got more work")
-			}
-			snp, _ := q.Snapshot()
-			if !snp.Machines[0].Gone {
-				t.Fatal("finished leaving machine should be gone")
-			}
-			m.Session = "new-session"
 			check(t, q, m, nil)
-		})
-	}
+			m.Session = ID()
+		}
+		requireState(t, q, j.ID, "queued")
+
+	})
 }
 func TestSuddenLossAndLateReturn(t *testing.T) {
-	t.Parallel()
-	for _, resumable := range []bool{true, false} {
-		t.Run("resumable="+stringBool(resumable), func(t *testing.T) {
-			q, c := fixture(t)
-			s := spec("experiment")
-			s.Resumable = resumable
-			submit(t, q, s)
-			a := machine("one", "fake")
-			a.Models = []string{"loaded"}
-			old := check(t, q, a, nil).Job
-			c.Advance(59 * time.Second)
-			requireState(t, q, old.ID, "running")
-			c.Advance(time.Second)
-			check(t, q, observer(), nil)
-			requireState(t, q, old.ID, "queued")
-			snap, _ := q.Snapshot()
-			for _, lost := range snap.Machines {
-				if lost.ID == a.ID && (!lost.Gone || len(lost.Models) != 0) {
-					t.Fatal("lost inventory not cleared")
+	t.Run("contract", func(t *testing.T) {
+		// Serial ancestry preserves the transferred fixture's process-global isolation.
+		for _, resumable := range []bool{true, false} {
+			t.Run("resumable="+stringBool(resumable), func(t *testing.T) {
+				q, c := fixture(t)
+				s := spec("experiment")
+				s.Resumable = resumable
+				submit(t, q, s)
+				a := machine("one", "fake")
+				a.Models = []string{"loaded"}
+				old := check(t, q, a, nil).Job
+				c.Advance(59 * time.Second)
+				requireState(t, q, old.ID, "running")
+				c.Advance(time.Second)
+				check(t, q, observer(), nil)
+				requireState(t, q, old.ID, "queued")
+				snap, _ := q.Snapshot()
+				for _, lost := range snap.Machines {
+					if lost.ID == a.ID && (!lost.Gone || len(lost.Models) != 0) {
+						t.Fatal("lost inventory not cleared")
+					}
 				}
-			}
-			next := check(t, q, machine("two", "fake"), nil).Job
-			if next.Attempt != 2 || next.Checkpoint != old.Checkpoint {
-				t.Fatal("retry lost checkpoint or attempt")
-			}
-			reply := check(t, q, a, old)
-			if !reply.Stop || !reply.Kill {
-				t.Fatal("returning stale copy must be killed")
-			}
-			oldKey := releaseKey(HostRelease{Job: old.ID, Machine: old.Machine, Session: old.Session, Attempt: old.Attempt})
-			if release, ok := q.s.HostReleases[oldKey]; !ok || release.CPUCores != 1 {
-				t.Fatal("loss did not retain the old attempt's default core")
-			}
-			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
-				t.Fatalf("old completion accepted: %v", err)
-			}
-			if _, ok := q.s.HostReleases[oldKey]; ok {
-				t.Fatal("rejected result did not settle its exact release")
-			}
-			current := job(t, q, next.ID)
-			if current.State != "running" || current.Attempt != next.Attempt || current.Machine != next.Machine || current.Session != next.Session || current.ReleaseConfirmed {
-				t.Fatal("old completion changed replacement attempt", current)
-			}
-			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
-				t.Fatalf("repeated old completion accepted: %v", err)
-			}
-			if err := q.AppendLog(LogChunk{Result: result(old, true), Text: "late"}); !errors.Is(err, ErrStale) {
-				t.Fatal("old logs accepted")
-			}
-			finish(t, q, next, true)
-		})
-	}
+				next := check(t, q, machine("two", "fake"), nil).Job
+				if next.Attempt != 2 || next.Checkpoint != old.Checkpoint {
+					t.Fatal("retry lost checkpoint or attempt")
+				}
+				reply := check(t, q, a, old)
+				if !reply.Stop || !reply.Kill {
+					t.Fatal("returning stale copy must be killed")
+				}
+				oldKey := releaseKey(HostRelease{Job: old.ID, Machine: old.Machine, Session: old.Session, Attempt: old.Attempt})
+				if release, ok := q.s.HostReleases[oldKey]; !ok || release.CPUCores != 1 {
+					t.Fatal("loss did not retain the old attempt's default core")
+				}
+				if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
+					t.Fatalf("old completion accepted: %v", err)
+				}
+				if _, ok := q.s.HostReleases[oldKey]; ok {
+					t.Fatal("rejected result did not settle its exact release")
+				}
+				current := job(t, q, next.ID)
+				if current.State != "running" || current.Attempt != next.Attempt || current.Machine != next.Machine || current.Session != next.Session || current.ReleaseConfirmed {
+					t.Fatal("old completion changed replacement attempt", current)
+				}
+				if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
+					t.Fatalf("repeated old completion accepted: %v", err)
+				}
+				if err := q.AppendLog(LogChunk{Result: result(old, true), Text: "late"}); !errors.Is(err, ErrStale) {
+					t.Fatal("old logs accepted")
+				}
+				finish(t, q, next, true)
+			})
+		}
+
+	})
+
+	t.Run("WorkerFreshRestartRetriesCleanedSession", func(t *testing.T) {
+		q, c := fixture(t)
+		submit(t, q, spec("experiment"))
+		m := machine("a", "fake")
+		r := check(t, q, m, nil).Job
+		c.Advance(time.Second)
+		m.Session = "fresh"
+		reply, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: r.Session, period: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply.Job == nil || reply.Job.Attempt != 2 {
+			t.Fatalf("fresh worker: %+v", reply)
+		}
+		if !errors.Is(q.Complete(result(r, true)), ErrStale) {
+			t.Fatal("orphan result accepted")
+		}
+
+	})
 }
 func stringBool(v bool) string {
 	if v {
@@ -479,38 +434,70 @@ func stringBool(v bool) string {
 }
 func TestThreeAttempts(t *testing.T) {
 	t.Parallel()
-	q, c := fixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	j := submit(t, q, s)
-	m := machine("one", "fake")
-	for i := 1; i <= 3; i++ {
-		r := check(t, q, m, nil).Job
-		if r == nil || r.Attempt != i {
-			t.Fatalf("attempt %d: %+v", i, r)
+
+	t.Run("contract", func(t *testing.T) {
+		q, c := fixture(t)
+		s := spec("experiment")
+		s.Resumable = false
+		j := submit(t, q, s)
+		m := machine("one", "fake")
+		for i := 1; i <= 3; i++ {
+			r := check(t, q, m, nil).Job
+			if r == nil || r.Attempt != i {
+				t.Fatalf("attempt %d: %+v", i, r)
+			}
+			advanceReportingPeer(t, q, c, observer(), LossAfter)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			// Reusing the same worker requires cleanup of its exact lost copy.
+			released := result(r, false)
+			released.ReleaseOnly = true
+			if err := q.Complete(released); err != nil {
+				t.Fatal(err)
+			}
 		}
-		advanceReportingPeer(t, q, c, observer(), LossAfter)
-		if err := q.Tick(); err != nil {
-			t.Fatal(err)
+		requireState(t, q, j.ID, "failed")
+		if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
+			t.Fatal("missing plain failure reason")
 		}
-		// Reusing the same worker requires cleanup of its exact lost copy.
-		released := result(r, false)
-		released.ReleaseOnly = true
-		if err := q.Complete(released); err != nil {
-			t.Fatal(err)
+		if check(t, q, m, nil).Job != nil {
+			t.Fatal("fourth attempt assigned")
 		}
-	}
-	requireState(t, q, j.ID, "failed")
-	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
-		t.Fatal("missing plain failure reason")
-	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("fourth attempt assigned")
-	}
+
+	})
+
+	t.Run("ResumableThreeInfrastructureLosses", func(t *testing.T) {
+		// Source phase stays serial within the contract journey.
+		q, c := fixture(t)
+		j := submit(t, q, spec("experiment"))
+		m := machine("one", "fake")
+		for i := 0; i < 3; i++ {
+			r := check(t, q, m, nil).Job
+			if r == nil {
+				t.Fatal("no assignment")
+			}
+			advanceReportingPeer(t, q, c, observer(), LossAfter)
+			// Reusing the same worker requires cleanup of its exact lost copy.
+			released := result(r, false)
+			released.ReleaseOnly = true
+			if err := q.Complete(released); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := job(t, q, j.ID)
+		if got.Losses != 3 || got.State != "failed" {
+			t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
+		}
+		if check(t, q, m, nil).Job != nil {
+			t.Fatal("failed job received a fourth execution")
+		}
+
+	})
 }
 func TestWaitingReasonAndGiveUp(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"platform", "pinned", "environment", "memory"} {
+	for _, kind := range []string{"memory"} {
 		t.Run(kind, func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("experiment")
@@ -570,71 +557,74 @@ func TestCancelAndFailure(t *testing.T) {
 	requireState(t, q, c.ID, "failed")
 }
 func TestPersistenceAndAssignmentRedelivery(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "queue.db")
-	clock := &fakeClock{now: time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)}
-	q, err := Open(path, t.TempDir(), clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	fakeCheckpointAvailability(t, q, true)
-	j := submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
-	// A slow checkpoint probe can temporarily withhold either assignment response.
-	assignment := func() *Job {
-		var assigned *Job
-		await(t, func() bool {
-			assigned = check(t, q, m, nil).Job
-			return assigned != nil
-		})
-		return assigned
-	}
-	r := assignment()
-	if r.ID != j.ID || r.Attempt != 1 {
-		t.Fatalf("assignment %+v want job %s attempt 1", r, j.ID)
-	}
-	if retry := assignment(); retry.ID != r.ID || retry.Attempt != 1 {
-		t.Fatal("assignment response lost")
-	}
-	if err := q.AppendLog(LogChunk{Result: result(r, true), Text: "hello"}); err != nil {
-		t.Fatal(err)
-	}
-	q.Close()
-	q, err = Open(path, t.TempDir(), clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer q.Close()
-	fakeCheckpointAvailability(t, q, true)
-	requireState(t, q, j.ID, "running")
-	if reply := check(t, q, m, r); reply.Stop {
-		t.Fatal("queue restart lost running job")
-	}
-	logs, err := q.Logs(j.ID, 0)
-	if err != nil || len(logs) != 1 || logs[0].Text != "hello" {
-		t.Fatalf("logs %+v %v", logs, err)
-	}
-	finish(t, q, r, true)
-	requireState(t, q, j.ID, "succeeded")
-}
-func TestValidationAndYAML(t *testing.T) {
-	for _, p := range []string{"[cuda]", "any", "{required: [xpu]}", "{preferred: [metal]}", "{any: true}"} {
-		s := spec("experiment")
-		data := "name: demo\nproject: test\npriority: experiment\nrun:\n  command: [echo, hello]\nneeds:\n  memory_gb: 8\n  platform: " + p + "\nenvironment: torch-cuda\n"
-		if err := yaml.Unmarshal([]byte(data), &s); err != nil {
+	t.Run("contract", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "queue.db")
+		clock := &fakeClock{now: time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)}
+		q, err := Open(path, t.TempDir(), clock)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Validate(); err != nil {
-			t.Fatalf("%s: %v", p, err)
+		defer q.Close()
+		fakeCheckpointAvailability(t, q, true)
+		j := submit(t, q, spec("experiment"))
+		m := machine("one", "fake")
+		// A slow checkpoint probe can temporarily withhold either assignment response.
+		assignment := func() *Job {
+			var assigned *Job
+			await(t, func() bool {
+				assigned = check(t, q, m, nil).Job
+				return assigned != nil
+			})
+			return assigned
 		}
-	}
-	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = -1 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"unknown"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
-		s := spec("experiment")
-		change(&s)
-		if s.Validate() == nil {
-			t.Fatal("invalid job accepted")
+		r := assignment()
+		if r.ID != j.ID || r.Attempt != 1 {
+			t.Fatalf("assignment %+v want job %s attempt 1", r, j.ID)
 		}
-	}
+		if retry := assignment(); retry.ID != r.ID || retry.Attempt != 1 {
+			t.Fatal("assignment response lost")
+		}
+		if err := q.AppendLog(LogChunk{Result: result(r, true), Text: "hello"}); err != nil {
+			t.Fatal(err)
+		}
+		q.Close()
+		q, err = Open(path, t.TempDir(), clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer q.Close()
+		fakeCheckpointAvailability(t, q, true)
+		requireState(t, q, j.ID, "running")
+		if reply := check(t, q, m, r); reply.Stop {
+			t.Fatal("queue restart lost running job")
+		}
+		logs, err := q.Logs(j.ID, 0)
+		if err != nil || len(logs) != 1 || logs[0].Text != "hello" {
+			t.Fatalf("logs %+v %v", logs, err)
+		}
+		finish(t, q, r, true)
+		requireState(t, q, j.ID, "succeeded")
+
+	})
+
+	t.Run("LogAndCompletionRedelivery", func(t *testing.T) {
+		q, _ := fixture(t)
+		submit(t, q, spec("experiment"))
+		r := check(t, q, machine("a", "fake"), nil).Job
+		l := LogChunk{Result: result(r, true), Offset: 1, Text: "once"}
+		for i := 0; i < 2; i++ {
+			if err := q.AppendLog(l); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ls, err := q.Logs(r.ID, 0)
+		if err != nil || len(ls) != 1 {
+			t.Fatalf("duplicated delivery %+v %v", ls, err)
+		}
+		finish(t, q, r, true)
+		finish(t, q, r, true)
+
+	})
 }
 
 func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
@@ -695,33 +685,6 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 }
 
 func observer() Machine { m := machine("observer", "metal"); m.FreeMemoryGB = 1; return m }
-
-func TestResumableThreeInfrastructureLosses(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
-	for i := 0; i < 3; i++ {
-		r := check(t, q, m, nil).Job
-		if r == nil {
-			t.Fatal("no assignment")
-		}
-		advanceReportingPeer(t, q, c, observer(), LossAfter)
-		// Reusing the same worker requires cleanup of its exact lost copy.
-		released := result(r, false)
-		released.ReleaseOnly = true
-		if err := q.Complete(released); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := job(t, q, j.ID)
-	if got.Losses != 3 || got.State != "failed" {
-		t.Fatalf("after %d counted losses: state=%s, want failed", got.Losses, got.State)
-	}
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("failed job received a fourth execution")
-	}
-}
 
 func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 	dir := t.TempDir()

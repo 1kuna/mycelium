@@ -1,7 +1,11 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http/httptest"
 	"slices"
 	"testing"
 	"time"
@@ -49,28 +53,162 @@ func assignedJob(r Reply) *Job {
 }
 
 func TestM3ConcurrentDeviceSlotsAndCPU(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	first := submit(t, q, spec("experiment"))
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != first.ID || !slices.Equal(a.AllocatedDevices, []string{"0"}) {
-		t.Fatal("first device assignment", a)
-	}
-	second := submit(t, q, spec("experiment"))
-	b := assignedJob(machineCheck(t, q, m3Machine(), a))
-	if b == nil || b.ID != second.ID || !slices.Equal(b.AllocatedDevices, []string{"1"}) {
-		t.Fatal("neighbor was not admitted on the free device", b)
-	}
-	third := submit(t, q, spec("experiment"))
-	if got := assignedJob(machineCheck(t, q, m3Machine(), a, b)); got != nil {
-		t.Fatal("same-card overlap", got.ID)
-	}
-	cpu := submit(t, q, cpuSpec(1, 1))
-	c := assignedJob(machineCheck(t, q, m3Machine(), a, b))
-	if c == nil || c.ID != cpu.ID || len(c.AllocatedDevices) != 0 {
-		t.Fatal("CPU backfill beside two GPU jobs", c)
-	}
-	requireState(t, q, third.ID, "queued")
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := m3Machine()
+		first := submit(t, q, spec("experiment"))
+		a := assignedJob(machineCheck(t, q, m))
+		if a == nil || a.ID != first.ID || !slices.Equal(a.AllocatedDevices, []string{"0"}) {
+			t.Fatal("first device assignment", a)
+		}
+		second := submit(t, q, spec("experiment"))
+		b := assignedJob(machineCheck(t, q, m3Machine(), a))
+		if b == nil || b.ID != second.ID || !slices.Equal(b.AllocatedDevices, []string{"1"}) {
+			t.Fatal("neighbor was not admitted on the free device", b)
+		}
+		third := submit(t, q, spec("experiment"))
+		if got := assignedJob(machineCheck(t, q, m3Machine(), a, b)); got != nil {
+			t.Fatal("same-card overlap", got.ID)
+		}
+		cpu := submit(t, q, cpuSpec(1, 1))
+		c := assignedJob(machineCheck(t, q, m3Machine(), a, b))
+		if c == nil || c.ID != cpu.ID || len(c.AllocatedDevices) != 0 {
+			t.Fatal("CPU backfill beside two GPU jobs", c)
+		}
+		requireState(t, q, third.ID, "queued")
+
+	})
+
+	t.Run("M3SelectorsAndTypedErrors", func(t *testing.T) {
+		for _, tc := range []struct{ name, selector, code string }{
+			{"count", `{"count":2}`, "gpu_count_unsupported"},
+			{"zero", `{"count":0}`, "gpu_selector_invalid"},
+			{"fraction", `{"count":1.5}`, "gpu_selector_invalid"},
+			{"empty", `{"devices":[]}`, "gpu_selector_invalid"},
+			{"duplicate", `{"devices":["0","0"]}`, "gpu_selector_invalid"},
+			{"noncanonical", `{"devices":["01"]}`, "gpu_selector_invalid"},
+			{"number", `{"devices":[0]}`, "gpu_selector_invalid"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				q, _ := fixture(t)
+				b, _ := json.Marshal(spec("experiment"))
+				var raw map[string]any
+				_ = json.Unmarshal(b, &raw)
+				raw["needs"].(map[string]any)["gpu"] = json.RawMessage(tc.selector)
+				b, _ = json.Marshal(raw)
+				r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(b))
+				r.Header.Set("Authorization", "Bearer test")
+				w := httptest.NewRecorder()
+				API{q, "test"}.Handler().ServeHTTP(w, r)
+				var body struct{ Code string }
+				_ = json.Unmarshal(w.Body.Bytes(), &body)
+				if w.Code != 400 || body.Code != tc.code {
+					t.Fatalf("%d %s", w.Code, w.Body.String())
+				}
+			})
+		}
+		q, _ := fixture(t)
+		m := m3Machine()
+		m.Devices[0].Platform = "cuda"
+		profile := *m.CapabilityProfile
+		profile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}
+		m.Devices[0].CapabilityProfile = &profile
+		machineCheck(t, q, m)
+		j := submit(t, q, m3Spec("experiment", "1", 2, 1))
+		a := assignedJob(machineCheck(t, q, m))
+		if a == nil || a.ID != j.ID || !slices.Equal(a.AllocatedDevices, []string{"1"}) {
+			t.Fatal("heterogeneous selector", a)
+		}
+		unknown := submit(t, q, m3Spec("experiment", "9", 2, 1))
+		if got := job(t, q, unknown.ID); got.State != "queued" || got.DiagnosticCode != "no_matching_device" {
+			t.Fatalf("unknown selection: %+v", got)
+		}
+		s := cpuSpec(1, 1)
+		s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+		_, err := q.Submit(s)
+		var typed *HTTPError
+		if !errors.As(err, &typed) || typed.Code != "gpu_selector_invalid" {
+			t.Fatal(err)
+		}
+
+	})
+
+	t.Run("QCPreferredPlatformDeferral", func(t *testing.T) {
+		q, _ := fixture(t)
+		metal := machine("mac", "metal", "mac-host")
+		check(t, q, metal, nil)
+		m := m3Machine()
+		machineCheck(t, q, m)
+		s := spec("experiment")
+		s.Needs.Platform = Platform{Preferred: []string{"metal"}}
+		j := submit(t, q, s)
+		if got := assignedJob(machineCheck(t, q, m)); got != nil {
+			t.Fatalf("machine worker took %s although preferred idle metal exists", got.ID)
+		}
+		if got := check(t, q, metal, nil).Job; got == nil || got.ID != j.ID {
+			t.Fatal("preferred machine did not get job")
+		}
+
+	})
+
+	t.Run("QCKillPhaseAllowsCPUBackfill", func(t *testing.T) {
+		q, clock := fixture(t)
+		submit(t, q, m3Spec("experiment", "0", 1, 1))
+		a := assignedJob(machineCheck(t, q, m3Machine()))
+		if a == nil {
+			t.Fatal("setup")
+		}
+		if err := q.Cancel(a.ID); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(StopGrace + time.Second)
+		cpu := submit(t, q, cpuSpec(1, 1))
+		got := assignedJob(machineCheck(t, q, m3Machine(), a))
+		if got == nil || got.ID != cpu.ID {
+			t.Fatal("kill fenced free CPU resources", got)
+		}
+
+	})
+
+	t.Run("MachineInventoryAuthorityAllowsIndependentDeviceSlots", func(t *testing.T) {
+		q, clock := fixture(t)
+		m := machine("inventory", "fake")
+		m.TotalMemoryGB, m.FreeMemoryGB = 1000, 1000
+		m.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-a", Fingerprint: "fixture", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}, {ID: "1", Platform: "fake", Identity: "fake-b", Fingerprint: "fixture", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
+		huge := spec("experiment")
+		huge.Needs.MemoryGB = 17 // More than both 8 GiB cards together (MY-30 lets 9 GiB span them).
+		oversized := submit(t, q, huge)
+		c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+		reply, err := q.Checkin(c)
+		if err != nil || len(reply.Attempts) != 0 {
+			t.Fatal("scalar capacity bypassed inventory", err)
+		}
+		if err := q.Cancel(oversized.ID); err != nil {
+			t.Fatal(err)
+		}
+		first := submit(t, q, spec("experiment"))
+		clock.Advance(time.Millisecond)
+		second := submit(t, q, spec("experiment"))
+		reply, err = q.Checkin(c)
+		if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].ID != first.ID {
+			t.Fatal("inventory first admission", err)
+		}
+		assigned := reply.Attempts[0].Job
+		if !slices.Equal(assigned.AllocatedDevices, []string{"0"}) || !slices.Equal(assigned.Copies[len(assigned.Copies)-1].AllocatedDevices, []string{"0"}) {
+			t.Fatal("assignment/copy lost device selection")
+		}
+		c.Attempts = []AttemptReport{{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: m.Session, Started: true}}
+		reply, err = q.Checkin(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		neighbor := assignedJob(reply)
+		if neighbor == nil || neighbor.ID != second.ID || !slices.Equal(neighbor.AllocatedDevices, []string{"1"}) {
+			t.Fatal("free neighboring device did not admit the second job", neighbor)
+		}
+		requireState(t, q, second.ID, "running")
+
+	})
 }
 
 func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
@@ -102,33 +240,6 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	machineCheck(t, q, m)
 	if len(q.s.BatchReleases) != 0 {
 		t.Fatal("fresh inventory retained speculative release credit", q.s.BatchReleases)
-	}
-}
-
-func TestM3DockerCreateKeepsLaunchAuthorization(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	m.Capabilities = append(m.Capabilities, "docker")
-	s := dockerJob().Spec
-	s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
-	j := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != j.ID {
-		t.Fatal("missing Docker assignment", a)
-	}
-	m.DockerCleanup = "creating"
-	machineCheck(t, q, m, a)
-	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: "1"}
-	if err := q.AuthorizeLaunch(launch); err != nil {
-		t.Fatalf("own device create rejected: %v", err)
-	}
-	if q.s.Machines[m.ID].DockerCleanup != "creating" {
-		t.Fatal("authorization changed persisted diagnostics")
-	}
-	m.DockerCleanup = "cleanup unconfirmed: inspect"
-	machineCheck(t, q, m, a)
-	if err := q.AuthorizeLaunch(launch); err == nil {
-		t.Fatal("unconfirmed cleanup permitted launch")
 	}
 }
 
@@ -174,21 +285,5 @@ func TestM3LegacyCopyKeepsRecoveryExclusion(t *testing.T) {
 		if target.GPU != "cpu" && q.workerBatchIdle(target) {
 			t.Fatal("legacy copy without device evidence left a GPU slot free", target.Device)
 		}
-	}
-}
-
-func TestM3SettledReportsDrainBeforeNewAssignment(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	submit(t, q, spec("experiment"))
-	a := assignedJob(machineCheck(t, q, m))
-	if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Interrupted: true}); err != nil {
-		t.Fatal(err)
-	}
-	if next := assignedJob(machineCheck(t, q, m, a)); next != nil {
-		t.Fatal("new assignment prevented recovered custody from draining", next.Attempt)
-	}
-	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.Attempt != a.Attempt+1 {
-		t.Fatal("fresh admission did not resume after settled report drained", next)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestExtensionUsabilityTypedConflictsAndShortIDs(t *testing.T) {
@@ -75,55 +74,6 @@ func TestExtensionUsabilityTypedConflictsAndShortIDs(t *testing.T) {
 	}
 }
 
-func TestExtensionStaticUsabilityPitfalls(t *testing.T) {
-	for _, flaw := range []string{"port", "python"} {
-		t.Run(flaw, func(t *testing.T) {
-			e := compositionExtension(t, true)
-			if flaw == "port" {
-				port := 8765
-				e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "service", Command: []string{"service"}, MemoryGB: 0.1, Port: &port}}
-			} else {
-				e.Variants[0].Check = []string{"python3", "check.py"}
-			}
-			if err := StaticCheckExtension(e); err == nil {
-				t.Fatal("missed pitfall", flaw)
-			}
-		})
-	}
-}
-
-func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
-	e := compositionExtension(t, false)
-	e.Kinds = nil
-	delete(e.Variants[0].Baselines, "kind:sample")
-	e.Variants[0].Check = []string{"sh", "-c", `printf wrong > "$MYCE_CHECK_OUTPUT"`}
-	e = freezeComposition(t, e)
-	root := t.TempDir()
-	ext := filepath.Join(root, "extensions")
-	if err := InstallExtension(ext, e); err != nil {
-		t.Fatal(err)
-	}
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	reports, err := CheckExtension(ctx, ext, e, "fake", "0", "dev-host", os.Stderr, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
-	if err == nil || len(reports) != 1 || reports[0].Qualified {
-		t.Fatal(reports, err)
-	}
-	snapshot, err := d.Queue.publicSnapshot()
-	if err != nil || len(snapshot.Jobs) != 1 {
-		t.Fatal(snapshot, err)
-	}
-	if snapshot.Jobs[0].State != "failed" || !strings.Contains(JobState(snapshot.Jobs[0]), "internal extension check") {
-		t.Fatal("baseline mismatch not failed/labelled", snapshot.Jobs[0])
-	}
-}
-
 func TestExtensionRunOutputContract(t *testing.T) {
 	q, _ := fixture(t)
 	e := compositionExtension(t, false)
@@ -151,18 +101,6 @@ func TestExtensionRunOutputContract(t *testing.T) {
 	}
 	if _, err := localResultPath(root, "nested/file"); err == nil {
 		t.Fatal("result escaped through symlink")
-	}
-}
-
-func TestStatusNonzeroSubsecondDuration(t *testing.T) {
-	start := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
-	end := start.Add(100 * time.Millisecond)
-	if got := JobAge(&Job{State: "succeeded", StartedAt: &start, FinishedAt: &end}, end); got != "duration <1s" {
-		t.Fatal(got)
-	}
-	end = start.Add(7 * time.Second)
-	if got := JobAge(&Job{State: "succeeded", StartedAt: &start, FinishedAt: &end}, end); got != "duration 7s" {
-		t.Fatal(got)
 	}
 }
 

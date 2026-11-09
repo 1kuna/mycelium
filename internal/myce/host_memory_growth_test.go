@@ -10,73 +10,94 @@ import (
 )
 
 func TestHostMemoryRemainingGrowthAdmission(t *testing.T) {
-	for _, tc := range []struct {
-		name                                  string
-		used, available, budget, age          float64
-		missing, wrongAttempt, wrongJob, want bool
-	}{
-		{name: "fresh admits production", used: 2.75, available: 14, budget: 24, want: true},
-		// Exactly 2 GiB cannot admit .36: 14 - (16.356244 - 2) < 0.
-		{name: "exact two GiB still needs growth", used: 2, available: 14, budget: 24},
-		{name: "near envelope under pressure", used: 16.2, available: .4, budget: 24},
-		{name: "stale", used: 2.75, available: 14, budget: 24, age: 5},
-		{name: "missing", available: 14, budget: 24, missing: true},
-		{name: "wrong attempt", used: 2.75, available: 14, budget: 24, wrongAttempt: true},
-		{name: "wrong job", used: 2.75, available: 14, budget: 24, wrongJob: true},
-		{name: "full budget cap", used: 16, available: 14, budget: 16.5},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			q, clock := fixture(t)
-			m := cpuMachine("growth-host", "growth-host", "cpu", 16, 24)
-			m.Devices = []MachineDevice{}
-			m.HostMemoryBudgetGB = tc.budget
-			first := submit(t, q, cpuSpec(4, 16.35624408721924))
-			assigned := check(t, q, m, nil).Job
-			if assigned == nil || assigned.ID != first.ID {
-				t.Fatal("holder not assigned")
-			}
-			clock.Advance(time.Second)
-			report := AttemptReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: m.Session, Started: true}
-			if !tc.missing {
-				report.CurrentHostMemory = &CurrentHostMemory{NonreclaimableGB: tc.used, AgeSeconds: tc.age}
-			}
-			if tc.wrongAttempt {
-				report.Attempt++
-			}
-			m.HostAvailableMemoryGB = tc.available
-			if tc.wrongJob {
-				report.ID = "old-job"
-			}
-			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
-				t.Fatal(err)
-			}
-			// Production is deliberately submitted after a competing same-size job.
-			experiment := submit(t, q, cpuSpec(2, .36))
-			s := cpuSpec(2, .36)
-			s.Priority = "production"
-			prod := submit(t, q, s)
-			reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := assignedJob(reply)
-			if tc.want {
-				if got == nil || got.ID != prod.ID {
-					t.Fatalf("production not admitted: %+v; reason=%s", got, job(t, q, prod.ID).Reason)
+	t.Run("contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                                  string
+			used, available, budget, age          float64
+			missing, wrongAttempt, wrongJob, want bool
+		}{
+			{name: "fresh admits production", used: 2.75, available: 14, budget: 24, want: true},
+			// Exactly 2 GiB cannot admit .36: 14 - (16.356244 - 2) < 0.
+			{name: "exact two GiB still needs growth", used: 2, available: 14, budget: 24},
+			{name: "near envelope under pressure", used: 16.2, available: .4, budget: 24},
+			{name: "stale", used: 2.75, available: 14, budget: 24, age: 5},
+			{name: "missing", available: 14, budget: 24, missing: true},
+			{name: "wrong attempt", used: 2.75, available: 14, budget: 24, wrongAttempt: true},
+			{name: "wrong job", used: 2.75, available: 14, budget: 24, wrongJob: true},
+			{name: "full budget cap", used: 16, available: 14, budget: 16.5},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				q, clock := fixture(t)
+				m := cpuMachine("growth-host", "growth-host", "cpu", 16, 24)
+				m.Devices = []MachineDevice{}
+				m.HostMemoryBudgetGB = tc.budget
+				first := submit(t, q, cpuSpec(4, 16.35624408721924))
+				assigned := check(t, q, m, nil).Job
+				if assigned == nil || assigned.ID != first.ID {
+					t.Fatal("holder not assigned")
 				}
-				requireState(t, q, experiment.ID, "queued")
-			} else if got != nil {
-				t.Fatalf("unsafe admission: %+v", got)
-			}
+				clock.Advance(time.Second)
+				report := AttemptReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: m.Session, Started: true}
+				if !tc.missing {
+					report.CurrentHostMemory = &CurrentHostMemory{NonreclaimableGB: tc.used, AgeSeconds: tc.age}
+				}
+				if tc.wrongAttempt {
+					report.Attempt++
+				}
+				m.HostAvailableMemoryGB = tc.available
+				if tc.wrongJob {
+					report.ID = "old-job"
+				}
+				if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {
+					t.Fatal(err)
+				}
+				// Production is deliberately submitted after a competing same-size job.
+				experiment := submit(t, q, cpuSpec(2, .36))
+				s := cpuSpec(2, .36)
+				s.Priority = "production"
+				prod := submit(t, q, s)
+				reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := assignedJob(reply)
+				if tc.want {
+					if got == nil || got.ID != prod.ID {
+						t.Fatalf("production not admitted: %+v; reason=%s", got, job(t, q, prod.ID).Reason)
+					}
+					requireState(t, q, experiment.ID, "queued")
+				} else if got != nil {
+					t.Fatalf("unsafe admission: %+v", got)
+				}
 
-			// The worker must independently recheck growth and the full static budget.
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return tc.available, nil }, hostMemorySamples: currentHostMemorySamples([]AttemptReport{report}, clock.Now())}
-			next := *job(t, q, prod.ID)
-			if err := localAttemptAdmission(w, []Job{*assigned}, next, nil); (err == nil) != tc.want {
-				t.Fatalf("worker admission=%v want %v", err, tc.want)
-			}
-		})
-	}
+				// The worker must independently recheck growth and the full static budget.
+				w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return tc.available, nil }, hostMemorySamples: currentHostMemorySamples([]AttemptReport{report}, clock.Now())}
+				next := *job(t, q, prod.ID)
+				if err := localAttemptAdmission(w, []Job{*assigned}, next, nil); (err == nil) != tc.want {
+					t.Fatalf("worker admission=%v want %v", err, tc.want)
+				}
+			})
+		}
+
+	})
+
+	t.Run("HostMemoryFailedTelemetryAndLegacy", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := machine("legacy", "fake")
+		check(t, q, m, nil)
+		s := spec("experiment")
+		s.Needs.HostMemoryGB = 1
+		submit(t, q, s)
+		if check(t, q, m, nil).Job != nil {
+			t.Fatal("host request admitted without telemetry")
+		}
+		s.Needs.HostMemoryGB = 0
+		j := submit(t, q, s)
+		if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
+			t.Fatal("legacy behavior changed")
+		}
+
+	})
 }
 
 func TestHostMemoryRemainingGrowthExpiresWithoutRenewal(t *testing.T) {
@@ -168,42 +189,6 @@ func TestHostMemoryCurrentCreditsOnlyAnonymousResident(t *testing.T) {
 	samples := currentHostMemorySamples(reports, clock.Now())
 	if remainingHostGrowth(16.356, samples[attemptKey{"holder", 1, "new"}], clock.Now()) != 16.356 {
 		t.Fatal("stale session credited")
-	}
-}
-
-func TestHostMemoryProbeForecastRequiresCompleteTimedFootprint(t *testing.T) {
-	_, clock := fixture(t)
-	dir := t.TempDir()
-	write := func(name, value string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a := &memoryAttempt{fs: osMemoryFS{}, path: dir}
-	write("memory.current", "8589934592")
-	stats := "kernel 134217728\nshmem 134217728\nunevictable 0\nfile_dirty 67108864\nfile_writeback 0\nfile 6442450944\n"
-	write("memory.stat", "anon 1073741824\n"+stats)
-	first := a.currentHostMemory(clock)
-	if first == nil || first.GrowthObserved || first.FootprintGB == nil || *first.FootprintGB != 1.3125 {
-		t.Fatal("invented first horizon or counted reclaimable cache", first)
-	}
-	clock.Advance(time.Second)
-	write("memory.stat", "anon 2147483648\n"+stats)
-	second := a.currentHostMemory(clock)
-	if second == nil || !second.GrowthObserved || second.GrowthGB != 1 || second.GrowthRateGB != 1 || second.FootprintGB == nil || *second.FootprintGB != 2.3125 || second.NonreclaimableGB != 2 {
-		t.Fatal("missing measured footprint/growth", second)
-	}
-	clock.Advance(time.Second)
-	write("memory.stat", "anon 2147483648\n")
-	missing := a.currentHostMemory(clock)
-	if missing == nil || missing.GrowthObserved || missing.FootprintGB != nil {
-		t.Fatal("partial counters authorize forecast", missing)
-	}
-	clock.Advance(time.Second)
-	write("memory.stat", "anon 2147483648\n"+stats)
-	if a.currentHostMemory(clock).GrowthObserved {
-		t.Fatal("bridged missing observation interval")
 	}
 }
 

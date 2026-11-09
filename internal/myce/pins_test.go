@@ -1,6 +1,8 @@
 package myce
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestDeviceMaintenancePinsAndRetry(t *testing.T) {
 	q, clock, legacy := modelFixture(t)

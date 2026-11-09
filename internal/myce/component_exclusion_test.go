@@ -219,129 +219,133 @@ func TestComponentExclusionSelectors(t *testing.T) {
 }
 
 func TestComponentExclusionRevisionAuthorityAndDrain(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	machineCheck(t, q, m)
-	server := httptest.NewServer(API{Queue: q, Token: "fixture-only"}.Handler())
-	defer server.Close()
-	zero := uint64(0)
-	r := ComponentExclusionRequest{Action: "add", Selector: "platform=fake", SetBy: "operator", IfRevision: &zero}
-	c := Client{URL: server.URL}
-	if err := c.Call(t.Context(), "POST", "/api/exclusions", r, nil); err == nil {
-		t.Fatal("unauthenticated edit accepted")
-	}
-	c.Token = "fixture-only"
-	if err := c.Call(t.Context(), "POST", "/api/exclusions", r, nil); err != nil {
-		t.Fatal(err)
-	}
-	r.Action = "remove"
-	if _, err := q.ChangeComponentExclusion(r); !errors.Is(err, ErrStale) {
-		t.Fatal("stale revision accepted", err)
-	}
-	r.IfRevision = nil
-	if _, err := q.ChangeComponentExclusion(r); err == nil {
-		t.Fatal("missing revision accepted")
-	}
-	changeExclusion(t, q, "platform=fake", "remove")
-	// New inventory is covered by a broad policy without expanding it into
-	// a snapshot of today's device IDs.
-	changeExclusion(t, q, "platform=cuda", "add")
-	d := m.Devices[0]
-	d.ID, d.Selector, d.Identity, d.Platform = "2", "2", "later", "cuda"
-	d.CapabilityProfile = &CapabilityProfile{MemoryLayout: "separate", Accelerators: []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}}
-	m.Devices = append(m.Devices, d)
-	machineCheck(t, q, m)
-	j := submit(t, q, exclusionSpec(m.ID, "2"))
-	machineCheck(t, q, m)
-	requireState(t, q, j.ID, "queued")
-	changeExclusion(t, q, "platform=cuda", "remove")
-	if restored := assignedJob(machineCheck(t, q, m)); restored == nil || restored.ID != j.ID {
-		t.Fatal("newly discovered platform capacity did not restore", restored)
-	} else {
-		finish(t, q, restored, true)
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := m3Machine()
 		machineCheck(t, q, m)
-	}
-	// Removing a narrow setting does not undo an overlapping broad one.
-	changeExclusion(t, q, "kind=gpu", "add")
-	narrow := changeExclusion(t, q, "host=machine;devices=0", "add")
-	changeExclusion(t, q, narrow.Selector, "remove")
-	if !q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[m.ID], []string{"0"})) {
-		t.Fatal("narrow remove bypassed broad fence")
-	}
-	changeExclusion(t, q, "kind=gpu", "remove")
-	changeExclusion(t, q, "host=machine", "add")
-	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume"}); err == nil {
-		t.Fatal("resume bypassed durable exclusion")
-	}
-	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain", DrainOwner: "independent-upgrade"}); err != nil {
-		t.Fatal(err)
-	}
-	changeExclusion(t, q, "host=machine", "remove")
-	status, err := q.HostMaintenanceStatus(m.HostID)
-	if err != nil || status.Policy.Mode != "drained" || status.Policy.DrainOwner != "independent-upgrade" {
-		t.Fatal("removal resumed independent drain", status, err)
-	}
-	for _, selector := range []string{"", "kind=cpu", "kind=ram", "platform=cpu", "host=machine;devices=0;kind=gpu", "devices=0", "platform=missing", "kind=gpu;kind=gpu"} {
-		if _, err := q.ResolveComponentSelector(selector); err == nil {
-			t.Fatal("invalid selector accepted", selector)
+		server := httptest.NewServer(API{Queue: q, Token: "fixture-only"}.Handler())
+		defer server.Close()
+		zero := uint64(0)
+		r := ComponentExclusionRequest{Action: "add", Selector: "platform=fake", SetBy: "operator", IfRevision: &zero}
+		c := Client{URL: server.URL}
+		if err := c.Call(t.Context(), "POST", "/api/exclusions", r, nil); err == nil {
+			t.Fatal("unauthenticated edit accepted")
 		}
-	}
-}
+		c.Token = "fixture-only"
+		if err := c.Call(t.Context(), "POST", "/api/exclusions", r, nil); err != nil {
+			t.Fatal(err)
+		}
+		r.Action = "remove"
+		if _, err := q.ChangeComponentExclusion(r); !errors.Is(err, ErrStale) {
+			t.Fatal("stale revision accepted", err)
+		}
+		r.IfRevision = nil
+		if _, err := q.ChangeComponentExclusion(r); err == nil {
+			t.Fatal("missing revision accepted")
+		}
+		changeExclusion(t, q, "platform=fake", "remove")
+		// New inventory is covered by a broad policy without expanding it into
+		// a snapshot of today's device IDs.
+		changeExclusion(t, q, "platform=cuda", "add")
+		d := m.Devices[0]
+		d.ID, d.Selector, d.Identity, d.Platform = "2", "2", "later", "cuda"
+		d.CapabilityProfile = &CapabilityProfile{MemoryLayout: "separate", Accelerators: []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}}
+		m.Devices = append(m.Devices, d)
+		machineCheck(t, q, m)
+		j := submit(t, q, exclusionSpec(m.ID, "2"))
+		machineCheck(t, q, m)
+		requireState(t, q, j.ID, "queued")
+		changeExclusion(t, q, "platform=cuda", "remove")
+		if restored := assignedJob(machineCheck(t, q, m)); restored == nil || restored.ID != j.ID {
+			t.Fatal("newly discovered platform capacity did not restore", restored)
+		} else {
+			finish(t, q, restored, true)
+			machineCheck(t, q, m)
+		}
+		// Removing a narrow setting does not undo an overlapping broad one.
+		changeExclusion(t, q, "kind=gpu", "add")
+		narrow := changeExclusion(t, q, "host=machine;devices=0", "add")
+		changeExclusion(t, q, narrow.Selector, "remove")
+		if !q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[m.ID], []string{"0"})) {
+			t.Fatal("narrow remove bypassed broad fence")
+		}
+		changeExclusion(t, q, "kind=gpu", "remove")
+		changeExclusion(t, q, "host=machine", "add")
+		if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume"}); err == nil {
+			t.Fatal("resume bypassed durable exclusion")
+		}
+		if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain", DrainOwner: "independent-upgrade"}); err != nil {
+			t.Fatal(err)
+		}
+		changeExclusion(t, q, "host=machine", "remove")
+		status, err := q.HostMaintenanceStatus(m.HostID)
+		if err != nil || status.Policy.Mode != "drained" || status.Policy.DrainOwner != "independent-upgrade" {
+			t.Fatal("removal resumed independent drain", status, err)
+		}
+		for _, selector := range []string{"", "kind=cpu", "kind=ram", "platform=cpu", "host=machine;devices=0;kind=gpu", "devices=0", "platform=missing", "kind=gpu;kind=gpu"} {
+			if _, err := q.ResolveComponentSelector(selector); err == nil {
+				t.Fatal("invalid selector accepted", selector)
+			}
+		}
 
-func TestComponentExclusionUnstartedModelAndBenchmarkFences(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	submit(t, q, exclusionSpec(m.ID, "0"))
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil {
-		t.Fatal("missing offer")
-	}
-	changeExclusion(t, q, "host=machine;kind=gpu", "add")
-	if err := q.Started(result(a, false)); !errors.Is(err, ErrStale) {
-		t.Fatal("late Started bypassed exclusion", err)
-	}
-	if !q.benchmarkDeviceAdmissionBlocked(&m) {
-		t.Fatal("benchmark missed selector")
-	}
-	q, _, legacy := modelFixture(t)
-	legacy.Leaving = true
-	check(t, q, legacy, nil)
-	m = m3Machine()
-	m.ModelURL, m.ModelConfigHash = "http://127.0.0.1:1234", modelConfigHash(q.models)
-	machineCheck(t, q, m)
-	first := addModelCall(t, q, "experiment")
-	var slot *ModelSlot
-	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID {
-			slot = s
+	})
+
+	t.Run("ComponentExclusionUnstartedModelAndBenchmarkFences", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := m3Machine()
+		submit(t, q, exclusionSpec(m.ID, "0"))
+		a := assignedJob(machineCheck(t, q, m))
+		if a == nil {
+			t.Fatal("missing offer")
 		}
-	}
-	if slot == nil {
-		t.Fatal("missing engine")
-	}
-	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: slot.Device, Attempt: slot.Attempt, State: "ready"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if first.Machine != m.ID {
-		t.Fatal("call not routed")
-	}
-	changeExclusion(t, q, "platform=fake", "add")
-	if first.Error != "" || first.StopAt != nil || slot.State != "ready" {
-		t.Fatal("running model call interrupted", first, slot)
-	}
-	if next := addModelCall(t, q, "experiment"); next.Machine != "" {
-		t.Fatal("new model call bypassed fleet selector", next)
-	}
-	// Selector and attribution are present in both JSON and escaped web status.
-	snap, err := q.Snapshot()
-	if err != nil || len(snap.ComponentExclusions) != 1 || snap.ComponentExclusions[0].SetBy != "test-operator" {
-		t.Fatal("status omitted attribution", snap.ComponentExclusions, err)
-	}
-	page := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("Authorization", "Bearer fixture-only")
-	API{Queue: q, Token: "fixture-only"}.Handler().ServeHTTP(page, req)
-	if !strings.Contains(page.Body.String(), "platform=fake") || !strings.Contains(page.Body.String(), "test-operator") {
-		t.Fatal("web status omitted exclusion", page.Body.String())
-	}
+		changeExclusion(t, q, "host=machine;kind=gpu", "add")
+		if err := q.Started(result(a, false)); !errors.Is(err, ErrStale) {
+			t.Fatal("late Started bypassed exclusion", err)
+		}
+		if !q.benchmarkDeviceAdmissionBlocked(&m) {
+			t.Fatal("benchmark missed selector")
+		}
+		q, _, legacy := modelFixture(t)
+		legacy.Leaving = true
+		check(t, q, legacy, nil)
+		m = m3Machine()
+		m.ModelURL, m.ModelConfigHash = "http://127.0.0.1:1234", modelConfigHash(q.models)
+		machineCheck(t, q, m)
+		first := addModelCall(t, q, "experiment")
+		var slot *ModelSlot
+		for _, s := range q.s.ModelSlots {
+			if s.Machine == m.ID {
+				slot = s
+			}
+		}
+		if slot == nil {
+			t.Fatal("missing engine")
+		}
+		if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: slot.Device, Attempt: slot.Attempt, State: "ready"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if first.Machine != m.ID {
+			t.Fatal("call not routed")
+		}
+		changeExclusion(t, q, "platform=fake", "add")
+		if first.Error != "" || first.StopAt != nil || slot.State != "ready" {
+			t.Fatal("running model call interrupted", first, slot)
+		}
+		if next := addModelCall(t, q, "experiment"); next.Machine != "" {
+			t.Fatal("new model call bypassed fleet selector", next)
+		}
+		// Selector and attribution are present in both JSON and escaped web status.
+		snap, err := q.Snapshot()
+		if err != nil || len(snap.ComponentExclusions) != 1 || snap.ComponentExclusions[0].SetBy != "test-operator" {
+			t.Fatal("status omitted attribution", snap.ComponentExclusions, err)
+		}
+		page := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Header.Set("Authorization", "Bearer fixture-only")
+		API{Queue: q, Token: "fixture-only"}.Handler().ServeHTTP(page, req)
+		if !strings.Contains(page.Body.String(), "platform=fake") || !strings.Contains(page.Body.String(), "test-operator") {
+			t.Fatal("web status omitted exclusion", page.Body.String())
+		}
+
+	})
 }

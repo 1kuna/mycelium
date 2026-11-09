@@ -11,81 +11,85 @@ import (
 )
 
 func TestOwnHelperUnifiedLaunch(t *testing.T) {
-	for _, tc := range []struct {
-		name                        string
-		device, allowance, neighbor float64
-		want                        bool
-	}{
-		{"resident helper fits", 22.3, 96, 0, true},
-		{"neighbor occupies room", 22.3, 96, 5, false},
-		{"helper overshoot fits larger charge", 50, 96, 0, true},
-		{"helper overshoot exceeds allowance", 60, 96, 0, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, clock := fixture(t)
-			m := unifiedCUDAAdmissionMachine()
-			m.CapabilityProfile.SystemMemoryBytes = 121 << 30
-			m.CapabilityProfile.LogicalCPUs = 32
-			m.HostMemoryBudgetGB = tc.allowance
-			j := Job{ID: "own", Machine: m.ID, State: "running", Attempt: 1, Session: m.Session, Spec: spec("production")}
-			j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 38.73198699951172, 44.519424227328635
-			rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{j}, batchSupervisors: map[attemptKey]*attemptSupervisor{}}
-			// At launch, a single helper has loaded CUDA memory, plus 1.22
-			// GiB uniquely charged anon. Remaining physical occupancy, including
-			// that anon, is 5.44 GiB: the incident's 68.26 GiB launch headroom.
-			samples := map[attemptKey]hostMemorySample{jobKey(j): {gb: 1.22, at: clock.Now(), deviceGB: tc.device, residentGB: tc.device, deviceAt: clock.Now()}}
-			raw := 121 - tc.device - 5.44 - tc.neighbor
-			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return raw - 16, nil }}
-			rt.hostMemorySource = w.sharedHostLiveMemory
-			rt.batchHostMemorySamples = samples
-			report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 1.22, sampledAt: clock.Now(), DeviceGB: &tc.device, deviceSampledAt: clock.Now(), deviceResidentGB: tc.device}}
-			rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, report: report, admissionMu: &rt.admissionMu}
-			if tc.neighbor > 0 {
-				n := Job{ID: "neighbor", State: "running", Attempt: 1, Session: m.Session, Spec: spec("production")}
-				n.Spec.Needs.MemoryGB, n.Spec.Needs.HostMemoryGB = 0, tc.neighbor
-				rt.batchJobs = append(rt.batchJobs, n)
-			}
-			err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: m.Session, Key: j.ID, Attempt: "1"})
-			if (err == nil) != tc.want {
-				t.Fatalf("launch=%v; want fit=%t", err, tc.want)
-			}
-			if tc.device > j.Spec.Needs.MemoryGB {
-				e := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-				charge := helperHostCharge(&j, &m, samples[jobKey(j)], clock.Now(), e)
-				if math.Abs(charge-(e+tc.device-j.Spec.Needs.MemoryGB)) > 1e-9 {
-					t.Fatalf("device overshoot lost from static charge: %g", charge)
+	t.Run("contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                        string
+			device, allowance, neighbor float64
+			want                        bool
+		}{
+			{"resident helper fits", 22.3, 96, 0, true},
+			{"neighbor occupies room", 22.3, 96, 5, false},
+			{"helper overshoot fits larger charge", 50, 96, 0, true},
+			{"helper overshoot exceeds allowance", 60, 96, 0, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, clock := fixture(t)
+				m := unifiedCUDAAdmissionMachine()
+				m.CapabilityProfile.SystemMemoryBytes = 121 << 30
+				m.CapabilityProfile.LogicalCPUs = 32
+				m.HostMemoryBudgetGB = tc.allowance
+				j := Job{ID: "own", Machine: m.ID, State: "running", Attempt: 1, Session: m.Session, Spec: spec("production")}
+				j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 38.73198699951172, 44.519424227328635
+				rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{j}, batchSupervisors: map[attemptKey]*attemptSupervisor{}}
+				// At launch, a single helper has loaded CUDA memory, plus 1.22
+				// GiB uniquely charged anon. Remaining physical occupancy, including
+				// that anon, is 5.44 GiB: the incident's 68.26 GiB launch headroom.
+				samples := map[attemptKey]hostMemorySample{jobKey(j): {gb: 1.22, at: clock.Now(), deviceGB: tc.device, residentGB: tc.device, deviceAt: clock.Now()}}
+				raw := 121 - tc.device - 5.44 - tc.neighbor
+				w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return raw - 16, nil }}
+				rt.hostMemorySource = w.sharedHostLiveMemory
+				rt.batchHostMemorySamples = samples
+				report := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 1.22, sampledAt: clock.Now(), DeviceGB: &tc.device, deviceSampledAt: clock.Now(), deviceResidentGB: tc.device}}
+				rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, report: report, admissionMu: &rt.admissionMu}
+				if tc.neighbor > 0 {
+					n := Job{ID: "neighbor", State: "running", Attempt: 1, Session: m.Session, Spec: spec("production")}
+					n.Spec.Needs.MemoryGB, n.Spec.Needs.HostMemoryGB = 0, tc.neighbor
+					rt.batchJobs = append(rt.batchJobs, n)
 				}
-			}
-		})
-	}
-}
+				err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: m.Session, Key: j.ID, Attempt: "1"})
+				if (err == nil) != tc.want {
+					t.Fatalf("launch=%v; want fit=%t", err, tc.want)
+				}
+				if tc.device > j.Spec.Needs.MemoryGB {
+					e := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+					charge := helperHostCharge(&j, &m, samples[jobKey(j)], clock.Now(), e)
+					if math.Abs(charge-(e+tc.device-j.Spec.Needs.MemoryGB)) > 1e-9 {
+						t.Fatalf("device overshoot lost from static charge: %g", charge)
+					}
+				}
+			})
+		}
 
-func TestOwnHelperCreditDoesNotSpendNeighborsAnonTwice(t *testing.T) {
-	_, clock := fixture(t)
-	m := unifiedCUDAAdmissionMachine()
-	j := Job{ID: "own", State: "running", Attempt: 1, Spec: spec("production")}
-	j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 8, 24
-	n := Job{ID: "neighbor", State: "running", Attempt: 1, Spec: cpuSpec(1, 20)}
-	if err := normalizeResources(&n.Spec); err != nil {
-		t.Fatal(err)
-	}
-	rt := modelRuntime{clock: clock, memoryMachine: m, batchJobs: []Job{j, n}}
-	// All CUDA pages might also be in the neighbor's uniquely charged anon.
-	// The union credit is max(20,22), not 20+22 or 20+1+22.
-	s := map[attemptKey]hostMemorySample{
-		jobKey(j): {gb: 1, at: clock.Now(), deviceGB: 22, residentGB: 22, deviceAt: clock.Now()},
-		jobKey(n): {gb: 20, at: clock.Now()},
-	}
-	if err := rt.checkHostAdmissionLocked(20, true, s, jobKey(j)); !errors.Is(err, errWorkerMemory) {
-		t.Fatal("overlapping neighbor anon/device occupancy earned duplicate credit", err)
-	}
-	// A neighbor is never given the launching attempt's device credit.
-	if err := rt.checkHostAdmissionLocked(31, true, s, jobKey(j)); err != nil {
-		t.Fatal("one union credit did not admit the exact launch", err)
-	}
-	if err := rt.checkHostAdmissionLocked(31, true, s); !errors.Is(err, errWorkerMemory) {
-		t.Fatal("non-launching job received helper credit", err)
-	}
+	})
+
+	t.Run("OwnHelperCreditDoesNotSpendNeighborsAnonTwice", func(t *testing.T) {
+		_, clock := fixture(t)
+		m := unifiedCUDAAdmissionMachine()
+		j := Job{ID: "own", State: "running", Attempt: 1, Spec: spec("production")}
+		j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 8, 24
+		n := Job{ID: "neighbor", State: "running", Attempt: 1, Spec: cpuSpec(1, 20)}
+		if err := normalizeResources(&n.Spec); err != nil {
+			t.Fatal(err)
+		}
+		rt := modelRuntime{clock: clock, memoryMachine: m, batchJobs: []Job{j, n}}
+		// All CUDA pages might also be in the neighbor's uniquely charged anon.
+		// The union credit is max(20,22), not 20+22 or 20+1+22.
+		s := map[attemptKey]hostMemorySample{
+			jobKey(j): {gb: 1, at: clock.Now(), deviceGB: 22, residentGB: 22, deviceAt: clock.Now()},
+			jobKey(n): {gb: 20, at: clock.Now()},
+		}
+		if err := rt.checkHostAdmissionLocked(20, true, s, jobKey(j)); !errors.Is(err, errWorkerMemory) {
+			t.Fatal("overlapping neighbor anon/device occupancy earned duplicate credit", err)
+		}
+		// A neighbor is never given the launching attempt's device credit.
+		if err := rt.checkHostAdmissionLocked(31, true, s, jobKey(j)); err != nil {
+			t.Fatal("one union credit did not admit the exact launch", err)
+		}
+		if err := rt.checkHostAdmissionLocked(31, true, s); !errors.Is(err, errWorkerMemory) {
+			t.Fatal("non-launching job received helper credit", err)
+		}
+
+	})
 }
 
 func TestOwnHelperRetainsRemainingDeviceDemand(t *testing.T) {

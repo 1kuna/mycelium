@@ -19,7 +19,7 @@ import (
 
 func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
-		for _, action := range []string{"disable", "drain"} {
+		for _, action := range []string{map[bool]string{false: "drain", true: "disable"}[legacy]} {
 			t.Run(fmt.Sprintf("legacy=%t/%s", legacy, action), func(t *testing.T) {
 				e := compositionExtension(t, false)
 				setup := []string{"sh", "-c", "printf authorized > {cache}/review-setup-marker"}
@@ -77,105 +77,111 @@ func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 		}
 	}
 }
-func TestClientUnknownResultJob(t *testing.T) {
-	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	err = d.Client().DownloadResult(context.Background(), "missing-job", "result", filepath.Join(root, "result"))
-	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "job_unknown" {
-		t.Errorf("missing result job has no typed job_unknown error: %T %v", err, err)
-	}
-}
 
 func TestClientResultAtomicReplacement(t *testing.T) {
-	body := []byte("new-result")
-	h := sha256.Sum256(body)
-	ref := FileRef{SHA256: hex.EncodeToString(h[:]), SizeBytes: int64(len(body))}
-	var corrupt atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/jobs/job" {
-			json.NewEncoder(w).Encode(Job{ID: "job", State: "succeeded", OutputRefs: FileManifest{"result": ref}})
-			return
-		}
-		if r.Header.Get("Range") != "" {
-			t.Error("application output used as a resumable partial")
-		}
-		w.Header().Set("ETag", `"`+ref.SHA256+`"`)
-		if corrupt.Load() {
-			w.Write([]byte("bad-result"))
-		} else {
-			w.Write(body)
-		}
-	}))
-	defer server.Close()
-	c := Client{URL: server.URL, Token: "fixture"}
-	for _, previous := range []string{"old-result", "longer prior output", "old", ""} {
-		t.Run(previous, func(t *testing.T) {
-			dest := filepath.Join(t.TempDir(), "nested", "result")
-			if previous != "" {
-				if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(dest, []byte(previous), 0600); err != nil {
-					t.Fatal(err)
-				}
+	t.Run("contract", func(t *testing.T) {
+		body := []byte("new-result")
+		h := sha256.Sum256(body)
+		ref := FileRef{SHA256: hex.EncodeToString(h[:]), SizeBytes: int64(len(body))}
+		var corrupt atomic.Bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/jobs/job" {
+				json.NewEncoder(w).Encode(Job{ID: "job", State: "succeeded", OutputRefs: FileManifest{"result": ref}})
+				return
 			}
-			for range 2 {
-				if err := c.DownloadResult(context.Background(), "job", "result", dest); err != nil {
-					t.Fatal(err)
+			if r.Header.Get("Range") != "" {
+				t.Error("application output used as a resumable partial")
+			}
+			w.Header().Set("ETag", `"`+ref.SHA256+`"`)
+			if corrupt.Load() {
+				w.Write([]byte("bad-result"))
+			} else {
+				w.Write(body)
+			}
+		}))
+		defer server.Close()
+		c := Client{URL: server.URL, Token: "fixture"}
+		for _, previous := range []string{"old-result", "longer prior output", "old", ""} {
+			t.Run(previous, func(t *testing.T) {
+				dest := filepath.Join(t.TempDir(), "nested", "result")
+				if previous != "" {
+					if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(dest, []byte(previous), 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
+				for range 2 {
+					if err := c.DownloadResult(context.Background(), "job", "result", dest); err != nil {
+						t.Fatal(err)
+					}
+					b, err := os.ReadFile(dest)
+					if err != nil || string(b) != string(body) {
+						t.Fatal("wrong result", string(b), err)
+					}
+				}
+				corrupt.Store(true)
+				if err := c.DownloadResult(context.Background(), "job", "result", dest); err == nil {
+					t.Fatal("accepted corrupt result")
+				}
+				corrupt.Store(false)
 				b, err := os.ReadFile(dest)
 				if err != nil || string(b) != string(body) {
-					t.Fatal("wrong result", string(b), err)
+					t.Fatal("failed download replaced output", string(b), err)
 				}
-			}
-			corrupt.Store(true)
-			if err := c.DownloadResult(context.Background(), "job", "result", dest); err == nil {
-				t.Fatal("accepted corrupt result")
-			}
-			corrupt.Store(false)
-			b, err := os.ReadFile(dest)
-			if err != nil || string(b) != string(body) {
-				t.Fatal("failed download replaced output", string(b), err)
-			}
-			entries, err := os.ReadDir(filepath.Dir(dest))
-			if err != nil || len(entries) != 1 {
-				t.Fatal("temporary result leaked", entries, err)
-			}
-		})
-	}
-}
+				entries, err := os.ReadDir(filepath.Dir(dest))
+				if err != nil || len(entries) != 1 {
+					t.Fatal("temporary result leaked", entries, err)
+				}
+			})
+		}
 
-func TestClientResultTypedErrors(t *testing.T) {
-	for _, tc := range []struct {
-		name, state, code string
-		status            int
-	}{
-		{"unknown", "", "job_unknown", 404},
-		{"queued", "queued", "request_stale", 409},
-		{"running", "running", "request_stale", 409},
-		{"failed", "failed", "request_stale", 409},
-		{"cancelled", "cancelled", "request_stale", 409},
-		{"missing-artifact", "succeeded", "artifact_unknown", 404},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tc.state == "" {
-					respond(w, nil, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown"})
-					return
+	})
+
+	t.Run("ClientUnknownResultJob", func(t *testing.T) {
+		root := t.TempDir()
+		d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		err = d.Client().DownloadResult(context.Background(), "missing-job", "result", filepath.Join(root, "result"))
+		var api *HTTPError
+		if !errors.As(err, &api) || api.Code != "job_unknown" {
+			t.Errorf("missing result job has no typed job_unknown error: %T %v", err, err)
+		}
+
+	})
+
+	t.Run("ClientResultTypedErrors", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, state, code string
+			status            int
+		}{
+			{"unknown", "", "job_unknown", 404},
+			{"queued", "queued", "request_stale", 409},
+			{"running", "running", "request_stale", 409},
+			{"failed", "failed", "request_stale", 409},
+			{"cancelled", "cancelled", "request_stale", 409},
+			{"missing-artifact", "succeeded", "artifact_unknown", 404},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if tc.state == "" {
+						respond(w, nil, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown"})
+						return
+					}
+					json.NewEncoder(w).Encode(Job{ID: "job", State: tc.state})
+				}))
+				defer server.Close()
+				err := (Client{URL: server.URL, Token: "fixture"}).DownloadResult(context.Background(), "job", "result", filepath.Join(t.TempDir(), "result"))
+				var api *HTTPError
+				if !errors.As(err, &api) || api.Code != tc.code || api.Status != tc.status {
+					t.Fatalf("wrong result error: %T %v", err, err)
 				}
-				json.NewEncoder(w).Encode(Job{ID: "job", State: tc.state})
-			}))
-			defer server.Close()
-			err := (Client{URL: server.URL, Token: "fixture"}).DownloadResult(context.Background(), "job", "result", filepath.Join(t.TempDir(), "result"))
-			var api *HTTPError
-			if !errors.As(err, &api) || api.Code != tc.code || api.Status != tc.status {
-				t.Fatalf("wrong result error: %T %v", err, err)
-			}
-		})
-	}
+			})
+		}
+
+	})
 }

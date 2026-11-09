@@ -48,111 +48,116 @@ func localApprovalFixture(t *testing.T) (*ModelCache, Model, string, string) {
 	return cache, model, canonical, blob
 }
 func TestEntryLocalApprovalUsesOriginalFolderAndInvalidates(t *testing.T) {
-	for _, change := range []string{"file", "blob", "added", "symlink", "inode", "host", "identity", "unapproved"} {
-		t.Run(change, func(t *testing.T) {
-			c, m, snapshot, blob := localApprovalFixture(t)
-			path, err := c.Prepare(context.Background(), m)
-			if err != nil || path != snapshot {
-				t.Fatal("in-place approval not used", err)
-			}
-			if _, err := os.Stat(c.Root); !os.IsNotExist(err) {
-				t.Fatal("local source touched copy cache")
-			}
-			if c.ApprovedModels([]Model{m})[m.LocalSource] != m.SHA256 {
-				t.Fatal("approved identity not advertised")
-			}
-			switch change {
-			case "file":
-				err = os.WriteFile(filepath.Join(snapshot, "config.json"), []byte("changed"), 0600)
-			case "blob":
-				err = os.WriteFile(blob, []byte("changed weight bytes"), 0600)
-			case "added":
-				err = os.WriteFile(filepath.Join(snapshot, "new-file"), []byte("new"), 0600)
-			case "symlink":
-				err = os.Rename(filepath.Join(snapshot, "weights.bin"), filepath.Join(snapshot, "old-link"))
-			case "inode":
-				path := filepath.Join(snapshot, "config.json")
-				info, e := os.Stat(path)
-				if e != nil {
-					t.Fatal(e)
+	t.Run("contract", func(t *testing.T) {
+		for _, change := range []string{"file", "blob", "added", "symlink", "inode", "host", "identity", "unapproved"} {
+			t.Run(change, func(t *testing.T) {
+				c, m, snapshot, blob := localApprovalFixture(t)
+				path, err := c.Prepare(context.Background(), m)
+				if err != nil || path != snapshot {
+					t.Fatal("in-place approval not used", err)
 				}
-				replacement := filepath.Join(t.TempDir(), "replacement")
-				if e = os.WriteFile(replacement, []byte("{}"), 0600); e != nil {
-					t.Fatal(e)
+				if _, err := os.Stat(c.Root); !os.IsNotExist(err) {
+					t.Fatal("local source touched copy cache")
 				}
-				if e = os.Chtimes(replacement, info.ModTime(), info.ModTime()); e != nil {
-					t.Fatal(e)
+				if c.ApprovedModels([]Model{m})[m.LocalSource] != m.SHA256 {
+					t.Fatal("approved identity not advertised")
 				}
-				err = os.Rename(replacement, path)
-			case "host":
-				path := filepath.Join(c.ApprovalRoot, "approved.json")
-				data, e := os.ReadFile(path)
-				if e != nil {
-					t.Fatal(e)
+				switch change {
+				case "file":
+					err = os.WriteFile(filepath.Join(snapshot, "config.json"), []byte("changed"), 0600)
+				case "blob":
+					err = os.WriteFile(blob, []byte("changed weight bytes"), 0600)
+				case "added":
+					err = os.WriteFile(filepath.Join(snapshot, "new-file"), []byte("new"), 0600)
+				case "symlink":
+					err = os.Rename(filepath.Join(snapshot, "weights.bin"), filepath.Join(snapshot, "old-link"))
+				case "inode":
+					path := filepath.Join(snapshot, "config.json")
+					info, e := os.Stat(path)
+					if e != nil {
+						t.Fatal(e)
+					}
+					replacement := filepath.Join(t.TempDir(), "replacement")
+					if e = os.WriteFile(replacement, []byte("{}"), 0600); e != nil {
+						t.Fatal(e)
+					}
+					if e = os.Chtimes(replacement, info.ModTime(), info.ModTime()); e != nil {
+						t.Fatal(e)
+					}
+					err = os.Rename(replacement, path)
+				case "host":
+					path := filepath.Join(c.ApprovalRoot, "approved.json")
+					data, e := os.ReadFile(path)
+					if e != nil {
+						t.Fatal(e)
+					}
+					var a localModelApproval
+					if e = json.Unmarshal(data, &a); e != nil {
+						t.Fatal(e)
+					}
+					a.Host = "another-host-placeholder"
+					data, e = json.Marshal(a)
+					if e != nil {
+						t.Fatal(e)
+					}
+					err = os.WriteFile(path, data, 0600)
+				case "identity":
+					m.SHA256 = "different-identity"
+				case "unapproved":
+					m.LocalSource = "not-approved"
 				}
-				var a localModelApproval
-				if e = json.Unmarshal(data, &a); e != nil {
-					t.Fatal(e)
+				if err != nil {
+					t.Fatal(err)
 				}
-				a.Host = "another-host-placeholder"
-				data, e = json.Marshal(a)
-				if e != nil {
-					t.Fatal(e)
+				if _, err = c.Prepare(context.Background(), m); err == nil {
+					t.Fatal("changed/unapproved folder accepted")
 				}
-				err = os.WriteFile(path, data, 0600)
-			case "identity":
-				m.SHA256 = "different-identity"
-			case "unapproved":
-				m.LocalSource = "not-approved"
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err = c.Prepare(context.Background(), m); err == nil {
-				t.Fatal("changed/unapproved folder accepted")
-			}
-			if len(c.ApprovedModels([]Model{m})) != 0 {
-				t.Fatal("invalid approval advertised")
-			}
-			if change == "file" || change == "blob" || change == "added" || change == "inode" {
-				refreshed, e := ApproveLocalModel(context.Background(), c.ApprovalRoot, m.LocalSource, snapshot, filepath.Dir(filepath.Dir(snapshot)))
-				if e != nil {
-					t.Fatal(e)
+				if len(c.ApprovedModels([]Model{m})) != 0 {
+					t.Fatal("invalid approval advertised")
 				}
-				refreshed.Name = m.Name
-				if _, e = c.Prepare(context.Background(), refreshed); e != nil {
-					t.Fatal("explicit reapproval failed", e)
+				if change == "file" || change == "blob" || change == "added" || change == "inode" {
+					refreshed, e := ApproveLocalModel(context.Background(), c.ApprovalRoot, m.LocalSource, snapshot, filepath.Dir(filepath.Dir(snapshot)))
+					if e != nil {
+						t.Fatal(e)
+					}
+					refreshed.Name = m.Name
+					if _, e = c.Prepare(context.Background(), refreshed); e != nil {
+						t.Fatal("explicit reapproval failed", e)
+					}
 				}
-			}
-		})
-	}
-}
-func TestEntryLocalApprovalRejectsEscapingSymlinksAndMixedSources(t *testing.T) {
-	c, m, snapshot, _ := localApprovalFixture(t)
-	outside := filepath.Join(t.TempDir(), "outside")
-	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(snapshot, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ApproveLocalModel(context.Background(), c.ApprovalRoot, "unsafe", snapshot, snapshot); err == nil {
-		t.Fatal("escaping blob accepted")
-	}
-	for _, mode := range []string{"file_store", "direct_nas", "path", "missing-files"} {
-		copy := m
-		switch mode {
-		case "file_store":
-			copy.FileStore = true
-		case "direct_nas":
-			copy.DirectNAS = true
-		case "path":
-			copy.Path = snapshot
-		case "missing-files":
-			copy.Files = nil
+			})
 		}
-		if err := validateModels(ModelConfig{Models: []Model{copy}, Idle: 1, Wait: 1}); err == nil {
-			t.Fatal("mixed/invalid local source accepted", mode)
+
+	})
+
+	t.Run("EntryLocalApprovalRejectsEscapingSymlinksAndMixedSources", func(t *testing.T) {
+		c, m, snapshot, _ := localApprovalFixture(t)
+		outside := filepath.Join(t.TempDir(), "outside")
+		if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+			t.Fatal(err)
 		}
-	}
+		if err := os.Symlink(outside, filepath.Join(snapshot, "escape")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ApproveLocalModel(context.Background(), c.ApprovalRoot, "unsafe", snapshot, snapshot); err == nil {
+			t.Fatal("escaping blob accepted")
+		}
+		for _, mode := range []string{"file_store", "direct_nas", "path", "missing-files"} {
+			copy := m
+			switch mode {
+			case "file_store":
+				copy.FileStore = true
+			case "direct_nas":
+				copy.DirectNAS = true
+			case "path":
+				copy.Path = snapshot
+			case "missing-files":
+				copy.Files = nil
+			}
+			if err := validateModels(ModelConfig{Models: []Model{copy}, Idle: 1, Wait: 1}); err == nil {
+				t.Fatal("mixed/invalid local source accepted", mode)
+			}
+		}
+
+	})
 }

@@ -65,94 +65,121 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 	if !found {
 		t.Fatalf("not escalated: %+v", snap.HoldsDetail)
 	}
-}
 
-func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
-	q, c := fixture(t)
-	m := machine("worker", "fake")
-	m.HostID = "host"
-	check(t, q, m, nil)
-	for _, status := range []string{"creating", "create pending", "start pending", "stopping", "cleanup unconfirmed: inspect"} {
-		q.s.Machines[m.ID].DockerCleanup = status
-		s, err := q.Snapshot()
+	t.Run("HoldsDetailKindsAndLegacyCompatibility", func(t *testing.T) {
+		q, c := fixture(t)
+		m := machine("worker", "fake")
+		m.HostID = "host"
+		check(t, q, m, nil)
+		for _, status := range []string{"creating", "create pending", "start pending", "stopping", "cleanup unconfirmed: inspect"} {
+			q.s.Machines[m.ID].DockerCleanup = status
+			s, err := q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "host: Docker cleanup unconfirmed; " + status
+			kind := "docker_transition"
+			if strings.HasPrefix(status, "cleanup unconfirmed") {
+				kind = "docker_cleanup_waiting"
+			}
+			if len(s.HoldsDetail) != 1 || s.HoldsDetail[0].Kind != kind || s.HoldsDetail[0].Text != want || s.HoldsDetail[0].OperatorActionRequired || !reflect.DeepEqual(s.HostHolds, []string{want}) {
+				t.Fatalf("%s: %+v %v", status, s.HoldsDetail, s.HostHolds)
+			}
+		}
+		q.s.Machines[m.ID].DockerCleanup = ""
+		setMaintenance(t, q, "host", "disable")
+		deadline := c.Now()
+		q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
+		r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}
+		q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+		s, err := q.publicSnapshot()
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "host: Docker cleanup unconfirmed; " + status
-		kind := "docker_transition"
-		if strings.HasPrefix(status, "cleanup unconfirmed") {
-			kind = "docker_cleanup_waiting"
+		kinds := map[string]bool{}
+		for _, d := range s.HoldsDetail {
+			kinds[d.Kind] = true
+			if d.OperatorActionRequired {
+				t.Fatalf("operator fence: %+v", d)
+			}
+			if strings.Contains(d.Text, "private reason") {
+				t.Fatal("private reason exposed")
+			}
 		}
-		if len(s.HoldsDetail) != 1 || s.HoldsDetail[0].Kind != kind || s.HoldsDetail[0].Text != want || s.HoldsDetail[0].OperatorActionRequired || !reflect.DeepEqual(s.HostHolds, []string{want}) {
-			t.Fatalf("%s: %+v %v", status, s.HoldsDetail, s.HostHolds)
+		if !kinds["host_disabled"] || !kinds["startup_release"] || len(s.HostHolds) != 0 {
+			t.Fatalf("fences: %+v", s)
 		}
-	}
-	q.s.Machines[m.ID].DockerCleanup = ""
-	setMaintenance(t, q, "host", "disable")
-	deadline := c.Now()
-	q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
-	r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}
-	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	s, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kinds := map[string]bool{}
-	for _, d := range s.HoldsDetail {
-		kinds[d.Kind] = true
-		if d.OperatorActionRequired {
-			t.Fatalf("operator fence: %+v", d)
+		data, _ := json.Marshal(s)
+		if strings.Contains(string(data), `"host_holds"`) {
+			t.Fatal("empty legacy list must be omitted")
 		}
-		if strings.Contains(d.Text, "private reason") {
-			t.Fatal("private reason exposed")
+		if !strings.Contains(string(data), `"holds_detail":[`) {
+			t.Fatal("missing details array")
 		}
-	}
-	if !kinds["host_disabled"] || !kinds["startup_release"] || len(s.HostHolds) != 0 {
-		t.Fatalf("fences: %+v", s)
-	}
-	data, _ := json.Marshal(s)
-	if strings.Contains(string(data), `"host_holds"`) {
-		t.Fatal("empty legacy list must be omitted")
-	}
-	if !strings.Contains(string(data), `"holds_detail":[`) {
-		t.Fatal("missing details array")
-	}
-}
 
-func TestHoldsDetailProductionKinds(t *testing.T) {
-	q, c, a, _, _ := holdFleet(t, true)
-	// Direct state fixtures isolate formatting from dispatch; snapshots above
-	// exercise the public status path after explicit maintenance.
-	h := q.s.Hosts["b70"]
-	h.Active = true
-	d := q.productionHoldDetail("b70")
-	if d.Kind != "production_hold" || d.OperatorActionRequired || d.Text != "b70: production hold" {
-		t.Fatalf("active: %+v", d)
-	}
-	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: a.Session, Attempt: 1, Until: c.Now().Add(10 * time.Second)}
-	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	d = q.productionHoldDetail("b70")
-	if d.Kind != "production_stopping" || d.OperatorActionRequired || d.Text != "b70: production hold; stopping 1 attempts; grace remaining 10s" {
-		t.Fatalf("grace: %+v", d)
-	}
-	c.Advance(10 * time.Second)
-	d = q.productionHoldDetail("b70")
-	if d.Kind != "production_release_unknown" || d.OperatorActionRequired || d.Text != "b70: production hold; release unknown: worker b70-0" {
-		t.Fatalf("unknown: %+v", d)
-	}
-}
+	})
 
-func TestHoldsDetailEmptyIsArray(t *testing.T) {
-	q, _ := fixture(t)
-	s, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), `"holds_detail":[]`) || strings.Contains(string(data), `"host_holds"`) {
-		t.Fatalf("empty holds fields: %s", data)
-	}
+	t.Run("HoldsReviewHostDisableScope", func(t *testing.T) {
+		q, _, _, _, _ := holdFleet(t, false)
+		assert := func(want bool) {
+			t.Helper()
+			s, err := q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, d := range s.HoldsDetail {
+				if d.Host == "b70" && d.Kind == "host_disabled" {
+					found = true
+					if d.OperatorActionRequired || d.ClearsAt != nil {
+						t.Fatalf("disable is not a fault: %+v", d)
+					}
+				}
+			}
+			if found != want {
+				t.Fatalf("host disable=%v want=%v: %+v", found, want, s.HoldsDetail)
+			}
+		}
+		assert(false)
+		if err := setMaintenance(t, q, "b70", "disable"); err != nil {
+			t.Fatal(err)
+		}
+		assert(true)
+		if err := setMaintenance(t, q, "b70", "resume"); err != nil {
+			t.Fatal(err)
+		}
+		assert(false)
+
+	})
+
+	t.Run("HoldsReviewStartupGone", func(t *testing.T) {
+		q, c := fixture(t)
+		m := machine("worker", "fake")
+		m.HostID = "host"
+		check(t, q, m, nil)
+		now := c.Now()
+		q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &now}}
+		r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}
+		q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+		for _, gone := range []bool{false, true} {
+			q.s.Machines[m.ID].Gone = gone
+			s, err := q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, d := range s.HoldsDetail {
+				if d.Kind == "startup_release" {
+					found = true
+					if d.OperatorActionRequired != gone || d.ClearsAt != nil {
+						t.Fatalf("gone=%v: %+v", gone, d)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("startup fence missing")
+			}
+		}
+
+	})
 }

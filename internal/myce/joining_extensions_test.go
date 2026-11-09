@@ -2,8 +2,10 @@ package myce
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,99 +13,122 @@ import (
 // A trusted joining client must retain both startup facts and qualification
 // reports while running the two extension job forms through the real worker.
 func TestJoiningExtensionEndToEnd(t *testing.T) {
-	t.Setenv("MYCE_TOKEN", "must-not-reach-extension")
-	q, _ := fixture(t)
-	clock := &workerFakeClock{now: q.clock.Now()}
-	q.clock = clock
-	server, invitation := joiningTestServer(t, API{Queue: q, Token: "throwaway-test-only"}.Handler())
-	invitation.Address = ""
-	discovery := &fakeDiscovery{addresses: []string{server.URL}}
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	client, err := ResolveJoining(ctx, invitation, "", discovery)
-	if err != nil || discovery.calls != 1 || client.URL != server.URL {
-		t.Fatal("trusted discovery failed", err)
-	}
-	root, shared, state := t.TempDir(), t.TempDir(), t.TempDir()
-	e := fakeExtension(t)
-	installQualified(t, root, e, "")
-	if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
-		t.Fatal(err)
-	}
-	for name, data := range map[string]string{
-		"input":  "joined-extension-result\n",
-		"script": "test -z \"$MYCE_TOKEN\" || exit 99\nprintf joined-program-result > output\n",
-	} {
-		if err := os.WriteFile(filepath.Join(shared, name), []byte(data), 0600); err != nil {
+	t.Run("contract", func(t *testing.T) {
+		t.Setenv("MYCE_TOKEN", "must-not-reach-extension")
+		q, _ := fixture(t)
+		clock := &workerFakeClock{now: q.clock.Now()}
+		q.clock = clock
+		server, invitation := joiningTestServer(t, API{Queue: q, Token: "throwaway-test-only"}.Handler())
+		invitation.Address = ""
+		discovery := &fakeDiscovery{addresses: []string{server.URL}}
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer cancel()
+		client, err := ResolveJoining(ctx, invitation, "", discovery)
+		if err != nil || discovery.calls != 1 || client.URL != server.URL {
+			t.Fatal("trusted discovery failed", err)
+		}
+		root, shared, state := t.TempDir(), t.TempDir(), t.TempDir()
+		e := fakeExtension(t)
+		installQualified(t, root, e, "")
+		if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
 			t.Fatal(err)
 		}
-	}
-	w := Worker{EnvironmentLimit: 1 << 30, Client: client, StateDir: state, ExtensionRoot: root, JobFileRoot: shared, Machine: machine("joined", "fake"), Interval: 5 * time.Millisecond}
-	// Exercise ordinary startup detection rather than the scheduler fixture profile.
-	w.Machine.CapabilityProfile = nil
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
-			}
-		case <-time.After(testWaitTimeout):
-			t.Error("joined worker did not exit")
-		}
-	})
-	for _, program := range []bool{false, true} {
-		s := Spec{Name: "joined-extension", Project: "test", Priority: "experiment", Kind: "sample", Inputs: map[string]string{"input": "input"}, Outputs: map[string]string{"output": "results"}}
-		want := "joined-extension-result\n"
-		if program {
-			s.Kind = ""
-			s.Program = &Program{Type: "sample-script", File: "script"}
-			s.Inputs = map[string]string{"script": "script"}
-			want = "joined-program-result"
-		}
-		var submitted Job
-		if err := client.Call(ctx, "POST", "/api/jobs", s, &submitted); err != nil {
-			t.Fatal(err)
-		}
-		var completed *Job
-		await(t, func() bool {
-			var current Job
-			if err := client.Call(ctx, "GET", "/api/jobs/"+submitted.ID, nil, &current); err != nil {
+		for name, data := range map[string]string{
+			"input":  "joined-extension-result\n",
+			"script": "test -z \"$MYCE_TOKEN\" || exit 99\nprintf joined-program-result > output\n",
+		} {
+			if err := os.WriteFile(filepath.Join(shared, name), []byte(data), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if !terminal(current.State) {
-				return false
-			}
-			if current.State != "succeeded" {
-				t.Fatalf("joined extension job: state=%s reason=%s", current.State, current.Reason)
-			}
-			completed = &current
-			clock.Advance(time.Second)
-			var snap Snapshot
-			if err := client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
-				t.Fatal(err)
-			}
-			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {
-				t.Fatal("check-in lost profile or extension reports")
-			}
-			for _, report := range snap.Machines[0].ExtensionReports {
-				if !report.Qualified || report.Digest != e.Digest {
-					t.Fatal("check-in lost qualification identity")
+		}
+		w := Worker{EnvironmentLimit: 1 << 30, Client: client, StateDir: state, ExtensionRoot: root, JobFileRoot: shared, Machine: machine("joined", "fake"), Interval: 5 * time.Millisecond}
+		// Exercise ordinary startup detection rather than the scheduler fixture profile.
+		w.Machine.CapabilityProfile = nil
+		done := make(chan error, 1)
+		go func() { done <- w.Run(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
 				}
+			case <-time.After(testWaitTimeout):
+				t.Error("joined worker did not exit")
 			}
-			return true
 		})
-		if completed.Extension == nil || completed.Extension.Digest != e.Digest {
-			t.Fatal("attempt lost extension identity")
+		for _, program := range []bool{false, true} {
+			s := Spec{Name: "joined-extension", Project: "test", Priority: "experiment", Kind: "sample", Inputs: map[string]string{"input": "input"}, Outputs: map[string]string{"output": "results"}}
+			want := "joined-extension-result\n"
+			if program {
+				s.Kind = ""
+				s.Program = &Program{Type: "sample-script", File: "script"}
+				s.Inputs = map[string]string{"script": "script"}
+				want = "joined-program-result"
+			}
+			var submitted Job
+			if err := client.Call(ctx, "POST", "/api/jobs", s, &submitted); err != nil {
+				t.Fatal(err)
+			}
+			var completed *Job
+			await(t, func() bool {
+				var current Job
+				if err := client.Call(ctx, "GET", "/api/jobs/"+submitted.ID, nil, &current); err != nil {
+					t.Fatal(err)
+				}
+				if !terminal(current.State) {
+					return false
+				}
+				if current.State != "succeeded" {
+					t.Fatalf("joined extension job: state=%s reason=%s", current.State, current.Reason)
+				}
+				completed = &current
+				clock.Advance(time.Second)
+				var snap Snapshot
+				if err := client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+					t.Fatal(err)
+				}
+				if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {
+					t.Fatal("check-in lost profile or extension reports")
+				}
+				for _, report := range snap.Machines[0].ExtensionReports {
+					if !report.Qualified || report.Digest != e.Digest {
+						t.Fatal("check-in lost qualification identity")
+					}
+				}
+				return true
+			})
+			if completed.Extension == nil || completed.Extension.Digest != e.Digest {
+				t.Fatal("attempt lost extension identity")
+			}
+			data, err := os.ReadFile(filepath.Join(shared, completed.OutputFiles["output"]))
+			if err != nil || string(data) != want {
+				t.Fatal("joined extension output mismatch", err)
+			}
 		}
-		data, err := os.ReadFile(filepath.Join(shared, completed.OutputFiles["output"]))
-		if err != nil || string(data) != want {
-			t.Fatal("joined extension output mismatch", err)
+		if _, err := os.Stat(filepath.Join(state, "capability-profile.json")); !os.IsNotExist(err) {
+			t.Fatal("default join wrote benchmark cache", err)
 		}
-	}
-	if _, err := os.Stat(filepath.Join(state, "capability-profile.json")); !os.IsNotExist(err) {
-		t.Fatal("default join wrote benchmark cache", err)
-	}
+
+	})
+
+	t.Run("ProfileCheckinAndPersistence", func(t *testing.T) {
+		q, _ := fixture(t)
+		server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+		defer server.Close()
+		m := machine("profile-test", "fake")
+		m.CapabilityProfile = &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", Onboarding: "hardware-facts-only; throughput pending", MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, LogicalCPUs: 8, RecordedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+		var reply Reply
+		if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, Fresh: true}, &reply); err != nil {
+			t.Fatal(err)
+		}
+		var snapshot Snapshot
+		if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Machines) != 1 || snapshot.Machines[0].CapabilityProfile == nil || !strings.Contains(snapshot.Machines[0].CapabilityProfile.Summary(), "unified") {
+			t.Fatal("profile missing from status")
+		}
+
+	})
 }

@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,111 +16,7 @@ import (
 func idleSignals() OwnerSignals {
 	return OwnerSignals{IdleKnown: true, IdleSeconds: 300, Power: "ac", Laptop: true, Heat: "nominal"}
 }
-func TestAvailabilityTransitions(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	p := availabilityPolicy{clock: clock, daily: true}
-	s := idleSignals()
-	s.IdleSeconds = 0.5
-	if p.evaluate(s).Available {
-		t.Fatal("admitted within the observation resolution")
-	}
-	clock.Advance(time.Second)
-	s.IdleSeconds = 2
-	if !p.evaluate(s).Available {
-		t.Fatal("not admitted after observed idle recovery")
-	}
-	for _, tc := range []struct {
-		name   string
-		change func(*OwnerSignals)
-		reason string
-	}{
-		{"owner", func(s *OwnerSignals) { s.IdleSeconds = 0 }, "waiting for owner idle recovery"},
-		{"battery", func(s *OwnerSignals) { s.Power = "battery" }, "on battery"},
-		{"power unknown", func(s *OwnerSignals) { s.Power = "unknown" }, "power source unavailable"},
-		{"idle unknown", func(s *OwnerSignals) { s.IdleKnown = false }, "owner activity unavailable"},
-		{"idle invalid", func(s *OwnerSignals) { s.IdleSeconds = math.NaN() }, "owner activity unavailable"},
-		{"heat unknown", func(s *OwnerSignals) { s.Heat = "unknown" }, "heat sensing unavailable"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			bad := idleSignals()
-			tc.change(&bad)
-			a := p.evaluate(bad)
-			if a.Available || a.Reason != tc.reason {
-				t.Fatal(a)
-			}
-			if !p.evaluate(idleSignals()).Available {
-				t.Fatal("fresh good signals didn't recover")
-			}
-		})
-	}
-}
-func TestAvailabilityCoolingAndWake(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	p := availabilityPolicy{clock: clock, daily: true, probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}}
-	s := idleSignals()
-	advance := func(d time.Duration) { clock.Advance(d); s.IdleSeconds += d.Seconds() }
-	s.Heat = "fair"
-	if p.evaluate(s).Available {
-		t.Fatal("hot admitted")
-	}
-	advance(time.Second)
-	s.Heat = "nominal"
-	if p.evaluate(s).Available {
-		t.Fatal("thermal recovery skipped")
-	}
-	advance(500 * time.Millisecond)
-	s.Heat = "serious"
-	p.evaluate(s) // Measured failed recovery span.
-	advance(time.Second)
-	s.Heat = "nominal"
-	p.evaluate(s)
-	advance(time.Second)
-	if p.evaluate(s).Available {
-		t.Fatal("learned thermal hysteresis skipped")
-	}
-	advance(time.Second)
-	if !p.evaluate(s).Available {
-		t.Fatal("thermal recovery failed")
-	}
-	advance(time.Hour)
-	if p.evaluate(s).Available {
-		t.Fatal("sleep counted toward idle")
-	}
-	advance(time.Second)
-	if !p.evaluate(s).Available {
-		t.Fatal("fresh awake recovery failed")
-	}
-	s.Heat = "critical"
-	p.evaluate(s)
-	advance(time.Second)
-	s.Heat = "unknown"
-	p.evaluate(s)
-	advance(time.Second)
-	s.Heat = "nominal"
-	if p.evaluate(s).Available {
-		t.Fatal("unknown heat proved cooling")
-	}
-}
-func TestDedicatedAvailabilityAndStaleness(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	p := availabilityPolicy{clock: clock}
-	if !p.evaluate(OwnerSignals{Power: "unknown", Heat: "unknown"}).Available {
-		t.Fatal("dedicated server default changed")
-	}
-	if p.evaluate(OwnerSignals{Power: "battery", Laptop: true}).Available {
-		t.Fatal("dedicated laptop ran on battery")
-	}
-	p.laptop = true
-	if p.evaluate(OwnerSignals{Power: "unknown"}).Available {
-		t.Fatal("explicit laptop allowed unknown power")
-	}
-	monitor := newAvailabilityMonitor(clock, true, false, false)
-	monitor.sample(idleSignals())
-	clock.Advance(signalMaxAge + time.Second)
-	if a := monitor.snapshot(); a.Available || a.Reason != "owner signals stale" {
-		t.Fatal(a)
-	}
-}
+
 func profileAvailability(m Machine, a Availability) Machine {
 	profile := *m.CapabilityProfile
 	profile.Availability = &a
@@ -129,107 +24,162 @@ func profileAvailability(m Machine, a Availability) Machine {
 	return m
 }
 func TestPoliteQueueStopAndResume(t *testing.T) {
-	for _, signal := range []string{"owner", "battery", "heat", "unknown"} {
-		t.Run(signal, func(t *testing.T) {
-			q, clock := fixture(t)
-			p := availabilityPolicy{clock: clock, daily: true}
-			m := profileAvailability(machine("daily", "fake"), p.evaluate(idleSignals()))
-			j := submit(t, q, spec("experiment"))
-			r := check(t, q, m, nil)
-			if r.Job == nil {
-				t.Fatal("not assigned")
-			}
-			s := idleSignals()
-			switch signal {
-			case "owner":
-				s.IdleSeconds = 0
-			case "battery":
-				s.Power = "battery"
-			case "heat":
-				s.Heat = "serious"
-			case "unknown":
-				s.Heat = "unknown"
-			}
-			m = profileAvailability(m, p.evaluate(s))
-			r2 := check(t, q, m, r.Job)
-			if !r2.Stop || r2.Leave || r2.GraceSeconds != 10 || !r2.AdmissionBlocked {
-				t.Fatal(r2)
-			}
-			got := job(t, q, j.ID)
-			if got.State != "stopping" || got.Losses != 0 {
-				t.Fatal(got)
-			}
-			finish(t, q, r.Job, true)
-			if check(t, q, m, nil).Job != nil {
-				t.Fatal("withholding worker got job")
-			}
-			other := machine("elsewhere", "fake")
-			r3 := check(t, q, other, nil)
-			if r3.Job == nil || r3.Job.ID != j.ID || r3.Job.Attempt != 2 {
-				t.Fatal("didn't resume elsewhere", r3)
-			}
-			if job(t, q, j.ID).Losses != 0 {
-				t.Fatal("planned stop consumed retry")
-			}
-		})
-	}
+	t.Run("contract", func(t *testing.T) {
+		for _, signal := range []string{"owner", "battery", "heat", "unknown"} {
+			t.Run(signal, func(t *testing.T) {
+				q, clock := fixture(t)
+				p := availabilityPolicy{clock: clock, daily: true}
+				m := profileAvailability(machine("daily", "fake"), p.evaluate(idleSignals()))
+				j := submit(t, q, spec("experiment"))
+				r := check(t, q, m, nil)
+				if r.Job == nil {
+					t.Fatal("not assigned")
+				}
+				s := idleSignals()
+				switch signal {
+				case "owner":
+					s.IdleSeconds = 0
+				case "battery":
+					s.Power = "battery"
+				case "heat":
+					s.Heat = "serious"
+				case "unknown":
+					s.Heat = "unknown"
+				}
+				m = profileAvailability(m, p.evaluate(s))
+				r2 := check(t, q, m, r.Job)
+				if !r2.Stop || r2.Leave || r2.GraceSeconds != 10 || !r2.AdmissionBlocked {
+					t.Fatal(r2)
+				}
+				got := job(t, q, j.ID)
+				if got.State != "stopping" || got.Losses != 0 {
+					t.Fatal(got)
+				}
+				finish(t, q, r.Job, true)
+				if check(t, q, m, nil).Job != nil {
+					t.Fatal("withholding worker got job")
+				}
+				other := machine("elsewhere", "fake")
+				r3 := check(t, q, other, nil)
+				if r3.Job == nil || r3.Job.ID != j.ID || r3.Job.Attempt != 2 {
+					t.Fatal("didn't resume elsewhere", r3)
+				}
+				if job(t, q, j.ID).Losses != 0 {
+					t.Fatal("planned stop consumed retry")
+				}
+			})
+		}
+
+	})
+
+	t.Run("DedicatedAvailabilityAndStaleness", func(t *testing.T) {
+		clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
+		monitor := newAvailabilityMonitor(clock, true, false, false)
+		monitor.sample(idleSignals())
+		clock.Advance(signalMaxAge + time.Second)
+		if a := monitor.snapshot(); a.Available || a.Reason != "owner signals stale" {
+			t.Fatal(a)
+		}
+
+	})
+
+	t.Run("PoliteOfflineResultDoesNotChargeLoss", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := machine("daily", "fake")
+		j := submit(t, q, spec("experiment"))
+		r := check(t, q, m, nil)
+		res := result(r.Job, true)
+		res.Interrupted = true
+		res.PoliteStop = true
+		if err := q.Complete(res); err != nil {
+			t.Fatal(err)
+		}
+		got := job(t, q, j.ID)
+		if got.State != "queued" || got.Losses != 0 {
+			t.Fatal(got)
+		}
+		if err := q.Complete(res); !errors.Is(err, ErrStale) {
+			t.Fatal("late result accepted", err)
+		}
+
+	})
 }
-func TestPoliteOfflineResultDoesNotChargeLoss(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("daily", "fake")
-	j := submit(t, q, spec("experiment"))
-	r := check(t, q, m, nil)
-	res := result(r.Job, true)
-	res.Interrupted = true
-	res.PoliteStop = true
-	if err := q.Complete(res); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, j.ID)
-	if got.State != "queued" || got.Losses != 0 {
-		t.Fatal(got)
-	}
-	if err := q.Complete(res); !errors.Is(err, ErrStale) {
-		t.Fatal("late result accepted", err)
-	}
-}
+
 func TestPerMachineJobLimit(t *testing.T) {
-	q, clock := fixture(t)
-	a, b := machine("card1", "fake"), machine("card2", "fake")
-	a.HostID = "same"
-	b.HostID = "same"
-	a.MaxJobs = 1
-	b.MaxJobs = 1
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	first, second := submit(t, q, spec("production")), submit(t, q, spec("experiment"))
-	r := check(t, q, a, nil)
-	if r.Job == nil || r.Job.ID != first.ID {
-		t.Fatal(r)
-	}
-	if err := q.Started(result(r.Job, true)); err != nil {
-		t.Fatal("own admission counted against its start gate", err)
-	}
-	clock.Advance(time.Second)
-	if got := check(t, q, b, nil); got.Job != nil {
-		t.Fatal("limit bypassed across GPUs", got)
-	}
-	if q.machineLimitReason(&b) == "" {
-		t.Fatal("no limit reason")
-	}
-	finish(t, q, r.Job, true)
-	if got := check(t, q, b, nil); got.Job == nil || got.Job.ID != second.ID {
-		t.Fatal("released job didn't free limit", got)
-	}
-	// Absence of the optional limit preserves simultaneous per-resource filling.
-	q2, _ := fixture(t)
-	a.MaxJobs = 0
-	b.MaxJobs = 0
-	submit(t, q2, spec("experiment"))
-	submit(t, q2, spec("experiment"))
-	if check(t, q2, a, nil).Job == nil || check(t, q2, b, nil).Job == nil {
-		t.Fatal("default filling changed")
-	}
+	t.Run("contract", func(t *testing.T) {
+		q, clock := fixture(t)
+		a, b := machine("card1", "fake"), machine("card2", "fake")
+		a.HostID = "same"
+		b.HostID = "same"
+		a.MaxJobs = 1
+		b.MaxJobs = 1
+		check(t, q, a, nil)
+		check(t, q, b, nil)
+		first, second := submit(t, q, spec("production")), submit(t, q, spec("experiment"))
+		r := check(t, q, a, nil)
+		if r.Job == nil || r.Job.ID != first.ID {
+			t.Fatal(r)
+		}
+		if err := q.Started(result(r.Job, true)); err != nil {
+			t.Fatal("own admission counted against its start gate", err)
+		}
+		clock.Advance(time.Second)
+		if got := check(t, q, b, nil); got.Job != nil {
+			t.Fatal("limit bypassed across GPUs", got)
+		}
+		if q.machineLimitReason(&b) == "" {
+			t.Fatal("no limit reason")
+		}
+		finish(t, q, r.Job, true)
+		if got := check(t, q, b, nil); got.Job == nil || got.Job.ID != second.ID {
+			t.Fatal("released job didn't free limit", got)
+		}
+		// Absence of the optional limit preserves simultaneous per-resource filling.
+		q2, _ := fixture(t)
+		a.MaxJobs = 0
+		b.MaxJobs = 0
+		submit(t, q2, spec("experiment"))
+		submit(t, q2, spec("experiment"))
+		if check(t, q2, a, nil).Job == nil || check(t, q2, b, nil).Job == nil {
+			t.Fatal("default filling changed")
+		}
+
+	})
+
+	t.Run("MachineLimitRetainsUnacknowledgedStop", func(t *testing.T) {
+		q, clock := fixture(t)
+		a, b := machine("limited-a", "fake"), machine("limited-b", "fake")
+		a.HostID = "limited-host"
+		b.HostID = "limited-host"
+		a.MaxJobs = 1
+		b.MaxJobs = 1
+		check(t, q, a, nil)
+		check(t, q, b, nil)
+		j := submit(t, q, spec("experiment"))
+		assigned := check(t, q, a, nil).Job
+		if assigned == nil {
+			t.Fatal("no initial assignment")
+		}
+		a = profileAvailability(a, Availability{Mode: "daily", Reason: "owner active"})
+		check(t, q, a, assigned)
+		clock.Advance(11 * time.Second)
+		q.Tick()
+		if q.machineLimitReason(&b) == "" {
+			t.Fatal("expired grace credited unacknowledged physical release")
+		}
+		if r := check(t, q, b, nil); r.Job != nil {
+			t.Fatal("limit admitted over an unacknowledged attempt")
+		}
+		ack := result(assigned, true)
+		ack.ReleaseOnly = true
+		if err := q.Complete(ack); err != nil {
+			t.Fatal(err)
+		}
+		if r := check(t, q, b, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Attempt != 2 {
+			t.Fatal("confirmed release didn't free machine limit", r)
+		}
+
+	})
 }
 
 func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
@@ -321,46 +271,81 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 }
 
 func TestMachineLimitIncludesModelCalls(t *testing.T) {
-	q, clock, m := modelFixture(t, "shared")
-	m.MaxJobs = 1
-	check(t, q, m, nil)
-	first := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	if first.Machine != m.ID {
-		t.Fatal("first model call not routed")
-	}
-	second := addModelCall(t, q, "production")
-	if second.Machine != "" {
-		t.Fatal("model call exceeded machine limit")
-	}
-	other := machine("second-card", "fake")
-	other.HostID = "shared"
-	other.MaxJobs = 1
-	check(t, q, other, nil)
-	j := submit(t, q, spec("experiment"))
-	if check(t, q, other, nil).Job != nil {
-		t.Fatal("batch exceeded model call limit")
-	}
-	clock.Advance(time.Second)
-	if err := q.finishCall(first.ID); err != nil {
-		t.Fatal(err)
-	}
-	if second.Machine != m.ID {
-		t.Fatal("finishing call didn't free limit")
-	}
-	// A withholding hypha may not serve its ready pinned model.
-	m = profileAvailability(m, Availability{Mode: "daily", Reason: "on battery"})
-	reportModel(t, q, m, "ready")
-	if second.Error == "" {
-		t.Fatal("running model call wasn't withdrawn")
-	}
-	third := addModelCall(t, q, "production")
-	if third.Machine != "" {
-		t.Fatal("withholding hypha routed a model call")
-	}
-	if job(t, q, j.ID).State != "queued" {
-		t.Fatal("blocked job changed")
-	}
+	t.Run("contract", func(t *testing.T) {
+		q, clock, m := modelFixture(t, "shared")
+		m.MaxJobs = 1
+		check(t, q, m, nil)
+		first := addModelCall(t, q, "experiment")
+		reportModel(t, q, m, "ready")
+		if first.Machine != m.ID {
+			t.Fatal("first model call not routed")
+		}
+		second := addModelCall(t, q, "production")
+		if second.Machine != "" {
+			t.Fatal("model call exceeded machine limit")
+		}
+		other := machine("second-card", "fake")
+		other.HostID = "shared"
+		other.MaxJobs = 1
+		check(t, q, other, nil)
+		j := submit(t, q, spec("experiment"))
+		if check(t, q, other, nil).Job != nil {
+			t.Fatal("batch exceeded model call limit")
+		}
+		clock.Advance(time.Second)
+		if err := q.finishCall(first.ID); err != nil {
+			t.Fatal(err)
+		}
+		if second.Machine != m.ID {
+			t.Fatal("finishing call didn't free limit")
+		}
+		// A withholding hypha may not serve its ready pinned model.
+		m = profileAvailability(m, Availability{Mode: "daily", Reason: "on battery"})
+		reportModel(t, q, m, "ready")
+		if second.Error == "" {
+			t.Fatal("running model call wasn't withdrawn")
+		}
+		third := addModelCall(t, q, "production")
+		if third.Machine != "" {
+			t.Fatal("withholding hypha routed a model call")
+		}
+		if job(t, q, j.ID).State != "queued" {
+			t.Fatal("blocked job changed")
+		}
+
+	})
+
+	t.Run("AvailabilityCancelsModelWorkAndRecovers", func(t *testing.T) {
+		clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
+		monitor := newAvailabilityMonitor(clock, true, false, false)
+		monitor.sample(idleSignals())
+		work := monitor.workContext()
+		if work.Err() != nil {
+			t.Fatal("eligible model context cancelled")
+		}
+		s := idleSignals()
+		s.Power = "battery"
+		monitor.sample(s)
+		if work.Err() == nil {
+			t.Fatal("active model work wasn't cancelled")
+		}
+		rt := &modelRuntime{availability: monitor, clock: clock, models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{}, state: "ready", queueFlight: 1}}}
+		rt.withdrawLocalAvailability()
+		rt.wg.Wait()
+		if rt.models["test"].state != "unloaded" {
+			t.Fatal("offline model engine not released")
+		}
+		monitor.sample(idleSignals())
+		if monitor.workContext().Err() != nil {
+			t.Fatal("fresh eligibility didn't reopen model admission")
+		}
+		clock.Advance(signalMaxAge + time.Second)
+		work = monitor.workContext()
+		if work.Err() == nil {
+			t.Fatal("stale model work not cancelled")
+		}
+
+	})
 }
 
 func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
@@ -437,71 +422,6 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 		matches, _ := filepath.Glob(filepath.Join(state, "*.result.json"))
 		return len(matches) == 1
 	})
-}
-
-func TestAvailabilityCancelsModelWorkAndRecovers(t *testing.T) {
-	clock := &fakeClock{now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
-	monitor := newAvailabilityMonitor(clock, true, false, false)
-	monitor.sample(idleSignals())
-	work := monitor.workContext()
-	if work.Err() != nil {
-		t.Fatal("eligible model context cancelled")
-	}
-	s := idleSignals()
-	s.Power = "battery"
-	monitor.sample(s)
-	if work.Err() == nil {
-		t.Fatal("active model work wasn't cancelled")
-	}
-	rt := &modelRuntime{availability: monitor, clock: clock, models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{}, state: "ready", queueFlight: 1}}}
-	rt.withdrawLocalAvailability()
-	rt.wg.Wait()
-	if rt.models["test"].state != "unloaded" {
-		t.Fatal("offline model engine not released")
-	}
-	monitor.sample(idleSignals())
-	if monitor.workContext().Err() != nil {
-		t.Fatal("fresh eligibility didn't reopen model admission")
-	}
-	clock.Advance(signalMaxAge + time.Second)
-	work = monitor.workContext()
-	if work.Err() == nil {
-		t.Fatal("stale model work not cancelled")
-	}
-}
-
-func TestMachineLimitRetainsUnacknowledgedStop(t *testing.T) {
-	q, clock := fixture(t)
-	a, b := machine("limited-a", "fake"), machine("limited-b", "fake")
-	a.HostID = "limited-host"
-	b.HostID = "limited-host"
-	a.MaxJobs = 1
-	b.MaxJobs = 1
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	j := submit(t, q, spec("experiment"))
-	assigned := check(t, q, a, nil).Job
-	if assigned == nil {
-		t.Fatal("no initial assignment")
-	}
-	a = profileAvailability(a, Availability{Mode: "daily", Reason: "owner active"})
-	check(t, q, a, assigned)
-	clock.Advance(11 * time.Second)
-	q.Tick()
-	if q.machineLimitReason(&b) == "" {
-		t.Fatal("expired grace credited unacknowledged physical release")
-	}
-	if r := check(t, q, b, nil); r.Job != nil {
-		t.Fatal("limit admitted over an unacknowledged attempt")
-	}
-	ack := result(assigned, true)
-	ack.ReleaseOnly = true
-	if err := q.Complete(ack); err != nil {
-		t.Fatal(err)
-	}
-	if r := check(t, q, b, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Attempt != 2 {
-		t.Fatal("confirmed release didn't free machine limit", r)
-	}
 }
 
 func TestDailyDesktopCPUThermalWaiver(t *testing.T) {

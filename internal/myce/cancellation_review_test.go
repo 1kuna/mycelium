@@ -3,7 +3,6 @@ package myce
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -11,44 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestCancellationRejoinBeforeCancel(t *testing.T) {
-	q, c := fixture(t)
-	one, two := machine("one", "fake"), machine("two", "fake")
-	for _, m := range []*Machine{&one, &two} {
-		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
-	}
-	s := spec("experiment")
-	s.Needs.HostMemoryGB = 4
-	j := submit(t, q, s)
-	first := check(t, q, one, nil).Job
-	check(t, q, two, nil)
-	check(t, q, machine("three", "fake"), nil)
-	c.Advance(LossAfter)
-	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
-		q.maintain()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	second := check(t, q, two, nil).Job
-	if second == nil || second.Attempt != 2 {
-		t.Fatal("missing second attempt")
-	}
-	one.Session = "fresh-one"
-	if _, err := q.Checkin(Checkin{Machine: one, Fresh: true, PreviousSession: first.Session}); err != nil {
-		t.Fatal(err)
-	}
-	finish(t, q, second, true)
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-		t.Fatal("recreated discharged custody", a)
-	}
-	q.refreshHostMemory()
-	if len(q.s.HostReleases) != 0 || q.s.Machines[one.ID].HostMemoryInUseGB != 0 {
-		t.Fatal("cancel invented a historical charge")
-	}
-}
 
 func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 	for _, tracked := range []bool{false, true} {
@@ -129,99 +90,84 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 }
 
 func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
-	q, c := fixture(t)
-	m := machine("one", "fake")
-	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	s := spec("production")
-	s.AllowedMachines, s.Needs.HostMemoryGB = []string{m.ID}, 4
-	j := submit(t, q, s)
-	first := check(t, q, m, nil).Job
-	if first == nil {
-		t.Fatal("missing production assignment")
-	}
-	if err := q.Started(result(first, true)); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, machine("two", "fake"), nil)
-	check(t, q, machine("three", "fake"), nil)
-	c.Advance(ProductionLossAfter)
-	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
-		q.maintain()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if q.s.Jobs[j.ID].State != "queued" {
-		t.Fatal("production loss did not requeue")
-	}
-	m.Session = "second-one"
-	if reply := check(t, q, m, nil); reply.Job != nil {
-		t.Fatal("old custody allowed production reassignment")
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-		t.Fatal(a)
-	}
-	m.Session = "fresh-one"
-	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: "second-one"}); err != nil {
-		t.Fatal(err)
-	}
-	key := releaseKey(HostRelease{Job: j.ID, Machine: first.Machine, Session: first.Session, Attempt: first.Attempt})
-	if _, retained := q.s.HostReleases[key]; !retained || !q.held(m.ID) || q.s.Machines[m.ID].HostMemoryInUseGB != 4 {
-		t.Fatal("fresh S2 cleanup freed S1 production custody")
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed {
-		t.Fatal("older production session was confirmed", a)
-	}
-	r := result(first, false)
-	r.ReleaseOnly = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" || q.held(m.ID) {
-		t.Fatal("exact S1 cleanup failed to settle custody", a)
-	}
-}
+	t.Run("contract", func(t *testing.T) {
+		q, c := fixture(t)
+		m := machine("one", "fake")
+		m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
+		if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+			t.Fatal(err)
+		}
+		s := spec("production")
+		s.AllowedMachines, s.Needs.HostMemoryGB = []string{m.ID}, 4
+		j := submit(t, q, s)
+		first := check(t, q, m, nil).Job
+		if first == nil {
+			t.Fatal("missing production assignment")
+		}
+		if err := q.Started(result(first, true)); err != nil {
+			t.Fatal(err)
+		}
+		check(t, q, machine("two", "fake"), nil)
+		check(t, q, machine("three", "fake"), nil)
+		c.Advance(ProductionLossAfter)
+		if err := q.update(func() error {
+			q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+			q.maintain()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if q.s.Jobs[j.ID].State != "queued" {
+			t.Fatal("production loss did not requeue")
+		}
+		m.Session = "second-one"
+		if reply := check(t, q, m, nil); reply.Job != nil {
+			t.Fatal("old custody allowed production reassignment")
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+			t.Fatal(a)
+		}
+		m.Session = "fresh-one"
+		if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: "second-one"}); err != nil {
+			t.Fatal(err)
+		}
+		key := releaseKey(HostRelease{Job: j.ID, Machine: first.Machine, Session: first.Session, Attempt: first.Attempt})
+		if _, retained := q.s.HostReleases[key]; !retained || !q.held(m.ID) || q.s.Machines[m.ID].HostMemoryInUseGB != 4 {
+			t.Fatal("fresh S2 cleanup freed S1 production custody")
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed {
+			t.Fatal("older production session was confirmed", a)
+		}
+		r := result(first, false)
+		r.ReleaseOnly = true
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" || q.held(m.ID) {
+			t.Fatal("exact S1 cleanup failed to settle custody", a)
+		}
 
-func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
-	for _, held := range []bool{false, true} {
-		t.Run(map[bool]string{false: "redelivery", true: "held-host"}[held], func(t *testing.T) {
-			q, _ := fixture(t)
-			m := machine("one", "fake")
-			if held {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			j := submit(t, q, spec("production"))
-			assigned := check(t, q, m, nil).Job // Assignment reply is lost before launch.
-			if assigned == nil {
-				t.Fatal("missing assignment")
-			}
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			if len(q.s.HostReleases) != 1 {
-				t.Fatal("fixture must retain runtime custody before cancellation")
-			}
-			if a := cancelAck(t, q, j.ID); a.State != "stopping" || ackRelease(a) != "pending" {
-				t.Fatal(a)
-			}
-			if reply := check(t, q, m, nil); reply.Job != nil {
-				t.Fatal("cancelled assignment was redelivered")
-			}
-			if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
-				t.Fatal("same-session empty report did not prove exact release", a)
-			}
-			if !q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed || len(q.s.HostReleases) != 0 {
-				t.Fatal("exact attempt evidence or release record was not settled")
-			}
-			assertNoCancellationAttempt(t, q, assigned)
-		})
-	}
+	})
+
+	t.Run("CancellationExcludedFromHoldDemand", func(t *testing.T) {
+		q, _, a, _, _ := holdFleet(t, true)
+		p := spec("production")
+		p.AllowedMachines = []string{a.ID}
+		j := submit(t, q, p)
+		j = check(t, q, a, nil).Job
+		cancelAck(t, q, j.ID)
+		// A release-only receipt proves resources gone while the cancelled job is
+		// still stopping. It must not continue to count as production demand.
+		r := result(j, false)
+		r.ReleaseOnly = true
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if q.held(hostID(&a)) {
+			t.Fatal("cancelled stopping job retained production demand")
+		}
+
+	})
 }
 
 // Write the original wire shape: pre-S03 copies have no release evidence fields.
@@ -291,59 +237,6 @@ func TestCancellationLegacyCopies(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestCancellationAcknowledgementTime(t *testing.T) {
-	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	first := cancelAck(t, q, j.ID)
-	reserved, err := q.CancelSubmission("test", "reserved-time")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	if a := cancelAck(t, q, j.ID); !a.AcknowledgedAt.Equal(*first.AcknowledgedAt) {
-		t.Fatal("job acknowledgement changed")
-	}
-	a, err := q.CancelSubmission("test", "reserved-time")
-	if err != nil || !a.AcknowledgedAt.Equal(*reserved.AcknowledgedAt) {
-		t.Fatal("reservation acknowledgement changed", a, err)
-	}
-	q = reopenCancellationQueue(t, q, c)
-	s := spec("experiment")
-	s.SubmissionKey = "reserved-time"
-	bound := submit(t, q, s)
-	if a := cancelAck(t, q, bound.ID); !a.AcknowledgedAt.Equal(*reserved.AcknowledgedAt) {
-		t.Fatal("bound reservation changed acknowledgement")
-	}
-}
-
-func TestCancellationLegacyIntentPersistsOnOpen(t *testing.T) {
-	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	if err := q.update(func() error { q.s.Jobs[j.ID].Reason = "cancel requested"; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenCancellationQueue(t, q, c)
-	first := *q.s.Jobs[j.ID].CancelledAt
-	var saved []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&saved); err != nil {
-		t.Fatal(err)
-	}
-	decoded, decodeErr := readQueueState(q.db, saved)
-	if decodeErr != nil {
-		t.Fatal(decodeErr)
-	}
-	saved = decoded
-	var persisted state
-	if err := json.Unmarshal(saved, &persisted); err != nil || persisted.Jobs[j.ID].CancelledAt == nil {
-		t.Fatal("Open did not persist cancellation import", err)
-	}
-	c.Advance(time.Second)
-	q = reopenCancellationQueue(t, q, c)
-	if !q.s.Jobs[j.ID].CancelledAt.Equal(first) {
-		t.Fatal("legacy cancellation time moved on reopen")
 	}
 }
 
@@ -449,78 +342,4 @@ func TestCancellationPlacementPreemption(t *testing.T) {
 			assertNoCancellationAttempt(t, q, j)
 		})
 	}
-}
-
-func TestCancellationExcludedFromHoldDemand(t *testing.T) {
-	q, _, a, _, _ := holdFleet(t, true)
-	p := spec("production")
-	p.AllowedMachines = []string{a.ID}
-	j := submit(t, q, p)
-	j = check(t, q, a, nil).Job
-	cancelAck(t, q, j.ID)
-	// A release-only receipt proves resources gone while the cancelled job is
-	// still stopping. It must not continue to count as production demand.
-	r := result(j, false)
-	r.ReleaseOnly = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if q.held(hostID(&a)) {
-		t.Fatal("cancelled stopping job retained production demand")
-	}
-}
-
-func TestSubmissionKeyLimits(t *testing.T) {
-	q, _ := fixture(t)
-	for _, key := range []string{"a", "AZaz09._:-", strings.Repeat("k", 128)} {
-		s := spec("experiment")
-		s.SubmissionKey = key
-		j := submit(t, q, s)
-		if a, err := q.CancelSubmission(s.Project, key); err != nil || *a.JobID != j.ID {
-			t.Fatal("valid key rejected", err)
-		}
-	}
-	for _, key := range []string{"a/b", "has space", "ümlaut", "line\nbreak", strings.Repeat("k", 129)} {
-		s := spec("experiment")
-		s.SubmissionKey = key
-		_, err := q.Submit(s)
-		submissionError(t, err, 400, "submission_key_invalid")
-		_, err = q.CancelSubmission(s.Project, key)
-		submissionError(t, err, 400, "submission_key_invalid")
-	}
-	handler := API{Queue: q, Token: "test"}.Handler()
-	schema := compileWireSchema(t, "error-v1.schema.json")
-	for _, path := range []string{"/api/jobs", "/api/jobs/cancel"} {
-		for _, key := range []any{"", "a/b", "space key", strings.Repeat("x", 129), nil, 42} {
-			body := map[string]any{"project": "test", "submission_key": key}
-			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(wireJSON(t, body))))
-			r.Header.Set("Authorization", "Bearer test")
-			w := httptest.NewRecorder()
-			handler.ServeHTTP(w, r)
-			var reply map[string]any
-			if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
-				t.Fatal(err)
-			}
-			if w.Code != 400 || reply["code"] != "submission_key_invalid" {
-				t.Fatal(path, key, w.Code, reply)
-			}
-			validateWireValue(t, schema, reply)
-		}
-	}
-}
-
-func TestWireUnknownJobHandler(t *testing.T) {
-	q, _ := fixture(t)
-	r := httptest.NewRequest(http.MethodPost, "/api/jobs/unknown/cancel", nil)
-	r.Header.Set("Authorization", "Bearer test")
-	w := httptest.NewRecorder()
-	API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusNotFound {
-		t.Fatal(w.Code)
-	}
-	var reply map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
-		t.Fatal(err)
-	}
-	validateWireValue(t, compileWireSchema(t, "error-v1.schema.json"), reply)
 }

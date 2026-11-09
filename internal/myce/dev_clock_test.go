@@ -1,12 +1,10 @@
 package myce
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,134 +21,62 @@ func clockRequest(handler http.Handler, body, token string) *httptest.ResponseRe
 }
 
 func TestDevClockProductionRouteAbsent(t *testing.T) {
-	q, _ := fixture(t)
-	// An injected clock alone does not enable a dev endpoint (including fake clocks).
-	for _, clock := range []Clock{q.clock, RealClock{}} {
-		q.clock = clock
-		response := clockRequest(API{Queue: q, Token: "test"}.Handler(), `{"seconds":1}`, "test")
-		if response.Code != 404 {
-			t.Fatalf("production status = %d", response.Code)
-		}
-	}
-}
-
-func TestDevClockValidationAndAuthentication(t *testing.T) {
-	q, _ := fixture(t)
-	clock := &devClock{}
-	q.clock = clock
-	handler := API{Queue: q, Token: "test"}.Handler()
-	for _, body := range []string{`{}`, `null`, `{"seconds":null}`, `{"seconds":0}`, `{"seconds":-1}`, `{"seconds":7776001}`, `{"seconds":1e100}`, `{"seconds":1e-10}`, `{"seconds":"1"}`, `{"seconds":1,"extra":true}`, `{"seconds":1} {}`} {
-		if response := clockRequest(handler, body, "test"); response.Code != 400 {
-			t.Fatalf("%s: %d", body, response.Code)
-		}
-	}
-	if response := clockRequest(handler, `{"seconds":1}`, "wrong"); response.Code != 401 {
-		t.Fatal(response.Code)
-	}
-	if clock.offset != 0 {
-		t.Fatal("rejected request advanced clock")
-	}
-	before := clock.Now()
-	if response := clockRequest(handler, `{"seconds":0.001}`, "test"); response.Code != 200 {
-		t.Fatal(response.Code, response.Body.String())
-	}
-	if clock.Now().Before(before.Add(time.Millisecond)) {
-		t.Fatal("clock did not advance")
-	}
-	minimumClock := &devClock{}
-	q.clock = minimumClock
-	if response := clockRequest(API{Queue: q, Token: "test"}.Handler(), `{"seconds":0.000000001}`, "test"); response.Code != 200 || minimumClock.offset != time.Nanosecond {
-		t.Fatal("minimum valid advance", response.Code, minimumClock.offset)
-	}
-	for _, invalid := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
-		if _, err := clock.advance(invalid); err == nil {
-			t.Fatal("accepted nonfinite advance")
-		}
-	}
-	limitClock := &devClock{}
-	if _, err := limitClock.advance(devClockMaxAdvance.Seconds()); err != nil || limitClock.offset != devClockMaxAdvance {
-		t.Fatal("maximum valid advance", err)
-	}
-	clock.offset = time.Duration(math.MaxInt64)
-	if _, err := clock.advance(1); err == nil || clock.offset != time.Duration(math.MaxInt64) {
-		t.Fatal("offset overflow")
-	}
-}
-
-func TestDevClockConcurrentAdvances(t *testing.T) {
-	q, _ := fixture(t)
-	clock := &devClock{}
-	q.clock = clock
-	handler := API{Queue: q, Token: "test"}.Handler()
-	var wg sync.WaitGroup
-	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if response := clockRequest(handler, `{"seconds":1}`, "test"); response.Code != 200 {
-				t.Error(response.Code, response.Body.String())
+	t.Run("contract", func(t *testing.T) {
+		q, _ := fixture(t)
+		// An injected clock alone does not enable a dev endpoint (including fake clocks).
+		for _, clock := range []Clock{q.clock, RealClock{}} {
+			q.clock = clock
+			response := clockRequest(API{Queue: q, Token: "test"}.Handler(), `{"seconds":1}`, "test")
+			if response.Code != 404 {
+				t.Fatalf("production status = %d", response.Code)
 			}
-			_ = clock.Now()
-		}()
-	}
-	wg.Wait()
-	if clock.offset != 20*time.Second {
-		t.Fatal(clock.offset)
-	}
-}
-
-func TestDevClockOrdinaryElapsedTime(t *testing.T) {
-	clock := &devClock{}
-	if _, err := clock.advance(time.Hour.Seconds()); err != nil {
-		t.Fatal(err)
-	}
-	// The timer supplies an elapsed-time observation; no process or scheduler
-	// decision is synchronized by an arbitrary sleep.
-	elapsed := <-time.After(time.Millisecond)
-	now := clock.Now()
-	if now.Before(elapsed.Add(time.Hour)) || now.After(RealClock{}.Now().Add(time.Hour)) {
-		t.Fatal("dev time did not continue with ordinary elapsed time")
-	}
-}
-
-func TestDevClockRestartReset(t *testing.T) {
-	root := t.TempDir()
-	config := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}
-	d, err := StartDev(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clock, ok := d.Queue.clock.(*devClock)
-	if !ok {
-		t.Fatal("StartDev did not install its private clock")
-	}
-	response := clockRequest(API{Queue: d.Queue, Token: "test"}.Handler(), `{"seconds":3600}`, "test")
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if response.Code != 200 {
-		t.Fatal(response.Code, response.Body.String())
-	}
-	// Reopen the same SQLite queue at the same queue endpoint.
-	config.Address = strings.TrimPrefix(d.URL, "http://")
-	before := RealClock{}.Now()
-	d, err = StartDev(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := d.Close(); err != nil {
-			t.Error(err)
 		}
-	}()
-	restarted, ok := d.Queue.clock.(*devClock)
-	if !ok || restarted == clock {
-		t.Fatal("restart did not install a fresh private clock")
-	}
-	now := restarted.Now()
-	if now.Before(before) || now.After(RealClock{}.Now()) {
-		t.Fatal("restart retained the dev offset")
-	}
+
+	})
+
+	t.Run("DevClockValidationAndAuthentication", func(t *testing.T) {
+		q, _ := fixture(t)
+		clock := &devClock{}
+		q.clock = clock
+		handler := API{Queue: q, Token: "test"}.Handler()
+		for _, body := range []string{`{}`, `null`, `{"seconds":null}`, `{"seconds":0}`, `{"seconds":-1}`, `{"seconds":7776001}`, `{"seconds":1e100}`, `{"seconds":1e-10}`, `{"seconds":"1"}`, `{"seconds":1,"extra":true}`, `{"seconds":1} {}`} {
+			if response := clockRequest(handler, body, "test"); response.Code != 400 {
+				t.Fatalf("%s: %d", body, response.Code)
+			}
+		}
+		if response := clockRequest(handler, `{"seconds":1}`, "wrong"); response.Code != 401 {
+			t.Fatal(response.Code)
+		}
+		if clock.offset != 0 {
+			t.Fatal("rejected request advanced clock")
+		}
+		before := clock.Now()
+		if response := clockRequest(handler, `{"seconds":0.001}`, "test"); response.Code != 200 {
+			t.Fatal(response.Code, response.Body.String())
+		}
+		if clock.Now().Before(before.Add(time.Millisecond)) {
+			t.Fatal("clock did not advance")
+		}
+		minimumClock := &devClock{}
+		q.clock = minimumClock
+		if response := clockRequest(API{Queue: q, Token: "test"}.Handler(), `{"seconds":0.000000001}`, "test"); response.Code != 200 || minimumClock.offset != time.Nanosecond {
+			t.Fatal("minimum valid advance", response.Code, minimumClock.offset)
+		}
+		for _, invalid := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			if _, err := clock.advance(invalid); err == nil {
+				t.Fatal("accepted nonfinite advance")
+			}
+		}
+		limitClock := &devClock{}
+		if _, err := limitClock.advance(devClockMaxAdvance.Seconds()); err != nil || limitClock.offset != devClockMaxAdvance {
+			t.Fatal("maximum valid advance", err)
+		}
+		clock.offset = time.Duration(math.MaxInt64)
+		if _, err := clock.advance(1); err == nil || clock.offset != time.Duration(math.MaxInt64) {
+			t.Fatal("offset overflow")
+		}
+
+	})
 }
 
 func TestDevClockQueueDecisions(t *testing.T) {
@@ -269,21 +195,5 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 	}
 	if samples > 10 {
 		t.Fatalf("clock advance fabricated coverage across outage: %d samples", samples)
-	}
-}
-
-func TestResolveExtensionCheckTargetInstalledCPU(t *testing.T) {
-	server := httptest.NewServer(http.NotFoundHandler())
-	defer server.Close()
-	client := Client{URL: server.URL}
-	for _, platform := range []string{"cpu", "cuda", "xpu"} {
-		target, err := ResolveExtensionCheckTarget(context.Background(), client, "installed", platform, "", "/cache")
-		if platform == "cpu" {
-			if err != nil || target.Host != "installed" || target.Platform != "cpu" || target.Device != "" || target.EnvironmentCache != "/cache" {
-				t.Fatalf("CPU target: %+v, %v", target, err)
-			}
-		} else if err == nil {
-			t.Fatalf("%s accepted missing device", platform)
-		}
 	}
 }

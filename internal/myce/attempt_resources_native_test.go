@@ -2,13 +2,12 @@ package myce
 
 import (
 	"context"
+	"mycelium/internal/probeguard"
 	"os"
 	"runtime"
 	"sort"
 	"testing"
 	"time"
-
-	"mycelium/internal/probeguard"
 )
 
 // Read-only OS qualification is deliberately separate from synthetic gates.

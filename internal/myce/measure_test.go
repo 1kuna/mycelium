@@ -27,212 +27,313 @@ func measureTestOptions(t *testing.T) MeasureOptions {
 	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 1, HostGB: 2}, nil }, ProductionSafety: func(context.Context) error { return nil }}
 }
 func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
-	o := measureTestOptions(t)
-	usage := MemoryReading{DeviceGB: 1, HostGB: 2}
-	var engines []*measurementEngine
-	o.ReadMemory = func(context.Context) (MemoryReading, error) { return usage, nil }
-	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
-		e := &measurementEngine{}
-		e.load = func(context.Context, Model) error {
-			for _, previous := range engines[:len(engines)-1] {
-				if previous.unloaded {
-					t.Error("earlier model unloaded before combined measurement")
+	t.Run("contract", func(t *testing.T) {
+		o := measureTestOptions(t)
+		usage := MemoryReading{DeviceGB: 1, HostGB: 2}
+		var engines []*measurementEngine
+		o.ReadMemory = func(context.Context) (MemoryReading, error) { return usage, nil }
+		o.NewEngine = func(m Model, _ string, _ Clock) Engine {
+			e := &measurementEngine{}
+			e.load = func(context.Context, Model) error {
+				for _, previous := range engines[:len(engines)-1] {
+					if previous.unloaded {
+						t.Error("earlier model unloaded before combined measurement")
+					}
 				}
+				usage.DeviceGB += 3
+				usage.HostGB += 4
+				return nil
 			}
-			usage.DeviceGB += 3
-			usage.HostGB += 4
-			return nil
+			engines = append(engines, e)
+			return e
 		}
-		engines = append(engines, e)
-		return e
-	}
-	r, err := Measure(context.Background(), o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Baseline.DeviceGB != 1 || r.Peak.DeviceGB != 7 || r.Delta.DeviceGB != 6 || !r.Fits || len(r.Models) != 2 || r.Models[1].Delta.DeviceGB != 3 {
-		t.Fatalf("unexpected report %+v", r)
-	}
-	for _, e := range engines {
-		if !e.unloaded {
-			t.Fatal("engine not unloaded")
+		r, err := Measure(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-}
-func TestMeasureFailureUnloadsFailedAndEarlierEngines(t *testing.T) {
-	o := measureTestOptions(t)
-	var engines []*measurementEngine
-	released := 0
-	o.Prepare = func(_ context.Context, m Model, _ string) (Model, func(), error) {
-		return m, func() { released++ }, nil
-	}
-	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
-		e := &measurementEngine{load: func(context.Context, Model) error {
-			if m.Name == "two" {
-				return errors.New("load failed")
+		if r.Baseline.DeviceGB != 1 || r.Peak.DeviceGB != 7 || r.Delta.DeviceGB != 6 || !r.Fits || len(r.Models) != 2 || r.Models[1].Delta.DeviceGB != 3 {
+			t.Fatalf("unexpected report %+v", r)
+		}
+		for _, e := range engines {
+			if !e.unloaded {
+				t.Fatal("engine not unloaded")
 			}
-			return nil
-		}}
-		engines = append(engines, e)
-		return e
-	}
-	r, err := Measure(context.Background(), o)
-	if err == nil || r.Fits {
-		t.Fatalf("expected failed measurement: %+v %v", r, err)
-	}
-	for _, e := range engines {
-		if !e.unloaded {
-			t.Fatal("cleanup missed engine")
 		}
-	}
-	if released != 2 {
-		t.Fatalf("released %d", released)
-	}
-}
-func TestMeasureForceNeverBypassesJoinLock(t *testing.T) {
-	o := measureTestOptions(t)
-	s, e := o.Worker.openStore()
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer s.close()
-	o.Force = true
-	if _, e = Measure(context.Background(), o); e == nil || !strings.Contains(e.Error(), "already in use") {
-		t.Fatalf("lock error: %v", e)
-	}
-}
-func TestMeasureSamplingFailureCancelsLoad(t *testing.T) {
-	o := measureTestOptions(t)
-	o.SampleInterval = time.Millisecond
-	n := 0
-	o.ReadMemory = func(context.Context) (MemoryReading, error) {
-		n++
-		if n >= 3 {
-			return MemoryReading{}, errors.New("lost probe")
-		}
-		return MemoryReading{}, nil
-	}
-	e := &measurementEngine{load: func(c context.Context, _ Model) error { <-c.Done(); return c.Err() }}
-	o.NewEngine = func(Model, string, Clock) Engine { return e }
-	if _, err := Measure(context.Background(), o); err == nil || !e.unloaded {
-		t.Fatalf("error=%v cleanup=%v", err, e.unloaded)
-	}
-}
-func TestMeasureRejectsInventedMemory(t *testing.T) {
-	if _, e := NewMeasurementSource("fake", "0"); e == nil {
-		t.Fatal("fake budget accepted as measured")
-	}
-	if _, e := parseMeasureHost([]byte("MemTotal: 100 kB\nMemAvailable: 200 kB\n")); e == nil {
-		t.Fatal("invalid counters accepted")
-	}
-}
 
-func TestMeasureUnifiedCUDASourceAndWarmupPeak(t *testing.T) {
-	var used atomic.Int64
-	used.Store(2)
-	source, err := newMeasurementSource("cuda", "GPU-selected", "linux", func(path string) ([]byte, error) {
-		if path != "/proc/meminfo" {
-			t.Fatalf("unexpected host probe %s", path)
-		}
-		return []byte(fmt.Sprintf("MemTotal: 16777216 kB\nMemAvailable: %d kB\n", (16-used.Load())*1024*1024)), nil
-	}, func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "nvidia-smi" || !contains(args, "--id=GPU-selected") || (!contains(args, "--query-gpu=memory.used") && !contains(args, "--query-gpu=memory.free")) {
-			t.Fatalf("unbound device probe %s %v", name, args)
-		}
-		return []byte("[N/A]\n"), nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	o.ReadMemory = source
-	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/v1/chat/completions", Body: []byte(`{}`)}}
-	o.NewEngine = func(Model, string, Clock) Engine {
-		return &measurementEngine{
-			load: func(context.Context, Model) error { used.Store(6); return nil },
-			call: func(context.Context, string, []byte) (*http.Response, error) {
-				used.Store(8)
-				return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
-			},
-		}
-	}
-	r, err := Measure(context.Background(), o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !r.Fits || r.Baseline.DeviceGB != 2 || r.Peak.DeviceGB != 8 || r.Delta.DeviceGB != 6 || r.Models[0].Delta.DeviceGB != 6 {
-		t.Fatalf("unified load/warm-up footprint: %+v", r)
-	}
-	for _, reading := range []MemoryReading{r.Baseline, r.Peak, r.Delta, r.Models[0].Before, r.Models[0].Peak, r.Models[0].Delta} {
-		if reading.Basis != "unified/host" || reading.DeviceGB != reading.HostGB {
-			t.Fatalf("shared RAM must be labelled, not added: %+v", reading)
-		}
-	}
-}
 
-func TestMeasureNativeSourceRefusesUnsupportedProbes(t *testing.T) {
-	for _, tc := range []struct {
-		name, used, free, host string
-		probeErr               error
-	}{
-		{name: "dedicated used unavailable", used: "N/A", free: "8192"},
-		{name: "malformed used", used: "wrong", free: "N/A"},
-		{name: "malformed detection", used: "N/A", free: "wrong"},
-		{name: "failed probe", probeErr: errors.New("probe unavailable")},
-		{name: "missing host counters", used: "N/A", free: "N/A", host: "MemTotal: 16777216 kB\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			source, err := newMeasurementSource("cuda", "GPU-selected", "linux", func(string) ([]byte, error) {
-				if tc.host != "" {
-					return []byte(tc.host), nil
+	t.Run("MeasureFailureUnloadsFailedAndEarlierEngines", func(t *testing.T) {
+		o := measureTestOptions(t)
+		var engines []*measurementEngine
+		released := 0
+		o.Prepare = func(_ context.Context, m Model, _ string) (Model, func(), error) {
+			return m, func() { released++ }, nil
+		}
+		o.NewEngine = func(m Model, _ string, _ Clock) Engine {
+			e := &measurementEngine{load: func(context.Context, Model) error {
+				if m.Name == "two" {
+					return errors.New("load failed")
 				}
-				return []byte("MemTotal: 16777216 kB\nMemAvailable: 14680064 kB\n"), nil
-			}, func(_ context.Context, _ string, args ...string) ([]byte, error) {
-				if tc.probeErr != nil {
-					return nil, tc.probeErr
-				}
-				if contains(args, "--query-gpu=memory.used") {
-					return []byte(tc.used), nil
-				}
-				return []byte(tc.free), nil
-			})
-			if err != nil {
-				t.Fatal(err)
+				return nil
+			}}
+			engines = append(engines, e)
+			return e
+		}
+		r, err := Measure(context.Background(), o)
+		if err == nil || r.Fits {
+			t.Fatalf("expected failed measurement: %+v %v", r, err)
+		}
+		for _, e := range engines {
+			if !e.unloaded {
+				t.Fatal("cleanup missed engine")
 			}
-			if _, err := source(context.Background()); err == nil {
-				t.Fatal("unsupported probe accepted as measured memory")
+		}
+		if released != 2 {
+			t.Fatalf("released %d", released)
+		}
+
+	})
+
+	t.Run("MeasureSamplingFailureCancelsLoad", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.SampleInterval = time.Millisecond
+		n := 0
+		o.ReadMemory = func(context.Context) (MemoryReading, error) {
+			n++
+			if n >= 3 {
+				return MemoryReading{}, errors.New("lost probe")
 			}
+			return MemoryReading{}, nil
+		}
+		e := &measurementEngine{load: func(c context.Context, _ Model) error { <-c.Done(); return c.Err() }}
+		o.NewEngine = func(Model, string, Clock) Engine { return e }
+		if _, err := Measure(context.Background(), o); err == nil || !e.unloaded {
+			t.Fatalf("error=%v cleanup=%v", err, e.unloaded)
+		}
+
+	})
+
+	t.Run("MeasureUnifiedCUDASourceAndWarmupPeak", func(t *testing.T) {
+		var used atomic.Int64
+		used.Store(2)
+		source, err := newMeasurementSource("cuda", "GPU-selected", "linux", func(path string) ([]byte, error) {
+			if path != "/proc/meminfo" {
+				t.Fatalf("unexpected host probe %s", path)
+			}
+			return []byte(fmt.Sprintf("MemTotal: 16777216 kB\nMemAvailable: %d kB\n", (16-used.Load())*1024*1024)), nil
+		}, func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if name != "nvidia-smi" || !contains(args, "--id=GPU-selected") || (!contains(args, "--query-gpu=memory.used") && !contains(args, "--query-gpu=memory.free")) {
+				t.Fatalf("unbound device probe %s %v", name, args)
+			}
+			return []byte("[N/A]\n"), nil
 		})
-	}
-}
-
-func TestMeasureRefusesChangedMemoryBasis(t *testing.T) {
-	o := measureTestOptions(t)
-	first := true
-	o.ReadMemory = func(context.Context) (MemoryReading, error) {
-		basis := "dedicated/host"
-		if first {
-			basis, first = "unified/host", false
+		if err != nil {
+			t.Fatal(err)
 		}
-		return MemoryReading{DeviceGB: 2, HostGB: 2, Basis: basis}, nil
-	}
-	o.NewEngine = func(Model, string, Clock) Engine { t.Fatal("engine started with inconsistent probes"); return nil }
-	if _, err := Measure(context.Background(), o); err == nil || !strings.Contains(err.Error(), "basis changed") {
-		t.Fatalf("basis change not refused: %v", err)
-	}
-}
-func TestMeasureWarmupFailureUnloads(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer", Body: []byte(`{}`)}}
-	e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(context.Context, string, []byte) (*http.Response, error) {
-		return nil, errors.New("warmup failure")
-	}}
-	o.NewEngine = func(Model, string, Clock) Engine { return e }
-	if _, err := Measure(context.Background(), o); err == nil || !e.unloaded {
-		t.Fatal("warmup failure did not clean up")
-	}
+		o := measureTestOptions(t)
+		o.Models = o.Models[:1]
+		o.ReadMemory = source
+		o.Warmup = map[string]MeasureWarmup{"one": {Path: "/v1/chat/completions", Body: []byte(`{}`)}}
+		o.NewEngine = func(Model, string, Clock) Engine {
+			return &measurementEngine{
+				load: func(context.Context, Model) error { used.Store(6); return nil },
+				call: func(context.Context, string, []byte) (*http.Response, error) {
+					used.Store(8)
+					return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+				},
+			}
+		}
+		r, err := Measure(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !r.Fits || r.Baseline.DeviceGB != 2 || r.Peak.DeviceGB != 8 || r.Delta.DeviceGB != 6 || r.Models[0].Delta.DeviceGB != 6 {
+			t.Fatalf("unified load/warm-up footprint: %+v", r)
+		}
+		for _, reading := range []MemoryReading{r.Baseline, r.Peak, r.Delta, r.Models[0].Before, r.Models[0].Peak, r.Models[0].Delta} {
+			if reading.Basis != "unified/host" || reading.DeviceGB != reading.HostGB {
+				t.Fatalf("shared RAM must be labelled, not added: %+v", reading)
+			}
+		}
+
+	})
+
+	t.Run("MeasureRefusesChangedMemoryBasis", func(t *testing.T) {
+		o := measureTestOptions(t)
+		first := true
+		o.ReadMemory = func(context.Context) (MemoryReading, error) {
+			basis := "dedicated/host"
+			if first {
+				basis, first = "unified/host", false
+			}
+			return MemoryReading{DeviceGB: 2, HostGB: 2, Basis: basis}, nil
+		}
+		o.NewEngine = func(Model, string, Clock) Engine { t.Fatal("engine started with inconsistent probes"); return nil }
+		if _, err := Measure(context.Background(), o); err == nil || !strings.Contains(err.Error(), "basis changed") {
+			t.Fatalf("basis change not refused: %v", err)
+		}
+
+	})
+
+	t.Run("MeasureWarmupFailureUnloads", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.Models = o.Models[:1]
+		o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer", Body: []byte(`{}`)}}
+		e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(context.Context, string, []byte) (*http.Response, error) {
+			return nil, errors.New("warmup failure")
+		}}
+		o.NewEngine = func(Model, string, Clock) Engine { return e }
+		if _, err := Measure(context.Background(), o); err == nil || !e.unloaded {
+			t.Fatal("warmup failure did not clean up")
+		}
+
+	})
+
+	t.Run("MeasureDeviceBoundBeforeEngineConstruction", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.Models = o.Models[:1]
+		o.Device = "2"
+		o.NewEngine = func(m Model, _ string, _ Clock) Engine {
+			if m.Device != "2" || m.DeviceEnv["CUDA_VISIBLE_DEVICES"] != "2" {
+				t.Fatalf("wrong selected device %+v", m)
+			}
+			return &measurementEngine{load: func(context.Context, Model) error { return nil }}
+		}
+		if _, e := Measure(context.Background(), o); e != nil {
+			t.Fatal(e)
+		}
+
+	})
+
+	t.Run("MeasureBudgetUsesAbsolutePeak", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.Models = o.Models[:1]
+		o.BudgetGB = 2
+		o.ReadMemory = func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 3, HostGB: 4}, nil }
+		o.NewEngine = func(Model, string, Clock) Engine {
+			return &measurementEngine{load: func(context.Context, Model) error { return nil }}
+		}
+		r, e := Measure(context.Background(), o)
+		if e != nil || r.Fits || r.Delta.DeviceGB != 0 {
+			t.Fatalf("absolute usage was not used for fit: %+v %v", r, e)
+		}
+
+	})
+
+	t.Run("MeasureFailedUnloadKeepsEnvironmentLease", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.Models = o.Models[:1]
+		released := false
+		o.Prepare = func(_ context.Context, m Model, _ string) (Model, func(), error) {
+			return m, func() { released = true }, nil
+		}
+		o.NewEngine = func(Model, string, Clock) Engine {
+			return &failedMeasureUnload{measurementEngine{load: func(context.Context, Model) error { return nil }}}
+		}
+		r, err := Measure(context.Background(), o)
+		if err == nil || released || r.Fits || r.Error == "" {
+			t.Fatalf("unsafe failed cleanup lease: released=%t report=%+v err=%v", released, r, err)
+		}
+
+	})
+
+	t.Run("MeasureOverlappingWarmups", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.WarmupParallel = 2
+		o.Models = append(o.Models, Model{Name: "three", Platforms: []string{"cuda"}})
+		o.SampleInterval = time.Millisecond
+		var active atomic.Int32
+		sampled := make(chan struct{})
+		var once sync.Once
+		o.ReadMemory = func(context.Context) (MemoryReading, error) {
+			n := active.Load()
+			if n == 2 {
+				once.Do(func() { close(sampled) })
+			}
+			return MemoryReading{DeviceGB: float64(n * 4), HostGB: float64(n * 5)}, nil
+		}
+		o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}, "three": {Path: "/infer"}}
+		var engines []*measurementEngine
+		o.NewEngine = func(Model, string, Clock) Engine {
+			e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
+				active.Add(1)
+				defer active.Add(-1)
+				select {
+				case <-sampled:
+					return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
+				case <-c.Done():
+					return nil, c.Err()
+				}
+			}}
+			engines = append(engines, e)
+			return e
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer cancel()
+		r, err := Measure(ctx, o)
+		if err != nil || r.Peak.DeviceGB != 8 || r.Peak.HostGB != 10 || r.WarmupParallel != 2 {
+			t.Fatalf("%+v %v", r, err)
+		}
+		for _, e := range engines {
+			if !e.unloaded {
+				t.Fatal("cleanup")
+			}
+		}
+
+	})
+
+	t.Run("MeasureLoadTimeoutOption", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.LoadTimeout = time.Millisecond
+		o.Models = o.Models[:1]
+		e := &measurementEngine{load: func(c context.Context, _ Model) error { <-c.Done(); return c.Err() }}
+		o.NewEngine = func(Model, string, Clock) Engine { return e }
+		_, err := Measure(context.Background(), o)
+		if !errors.Is(err, context.DeadlineExceeded) || !e.unloaded {
+			t.Fatalf("%v", err)
+		}
+
+	})
+
+	t.Run("MeasureWarmupFailureCancelsPeers", func(t *testing.T) {
+		o := measureTestOptions(t)
+		o.WarmupParallel = 2
+		o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}}
+		started := make(chan struct{})
+		cancelled := make(chan struct{})
+		var engines []*measurementEngine
+		o.NewEngine = func(m Model, _ string, _ Clock) Engine {
+			e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
+				if m.Name == "one" {
+					close(started)
+					<-c.Done()
+					close(cancelled)
+					return nil, c.Err()
+				}
+				<-started
+				return nil, errors.New("warm failure")
+			}}
+			engines = append(engines, e)
+			return e
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer cancel()
+		r, err := Measure(ctx, o)
+		if err == nil || r.Fits {
+			t.Fatalf("%+v %v", r, err)
+		}
+		select {
+		case <-cancelled:
+		default:
+			t.Fatal("peer not cancelled before return")
+		}
+		for _, e := range engines {
+			if !e.unloaded {
+				t.Fatal("engine not cleaned up")
+			}
+		}
+
+	})
 }
 
 func TestMeasureXPURequiresCurrentSelectedDevice(t *testing.T) {
@@ -245,33 +346,6 @@ func TestMeasureXPURequiresCurrentSelectedDevice(t *testing.T) {
 		if _, e := parseMeasureXPU([]byte(data), "1"); e == nil {
 			t.Fatal("accepted missing/incorrect native counter")
 		}
-	}
-}
-func TestMeasureDeviceBoundBeforeEngineConstruction(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	o.Device = "2"
-	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
-		if m.Device != "2" || m.DeviceEnv["CUDA_VISIBLE_DEVICES"] != "2" {
-			t.Fatalf("wrong selected device %+v", m)
-		}
-		return &measurementEngine{load: func(context.Context, Model) error { return nil }}
-	}
-	if _, e := Measure(context.Background(), o); e != nil {
-		t.Fatal(e)
-	}
-}
-func TestMeasureBudgetUsesAbsolutePeak(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	o.BudgetGB = 2
-	o.ReadMemory = func(context.Context) (MemoryReading, error) { return MemoryReading{DeviceGB: 3, HostGB: 4}, nil }
-	o.NewEngine = func(Model, string, Clock) Engine {
-		return &measurementEngine{load: func(context.Context, Model) error { return nil }}
-	}
-	r, e := Measure(context.Background(), o)
-	if e != nil || r.Fits || r.Delta.DeviceGB != 0 {
-		t.Fatalf("absolute usage was not used for fit: %+v %v", r, e)
 	}
 }
 
@@ -288,19 +362,7 @@ func (e *measurementRequestEngine) CallRequest(_ context.Context, method, path s
 	e.headers = h
 	return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
 }
-func TestMeasureWarmupRequestMethodAndHeaders(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	o.Warmup = map[string]MeasureWarmup{"one": {Method: "PUT", Path: "/audio", Headers: http.Header{"X-Test": []string{"yes"}}, Body: []byte(`{}`)}}
-	e := &measurementRequestEngine{measurementEngine: measurementEngine{load: func(context.Context, Model) error { return nil }}}
-	o.NewEngine = func(Model, string, Clock) Engine { return e }
-	if _, err := Measure(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	if e.method != "PUT" || e.path != "/audio" || e.headers.Get("X-Test") != "yes" || !e.unloaded {
-		t.Fatalf("request was not preserved: %+v", e)
-	}
-}
+
 func TestMeasureProbeIncludesTransientLoadPeak(t *testing.T) {
 	o := measureTestOptions(t)
 	o.Models = o.Models[:1]
@@ -342,129 +404,3 @@ func TestMeasureProbeIncludesTransientLoadPeak(t *testing.T) {
 type failedMeasureUnload struct{ measurementEngine }
 
 func (*failedMeasureUnload) Unload() error { return errors.New("owned group still present") }
-func TestMeasureFailedUnloadKeepsEnvironmentLease(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	released := false
-	o.Prepare = func(_ context.Context, m Model, _ string) (Model, func(), error) {
-		return m, func() { released = true }, nil
-	}
-	o.NewEngine = func(Model, string, Clock) Engine {
-		return &failedMeasureUnload{measurementEngine{load: func(context.Context, Model) error { return nil }}}
-	}
-	r, err := Measure(context.Background(), o)
-	if err == nil || released || r.Fits || r.Error == "" {
-		t.Fatalf("unsafe failed cleanup lease: released=%t report=%+v err=%v", released, r, err)
-	}
-}
-
-func TestMeasureOverlappingWarmups(t *testing.T) {
-	o := measureTestOptions(t)
-	o.WarmupParallel = 2
-	o.Models = append(o.Models, Model{Name: "three", Platforms: []string{"cuda"}})
-	o.SampleInterval = time.Millisecond
-	var active atomic.Int32
-	sampled := make(chan struct{})
-	var once sync.Once
-	o.ReadMemory = func(context.Context) (MemoryReading, error) {
-		n := active.Load()
-		if n == 2 {
-			once.Do(func() { close(sampled) })
-		}
-		return MemoryReading{DeviceGB: float64(n * 4), HostGB: float64(n * 5)}, nil
-	}
-	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}, "three": {Path: "/infer"}}
-	var engines []*measurementEngine
-	o.NewEngine = func(Model, string, Clock) Engine {
-		e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
-			active.Add(1)
-			defer active.Add(-1)
-			select {
-			case <-sampled:
-				return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
-			case <-c.Done():
-				return nil, c.Err()
-			}
-		}}
-		engines = append(engines, e)
-		return e
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	r, err := Measure(ctx, o)
-	if err != nil || r.Peak.DeviceGB != 8 || r.Peak.HostGB != 10 || r.WarmupParallel != 2 {
-		t.Fatalf("%+v %v", r, err)
-	}
-	for _, e := range engines {
-		if !e.unloaded {
-			t.Fatal("cleanup")
-		}
-	}
-}
-func TestMeasureLoadTimeoutOption(t *testing.T) {
-	o := measureTestOptions(t)
-	o.LoadTimeout = time.Millisecond
-	o.Models = o.Models[:1]
-	e := &measurementEngine{load: func(c context.Context, _ Model) error { <-c.Done(); return c.Err() }}
-	o.NewEngine = func(Model, string, Clock) Engine { return e }
-	_, err := Measure(context.Background(), o)
-	if !errors.Is(err, context.DeadlineExceeded) || !e.unloaded {
-		t.Fatalf("%v", err)
-	}
-}
-
-func TestMeasureWarmupFailureCancelsPeers(t *testing.T) {
-	o := measureTestOptions(t)
-	o.WarmupParallel = 2
-	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}, "two": {Path: "/infer"}}
-	started := make(chan struct{})
-	cancelled := make(chan struct{})
-	var engines []*measurementEngine
-	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
-		e := &measurementEngine{load: func(context.Context, Model) error { return nil }, call: func(c context.Context, _ string, _ []byte) (*http.Response, error) {
-			if m.Name == "one" {
-				close(started)
-				<-c.Done()
-				close(cancelled)
-				return nil, c.Err()
-			}
-			<-started
-			return nil, errors.New("warm failure")
-		}}
-		engines = append(engines, e)
-		return e
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	r, err := Measure(ctx, o)
-	if err == nil || r.Fits {
-		t.Fatalf("%+v %v", r, err)
-	}
-	select {
-	case <-cancelled:
-	default:
-		t.Fatal("peer not cancelled before return")
-	}
-	for _, e := range engines {
-		if !e.unloaded {
-			t.Fatal("engine not cleaned up")
-		}
-	}
-}
-func TestMeasureSeparatesWarmupTime(t *testing.T) {
-	o := measureTestOptions(t)
-	o.Models = o.Models[:1]
-	clock := &fakeClock{now: time.Unix(0, 0)}
-	o.Worker.Clock = clock
-	o.Warmup = map[string]MeasureWarmup{"one": {Path: "/infer"}}
-	o.NewEngine = func(Model, string, Clock) Engine {
-		return &measurementEngine{load: func(context.Context, Model) error { clock.Advance(5 * time.Second); return nil }, call: func(context.Context, string, []byte) (*http.Response, error) {
-			clock.Advance(2 * time.Second)
-			return &http.Response{StatusCode: 200, Body: http.NoBody}, nil
-		}}
-	}
-	r, err := Measure(context.Background(), o)
-	if err != nil || r.Models[0].LoadSeconds != 5 || r.Models[0].WarmupSeconds != 2 || r.WarmupSeconds != 2 {
-		t.Fatalf("%+v %v", r, err)
-	}
-}

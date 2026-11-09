@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -124,36 +123,6 @@ func TestPixiEnvironmentSingleFlightStableActivationAndFingerprint(t *testing.T)
 		t.Fatal("changed fingerprint did not rebuild")
 	}
 }
-func TestPixiEnvironmentBrokenLockAndPartialRecovery(t *testing.T) {
-	fakePixi(t)
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}
-	r := pixiRecipe(t, "broken")
-	_, _, err := c.Acquire(context.Background(), r)
-	if err == nil || !strings.Contains(err.Error(), "build failed") || c.ready(r.Key) {
-		t.Fatal("broken lock accepted", err)
-	}
-	if _, err = os.Stat(filepath.Join(c.Root, r.Key)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("failed prefix retained as usable", err)
-	}
-	key := strings.Repeat("e", 64)
-	dir := filepath.Join(c.Root, key)
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(dir, "half-installed"), []byte("incomplete"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = c.Cleanup(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("restart retained partial", err)
-	}
-	trash, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
-	if len(trash) != 0 {
-		t.Fatal("retained retired builds", len(trash))
-	}
-}
 
 func TestPixiEnvironmentActivationDiagnostics(t *testing.T) {
 	for _, mode := range []string{"warning", "invalid", "failure"} {
@@ -222,95 +191,99 @@ func realPixi(t *testing.T) {
 	t.Log(strings.TrimSpace(string(b)))
 }
 
-func TestPixiRealEnvironment(t *testing.T) {
-	realPixi(t)
-	// Empty locked native environment needs neither downloads nor GPU access.
-	platform := map[string]string{"darwin/arm64": "osx-arm64", "darwin/amd64": "osx-64", "linux/amd64": "linux-64", "linux/arm64": "linux-aarch64", "windows/amd64": "win-64"}[runtime.GOOS+"/"+runtime.GOARCH]
-	if platform == "" {
-		t.Skip("unsupported real pixi test target")
-	}
-	dir := t.TempDir()
-	manifest := fmt.Sprintf("[workspace]\nname='myce-test'\nchannels=[]\nplatforms=['%s']\n", platform)
-	if err := os.WriteFile(filepath.Join(dir, "pixi.toml"), []byte(manifest), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("pixi", "lock", "--no-config", "--manifest-path", filepath.Join(dir, "pixi.toml"))
-	cmd.Env = cleanExtensionEnv(nil)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("pixi lock: %v %s", err, b)
-	}
-	r, err := snapshotEnvironment(EnvironmentRecipe{Backend: "pixi", LockFile: filepath.Join(dir, "pixi.lock")}, "fake")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 64 << 20}
-	root, release, err := c.Acquire(context.Background(), r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	if environmentActivation(root)["CONDA_PREFIX"] == "" {
-		t.Fatal("real activation absent")
-	}
-}
-
 func TestPixiRealExtensionActivationJob(t *testing.T) {
-	realPixi(t)
-	platform := map[string]string{"darwin/arm64": "osx-arm64", "darwin/amd64": "osx-64", "linux/amd64": "linux-64", "linux/arm64": "linux-aarch64"}[runtime.GOOS+"/"+runtime.GOARCH]
-	if platform == "" {
-		t.Skip("unsupported real pixi test target")
-	}
-	// Empty channels/dependencies keep this test rootless, offline and GPU-free.
-	// [project] intentionally exercises pixi's supported deprecation warning.
-	e := compositionExtension(t, false)
-	v := &e.Variants[0]
-	v.Environments = map[string]EnvironmentRecipe{"main": {Backend: "pixi", LockFile: "env/pixi.lock"}}
-	v.Execution.Main.Environment = "main"
-	v.Execution.Main.Command = []string{"sh", "-c", `test "$E2_ACTIVATION_EXPECTED" = present && test "$E2_SHARED_ACTIVATION" = shared && printf 'activation:%s/%s\n' "$E2_ACTIVATION_EXPECTED" "$E2_SHARED_ACTIVATION"`}
-	e.Files["env/pixi.toml"] = []byte(fmt.Sprintf("[project]\nname='myce-activation-test'\nchannels=[]\nplatforms=['%s']\n[activation]\nscripts=['scripts/activate.sh', '../shared/activate.sh']\n", platform))
-	e.Files["env/scripts/activate.sh"] = []byte("export E2_ACTIVATION_EXPECTED=present\n")
-	e.Files["shared/activate.sh"] = []byte("export E2_SHARED_ACTIVATION=shared\n")
-	dir := t.TempDir()
-	for name, b := range e.Files {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+	t.Run("contract", func(t *testing.T) {
+		realPixi(t)
+		platform := map[string]string{"darwin/arm64": "osx-arm64", "darwin/amd64": "osx-64", "linux/amd64": "linux-64", "linux/arm64": "linux-aarch64"}[runtime.GOOS+"/"+runtime.GOARCH]
+		if platform == "" {
+			t.Skip("unsupported real pixi test target")
+		}
+		// Empty channels/dependencies keep this test rootless, offline and GPU-free.
+		// [project] intentionally exercises pixi's supported deprecation warning.
+		e := compositionExtension(t, false)
+		v := &e.Variants[0]
+		v.Environments = map[string]EnvironmentRecipe{"main": {Backend: "pixi", LockFile: "env/pixi.lock"}}
+		v.Execution.Main.Environment = "main"
+		v.Execution.Main.Command = []string{"sh", "-c", `test "$E2_ACTIVATION_EXPECTED" = present && test "$E2_SHARED_ACTIVATION" = shared && printf 'activation:%s/%s\n' "$E2_ACTIVATION_EXPECTED" "$E2_SHARED_ACTIVATION"`}
+		e.Files["env/pixi.toml"] = []byte(fmt.Sprintf("[project]\nname='myce-activation-test'\nchannels=[]\nplatforms=['%s']\n[activation]\nscripts=['scripts/activate.sh', '../shared/activate.sh']\n", platform))
+		e.Files["env/scripts/activate.sh"] = []byte("export E2_ACTIVATION_EXPECTED=present\n")
+		e.Files["shared/activate.sh"] = []byte("export E2_SHARED_ACTIVATION=shared\n")
+		dir := t.TempDir()
+		for name, b := range e.Files {
+			p := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "pixi", "lock", "--no-config", "--manifest-path", filepath.Join(dir, "env", "pixi.toml"))
+		cmd.Env = cleanExtensionEnv(nil)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("pixi lock: %v %s", err, b)
+		}
+		lock, err := os.ReadFile(filepath.Join(dir, "env", "pixi.lock"))
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, b, 0600); err != nil {
+		e.Files["env/pixi.lock"] = lock
+		e = freezeComposition(t, e)
+		w, logs := runPreparedExtensionJob(t, e)
+		root := filepath.Join(w.environmentCache.Root, e.Variants[0].Environments["main"].Key)
+		for name, want := range e.Files {
+			got, err := os.ReadFile(filepath.Join(root, "extension", name))
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("prepared folder changed digest-verified file %s: %v", name, err)
+			}
+		}
+		buildLog, err := os.ReadFile(root + ".build.log")
+		if err != nil || !strings.Contains(strings.ToLower(string(buildLog)), "deprecat") {
+			t.Fatalf("real pixi warning was not retained: %v %s", err, buildLog)
+		}
+		for _, log := range logs {
+			if strings.Contains(log.Text, "activation:present/shared") {
+				return
+			}
+		}
+		t.Fatal("real pixi job did not receive bundled activation", logs)
+
+	})
+
+	t.Run("PixiRealEnvironment", func(t *testing.T) {
+		realPixi(t)
+		// Empty locked native environment needs neither downloads nor GPU access.
+		platform := map[string]string{"darwin/arm64": "osx-arm64", "darwin/amd64": "osx-64", "linux/amd64": "linux-64", "linux/arm64": "linux-aarch64", "windows/amd64": "win-64"}[runtime.GOOS+"/"+runtime.GOARCH]
+		if platform == "" {
+			t.Skip("unsupported real pixi test target")
+		}
+		dir := t.TempDir()
+		manifest := fmt.Sprintf("[workspace]\nname='myce-test'\nchannels=[]\nplatforms=['%s']\n", platform)
+		if err := os.WriteFile(filepath.Join(dir, "pixi.toml"), []byte(manifest), 0600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "pixi", "lock", "--no-config", "--manifest-path", filepath.Join(dir, "env", "pixi.toml"))
-	cmd.Env = cleanExtensionEnv(nil)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("pixi lock: %v %s", err, b)
-	}
-	lock, err := os.ReadFile(filepath.Join(dir, "env", "pixi.lock"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.Files["env/pixi.lock"] = lock
-	e = freezeComposition(t, e)
-	w, logs := runPreparedExtensionJob(t, e)
-	root := filepath.Join(w.environmentCache.Root, e.Variants[0].Environments["main"].Key)
-	for name, want := range e.Files {
-		got, err := os.ReadFile(filepath.Join(root, "extension", name))
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("prepared folder changed digest-verified file %s: %v", name, err)
+		cmd := exec.Command("pixi", "lock", "--no-config", "--manifest-path", filepath.Join(dir, "pixi.toml"))
+		cmd.Env = cleanExtensionEnv(nil)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("pixi lock: %v %s", err, b)
 		}
-	}
-	buildLog, err := os.ReadFile(root + ".build.log")
-	if err != nil || !strings.Contains(strings.ToLower(string(buildLog)), "deprecat") {
-		t.Fatalf("real pixi warning was not retained: %v %s", err, buildLog)
-	}
-	for _, log := range logs {
-		if strings.Contains(log.Text, "activation:present/shared") {
-			return
+		r, err := snapshotEnvironment(EnvironmentRecipe{Backend: "pixi", LockFile: filepath.Join(dir, "pixi.lock")}, "fake")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	t.Fatal("real pixi job did not receive bundled activation", logs)
+		c := &EnvironmentCache{Root: t.TempDir(), Limit: 64 << 20}
+		root, release, err := c.Acquire(context.Background(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		if environmentActivation(root)["CONDA_PREFIX"] == "" {
+			t.Fatal("real activation absent")
+		}
+
+	})
 }
 func TestEnvironmentCancelledBuildRecoversStablePrefix(t *testing.T) {
 	r, err := snapshotEnvironment(EnvironmentRecipe{Build: []string{"blocked"}}, "fake")
@@ -336,35 +309,5 @@ func TestEnvironmentCancelledBuildRecoversStablePrefix(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(c.Root, r.Key)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("cancel prefix not cleaned", err)
-	}
-}
-func TestPixiDeclarationSnapshotsCompleteFolder(t *testing.T) {
-	e := compositionExtension(t, false)
-	v := &e.Variants[0]
-	v.Environments = map[string]EnvironmentRecipe{"main": {Backend: "pixi", Manifest: "env/pixi.toml", LockFile: "env/pixi.lock"}}
-	v.Execution.Main.Environment = "main"
-	e.Files["env/pixi.toml"] = []byte("[workspace]\n")
-	e.Files["env/pixi.lock"] = []byte("locked")
-	e.Files["env/scripts/activate.sh"] = []byte("export E2_ACTIVATION_EXPECTED=present\n")
-	e.Files["shared/config.txt"] = []byte("configuration")
-	e = freezeComposition(t, e)
-	r := e.Variants[0].Environments["main"]
-	for name, want := range e.Files {
-		if !bytes.Equal(r.Files["extension/"+name], want) {
-			t.Fatalf("missing bundled file %s", name)
-		}
-	}
-	var out Extension
-	b, _ := json.Marshal(e)
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Variants[0].Environments["main"].Key != r.Key {
-		t.Fatal("snapshot transport changed")
-	}
-	e.Files["shared/config.txt"] = []byte("changed configuration")
-	changed := freezeComposition(t, e)
-	if changed.Digest == e.Digest || changed.Variants[0].Environments["main"].Key == r.Key {
-		t.Fatal("bundled content change did not invalidate digest and environment")
 	}
 }

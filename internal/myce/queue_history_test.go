@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -214,42 +215,95 @@ func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 // Cold terminal records still accept durable exclusion and exact-attempt release;
 // a failed SQLite write must restore both the job and its keyed retained answer.
 func TestRetainedAnswerTransactionRollback(t *testing.T) {
-	q, c := fixture(t)
-	s := spec("experiment")
-	s.SubmissionKey = "retained-rollback"
-	j := submit(t, q, s)
-	assigned := check(t, q, machine("worker", "fake"), nil).Job
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatal(err)
-	}
-	finish(t, q, assigned, true)
-	before := cloneJob(q.s.Jobs[j.ID])
-	if _, err := q.db.Exec(`CREATE TRIGGER reject_retained BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'write failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.CancelJob(j.ID); err == nil {
-		t.Fatal("failed write acknowledged cancellation")
-	}
-	if q.s.Jobs[j.ID].CancelledAt != nil || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.CancelledAt != nil {
-		t.Fatal("failed cold cancellation escaped rollback")
-	}
-	if _, err := q.db.Exec(`DROP TRIGGER reject_retained`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.CancelJob(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenCancellationQueue(t, q, c)
-	got := submit(t, q, s)
-	if got.ID != j.ID || got.State != "succeeded" || got.CancelledAt == nil || got.Attempt != before.Attempt {
-		t.Fatal("cold answer lost state/attempt/exclusion on restart")
-	}
-	stale := result(assigned, true)
-	stale.Attempt++
-	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
-		t.Fatalf("stale terminal payload accepted: %v", err)
-	}
-	if got := job(t, q, j.ID); got.Attempt != before.Attempt || got.State != "succeeded" {
-		t.Fatal("stale result changed retained answer")
-	}
+	t.Run("contract", func(t *testing.T) {
+		q, c := fixture(t)
+		s := spec("experiment")
+		s.SubmissionKey = "retained-rollback"
+		j := submit(t, q, s)
+		assigned := check(t, q, machine("worker", "fake"), nil).Job
+		if err := q.Started(result(assigned, true)); err != nil {
+			t.Fatal(err)
+		}
+		finish(t, q, assigned, true)
+		before := cloneJob(q.s.Jobs[j.ID])
+		if _, err := q.db.Exec(`CREATE TRIGGER reject_retained BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'write failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.CancelJob(j.ID); err == nil {
+			t.Fatal("failed write acknowledged cancellation")
+		}
+		if q.s.Jobs[j.ID].CancelledAt != nil || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.CancelledAt != nil {
+			t.Fatal("failed cold cancellation escaped rollback")
+		}
+		if _, err := q.db.Exec(`DROP TRIGGER reject_retained`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.CancelJob(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		q = reopenCancellationQueue(t, q, c)
+		got := submit(t, q, s)
+		if got.ID != j.ID || got.State != "succeeded" || got.CancelledAt == nil || got.Attempt != before.Attempt {
+			t.Fatal("cold answer lost state/attempt/exclusion on restart")
+		}
+		stale := result(assigned, true)
+		stale.Attempt++
+		if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+			t.Fatalf("stale terminal payload accepted: %v", err)
+		}
+		if got := job(t, q, j.ID); got.Attempt != before.Attempt || got.State != "succeeded" {
+			t.Fatal("stale result changed retained answer")
+		}
+
+	})
+
+	t.Run("QueueRecordsKeyedRollback", func(t *testing.T) {
+		for _, cold := range []bool{false, true} {
+			for _, fromKey := range []bool{false, true} {
+				t.Run(map[bool]string{false: "live", true: "cold"}[cold]+"/"+map[bool]string{false: "job", true: "key"}[fromKey], func(t *testing.T) {
+					q, _ := fixture(t)
+					s := spec("production")
+					s.SubmissionKey = "undo"
+					j := submit(t, q, s)
+					if cold {
+						run := check(t, q, machine("worker", "fake"), nil).Job
+						finish(t, q, run, true)
+					}
+					before, err := json.Marshal(q.s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					rejected := errors.New("rejected")
+					if err := q.update(func() error {
+						var live *Job
+						if fromKey {
+							live = q.touchSubmission(submissionDigest(s.Project, s.SubmissionKey)).Job
+						} else {
+							live = q.touchJob(j.ID)
+						}
+						live.Spec.Run.Command[0] = "mutated"
+						live.Reason = "mutated"
+						return rejected
+					}); !errors.Is(err, rejected) {
+						t.Fatal(err)
+					}
+					after, err := json.Marshal(q.s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if string(before) != string(after) {
+						t.Fatal("job or retained key changed after rollback")
+					}
+					if _, err := q.CancelJob(j.ID); err != nil {
+						t.Fatal(err)
+					}
+					replay := submit(t, q, s)
+					if replay.CancelledAt == nil || replay.ID != j.ID {
+						t.Fatal("rollback broke key alias", replay)
+					}
+				})
+			}
+		}
+
+	})
 }

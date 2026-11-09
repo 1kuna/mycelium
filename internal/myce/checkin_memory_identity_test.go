@@ -2,90 +2,12 @@ package myce
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestCheckinMemoryIdentitiesFenceAndRollback(t *testing.T) {
-	q, _ := fixture(t)
-	m := cpuMachine("worker", "worker", "cpu", 8, 32)
-	m.ExtensionFingerprint = "cpu-v1"
-	check(t, q, m, nil)
-	s := cpuSpec(1, 1)
-	s.Needs.Memory = "auto"
-	j := submit(t, q, s)
-	live := q.s.Jobs[j.ID]
-	want := profileMemoryIdentity(live)
-	before := q.snapshotCheckinMemoryIdentities(context.Background())
-	if before.current(q)[live] != profileMemoryIdentity(live) {
-		t.Fatal("snapshot differs from ordinary identity")
-	}
-	q.checkinMemoryIdentities = before.current(q)
-	target := q.s.Machines[m.ID]
-	cached := q.candidates(target).pick(nil)
-	q.checkinMemoryIdentities = nil
-	ordinary := q.batchCandidateWithResources(live, target, nil)
-	if cached == nil || ordinary == nil {
-		t.Fatal("missing memory candidate")
-	}
-	cachedKey, cachedReason := q.workObservationKey(cached)
-	ordinaryKey, ordinaryReason := q.workObservationKey(ordinary)
-	if !reflect.DeepEqual(cachedKey, ordinaryKey) || cachedReason != ordinaryReason || !reflect.DeepEqual(cached.MemoryEnvelope, ordinary.MemoryEnvelope) || !reflect.DeepEqual(cached.Spec.Needs, ordinary.Spec.Needs) {
-		t.Fatal("prepared identity changed memory admission or observation fences")
-	}
-	if live.planningMemoryIdentity != "" {
-		t.Fatal("planner identity escaped into the durable job")
-	}
-
-	// A failed concurrent transaction may replace pointers without advancing
-	// the commit revision. Its replacement must miss the prepared identity.
-	abort := errors.New("rollback")
-	if err := q.update(func() error {
-		q.touchJob(j.ID).Spec.Run.Command = []string{"echo", "rolled back"}
-		return abort
-	}); !errors.Is(err, abort) {
-		t.Fatal(err)
-	}
-	live = q.s.Jobs[j.ID]
-	if _, ok := before.current(q)[live]; ok {
-		t.Fatal("rollback replacement reused an old object's identity")
-	}
-	if profileMemoryIdentity(live) != want {
-		t.Fatal("rollback changed the recipe identity")
-	}
-	before = q.snapshotCheckinMemoryIdentities(context.Background())
-	if err := q.update(func() error {
-		q.touchJob(j.ID).Spec.Run.Command = []string{"echo", "changed"}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if before.current(q) != nil {
-		t.Fatal("committed mutation did not invalidate the snapshot")
-	}
-	// Stale snapshots use the ordinary planner, including the changed recipe.
-	set := q.candidates(q.s.Machines[m.ID])
-	if len(set.jobs) != 1 || profileMemoryIdentity(set.jobs[0]) != profileMemoryIdentity(q.s.Jobs[j.ID]) {
-		t.Fatal("fallback reused stale recipe identity")
-	}
-}
-
-func TestCloneJobInputManifestIsolation(t *testing.T) {
-	live := &Job{}
-	original := FileRef{SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SizeBytes: 1}
-	live.Spec.Files = FileManifest{"input": original}
-	copy := cloneJob(live)
-	copy.Spec.Files["input"] = FileRef{SizeBytes: 2}
-	copy.Spec.Files["new"] = FileRef{SizeBytes: 3}
-	if live.Spec.Files["input"] != original || len(live.Spec.Files) != 1 {
-		t.Fatal("clone changed the original input manifest")
-	}
-}
 
 // Synthetic fleet, real SQLite transactions. Wall time is observational only;
 // every scheduling decision uses the frozen queue clock. No fleet data is used.

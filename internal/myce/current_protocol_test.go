@@ -77,35 +77,6 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	}
 }
 
-func TestCurrentProtocolUniversalPrelaunch(t *testing.T) {
-	for _, priority := range []string{"experiment", "deadline", "production"} {
-		t.Run(priority, func(t *testing.T) {
-			q, _ := fixture(t)
-			submit(t, q, spec(priority))
-			a := check(t, q, machine("worker", "fake"), nil).Job
-			if a == nil {
-				t.Fatal("assignment")
-			}
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; API{q, "test"}.Handler().ServeHTTP(w, r) }))
-			defer server.Close()
-			worker := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake")}
-			if err := worker.authorizeStart(*a, a.Session); err != nil {
-				t.Fatal(err)
-			}
-			if calls != 1 || job(t, q, a.ID).StartedAt == nil {
-				t.Fatal("missing durable start")
-			}
-			if err := q.Cancel(a.ID); err != nil {
-				t.Fatal(err)
-			}
-			if err := worker.authorizeStart(*a, a.Session); err == nil {
-				t.Fatal("cancelled launch authorized")
-			}
-		})
-	}
-}
-
 func TestCurrentProtocolServerCompatibility(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("server", "fake")
@@ -130,25 +101,58 @@ func TestCurrentProtocolServerCompatibility(t *testing.T) {
 }
 
 func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
-	worker := recoveryWorker(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUpgradeRequired) }))
-	defer server.Close()
-	worker.Client = Client{URL: server.URL}
-	store, err := worker.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	store.state.Session = worker.Machine.Session
-	j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > {work}/payload"})
-	marker := filepath.Join(store.dir, "job-files", j.ID, "1", "payload")
-	j.Spec.Resumable = false
-	if _, err = startAfterFixtureInputs(t, worker, store, j); err == nil {
-		t.Fatal("refused batch executed")
-	}
-	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("payload ran before authorization")
-	}
+	t.Run("contract", func(t *testing.T) {
+		worker := recoveryWorker(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUpgradeRequired) }))
+		defer server.Close()
+		worker.Client = Client{URL: server.URL}
+		store, err := worker.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		store.state.Session = worker.Machine.Session
+		j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > {work}/payload"})
+		marker := filepath.Join(store.dir, "job-files", j.ID, "1", "payload")
+		j.Spec.Resumable = false
+		if _, err = startAfterFixtureInputs(t, worker, store, j); err == nil {
+			t.Fatal("refused batch executed")
+		}
+		if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("payload ran before authorization")
+		}
+
+	})
+
+	t.Run("CurrentProtocolUniversalPrelaunch", func(t *testing.T) {
+		for _, priority := range []string{"experiment", "deadline", "production"} {
+			t.Run(priority, func(t *testing.T) {
+				q, _ := fixture(t)
+				submit(t, q, spec(priority))
+				a := check(t, q, machine("worker", "fake"), nil).Job
+				if a == nil {
+					t.Fatal("assignment")
+				}
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; API{q, "test"}.Handler().ServeHTTP(w, r) }))
+				defer server.Close()
+				worker := Worker{Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake")}
+				if err := worker.authorizeStart(*a, a.Session); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 || job(t, q, a.ID).StartedAt == nil {
+					t.Fatal("missing durable start")
+				}
+				if err := q.Cancel(a.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := worker.authorizeStart(*a, a.Session); err == nil {
+					t.Fatal("cancelled launch authorized")
+				}
+			})
+		}
+
+	})
 }
 
 func TestCurrentProtocolCredentials(t *testing.T) {

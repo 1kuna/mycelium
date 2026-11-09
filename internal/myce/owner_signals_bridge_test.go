@@ -3,13 +3,12 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"mycelium/internal/hostbridge"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"mycelium/internal/hostbridge"
 )
 
 func TestWSLHostBridgeEndToEnd(t *testing.T) {

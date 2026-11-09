@@ -79,73 +79,77 @@ func TestDeadlineGuidancePolicyAndIdentity(t *testing.T) {
 }
 
 func TestDeadlineGuidanceNonResumableAndOverrun(t *testing.T) {
-	q, clock := fixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	running := submit(t, q, s)
-	m := machine("worker", "fake")
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil || assigned.ID != running.ID {
-		t.Fatal(assigned)
-	}
-	if err := q.Started(Result{Machine: assigned.Machine, Session: assigned.Session, Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}}); err != nil {
-		t.Fatal(err)
-	}
-	demand := submit(t, q, spec("deadline"))
-	assertBlocker := func(want string) {
-		t.Helper()
+	t.Run("contract", func(t *testing.T) {
+		q, clock := fixture(t)
+		s := spec("experiment")
+		s.Resumable = false
+		running := submit(t, q, s)
+		m := machine("worker", "fake")
+		assigned := check(t, q, m, nil).Job
+		if assigned == nil || assigned.ID != running.ID {
+			t.Fatal(assigned)
+		}
+		if err := q.Started(Result{Machine: assigned.Machine, Session: assigned.Session, Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}}); err != nil {
+			t.Fatal(err)
+		}
+		demand := submit(t, q, spec("deadline"))
+		assertBlocker := func(want string) {
+			t.Helper()
+			got, err := q.jobSnapshot(demand.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blockers := strings.Join(got.DeadlineGuidance.Blockers, "; ")
+			if !strings.Contains(blockers, "non-resumable command "+running.ID) || !strings.Contains(blockers, want) {
+				t.Fatal(blockers)
+			}
+		}
+		assertBlocker("ETA unknown")
+		// Synthetic comparable timing evidence; clocks advance without wall sleeps.
+		predicted := 10.0
+		// Publish synthetic evidence through the commit boundary used by GET.
+		if err := q.update(func() error {
+			q.touchJob(running.ID).Timing = &WorkTiming{PredictedSeconds: &predicted}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocker("10s remaining")
+		clock.Advance(11 * time.Second)
+		assertBlocker("overrun")
+		if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
+			t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
+		}
+
+	})
+
+	t.Run("DeadlineGuidanceNonResumableSaturatedHost", func(t *testing.T) {
+		q, _ := fixture(t)
+		s := spec("experiment")
+		s.Resumable = false
+		s.Needs.CPUCores, s.Needs.HostMemoryGB = 4, 8
+		running := submit(t, q, s)
+		m := cpuMachine("worker", "host", "fake", 4, 8)
+		assigned := check(t, q, m, nil).Job
+		if assigned == nil || assigned.ID != running.ID {
+			t.Fatal(assigned)
+		}
+		if err := q.Started(Result{Machine: assigned.Machine, Session: assigned.Session, Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}}); err != nil {
+			t.Fatal(err)
+		}
+		s = spec("deadline")
+		s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
+		demand := submit(t, q, s)
 		got, err := q.jobSnapshot(demand.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		blockers := strings.Join(got.DeadlineGuidance.Blockers, "; ")
-		if !strings.Contains(blockers, "non-resumable command "+running.ID) || !strings.Contains(blockers, want) {
-			t.Fatal(blockers)
+		if blockers := strings.Join(got.DeadlineGuidance.Blockers, "; "); !strings.Contains(blockers, "non-resumable command "+running.ID) {
+			t.Fatal("saturated host lost its non-resumable blocker:", blockers)
 		}
-	}
-	assertBlocker("ETA unknown")
-	// Synthetic comparable timing evidence; clocks advance without wall sleeps.
-	predicted := 10.0
-	// Publish synthetic evidence through the commit boundary used by GET.
-	if err := q.update(func() error {
-		q.touchJob(running.ID).Timing = &WorkTiming{PredictedSeconds: &predicted}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	assertBlocker("10s remaining")
-	clock.Advance(11 * time.Second)
-	assertBlocker("overrun")
-	if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
-		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
-	}
-}
+		if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
+			t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
+		}
 
-func TestDeadlineGuidanceNonResumableSaturatedHost(t *testing.T) {
-	q, _ := fixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	s.Needs.CPUCores, s.Needs.HostMemoryGB = 4, 8
-	running := submit(t, q, s)
-	m := cpuMachine("worker", "host", "fake", 4, 8)
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil || assigned.ID != running.ID {
-		t.Fatal(assigned)
-	}
-	if err := q.Started(Result{Machine: assigned.Machine, Session: assigned.Session, Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}}); err != nil {
-		t.Fatal(err)
-	}
-	s = spec("deadline")
-	s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
-	demand := submit(t, q, s)
-	got, err := q.jobSnapshot(demand.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if blockers := strings.Join(got.DeadlineGuidance.Blockers, "; "); !strings.Contains(blockers, "non-resumable command "+running.ID) {
-		t.Fatal("saturated host lost its non-resumable blocker:", blockers)
-	}
-	if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
-		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
-	}
+	})
 }

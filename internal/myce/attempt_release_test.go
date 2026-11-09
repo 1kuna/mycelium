@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,130 +10,157 @@ import (
 )
 
 func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
-	for _, tc := range []struct {
-		name                         string
-		planned, docker, otherReport bool
-	}{
-		{name: "cancel"},
-		{name: "P3-planned-stop", planned: true},
-		{name: "Docker-cancel", docker: true},
-		{name: "Docker-P3-planned-stop", planned: true, docker: true},
-		{name: "Docker-cancel-other-report", docker: true, otherReport: true},
-		{name: "Docker-P3-other-report", planned: true, docker: true, otherReport: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			planned := tc.planned
-			q, clock := fixture(t)
-			m := machine("lost-assignment", "fake")
-			if tc.docker {
-				m = dockerMachine(m.ID, m.GPU)
-			}
-			if planned {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
-					t.Fatal(err)
+	t.Run("contract", func(t *testing.T) {
+		for _, tc := range []struct {
+			name                         string
+			planned, docker, otherReport bool
+		}{
+			{name: "cancel"},
+			{name: "P3-planned-stop", planned: true},
+			{name: "Docker-cancel", docker: true},
+			{name: "Docker-P3-planned-stop", planned: true, docker: true},
+			{name: "Docker-cancel-other-report", docker: true, otherReport: true},
+			{name: "Docker-P3-other-report", planned: true, docker: true, otherReport: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				planned := tc.planned
+				q, clock := fixture(t)
+				m := machine("lost-assignment", "fake")
+				if tc.docker {
+					m = dockerMachine(m.ID, m.GPU)
 				}
-			}
-			acknowledgements := make(chan Result, 8)
-			api := API{q, "test"}.Handler()
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/workers/complete" {
-					var ack Result
-					if err := json.NewDecoder(r.Body).Decode(&ack); err != nil {
-						t.Error(err)
+				if planned {
+					if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+						t.Fatal(err)
 					}
-					acknowledgements <- ack
-					respondOperation(rw, nil, q.Complete(ack), "worker_result_invalid")
-					return
 				}
-				api.ServeHTTP(rw, r)
-			}))
-			defer server.Close()
-			w := Worker{Clock: clock, Machine: m, Client: Client{URL: server.URL, Token: "test"}}
-			victimSpec := spec("experiment")
-			if tc.docker {
-				victimSpec.Run = dockerJob().Spec.Run
-			}
-			victim := submit(t, q, victimSpec)
-			// The queue commits the assignment, but the worker never receives it.
-			wire := attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second})
-			if len(wire.Attempts) != 1 {
-				t.Fatalf("missing initial assignment: %+v", wire)
-			}
-			lost := wire.Attempts[0].Job
-			if lost == nil || lost.ID != victim.ID {
-				t.Fatal("missing initial assignment")
-			}
-			var next *Job
-			if planned {
-				demand := spec("production")
-				deadline := clock.Now().Add(5 * time.Second)
-				demand.StartBy = &deadline
-				next = submit(t, q, demand)
-			} else {
-				if err := q.Cancel(victim.ID); err != nil {
+				acknowledgements := make(chan Result, 8)
+				api := API{q, "test"}.Handler()
+				server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/api/workers/complete" {
+						var ack Result
+						if err := json.NewDecoder(r.Body).Decode(&ack); err != nil {
+							t.Error(err)
+						}
+						acknowledgements <- ack
+						respondOperation(rw, nil, q.Complete(ack), "worker_result_invalid")
+						return
+					}
+					api.ServeHTTP(rw, r)
+				}))
+				defer server.Close()
+				w := Worker{Clock: clock, Machine: m, Client: Client{URL: server.URL, Token: "test"}}
+				victimSpec := spec("experiment")
+				if tc.docker {
+					victimSpec.Run = dockerJob().Spec.Run
+				}
+				victim := submit(t, q, victimSpec)
+				// The queue commits the assignment, but the worker never receives it.
+				wire := attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second})
+				if len(wire.Attempts) != 1 {
+					t.Fatalf("missing initial assignment: %+v", wire)
+				}
+				lost := wire.Attempts[0].Job
+				if lost == nil || lost.ID != victim.ID {
+					t.Fatal("missing initial assignment")
+				}
+				var next *Job
+				if planned {
+					demand := spec("production")
+					deadline := clock.Now().Add(5 * time.Second)
+					demand.StartBy = &deadline
+					next = submit(t, q, demand)
+				} else {
+					if err := q.Cancel(victim.ID); err != nil {
+						t.Fatal(err)
+					}
+					next = submit(t, q, spec("experiment"))
+				}
+				requireState(t, q, victim.ID, "stopping")
+				// No grace/expiry advance: an unheld key can be released immediately.
+				if reply, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil || reply.Stop {
+					t.Fatalf("unheld stop affected worker: %+v %v", reply, err)
+				}
+				if len(acknowledgements) != 1 {
+					t.Fatalf("unheld stop got %d exact release acknowledgements; want 1", len(acknowledgements))
+				}
+				ack := <-acknowledgements
+				if !ack.ReleaseOnly || ack.ReleasePending || ack.Success || ack.ID != lost.ID || ack.Attempt != lost.Attempt || ack.Session != m.Session || ack.Machine != m.ID {
+					t.Fatalf("not an exact release-only acknowledgement: %+v", ack)
+				}
+				want := "cancelled"
+				if planned {
+					want = "queued"
+				}
+				got := job(t, q, victim.ID)
+				if (got.State != want && !tc.docker) || !got.ReleaseConfirmed || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("unheld stop not promptly released: %+v", got)
+				}
+				if tc.otherReport {
+					attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{
+						{Execution: Execution{ID: "unknown", Attempt: 1}, Session: m.Session},
+					}})
+					requireState(t, q, victim.ID, want)
+				}
+				reply, err := w.checkin(context.Background(), Checkin{Machine: m})
+				if err != nil || reply.Job == nil || reply.Job.ID != next.ID {
+					t.Fatalf("next job did not place promptly: %+v %v", reply, err)
+				}
+				got = job(t, q, victim.ID)
+				if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("acknowledged absent attempt not released: %+v", got)
+				}
+				if planned {
+					if err := q.Started(result(reply.Job, false)); err != nil {
+						t.Fatalf("production missed start deadline: %v", err)
+					}
+					if job(t, q, next.ID).StartedAt == nil {
+						t.Fatal("production did not start")
+					}
+				}
+			})
+		}
+
+	})
+
+	t.Run("CancellationLostAssignmentEmptyCheckin", func(t *testing.T) {
+		for _, held := range []bool{false, true} {
+			t.Run(map[bool]string{false: "redelivery", true: "held-host"}[held], func(t *testing.T) {
+				q, _ := fixture(t)
+				m := machine("one", "fake")
+				if held {
+					if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				j := submit(t, q, spec("production"))
+				assigned := check(t, q, m, nil).Job // Assignment reply is lost before launch.
+				if assigned == nil {
+					t.Fatal("missing assignment")
+				}
+				if err := q.Tick(); err != nil {
 					t.Fatal(err)
 				}
-				next = submit(t, q, spec("experiment"))
-			}
-			requireState(t, q, victim.ID, "stopping")
-			// No grace/expiry advance: an unheld key can be released immediately.
-			if reply, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil || reply.Stop {
-				t.Fatalf("unheld stop affected worker: %+v %v", reply, err)
-			}
-			if len(acknowledgements) != 1 {
-				t.Fatalf("unheld stop got %d exact release acknowledgements; want 1", len(acknowledgements))
-			}
-			ack := <-acknowledgements
-			if !ack.ReleaseOnly || ack.ReleasePending || ack.Success || ack.ID != lost.ID || ack.Attempt != lost.Attempt || ack.Session != m.Session || ack.Machine != m.ID {
-				t.Fatalf("not an exact release-only acknowledgement: %+v", ack)
-			}
-			want := "cancelled"
-			if planned {
-				want = "queued"
-			}
-			got := job(t, q, victim.ID)
-			if (got.State != want && !tc.docker) || !got.ReleaseConfirmed || got.Losses != 0 || got.InfrastructureRetries != 0 {
-				t.Fatalf("unheld stop not promptly released: %+v", got)
-			}
-			if tc.otherReport {
-				attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{
-					{Execution: Execution{ID: "unknown", Attempt: 1}, Session: m.Session},
-				}})
-				requireState(t, q, victim.ID, want)
-			}
-			reply, err := w.checkin(context.Background(), Checkin{Machine: m})
-			if err != nil || reply.Job == nil || reply.Job.ID != next.ID {
-				t.Fatalf("next job did not place promptly: %+v %v", reply, err)
-			}
-			got = job(t, q, victim.ID)
-			if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
-				t.Fatalf("acknowledged absent attempt not released: %+v", got)
-			}
-			if planned {
-				if err := q.Started(result(reply.Job, false)); err != nil {
-					t.Fatalf("production missed start deadline: %v", err)
+				if len(q.s.HostReleases) != 1 {
+					t.Fatal("fixture must retain runtime custody before cancellation")
 				}
-				if job(t, q, next.ID).StartedAt == nil {
-					t.Fatal("production did not start")
+				if a := cancelAck(t, q, j.ID); a.State != "stopping" || ackRelease(a) != "pending" {
+					t.Fatal(a)
 				}
-			}
-		})
-	}
-}
+				if reply := check(t, q, m, nil); reply.Job != nil {
+					t.Fatal("cancelled assignment was redelivered")
+				}
+				if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
+					t.Fatal("same-session empty report did not prove exact release", a)
+				}
+				if !q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed || len(q.s.HostReleases) != 0 {
+					t.Fatal("exact attempt evidence or release record was not settled")
+				}
+				assertNoCancellationAttempt(t, q, assigned)
+			})
+		}
 
-func TestAttemptProtocolCheckinBadRequestPreserved(t *testing.T) {
-	q, clock := fixture(t)
-	m := machine("duplicate", "fake")
-	check(t, q, m, nil)
-	server := httptest.NewServer(API{q, "test"}.Handler())
-	defer server.Close()
-	m.Session = "other-session"
-	w := Worker{Clock: clock, Machine: m, Client: Client{URL: server.URL, Token: "test"}}
-	_, err := w.checkin(context.Background(), Checkin{Machine: m})
-	var he *HTTPError
-	if !errors.As(err, &he) || he.Status != http.StatusBadRequest || he.Code != "worker_checkin_invalid" {
-		t.Fatalf("duplicate worker check-in misreported as queue incompatibility: %v", err)
-	}
+	})
 }
 
 func TestAttemptProtocolUnheldStopFences(t *testing.T) {

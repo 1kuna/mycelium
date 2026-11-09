@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,36 +11,60 @@ import (
 )
 
 func TestPathDiagnosticQueueLibrary(t *testing.T) {
-	root := t.TempDir()
-	catalog := filepath.Join(root, "catalog.yaml")
-	if err := os.WriteFile(catalog, []byte("environments:\n  tools:\n    cpu: {backend: pixi, lock_file: pixi.lock}\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "pixi.lock"), []byte("locked"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := ReadEnvironments(catalog)
-	d := pathDiagnostic(err)
-	if d == nil || d.Side != "queue" || d.Field != "environment.manifest" || d.Companion != "pixi.toml" || d.Cause != "companion_absent" || d.ResolutionBase != "environment-library" || d.Path != "environment:tools/cpu" {
-		t.Fatalf("diagnostic: %+v, %v", d, err)
-	}
-	if strings.Contains(err.Error(), root) || !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("private root or lost local cause", err)
-	}
-	// ENOTDIR is a real wrong-root read, without guessing whether some other
-	// host might have the desired path.
-	_, err = snapshotEnvironment(EnvironmentRecipe{LockFile: filepath.Join(root, "pixi.lock", "requirements.txt"), Python: "3.12"}, "cpu")
-	if d = pathDiagnostic(err); d == nil || d.Cause != "wrong_type" {
-		t.Fatal(err)
-	}
-}
+	t.Run("contract", func(t *testing.T) {
+		root := t.TempDir()
+		catalog := filepath.Join(root, "catalog.yaml")
+		if err := os.WriteFile(catalog, []byte("environments:\n  tools:\n    cpu: {backend: pixi, lock_file: pixi.lock}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "pixi.lock"), []byte("locked"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ReadEnvironments(catalog)
+		d := pathDiagnostic(err)
+		if d == nil || d.Side != "queue" || d.Field != "environment.manifest" || d.Companion != "pixi.toml" || d.Cause != "companion_absent" || d.ResolutionBase != "environment-library" || d.Path != "environment:tools/cpu" {
+			t.Fatalf("diagnostic: %+v, %v", d, err)
+		}
+		if strings.Contains(err.Error(), root) || !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("private root or lost local cause", err)
+		}
+		// ENOTDIR is a real wrong-root read, without guessing whether some other
+		// host might have the desired path.
+		_, err = snapshotEnvironment(EnvironmentRecipe{LockFile: filepath.Join(root, "pixi.lock", "requirements.txt"), Python: "3.12"}, "cpu")
+		if d = pathDiagnostic(err); d == nil || d.Cause != "wrong_type" {
+			t.Fatal(err)
+		}
 
-func TestPathDiagnosticUnreadable(t *testing.T) {
-	// Deterministic even when tests run with privileges that bypass mode bits.
-	err := PathReadError("environment.lock_file", "queue", "requirements.txt", "queue-working-directory", "", &os.PathError{Op: "open", Path: "/synthetic/hidden/requirements.txt", Err: os.ErrPermission})
-	if d := pathDiagnostic(err); d.Cause != "unreadable" || strings.Contains(err.Error(), "/synthetic/hidden") || !errors.Is(err, os.ErrPermission) {
-		t.Fatal(err)
-	}
+	})
+
+	t.Run("ResolveInlineEnvironmentValidationError", func(t *testing.T) {
+		q, _ := fixture(t)
+		s := cpuResolveSpec()
+		root := t.TempDir()
+		s.Environment = Environment{LockFile: filepath.Join(root, "x-requirements.txt"), Python: "3.12"}
+		if err := os.WriteFile(s.Environment.LockFile, []byte("# locked fixture\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		r, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := resolveFinding(r, "environment")
+		if f == nil || f.Problem != "lock_file must be uv.lock, pyproject.toml, or requirements.txt" || f.PathDiagnostic != nil || !strings.Contains(f.Fix, "Correct the environment declaration") {
+			t.Fatalf("inline validation error hidden: %+v", r.Findings)
+		}
+		// A missing correctly named file still reports the queue-side path diagnostic.
+		s.Environment.LockFile = filepath.Join(root, "requirements.txt")
+		r, err = q.Resolve(ResolveRequest{Spec: s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f = resolveFinding(r, "environment.lock_file")
+		if f == nil || f.PathDiagnostic == nil || f.Side != "queue" || f.PathDiagnostic.Path != s.Environment.LockFile || f.PathDiagnostic.ResolutionBase != "queue-working-directory" || !strings.Contains(f.Problem, "not the submitter") {
+			t.Fatalf("queue path diagnostic lost: %+v", r.Findings)
+		}
+
+	})
 }
 
 func TestPathDiagnosticWorkerReadAndFreshness(t *testing.T) {
@@ -78,41 +101,5 @@ func TestPathDiagnosticWorkerReadAndFreshness(t *testing.T) {
 	injected.Path = "/synthetic/worker/private"
 	if safeWorkerPathDiagnostic(&injected) != nil {
 		t.Fatal("accepted arbitrary worker path")
-	}
-}
-
-func TestEnvironmentLibraryDifferentRoots(t *testing.T) {
-	var key string
-	for range 2 {
-		root := t.TempDir()
-		for name, contents := range map[string]string{"catalog.yaml": "environments:\n  tools:\n    cpu: {python: '3.12', lock_file: requirements.txt}\n", "requirements.txt": "# empty locked CPU fixture\n"} {
-			if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		catalog, err := ReadEnvironments(filepath.Join(root, "catalog.yaml"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		r := catalog.Environments["tools"]["cpu"]
-		if key != "" && key != r.Key {
-			t.Fatal("root changed recipe identity")
-		}
-		key = r.Key
-		if err := os.RemoveAll(root); err != nil {
-			t.Fatal(err)
-		}
-		cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
-			data, err := os.ReadFile(filepath.Join(dir, "requirements.txt"))
-			if err != nil || string(data) != "# empty locked CPU fixture\n" {
-				t.Fatalf("snapshot at worker root: %q, %v", data, err)
-			}
-			return nil
-		}}
-		_, release, err := cache.Acquire(context.Background(), r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		release()
 	}
 }

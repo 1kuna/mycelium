@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,76 +155,12 @@ func TestSubmitVerificationDoesNotBlockQueue(t *testing.T) {
 }
 
 func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
-	t.Run("request-cancel", func(t *testing.T) {
-		q, _ := fixture(t)
-		s := submitVerificationInput(t, q)
-		entered, unblock := gateSubmitVerification(t, q, nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		body, err := json.Marshal(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(body)).WithContext(ctx)
-		r.Header.Set("Authorization", "Bearer test")
-		w := httptest.NewRecorder()
-		done := make(chan struct{})
-		go func() { API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r); close(done) }()
-		submitVerificationWait(t, "durability barrier", entered)
-		cancel()
-		// The handler must finish BEFORE releasing the non-cancellable syscall.
-		submitVerificationWait(t, "cancelled HTTP request", done)
-		if w.Code < http.StatusBadRequest {
-			t.Fatal("cancelled request accepted", w.Code)
-		}
-		requireNoSubmission(t, q)
-		// A second caller waiting for the occupied I/O slot is cancellable too.
-		waiting, stopWaiting := context.WithCancel(context.Background())
-		second := startSubmitVerification(q, waiting, s)
-		stopWaiting()
-		if got := submitVerificationWait(t, "cancelled slot acquisition", second); !errors.Is(got.err, context.Canceled) {
-			t.Fatal(got)
-		}
-		unblock()
-		// Later completion of the old I/O can never create its job.
-		requireNoSubmission(t, q)
-	})
-	for _, deadline := range []string{"request-deadline"} {
-		t.Run(deadline, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				q, _ := fixture(t)
-				s := submitVerificationInput(t, q)
-				entered, unblock := gateSubmitVerification(t, q, nil)
-				ctx := context.Background()
-				budget := time.Second
-				if deadline == "request-deadline" {
-					var cancel context.CancelFunc
-					budget = time.Second
-					ctx, cancel = context.WithTimeout(ctx, budget)
-					defer cancel()
-				}
-				start := time.Now()
-				done := startSubmitVerification(q, ctx, s)
-				submitVerificationWait(t, "durability barrier", entered)
-				// synctest advances to the actual context deadline only after all
-				// actors block on effects; no wall sleeps or large fixture required.
-				got := <-done
-				if !errors.Is(got.err, context.DeadlineExceeded) || time.Since(start) != budget {
-					t.Fatal("request deadline not preserved", got, time.Since(start), budget)
-				}
-				requireNoSubmission(t, q)
-				unblock()
-				synctest.Wait()
-				requireNoSubmission(t, q)
-			})
-		})
-	}
-	t.Run("http-request-deadline", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
+	t.Run("contract", func(t *testing.T) {
+		t.Run("request-cancel", func(t *testing.T) {
 			q, _ := fixture(t)
 			s := submitVerificationInput(t, q)
 			entered, unblock := gateSubmitVerification(t, q, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			body, err := json.Marshal(s)
 			if err != nil {
@@ -235,262 +170,410 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer test")
 			w := httptest.NewRecorder()
 			done := make(chan struct{})
-			start := time.Now()
 			go func() { API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r); close(done) }()
 			submitVerificationWait(t, "durability barrier", entered)
-			<-done
-			if w.Code < http.StatusBadRequest || time.Since(start) != time.Second {
-				t.Fatal("HTTP request deadline not propagated", w.Code, time.Since(start))
+			cancel()
+			// The handler must finish BEFORE releasing the non-cancellable syscall.
+			submitVerificationWait(t, "cancelled HTTP request", done)
+			if w.Code < http.StatusBadRequest {
+				t.Fatal("cancelled request accepted", w.Code)
 			}
 			requireNoSubmission(t, q)
+			// A second caller waiting for the occupied I/O slot is cancellable too.
+			waiting, stopWaiting := context.WithCancel(context.Background())
+			second := startSubmitVerification(q, waiting, s)
+			stopWaiting()
+			if got := submitVerificationWait(t, "cancelled slot acquisition", second); !errors.Is(got.err, context.Canceled) {
+				t.Fatal(got)
+			}
 			unblock()
-			synctest.Wait()
+			// Later completion of the old I/O can never create its job.
 			requireNoSubmission(t, q)
 		})
-	})
-	for _, change := range []string{"client-inputs", "file-store", "checkpoint-mode", "placement", "host-maintenance", "queue-close"} {
-		t.Run(change, func(t *testing.T) {
-			q, _ := fixture(t)
-			s := submitVerificationInput(t, q)
-			s.AllowedMachines = []string{"target"}
-			s.Run.Env = map[string]string{"VALUE": "original"}
-			original := cloneJob(&Job{Spec: s}).Spec
-			m := machine("target", "fake")
-			m.HostID = "target-host"
-			check(t, q, m, nil)
-			entered, unblock := gateSubmitVerification(t, q, nil)
-			done := startSubmitVerification(q, context.Background(), s)
-			submitVerificationWait(t, "durability barrier", entered)
-			switch change {
-			case "client-inputs":
-				// Mutate only after the effect proves the snapshot is owned.
-				s.Files["input"] = FileRef{SHA256: "unverified", SizeBytes: 1}
-				s.Run.Command[0], s.Run.Env["VALUE"], s.AllowedMachines[0] = "changed", "changed", "changed"
-			case "file-store", "checkpoint-mode":
-				root := t.TempDir()
-				checkpoints := true
-				if change == "checkpoint-mode" {
-					root, checkpoints = q.files.root, false
-				}
-				if err := q.ConfigureFileStore(root, 1<<20, checkpoints); err != nil {
+		for _, deadline := range []string{"request-deadline"} {
+			t.Run(deadline, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					q, _ := fixture(t)
+					s := submitVerificationInput(t, q)
+					entered, unblock := gateSubmitVerification(t, q, nil)
+					ctx := context.Background()
+					budget := time.Second
+					if deadline == "request-deadline" {
+						var cancel context.CancelFunc
+						budget = time.Second
+						ctx, cancel = context.WithTimeout(ctx, budget)
+						defer cancel()
+					}
+					start := time.Now()
+					done := startSubmitVerification(q, ctx, s)
+					submitVerificationWait(t, "durability barrier", entered)
+					// synctest advances to the actual context deadline only after all
+					// actors block on effects; no wall sleeps or large fixture required.
+					got := <-done
+					if !errors.Is(got.err, context.DeadlineExceeded) || time.Since(start) != budget {
+						t.Fatal("request deadline not preserved", got, time.Since(start), budget)
+					}
+					requireNoSubmission(t, q)
+					unblock()
+					synctest.Wait()
+					requireNoSubmission(t, q)
+				})
+			})
+		}
+		t.Run("http-request-deadline", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				q, _ := fixture(t)
+				s := submitVerificationInput(t, q)
+				entered, unblock := gateSubmitVerification(t, q, nil)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				body, err := json.Marshal(s)
+				if err != nil {
 					t.Fatal(err)
 				}
-			case "placement":
-				if err := q.update(func() error {
-					q.s.Policies = map[string]ProjectPolicy{s.Project: {AllowedMachines: []string{"elsewhere"}}}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			case "host-maintenance":
-				if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
-					t.Fatal(err)
-				}
-			case "queue-close":
-				if err := q.Close(); err != nil {
-					t.Fatal(err)
-				}
-			}
-			unblock()
-			got := submitVerificationWait(t, "submission recheck", done)
-			if change != "client-inputs" && change != "host-maintenance" {
-				if got.err == nil {
-					t.Fatal("changed custody/placement was accepted", got)
+				r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(body)).WithContext(ctx)
+				r.Header.Set("Authorization", "Bearer test")
+				w := httptest.NewRecorder()
+				done := make(chan struct{})
+				start := time.Now()
+				go func() { API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r); close(done) }()
+				submitVerificationWait(t, "durability barrier", entered)
+				<-done
+				if w.Code < http.StatusBadRequest || time.Since(start) != time.Second {
+					t.Fatal("HTTP request deadline not propagated", w.Code, time.Since(start))
 				}
 				requireNoSubmission(t, q)
-				return
-			}
-			if got.err != nil || got.job.ID == "" || got.job.Spec.Files["input"] != original.Files["input"] || got.job.Spec.Run.Env["VALUE"] != "original" || got.job.Spec.Run.Command[0] != original.Run.Command[0] {
-				t.Fatal("submission snapshot changed", got)
-			}
-			if replay := submit(t, q, original); replay.ID != got.job.ID {
-				t.Fatal("snapshot fingerprint changed", replay)
-			}
-			if change == "host-maintenance" {
-				if reply := check(t, q, m, nil); reply.Job != nil || !reply.AdmissionBlocked {
-					t.Fatal("maintenance admitted verified submission", reply)
-				}
-				if j := job(t, q, got.job.ID); j.Attempt != 0 || j.State != "queued" {
-					t.Fatal("maintenance defeated by in-flight submit", j)
-				}
-			}
+				unblock()
+				synctest.Wait()
+				requireNoSubmission(t, q)
+			})
 		})
-	}
-}
-
-func TestSubmitVerificationKeyAtomicity(t *testing.T) {
-	t.Run("concurrent-identical", func(t *testing.T) {
-		q, _ := fixture(t)
-		s := submitVerificationInput(t, q)
-		entered, unblock := gateSubmitVerification(t, q, nil)
-		const count = 12
-		pending := make([]<-chan submitVerificationResult, count)
-		for i := range pending {
-			pending[i] = startSubmitVerification(q, context.Background(), s)
-		}
-		submitVerificationWait(t, "durability barrier", entered)
-		unblock()
-		id := ""
-		for _, done := range pending {
-			got := submitVerificationWait(t, "concurrent submit", done)
-			if got.err != nil || got.job.ID == "" || id != "" && got.job.ID != id {
-				t.Fatal("concurrent key duplicated or failed", got)
-			}
-			id = got.job.ID
-		}
-		if len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
-			t.Fatal("key/job creation was not atomic")
-		}
-		ack, err := q.CancelSubmission(s.Project, s.SubmissionKey)
-		if err != nil || ack.JobID == nil || *ack.JobID != id || !ack.WillNotRun {
-			t.Fatal("submit-first cancellation lost binding", ack, err)
-		}
-		if replay := submit(t, q, s); replay.ID != id || replay.State != "cancelled" {
-			t.Fatal("cancelled job resurrected", replay)
-		}
-	})
-	for _, outcome := range []string{"cancel-first", "cancel-before-error", "expiry", "duplicate-conflict", "write-failure", "cancel-write-failure"} {
-		t.Run(outcome, func(t *testing.T) {
-			q, clock := fixture(t)
-			s := submitVerificationInput(t, q)
-			var barrierError error
-			if outcome == "cancel-before-error" {
-				barrierError = errors.New("injected directory sync failure")
-			}
-			entered, unblock := gateSubmitVerification(t, q, barrierError)
-			done := startSubmitVerification(q, context.Background(), s)
-			submitVerificationWait(t, "durability barrier", entered)
-			var reserved Cancellation
-			var duplicate *Job
-			switch outcome {
-			case "cancel-first", "cancel-before-error", "expiry":
-				var err error
-				reserved, err = q.CancelSubmission(s.Project, s.SubmissionKey)
-				if err != nil || reserved.State != "absent" || !reserved.WillNotRun {
-					t.Fatal(reserved, err)
-				}
-				if outcome == "expiry" {
-					clock.Advance(submissionRetention)
-					if err := q.Tick(); err != nil {
+		for _, change := range []string{"client-inputs", "file-store", "checkpoint-mode", "placement", "host-maintenance", "queue-close"} {
+			t.Run(change, func(t *testing.T) {
+				q, _ := fixture(t)
+				s := submitVerificationInput(t, q)
+				s.AllowedMachines = []string{"target"}
+				s.Run.Env = map[string]string{"VALUE": "original"}
+				original := cloneJob(&Job{Spec: s}).Spec
+				m := machine("target", "fake")
+				m.HostID = "target-host"
+				check(t, q, m, nil)
+				entered, unblock := gateSubmitVerification(t, q, nil)
+				done := startSubmitVerification(q, context.Background(), s)
+				submitVerificationWait(t, "durability barrier", entered)
+				switch change {
+				case "client-inputs":
+					// Mutate only after the effect proves the snapshot is owned.
+					s.Files["input"] = FileRef{SHA256: "unverified", SizeBytes: 1}
+					s.Run.Command[0], s.Run.Env["VALUE"], s.AllowedMachines[0] = "changed", "changed", "changed"
+				case "file-store", "checkpoint-mode":
+					root := t.TempDir()
+					checkpoints := true
+					if change == "checkpoint-mode" {
+						root, checkpoints = q.files.root, false
+					}
+					if err := q.ConfigureFileStore(root, 1<<20, checkpoints); err != nil {
+						t.Fatal(err)
+					}
+				case "placement":
+					if err := q.update(func() error {
+						q.s.Policies = map[string]ProjectPolicy{s.Project: {AllowedMachines: []string{"elsewhere"}}}
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				case "host-maintenance":
+					if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
+						t.Fatal(err)
+					}
+				case "queue-close":
+					if err := q.Close(); err != nil {
 						t.Fatal(err)
 					}
 				}
-			case "duplicate-conflict":
-				changed := s
-				changed.Files = nil
-				duplicate = submit(t, q, changed)
-			case "write-failure", "cancel-write-failure":
-				// Reject the normalized state upsert on both its first-write
-				// and conflict/update paths.
-				if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
-					t.Fatal(err)
+				unblock()
+				got := submitVerificationWait(t, "submission recheck", done)
+				if change != "client-inputs" && change != "host-maintenance" {
+					if got.err == nil {
+						t.Fatal("changed custody/placement was accepted", got)
+					}
+					requireNoSubmission(t, q)
+					return
 				}
-				if outcome == "cancel-write-failure" {
-					if _, err := q.CancelSubmission(s.Project, s.SubmissionKey); err == nil {
-						t.Fatal("failed cancellation acknowledged")
+				if got.err != nil || got.job.ID == "" || got.job.Spec.Files["input"] != original.Files["input"] || got.job.Spec.Run.Env["VALUE"] != "original" || got.job.Spec.Run.Command[0] != original.Run.Command[0] {
+					t.Fatal("submission snapshot changed", got)
+				}
+				if replay := submit(t, q, original); replay.ID != got.job.ID {
+					t.Fatal("snapshot fingerprint changed", replay)
+				}
+				if change == "host-maintenance" {
+					if reply := check(t, q, m, nil); reply.Job != nil || !reply.AdmissionBlocked {
+						t.Fatal("maintenance admitted verified submission", reply)
+					}
+					if j := job(t, q, got.job.ID); j.Attempt != 0 || j.State != "queued" {
+						t.Fatal("maintenance defeated by in-flight submit", j)
+					}
+				}
+			})
+		}
+
+	})
+
+	t.Run("SubmitVerificationUsesCallerLifetime", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			q, _ := fixture(t)
+			spec := submitVerificationInput(t, q)
+			entered, unblock := gateSubmitVerification(t, q, nil)
+			done := startSubmitVerification(q, context.Background(), spec)
+			submitVerificationWait(t, "durability barrier", entered)
+			time.Sleep(31 * time.Second)
+			select {
+			case got := <-done:
+				t.Fatal("submission expired independently of caller", got)
+			default:
+			}
+			unblock()
+			got := <-done
+			if got.err != nil {
+				t.Fatal(got.err)
+			}
+		})
+
+	})
+}
+
+func TestSubmitVerificationKeyAtomicity(t *testing.T) {
+	t.Run("contract", func(t *testing.T) {
+		t.Run("concurrent-identical", func(t *testing.T) {
+			q, _ := fixture(t)
+			s := submitVerificationInput(t, q)
+			entered, unblock := gateSubmitVerification(t, q, nil)
+			const count = 12
+			pending := make([]<-chan submitVerificationResult, count)
+			for i := range pending {
+				pending[i] = startSubmitVerification(q, context.Background(), s)
+			}
+			submitVerificationWait(t, "durability barrier", entered)
+			unblock()
+			id := ""
+			for _, done := range pending {
+				got := submitVerificationWait(t, "concurrent submit", done)
+				if got.err != nil || got.job.ID == "" || id != "" && got.job.ID != id {
+					t.Fatal("concurrent key duplicated or failed", got)
+				}
+				id = got.job.ID
+			}
+			if len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
+				t.Fatal("key/job creation was not atomic")
+			}
+			ack, err := q.CancelSubmission(s.Project, s.SubmissionKey)
+			if err != nil || ack.JobID == nil || *ack.JobID != id || !ack.WillNotRun {
+				t.Fatal("submit-first cancellation lost binding", ack, err)
+			}
+			if replay := submit(t, q, s); replay.ID != id || replay.State != "cancelled" {
+				t.Fatal("cancelled job resurrected", replay)
+			}
+		})
+		for _, outcome := range []string{"cancel-first", "cancel-before-error", "expiry", "duplicate-conflict", "write-failure", "cancel-write-failure"} {
+			t.Run(outcome, func(t *testing.T) {
+				q, clock := fixture(t)
+				s := submitVerificationInput(t, q)
+				var barrierError error
+				if outcome == "cancel-before-error" {
+					barrierError = errors.New("injected directory sync failure")
+				}
+				entered, unblock := gateSubmitVerification(t, q, barrierError)
+				done := startSubmitVerification(q, context.Background(), s)
+				submitVerificationWait(t, "durability barrier", entered)
+				var reserved Cancellation
+				var duplicate *Job
+				switch outcome {
+				case "cancel-first", "cancel-before-error", "expiry":
+					var err error
+					reserved, err = q.CancelSubmission(s.Project, s.SubmissionKey)
+					if err != nil || reserved.State != "absent" || !reserved.WillNotRun {
+						t.Fatal(reserved, err)
+					}
+					if outcome == "expiry" {
+						clock.Advance(submissionRetention)
+						if err := q.Tick(); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "duplicate-conflict":
+					changed := s
+					changed.Files = nil
+					duplicate = submit(t, q, changed)
+				case "write-failure", "cancel-write-failure":
+					// Reject the normalized state upsert on both its first-write
+					// and conflict/update paths.
+					if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
+						t.Fatal(err)
+					}
+					if outcome == "cancel-write-failure" {
+						if _, err := q.CancelSubmission(s.Project, s.SubmissionKey); err == nil {
+							t.Fatal("failed cancellation acknowledged")
+						}
+						requireNoSubmission(t, q)
+						if _, err := q.db.Exec(`DROP TRIGGER reject_queue`); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				unblock()
+				got := submitVerificationWait(t, "key recheck", done)
+				switch outcome {
+				case "expiry":
+					if got.err != nil || got.job == nil || got.job.State != "cancelled" {
+						t.Fatal("aged cancellation became executable", got)
+					}
+					ack, err := q.CancelSubmission(s.Project, s.SubmissionKey)
+					if err != nil || ack.State != "cancelled" || !ack.WillNotRun || len(q.s.Jobs) != 1 {
+						t.Fatal("aged reservation lost cancellation", ack, err)
+					}
+				case "duplicate-conflict":
+					submissionError(t, got.err, 409, "submission_key_conflict")
+					if len(q.s.Jobs) != 1 || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].JobID != duplicate.ID {
+						t.Fatal("concurrent key binding overwritten")
+					}
+				case "write-failure":
+					if got.err == nil {
+						t.Fatal("failed SQLite commit accepted")
 					}
 					requireNoSubmission(t, q)
 					if _, err := q.db.Exec(`DROP TRIGGER reject_queue`); err != nil {
 						t.Fatal(err)
 					}
+					submit(t, q, s)
+				case "cancel-write-failure":
+					if got.err != nil || got.job.State != "queued" || got.job.CancelledAt != nil || len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
+						t.Fatal("unacknowledged cancellation leaked", got)
+					}
+				default:
+					if got.err != nil || got.job.State != "cancelled" || got.job.Attempt != 0 || got.job.CancelledAt == nil || !got.job.CancelledAt.Equal(*reserved.AcknowledgedAt) || len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
+						t.Fatal("cancel-first ordering lost", got)
+					}
+					changed := s
+					changed.Run.Command, changed.Files = nil, FileManifest{"unavailable": {}}
+					if replay := submit(t, q, changed); replay.ID != got.job.ID || replay.State != "cancelled" {
+						t.Fatal("reservation replay lost precedence", replay)
+					}
 				}
+			})
+		}
+		t.Run("replay-bypasses-blocked-verifier", func(t *testing.T) {
+			q, _ := fixture(t)
+			s := submitVerificationInput(t, q)
+			first := submit(t, q, s)
+			entered, unblock := gateSubmitVerification(t, q, nil)
+			other := s
+			other.SubmissionKey = "other-key"
+			done := startSubmitVerification(q, context.Background(), other)
+			submitVerificationWait(t, "durability barrier", entered)
+			replay := submitVerificationWait(t, "key replay", startSubmitVerification(q, context.Background(), s))
+			if replay.err != nil || replay.job.ID != first.ID {
+				t.Fatal("retained key entered blocked verification", replay)
 			}
+			changed := s
+			changed.Name = "changed"
+			conflict := submitVerificationWait(t, "key conflict", startSubmitVerification(q, context.Background(), changed))
+			submissionError(t, conflict.err, 409, "submission_key_conflict")
 			unblock()
-			got := submitVerificationWait(t, "key recheck", done)
-			switch outcome {
-			case "expiry":
-				if got.err != nil || got.job == nil || got.job.State != "cancelled" {
-					t.Fatal("aged cancellation became executable", got)
-				}
-				ack, err := q.CancelSubmission(s.Project, s.SubmissionKey)
-				if err != nil || ack.State != "cancelled" || !ack.WillNotRun || len(q.s.Jobs) != 1 {
-					t.Fatal("aged reservation lost cancellation", ack, err)
-				}
-			case "duplicate-conflict":
-				submissionError(t, got.err, 409, "submission_key_conflict")
-				if len(q.s.Jobs) != 1 || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].JobID != duplicate.ID {
-					t.Fatal("concurrent key binding overwritten")
-				}
-			case "write-failure":
-				if got.err == nil {
-					t.Fatal("failed SQLite commit accepted")
-				}
-				requireNoSubmission(t, q)
-				if _, err := q.db.Exec(`DROP TRIGGER reject_queue`); err != nil {
-					t.Fatal(err)
-				}
-				submit(t, q, s)
-			case "cancel-write-failure":
-				if got.err != nil || got.job.State != "queued" || got.job.CancelledAt != nil || len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
-					t.Fatal("unacknowledged cancellation leaked", got)
-				}
-			default:
-				if got.err != nil || got.job.State != "cancelled" || got.job.Attempt != 0 || got.job.CancelledAt == nil || !got.job.CancelledAt.Equal(*reserved.AcknowledgedAt) || len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
-					t.Fatal("cancel-first ordering lost", got)
-				}
-				changed := s
-				changed.Run.Command, changed.Files = nil, FileManifest{"unavailable": {}}
-				if replay := submit(t, q, changed); replay.ID != got.job.ID || replay.State != "cancelled" {
-					t.Fatal("reservation replay lost precedence", replay)
-				}
+			if got := submitVerificationWait(t, "other submit", done); got.err != nil {
+				t.Fatal(got)
 			}
 		})
-	}
-	t.Run("replay-bypasses-blocked-verifier", func(t *testing.T) {
-		q, _ := fixture(t)
-		s := submitVerificationInput(t, q)
-		first := submit(t, q, s)
-		entered, unblock := gateSubmitVerification(t, q, nil)
-		other := s
-		other.SubmissionKey = "other-key"
-		done := startSubmitVerification(q, context.Background(), other)
-		submitVerificationWait(t, "durability barrier", entered)
-		replay := submitVerificationWait(t, "key replay", startSubmitVerification(q, context.Background(), s))
-		if replay.err != nil || replay.job.ID != first.ID {
-			t.Fatal("retained key entered blocked verification", replay)
-		}
-		changed := s
-		changed.Name = "changed"
-		conflict := submitVerificationWait(t, "key conflict", startSubmitVerification(q, context.Background(), changed))
-		submissionError(t, conflict.err, 409, "submission_key_conflict")
-		unblock()
-		if got := submitVerificationWait(t, "other submit", done); got.err != nil {
-			t.Fatal(got)
-		}
+		t.Run("corrupt-input", func(t *testing.T) {
+			q, _ := fixture(t)
+			s := submitVerificationInput(t, q)
+			if err := os.WriteFile(q.files.blob(s.Files["input"]), []byte("corrupt"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := q.Submit(s); err == nil {
+				t.Fatal("corrupt input accepted")
+			}
+			requireNoSubmission(t, q)
+		})
+
 	})
-	t.Run("corrupt-input", func(t *testing.T) {
+
+	t.Run("SubmissionConcurrent", func(t *testing.T) {
 		q, _ := fixture(t)
-		s := submitVerificationInput(t, q)
-		if err := os.WriteFile(q.files.blob(s.Files["input"]), []byte("corrupt"), 0600); err != nil {
+		s := keyedSpec()
+		const n = 16
+		ids := make(chan string, n)
+		errs := make(chan error, n)
+		var wg sync.WaitGroup
+		for range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				j, err := q.Submit(s)
+				if err != nil {
+					errs <- err
+					return
+				}
+				ids <- j.ID
+			}()
+		}
+		wg.Wait()
+		close(ids)
+		close(errs)
+		for err := range errs {
+			t.Error(err)
+		}
+		id := ""
+		for got := range ids {
+			if id != "" && got != id {
+				t.Fatal("duplicate jobs")
+			}
+			id = got
+		}
+		if len(q.s.Jobs) != 1 || len(q.s.Submissions) != 1 {
+			t.Fatal("non-atomic identity")
+		}
+
+	})
+
+	t.Run("SubmissionPersistenceAndRollback", func(t *testing.T) {
+		q, c := fixture(t)
+		s := keyedSpec()
+		first := submit(t, q, s)
+		var path string
+		if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.Submit(s); err == nil {
-			t.Fatal("corrupt input accepted")
+		root := q.root
+		if err := q.Close(); err != nil {
+			t.Fatal(err)
 		}
-		requireNoSubmission(t, q)
+		reopened, err := Open(path, root, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reopened.Close()
+		if got := submit(t, reopened, s); got.ID != first.ID {
+			t.Fatal("restart created duplicate")
+		}
+		// A SQLite failure must roll back both the job and its key.
+		if _, err := reopened.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		s.SubmissionKey = "write-failure"
+		if _, err := reopened.Submit(s); err == nil {
+			t.Fatal("failed write accepted")
+		}
+		if len(reopened.s.Jobs) != 1 || reopened.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil {
+			t.Fatal("failed write retained identity")
+		}
+		if _, err := reopened.db.Exec(`DROP TRIGGER reject_queue`); err != nil {
+			t.Fatal(err)
+		}
+		submit(t, reopened, s)
+
 	})
 }
 
 // Slow but live storage must not lose a legitimate submission at the former
 // 30-second default. The existing cancellation/retained-slot tests prove a stuck
 // syscall cannot publish late work or spawn more verification I/O.
-func TestSubmitVerificationUsesCallerLifetime(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		q, _ := fixture(t)
-		spec := submitVerificationInput(t, q)
-		entered, unblock := gateSubmitVerification(t, q, nil)
-		done := startSubmitVerification(q, context.Background(), spec)
-		submitVerificationWait(t, "durability barrier", entered)
-		time.Sleep(31 * time.Second)
-		select {
-		case got := <-done:
-			t.Fatal("submission expired independently of caller", got)
-		default:
-		}
-		unblock()
-		got := <-done
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-	})
-}

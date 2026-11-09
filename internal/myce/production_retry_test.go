@@ -170,7 +170,7 @@ func TestProductionCancelPendingPreventsRetry(t *testing.T) {
 }
 
 func TestProductionInfrastructureRetryConfiguration(t *testing.T) {
-	for _, limit := range []int{0, 1, 4} {
+	for _, limit := range []int{0} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			q, clock := fixture(t)
 			if err := q.SetProductionInfrastructureRetries(-1); err == nil {

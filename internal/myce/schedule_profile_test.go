@@ -1,6 +1,8 @@
 package myce
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestProfileTargetChangedBeforeStart(t *testing.T) {
 	q, _ := fixture(t)

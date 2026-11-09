@@ -21,26 +21,6 @@ import (
 	"time"
 )
 
-func TestNativeOutcomeTermStop(t *testing.T) {
-	for _, group := range []bool{false, true} {
-		for _, independentExit := range []bool{false, true} {
-			t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-				command := `touch "$1"; exec sleep 600`
-				if independentExit {
-					command = `trap 'exit 7' TERM; touch "$1"; while :; do sleep .01; done`
-				}
-				w, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", command, "main", "{work}/ready"})
-				nativeFile(t, p.job.Spec.Run.Workdir, "ready")
-				p.stop(w.Clock.Now(), time.Second, false)
-				r := d5Finish(t, p)
-				if r.Success || !r.Interrupted {
-					t.Fatal("TERM stop became stage failure", r)
-				}
-			})
-		}
-	}
-}
-
 // Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	q, _ := fixture(t)
@@ -98,27 +78,6 @@ func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 }
 
 // Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
-func TestOutcomeCancellationPrecedence(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("worker", "fake")
-	j := submit(t, q, spec("production"))
-	running := check(t, q, m, nil).Job
-	if err := q.Started(result(running, false)); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Cancel(j.ID); err != nil {
-		t.Fatal(err)
-	}
-	r := result(running, false)
-	r.Interrupted, r.OperatorStop = true, true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, j.ID)
-	if got.State != "cancelled" || got.InfrastructureRetries != 0 {
-		t.Fatal("stop bypassed cancellation", got)
-	}
-}
 
 type outcomeRow struct {
 	startFailureKind                                       string
@@ -131,28 +90,93 @@ type outcomeRow struct {
 }
 
 func TestOutcomeRuntimeTable(t *testing.T) {
-	for _, runtime := range []string{"native", "native-group", "docker"} {
-		for _, tc := range []outcomeRow{
-			{name: "completion", success: true},
-			{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
-			{name: "priority-independent-exit", priority: true, code: 7},
-			{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
-			{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
-			{name: "mycelium-foreign-port-probe", code: 1, portProbe: true, interrupted: true},
-			{name: "exit-143-without-signal", code: 143},
-			{name: "observation-loss", code: 137, lost: true, interrupted: true},
-		} {
-			t.Run(runtime+"/"+tc.name, func(t *testing.T) {
-				r := operatorOutcome(d5RuntimeOutcome(t, runtime, tc), tc.operator)
-				if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
-					t.Fatalf("priority stop provenance: %+v", r)
-				}
-				if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
-					t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
+	t.Run("contract", func(t *testing.T) {
+		for _, runtime := range []string{"native", "native-group", "docker"} {
+			for _, tc := range []outcomeRow{
+				{name: "completion", success: true},
+				{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
+				{name: "priority-independent-exit", priority: true, code: 7},
+				{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
+				{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
+				{name: "mycelium-foreign-port-probe", code: 1, portProbe: true, interrupted: true},
+				{name: "exit-143-without-signal", code: 143},
+				{name: "observation-loss", code: 137, lost: true, interrupted: true},
+			} {
+				t.Run(runtime+"/"+tc.name, func(t *testing.T) {
+					r := operatorOutcome(d5RuntimeOutcome(t, runtime, tc), tc.operator)
+					if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
+						t.Fatalf("priority stop provenance: %+v", r)
+					}
+					if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
+						t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
+					}
+				})
+			}
+		}
+
+	})
+
+	t.Run("D5ReviewNativeIndependent143BeforeSignal", func(t *testing.T) {
+		for _, group := range []bool{false, true} {
+			t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
+				_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 143`, "main", "{work}/ready", "{work}/finish"})
+				dir := p.job.Spec.Run.Workdir
+				nativeFile(t, dir, "ready")
+				// Record intent only. No signal is sent; payload independently exits 143.
+				p.mu.Lock()
+				p.stopped = true
+				p.mu.Unlock()
+				nativeTouch(t, dir, "finish")
+				r := d5Finish(t, p)
+				t.Logf("independent exit 143: success=%v interrupted=%v error=%s", r.Success, r.Interrupted, r.Error)
+				if r.Success || r.Interrupted {
+					t.Fatal("independent payload exit became interruption", r)
 				}
 			})
 		}
-	}
+
+	})
+
+	t.Run("NativeOutcomeTermStop", func(t *testing.T) {
+		for _, group := range []bool{false, true} {
+			for _, independentExit := range []bool{false, true} {
+				t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
+					command := `touch "$1"; exec sleep 600`
+					if independentExit {
+						command = `trap 'exit 7' TERM; touch "$1"; while :; do sleep .01; done`
+					}
+					w, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", command, "main", "{work}/ready"})
+					nativeFile(t, p.job.Spec.Run.Workdir, "ready")
+					p.stop(w.Clock.Now(), time.Second, false)
+					r := d5Finish(t, p)
+					if r.Success || !r.Interrupted {
+						t.Fatal("TERM stop became stage failure", r)
+					}
+				})
+			}
+		}
+
+	})
+
+	t.Run("NativeOutcomeIndependentExitWithStop", func(t *testing.T) {
+		for _, group := range []bool{false, true} {
+			t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
+				_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", "{work}/ready", "{work}/finish"})
+				dir := p.job.Spec.Run.Workdir
+				nativeFile(t, dir, "ready")
+				// Freeze intent separately from delivery, then observe a payload exit.
+				p.mu.Lock()
+				p.stopped = true
+				p.mu.Unlock()
+				nativeTouch(t, dir, "finish")
+				r := d5Finish(t, p)
+				if r.Success || r.Interrupted {
+					t.Fatal("independent exit masked", r)
+				}
+			})
+		}
+
+	})
 }
 
 // Only daemon/process-observation and memory accounting are faked. Each row
@@ -327,25 +351,6 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		recoveryErr = dockerRecoveryError(state)
 	}
 	return dockerOutcome(state, Result{}, recoveryErr)
-}
-
-func TestNativeOutcomeIndependentExitWithStop(t *testing.T) {
-	for _, group := range []bool{false, true} {
-		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-			_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", "{work}/ready", "{work}/finish"})
-			dir := p.job.Spec.Run.Workdir
-			nativeFile(t, dir, "ready")
-			// Freeze intent separately from delivery, then observe a payload exit.
-			p.mu.Lock()
-			p.stopped = true
-			p.mu.Unlock()
-			nativeTouch(t, dir, "finish")
-			r := d5Finish(t, p)
-			if r.Success || r.Interrupted {
-				t.Fatal("independent exit masked", r)
-			}
-		})
-	}
 }
 
 // Kill only the worker process; the replacement uses actual orphan recovery.

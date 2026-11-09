@@ -90,61 +90,88 @@ func TestPieceDependencyProductionWindowStartsAtReadiness(t *testing.T) {
 }
 
 func TestPieceDependencySiblingFailureAndParentAbort(t *testing.T) {
-	q, _, m, s := fanOutFixture(t, 3)
-	s.Outputs = map[string]string{"out": "results"}
-	parent := submit(t, q, s)
-	ready := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
-	blocked := submit(t, q, pieceConsumer(s, parent.ID, "item-2"))
-	wave := check(t, q, m, nil).Job
-	finish(t, q, wave, true)
-	// Fail the remaining producer wave directly, so downstream fairness needn't
-	// determine which of the two now-runnable commands happens to be pulled first.
-	q.mu.Lock()
-	tail := q.fanOutCandidate(q.s.Jobs[parent.ID], q.s.Machines[m.ID])
-	if tail == nil {
+	t.Run("contract", func(t *testing.T) {
+		q, _, m, s := fanOutFixture(t, 3)
+		s.Outputs = map[string]string{"out": "results"}
+		parent := submit(t, q, s)
+		ready := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
+		blocked := submit(t, q, pieceConsumer(s, parent.ID, "item-2"))
+		wave := check(t, q, m, nil).Job
+		finish(t, q, wave, true)
+		// Fail the remaining producer wave directly, so downstream fairness needn't
+		// determine which of the two now-runnable commands happens to be pulled first.
+		q.mu.Lock()
+		tail := q.fanOutCandidate(q.s.Jobs[parent.ID], q.s.Machines[m.ID])
+		if tail == nil {
+			q.mu.Unlock()
+			t.Fatal("no tail")
+		}
+		tail = q.assignFanOut(tail, q.s.Machines[m.ID])
+		assigned := q.assign(tail, q.s.Machines[m.ID])
 		q.mu.Unlock()
-		t.Fatal("no tail")
-	}
-	tail = q.assignFanOut(tail, q.s.Machines[m.ID])
-	assigned := q.assign(tail, q.s.Machines[m.ID])
-	q.mu.Unlock()
-	finish(t, q, &assigned, false)
-	if got := job(t, q, blocked.ID); got.State != "failed" || got.DiagnosticCode != "upstream_failed" {
-		t.Fatalf("unaccepted dependency did not fail: %+v", got)
-	}
-	if got := job(t, q, ready.ID); !dependencyReady(got) || got.State != "queued" {
-		t.Fatal("sibling failure retracted accepted output")
-	}
-	late := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
-	if !dependencyReady(late) {
-		t.Fatal("late accepted dependency lost")
-	}
-	consumer := check(t, q, m, nil).Job
-	if consumer == nil || consumer.Spec.After == nil {
-		t.Fatal("no consumer assignment")
-	}
-	cancelled, err := q.CancelJob(parent.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if *cancelled.Release != "pending" || !cancelled.WillNotRun {
-		t.Fatalf("parent omitted consumer release: %+v", cancelled)
-	}
-	if got := job(t, q, consumer.ID); !cancelledJobForTest(got) {
-		t.Fatal("parent abort did not fence consumer")
-	}
-	if err := q.Started(result(consumer, true)); err == nil {
-		t.Fatal("Started authorized after abort")
-	}
-	finish(t, q, consumer, true)
-	ack, err := q.CancelJob(parent.ID)
-	if err != nil || *ack.Release == "pending" {
-		t.Fatalf("release did not settle: %+v %v", ack, err)
-	}
-	future := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
-	if future.State != "cancelled" || future.Dependency.ReadyAt != nil {
-		t.Fatal("future consumer escaped abort")
-	}
+		finish(t, q, &assigned, false)
+		if got := job(t, q, blocked.ID); got.State != "failed" || got.DiagnosticCode != "upstream_failed" {
+			t.Fatalf("unaccepted dependency did not fail: %+v", got)
+		}
+		if got := job(t, q, ready.ID); !dependencyReady(got) || got.State != "queued" {
+			t.Fatal("sibling failure retracted accepted output")
+		}
+		late := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
+		if !dependencyReady(late) {
+			t.Fatal("late accepted dependency lost")
+		}
+		consumer := check(t, q, m, nil).Job
+		if consumer == nil || consumer.Spec.After == nil {
+			t.Fatal("no consumer assignment")
+		}
+		cancelled, err := q.CancelJob(parent.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *cancelled.Release != "pending" || !cancelled.WillNotRun {
+			t.Fatalf("parent omitted consumer release: %+v", cancelled)
+		}
+		if got := job(t, q, consumer.ID); !cancelledJobForTest(got) {
+			t.Fatal("parent abort did not fence consumer")
+		}
+		if err := q.Started(result(consumer, true)); err == nil {
+			t.Fatal("Started authorized after abort")
+		}
+		finish(t, q, consumer, true)
+		ack, err := q.CancelJob(parent.ID)
+		if err != nil || *ack.Release == "pending" {
+			t.Fatalf("release did not settle: %+v %v", ack, err)
+		}
+		future := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
+		if future.State != "cancelled" || future.Dependency.ReadyAt != nil {
+			t.Fatal("future consumer escaped abort")
+		}
+
+	})
+
+	t.Run("PieceDependencyWholeParentFailure", func(t *testing.T) {
+		q, clock, m, s := fanOutFixture(t, 3)
+		s.Outputs = map[string]string{"out": "results"}
+		parent := submit(t, q, s)
+		ordinary := submit(t, q, wholeParentConsumer(s, parent.ID, false))
+		fanOut := submit(t, q, wholeParentConsumer(s, parent.ID, true))
+		wave := check(t, q, m, nil).Job
+		finish(t, q, wave, true)
+		clock.Advance(time.Second)
+		tail := check(t, q, m, nil).Job
+		finish(t, q, tail, false)
+		for _, id := range []string{ordinary.ID, fanOut.ID} {
+			got := job(t, q, id)
+			if got.State != "failed" || got.DiagnosticCode != "upstream_failed" || got.Attempt != 0 || got.StartedAt != nil || !got.FinishedAt.Equal(clock.Now()) || got.Reason != "upstream fan-out parent "+parent.ID+" did not succeed" {
+				t.Error("upstream failure did not fail unattempted consumer clearly", got)
+			}
+		}
+		late := submit(t, q, wholeParentConsumer(s, parent.ID, true))
+		if late.State != "failed" || late.Attempt != 0 {
+			t.Fatal("late whole-parent consumer accepted failed parent", late)
+		}
+
+	})
 }
 func cancelledJobForTest(j *Job) bool {
 	return cancelled(j) && (j.State == "stopping" || j.State == "cancelled")
@@ -332,29 +359,6 @@ func TestPieceDependencyWholeParentAdmissionAndRestart(t *testing.T) {
 	}
 	if got := job(t, q, gather.ID); !dependencyReady(got) || got.Dependency.Executions["item-0"].ID != child.ID {
 		t.Fatalf("dependent gather not ready: state=%s reason=%s after=%+v binding=%+v parent=%+v", got.State, got.Reason, got.Spec.After, got.Dependency, job(t, q, consumer.ID).FanOut)
-	}
-}
-
-func TestPieceDependencyWholeParentFailure(t *testing.T) {
-	q, clock, m, s := fanOutFixture(t, 3)
-	s.Outputs = map[string]string{"out": "results"}
-	parent := submit(t, q, s)
-	ordinary := submit(t, q, wholeParentConsumer(s, parent.ID, false))
-	fanOut := submit(t, q, wholeParentConsumer(s, parent.ID, true))
-	wave := check(t, q, m, nil).Job
-	finish(t, q, wave, true)
-	clock.Advance(time.Second)
-	tail := check(t, q, m, nil).Job
-	finish(t, q, tail, false)
-	for _, id := range []string{ordinary.ID, fanOut.ID} {
-		got := job(t, q, id)
-		if got.State != "failed" || got.DiagnosticCode != "upstream_failed" || got.Attempt != 0 || got.StartedAt != nil || !got.FinishedAt.Equal(clock.Now()) || got.Reason != "upstream fan-out parent "+parent.ID+" did not succeed" {
-			t.Error("upstream failure did not fail unattempted consumer clearly", got)
-		}
-	}
-	late := submit(t, q, wholeParentConsumer(s, parent.ID, true))
-	if late.State != "failed" || late.Attempt != 0 {
-		t.Fatal("late whole-parent consumer accepted failed parent", late)
 	}
 }
 

@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,92 +61,6 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 		if err := lowerExecution(&invalid); err == nil {
 			t.Fatal("invalid cap accepted", gb)
 		}
-	}
-}
-
-func TestNativeGroupCgroupRecoveryPreservesOOMWithOperatorStop(t *testing.T) {
-	q, _ := fixture(t)
-	m := machine("recovery-worker", "fake", "d5-synthetic-host")
-	m.HostMemoryMeasured = true
-	m.HostAvailableMemoryGB = 64
-	m.FreeHostMemoryGB = 64
-	specification := spec("production")
-	specification.Needs.HostMemoryGB = 2
-	specification.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "600"}, MemoryGB: 1}}
-	j := submit(t, q, specification)
-	running := check(t, q, m, nil).Job
-	if err := q.Started(result(running, false)); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(API{Queue: q, Token: "d5-synthetic"}.Handler())
-	defer server.Close()
-	w := recoveryWorker(t)
-	w.Machine = m
-	w.Client = Client{URL: server.URL, Token: "d5-synthetic"}
-	w.memoryCeilings = fakeCeilings(t)
-	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
-	identity := ID()
-	parent, err := w.memoryCeilings.create("attempt-"+identity, 2<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	children, err := parent.children()
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := children.create("sidecar-helper", 1<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(leaf.path, "memory.events"), []byte("oom 1\noom_kill 1\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.state = workerState{Job: running, Session: m.Session, Identity: identity, Log: identity + ".log"}
-	if err := store.save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(store.dir, "operator-stop.json", store.state); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(store.dir, "attempt-"+identity+".json", workerState{Identity: identity, Cgroup: parent.path, Groups: map[int]map[int]string{}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWorkerJSON(store.dir, "native-"+identity+".json", struct {
-		Identity string
-		Members  []nativeMember
-	}{identity, []nativeMember{{Name: "helper", Cgroup: leaf.path}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(store.dir, identity+".log"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	store.close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	defer func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Error("recovered worker did not stop")
-		}
-	}()
-	await(t, func() bool { got := job(t, q, j.ID); return got.State == "failed" && got.ReleaseConfirmed })
-	got := job(t, q, j.ID)
-	if got.InfrastructureRetries != 0 || got.ExecutionCause == nil || got.ExecutionCause.Class != "resource_limit" {
-		t.Fatal("OOM reclassified as operator interruption", got)
-	}
-	if _, err := os.Stat(parent.path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("recovery retained empty child tree", err)
 	}
 }
 
