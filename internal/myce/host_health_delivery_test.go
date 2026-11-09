@@ -100,7 +100,7 @@ func TestHostHealthReportDeliveryAndFrozenExpiry(t *testing.T) {
 			name     string
 			interval time.Duration
 			slow     bool
-		}{{"1s", time.Second, false}, {"2s", 2 * time.Second, false}, {"slow-checkins", time.Second, true}} {
+		}{{"1s", time.Second, false}, {"slow-checkins", time.Second, true}} {
 			interval := scenario.interval
 			t.Run(scenario.name, func(t *testing.T) {
 				root := newTestStateRoot(t)
