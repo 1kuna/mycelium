@@ -123,19 +123,36 @@ Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
 Local development admission uses an atomic directory per heavy run, shared
-across Git worktrees. It recognizes both existing `local-go-slot` lanes and
+across Git worktrees and ordinary clones under
+`~/.cache/mycelium-gates/control`. It registers legacy checkout report roots,
+recognizes both existing `local-go-slot` lanes and
 preserves unknown/abandoned ownership. Full runs remain serialized until measured
 capacity is recorded; two heavy lanes permit a release build alongside diagnosis.
-Release waiters take the next free lane. A run needs 45 GiB disk free at entry;
-the measurement supervisor stops its owned gate below 42 GiB and retains capacity
-if fixture cleanup is uncertain. These floors preserve room for the workstation
+Release waiters take the next free lane through `GATE_PRIORITY=release` for a
+gate, or the supported release command wrapper (use an absolute output path
+because source runs in a snapshot):
+
+```sh
+python3 scripts/gate-local.py --priority release --command \
+  go build -o "$PWD/.reports/release-myce" ./cmd/myce
+```
+
+A run needs 45 GiB disk free at entry. The host measurement supervisor remains
+active through source preparation, Linux staging and guest execution, stopping
+its owned supervisor below 42 GiB. On macOS, elevated memory pressure or new
+swap-outs also stop owned work. Missing nonce-bound cleanup receipts, SSH failure
+or supervisor death retain capacity; exit status alone never releases it. These floors preserve room for the workstation
 and recovery after the 2026-11-02/03 saturation incident.
 
 Darwin development uses a gate-owned Go build cache shared across checkouts.
 Only idle gate-owned build objects are automatically evicted above 12 GiB;
 module downloads, compatibility sources and timing history are retained. Linux
 uses persistent guest build/module caches and the same idle eviction policy.
-No other project's cache is trimmed. The ceiling is an initial storage budget,
+No other project's cache is trimmed. The initial 22 GiB available-memory entry
+threshold (16 GiB workstation reserve plus the profile-declared 6 GiB gate need)
+is an unmeasured starting value, pending four-core native/Linux peak calibration;
+it must not be described as a measured execution envelope. Compressed pages are
+not counted as free. The ceiling is an initial storage budget,
 not a measured per-run peak; `.reports/gate-local.jsonl` records actual growth.
 
 Native-only legacy/fleet Mac gates retain the following custody mechanism.
@@ -452,28 +469,48 @@ limactl autostart enable --condition=login mycelium-gates
 The 100 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
 `uv python install 3.11` inside the VM; install Docker separately for real-daemon
 focused tests. Follow upstream checksum verification for the Go archive.
-The VM receives a snapshot of tracked and unignored source files, including
-uncommitted edits; host HOME/NAS directories are not mounted. Compilation and
+Both platforms receive the same immutable snapshot of tracked and unignored
+source files, including uncommitted edits; host HOME/NAS directories are not mounted. Compilation and
 fixture I/O use the guest-native filesystem. Persistent guest caches are
 `~/.cache/mycelium-gates/go-build` and `~/.cache/mycelium-gates/go-mod`.
 Preparation downloads dependencies before the offline gate. `GATE_VM` selects a
 separately provisioned Lima instance. The initial gate CPU budget is four cores
 per platform leg; the wrapper runs the legs sequentially pending capacity proof.
 
-For a focused command in the same VM, retain your local admission slot and use:
+For a focused Linux command with the same host admission, disk supervision and
+fixture cleanup:
 
 ```sh
-python3 scripts/gate-linux.py -- python3 scripts/gate-budget.py \
-  scripts/gate-command.sh go test -race -count=1 ./internal/myce -run '^TestName$'
+python3 scripts/gate-local.py --platform linux --command \
+  go test -race -count=1 ./internal/myce -run '^TestName$'
 ```
 
-`--repo DIR` selects another checkout; `--ref SHA` uses its committed bytes.
-Instrumentation helpers are added separately; product/test sources stay at that
-revision. Failed source snapshots are retained for diagnosis; confirm guest
-fixture exit before removing them. Gate logs remain local. The JSONL measurement
-records wall/user/system seconds, sampled RSS sum (shared pages may count twice),
-disk/cache deltas and foreground process-launch latency. That latency is a
-workstation responsiveness proxy, not a UI latency guarantee.
+`--repo DIR --ref SHA` selects committed product/test bytes from another checkout.
+For exact-head release proof, use:
+
+```sh
+python3 scripts/gate-local.py full --repo DIR --ref SHA --priority release
+```
+
+`gate-linux.py` is the transport helper; call the admitted wrapper above for work.
+Instrumentation helpers are overlaid identically on both platforms and identified
+separately from product/test sources. Compatibility predecessor archives are
+created from the actual Git root and checked for their commit and module/core
+contents before either full leg. Failed source snapshots remain for diagnosis;
+confirm fixture exit before removal. Success removes only run source/scratch.
+
+Each run prints its private `.reports/local-gates/UUID` receipt directory. Retain
+`manifest.json`, `source-identity.json`, and nonce-bound `native-cleanup.json`,
+`linux-cleanup.json`, `overall-cleanup.json`. The append-only
+`.reports/gate-local.jsonl` schema 1 has a common `run_id` and `phase` of `host`,
+`native` or `linux`; rows identify `source_sha`, `source_dirty`,
+`source_archive_sha256` and `instrumentation_sha256`. A clean commit plus matching
+archive/instrumentation digests identifies exact-head proof; HEAD alone does not.
+Rows record wall/user/system seconds, sampled RSS sum (shared pages may count
+twice), disk/cache deltas, host pressure/swap observations, all VZ process RSS and
+foreground process-launch latency. Guest RSS and host VM RSS are separate
+observations. The host row includes preparation and both legs. Launch latency is
+a workstation responsiveness proxy, not a UI latency guarantee.
 
 Stop with `limactl stop mycelium-gates`; disable login startup with
 `limactl autostart disable mycelium-gates`. Before deletion, verify no guest work

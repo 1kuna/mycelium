@@ -340,12 +340,18 @@ elif args[0] == 'test':
             root = Path(folder)
             (root / 'scripts').mkdir()
             gate = root / 'scripts/gate.sh'
-            gate.write_text('cd "$GATE_SCRATCH"\nsleep 60 &\nexit 0\n')
+            gate.write_text('test -z "${GATE_CLEANUP_RECEIPT+x}" || exit 9\n'
+                            'test -z "${GATE_CLEANUP_ID+x}" || exit 9\n'
+                            'cd "$GATE_SCRATCH"\nsleep 60 &\nexit 0\n')
+            receipt = root / 'cleanup.json'
+            env = dict(os.environ, GATE_CLEANUP_RECEIPT=str(receipt), GATE_CLEANUP_ID='test-nonce')
             other = subprocess.Popen(['sleep', '60'], start_new_session=True)
             try:
                 run = subprocess.run([sys.executable, str(scripts / 'gate-budget.py'), str(gate)],
-                                     capture_output=True, text=True, timeout=15)
+                                     capture_output=True, text=True, timeout=15, env=env)
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(json.loads(receipt.read_text()),
+                    dict(schema=1, identity='test-nonce', stopped=True, status=0))
                 self.assertIn('gate quick: exit=0', run.stdout)
                 self.assertEqual(list((root / '.gate').iterdir()), [])
                 self.assertIsNone(other.poll())

@@ -272,8 +272,7 @@ def main():
     # The repository's two-suite safety rule is specific to Macs. Linux fleet
     # jobs are already admitted against declared CPU and learned host memory;
     # an additional fixed suite count would strand those allocated resources.
-    slot = acquire_full_slot() if (mode == 'full' and sys.platform == 'darwin'
-                                   and os.environ.get('GATE_LOCAL_CAPACITY_HELD') != '1') else None
+    slot = acquire_full_slot() if mode == 'full' and sys.platform == 'darwin' else None
     root = Path(sys.argv[1]).resolve().parent.parent / '.gate'
     root.mkdir(exist_ok=True)
     scratch = tempfile.mkdtemp(prefix='run.', dir=root)
@@ -282,6 +281,9 @@ def main():
         write_full_custody(slot, marker, scratch)
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
+    # Receipt authority belongs only to this supervisor, never nested fixtures.
+    receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)
+    receipt_identity = child_env.pop('GATE_CLEANUP_ID', None)
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=not bool(os.environ.get('MYCE_PROCESS_SESSION')))
     try:
         # Per-command progress watchdogs decide stalls; no gate wall deadline.
@@ -305,6 +307,15 @@ def main():
             status = 125  # Unconfirmed custody prevents capacity reuse.
         if slot is not None:
             release_full_slot(slot, stopped)
+        if receipt_path and receipt_identity:
+            # Publish after cleanup and admission custody have both settled.
+            # A killed supervisor cannot leave a success-shaped receipt.
+            path = Path(receipt_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pending = path.with_name(path.name + '.' + uuid.uuid4().hex)
+            pending.write_text(json.dumps(dict(schema=1, identity=receipt_identity,
+                                               stopped=stopped, status=status)) + '\n')
+            pending.replace(path)
         print(f'gate {mode}: exit={status} wall={int(time.monotonic() - started)}s', flush=True)
     return status
 

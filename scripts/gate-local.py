@@ -1,92 +1,196 @@
 #!/usr/bin/env python3
-"""Run both native Darwin and local Linux gates, without queue availability."""
+"""Run identified Darwin/Linux source under host-wide admission and disk guard."""
+import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import shutil
+import signal
 import subprocess
 import sys
-import tempfile
+import uuid
 
 REPO = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location('gate_capacity', Path(__file__).with_name('gate-capacity.py'))
-capacity = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(capacity)
 
 
-_cache_spec = importlib.util.spec_from_file_location('gate_cache', Path(__file__).with_name('gate-cache.py'))
-cache_tools = importlib.util.module_from_spec(_cache_spec)
-_cache_spec.loader.exec_module(cache_tools)
-trim_cache = cache_tools.trim_cache
+def module(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + '.py'))
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
+trim_cache = module('gate-cache').trim_cache
+HELPERS = ('gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
+           'gate-cache.py', 'gate-measure.py', 'gate-memory.py')
+
+
+def execute(path):
+    """Child orchestration; parent measures host disk across every phase."""
+    manifest = json.loads(path.read_text())
+    repo, folder = Path(manifest['repo']), path.parent
+    source = folder / 'source'
+    archive = folder / 'source.tar'
+    source.mkdir()
+    identity = sources.freeze(repo, archive, manifest.get('ref'))
+    sources.extract(archive, source)
+    predecessor_files = sources.predecessors(repo, source) if manifest['mode'] == 'full' and not manifest['command'] else []
+    # Both platforms receive the same current supervisor instrumentation,
+    # separately identified from the selected product/test revision.
+    import hashlib
+    digest = hashlib.sha256()
+    for helper in HELPERS:
+        data = Path(__file__).with_name(helper).read_bytes()
+        digest.update(helper.encode() + b'\0' + data)
+        (source / 'scripts' / helper).write_bytes(data)
+    identity['instrumentation_sha256'] = digest.hexdigest()
+    info = folder / 'source-identity.json'
+    info.write_text(json.dumps(identity) + '\n')
+    cache = Path(manifest['cache'])
+    env = dict(os.environ, GOCACHE=str(cache), GOMAXPROCS=str(manifest['cores']),
+               GATE_TARGET='native', GIT_CEILING_DIRECTORIES=str(source.parent))
+    for key in list(env):
+        if key.startswith('MYCE_'):
+            del env[key]
+    report = Path(manifest['report'])
+    selection = folder / 'selection.tsv'
+    if manifest['mode'] == 'quick' and not manifest['command']:
+        if manifest.get('selection'):
+            shutil.copyfile(manifest['selection'], selection)
+        else:
+            with selection.open('w') as output:
+                subprocess.run([sys.executable, str(repo / 'scripts/gate-related.py'),
+                                manifest.get('base') or 'origin/main'], cwd=repo,
+                               stdout=output, check=True)
+        # A concurrent edit cannot change the source selected for either leg.
+        verify = folder / 'verify.tar'
+        checked = sources.freeze(repo, verify, manifest.get('ref'))
+        verify.unlink()
+        if checked != {k: v for k, v in identity.items() if k != 'instrumentation_sha256'}:
+            raise RuntimeError('source changed during quick selection; no test started')
+    started_receipts = []
+    current = None
+    interrupted = []
+
+    def interrupt(signum, frame):
+        interrupted.append(signum)
+        if current is not None and current.poll() is None:
+            current.send_signal(signum)
+    handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        mode = manifest['mode']
+        status = 0
+        if manifest['platform'] != 'linux':
+            native_id = uuid.uuid4().hex
+            native_receipt = folder / 'native-cleanup.json'
+            native_env = dict(env, GATE_CLEANUP_ID=native_id, GATE_CLEANUP_RECEIPT=str(native_receipt))
+            mode = manifest['mode']
+            payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
+            if not manifest['command'] and mode == 'quick':
+                payload += ['--selection', str(selection)]
+            native = [sys.executable, str(REPO / 'scripts/gate-measure.py'), '--report', str(report),
+                      '--run-id', manifest['identity'],
+                      '--source-info', str(info), '--mode', mode, '--phase', 'native', '--',
+                      sys.executable, 'scripts/gate-budget.py', 'scripts/gate-command.sh', *payload]
+            started_receipts.append((native_receipt, native_id))
+            current = subprocess.Popen(native, cwd=source, env=native_env)
+            status = current.wait()
+            if not receipts.confirmed(native_receipt, native_id) or status == 125 or status >= 128 or status < 0 or interrupted:
+                return 125
+            if manifest['platform'] == 'native':
+                return status
+        linux_id = uuid.uuid4().hex
+        linux_receipt = folder / 'linux-cleanup.json'
+        linux = [sys.executable, str(REPO / 'scripts/gate-linux.py'), '--archive', str(archive),
+                 '--report', str(report), '--cleanup-receipt', str(linux_receipt),
+                 '--cleanup-id', linux_id, '--cores', str(manifest['cores']),
+                 '--input', str(info) + '=source-identity.json']
+        for predecessor in predecessor_files:
+            linux += ['--input', str(predecessor) + '=.gate-predecessors/' + predecessor.name]
+        if mode == 'quick' and not manifest['command']:
+            linux += ['--input', str(selection) + '=gate-selection.tsv']
+        linux_payload = manifest['command'] or ['bash', 'scripts/gate-leg.sh', mode]
+        if mode == 'quick' and not manifest['command']:
+            linux_payload += ['--selection', 'gate-selection.tsv']
+        linux += ['--', 'python3', 'scripts/gate-measure.py', '--source-info', 'source-identity.json',
+                  '--run-id', manifest['identity'],
+                  '--mode', mode, '--phase', 'linux', '--', *linux_payload]
+        started_receipts.append((linux_receipt, linux_id))
+        current = subprocess.Popen(linux, cwd=source, env=env)
+        result = current.wait()
+        if not receipts.confirmed(linux_receipt, linux_id) or result == 125 or interrupted:
+            return 125
+        return status or result
+    finally:
+        # Positive receipts, not exit-code guesses, authorize capacity reuse.
+        complete = (bool(started_receipts) and
+                    all(receipts.confirmed(p, key) for p, key in started_receipts) and
+                    current is not None and current.poll() is not None)
+        receipts.publish(folder / 'overall-cleanup.json', manifest['identity'],
+                         stopped=complete, status=0 if complete else 125)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'quick'
-    # Use a dedicated, shared-across-checkouts cache so automatic eviction
-    # cannot remove other projects' active Go build output.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', nargs='?', choices=('quick', 'full'), default='quick')
+    parser.add_argument('base', nargs='?')
+    parser.add_argument('--selection', type=Path)
+    parser.add_argument('--repo', type=Path, default=REPO)
+    parser.add_argument('--ref')
+    parser.add_argument('--platform', choices=('native', 'linux', 'both'))
+    parser.add_argument('--priority', choices=('normal', 'release'), default=os.environ.get('GATE_PRIORITY', 'normal'))
+    parser.add_argument('--cores', type=int, default=4)
+    parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
+    parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if args.execute:
+        return execute(args.execute)
+    repo = args.repo.resolve()
+    slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
+                            wait=args.priority == 'release')
     cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
     cache.mkdir(parents=True, exist_ok=True)
-    slot = capacity.acquire(REPO, mode=mode, cores=4)
-    env = dict(os.environ, GOCACHE=str(cache), GOMAXPROCS='4',
-               GATE_TARGET='native', GATE_LOCAL_CAPACITY_HELD='1')
-    report = REPO / '.reports/gate-local.jsonl'
-    status = 0
-    stopped = True
+    identity = uuid.uuid4().hex
+    folder = repo / '.reports/local-gates' / identity
+    folder.mkdir(parents=True)
+    report = repo / '.reports/gate-local.jsonl'
+    manifest = dict(repo=str(repo), mode=args.mode, base=args.base, ref=args.ref,
+                    selection=str(args.selection.resolve()) if args.selection else None,
+                    command=args.command, cores=args.cores, identity=identity,
+                    platform=args.platform or ('native' if args.command else 'both'),
+                    cache=str(cache), report=str(report))
+    path = folder / 'manifest.json'
+    path.write_text(json.dumps(manifest) + '\n')
     try:
-        # Trim only when no second heavy owner exists. Hold admission while
-        # checking/evicting, preventing a new gate from racing the idle test.
-        with capacity.admission_lock(capacity.root(REPO)):
-            others = [p for p in capacity.root(REPO).glob('local-go-slot*')
-                      if p.is_dir() and p != slot.directory]
-            if not others:
+        with capacity.admission_lock(capacity.root(repo)):
+            legacy = [p for d in capacity.legacy_directories(repo) for p in capacity.occupied_lanes(d)]
+            others = [p for p in capacity.occupied_lanes(capacity.root(repo)) if p != slot.directory]
+            if not others and not legacy and not capacity.native_full_custody():
                 trim_cache(cache)
-        sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
-        with tempfile.TemporaryDirectory(prefix='local-', dir=REPO / '.gate') as folder:
-            selection = Path(folder) / 'selection.tsv'
-            if mode == 'quick':
-                if len(sys.argv) > 2 and sys.argv[2] == '--selection':
-                    shutil.copyfile(sys.argv[3], selection)
-                else:
-                    base = sys.argv[2] if len(sys.argv) > 2 else 'origin/main'
-                    with selection.open('w') as output:
-                        subprocess.run([sys.executable, str(REPO / 'scripts/gate-related.py'), base],
-                                       stdout=output, cwd=REPO, check=True)
-            # Preparation is local and may download dependencies once; the
-            # inner gate remains offline and uses its existing fixture custody.
-            subprocess.run(['go', 'mod', 'download'], cwd=REPO, env=env, check=True)
-            if mode == 'full':
-                subprocess.run([sys.executable, 'scripts/upgrade-compat.py', 'prepare'],
-                               cwd=REPO, env=env, check=True)
-            native_args = [mode] if mode == 'full' else ['quick', '--selection', str(selection)]
-            measured = [sys.executable, 'scripts/gate-measure.py', '--report', str(report),
-                        '--source-sha', sha, '--mode', mode, '--', 'bash', 'scripts/gate.sh']
-            stopped = False
-            native = subprocess.run([*measured, *native_args], cwd=REPO, env=env)
-            status = native.returncode
-            if status == 125:
-                return status  # Safety/custody refusal stops dependent work.
-            linux_args = [mode] if mode == 'full' else ['quick', '--selection', 'gate-selection.tsv']
-            linux = [sys.executable, 'scripts/gate-linux.py', '--report', str(report)]
-            if mode == 'quick':
-                linux += ['--input', str(selection) + '=gate-selection.tsv']
-            linux += ['--', 'python3', 'scripts/gate-measure.py', '--source-sha', sha,
-                      '--mode', mode, '--', 'bash', 'scripts/gate.sh', *linux_args]
-            result = subprocess.run(linux, cwd=REPO, env=env)
-            status = status or result.returncode
-            stopped = result.returncode != 125 and native.returncode != 125
-        return status
+        env = dict(os.environ, GOCACHE=str(cache))
+        command = [sys.executable, str(REPO / 'scripts/gate-measure.py'), '--report', str(report),
+                   '--run-id', identity,
+                   '--source-info', str(folder / 'source-identity.json'), '--mode', args.mode,
+                   '--phase', 'host', '--disk-root', str(Path.home()), '--',
+                   sys.executable, str(__file__), '--execute', str(path)]
+        result = subprocess.run(command, cwd=repo, env=env)
+        confirmed = receipts.confirmed(folder / 'overall-cleanup.json', identity)
+        if confirmed and result.returncode == 0:
+            shutil.rmtree(folder / 'source')
+            (folder / 'source.tar').unlink()
+        return result.returncode if confirmed else 125
     finally:
-        # gate-budget marks incomplete fixture cleanup; retain local capacity
-        # on any interruption/unknown result rather than assuming process exit.
-        slot.release(stopped=stopped)
+        slot.release(stopped=receipts.confirmed(folder / 'overall-cleanup.json', identity))
+        print('local gate receipts:', folder, flush=True)
 
 
 if __name__ == '__main__':
     try:
-        (REPO / '.gate').mkdir(exist_ok=True)
         sys.exit(main())
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print('STOP local gate:', error, file=sys.stderr)
         sys.exit(125)
