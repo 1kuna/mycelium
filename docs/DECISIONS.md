@@ -18,21 +18,31 @@ Reviewed: 2026-11-09 (MY-37). Owner: project maintainer. This records sanitized 
   fleet-gate merge requirement for Mycelium development. Independent review,
   real race coverage, custody and native platform proof remain required.
 
-- **MY-38 — 2026-11-09 — Prioritize fast local iteration when updating gate admission.**
+- **MY-38 — 2026-11-09 — Faster tests first, faster iteration second.**
   Zach: “if you need to pause the queue to update and make iteration faster i'd
   prefer you did that rather than just constantly waiting. us being able to
-  iterate fast matters much more”. Source: Zach's direct instruction to the
-  Mycelium orchestrator, recorded in
-  [#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744617550).
-  Received by the local gate implementation worker. Orchestrator interpretation
-  (not Zach's words): this authority covers only the local development gate
-  queue. It may be paused or drained, and never-admitted waiters may be cancelled
-  and restarted with current helpers. Admitted and unknown execution custody
-  is never cleared; an admitted run may be cancelled only through supported gate
-  cancellation and must be restarted immediately. Other projects' fleet work
-  is never held. Release-critical work keeps priority, and each restarted
-  waiter receives its replacement receipt on its PR. This supersedes the earlier
-  orchestrator default to drain older waiters naturally before reactivation.
+  iterate fast matters much more”. Clarification: “i meant pausing the fleet if
+  it means you can apply whatever you need to so we can iterate quicker. but i
+  want you to make the test suite faster too so we can iterate quicker. top
+  priority is faster test suite and second priority is faster iteration so we
+  can reach better stability quicker which can't be done without a faster test
+  suite”. Source: Zach's direct instructions to the Mycelium orchestrator,
+  recorded on [#1086](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744617550)
+  and [the clarification](https://github.com/1kuna/mycelium/issues/1086#issuecomment-6744698723).
+  Received by the local gate landing and test-speed workers. Priority 1 is a
+  faster test suite; priority 2 is faster iteration toward stability. Fleet
+  pauses are authorized when they enable that work; the clarification supersedes
+  the orchestrator's initial local-gate-only interpretation.
+  Orchestrator application (not Zach's words): hold new placements while running
+  jobs finish or reach a checkpoint, never kill them, announce each pause to
+  affected consumer orchestrators, then resume. Before pausing a production host,
+  notify the orchestrator so it can announce the pause. Local never-admitted
+  gate waiters may be cancelled and restarted with current helpers; admitted
+  and unknown execution custody is never cleared. An admitted gate may only
+  be cancelled through supported cancellation; its replacement must restart
+  immediately. Release-critical work keeps priority; post each replacement
+  receipt or session on its PR. Supersedes the earlier orchestrator default to
+  drain older waiters naturally before measured admission is re-enabled.
 
 - **Orchestrator default (not a maintainer ruling), 2026-11-09 — Measured local admission.**
   Received by the local-runner worker after calibration: admit fulls from
