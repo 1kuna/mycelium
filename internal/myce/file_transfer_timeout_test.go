@@ -130,21 +130,26 @@ func TestFileRequestProgressingUnknownLengthUpload(t *testing.T) {
 	// This opaque fixture returns progress only after its aggregated Write.
 	// Darwin measured that operation at 312 ms despite continuing socket writes;
 	// allow three such periods while the complete upload still outlasts idle.
-	c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}, transferIdle: time.Second}
-	start := time.Now()
-	res, err := c.fileRequest(context.Background(), "PATCH", "/upload", io.LimitReader(bytes.NewReader(body), int64(len(body))), nil, int64(len(body)))
-	if err != nil {
-		t.Fatal("progressing upload failed:", err)
+	for _, idle := range []time.Duration{time.Second, 0} {
+		t.Run(idle.String(), func(t *testing.T) {
+			c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}, transferIdle: idle, uploadTiming: &uploadTiming{}}
+			start := time.Now()
+			res, err := c.fileRequest(context.Background(), "PATCH", "/upload", io.LimitReader(bytes.NewReader(body), int64(len(body))), nil, int64(len(body)))
+			if err != nil {
+				t.Fatal("progressing upload failed:", err)
+			}
+			if err := fileResponse(res, http.StatusNoContent); err != nil {
+				t.Fatal(err)
+			}
+			if time.Since(start) <= time.Second {
+				t.Fatal("upload did not exceed idle budget")
+			}
+			if got := <-received; !bytes.Equal(got, body) {
+				t.Fatal("upload truncated", len(got))
+			}
+		})
 	}
-	if err := fileResponse(res, http.StatusNoContent); err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(start) <= c.transferIdle {
-		t.Fatal("upload did not exceed idle budget")
-	}
-	if got := <-received; !bytes.Equal(got, body) {
-		t.Fatal("upload truncated", len(got))
-	}
+
 }
 
 type slowUploadConn struct{ net.Conn }

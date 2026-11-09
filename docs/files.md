@@ -227,14 +227,31 @@ of payloads.
 `get` refuses an existing destination and retains a `.myce-partial` download
 beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.
-Upload creation/HEAD/PATCH follow tus 1.0; retries use its acknowledged offset.
-File transfers use per-socket-operation deadlines, with no whole-request timeout.
-From #810, the no-progress window is learned from observed byte service time
-and gaps, independently of total duration or a presumed disk/network rate.
-Before throughput evidence, and during queue verification before headers, only
-the owner bounds the operation. Go callers use a context deadline; Python
-callers may set `transfer_timeout`. API calls have no default whole-request
-deadline; explicit caller HTTP/socket timeouts retain their meaning.
+Upload creation/HEAD/PATCH follow tus 1.0. If an upload fails on an older
+client, rerun `myce file put` on the unchanged file, or call Python `upload_file`
+again. The digest identifies the same upload; the client queries tus HEAD and
+seeks to the server's accepted offset. Profile/adapter retries retain their same
+submission key and receipt. There is no CLI stall-timeout override.
+
+From the release containing #1100, Go/CLI and Python reconcile an interrupted
+PATCH automatically, including a lost final acknowledgement. They first check
+for a published blob, then query the accepted offset before sending more bytes;
+local socket writes never count as acknowledgement. Typed integrity, authority
+and storage-policy refusals still return immediately. Retry pacing follows the
+current server `Retry-After` or measured service cost with positive jitter.
+
+File transfers have no default whole-request deadline. The per-socket progress
+window learns byte service time and gaps. Upload PATCH windows additionally use
+the upload's observed request round-trip/service time (four service periods of
+jitter allowance) and server `Retry-After` signals, with the one-second TCP
+initial/minimum retransmission timer basis from RFC 6298 sections 2.1/2.4. This
+prevents fast local copies from declaring a dead peer before retransmission;
+slower service and pressure raise the window. Evidence is scoped to one upload.
+A socket with no progress still times out; recovery reconciles rather than
+blindly replaying. Before non-PATCH response headers, only the owner bounds queue
+verification. Go callers use a context deadline; Python `transfer_timeout`
+bounds the whole upload, including retries. API `timeout` is separate and does
+not set this no-progress threshold. There is no default retry-count limit.
 Default and installed pinned TLS clients use this progress policy. An injected
 Go `DialTLSContext`, `DialTLS`, or custom `http.RoundTripper` retains its authority
 and protocol handling and owns its I/O deadlines; custom dial setup is bounded.
