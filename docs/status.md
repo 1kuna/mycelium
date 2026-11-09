@@ -2006,6 +2006,22 @@ most 1 MiB, mode 0600. Structured lifecycle, delivery and failure events exclude
 authority, raw transport errors, notifier paths/targets and environment values.
 The last-error timestamp distinguishes an old refusal from present progress.
 Legacy observers have no diagnostic record; absence cannot establish a cause.
+
+Interpret owner existence, observation and delivery separately. A current
+successful read establishes that observation advanced at that time; a held
+lock or a stale phase alone does not. A quiet long-poll can legitimately wait
+without job changes. Use the recorded read/hold/retry evidence rather than an
+invented fixed age cutoff; missing timing remains unknown. Queue/job status
+and local completion-observer status are separate observations. Job execution
+`liveness` does not establish completion-observer or receiver liveness.
+
+The raw-output fallback is intended to retain only approved aggregate fields:
+event time, `process_output` and byte count, never raw output/error bytes.
+Structured lifecycle records have their separately documented safe fields.
+Verification must include startup/error capture, malformed input and direct
+stdout/stderr paths with synthetic sentinels; bounded log size alone does not
+prove this privacy boundary. Keep expanded paths, authority and notifier
+configuration in their authorized private custody, outside diagnostic output.
 Status snapshots use atomic temporary-file replacement without durable syncs;
 observer progress reconstructs them after an unclean host stop. Receipt, arm
 registration and delivery acknowledgement saves still sync both the file and
