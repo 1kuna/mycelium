@@ -211,12 +211,18 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+	// Transport cancellation can return before the fake upstream has stopped.
+	// Fence finishCall until its teardown is acknowledged, so the next handler
+	// cannot spend released capacity while the fake still counts this request.
+	q.mu.Lock()
 	stop()
 	select {
 	case <-exited:
 	case <-ctx.Done():
+		q.mu.Unlock()
 		t.Fatal("cancel did not reach upstream")
 	}
+	q.mu.Unlock()
 	receive("production")
 	release <- struct{}{}
 	receive("experiment")
