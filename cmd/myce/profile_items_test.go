@@ -58,7 +58,9 @@ check: [test, -s, result]
 `, runtime.GOOS, runtime.GOARCH)
 	write(".mycelium/profiles/items.yaml", profile)
 	write(".gitignore", ".mycelium/receipts/\nitems/\n")
-	write("scripts/process.sh", "test -z \"$MYCE_TOKEN\"\ncat common item > result\nprintf '%s' \"$1\" >> result\nsleep 1\n")
+	// Each invocation is joined before the next; output and replay assertions
+	// depend on the result and source identity, not a minimum payload duration.
+	write("scripts/process.sh", "test -z \"$MYCE_TOKEN\"\ncat common item > result\nprintf '%s' \"$1\" >> result\n")
 	write("common.txt", "common\n")
 	write("docs.txt", "unrelated\n")
 	for _, item := range []string{"one", "two", "three"} {
@@ -171,7 +173,7 @@ check: [test, -s, result]
 	if changed.JobID == first.JobID {
 		t.Fatal("changed item did not rerun")
 	}
-	write("scripts/process.sh", "cat common item > result\nprintf '%s' \"$1\" >> result\nsleep 1\n# relevant change\n")
+	write("scripts/process.sh", "cat common item > result\nprintf '%s' \"$1\" >> result\n# relevant change\n")
 	profileGit(t, root, "add", "scripts/process.sh")
 	profileGit(t, root, "commit", "--quiet", "-m", "relevant")
 	relevant := invoke(root, "one", "one")

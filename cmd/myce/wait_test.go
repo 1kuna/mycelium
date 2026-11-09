@@ -532,7 +532,32 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 
 func TestWaitDeadlineGuidance(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+	api := myce.API{Queue: q, Token: "test-only"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
+			var request myce.WaitRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// Model the steady-state transport hold on the injected clock;
+			// real hold/wakeup coverage lives in TestWaitIndexCommitRollbackAndUnlockedReads.
+			if len(request.After) > 0 {
+				clock.advance(time.Duration(request.Seconds) * time.Second)
+			}
+			request.Seconds = 0
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		}
+		api.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 	client := myce.Client{URL: server.URL, Token: "test-only"}
 	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}
@@ -552,7 +577,6 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 		t.Fatal("default wait repeated scheduler details", diagnostics.String())
 	}
 	var structured bytes.Buffer
-	clock = &waitClock{now: clock.Now()}
 	err = waitJobsReporting(context.Background(), client, nil, []string{j.ID}, 7*time.Second, &structured, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil }, true)
 	var observed myce.Job
 	if exitCode(err) != 3 || json.Unmarshal(bytes.TrimSpace(structured.Bytes()), &observed) != nil || observed.DeadlineGuidance == nil {
