@@ -38,3 +38,16 @@ func validateCurrentCheckin(c Checkin) error {
 func currentProtocolError(message string) error {
 	return &HTTPError{Status: 426, Code: "worker_protocol_invalid", Message: message}
 }
+
+const resourceProtocol = "attempt-resources-v1"
+const resourceProtocolHeader = "X-Myce-Resource-Telemetry"
+const cpuPressureProtocolHeader = "X-Myce-CPU-Pressure"
+const cpuPressureProtocol = "cpu-pressure-v1"
+
+const unifiedMemoryProtocol = "unified-attempt-memory-v1"
+const hostMemorySampleProtocol = "host-memory-sample-v1"
+const probeMemoryProtocol = "cpu-probe-memory-v1"
+
+const hostHygieneProtocol = "host-hygiene-v1"
+const hostCollectionProtocol = "worker-collection-v1"
+const hostMountProgressProtocol = "mount-progress-v1"

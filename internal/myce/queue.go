@@ -1356,11 +1356,11 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	q.publishEfficiencyDiagnostics(diagnostics)
 	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
-func (q *Queue) Checkin(c Checkin) (Reply, error) {
-	return q.CheckinContext(context.Background(), c)
+func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {
+	return q.CheckinKeyedContext(context.Background(), c)
 }
 
-func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
+func (q *Queue) CheckinKeyedContext(ctx context.Context, c Checkin) (Reply, error) {
 	contact, settle := q.trackWorkerCheckin(c.Machine.ID, c.Machine.Session, c.period, true, ctx)
 	c.contact = contact
 	defer settle(false)
@@ -1420,9 +1420,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	preparedMachine := cloneMachine(&c.Machine)
 	reply := Reply{DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
-	if c.AttemptProtocol == "" && c.Running != nil {
-		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
-	}
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {
 		report, progress := &reports[i], &progresses[i]
@@ -1549,18 +1546,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				}
 			}
 		}
-		if c.AttemptProtocol == "" && c.Running == nil && old != nil && old.Session == m.Session {
-			for _, j := range q.liveJobs() {
-				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
-					if cancelled(j) {
-						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session}, false)
-						q.finishCancellation(j)
-					} else {
-						q.retry(j, j.Reason)
-					}
-				}
-			}
-		}
 		q.reconcileHostReleases(c)
 		if m.TotalMemoryGB == 0 {
 			m.TotalMemoryGB = m.FreeMemoryGB
@@ -1652,11 +1637,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
 			cause := report.DockerCause
-			// The legacy worker reports one current attempt, so its host diagnostic
-			// is unambiguous. Modern multi-attempt workers carry the exact cause.
-			if c.AttemptProtocol == "" && len(reports) == 1 {
-				cause = m.DockerCause
-			}
 			r := Result{Execution: report.Execution, Machine: m.ID, Session: report.Session, CleanupCause: cause}
 			if j, err := q.current(r); err == nil && j.Spec.Run.Docker {
 				q.alertAttemptLoss(j, attemptOutcome(j, r), false)
@@ -1773,7 +1753,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				}
 			}
 		}
-		if c.AttemptProtocol != "" && m.Devices != nil {
+		if m.Devices != nil {
 			q.checkinMachineAttempts(&m, reports, progresses, c.Recovering, &reply)
 			q.maintain()
 			return nil
@@ -1784,25 +1764,18 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			seen := map[attemptKey]bool{}
 			for i := range reports {
 				a := q.reconcileAttemptReport(&m, &reports[i], progresses[i])
-				if c.AttemptProtocol == "" {
-					reply.Stop, reply.Kill, reply.Hold = a.Stop, a.Kill, a.Hold
-					reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
-				} else {
-					reply.Attempts = append(reply.Attempts, a)
-					seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
-				}
+				reply.Attempts = append(reply.Attempts, a)
+				seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
 			}
 			// A report for another key neither acknowledges an omitted stop nor
 			// hides it. Keep every outstanding control individually addressed.
-			if c.AttemptProtocol != "" {
-				for _, j := range q.liveJobs() {
-					if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !seen[attemptKey{j.ID, j.Attempt, j.Session}] {
-						if j.ReleaseConfirmed {
-							q.retry(j, j.Reason)
-							continue
-						}
-						reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
+			for _, j := range q.liveJobs() {
+				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !seen[attemptKey{j.ID, j.Attempt, j.Session}] {
+					if j.ReleaseConfirmed {
+						q.retry(j, j.Reason)
+						continue
 					}
+					reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
 				}
 			}
 			return nil
@@ -1816,11 +1789,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
-					if c.AttemptProtocol != "" && !j.ReleaseConfirmed {
+					if !j.ReleaseConfirmed {
 						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}}
-						return nil
-					}
-					if j.Spec.Run.Docker && !j.ReleaseConfirmed {
 						return nil
 					}
 					if cancelled(j) {

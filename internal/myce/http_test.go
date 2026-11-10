@@ -17,7 +17,7 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 	defer server.Close()
 	ctx := context.Background()
 	c := Client{URL: server.URL, Token: "wrong"}
-	if err := c.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: machine("one", "fake"), period: time.Second}, nil); err == nil {
+	if err := c.Call(ctx, "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: machine("one", "fake"), period: time.Second}, nil); err == nil {
 		t.Fatal("unauthorized worker accepted")
 	}
 	c.Token = "secret"
@@ -28,8 +28,11 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var r Reply
-	if err := c.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: machine("one", "fake"), period: time.Second}, &r); err != nil {
+	if err := c.Call(ctx, "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: machine("one", "fake"), period: time.Second}, &r); err != nil {
 		t.Fatal(err)
+	}
+	if len(r.Attempts) > 0 {
+		r.Job = r.Attempts[0].Job
 	}
 	if r.Job == nil || r.Job.ID != j.ID {
 		t.Fatal("pull failed")

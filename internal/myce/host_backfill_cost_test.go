@@ -84,7 +84,7 @@ func BenchmarkHostBackfillControlLoad(b *testing.B) {
 				tick := time.NewTicker(time.Second)
 				defer tick.Stop()
 				for range 8 {
-					body, err := json.Marshal(Checkin{Machine: worker, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: worker.Session, Started: true}}})
+					body, err := json.Marshal(Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: worker, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: worker.Session, Started: true}}})
 					if err != nil {
 						b.Error(err)
 						return

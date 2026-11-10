@@ -48,11 +48,9 @@ func waitOpenQueue(t *testing.T, db, checkpoints string, clock *waitClock) *myce
 	return q
 }
 
-// legacyCLICheckin preserves the headerless wire contract in CLI fixtures.
-// Unknown first arrivals are idle; a real old worker sends again after its
-// default one-second interval. Already qualified reports do not advance time.
-func legacyCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myce.Reply, error) {
-	reply, err := q.Checkin(report)
+// Headerless direct fixtures establish cadence before assignment.
+func currentCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myce.Reply, error) {
+	reply, err := fixtureQueueCheckin(q, report)
 	if err != nil {
 		return reply, err
 	}
@@ -63,7 +61,7 @@ func legacyCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myc
 	for _, m := range snapshot.Machines {
 		if m.ID == report.Machine.ID && m.Session == report.Machine.Session && m.Suspect && reply.Job == nil && len(reply.Attempts) == 0 {
 			clock.advance(time.Second)
-			return q.Checkin(report)
+			return fixtureQueueCheckin(q, report)
 		}
 	}
 	return reply, nil
@@ -129,7 +127,7 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 	var reply myce.Reply
 	wait(t, ctx, func() bool {
 		var err error
-		reply, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		reply, err = currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -499,7 +497,7 @@ func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatalf("assignment: %v %+v %s", err, reply, waitAssignmentDiagnostics(q))
 	}
@@ -699,4 +697,26 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	if err := waitCommand(context.Background(), []string{"job", "--json", "--queue", server.URL, "--token", "fixture"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), `"reason":"full terminal reason"`) {
 		t.Fatal("--json flag", err, out.String())
 	}
+}
+
+func fixtureQueueCheckin(q *myce.Queue, c myce.Checkin) (myce.Reply, error) {
+	keyed := c.AttemptProtocol != ""
+	c.AttemptProtocol = "keyed-attempt-v1"
+	if c.Running != nil {
+		c.Attempts = []myce.AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
+	}
+	c.Running, c.Started = nil, false
+	r, err := q.CheckinKeyed(c)
+	if !keyed {
+		for _, a := range r.Attempts {
+			if a.Job != nil {
+				r.Job = a.Job
+			}
+			if len(c.Attempts) == 1 && c.Attempts[0].Execution == a.Execution && c.Attempts[0].Session == a.Session {
+				r.Stop, r.Kill, r.Hold = a.Stop, a.Kill, a.Hold
+				r.GraceSeconds, r.PriorityStop, r.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
+			}
+		}
+	}
+	return r, err
 }

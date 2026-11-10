@@ -540,7 +540,7 @@ check: [true]
 	m := myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
 		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
 		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "refusal-fixture-secret"

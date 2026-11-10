@@ -292,13 +292,9 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 			// custody until exact release acknowledgement, using ordinary stops.
 			q.stop(j, "assignment files unavailable")
 			a := AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}
-			if reply.AttemptProtocol == "" {
-				reply.Stop, reply.Kill, reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.Stop, a.Kill, a.GraceSeconds, a.PriorityStop, a.UserCancel
-			} else {
-				for i := range reply.Attempts {
-					if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
-						reply.Attempts[i] = a
-					}
+			for i := range reply.Attempts {
+				if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
+					reply.Attempts[i] = a
 				}
 			}
 		}

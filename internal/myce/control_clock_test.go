@@ -184,7 +184,7 @@ func TestControlClockHTTPAdvertisedCadence(t *testing.T) {
 	defer server.Close()
 	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Interval: 7 * time.Second}
 	m := machine("worker", "fake")
-	if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
+	if _, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	if got := q.machineLossTimeout(m.ID); got != 14*time.Second {
@@ -296,12 +296,12 @@ func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
 	w := Worker{Machine: machine("legacy", "fake"), Interval: 12 * time.Second, Client: Client{URL: server.URL, Token: "test"}}
 	j := submit(t, q, spec("production"))
 	c := Checkin{Machine: w.Machine}
-	first, err := w.checkin(context.Background(), c)
+	first, err := w.fixtureCheckin(context.Background(), c)
 	if err != nil || first.Job != nil || len(first.Attempts) != 0 {
 		t.Fatalf("empty idle reply did not remain idle: %+v %v", first, err)
 	}
 	clock.Advance(w.Interval)
-	second, err := w.checkin(context.Background(), c)
+	second, err := w.fixtureCheckin(context.Background(), c)
 	if err != nil || second.Job == nil || second.Job.ID != j.ID || len(second.Attempts) != 1 {
 		t.Fatalf("legacy work waited beyond one observed interval: %+v %v", second, err)
 	}
@@ -529,7 +529,7 @@ func TestControlClockFirstSessionResponseProtected(t *testing.T) {
 			}
 			m, peer := machine("worker", "fake"), machine("peer", "fake")
 			check(t, q, peer, nil)
-			c := Checkin{Machine: m}
+			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
 			if replacement {
 				check(t, q, m, nil)
 				c.Machine.Session = "replacement-session"

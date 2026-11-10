@@ -22,39 +22,6 @@ func attemptWire(t *testing.T, client Client, c Checkin) Reply {
 	return reply
 }
 
-func TestAttemptProtocolLegacyWorkerNewQueue(t *testing.T) {
-	q, clock := fixture(t)
-	server := httptest.NewServer(API{q, "test"}.Handler())
-	defer server.Close()
-	client := Client{URL: server.URL, Token: "test"}
-	m := machine("legacy", "fake")
-	submit(t, q, spec("experiment"))
-	reply := attemptWire(t, client, Checkin{Machine: m})
-	if reply.Job != nil || len(reply.Attempts) != 0 {
-		t.Fatal("cold legacy sender received work before establishing cadence")
-	}
-	clock.Advance(time.Second)
-	reply = attemptWire(t, client, Checkin{Machine: m})
-	if reply.Job == nil || reply.AttemptProtocol != "" || len(reply.Attempts) != 0 {
-		t.Fatalf("legacy assignment changed: %+v", reply)
-	}
-	j := reply.Job
-	clock.Advance(time.Second)
-	c := Checkin{Machine: m, Running: &Execution{ID: j.ID, Attempt: j.Attempt, Progress: 7}, Started: true}
-	if reply = attemptWire(t, client, c); reply.Stop || job(t, q, j.ID).Progress != 7 {
-		t.Fatal("legacy heartbeat/progress changed")
-	}
-	submit(t, q, spec("production"))
-	reply = attemptWire(t, client, c)
-	if !reply.Stop || reply.Kill || reply.GraceSeconds != 10 || reply.PriorityStop == nil || reply.PriorityStop.Cause != "priority_preemption" {
-		t.Fatalf("legacy P3 stop changed: %+v", reply)
-	}
-	finishInterrupted(t, q, j)
-	if got := job(t, q, j.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
-		t.Fatalf("planned stop charged retries: %+v", got)
-	}
-}
-
 func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
 	q, clock := fixture(t)
 	server := httptest.NewServer(API{q, "test"}.Handler())
@@ -62,7 +29,7 @@ func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
 	w := Worker{Clock: clock, Machine: machine("keyed", "fake"), Client: Client{URL: server.URL, Token: "test"}}
 	submit(t, q, spec("experiment"))
 	c := Checkin{Machine: w.Machine}
-	reply, err := w.checkin(context.Background(), c)
+	reply, err := w.fixtureCheckin(context.Background(), c)
 	if err != nil || reply.Job == nil || reply.Job.Session != c.Machine.Session {
 		t.Fatalf("keyed assignment: %+v %v", reply, err)
 	}
@@ -71,7 +38,7 @@ func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
 	clock.Advance(time.Second)
 	c.Running = &Execution{ID: j.ID, Attempt: j.Attempt, Progress: 9}
 	c.Started = true
-	reply, err = w.checkin(context.Background(), c)
+	reply, err = w.fixtureCheckin(context.Background(), c)
 	if err != nil || reply.Stop || reply.Job != nil || job(t, q, j.ID).Progress != 9 || job(t, q, j.ID).StartedAt == nil {
 		t.Fatalf("keyed heartbeat admitted a neighbor or lost progress: %+v %v", reply, err)
 	}
@@ -82,7 +49,7 @@ func TestAttemptProtocolKeyedWorkerNewQueue(t *testing.T) {
 		t.Fatalf("wire lost assignment identity: %+v", wire)
 	}
 	submit(t, q, spec("production"))
-	reply, err = w.checkin(context.Background(), c)
+	reply, err = w.fixtureCheckin(context.Background(), c)
 	if err != nil || !reply.Stop || reply.PriorityStop == nil || reply.GraceSeconds != 10 {
 		t.Fatalf("keyed P3 stop: %+v %v", reply, err)
 	}
@@ -120,7 +87,7 @@ func TestAttemptProtocolOldQueueRefused(t *testing.T) {
 			}))
 			defer server.Close()
 			w := Worker{Machine: machine("new", "fake"), Client: Client{URL: server.URL, Token: "test"}}
-			reply, err := w.checkin(context.Background(), Checkin{Machine: w.Machine})
+			reply, err := w.fixtureCheckin(context.Background(), Checkin{Machine: w.Machine})
 			var he *HTTPError
 			if !errors.As(err, &he) || he.Status != 426 || he.Code != "worker_protocol_invalid" || reply.Stop || reply.Job != nil {
 				t.Fatalf("old queue not clearly refused: %+v %v", reply, err)
@@ -178,6 +145,8 @@ func TestAttemptProtocolInvalidReports(t *testing.T) {
 	for _, edit := range []func(*Checkin){
 		func(c *Checkin) { c.AttemptProtocol = "unknown" },
 		func(c *Checkin) { c.AttemptProtocol = "" },
+		func(c *Checkin) { c.AttemptProtocol = ""; c.Attempts = nil },
+		func(c *Checkin) { c.AttemptProtocol = ""; c.Running = &c.Attempts[0].Execution; c.Attempts = nil },
 		func(c *Checkin) { c.Attempts[0].Session = "" },
 		func(c *Checkin) { c.Attempts[0].Session = "other" },
 		func(c *Checkin) { c.Attempts[0].ID = "" },

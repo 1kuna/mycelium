@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -218,47 +217,13 @@ func TestExecutionEvidenceMemberProjection(t *testing.T) {
 	}
 }
 
-func TestExecutionEvidenceProtocolCompatibility(t *testing.T) {
-	wire := &resourceWire{}
-	old := false
-	sent := []bool{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		_, has := body["execution_evidence"]
-		sent = append(sent, has)
-		if old && has {
-			w.WriteHeader(400)
-			w.Write([]byte(`{"code":"request_invalid","error":"unknown field"}`))
-			return
-		}
-		if !old {
-			w.Header().Set(executionEvidenceProtocolHeader, executionEvidenceProtocol)
-		}
-		w.Write([]byte(`{}`))
-	}))
-	defer server.Close()
-	client := Client{URL: server.URL, resourceWire: wire}
-	result := Result{Execution: Execution{Attempt: 1}, ExecutionEvidence: unstartedExecution(1)}
-	for i := 0; i < 4; i++ {
-		if i == 2 {
-			old = true
-		}
-		if err := client.Call(context.Background(), "POST", "/api/workers/complete", &result, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !reflect.DeepEqual(sent, []bool{false, true, true, false, false}) || result.ExecutionEvidence == nil {
-		t.Fatal("wire/durable evidence changed", sent)
-	}
+func TestExecutionEvidenceUntrustedStates(t *testing.T) {
 	bad := safeExecutionEvidence(&ExecutionEvidence{1, "private-secret", executionNotStarted, ""}, 1)
 	data, _ := json.Marshal(bad)
 	if strings.Contains(string(data), "private-secret") || bad.Main != executionUnknown || bad.EnvironmentPreparation != executionUnknown {
 		t.Fatal("untrusted state escaped", bad)
 	}
-	if safeExecutionEvidence(result.ExecutionEvidence, 2) != nil {
+	if safeExecutionEvidence(unstartedExecution(1), 2) != nil {
 		t.Fatal("wrong attempt proof accepted")
 	}
 }

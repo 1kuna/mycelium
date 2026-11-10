@@ -41,7 +41,7 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
-	badCheckin := Checkin{Machine: machine("current", "fake")}
+	badCheckin := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: machine("current", "fake")}
 	badCheckin.Machine.CapabilityProfile = nil
 	var reply Reply
 	err := client.Call(context.Background(), "POST", "/api/workers/checkin", badCheckin, &reply)

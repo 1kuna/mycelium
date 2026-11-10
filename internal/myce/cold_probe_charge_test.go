@@ -15,7 +15,7 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 	oldRSS := workerMemoryRSS
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
-	for _, evidence := range []string{"fresh", "missing", "stale", "legacy", "wrong attempt"} {
+	for _, evidence := range []string{"fresh", "missing", "stale", "wrong attempt"} {
 		t.Run(evidence, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := unifiedCUDAAdmissionMachine()
@@ -59,9 +59,6 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 			pending := submit(t, q, cpuSpec(2, 2))
 			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return 99, nil }}
 			w.sampleHeartbeatMemory(context.Background(), &m, []Job{*probe}, reports, actors)
-			if evidence == "legacy" {
-				reports = legacyProbeMemoryCheckin(Checkin{Attempts: reports}).Attempts
-			}
 			reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
 			if err != nil {
 				t.Fatal(err)

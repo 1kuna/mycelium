@@ -520,7 +520,7 @@ func TestHostHealthQueueDelayHTTPResponse(t *testing.T) {
 			handler := API{Queue: q, Token: "test"}.Handler()
 			nas := q.resolveNASInspections()
 			nas.mu.Lock()
-			body, err := json.Marshal(Checkin{Machine: m})
+			body, err := json.Marshal(Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m})
 			if err != nil {
 				t.Fatal(err)
 			}

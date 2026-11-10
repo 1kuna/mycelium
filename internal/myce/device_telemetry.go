@@ -25,28 +25,7 @@ func validDeviceTelemetry(s *DeviceTelemetry) bool {
 		(s.ActivePercent == nil || validMemoryValue(*s.ActivePercent) && *s.ActivePercent <= 100)
 }
 
-func legacyDeviceTelemetryCheckin(c Checkin) Checkin {
-	c.Machine.Devices = slices.Clone(c.Machine.Devices)
-	for i := range c.Machine.Devices {
-		c.Machine.Devices[i].Telemetry = nil
-	}
-	return c
-}
-
-func hasDeviceTelemetry(c Checkin) bool {
-	for _, d := range c.Machine.Devices {
-		if d.Telemetry != nil {
-			return true
-		}
-	}
-	return false
-}
-
 func (w Worker) deviceTelemetryCheckin(c Checkin) Checkin {
-	if w.unifiedMemoryWire == nil || !w.unifiedMemoryWire.telemetrySupported ||
-		w.unifiedMemoryWire.machine != c.Machine.ID || w.unifiedMemoryWire.session != c.Machine.Session {
-		return legacyDeviceTelemetryCheckin(c)
-	}
 	c.Machine.Devices = slices.Clone(c.Machine.Devices)
 	clock := w.Clock
 	if clock == nil {

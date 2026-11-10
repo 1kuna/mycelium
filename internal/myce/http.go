@@ -633,10 +633,9 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	resourceWire *resourceWire
-	URL          string
-	Token        string
-	HTTP         *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	URL   string
+	Token string
+	HTTP  *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
 	uploadTiming  *uploadTiming
@@ -649,12 +648,6 @@ type Client struct {
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
 	ctx, cancel := c.apiContext(ctx)
 	defer cancel()
-	supported := c.resourceWire != nil && c.resourceWire.supported.Load()
-	cpuPressure := c.resourceWire != nil && c.resourceWire.cpuPressure.Load()
-	in, evidenceFields := executionEvidenceWireInput(in, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
-	in, resourceFields := resourceWireInput(in, supported, cpuPressure)
-	in, finalizationFields := finalizationWireInput(in, false)
-	withoutContributors, contributorFields := withoutAdmissionContributors(in)
 	clock := c.clock()
 	pace := ClientPace{}
 	var last error
@@ -662,20 +655,6 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		started := clock.Now()
 		err := c.callOnce(ctx, method, path, in, out)
 		var api *HTTPError
-		if (resourceFields || evidenceFields || finalizationFields || contributorFields) && path != "/api/workers/checkin" && errors.As(err, &api) && api.Status == 400 && api.Code == "request_invalid" {
-			// Strict JSON rejection occurs before mutation. Finalization has no
-			// negotiated protocol: remove it independently, retaining telemetry
-			// advertised by this response. Keep the durable local result intact.
-			if c.resourceWire != nil && !finalizationFields {
-				c.resourceWire.supported.Store(false)
-				c.resourceWire.cpuPressure.Store(false)
-				c.resourceWire.executionEvidence.Store(false)
-			}
-			legacy, _ := executionEvidenceWireInput(withoutContributors, c.resourceWire != nil && c.resourceWire.executionEvidence.Load())
-			legacy, _ = resourceWireInput(legacy, c.resourceWire != nil && c.resourceWire.supported.Load(), c.resourceWire != nil && c.resourceWire.cpuPressure.Load())
-			legacy, _ = finalizationWireInput(legacy, true)
-			return c.callOnce(ctx, method, path, legacy, out)
-		}
 		safe := method == "GET" || method == "HEAD"
 		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
 			if last != nil && ctx.Err() != nil {
@@ -723,11 +702,6 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
-	if c.resourceWire != nil && workerProtocolEndpoint(path) {
-		c.resourceWire.executionEvidence.Store(res.Header.Get(executionEvidenceProtocolHeader) == executionEvidenceProtocol)
-		c.resourceWire.supported.Store(res.Header.Get(resourceProtocolHeader) == resourceProtocol)
-		c.resourceWire.cpuPressure.Store(res.Header.Get(cpuPressureProtocolHeader) == cpuPressureProtocol)
-	}
 	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
 		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
 	}

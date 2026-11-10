@@ -17,7 +17,7 @@ func TestStatusJSONPressureView(t *testing.T) {
 	q, _, _, _ := waitQueue(t)
 	release := myce.RunningRelease{Version: "v1.2.3", Commit: "0123456789abcdef"}
 	m := myce.Machine{CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 16 << 30}, ID: "worker", Session: "running-session", GPU: "fake", FreeMemoryGB: 8, Release: &release}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	live := myce.API{Queue: q, Token: "test-only"}.Handler()

@@ -28,8 +28,6 @@ var workerCheckpointPrepare = prepareCheckpoint
 type Worker struct {
 	storageHealth        *hostHealthMonitor
 	hygieneCollector     *workerHygieneCollector
-	hygieneWire          *workerHygieneWire
-	unifiedMemoryWire    *workerUnifiedMemoryWire
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
 	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
 	nasInspection        *workerNASInspection
@@ -1156,9 +1154,6 @@ func (w Worker) Run(stop context.Context) error {
 		w.serviceStop = stop
 	}
 	w.controlLatency = &workerControlLatency{}
-	w.Client.resourceWire = &resourceWire{}
-	w.hygieneWire = &workerHygieneWire{}
-	w.unifiedMemoryWire = &workerUnifiedMemoryWire{}
 	w.toolReport = &workerToolReport{}
 	if w.rootMonitor == nil {
 		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}

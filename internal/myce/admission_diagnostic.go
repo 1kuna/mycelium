@@ -38,41 +38,6 @@ type HostGrowthContributor struct {
 // A strict predecessor queue can reject this additive diagnostic after a
 // rollback. Strip only the wire copy: local outcome/release replay must keep
 // its complete evidence, including through saved-result and saved-log delivery.
-func withoutAdmissionContributors(in any) (any, bool) {
-	result := func(r Result) (Result, bool) {
-		changed := false
-		cause := func(c *RuntimeCause) *RuntimeCause {
-			if c == nil || c.Admission == nil || len(c.Admission.Contributors) == 0 {
-				return c
-			}
-			copy, detail := *c, *c.Admission
-			detail.Contributors = nil
-			copy.Admission, changed = &detail, true
-			return &copy
-		}
-		r.ExecutionCause, r.CleanupCause = cause(r.ExecutionCause), cause(r.CleanupCause)
-		return r, changed
-	}
-	switch v := in.(type) {
-	case *Result:
-		if v != nil {
-			return result(*v)
-		}
-	case Result:
-		return result(v)
-	case *LogChunk:
-		if v != nil {
-			return withoutAdmissionContributors(*v)
-		}
-	case LogChunk:
-		var changed bool
-		v.Result, changed = result(v.Result)
-		return v, changed
-	}
-	return in, false
-}
-
-type admissionError struct{ detail AdmissionDetail }
 
 func (e *admissionError) Error() string {
 	check := e.detail.Subcheck

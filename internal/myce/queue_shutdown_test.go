@@ -52,7 +52,7 @@ func TestQueueShutdownPreservesRunningAttempt(t *testing.T) {
 	request := make(chan error, 1)
 	go func() {
 		client := Client{URL: server.URL, Token: "test"}
-		request <- client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: peer}, nil)
+		request <- client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: peer}, nil)
 	}()
 	<-entered
 	q.BeginShutdown()

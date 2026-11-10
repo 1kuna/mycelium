@@ -606,7 +606,7 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Machine = m
 	var policyReply Reply
-	if err := w.Client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m}, &policyReply); err != nil {
+	if err := w.Client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}, &policyReply); err != nil {
 		t.Fatal(err)
 	}
 	w.Machine.HostMemoryBudgetGB = policyReply.HostMemoryBudget.GiB

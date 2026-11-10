@@ -51,7 +51,7 @@ func TestMachineRecoveryRejectsUnexpectedOffer(t *testing.T) {
 	}))
 	defer server.Close()
 	w := Worker{Machine: m, Client: Client{URL: server.URL, Token: "test"}}
-	r, err := w.checkin(context.Background(), recoveryCheckin(t, m))
+	r, err := w.fixtureCheckin(context.Background(), recoveryCheckin(t, m))
 	var protocol *HTTPError
 	if !errors.As(err, &protocol) || protocol.Status != 426 || protocol.Code != "worker_protocol_invalid" || r.Job != nil || len(r.Attempts) != 0 {
 		t.Fatal("recovery offer accepted instead of preserving custody", r, err)
