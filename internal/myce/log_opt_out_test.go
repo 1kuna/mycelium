@@ -130,7 +130,7 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			}
 			assertNoBatchLogs(t, q, j.ID, run.state)
 			var snapshot Snapshot
-			req := httptest.NewRequest("GET", "/api/status", nil)
+			req := httptest.NewRequest("GET", "/api/status?jobs=all&detail=full", nil)
 			req.Header.Set("Authorization", "Bearer test")
 			response := httptest.NewRecorder()
 			API{Queue: q, Token: "test"}.Handler().ServeHTTP(response, req)

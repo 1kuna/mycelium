@@ -13,6 +13,34 @@ files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
 partial transfers and pins persist through restart. See [models](../services.md)
 and [files](../files.md) for transfer, retention and cache limits.
 
+### Local acquisition root (#1248, next release)
+
+The supported installer accepts a selected local model source/acquisition root:
+
+```sh
+myce install worker --config CONFIG --model-root /local/model-acquisition --dry-run
+myce install worker --config CONFIG --model-root /local/model-acquisition
+```
+
+Use a real local directory with measured headroom above the filesystem floor.
+Outside the selected NAS, installer preflight verifies a local filesystem,
+directory ancestry, and write/sync/rename access. Checkpoint and environment
+source roots still require their selected mounted NAS and normal health probes.
+Saved configuration, identity, active-attempt checks and installer rollback stay
+on the supported reconfiguration path; no settings-file edit or mount bypass is
+needed. Dry-run and real installation perform the same read-only local-volume
+and headroom selection checks. Real preflight additionally probes write access
+before changing saved settings or services.
+
+The acquisition root is the source of immutable hub snapshots; the verified
+read-only execution copies live in the worker's model-snapshot cache and share
+its filesystem budget with other caches. This distinction allows acquisition
+to avoid charged network-filesystem dirty writeback. Catalog masters on NAS
+remain untouched. Moving the setting does not copy or delete old masters,
+download weights, authorize deleting a last unique source, or migrate a live
+attempt. Populate the selected acquisition root through the normal download
+job before requesting a snapshot there.
+
 ## General model servers and joint measurement
 
 General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,

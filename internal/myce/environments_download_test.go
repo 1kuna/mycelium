@@ -50,6 +50,15 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 					_, err := fmt.Fprint(out, `{"environment_variables":{"PATH":"/usr/bin:/bin"}}`)
 					return err
 				}
+				if vars["GOCACHE"] == "" || !withinNAS(dir, vars["GOCACHE"]) {
+					return errors.New("compiler cache escaped owned build prefix")
+				}
+				if err := os.MkdirAll(vars["GOCACHE"], 0700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(vars["GOCACHE"], "object"), make([]byte, 4096), 0600); err != nil {
+					return err
+				}
 				if args[1] == "venv" {
 					return nil
 				}
@@ -71,6 +80,9 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 					t.Fatal(err)
 				}
 				release()
+				if _, err := os.Stat(filepath.Join(c.Root, key, ".compiler-cache")); !os.IsNotExist(err) {
+					t.Fatal("joined builder retained rebuildable compiler cache", err)
+				}
 			}
 			if downloads != 1 {
 				t.Fatalf("wheel downloads=%d, want 1", downloads)

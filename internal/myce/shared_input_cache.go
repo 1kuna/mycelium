@@ -23,6 +23,7 @@ import (
 // Reuse the environment cache's OS locking and state-root initialization. Data
 // entries have their own integrity records and no environment/catalog lifecycle.
 type SharedInputCache struct {
+	budget                 *workerDiskBudget
 	cache                  EnvironmentCache
 	automatic              bool
 	readNAS                func(*os.File, []byte) (int, error)
@@ -66,7 +67,8 @@ func recordSharedVerification(root, signature string) error {
 }
 
 type sharedEntry struct {
-	Files FileManifest `json:"files"`
+	Files    FileManifest          `json:"files"`
+	Recovery *sharedRecoverySource `json:"recovery,omitempty"`
 }
 
 func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative string) (string, error) {
@@ -240,6 +242,11 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		c.verified[key] = signature
 		c.mu.Unlock()
 		valid = true
+		if c.budget != nil {
+			if err = saveWorkerJSON(root, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}); err != nil {
+				return "", err
+			}
+		}
 		c.mu.Lock()
 		c.hits++
 		c.mu.Unlock()
@@ -255,6 +262,17 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	err = c.stageInputNamed(ctx, key, func(ctx context.Context, stage string) error {
+		if c.budget != nil {
+			if err := saveWorkerJSON(stage, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}); err != nil {
+				return err
+			}
+		}
+		floor, _ := ctx.Value(diskBudgetFloorKey{}).(uint64)
+		release, err := c.budget.reserve(ctx, c.cache.Root, uint64(max(0, need)), floor)
+		if err != nil {
+			return err
+		}
+		defer release()
 		// The stage build lock protects this local verification, without holding
 		// admission while hashing. Completed archives no longer need transfer space.
 		complete, e := completedSharedStage(ctx, stage)
@@ -554,7 +572,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
-	b, err := json.Marshal(sharedEntry{files})
+	b, err := json.Marshal(sharedEntry{Files: files, Recovery: &sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}})
 	if err != nil {
 		return err
 	}
@@ -860,6 +878,28 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 				return e
 			}
 			continue
+		}
+		if c.budget != nil {
+			var recovery sharedRecoverySource
+			data, err := os.ReadFile(filepath.Join(c.cache.Root, v.name, "recovery.json"))
+			if err != nil || json.Unmarshal(data, &recovery) != nil || c.recoverable(ctx, &recovery, filepath.Join(c.cache.Root, v.name)) != nil {
+				unlockEnvironment(use)
+				continue
+			}
+			key := v.name
+			if strings.HasSuffix(v.name, ".partial") {
+				data, err := os.ReadFile(filepath.Join(c.cache.Root, v.name, "resume"))
+				if err != nil {
+					unlockEnvironment(use)
+					continue
+				}
+				key = string(data)
+			}
+			referenced, err := c.queueReferenced(ctx, key, &recovery)
+			if err != nil || referenced {
+				unlockEnvironment(use)
+				continue
+			}
 		}
 		e = removeSharedEntry(filepath.Join(c.cache.Root, v.name))
 		unlockEnvironment(use)
