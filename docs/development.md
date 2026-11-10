@@ -16,6 +16,32 @@ nodes and queue availability. On Darwin, the default gate includes native Darwin
 and a directly invoked local Linux VM. Inspect load/memory/disk before heavy work;
 use the capacity admission below rather than creating additional test processes.
 
+## Private developer evidence
+
+Git ignore rules do not exclude Go source from `go list ./...`, `go vet ./...`
+or other recursive Go commands. Give any ignored evidence directory containing
+Go files its own local, ignored `go.mod`, for example:
+
+```sh
+mkdir -p ops/private
+# Create only when absent; preserve an existing module definition.
+test -e ops/private/go.mod || printf 'module local.invalid/private-evidence\n' > ops/private/go.mod
+```
+
+The nested module is excluded from the parent module's `./...` traversal, even
+when evidence contains mixed packages or C files. Keep this file local with the
+evidence. New scratch directories can instead start with `.` or `_`, which Go
+also skips. Do not delete evidence to make tooling pass.
+
+The local gate trims its dedicated Go build cache to 12 GiB at every entry and
+exit, including overlapping runs. It evicts oldest Go object files only; Go
+rebuilds them on demand. Concurrent compilation can temporarily grow the cache
+between these scans. Module downloads, timing and compatibility records, and
+custody receipts are retained; symlinked directories are never traversed.
+After affirmative cleanup, successful and failed runs both remove their frozen
+source tree and source/runtime archives. Unconfirmed cleanup retains the tree
+for recovery; verdicts and receipts remain available in either case.
+
 ## Laptop test gates
 
 On the 64 GB development host, install Lima and prepare the local Linux VM once

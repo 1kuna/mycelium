@@ -601,6 +601,72 @@ sys.exit(m.main())
             self.assertEqual((evidence / 'source.tar').read_text(), 'retained')
 
 
+    def test_trim_preserves_symlinks_and_handles_concurrent_eviction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache, outside = root / 'cache', root / 'outside'
+            (cache / 'ab').mkdir(parents=True)
+            outside.mkdir()
+            unique = outside / ('a' * 64 + '-d')
+            unique.write_text('unique evidence')
+            (cache / 'cd').symlink_to(outside, target_is_directory=True)
+            (cache / 'ab' / ('b' * 64 + '-d')).symlink_to(unique)
+            (cache / 'ab' / ('c' * 64 + '-a')).mkdir()
+            obj = cache / 'ab' / ('d' * 64 + '-d')
+            obj.write_text('rebuildable')
+            original = Path.unlink
+            def racing_unlink(path, *args, **kwargs):
+                if path == obj:
+                    original(path)  # Concurrent Go cleanup removes it first.
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'unlink', racing_unlink):
+                self.assertEqual(local.trim_cache(cache, limit=0), 0)
+            self.assertEqual(unique.read_text(), 'unique evidence')
+            self.assertTrue((cache / 'ab' / ('b' * 64 + '-d')).is_symlink())
+            with self.assertRaises(ValueError):
+                local.trim_cache(cache, limit=-1)
+
+    def test_entry_exit_trim_and_terminal_source_cleanup(self):
+        for status, confirmed in ((0, True), (1, True), (125, False)):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                slot = Mock(directory=root / 'lane', owner={})
+                run_folder = None
+                events = []
+                def trim(cache):
+                    events.append('trim')
+                def admit(*args, **kwargs):
+                    self.assertEqual(events, ['trim'])
+                    return slot
+                def supervised(command, **kwargs):
+                    nonlocal run_folder
+                    manifest_path = Path(command[-1])
+                    manifest = json.loads(manifest_path.read_text())
+                    run_folder = manifest_path.parent
+                    (run_folder / 'source').mkdir()
+                    (run_folder / 'source' / 'file.go').write_text('snapshot')
+                    for name in ('source.tar', 'runtime.tar'):
+                        (run_folder / name).write_text('rebuildable')
+                    if confirmed:
+                        local.receipts.publish(run_folder / 'overall-cleanup.json',
+                            manifest['identity'], stopped=True, status=status)
+                    events.append('payload')
+                    return Mock(wait=Mock(return_value=status))
+                with (patch.object(sys, 'argv', ['gate-local.py', '--repo', str(root), '--command', 'true']),
+                      patch.object(Path, 'home', return_value=root),
+                      patch.object(local.capacity, 'acquire', side_effect=admit),
+                      patch.object(local.capacity, 'execution_lanes', return_value=[root / 'other']),
+                      patch.object(local.capacity, 'native_full_custody', return_value=True),
+                      patch.object(local, 'trim_cache', side_effect=trim),
+                      patch.object(local.subprocess, 'Popen', side_effect=supervised)):
+                    self.assertEqual(local.main(), status)
+                self.assertEqual(events, ['trim', 'payload', 'trim'])
+                for name in ('source', 'source.tar', 'runtime.tar'):
+                    self.assertEqual((run_folder / name).exists(), not confirmed)
+                self.assertTrue((run_folder / 'manifest.json').exists())
+                slot.release.assert_called_once_with(stopped=confirmed)
+
+
     def test_legacy_unknown_owner_blocks_full_even_with_free_second_lane(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
