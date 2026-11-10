@@ -452,8 +452,14 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
             sequence = max(previous) + 1
             publish_waiting(sequence_path, str(sequence))
             queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
+            # Frozen older quick callers only honor an exclusive calibration
+            # waiter. Encode that drain in the waiting ticket so they cannot
+            # overtake this FIFO either. It reserves no execution capacity;
+            # actual admission/owner priority and exclusivity stay unchanged.
             publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
-                priority=priority, mode=mode, sequence=sequence, exclusive=exclusive)) + '\n')
+                admission_protocol=3, priority='calibration', exclusive=True,
+                requested_priority=priority, requested_exclusive=exclusive,
+                mode=mode, sequence=sequence)) + '\n')
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
         while True:

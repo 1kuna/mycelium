@@ -663,6 +663,16 @@ slot.release()
                         if time.monotonic() > deadline: self.fail('normal quick did not queue')
                         time.sleep(.01)
                     first.release()  # A lane now fits every following request.
+                    # Pre-FIFO quick callers had no ticket of their own and
+                    # used this rank/exclusive predicate to honor a drain.
+                    # They must not bypass the new FIFO during an upgrade.
+                    rank = {'calibration': 0, 'release': 1, 'normal': 2}
+                    waiting = [json.loads(path.read_text()) for path in capacity.full_waiters(root)]
+                    for priority in rank:
+                        self.assertTrue(any(row.get('exclusive') and
+                            rank[priority] >= rank[row['priority']] for row in waiting))
+                    self.assertEqual(waiting[0]['requested_priority'], 'normal')
+                    self.assertFalse(waiting[0]['requested_exclusive'])
                     for mode, priority in [('quick', 'release'), ('full', 'release'),
                                            ('full', 'calibration')] * 3:
                         with self.assertRaisesRegex(RuntimeError, 'capacity busy'):

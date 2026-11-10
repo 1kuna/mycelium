@@ -327,7 +327,10 @@ request. This prevents the observed starvation of ordinary quicks by successive
 release-labelled requests. Quick requests always use normal admission, including
 when `--priority release` or `GATE_PRIORITY=release` is supplied. Release labels
 on fulls also give no queue precedence; calibration labels only qualify isolated
-measurements. No polling or relay is needed. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
+measurements. Waiting tickets encode the older exclusive-calibration drain so
+frozen older callers also honor the FIFO. That compatibility encoding reserves
+no execution capacity and grants no priority to the admitted gate.
+No polling or relay is needed. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
 removed only after OS process identity proves it has exited or is a zombie. Execution slots
 and unknown holder custody are separate from that queue cleanup. There is
 no queue timeout. With normal pressure, insufficient available memory is
