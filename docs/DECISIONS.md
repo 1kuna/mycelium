@@ -4,6 +4,14 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
 
 ## Current rulings
 
+- <a id="my-43"></a>**MY-43 — 2026-11-10 — Compute and token efficient.**
+  Zach: “i want our program to be both compute and token efficient”, approving
+  the orchestrator's proposal that agents report only on a state change, a fault
+  or a needed decision, plus one final summary, and that default status output be
+  small. Applies to Mycelium's product (control-plane cost per check-in; small
+  default status and one batched wait for consumer agents, #1120/#1053) and to
+  how Mycelium's agents report. Received by the Mycelium orchestrator, which carries it into worker briefs.
+
 - <a id="my-42"></a>**MY-42 — 2026-11-10 — Current and previous release only.**
   Source: Zach, answering refactor review finding 10: “yes drop old migration code”.
   The review proposed the floor “current and previous release only”; Zach approved
