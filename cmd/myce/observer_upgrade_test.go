@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,15 +85,25 @@ func TestObserverNewerCLIHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	oldVersion := myce.BuildVersion
-	myce.BuildVersion = "v3.0.0"
-	defer func() { myce.BuildVersion = oldVersion }()
+	old := filepath.Join(filepath.Dir(next), "old", "myce-dev-test")
+	if err := os.MkdirAll(filepath.Dir(old), 0700); err != nil {
+		t.Fatal(err)
+	}
+	buildOld := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", "-X mycelium/internal/myce.BuildVersion=v3.0.0", "-o", old, ".")
+	if out, err := buildOld.CombinedOutput(); err != nil {
+		t.Fatalf("build previous image: %v %s", err, out)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- runSharedProfileLoop(ctx, registry, lock, myce.RealClock{}, func(ctx context.Context, _ time.Duration) error { return waitPause(ctx, 10*time.Millisecond) })
-	}()
+	if err := startSharedObserver(ctx, old, registry, lock); err != nil {
+		t.Fatal(err)
+	}
+	lock.Close()
+	var previous observerSupervision
+	if err := readProfileJSON(filepath.Join(registry, "observer.supervision"), &previous); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(previous.PID, syscall.SIGTERM) })
 	wait(t, ctx, func() bool { return reads.Load() > 0 })
 	invoke := func() {
 		t.Helper()
@@ -104,19 +115,28 @@ func TestObserverNewerCLIHandoff(t *testing.T) {
 		}
 	}
 	invoke()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal("old observer did not hand off")
+	wait(t, ctx, func() bool {
+		var owner observerSupervision
+		var state observerDiagnostic
+		return readProfileJSON(filepath.Join(registry, "observer.supervision"), &owner) == nil && owner.PID != previous.PID &&
+			readProfileJSON(filepath.Join(registry, "observer.status"), &state) == nil && state.Version == "v3.1.0"
+	})
+	var replacement observerSupervision
+	if err := readProfileJSON(filepath.Join(registry, "observer.supervision"), &replacement); err != nil {
+		t.Fatal(err)
 	}
-	lock.Close()
+	t.Cleanup(func() { _ = syscall.Kill(replacement.PID, syscall.SIGTERM) })
 	var state observerDiagnostic
 	if err = readProfileJSON(filepath.Join(registry, "observer.status"), &state); err != nil || state.PID == os.Getpid() || state.Version != "v3.1.0" {
 		t.Fatalf("replacement metadata: %+v %v", state, err)
 	}
+	if err := syscall.Kill(state.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, ctx, func() bool {
+		var recovered observerDiagnostic
+		return readProfileJSON(filepath.Join(registry, "observer.status"), &recovered) == nil && recovered.PID != state.PID && recovered.Version == "v3.1.0"
+	})
 	terminal.Store(true)
 	wait(t, ctx, func() bool {
 		var saved profileReceipt

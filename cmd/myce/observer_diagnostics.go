@@ -70,23 +70,25 @@ func (w *observerLogWriter) Write(p []byte) (int, error) {
 }
 
 type observerDiagnostic struct {
-	PID            int                               `json:"pid"`
-	Version        string                            `json:"version"`
-	Commit         string                            `json:"commit"`
-	StartedAt      time.Time                         `json:"started_at"`
-	CapturedAt     time.Time                         `json:"captured_at"`
-	Phase          string                            `json:"phase"`
-	JobID          string                            `json:"job_id,omitempty"`
-	Registrations  int                               `json:"registrations"`
-	LastReadAt     time.Time                         `json:"last_read_at,omitempty"`
-	NextReadAt     time.Time                         `json:"next_read_at,omitempty"`
-	NextDeliveryAt time.Time                         `json:"next_delivery_at,omitempty"`
-	LastDeliveryAt time.Time                         `json:"last_delivery_at,omitempty"`
-	Delivered      int                               `json:"delivered"`
-	Failed         int                               `json:"failed"`
-	LastError      string                            `json:"last_error,omitempty"`
-	LastErrorAt    time.Time                         `json:"last_error_at,omitempty"`
-	Readers        map[uint64]observerReadDiagnostic `json:"readers,omitempty"`
+	NextWakeAt       time.Time                         `json:"next_wake_at,omitempty"`
+	LastReadDuration time.Duration                     `json:"last_read_duration,omitempty"`
+	PID              int                               `json:"pid"`
+	Version          string                            `json:"version"`
+	Commit           string                            `json:"commit"`
+	StartedAt        time.Time                         `json:"started_at"`
+	CapturedAt       time.Time                         `json:"captured_at"`
+	Phase            string                            `json:"phase"`
+	JobID            string                            `json:"job_id,omitempty"`
+	Registrations    int                               `json:"registrations"`
+	LastReadAt       time.Time                         `json:"last_read_at,omitempty"`
+	NextReadAt       time.Time                         `json:"next_read_at,omitempty"`
+	NextDeliveryAt   time.Time                         `json:"next_delivery_at,omitempty"`
+	LastDeliveryAt   time.Time                         `json:"last_delivery_at,omitempty"`
+	Delivered        int                               `json:"delivered"`
+	Failed           int                               `json:"failed"`
+	LastError        string                            `json:"last_error,omitempty"`
+	LastErrorAt      time.Time                         `json:"last_error_at,omitempty"`
+	Readers          map[uint64]observerReadDiagnostic `json:"readers,omitempty"`
 }
 type observerDiagnostics struct {
 	mu       sync.Mutex
@@ -140,10 +142,13 @@ func observerStatusCommand(root string, out io.Writer) error {
 	if err == nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	}
+	var supervision observerSupervision
+	_ = readProfileJSON(filepath.Join(root, "observer.supervision"), &supervision)
 	return json.NewEncoder(out).Encode(struct {
 		observerDiagnostic
-		OwnerLocked bool `json:"owner_locked"`
-	}{state, locked})
+		OwnerLocked bool                `json:"owner_locked"`
+		Supervision observerSupervision `json:"supervision"`
+	}{state, locked, supervision})
 }
 
 // Network operations report independently of the coordinator, so a parked
@@ -199,6 +204,7 @@ func (r *observerReadTrace) phase(phase, job string, cause error) {
 	}
 	if phase == "batch_read_complete" || phase == "terminal_read_complete" {
 		d.state.LastReadAt = d.clock.Now()
+		d.state.LastReadDuration = d.clock.Now().Sub(entry.StartedAt)
 	}
 	_ = d.save()
 }

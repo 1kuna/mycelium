@@ -32,25 +32,26 @@ type executionProfile struct {
 }
 
 type profileReceipt struct {
-	PathDiagnostic   *myce.PathDiagnostic `json:"path_diagnostic,omitempty"`
-	SubmissionReused bool                 `json:"submission_reused"`
-	Nonce            string               `json:"nonce"`
-	ArmNonce         string               `json:"arm_nonce,omitempty"`
-	Key              string               `json:"key"`
-	Project          string               `json:"project"`
-	Intent           string               `json:"intent"`
-	JobID            string               `json:"job_id,omitempty"`
-	Status           string               `json:"status"`
-	Observation      string               `json:"observation"`
-	Delivery         string               `json:"delivery"`
-	ObservationError string               `json:"observation_error,omitempty"`
-	DeliveryStatus   string               `json:"delivery_status,omitempty"`
-	FilesExpired     bool                 `json:"files_expired,omitempty"`
-	RefusalCode      string               `json:"refusal_code,omitempty"`
-	RefusalReason    string               `json:"refusal_reason,omitempty"`
-	ResultReference  myce.FileManifest    `json:"result_reference,omitempty"`
-	Spec             myce.Spec            `json:"spec"`
-	Uploads          map[string]string    `json:"uploads"`
+	PendingNotification *profileNotification `json:"pending_notification,omitempty"`
+	PathDiagnostic      *myce.PathDiagnostic `json:"path_diagnostic,omitempty"`
+	SubmissionReused    bool                 `json:"submission_reused"`
+	Nonce               string               `json:"nonce"`
+	ArmNonce            string               `json:"arm_nonce,omitempty"`
+	Key                 string               `json:"key"`
+	Project             string               `json:"project"`
+	Intent              string               `json:"intent"`
+	JobID               string               `json:"job_id,omitempty"`
+	Status              string               `json:"status"`
+	Observation         string               `json:"observation"`
+	Delivery            string               `json:"delivery"`
+	ObservationError    string               `json:"observation_error,omitempty"`
+	DeliveryStatus      string               `json:"delivery_status,omitempty"`
+	FilesExpired        bool                 `json:"files_expired,omitempty"`
+	RefusalCode         string               `json:"refusal_code,omitempty"`
+	RefusalReason       string               `json:"refusal_reason,omitempty"`
+	ResultReference     myce.FileManifest    `json:"result_reference,omitempty"`
+	Spec                myce.Spec            `json:"spec"`
+	Uploads             map[string]string    `json:"uploads"`
 }
 
 type profileObserver struct {

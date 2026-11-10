@@ -4301,11 +4301,44 @@ Notifier delivery retains its separately saved caller environment with MYCE_TOKE
 removed; legacy registrations without that snapshot keep the owner's PATH/locale
 fallback. Dev sessions and managed attempts retain their existing cleanup custody.
 
-There is no automatic supervisor in this release. A dead owner is recovered by
-the next ordinary keyed command, which adopts retained armed registrations.
+From the release containing #919's supervision fix, the detached starter owns a
+separate observer child and retains its process handle. Child exit or silence
+restarts observation automatically, without another keyed caller. One inherited
+lifetime lock spans replacement; startup.lock spans socket setup/readiness and
+idle retirement. Cooperative image handoff starts a replacement supervisor before
+the previous supervisor retires. Dev/managed-attempt observers and supervisors
+remain in their owner's original cleanup group/session.
+
+Each outstanding authority read is checked independently of peer progress.
+The initial read allowance is the batch protocol's 20-second maximum hold plus
+one second (RFC 6298 initial transport recovery period). Completed read cost
+extends it to at least two measured periods. A coordinator also gets the existing
+30-second notifier deadline plus that transport recovery period; its announced
+next wake protects intentional discovery/Retry-After/delivery waits. A missed
+window doubles the allowance, without a cap. This can replay a slow healthy read,
+trading that observation cost for detection of silent reads with no owner deadline.
+No queue job, authority, submission key or original arm is replaced. Repeated
+failed births/crashes back off from one transport recovery period, doubling
+without a cap; successful reads restore that recovery pace.
+
+`myce wait --observer-status` includes `supervision`: supervisor/child PIDs,
+restart count, learned window and the last recovery's time, reason, child exit
+code/signal when available, and final diagnostic snapshot. The separate private
+`observer.supervision` record survives child status replacement; earlier recovery
+snapshots remain in the existing two-file bounded structured log. Child stderr is
+classified as process-output byte counts, never copied raw into structured logs.
+Notifier intent is synced before execution and replayed after interrupted
+acknowledgement with its original payload and delivery ID. Receivers deduplicate
+that ID; a delivered/failed local acknowledgement still retires the registration.
+
 [Canonical per-user CLI supervision](https://github.com/1kuna/mycelium/issues/1166)
-is a separate follow-up; this release installs no observer unit/plist, publishes
-no independent client image and adds no observer service install/uninstall path.
+remains separate: native launchd/systemd login/boot recovery, recovery after the
+supervisor itself dies, and durable executable/registry install/upgrade/removal
+binding are not implemented here. This release installs no observer unit/plist
+and publishes no independent client image. Keep the starter executable available
+while arms need it; a missing restart image is retained as `launch_failed` and
+retried. Existing unsupervised/legacy owners need supported handoff or operator
+recovery to gain supervision; installing source alone does not alter a process.
 Ordinary startup and cooperative handoff hold startup.lock through socket
 replacement/readiness; old-owner cleanup serializes its identity check and unlink
 under the same lock. Broken owner startup records a bounded
