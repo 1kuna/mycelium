@@ -376,6 +376,9 @@ var dockerCLIExecutable struct {
 // the race-instrumented parent. Do not use this binary to run product tests.
 func dockerCLITestBinary(t *testing.T) string {
 	t.Helper()
+	if binary := os.Getenv("GATE_TEST_DOCKER_BINARY"); binary != "" {
+		return binary
+	}
 	dockerCLIExecutable.Do(func() {
 		dockerCLIExecutable.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "fake-docker.test")
 		dockerCLIExecutable.out, dockerCLIExecutable.err = exec.Command("go", "test", "-c", "-vet=off", "-race=false", "-o", dockerCLIExecutable.path, ".").CombinedOutput()

@@ -61,8 +61,16 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	// A median of three independent fixtures suppresses a single scheduler or
 	// storage outlier without retrying failed assertions or dropping samples.
 	var waits, burstHolds, launchWaits, launchHolds []time.Duration
-	for range 3 {
-		got := queueHistoryBurst(t, count)
+	for sample := range 3 {
+		var got queueHistoryBurstTiming
+		// Each sample owns tens of MB of real SQLite history. Finish its
+		// cleanup before the next sample instead of retaining all six queues
+		// (including the 1k baseline) until the entire root exits.
+		if !t.Run(fmt.Sprintf("history-%d-sample-%d", count, sample), func(t *testing.T) {
+			got = queueHistoryBurst(t, count)
+		}) {
+			t.FailNow()
+		}
 		waits = append(waits, got.burstWait)
 		burstHolds = append(burstHolds, got.burstHold)
 		launchWaits = append(launchWaits, got.launchWait)

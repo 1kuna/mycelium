@@ -16,6 +16,10 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# The shared CLI image helper has no test roots of its own. Exercise its real
+# child-process launch and synthetic-probe boundary, including in quick mode.
+SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)
+
 # Device-use ranking extends the existing placement regressions.
 SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
     'machine_placement_test.go', 'benchmark_test.go')

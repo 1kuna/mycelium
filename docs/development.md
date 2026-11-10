@@ -92,13 +92,24 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
-Full partitions both `internal/myce` and the CLI into balanced chunks. It
-allocates three chunks per process slot across the packages by measured work,
-then starts the longest estimated chunks first. This leaves work to refill a
-slot when another chunk finishes. The active process limit remains the available
-CPU count, capped at nine, with `GOMAXPROCS=1`, `GOFLAGS=-p=1` and `-parallel=1`
-per process to retain workstation headroom. One-core allocations run each
-package intact. Quick selection and its parallelism are unchanged.
+Full partitions both `internal/myce` and the CLI into balanced chunks. It aims
+for eight refill waves per process slot, stopping when the longest indivisible
+root sets the lower bound, and starts the longest estimated chunks first. The
+active process limit is the available CPU count, capped at nine, with
+`GOMAXPROCS=1`, `GOFLAGS=-p=1` and `-parallel=1` per process. One-core allocations
+run each package intact. Quick selection and its parallelism are unchanged.
+Cross-release upgrade compatibility starts in one of the same slots, alongside
+the test chunks, and its failure contributes to the final gate verdict. An
+unconfirmed cleanup still stops further admission.
+
+Each gate builds one race-instrumented `myce_test` CLI for its dev journeys and
+shares its absolute path through `GATE_TEST_CLI_BINARY`. Ordinary `go test` builds
+the helper on demand. Core shards also share the external non-race Docker
+simulator through `GATE_TEST_DOCKER_BINARY`; worker/adapter assertions remain
+race-instrumented. Each watchdog copies those images into its private temporary
+root so executable-path cleanup still identifies environment-scrubbed fixtures.
+Upgrade fixtures retain separately linked versioned images:
+the signed artifact identity and embedded version remain part of their proof.
 
 The planner asks Go for the current race-enabled inventory, including runnable
 examples and fuzz seed tests, under the same fixture watchdog used for tests.
@@ -113,7 +124,9 @@ temporary selection file, and prints each partition in the gate log. Run
 
 Quick and full have no overall wall deadline. Each Go package runs under its
 own test-progress watchdog, keyed by package, exact selected test expression,
-OS/architecture, Go version and available/assigned CPU count. Timings live beside
+OS/architecture, Go version and available/assigned CPU count.
+The full scheduler also keys those timings by shard concurrency, since each
+individual shard uses one Go CPU at every allocation size. Timings live beside
 Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
 on that host, and every invocation appends a sanitized record to
 `gate-timings.jsonl`. Fleet profiles return that report with their result marker.

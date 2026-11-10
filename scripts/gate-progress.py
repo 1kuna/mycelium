@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -96,11 +97,20 @@ def load_history(path):
     return None
 
 
-def run(label, command, cache, report, clock=time.monotonic):
+def history_identity(label):
     # The cache belongs to this execution environment, alongside Go's cache.
     # No hostname, address, source path or credentials are persisted in telemetry.
     identity = [label, platform.system(), platform.machine(), cpu_count(),
                 os.environ.get('GOVERSION', '')]
+    # Full shards each use one Go CPU. Four and eight competing shards must
+    # still learn separately; otherwise both appear to be the same CPU profile.
+    if slots := os.environ.get('GATE_TEST_SLOTS'):
+        identity.append(slots)
+    return identity
+
+
+def run(label, command, cache, report, clock=time.monotonic):
+    identity = history_identity(label)
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / (hashlib.sha256(json.dumps(identity).encode()).hexdigest() + '.json')
     history = load_history(path)
@@ -128,6 +138,14 @@ def run(label, command, cache, report, clock=time.monotonic):
         child_env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), TMPDIR=str(temporary),
                          XDG_CONFIG_HOME=str(home / '.config'), XDG_CACHE_HOME=str(home / '.cache'),
                          XDG_DATA_HOME=str(home / '.local/share'), GATE_PACKAGE_ID=uuid.uuid4().hex)
+        # Compile once, but keep each executable in its package's custody root.
+        # A reparented/env-scrubbed fixture must still be discoverable by its
+        # executable/mapping path without matching another shard's processes.
+        for key in ('GATE_TEST_CLI_BINARY', 'GATE_TEST_DOCKER_BINARY'):
+            if source := os.environ.get(key):
+                private = temporary / key.lower()
+                shutil.copy2(source, private)
+                child_env[key] = str(private)
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env)
     status = 1
     try:
@@ -201,6 +219,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                 status = 125
         elapsed = clock() - progress.started
         record = dict(label=label, cpu=cpu_count(), elapsed_seconds=elapsed,
+                      shard_slots=os.environ.get('GATE_TEST_SLOTS'),
                       longest_gap_seconds=max(progress.longest_gap, clock() - progress.last),
                       expected_seconds=expected, exit=status,
                       progress_kind='test lifecycle' if is_test else 'output',

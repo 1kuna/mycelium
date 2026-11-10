@@ -41,7 +41,8 @@ func TestNativeOutcomeTermStop(t *testing.T) {
 	}
 }
 
-// Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
+// Adapter production of these Results remains covered by TestOutcomeRuntimeNative,
+// TestOutcomeRuntimeNativeGroup and TestOutcomeRuntimeDocker.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
@@ -97,7 +98,8 @@ func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	}
 }
 
-// Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
+// Adapter production of these Results remains covered by TestOutcomeRuntimeNative,
+// TestOutcomeRuntimeNativeGroup and TestOutcomeRuntimeDocker.
 func TestOutcomeCancellationPrecedence(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
@@ -130,28 +132,32 @@ type outcomeRow struct {
 	success, interrupted                                   bool
 }
 
-func TestOutcomeRuntimeTable(t *testing.T) {
-	for _, runtime := range []string{"native", "native-group", "docker"} {
-		for _, tc := range []outcomeRow{
-			{name: "completion", success: true},
-			{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
-			{name: "priority-independent-exit", priority: true, code: 7},
-			{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
-			{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
-			{name: "mycelium-foreign-port-probe", code: 1, portProbe: true, interrupted: true},
-			{name: "exit-143-without-signal", code: 143},
-			{name: "observation-loss", code: 137, lost: true, interrupted: true},
-		} {
-			t.Run(runtime+"/"+tc.name, func(t *testing.T) {
-				r := operatorOutcome(d5RuntimeOutcome(t, runtime, tc), tc.operator)
-				if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
-					t.Fatalf("priority stop provenance: %+v", r)
-				}
-				if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
-					t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
-				}
-			})
-		}
+func TestOutcomeRuntimeNative(t *testing.T)      { testOutcomeRuntime(t, "native") }
+func TestOutcomeRuntimeNativeGroup(t *testing.T) { testOutcomeRuntime(t, "native-group") }
+func TestOutcomeRuntimeDocker(t *testing.T)      { testOutcomeRuntime(t, "docker") }
+
+// Independent roots let the gate schedule each real adapter separately. Every
+// outcome row, signal, persisted result and recovery assertion stays intact.
+func testOutcomeRuntime(t *testing.T, runtime string) {
+	for _, tc := range []outcomeRow{
+		{name: "completion", success: true},
+		{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
+		{name: "priority-independent-exit", priority: true, code: 7},
+		{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
+		{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
+		{name: "mycelium-foreign-port-probe", code: 1, portProbe: true, interrupted: true},
+		{name: "exit-143-without-signal", code: 143},
+		{name: "observation-loss", code: 137, lost: true, interrupted: true},
+	} {
+		t.Run(runtime+"/"+tc.name, func(t *testing.T) {
+			r := operatorOutcome(d5RuntimeOutcome(t, runtime, tc), tc.operator)
+			if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
+				t.Fatalf("priority stop provenance: %+v", r)
+			}
+			if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
+				t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
+			}
+		})
 	}
 }
 
