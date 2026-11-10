@@ -432,7 +432,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	// fresh across HTTP observations even when the parent is backgrounded.
 	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, SharedPressureSource: func(context.Context) (SharedHostPressure, error) {
 		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
-	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
+	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond}, func(q *Queue) { q.clock.(*devClock).base = &workerFakeClock{now: q.clock.Now()} })
 	if err != nil {
 		t.Fatal(err)
 	}

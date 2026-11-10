@@ -110,7 +110,7 @@ func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
 			}
 			// Output validation must not race worker-loss timing between the
 			// enrollment observation and CheckExtension's identity lookup.
-			d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
+			d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock.(*devClock).base = &workerFakeClock{now: q.clock.Now()} })
 			if err != nil {
 				t.Fatal(err)
 			}
