@@ -348,8 +348,11 @@ func TestExtensionBundleStoreRejectsEmbeddedState(t *testing.T) {
 	q, clock := fixture(t)
 	e := fakeExtension(t)
 	e.Files["run.sh"] = []byte("changed after freezing")
-	q.s.Extensions = map[string]Extension{extensionKey(e): e}
-	if err := q.update(func() error { return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("extensions/" + extensionKey(e))
+		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	dbPath := q.lock.Name()[:len(q.lock.Name())-len(".lock")]
@@ -372,7 +375,11 @@ func TestExtensionBundleStoreRejectsCorruptReference(t *testing.T) {
 	if err := q.files.freezeExtension(&e); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.update(func() error { q.s.Extensions = map[string]Extension{extensionKey(e): e}; return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("extensions/" + extensionKey(e))
+		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(q.files.blob(*e.FilesRef), []byte("corrupt"), 0600); err != nil {
