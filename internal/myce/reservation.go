@@ -373,7 +373,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 	present := false
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
-		if hostID(m) != r.Target.Host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if hostID(m) != r.Target.Host || m.Replacement != nil {
 			continue
 		}
 		for _, target := range q.machineTargets(m) {

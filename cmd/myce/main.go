@@ -59,7 +59,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -152,9 +152,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "resolve-native" {
 		return resolveNativeCommand(args[1:])
-	}
-	if args[0] == "reconcile-docker-retention" {
-		return reconcileDockerRetentionCommand(args[1:], os.Stdout)
 	}
 	if args[0] == "disable" || args[0] == "enable" {
 		return errors.New("retired host control; use myce host drain|disable|resume HOST")

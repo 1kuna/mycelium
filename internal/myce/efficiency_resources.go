@@ -71,7 +71,7 @@ func attemptIOStatus(r *AttemptResources) string {
 func (q *Queue) efficiencyIOPressure(now time.Time) map[string]*IOPressure {
 	byHost := map[string]*IOPressure{}
 	for _, m := range q.s.Machines {
-		if m.IOPressure == nil || m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.IOPressure == nil || m.Replacement != nil {
 			continue
 		}
 		host := hostID(m)

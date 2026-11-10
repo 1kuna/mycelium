@@ -79,7 +79,7 @@ func (q *Queue) detectIncidentHealth() {
 		}
 	}
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		host := hostID(m)

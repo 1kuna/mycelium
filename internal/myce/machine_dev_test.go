@@ -110,7 +110,7 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 	if neighbor := get(cpu.ID); neighbor.State != "running" || pid(neighbor) != pids[2] || syscall.Kill(pids[2], 0) != nil {
 		t.Fatal("kill-one disturbed CPU neighbor", neighbor)
 	}
-	// Explicit migration evidence, supplied by M4, refuses new intent over HTTP.
+	// Retained replacement evidence refuses new intent on retired workers over HTTP.
 	if err := d.Queue.update(func() error {
 		d.Queue.s.Machines["old-gpu0"] = &Machine{ID: "old-gpu0", Gone: true, Replacement: &MachineReplacement{Machine: "two-gpu", Device: "0"}}
 		return nil

@@ -79,8 +79,6 @@ type state struct {
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
 	EnrollmentReleaseKey []byte                     `json:"enrollment_release_key,omitempty"`
-	MachineConversion    *MachineConversion         `json:"machine_conversion,omitempty"`
-	ProductionDrains     map[string]productionDrain `json:"production_drains,omitempty"`
 
 	PriorityPolicy *PriorityPolicyRecord `json:"priority_policy,omitempty"`
 	// Actual fleet contact and the first reconnect after silence are separate
@@ -380,14 +378,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err = q.loadPersistedState(); err != nil {
 		db.Close()
 		return nil, err
-	}
-	if err = q.importProductionDrain(data); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if q.s.MachineConversion != nil && q.s.MachineConversion.PublicationPending {
-		db.Close()
-		return nil, errors.New("machine conversion publication incomplete; keep queue stopped and rerun install queue conversion or rollback")
 	}
 	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
 	if q.startupFiles != nil {
@@ -1467,9 +1457,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				m.Fleet.ObservedAt = q.clock.Now().Add(-time.Duration(age * float64(time.Second)))
 			}
 		}
-		if q.migrationInventoryBlocked(&m) {
-			return migrationError("machine_worker_conflict", "machine installation is rolled back; restore the saved legacy workers or convert forward under maintenance")
-		}
 		if err := inventoryTarget(&m); err != nil {
 			return err
 		}
@@ -1504,7 +1491,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
-		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) && !q.migrationLegacyCatalog(&m) {
+		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
