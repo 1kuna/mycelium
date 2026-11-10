@@ -49,6 +49,7 @@ class ProgressTests(unittest.TestCase):
               patch.object(sys, 'stdout', output)):
             code = progress.run('package:selection', command or ['go', 'test', './pkg'],
                                 cache, report, clock=lambda: now[0])
+        self.launched_environment = launch.call_args.kwargs.get('env')
         return code, launch.call_args.args[0], json.loads(report.read_text().splitlines()[-1])
 
     def test_slow_progressing_run_outlives_old_wall_budget(self):
@@ -109,6 +110,32 @@ class ProgressTests(unittest.TestCase):
                 self.assertIn(timeout, command)
                 self.assertEqual(record['shard_slots'], slots)
             self.assertEqual(len(list((root / 'cache').glob('*.json'))), 2)
+
+    def test_shared_images_retain_private_executable_custody_and_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'shared-image'
+            source.write_bytes(b'fixture executable bytes')
+            source.chmod(0o755)
+            remove = progress.custody.remove_scratch
+            inspected = []
+            def inspect_and_remove(scratch):
+                for key in ('GATE_TEST_CLI_BINARY', 'GATE_TEST_DOCKER_BINARY'):
+                    private = Path(scratch) / 'tmp' / key.lower()
+                    self.assertEqual(private.read_bytes(), source.read_bytes())
+                    self.assertTrue(os.access(private, os.X_OK))
+                    self.assertNotEqual(private.stat().st_ino, source.stat().st_ino)
+                    inspected.append((key, str(private)))
+                remove(scratch)
+            with (patch.dict(os.environ, GATE_TEST_CLI_BINARY=str(source), GATE_TEST_DOCKER_BINARY=str(source)),
+                  patch.object(progress.custody, 'remove_scratch', side_effect=inspect_and_remove)):
+                code, _, _ = self.execute(root, [(20, b'')])
+            self.assertEqual(code, 0)
+            self.assertEqual(len(inspected), 2)
+            for key, private in inspected:
+                self.assertEqual(self.launched_environment[key], private)
+                self.assertFalse(Path(private).exists())
+            self.assertEqual(source.read_bytes(), b'fixture executable bytes')
 
     def test_nested_execution_quota_limits_parallelism(self):
         files = {'/proc/self/cgroup': '0::/worker/job',

@@ -80,7 +80,9 @@ Each gate builds one race-instrumented `myce_test` CLI for its dev journeys and
 shares its absolute path through `GATE_TEST_CLI_BINARY`. Ordinary `go test` builds
 the helper on demand. Core shards also share the external non-race Docker
 simulator through `GATE_TEST_DOCKER_BINARY`; worker/adapter assertions remain
-race-instrumented. Upgrade fixtures retain separately linked versioned images:
+race-instrumented. Each watchdog copies those images into its private temporary
+root so executable-path cleanup still identifies environment-scrubbed fixtures.
+Upgrade fixtures retain separately linked versioned images:
 the signed artifact identity and embedded version remain part of their proof.
 
 The planner asks Go for the current race-enabled inventory, including runnable

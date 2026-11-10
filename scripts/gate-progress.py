@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -137,6 +138,14 @@ def run(label, command, cache, report, clock=time.monotonic):
         child_env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), TMPDIR=str(temporary),
                          XDG_CONFIG_HOME=str(home / '.config'), XDG_CACHE_HOME=str(home / '.cache'),
                          XDG_DATA_HOME=str(home / '.local/share'), GATE_PACKAGE_ID=uuid.uuid4().hex)
+        # Compile once, but keep each executable in its package's custody root.
+        # A reparented/env-scrubbed fixture must still be discoverable by its
+        # executable/mapping path without matching another shard's processes.
+        for key in ('GATE_TEST_CLI_BINARY', 'GATE_TEST_DOCKER_BINARY'):
+            if source := os.environ.get(key):
+                private = temporary / key.lower()
+                shutil.copy2(source, private)
+                child_env[key] = str(private)
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env)
     status = 1
     try:
