@@ -132,7 +132,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Notes = append(r.Notes, strings.Join(nasInputs, ", ")+": worker NAS reads are unverified. Paths are relative to each worker's --checkpoint-root; without --inspect-nas, resolve does not check their existence or bytes. For data elsewhere, use profile local: or myce file put PATH and a shared input with sha256 and size_bytes, without nas.")
 	}
 	if _, err := view.modelLimits(s); err != nil {
-		r.Findings = append(r.Findings, ResolveFinding{Field: "model_snapshots", Side: "queue", Problem: err.Error(), Fix: "Ask the queue owner to permit the repository in the policy's models.sources, or declare a permitted repository."})
+		r.Findings = append(r.Findings, ResolveFinding{Field: "model_snapshots", Side: "queue", Problem: err.Error(), Fix: "This queue has explicit models.sources restrictions; declare a repository matching those restrictions."})
 	} else if len(s.ModelSnapshots) > 0 {
 		r.Notes = append(r.Notes, "Model snapshots are verified by the worker before launch; a missing or changed snapshot fails the attempt with a named model_snapshot reason.")
 	}
