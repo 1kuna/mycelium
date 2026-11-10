@@ -1366,6 +1366,7 @@ func (q *Queue) maintain() {
 			q.touchJob(j.ID)
 			j.State = "failed"
 			j.Reason = "give-up time reached"
+			j.FinishedAt = &now
 		}
 	}
 	q.settleMaintenance()
