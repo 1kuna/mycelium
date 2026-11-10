@@ -4,6 +4,20 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
 
 ## Current rulings
 
+- <a id="my-42"></a>**MY-42 — 2026-11-10 — Current and previous release only.**
+  Source: Zach, answering refactor review finding 10: “yes drop old migration code”.
+  The review proposed the floor “current and previous release only”; Zach approved
+  that proposal in this answer. Relayed in the implementation brief and received
+  by the version-floor implementation sub-agent on 2026-11-10.
+  For the r6.8 release (`v3.1.0-rc.20261110.s076r6.8`), the floor is r6.7
+  (`v3.1.0-rc.20261110.s076r6.7`), the immediate predecessor. MY-35 requires
+  interoperation across that adjacent pair during rolling upgrades. Older
+  protocols, importers, converters and persistence formats belong in tagged
+  source history. Before deleting their runtime paths, verify that every active
+  installation and the production database meet the floor. This narrows
+  MY-03's compatibility
+  prohibition only for the adjacent release pair required by MY-35.
+
 - <a id="my-41"></a>**MY-41 — 2026-11-09 — Fast iteration; development tooling is changeable.**
   Source: Zach, 2026-11-09, relayed in the implementation brief and received by
   the merge-policy documentation worker. Quote lightly redacted for this public

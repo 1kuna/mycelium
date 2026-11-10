@@ -840,7 +840,7 @@ sys.exit(m.main())
             (frozen / 'scripts').mkdir()
             (frozen / 'scripts/upgrade-compat.py').write_text('\n'.join(
                 key + ' = ' + repr(identity['source_sha']) for key in
-                ('PREVIOUS', 'INVENTORY_BASELINE', 'CADENCE_BASELINE')))
+                ('PREVIOUS',)))
             # Reproduce the empty nested archive incident: cwd is below Git root.
             previous = Path.cwd()
             try:
@@ -848,7 +848,7 @@ sys.exit(m.main())
                 archives = local.sources.predecessors(repo, frozen)
             finally:
                 os.chdir(previous)
-            self.assertEqual(len(archives), 3)
+            self.assertEqual(len(archives), 1)
             with tarfile.open(archives[0]) as tar:
                 self.assertIn('go.mod', tar.getnames())
                 self.assertIn('internal/myce/source.go', tar.getnames())

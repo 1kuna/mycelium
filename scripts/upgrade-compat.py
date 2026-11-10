@@ -17,12 +17,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# No v3 release tag was published. This is the verified deployed s071 source.
-PREVIOUS = "100840b4094d77bbc69a80d807dba58722db877c"
-INVENTORY_BASELINE = "8b2585e1d7edaff376e96430bc614daa9f788342"
-CADENCE_BASELINE = "9b1180db3fe2c6e580e1565352c263aceb020932"
-OLD_VERSION = "v3.1.0-rc.20261104.s071.100840b"
-VERSION = "v3.1.0-rc.20261104.s072.abce497.1"
+# MY-42: current and previous release only. Pin the signed r6.7 source;
+# r6.8 is the current release. Advance this pair together at each release.
+PREVIOUS = "f010f15abc5483c527f4226cbf298966a35f2b33"
+OLD_VERSION = "v3.1.0-rc.20261110.s076r6.7"
+VERSION = "v3.1.0-rc.20261110.s076r6.8"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 
 
@@ -89,7 +88,7 @@ def extract(source, destination):
 
 
 def prepare():
-    for revision in (PREVIOUS, INVENTORY_BASELINE, CADENCE_BASELINE):
+    for revision in (PREVIOUS,):
         source = archive(revision)
         with tempfile.TemporaryDirectory(prefix="upgrade-modules-", dir=cache_root()) as tmp:
             extract(source, tmp)
@@ -147,7 +146,7 @@ def candidate_identity(source):
 
 
 @contextlib.contextmanager
-def process(binary, mode, root, *, queue="", config="", tools=None, expected_refusal=False, listen=""):
+def process(binary, mode, root, *, queue="", config="", tools=None, listen=""):
     root.mkdir(parents=True, exist_ok=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("MYCE_") and not k.startswith("UPGRADE_")}
     home = root / "home"
@@ -181,13 +180,7 @@ def process(binary, mode, root, *, queue="", config="", tools=None, expected_ref
                         child.wait(timeout=5)
                     log.seek(0)
                     raise RuntimeError(f"{mode} fixture shutdown stalled:\n{log.read()}")
-            if expected_refusal and active_error is None:
-                log.seek(0)
-                output = log.read()
-                if (child.returncode != 1 or "HTTP 426: worker_protocol_invalid" not in output
-                        or "DATA RACE" in output):
-                    raise RuntimeError(f"worker did not exit with the expected protocol refusal:\n{output[-6000:]}")
-            elif child.returncode and (active_error is None or isinstance(active_error, Exception)):
+            if child.returncode and (active_error is None or isinstance(active_error, Exception)):
                 log.seek(0)
                 detail = f"{active_error}; " if active_error else ""
                 raise RuntimeError(f"{detail}{mode} fixture exited {child.returncode}:\n{log.read()[-6000:]}")
@@ -206,25 +199,17 @@ def await_file(path, child, predicate=lambda value: True, timeout=30):
     raise RuntimeError(f"fixture did not reach {path.name} within {timeout}s")
 
 
-def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refusal=False, config=None, full_only=False):
+def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, config=None):
     with process(queue_binary, "queue", root / "queue") as queue:
         url = await_file(root / "queue/url", queue)
         with process(worker_binary, "worker", root / "worker", queue=url, tools=tools,
-                     config=config, expected_refusal=refusal) as worker:
+                     config=config) as worker:
             def ready(value):
                 rows = json.loads(value)
-                if refusal:
-                    return any(row["status"] == 400 for row in rows)
                 if any(row["status"] != 200 for row in rows):
                     raise RuntimeError(f"check-in refused: {rows}")
                 return len(rows) >= 2
             rows = json.loads(await_file(root / "queue/receipts.json", worker, ready))
-            if refusal:
-                # s071 predates tool_inventory and has strict JSON decoding. Its
-                # reverse pairing is explicitly unsupported, never silently skipped.
-                assert all(row["status"] == 400 for row in rows), rows
-                worker.wait(timeout=5)
-                return
             request = urllib.request.Request(url + "/api/status?detail=full", headers={"Authorization": "Bearer upgrade-fixture"})
             with urllib.request.urlopen(request, timeout=10) as response:
                 status = json.load(response)
@@ -236,9 +221,6 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, refu
             if large:
                 assert max(row["bytes"] for row in rows) >= 1_871_955, "incident-size check-in no longer exercised"
                 assert max(row["inventory_keys"] for row in rows) >= 41, "prepared inventory missing"
-            if full_only:
-                assert all(row["inventory_keys"] == 41 and not row["hash"] and not row["version"] for row in rows), rows
-                assert max(row["bytes"] for row in rows) >= 1_871_955, "full legacy inventory missing"
             assert all(row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "keyed attempts downgraded"
             print(f"upgrade-compat: PASS {name} (max check-in {max(row['bytes'] for row in rows)} bytes)", flush=True)
 
@@ -249,8 +231,6 @@ def run(args):
     with tempfile.TemporaryDirectory(prefix="upgrade-compat-", dir=scratch_parent) as tmp:
         scratch = Path(tmp)
         previous = binaries(archive(PREVIOUS, offline=True), PREVIOUS, OLD_VERSION, scratch)
-        baseline = binaries(archive(INVENTORY_BASELINE, offline=True), INVENTORY_BASELINE, VERSION, scratch)
-        legacy = binaries(archive(CADENCE_BASELINE, offline=True), CADENCE_BASELINE, VERSION, scratch)
         source = REPO
         if args.candidate:
             source = scratch / "candidate"
@@ -267,12 +247,11 @@ def run(args):
         cases = [
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
-            ("legacy worker first work", lambda: legacy_first_work(candidate, legacy, scratch, tools)),
-            ("previous queue + candidate worker", lambda: reverse(previous, candidate, scratch, tools)),
+            ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools)),
+            ("previous worker completes current work", lambda: first_work(candidate[0], previous[0], scratch / "previous-work", tools)),
+            ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
-            ("full-inventory worker + candidate queue", lambda: pairing("#790 full worker", candidate[0], baseline[0], scratch / "full-worker", tools, full_only=True)),
-            ("candidate worker + strict inventory queue", lambda: pairing("#790 strict queue", baseline[0], candidate[0], scratch / "strict-queue", tools, full_only=True)),
-            ("negotiated worker + queue restart and downgrade", lambda: inventory_restarts(candidate, baseline, scratch, tools)),
+            ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),
         ]
         for name, case in cases:
             try:
@@ -284,15 +263,7 @@ def run(args):
             raise RuntimeError("failed cases: " + ", ".join(failures))
 
 
-def reverse(previous, candidate, scratch, tools):
-    # Candidate's tool inventory didn't exist in s071; its strict decoder rejects
-    # it. Check the refusal through the real worker and retain it as an explicit
-    # support boundary until a negotiated protocol makes this direction work.
-    pairing("previous queue", previous[0], candidate[0], scratch / "old-queue", tools, refusal=True)
-    print("upgrade-compat: PASS s071 reverse pairing explicitly refuses unsupported inventory", flush=True)
-
-
-def inventory_restarts(candidate, baseline, scratch, tools):
+def inventory_restarts(candidate, previous, scratch, tools):
     root = scratch / "inventory-restarts"
     queue_root = root / "queue"
 
@@ -333,39 +304,35 @@ def inventory_restarts(candidate, baseline, scratch, tools):
             assert full["status"] == 200 and full["ack_hash"] == inventory_hash and not full["required"], "full refresh not acknowledged"
             assert rows[-1]["inventory_keys"] == 0, "unchanged heartbeats still send full inventory"
 
-            # An older queue uses a fresh disposable DB on the same endpoint:
-            # this tests worker protocol fallback, not queue-data downgrades.
+            # Reopen the same persisted state with the previous release while
+            # the current worker keeps its session and keyed attempt protocol.
             queues.close()
-            strict_root = root / "strict-queue"
-            queue = queues.enter_context(process(baseline[0], "queue", strict_root, listen=address))
-            assert await_file(strict_root / "url", queue) == url
-            rows = json.loads(await_file(strict_root / "receipts.json", worker,
-                                         lambda value: len(json.loads(value)) >= 3))
-            assert rows[0]["status"] == 400 and rows[0]["hash"] and rows[0]["inventory_keys"] == 0, "negotiated request did not hit strict decoder"
-            assert all(row["status"] == 200 and row["inventory_keys"] == 41
-                       and not row["hash"] and not row["version"] for row in rows[1:]), "legacy full fallback did not rejoin"
-            assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), "fallback changed session or attempt protocol"
-    print("upgrade-compat: PASS hash-only -> queue restart -> explicit full refresh -> #790 strict fallback", flush=True)
+            queue = queues.enter_context(process(previous[0], "queue", queue_root, listen=address))
+            assert await_file(queue_root / "url", queue) == url
+            rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
+            assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1"
+                       for row in rows), "previous queue changed session or attempt protocol"
+    print("upgrade-compat: PASS current restart -> previous queue -> full inventory refresh", flush=True)
 
 
-def legacy_first_work(candidate, previous, scratch, tools):
-    root = scratch / "legacy-first-work"
+
+def first_work(queue_binary, worker_binary, root, tools):
     # Status-only workers never needed a process-table tool. Real command
     # completion must verify process-group release, using the host's real ps.
     worker_tools = root / "worker-tools"
     shutil.copytree(tools, worker_tools)
     ps = shutil.which("ps")
     if not ps:
-        raise RuntimeError("legacy execution fixture requires ps for custody cleanup")
+        raise RuntimeError("execution fixture requires ps for custody cleanup")
     (worker_tools / "ps").symlink_to(ps)
-    with process(candidate[0], "queue-work", root / "queue") as queue:
+    with process(queue_binary, "queue-work", root / "queue") as queue:
         url = await_file(root / "queue/url", queue)
         job_id = (root / "queue/job-id").read_text()
-        with process(previous[0], "worker", root / "worker", queue=url, tools=worker_tools) as worker:
+        with process(worker_binary, "worker", root / "worker", queue=url, tools=worker_tools) as worker:
             request = urllib.request.Request(url + "/api/jobs/" + job_id, headers={"Authorization": "Bearer upgrade-fixture"})
             def offered(value):
                 rows = json.loads(value)
-                assert all(row["status"] == 200 and not row["period"] for row in rows), rows
+                assert all(row["status"] == 200 and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), rows
                 return any(row["offered"] for row in rows)
             try:
                 rows = json.loads(await_file(root / "queue/receipts.json", worker, offered))
@@ -378,11 +345,6 @@ def legacy_first_work(candidate, previous, scratch, tools):
                 with urllib.request.urlopen(status_request, timeout=10) as response:
                     detail["machines"] = json.load(response).get("machines")
                 raise RuntimeError(f"{error}; check-ins={len(rows)} recent={rows[-3:]} job={detail}") from error
-            # Startup recovery can qualify cadence before ordinary admission.
-            # Otherwise at most the first ordinary idle report needs a sample.
-            eligible = [row for row in rows if not row["recovering"]]
-            offer = next(i for i, row in enumerate(eligible) if row["offered"])
-            assert offer <= 1, "legacy admission waited beyond one observed send interval"
             deadline = time.monotonic() + 30
             while True:
                 with urllib.request.urlopen(request, timeout=10) as response:
@@ -396,13 +358,14 @@ def legacy_first_work(candidate, previous, scratch, tools):
                     detail = {field: job.get(field) for field in ("state", "reason", "release_confirmed", "losses", "copies")}
                     attempts = [json.loads((root / "worker/worker" / name).read_text()).get("result")
                                 for name in local.get("attempts", [])]
-                    raise RuntimeError(f"legacy command did not finish/release: job={detail} attempts={attempts}")
+                    raise RuntimeError(f"command did not finish/release: job={detail} attempts={attempts}")
                 time.sleep(.2)
             # Queue completion can be visible before the actor consumes its
             # reply and drops local custody. Join that real lifecycle too.
             await_file(root / "worker/worker/state.json", worker,
                        lambda value: not json.loads(value).get("attempts"))
-            print("upgrade-compat: PASS legacy worker empty idle reply -> measured cadence -> completed first work", flush=True)
+            print("upgrade-compat: PASS adjacent-release command completed with confirmed release", flush=True)
+
 
 
 def downgrade(previous, candidate, scratch, tools):
@@ -422,23 +385,6 @@ def downgrade(previous, candidate, scratch, tools):
         config_path = Path(config)
         saved_bytes = config_path.read_bytes()
         saved = json.loads(saved_bytes)
-        if saved["file_retention"] == 0 or saved["log_retention"] == 0:
-            # s071 cannot represent retain-until-release. Refusing is required:
-            # defaulting an omitted zero would silently restore age-based loss.
-            try:
-                command(install_command, env=env, timeout=30)
-            except RuntimeError as error:
-                field = "file-retention" if saved["file_retention"] == 0 else "log-retention"
-                assert f"{field}: duration must be positive" in str(error), error
-            else:
-                raise AssertionError("s071 accepted unsupported retain-until-release policy")
-            assert config_path.read_bytes() == saved_bytes, "refused downgrade changed saved policy"
-            print("upgrade-compat: PASS s071 refuses retain-until-release without changing config", flush=True)
-            # Separately exercise the existing supported downgrade contract with
-            # explicit operator policies; these are fixture intent, not defaults.
-            saved["file_retention"] = 11 * 60 * 60 * 1_000_000_000
-            saved["log_retention"] = 13 * 60 * 60 * 1_000_000_000
-            config_path.write_text(json.dumps(saved))
         command(install_command, env=env, timeout=30)
         restored = json.loads(config_path.read_bytes())
         assert all(restored[field] == saved[field] for field in ("file_retention", "log_retention")), "downgrade changed explicit retention"
@@ -446,7 +392,7 @@ def downgrade(previous, candidate, scratch, tools):
             await_file(root / "queue/receipts.json", queue, lambda value: len(json.loads(value)) >= 2)
             rows = json.loads((root / "queue/receipts.json").read_text())
             assert all(row["status"] == 200 for row in rows), rows
-        print("upgrade-compat: PASS candidate install -> s071 installer -> s071 worker", flush=True)
+        print("upgrade-compat: PASS candidate install -> previous installer -> previous worker", flush=True)
 
 
 class SuiteDeadline(BaseException):
