@@ -86,6 +86,14 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	t.Helper()
 	q, c := fixture(t)
+	// Enroll before loading retained history: enrollment is fixture setup, not
+	// part of either measured heartbeat/launch burst. Every measured operation
+	// below still sees the complete persisted 1k/10k history.
+	workers := make([]Machine, 8)
+	for i := range workers {
+		workers[i] = machine(fmt.Sprintf("worker-%d", i), "fake")
+		check(t, q, workers[i], nil)
+	}
 	// Approximate the incident's 4.6 MB jobs + 4.7 MB keyed answers per 1k.
 	q.mu.Lock()
 	q.s.Submissions = map[string]*submissionRecord{}
@@ -102,11 +110,6 @@ func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	// Fixtures seed history once, just like startup loading the existing DB.
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
-	}
-	workers := make([]Machine, 8)
-	for i := range workers {
-		workers[i] = machine(fmt.Sprintf("worker-%d", i), "fake")
-		check(t, q, workers[i], nil)
 	}
 	var waits, holds []time.Duration
 	q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }

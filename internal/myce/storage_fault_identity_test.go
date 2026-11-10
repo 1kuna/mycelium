@@ -137,6 +137,7 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sent := false
 	reports := make(chan Machine, 1)
+	dependent := &Job{Spec: Spec{Priority: "experiment"}}
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		out := httptest.NewRecorder()
 		switch r.URL.Path {
@@ -150,7 +151,11 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 				j.Session, j.Machine = c.Machine.Session, c.Machine.ID
 				reply.Job, sent = &j, true
 			}
-			if prepared.Load() && c.Machine.CheckpointUnavailable {
+			// The attempt-local CheckpointUnavailable flag can disappear when
+			// a later start retry is refused by the latched mount fault and its
+			// actor completes. Await the root identity/fence this test guards,
+			// which must remain visible after that completion too.
+			if prepared.Load() && strings.Contains(storageRootReason(dependent, &c.Machine), "checkpoint unavailable") {
 				select {
 				case reports <- c.Machine:
 				default:
@@ -197,7 +202,6 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 		}
 		return false
 	})
-	dependent := &Job{Spec: Spec{Priority: "experiment"}}
 	if !strings.Contains(storageRootReason(dependent, &reported), "checkpoint unavailable") {
 		t.Fatal("first queue-provided checkpoint root escaped owned fault observation", reported.UnavailableRoots)
 	}

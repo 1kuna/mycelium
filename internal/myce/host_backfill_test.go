@@ -18,6 +18,49 @@ func backfillMachine(id string, ram float64) Machine {
 	return m
 }
 
+// Backfill tests exercise placement over an existing fleet, not enrollment
+// throughput. Enroll one representative peer through Checkin, then load identical
+// idle peers in one durable fixture transaction. All 200 distinct physical hosts
+// remain visible to every real submission/check-in/completion below.
+func seedBackfillPeers(t *testing.T, q *Queue, exemplar string, hosts int) {
+	t.Helper()
+	accepted := q.s.Machines[exemplar]
+	if err := q.update(func() error {
+		q.contactMu.Lock()
+		defer q.contactMu.Unlock()
+		for i := 2; i < hosts; i++ {
+			// Keep queue-owned fields too (including CPU-ledger mode). Nested
+			// public inventory is independent of the accepted representative.
+			peer := *accepted
+			inventory := cloneMachine(accepted)
+			peer.CapabilityProfile, peer.Devices = inventory.CapabilityProfile, inventory.Devices
+			peer.ID = fmt.Sprintf("peer-%03d", i)
+			peer.HostID, peer.Session = peer.ID, "session-"+peer.ID
+			q.s.Machines[peer.ID] = &peer
+			// These peers have the same accepted cadence/session evidence,
+			// rather than becoming cold workers that placement cannot use.
+			contact := *q.contacts[exemplar]
+			contact.session, contact.pending = peer.Session, nil
+			q.editContact(peer.ID)
+			q.contacts[peer.ID] = &contact
+			evidence := q.s.ContactEvidence[exemplar]
+			evidence.Session = peer.Session
+			q.s.ContactEvidence[peer.ID] = evidence
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.Machines) != hosts {
+		t.Fatalf("backfill fixture has %d hosts, want %d", len(q.s.Machines), hosts)
+	}
+	for _, peer := range q.s.Machines {
+		if q.workerLossAllowance(peer) <= 0 {
+			t.Fatalf("backfill fixture peer %s has no qualified cadence", peer.ID)
+		}
+	}
+}
+
 func TestHostBackfillAccumulatesForAccelerator(t *testing.T) {
 	for _, tc := range []struct {
 		hosts int
@@ -29,10 +72,11 @@ func TestHostBackfillAccumulatesForAccelerator(t *testing.T) {
 			m := backfillMachine("accelerator", tc.ram)
 			machineCheck(t, q, m)
 			// Other hosts cannot run these Linux commands, as in the incident.
-			for i := 1; i < tc.hosts; i++ {
-				peer := valueMachine(fmt.Sprintf("peer-%03d", i), "cpu", tc.ram/8)
+			if tc.hosts > 1 {
+				peer := valueMachine("peer-001", "cpu", tc.ram/8)
 				peer.CapabilityProfile.OS = "darwin"
 				check(t, q, peer, nil)
+				seedBackfillPeers(t, q, peer.ID, tc.hosts)
 			}
 			cpu := cpuSpec(1, tc.ram/4)
 			if tc.cores {
