@@ -136,3 +136,47 @@ func (q *Queue) freezeContactView(v *Queue) {
 		v.contacts[id] = &workerContact{session: m.Session, processed: q.lastContact(m, v.clock.Now()), processedArrival: arrival, allowance: q.workerLossAllowance(m), arrivalAllowance: q.workerArrivalAllowance(m), suspect: q.workerSuspect(m, v.clock.Now())}
 	}
 }
+
+// Capture only the inputs to contact/loss diagnostics while q.mu is held.
+// A status reader computes the frozen view afterward, without the writer lock.
+// In particular, machineLossTimeout must not scan retained jobs repeatedly on
+// the live queue merely to copy a worker's contact evidence.
+func (q *Queue) captureContactInputs(clock Clock) *Queue {
+	v := &Queue{clock: clock, simulation: q.simulation, lossTimeouts: q.lossTimeouts,
+		restartUntil: q.restartUntil, restartControlUntil: q.restartControlUntil,
+		s:     state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, ModelSlots: map[string]*ModelSlot{}},
+		calls: map[string]*ModelCall{}, contacts: map[string]*workerContact{}}
+	if q.mu.control != nil {
+		v.mu.control = &controlClock{clock: clock.Now, at: clock.Now(), opportunity: q.controlNow()}
+	}
+	jobs := q.s.Jobs
+	if q.records != nil && !q.simulation && q.records.jobCount == len(jobs) {
+		jobs = q.records.live
+	}
+	for id, j := range jobs {
+		if j.State == "running" || j.State == "stopping" {
+			v.s.Jobs[id] = &Job{Machine: j.Machine, State: j.State, Spec: Spec{Priority: j.Spec.Priority}}
+		}
+	}
+	for id, c := range q.calls {
+		v.calls[id] = &ModelCall{Machine: c.Machine, Error: c.Error, Priority: c.Priority}
+	}
+	for id, slot := range q.s.ModelSlots {
+		v.s.ModelSlots[id] = &ModelSlot{Machine: slot.Machine, State: slot.State, InFlight: slot.InFlight, Priority: slot.Priority}
+	}
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	for id, m := range q.s.Machines {
+		v.s.Machines[id] = &Machine{ID: m.ID, Session: m.Session, LastSeen: m.LastSeen, Gone: m.Gone}
+		if c := q.contacts[id]; c != nil {
+			copy := *c
+			copy.pending = make(map[*checkinContact]struct{}, len(c.pending))
+			for pending := range c.pending {
+				p := *pending
+				copy.pending[&p] = struct{}{}
+			}
+			v.contacts[id] = &copy
+		}
+	}
+	return v
+}

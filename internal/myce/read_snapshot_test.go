@@ -113,7 +113,7 @@ func TestReadSnapshotBulkWorkDoesNotHoldQueue(t *testing.T) {
 	for _, id := range []string{"", "retained-000"} {
 		t.Run(fmt.Sprintf("job=%s", id), func(t *testing.T) {
 			q, clock := fixture(t)
-			for i := range 1000 {
+			for i := range 8000 {
 				key := fmt.Sprintf("retained-%03d", i)
 				q.s.Jobs[key] = &Job{ID: key, State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
 			}
@@ -135,6 +135,10 @@ func TestReadSnapshotBulkWorkDoesNotHoldQueue(t *testing.T) {
 			<-captured
 			writeDone := make(chan error, 1)
 			go func() {
+				if _, err := q.Checkin(Checkin{Machine: machine("control", "fake")}); err != nil {
+					writeDone <- err
+					return
+				}
 				writeDone <- q.update(func() error { q.touchJob("retained-000").Reason = "committed"; return nil })
 			}()
 			select {
