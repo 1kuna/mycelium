@@ -156,7 +156,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 	lastDetail := map[string]string{}
 	observed := map[string]bool{}
 	revisions := map[string]uint64{}
-	batchSupported := true
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -219,20 +218,14 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				cancel()
 				requestCtx, cancel = context.WithTimeout(ctx, budget)
 			}
-			read := c.GetJobForWait
-			// Preserve the initial placement/deadline advisory; steady-state
-			// polls need only state, and terminal replies are full Jobs.
-			if !observed[id] || jsonOutput {
-				read = c.GetJob
-			}
 			var j *myce.Job
 			var err error
-			if batchSupported || batchJobs != nil {
+			{
 				if batchJobs == nil {
 					batchJobs = map[string]*myce.Job{}
 					var reply myce.WaitReply
 					seconds := pace.Seconds(clock.Now(), event)
-					reply, batchErr = c.WaitBatchOnly(requestCtx, ids, revisions, seconds)
+					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
 					diagnosticDeadline = clock.Now().Add(myce.WaitBatchMaxSeconds * time.Second)
 					if batchErr == nil {
 						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
@@ -245,16 +238,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 							} else if known := metadata[ids[i]]; known != nil {
 								known.State = state.State
 							}
-							batchSupported = state.Revision > 0
 						}
 					}
 				}
 				j, err = batchJobs[id], batchErr
-				if myce.WaitBatchUnsupported(err) {
-					batchSupported, batchJobs = false, nil
-					j, err = read(requestCtx, id)
-				}
-				if err == nil && batchSupported && j != nil && !clock.Now().Before(diagnosticNotBefore) &&
+				if err == nil && j != nil && !clock.Now().Before(diagnosticNotBefore) &&
 					(jsonOutput && lastDetail[j.ID] != j.State+"\x00"+j.Reason || !observed[j.ID] && !batchMetadata[id] && j.State != "succeeded" && j.State != "failed" && j.State != "cancelled") {
 					// Spend at most one protocol hold interval on optional diagnostics
 					// across this whole batch, not one interval per job. This bounds the
@@ -285,8 +273,6 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 						}
 					}
 				}
-			} else {
-				j, err = read(requestCtx, id)
 			}
 			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
 			cancel()

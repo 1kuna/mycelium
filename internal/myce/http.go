@@ -702,9 +702,6 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
-	if support, ok := ctx.Value(waitCapabilityKey{}).(*bool); ok {
-		*support = res.Header.Get("X-Myce-Wait") == "batch-v1"
-	}
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}
 		var body struct {

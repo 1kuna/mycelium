@@ -733,8 +733,8 @@ class Client:
     def wait_many(self, job_ids, *, timeout: float | None = None) -> list[dict[str, Any]]:
         """Wait in one batch, returning full terminal Jobs in input order.
 
-        Start at the batch endpoint with all IDs. New queues include scalar
-        deadline metadata; older queues fall back to diagnostic/wait-view GETs.
+        Both supported releases provide scalar deadline metadata through the
+        batch endpoint. Fetch full Jobs only when they reach a terminal state.
         At most 256 distinct IDs fit the batch-v1 protocol. No jobs are cancelled.
         """
         ids = list(job_ids)
@@ -762,7 +762,6 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             return remaining if self.timeout is None else (self.timeout if remaining is None else min(self.timeout, remaining))
-        batch_unavailable = False
 
         def observe(original, observed):
             nonlocal changed, ids, end, event
@@ -820,72 +819,33 @@ class Client:
             failure = None
             held = False
             changed = False
-            batched = not batch_unavailable
             try:
-                if batched:
-                    seconds = min(20, int(pace.next(started, event)))
-                    if budget is not None:
-                        seconds = min(seconds, int(budget / 2))
-                    try:
-                        observations = self._wait_batch(list(pending), after, seconds, budget)
-                        diagnostic_end = self._clock.monotonic() + 20  # One batch-v1 hold across all legacy metadata reads.
-                        held = seconds > 0
-                    except APIError as error:
-                        if not (error.status == 405 or error.status == 404 and not error.code):
-                            raise
-                        batch_unavailable = True
-                        continue
-                    # Apply all available scalar metadata before any optional/full GET.
-                    # A slow payload read cannot delay learning a peer's deadline.
-                    for original, row in zip(list(pending), observations):
-                        saved = metadata.setdefault(original, {})
-                        saved["state"] = row["state"]
-                        if "spec" in row:
-                            saved["spec"] = row["spec"]
-                        if row.get("started_at"):
-                            saved["started_at"] = row["started_at"]
-                    refresh_times()
-                    for original, row in zip(list(pending), observations):
-                        after[row["id"]] = row["revision"]
-                        full_payload = False
-                        if original not in jobs and "spec" not in row and row["state"] not in TERMINAL:
-                            # Older batch queues omit deadline metadata. Try it once,
-                            # bounded by one shared protocol hold so bootstrap cannot stall.
-                            detail_budget = max(0, diagnostic_end - self._clock.monotonic())
-                            owner_budget = request_budget()
-                            if owner_budget is not None:
-                                detail_budget = min(detail_budget, owner_budget)
-                            try:
-                                detail = self._read_job(row["id"], timeout=detail_budget, retry=False)
-                                row = dict(detail, revision=row["revision"])
-                                full_payload = True
-                            except REQUEST_ERRORS as error:
-                                if not self._retryable(error, "wait"):
-                                    raise
-                                if isinstance(error, TimeoutError):
-                                    diagnostic_end = self._clock.monotonic()
-                        if row["state"] in TERMINAL and not full_payload:
-                            try:
-                                row = self._read_job(row["id"], timeout=request_budget(), wait=True)
-                            except REQUEST_ERRORS as error:
-                                if not self._retryable(error, "wait"):
-                                    raise
-                                failure = error
-                                continue
-                        observe(original, row)
-                else:
-                    # Apply each read immediately and keep observing healthy peers
-                    # even when another ID has a transient visibility/read failure.
-                    for job_id in list(pending):
+                seconds = min(20, int(pace.next(started, event)))
+                if budget is not None:
+                    seconds = min(seconds, int(budget / 2))
+                observations = self._wait_batch(list(pending), after, seconds, budget)
+                held = seconds > 0
+                # Apply all available scalar metadata before any optional/full GET.
+                # A slow payload read cannot delay learning a peer's deadline.
+                for original, row in zip(list(pending), observations):
+                    saved = metadata.setdefault(original, {})
+                    saved["state"] = row["state"]
+                    if "spec" in row:
+                        saved["spec"] = row["spec"]
+                    if row.get("started_at"):
+                        saved["started_at"] = row["started_at"]
+                refresh_times()
+                for original, row in zip(list(pending), observations):
+                    after[row["id"]] = row["revision"]
+                    if row["state"] in TERMINAL:
                         try:
-                            row = self._read_job(job_id, timeout=request_budget(),
-                                                 wait=job_id in jobs, retry=False)
+                            row = self._read_job(row["id"], timeout=request_budget(), wait=True)
                         except REQUEST_ERRORS as error:
                             if not self._retryable(error, "wait"):
                                 raise
                             failure = error
                             continue
-                        observe(job_id, row)
+                    observe(original, row)
             except REQUEST_ERRORS as error:
                 if not self._retryable(error, "wait"):
                     raise

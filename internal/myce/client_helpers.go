@@ -198,10 +198,6 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 			requestCtx, cancel = context.WithTimeout(ctx, jobDeadline.Sub(clock.Now()))
 		}
 		started := clock.Now()
-		read := c.GetJobForWait
-		if initial == nil {
-			read = c.GetJob
-		}
 		var j *Job
 		var err error
 		held := false
@@ -218,10 +214,8 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 					j, err = c.GetJobForWait(requestCtx, state.ID)
 				}
 			}
-		} else if initial == nil {
-			j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
 		} else {
-			j, err = read(requestCtx, id)
+			j, batchSupported, err = c.GetJobWaitCapability(requestCtx, id)
 		}
 		cancel()
 		if ctx.Err() != nil {

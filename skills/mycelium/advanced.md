@@ -63,7 +63,8 @@ Use one foreground `myce wait JOB_A JOB_B` for an owned batch on supporting
 clients (at most 256 distinct IDs in the source-audited CLI). `--json` adds full
 diagnostics when available; state/reason observation can continue if optional
 detail reads are unavailable. Scalar batch observation carries revisions and
-compatible clients fall back on older queues. `myce status JOB_ID` is the
+both supported releases provide it. Queues below the current/previous release
+floor must be upgraded; clients do not fall back to per-job polling. `myce status JOB_ID` is the
 explicit diagnostic read; keep full/history status out of loops.
 
 Python callers use `Client.from_installed()`, `client.wait(JOB_ID)` or
