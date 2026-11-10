@@ -673,6 +673,21 @@ slot.release()
                             rank[priority] >= rank[row['priority']] for row in waiting))
                     self.assertEqual(waiting[0]['requested_priority'], 'normal')
                     self.assertFalse(waiting[0]['requested_exclusive'])
+                    # Migrate older full tickets too: a frozen caller sorts
+                    # priority before sequence, which must agree with FIFO.
+                    older = root / 'local-go-wait-older.json'
+                    older.write_text(json.dumps(dict(pid=os.getpid(),
+                        process_identity=capacity.process_identity(os.getpid()),
+                        priority='normal', sequence=0, exclusive=False)))
+                    try:
+                        queue = capacity.full_waiters(root)
+                        legacy = sorted(queue, key=lambda path: (
+                            rank[json.loads(path.read_text())['priority']],
+                            json.loads(path.read_text())['sequence']))
+                        self.assertEqual(queue, legacy)
+                        self.assertEqual(queue[0], older)
+                    finally:
+                        older.unlink()
                     for mode, priority in [('quick', 'release'), ('full', 'release'),
                                            ('full', 'calibration')] * 3:
                         with self.assertRaisesRegex(RuntimeError, 'capacity busy'):

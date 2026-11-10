@@ -54,6 +54,14 @@ def full_waiters(directory):
             # This is a never-admitted queue ticket, not execution custody.
             path.unlink()
             continue
+        # Migrate the whole waiting queue together: older callers sort by
+        # priority before sequence, so upgrading only our own ticket would
+        # put it ahead of an older full and make the two orderings deadlock.
+        if row.get('admission_protocol') != 3:
+            row.update(requested_priority=row['priority'],
+                       requested_exclusive=row.get('exclusive', False),
+                       admission_protocol=3, priority='calibration', exclusive=True)
+            publish_waiting(path, json.dumps(row) + '\n')
         rows.append((row['sequence'], path))
     return [path for _, path in sorted(rows)]
 
