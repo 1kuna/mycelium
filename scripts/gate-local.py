@@ -52,6 +52,8 @@ def prepare(path):
     identity['admission'] = dict(cores=manifest['cores'], exclusive=owner.get('exclusive', False),
         calibration=owner.get('calibration', False),
         host_cores=owner.get('cores', manifest['cores']),
+        cpu_share_per_leg=owner.get('cpu_share_per_leg'),
+        automatic_slots=owner.get('automatic_slots', False),
         concurrent_platforms=manifest['platform'] == 'both',
         configuration_sha256=owner.get('admission_config_sha256'),
         fleet_worker_cpu_reserve_cores=owner.get('fleet_worker_cpu_reserve_cores'),
@@ -213,8 +215,8 @@ def main():
     parser.add_argument('--ref')
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
     parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
-    parser.add_argument('--cores', type=int, default=4,
-                        help='CPU cores per platform; both reserves twice this host budget')
+    parser.add_argument('--cores', type=int,
+                        help='test slots per platform; full defaults to measured eight-slot memory capacity, otherwise four')
     parser.add_argument('--exclusive', action='store_true',
                         help='wait for all local gate work; reserve it for isolated timing')
     parser.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)
@@ -223,6 +225,8 @@ def main():
     parser.add_argument('--reconcile', type=Path, nargs='+', metavar='RECEIPT',
                         help='verify abandoned measured custody and archive it without deleting scratch')
     args = parser.parse_args()
+    if args.cores is None and (args.mode != 'full' or args.command):
+        args.cores = 4
     if args.execute:
         return execute(args.execute)
     if args.reconcile:
@@ -252,6 +256,7 @@ def main():
                                 wait=True, after_pid=args.after_pid,
                                 exclusive=args.exclusive, source_root=planned_folder / 'source',
                                 platform=args.platform or ('native' if args.command else 'both'))
+        args.cores = slot.owner.get('per_leg_cores', args.cores or 4)
         folder = planned_folder
         folder.mkdir(parents=True)
         report = repo / '.reports/gate-local.jsonl'

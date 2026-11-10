@@ -163,14 +163,14 @@ class LocalGateTests(unittest.TestCase):
                 finally:
                     for run in runs: run.release()
 
-    def test_exclusive_native_calibration_can_measure_an_unqualified_core_count(self):
+    def test_exclusive_calibration_can_measure_an_unqualified_core_count(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             config = qualified_config(root)
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
                 for platform, exclusive, priority in [('native', False, 'calibration'),
-                        ('linux', True, 'calibration'), ('native', True, 'normal')]:
+                        ('both', True, 'calibration'), ('native', True, 'normal')]:
                     with self.subTest(platform=platform, exclusive=exclusive, priority=priority):
                         with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
                             capacity.acquire(root, mode='full', platform=platform, cores=8,
@@ -183,6 +183,13 @@ class LocalGateTests(unittest.TestCase):
                     self.assertEqual(run.owner['memory_requirement_at_entry_bytes'], 19 * capacity.GIB)
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root, mode='quick', cores=1)
+                finally: run.release()
+                run = capacity.acquire(root, mode='full', platform='linux', cores=8,
+                                       exclusive=True, priority='calibration')
+                try:
+                    self.assertTrue(run.owner['calibration'])
+                    self.assertEqual(run.owner['memory_requirement_at_entry_bytes'],
+                                     2 * (10 * capacity.GIB + capacity.GIB // 8) + 5 * capacity.GIB)
                 finally: run.release()
             config['resource_admission']['native_measured_cores'] = 8
             with self.assertRaisesRegex(ValueError, 'exclusive calibration'):
@@ -201,6 +208,58 @@ class LocalGateTests(unittest.TestCase):
                 finally: run.release()
                 with self.assertRaisesRegex(RuntimeError, 'measured local gate budget'):
                     capacity.acquire(root, mode='full', platform='linux', cores=8)
+
+    def test_full_defaults_follow_measured_memory_and_keep_the_cpu_share(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            evidence = root / 'eight-slots.jsonl'
+            legacy = root / 'resource-measurements.jsonl'
+            with legacy.open('a') as stream:
+                stream.write(json.dumps(dict(mode='full', status=1, phase='native',
+                    admission=dict(cores=8), max_tree_rss_sum_bytes=12 * capacity.GIB)) + '\n')
+            config['memory_measurement']['native_peak_bytes'] = 12 * capacity.GIB
+            config['memory_measurement']['evidence'][0]['sha256'] = hashlib.sha256(legacy.read_bytes()).hexdigest()
+            observations = [
+                dict(mode='full', phase='native', status=1, admission=dict(cores=8),
+                     max_tree_rss_sum_bytes=10 * capacity.GIB),
+                dict(mode='full', phase='linux', status=0, admission=dict(cores=8), run_id='eight'),
+                dict(mode='full', phase='host', status=0, admission=dict(cores=8), run_id='eight',
+                     max_tree_rss_sum_bytes=capacity.GIB // 8,
+                     samples=[dict(host_memory=dict(all_vz_rss_sum_bytes=12 * capacity.GIB))])]
+            evidence.write_text(''.join(json.dumps(r) + '\n' for r in observations))
+            config['full_slot_measurement'] = dict(slots=8, evidence=[dict(path=str(evidence),
+                sha256=hashlib.sha256(evidence.read_bytes()).hexdigest())])
+            (root / 'gate-capacity.json').write_text(json.dumps(config))
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=28 * capacity.GIB)):
+                for available, explicit, expected in [(28, None, 8), (25, None, 4), (28, 4, 4)]:
+                    with self.subTest(available=available, explicit=explicit):
+                        with patch.object(capacity, 'available_memory', return_value=available * capacity.GIB):
+                            run = capacity.acquire(root, mode='full', cores=explicit, platform='both')
+                        try:
+                            self.assertEqual(run.owner['per_leg_cores'], expected)
+                            self.assertEqual(run.owner['cores'], 8)
+                            self.assertEqual(run.owner['cpu_share_per_leg'], 4)
+                        finally: run.release()
+                run = capacity.acquire(root, mode='quick', platform='both')
+                try: self.assertEqual(run.owner['per_leg_cores'], 4)
+                finally: run.release()
+                with (patch.object(capacity, 'available_memory', side_effect=[21 * capacity.GIB, 28 * capacity.GIB]),
+                      patch.object(capacity.time, 'sleep'), contextlib.redirect_stdout(io.StringIO())):
+                    run = capacity.acquire(root, mode='full', cores=None, platform='both', wait=True)
+                try: self.assertEqual(run.owner['per_leg_cores'], 8)
+                finally: run.release()
+                config['resource_admission']['vm_cores'] = 4
+                (root / 'gate-capacity.json').write_text(json.dumps(config))
+                run = capacity.acquire(root, mode='full', cores=None, platform='both')
+                try: self.assertEqual(run.owner['per_leg_cores'], 4)
+                finally: run.release()
+            # A native-only observation cannot qualify a larger Linux slot set.
+            evidence.write_text(json.dumps(observations[0]) + '\n')
+            config['full_slot_measurement']['evidence'][0]['sha256'] = hashlib.sha256(evidence.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, 'native and Linux/VM'):
+                capacity.full_slot_profile(config)
 
     def test_both_reserves_two_host_budgets_but_one_guest_budget(self):
         with tempfile.TemporaryDirectory() as folder:

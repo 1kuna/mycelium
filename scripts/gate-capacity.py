@@ -160,6 +160,7 @@ def admission_config_digest(config):
     """Bind behavioral limits and their evidence; ignore descriptive metadata."""
     measured = config.get('memory_measurement', {})
     normalized = dict(resource_admission=config.get('resource_admission'),
+        full_slot_measurement=config.get('full_slot_measurement'),
         memory_measurement={key: measured.get(key) for key in (
             'native_peak_bytes', 'linux_peak_bytes', 'linux_provisional_bytes',
             'vm_peak_bytes', 'headroom_bytes', 'evidence')},
@@ -268,7 +269,43 @@ def admission_lock(directory):
         yield
 
 
-def memory_requirement(config, platform, mode='full'):
+def full_slot_profile(config):
+    """Qualify extra I/O-overlap slots from identified native and VM observations."""
+    profile = config.get('full_slot_measurement')
+    if profile is None:
+        return None
+    slots = profile['slots']
+    if type(slots) is not int or slots != 8:
+        raise ValueError('full slot measurement must identify the eight-slot comparison')
+    rows = [json.loads(line) for item in profile['evidence']
+            for line in _memory.evidence_bytes(item).splitlines()]
+    rows = [r for r in rows if r.get('mode') == 'full' and r.get('status') in (0, 1)
+            and not r.get('refusal') and r.get('admission', {}).get('cores') == slots]
+    native = [r for r in rows if r.get('phase') == 'native' and r.get('max_tree_rss_sum_bytes')]
+    hosts = [r for r in rows if r.get('phase') == 'host' and r.get('max_tree_rss_sum_bytes')
+             and any(s.get('host_memory', {}).get('all_vz_rss_sum_bytes', 0) > 0 for s in r.get('samples', []))
+             and any(g.get('phase') == 'linux' and g.get('run_id') == r.get('run_id') for g in rows)]
+    if not native or not hosts:
+        raise ValueError('eight-slot admission requires native and Linux/VM measurements')
+    base = config['memory_measurement']
+    # Older envelopes mixed an eight-slot native peak into the four-slot
+    # requirement. Recover the actual four-slot observations for the fallback.
+    baseline = [json.loads(line) for item in base['evidence']
+                for line in _memory.evidence_bytes(item).splitlines()]
+    four_native = [r['max_tree_rss_sum_bytes'] for r in baseline
+                   if r.get('mode') == 'full' and r.get('phase') in (None, 'native')
+                   and r.get('status') in (0, 1) and not r.get('refusal')
+                   and r.get('max_tree_rss_sum_bytes') and
+                   r.get('admission', {}).get('cores', base.get('measured_cores', 4)) == 4]
+    return dict(slots=slots,
+        four_native_peak_bytes=max(four_native, default=base['native_peak_bytes']),
+        native_peak_bytes=max(max(four_native, default=0), max(r['max_tree_rss_sum_bytes'] for r in native)),
+        linux_peak_bytes=max(base['linux_peak_bytes'], max(r['max_tree_rss_sum_bytes'] for r in hosts)),
+        vm_peak_bytes=max(base['vm_peak_bytes'], max(s.get('host_memory', {}).get('all_vz_rss_sum_bytes', 0)
+                                                  for r in hosts for s in r['samples'])))
+
+
+def memory_requirement(config, platform, mode='full', cores=None, slot_profile=None):
     # MY-41: quick/focused work uses its own measured envelope, not a full peak.
     if mode == 'quick' and config.get('quick_memory_measurement'):
         measured = config['quick_memory_measurement']
@@ -286,6 +323,11 @@ def memory_requirement(config, platform, mode='full'):
         return (44 if platform == 'both' else 22) * GIB  # Initial envelope per simultaneous leg.
     if not measured.get('evidence'):
         raise RuntimeError('memory qualification is missing its evidence')
+    if slot_profile and cores == slot_profile['slots']:
+        measured = dict(measured, **{k: slot_profile[k] for k in
+                                   ('native_peak_bytes', 'linux_peak_bytes', 'vm_peak_bytes')})
+    elif slot_profile and cores == 4:
+        measured = dict(measured, native_peak_bytes=slot_profile['four_native_peak_bytes'])
     native = int(measured['native_peak_bytes'])
     headroom = int(measured['headroom_bytes'])
     if native <= 0 or headroom <= 0:
@@ -305,6 +347,9 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     this deliberately overcounts its current RSS to cover future working-set
     growth without confusing shared pages with reclaimable private memory.
     """
+    automatic = cores is None and mode == 'full'
+    if automatic:
+        cores = 4
     if type(cores) is not int or cores <= 0:
         raise ValueError('local gate cores must be a positive integer')
     host_cores = cores * (2 if platform == 'both' else 1)
@@ -315,7 +360,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     prefix = 'local-go-calibration-wait-' if priority == 'calibration' else 'local-go-release-wait-'
     ticket = directory / (prefix + uuid.uuid4().hex)
     queue_ticket = None
-    checked_config, resources = None, None
+    checked_config, resources, slot_profile = None, None, None
     host_memory = total_memory()
     if type(host_memory) is not int or host_memory <= 0:
         raise RuntimeError('host physical memory capacity is unknown')
@@ -344,6 +389,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 config = json.loads(config_path.read_text()) if config_path.exists() else {}
                 if config != checked_config:
                     resources = resource_qualification(config)
+                    slot_profile = full_slot_profile(config) if resources else None
                     checked_config = config
                 if not resources and (directory / 'local-go-resource-group.custody').exists():
                     raise RuntimeError('resource qualification removed during active custody; retained')
@@ -360,9 +406,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 qualified_cores = (resources.get('native_measured_cores', resources['measured_cores'])
                                    if resources and platform == 'native' else
                                    resources['measured_cores'] if resources else cores)
-                calibration = (resources and mode == 'full' and platform == 'native'
+                calibration = (resources and mode == 'full' and platform != 'both'
                                and priority == 'calibration' and exclusive and cores > qualified_cores)
-                if resources and cores > qualified_cores and not calibration:
+                if (resources and cores > qualified_cores and not calibration and not automatic
+                        and not (mode == 'full' and slot_profile and cores == slot_profile['slots'])):
                     raise RuntimeError('requested cores exceed the measured local gate budget')
                 if exclusive and not resources:
                     raise RuntimeError('exclusive timing requires qualified resource admission')
@@ -397,16 +444,6 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if not candidate.exists():
                             full_marker = candidate
                             break
-                gate_memory = memory_requirement(config, platform, mode)
-                if calibration:
-                    # Candidate process count scales the measured peak conservatively.
-                    # This is a labelled measurement, not an enabled resource profile.
-                    measured = config['memory_measurement']
-                    gate_memory = (measured['native_peak_bytes'] * cores + qualified_cores - 1) // qualified_cores + measured['headroom_bytes']
-                needed_memory = gate_memory
-                if needed_memory > host_memory:
-                    raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
-                                       f'{host_memory / GIB:.2f} GiB host physical memory; no work started')
                 available = available_memory()
                 lanes = legacy + execution_lanes(directory)
                 occupied = len(lanes)
@@ -430,6 +467,34 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if row.get('platform') != 'native':
                             vm_cores += row.get('per_leg_cores', demand)
                             vm_memory += row.get('vm_peak_bytes', peak)
+                if automatic:
+                    cores = 4
+                    vm_fits = (platform == 'native' or slot_profile and
+                               vm_cores + slot_profile['slots'] <= resources['vm_cores'] and
+                               vm_memory + memory_requirement(config, 'linux', mode,
+                                   slot_profile['slots'], slot_profile) - config['memory_measurement']['headroom_bytes']
+                               <= resources['vm_memory_bytes'])
+                    if slot_profile and vm_fits and available >= reserved_memory + memory_requirement(
+                            config, platform, mode, slot_profile['slots'], slot_profile):
+                        cores = slot_profile['slots']
+                gate_memory = memory_requirement(config, platform, mode, cores, slot_profile)
+                if calibration:
+                    # Scale the existing platform observation for an identified
+                    # calibration; only measured profiles enable normal defaults.
+                    measured = config['memory_measurement']
+                    peak = (measured['native_peak_bytes'] if platform == 'native' else
+                            measured['linux_peak_bytes'] + measured['vm_peak_bytes'])
+                    gate_memory = (peak * cores + qualified_cores - 1) // qualified_cores + measured['headroom_bytes']
+                needed_memory = gate_memory
+                if needed_memory > host_memory:
+                    raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
+                                       f'{host_memory / GIB:.2f} GiB host physical memory; no work started')
+                # Slots overlap subprocess and filesystem waits. The qualified
+                # full keeps its existing CPU share while using measured extra
+                # slots; it cannot admit another lane into that reserved share.
+                cpu_share = (min(cores, resources['measured_cores'])
+                             if mode == 'full' and slot_profile and cores == slot_profile['slots'] else cores)
+                host_cores = cpu_share * (2 if platform == 'both' else 1)
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
                 if reserve < 0:
                     raise ValueError('workstation CPU reserve must not be negative')
@@ -456,8 +521,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             for row in owners) and
                         not any(row.get('exclusive') for row in owners) and
                         (not exclusive or not owners))
-                    vm_peak = (memory_requirement(config, 'linux', mode) - headroom
+                    vm_peak = (memory_requirement(config, 'linux', mode, cores, slot_profile) - headroom
                                if platform != 'native' else 0)
+                    if calibration and platform == 'linux':
+                        vm_peak = gate_memory - headroom
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
                                        and vm_memory + vm_peak <= resources['vm_memory_bytes'])
@@ -486,6 +553,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
                                      mode=mode, priority=priority, cores=host_cores, per_leg_cores=cores,
+                                     automatic_slots=automatic, cpu_share_per_leg=cpu_share,
                                      local_worker_usage_at_entry=worker,
                                      fleet_worker_cpu_reserve_cores=worker_cores,
                                      workstation_cpu_reserve_cores=reserve,
@@ -507,6 +575,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         (slot / 'owner.json').write_text(json.dumps(owner) + '\n')
                         if full_marker:
                             full_marker.write_text(json.dumps(owner) + '\n')
+                        if automatic:
+                            print(f'gate: full selected {cores} slots per leg; CPU share {cpu_share} per leg; '
+                                  f'{admission_memory / GIB:.2f} GiB measured memory required, '
+                                  f'{available / GIB:.2f} GiB available', flush=True)
                         return Slot(slot, owner, full_marker, group)
             if not wait:
                 reason = (f'capacity busy: available memory below {admission_memory / GIB:.2f} GiB measured entry requirement'

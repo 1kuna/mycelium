@@ -197,17 +197,40 @@ Full admission reserves each active run's entire measured peak on top of the new
 run's peak and shared headroom. This conservatively counts current RSS again
 to cover later growth without assuming shared pages are reclaimable. CPU budgets
 sum across runs; Linux demand also fits the VM's configured CPU/RAM capacity.
-Requests above the qualified CPU budget require a new measurement.
+Additional full-test slots require a digest-bound native and Linux/VM memory
+measurement. Exclusive single-platform calibration can collect that evidence;
+its provisional memory envelope scales the existing platform measurement.
 
 `--platform both` launches the native and local-VM legs together from one frozen
-source. `--cores` remains the allocation **per platform**: four cores per leg
-reserves eight host cores and four guest cores. Admission sums the two measured
+source. Full gates default to eight test slots **per platform** when the
+`full_slot_measurement` evidence qualifies both platforms and live available
+memory covers their combined measured peaks, active reservations and existing
+headroom. Otherwise they use four. Selection is repeated under the admission
+lock while waiting; it never launches one leg first to squeeze into RAM.
+`--cores 4` explicitly retains four slots; quick gates still default to four.
+The eight-slot profile contains `slots: 8` and digest-bound `evidence` entries
+in the same format as `memory_measurement.evidence`; it introduces no RAM limit.
+The eight-slot envelope uses the maximum native RSS in its identified evidence,
+at least the four-slot native peak, and retains the maximum measured
+host-transport and VM RSS. Use representative current build/shard observations
+when replacing older evidence. The four-slot fallback uses the native observations made at four slots,
+instead of charging it for the historical eight-slot native peak. Both retain
+the measured VM residency and shared headroom. Failed test verdicts are valid resource samples;
+refused or incomplete observations cannot qualify a profile.
+
+Test slots are concurrent processes, not CPU isolation. A measured eight-slot
+full overlaps I/O waits within the existing qualified CPU share per leg;
+admission continues charging that entire share, including the fleet/workstation
+reserves, so later gate work cannot occupy it. CPU use may burst above that
+share; the slot comparison and full wall measurement qualify the tradeoff.
+The owner receipt records slots and CPU share separately. VM slot and residency
+checks and live pressure/swap guards remain in force. Admission sums the measured
 working sets plus the existing shared headroom; native memory is not charged to
 the VM. Each leg retains its own cleanup receipt. Ordinary test failure collects
 both verdicts; a signal or unconfirmed cleanup cancels the peer and retains
 uncertain custody. Both-platform elapsed time measures their overlap, rather
 than adding the two leg walls. Concurrent wall improvement is measured in the
-next release full, not inferred from individual peak RSS.
+release-batch full, not inferred from individual peak RSS.
 
 Full-gate chunk weights use platform-specific passed-root timings when available,
 with the generic hints and a default weight for new roots. The planner targets
