@@ -107,6 +107,11 @@ resources, targets or isolation. Plain native commands default to unsandboxed
 under MY-25; new native extension registrations have their separate sandbox
 policy. Declare `isolation: sandboxed` when that boundary is needed.
 
+From the release implementing MY-44, declared `model_snapshots` need no queue-owner
+approval: absent model policy permits every repository. Optional explicit source
+restrictions and physical disk/cache limits still apply; snapshots need an exact
+commit and verified bytes. See [snapshot submission](advanced.md#submit).
+
 On releases with the contained-forecast correction, CPU forecast reservations
 stay within their actual hard cgroup ceiling; measured demand and probe floors
 remain protected. Hard-contained CPU remaining-growth forecasts also stay within

@@ -301,6 +301,10 @@ unload errors. In-flight calls show zero idle seconds.
 
 ## Explicit master download and pins
 
+From the release implementing MY-44, `myce model fetch` accepts any HTTPS file
+URL; it does not require a preapproved download host. Exact size and SHA-256
+verification remain required.
+
 For a multi-file master, keep `--model-root` at the directory **containing**
 the bundle and include the bundle name in each destination, including nested
 paths (for example `bundle/weights/model.bin`). Fetch downloads into a stable

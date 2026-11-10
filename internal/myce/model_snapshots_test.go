@@ -93,6 +93,141 @@ func awaitTerminal(t *testing.T, ctx context.Context, c Client, id string) Job {
 	}
 }
 
+func TestModelSnapshotsPolicyDefaultsAndRestrictions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  *ModelPolicy
+		allowed bool
+	}{
+		{"absent", nil, true},
+		{"empty", &ModelPolicy{}, true},
+		{"limits only", &ModelPolicy{MaxBytes: 1024, FreeFloorBytes: 512}, true},
+		{"matching restriction", &ModelPolicy{Sources: []string{"org/*"}}, true},
+		{"nonmatching restriction", &ModelPolicy{Sources: []string{"other/*"}}, false},
+		{"deny match", &ModelPolicy{Sources: []string{"!org/*"}}, false},
+		{"deny other", &ModelPolicy{Sources: []string{"!other/*"}}, true},
+		{"deny overrides permit", &ModelPolicy{Sources: []string{"*/*", "!org/tiny"}}, false},
+		{"deny order independent", &ModelPolicy{Sources: []string{"!org/tiny", "org/*"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			policy := q.PriorityPolicy()
+			policy.Policy.Models = tc.policy
+			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
+				t.Fatal(err)
+			}
+			s := spec("experiment")
+			s.ModelSnapshots = snapshotJob("org/tiny").Spec.ModelSnapshots
+			job, err := q.Submit(s)
+			if !tc.allowed {
+				if err == nil || !strings.Contains(err.Error(), "not permitted") {
+					t.Fatalf("explicit restriction ignored: %v", err)
+				}
+				return
+			}
+			if err != nil || job.ModelLimits == nil {
+				t.Fatalf("default permission not frozen: job=%+v err=%v", job, err)
+			}
+			want := ModelLimits{PolicyRevision: 1}
+			if tc.policy != nil {
+				want.MaxBytes, want.FreeFloorBytes = tc.policy.MaxBytes, tc.policy.FreeFloorBytes
+			}
+			if *job.ModelLimits != want {
+				t.Fatalf("limits=%+v want=%+v", job.ModelLimits, want)
+			}
+			policy = q.PriorityPolicy()
+			policy.Policy.Models = &ModelPolicy{Sources: []string{"!org/*"}, MaxBytes: 1, FreeFloorBytes: 1}
+			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := q.jobSnapshot(job.ID)
+			if err != nil || saved.ModelLimits == nil || *saved.ModelLimits != want {
+				t.Fatalf("accepted limits changed with policy: %+v %v", saved, err)
+			}
+		})
+	}
+	for _, p := range []ModelPolicy{
+		{MaxBytes: -1}, {FreeFloorBytes: -1},
+		{Sources: []string{"!org/["}}, {Sources: []string{"org"}},
+		{Sources: []string{"!"}}, {Sources: []string{"/name"}},
+	} {
+		if err := p.validate(); err == nil {
+			t.Fatalf("invalid policy accepted: %+v", p)
+		}
+	}
+}
+
+func TestModelSnapshotsPhysicalLimits(t *testing.T) {
+	originalProbe := workerDiskProbe
+	t.Cleanup(func() { workerDiskProbe = originalProbe })
+	const total = uint64(100 << 30)
+	for _, tc := range []struct {
+		name   string
+		limits ModelLimits
+		free   uint64
+		wantOK bool
+	}{
+		{"derived floor fits", ModelLimits{}, diskFreeFloor(total) + uint64(len(tinyWeights)+len(tinyConfig)), true},
+		{"derived floor refuses", ModelLimits{}, diskFreeFloor(total), false},
+		{"explicit floor refuses", ModelLimits{FreeFloorBytes: 2 << 30}, 2 << 30, false},
+		{"size limit refuses", ModelLimits{MaxBytes: 1}, total, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workerDiskProbe = func(string) (DiskReading, error) {
+				return DiskReading{TotalBytes: total, FreeBytes: tc.free}, nil
+			}
+			root := t.TempDir()
+			tinyModel(t, root)
+			w := snapshotWorker(t, root, &fakeClock{now: time.Unix(1000, 0)})
+			job := snapshotJob("org/tiny")
+			job.ModelLimits = &tc.limits
+			_, releases, err := w.acquireModelSnapshots(context.Background(), job)
+			for _, release := range releases {
+				release()
+			}
+			if tc.wantOK {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(runtimeDiagnostic(err).String(), "model_snapshot_too_large") {
+				t.Fatalf("physical protection ignored: %v", err)
+			}
+		})
+	}
+	t.Run("derived floor permits inactive cache eviction", func(t *testing.T) {
+		workerDiskProbe = originalProbe
+		root := t.TempDir()
+		tinyModel(t, root)
+		hubRepo(t, root, "org/other", tinyRevision, map[string]string{"model.safetensors": "other weights"})
+		w := snapshotWorker(t, root, &fakeClock{now: time.Unix(1000, 0)})
+		paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, release := range releases {
+			release()
+		}
+		victim := paths["MYCE_MODEL_BASE"]
+		workerDiskProbe = func(string) (DiskReading, error) {
+			free := diskFreeFloor(total)
+			if _, err := os.Stat(victim); os.IsNotExist(err) {
+				free += 4096 // Removing the inactive snapshot frees enough for the new one.
+			}
+			return DiskReading{TotalBytes: total, FreeBytes: free}, nil
+		}
+		_, releases, err = w.acquireModelSnapshots(context.Background(), snapshotJob("org/other"))
+		for _, release := range releases {
+			release()
+		}
+		if err != nil {
+			t.Fatal("derived floor refused before inactive cache eviction:", err)
+		}
+		if _, err := os.Stat(victim); !os.IsNotExist(err) {
+			t.Fatalf("inactive snapshot was not evicted: %v", err)
+		}
+	})
+}
+
 func TestModelSnapshotsNativeDevJourney(t *testing.T) {
 	state := t.TempDir()
 	if err := PrepareStateRoots(state); err != nil {
@@ -138,19 +273,17 @@ if (printf changed > "$MYCE_MODEL_BASE/model.safetensors") 2>/dev/null; then exi
 if touch "$MYCE_MODEL_BASE/new" 2>/dev/null; then exit 22; fi
 printf '%s' "$MYCE_MODEL_BASE" > result`
 
-	if _, err := c.Submit(ctx, declare("org/tiny", tinyRevision, reads)); err == nil || !strings.Contains(err.Error(), "not permitted by local model policy") {
-		t.Fatal("model accepted without local policy", err)
-	}
 	var resolved ResolveReport
-	if err := c.Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: declare("org/tiny", tinyRevision, reads)}, &resolved); err != nil || len(resolved.Findings) == 0 || resolved.Findings[0].Field != "model_snapshots" {
-		t.Fatalf("resolve hid the policy refusal: %v %+v", err, resolved.Findings)
+	if err := c.Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: declare("org/tiny", tinyRevision, reads)}, &resolved); err != nil {
+		t.Fatal(err)
 	}
-	setModelPolicy(t, ctx, c, &ModelPolicy{Sources: []string{"org/*"}, MaxBytes: 1 << 20})
+	for _, finding := range resolved.Findings {
+		if finding.Field == "model_snapshots" {
+			t.Fatalf("resolve requires model approval by default: %+v", finding)
+		}
+	}
 	if _, err := c.Submit(ctx, declare("org/tiny", "main", reads)); err == nil || !strings.Contains(err.Error(), "full 40-character lowercase commit") {
 		t.Fatal("movable revision accepted", err)
-	}
-	if _, err := c.Submit(ctx, declare("elsewhere/tiny", tinyRevision, reads)); err == nil || !strings.Contains(err.Error(), "not permitted") {
-		t.Fatal("unlisted source accepted", err)
 	}
 
 	t.Run("read-only snapshot", func(t *testing.T) {
@@ -199,6 +332,21 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 			}
 		})
 	}
+	setModelPolicy(t, ctx, c, &ModelPolicy{Sources: []string{"org/*"}, MaxBytes: 1 << 20})
+	if _, err := c.Submit(ctx, declare("elsewhere/tiny", tinyRevision, reads)); err == nil || !strings.Contains(err.Error(), "not permitted") {
+		t.Fatal("explicitly restricted source accepted", err)
+	}
+	if err := c.Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: declare("elsewhere/tiny", tinyRevision, reads)}, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, finding := range resolved.Findings {
+		found = found || finding.Field == "model_snapshots"
+	}
+	if !found {
+		t.Fatalf("resolve hid explicit model restriction: %+v", resolved.Findings)
+	}
+
 	if data, _ := os.ReadFile(outside); string(data) != "not a model blob" {
 		t.Fatal("escape target changed")
 	}
