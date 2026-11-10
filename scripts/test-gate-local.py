@@ -80,7 +80,7 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     next_gate = capacity.acquire(root)
                     try:
                         self.assertTrue(peer.directory.exists())
-                        self.assertTrue(waiter.exists())
+                        self.assertFalse(waiter.exists())  # Retired priority label, not its live process.
                         self.assertNotEqual(peer.owner['run_id'], next_gate.owner['run_id'])
                         self.assertFalse(Path(dead['scratch']).exists())
                         archives = list((root / 'selfheal-backups').iterdir())
@@ -632,7 +632,6 @@ finally: slot.release()
                 custody = root / 'local-go-full-unknown.custody'
                 custody.write_text(json.dumps(record))
                 self.assertEqual(capacity.full_waiters(root), [])
-                self.assertFalse(capacity.priority_waiting(root, 'release'))
                 self.assertTrue(custody.exists())
             finally: child.wait(timeout=5)
 

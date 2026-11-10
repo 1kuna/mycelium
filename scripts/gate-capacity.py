@@ -45,29 +45,6 @@ def publish_waiting(path, text):
     pending.replace(path)
 
 
-def priority_waiting(directory, priority):
-    active = False
-    for path in directory.glob('local-go-' + priority + '-wait-*'):
-        raw = path.read_text()
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            row = None
-        if isinstance(row, dict):
-            dead = process_identity(row['pid']) != row['process_identity']
-        elif raw.strip().isdigit():
-            # Older waiting records contained only PID: absence proves death;
-            # an extant/reused PID lacks start identity and remains unknown.
-            dead = process_identity(int(raw)) is None
-        else:
-            dead = False  # Preserve unknown legacy waiting records.
-        if dead:
-            path.unlink()
-        else:
-            active = True
-    return active
-
-
 def full_waiters(directory):
     """Live FIFO tickets; the historical filename now covers every mode."""
     rows = []
@@ -520,10 +497,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 slots = ((os.cpu_count() or 1) + 2 if resources else
                          min(2, max(1, int(config.get('heavy_slots', 2)))))
                 fulls = min(2, max(1, int(config.get('full_slots', 1))))
-                # Retire dead pre-FIFO tickets; live legacy priority labels no
-                # longer reserve capacity ahead of the actual queue.
-                priority_waiting(directory, 'release')
-                priority_waiting(directory, 'calibration')
+                # These old labels contain no execution custody. Retire them
+                # without probing their PIDs: they grant no queue precedence.
+                for label in ('release', 'calibration'):
+                    for path in directory.glob('local-go-' + label + '-wait-*'):
+                        path.unlink(missing_ok=True)
                 queue = full_waiters(directory)
                 queue_first = bool(queue) and queue[0] == queue_ticket
                 batch_done = not after_identity or process_identity(after_pid) != after_identity
