@@ -157,8 +157,9 @@ func TestQueueRecordsViewAndDecisionRollback(t *testing.T) {
 			t.Fatal("rollback failed to recompute shared-host view")
 		}
 		q = reopenQueue(t, q, clock)
-		if q.s.Machines[m.ID].SharedHostReason != before || q.s.HostMaintenance[hostID(&m)].SharedHost == nil {
-			t.Fatal("reopen lost original policy or its view")
+		status, err := q.HostMaintenanceStatus(hostID(&m))
+		if err != nil || status.Policy.SharedHost == nil || len(status.Workers) != 1 || status.Workers[0].Machine.SharedHostReason != before {
+			t.Fatalf("reopen lost original policy or its recomputed view: %+v %v", status, err)
 		}
 		if err := q.update(func() error { removeProfile(); return nil }); err != nil {
 			t.Fatal(err)
@@ -167,8 +168,9 @@ func TestQueueRecordsViewAndDecisionRollback(t *testing.T) {
 			t.Fatal("policy view rewrote inventory")
 		}
 		q = reopenQueue(t, q, clock)
-		if q.s.Machines[m.ID].SharedHostReason != "" || q.s.HostMaintenance[hostID(&m)].SharedHost != nil {
-			t.Fatal("reopen lost committed policy or failed to recompute its view")
+		status, err = q.HostMaintenanceStatus(hostID(&m))
+		if err != nil || status.Policy.SharedHost != nil || len(status.Workers) != 1 || status.Workers[0].Machine.SharedHostReason != "" {
+			t.Fatalf("reopen lost committed policy or its recomputed view: %+v %v", status, err)
 		}
 	})
 
