@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -47,19 +46,7 @@ func TestStorageCompatCollectedCustodyDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	database, root, files := filepath.Join(dir, "queue.db"), filepath.Join(dir, "checkpoints"), filepath.Join(dir, "files")
-	db, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("CREATE TABLE queue (id INTEGER PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("INSERT INTO queue VALUES (1, ?)", wire); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	seedParkedStorageState(t, database, wire)
 	c := &fakeClock{now: collected.Add(10 * 24 * time.Hour)}
 	q, err := Open(database, root, c, WithFileStore(files, 1024, true))
 	if err != nil {
