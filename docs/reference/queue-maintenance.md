@@ -212,6 +212,17 @@ A failed upgrade retains the previous layout and marker. Readers predating v3
 refuse the new layout; recovery needs a compatible binary or a consistent backup
 from before the upgrade.
 
+A transaction runs the full maintenance planner once. Check-ins keep that pass
+before assignment so deadline, loss and custody fences still apply to every
+new offer. Fan-out, dependency and pause decisions then reach a fixed point
+through a transaction-local worklist of changed jobs and their relations,
+including changes made after planning. The final closure runs before efficiency
+accounting and the same atomic FULL commit. A rejected transaction rolls back
+the whole closure. Repeated maintenance requests settle that worklist without
+repeating inventory-wide planning. Host-hold target/preemption planning runs
+once; release-only finalization can clear a hold after the transaction's last
+custody change.
+
 `BenchmarkCheckinPersistence` reports control-hold and persistence phases,
 changed payload bytes and private-fixture WAL growth for retained-history and
 768-input-manifest workloads. It uses real SQLite commits and an injected queue

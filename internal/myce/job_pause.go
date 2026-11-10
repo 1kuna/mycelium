@@ -55,7 +55,7 @@ func (q *Queue) changeJobPause(id string, request *PauseJobRequest, revision uin
 			}
 			q.resumeJob(j)
 		}
-		q.maintain()
+		q.settleMaintenance()
 		copy := cloneJob(j)
 		out = &copy
 		return nil
@@ -86,31 +86,24 @@ func (q *Queue) resumeJob(j *Job) {
 	j.State, j.Pause, j.Reason = "queued", nil, ""
 	j.PauseRevision++
 }
-func (q *Queue) maintainJobPauses() {
-	now := q.clock.Now()
-	for _, j := range q.liveJobs() {
-		if j.State == "paused" && j.Pause != nil && j.Pause.Parent == "" && expired(j.Pause.Until, now) {
-			q.resumeJob(j)
-		}
+func (q *Queue) maintainJobPause(parent *Job) {
+	if parent.State == "paused" && parent.Pause != nil && parent.Pause.Parent == "" && expired(parent.Pause.Until, q.clock.Now()) {
+		q.resumeJob(parent)
 	}
-	// Assigned children drain. Retried children join the parent's pause before
-	// any planning, with their original queue/fairness fields untouched.
-	for _, parent := range q.liveJobs() {
-		if parent.FanOut == nil {
+	if parent.FanOut == nil {
+		return
+	}
+	for _, id := range parent.FanOut.Children {
+		child := q.s.Jobs[id]
+		if child == nil {
 			continue
 		}
-		for _, id := range parent.FanOut.Children {
-			child := q.s.Jobs[id]
-			if child == nil {
-				continue
-			}
-			if parent.State == "paused" && parent.Pause != nil && child.State == "queued" {
-				pause := *parent.Pause
-				pause.Parent = parent.ID
-				q.pauseJob(child, pause)
-			} else if parent.State != "paused" && child.State == "paused" && child.Pause != nil && child.Pause.Parent == parent.ID {
-				q.resumeJob(child)
-			}
+		if parent.State == "paused" && parent.Pause != nil && child.State == "queued" {
+			pause := *parent.Pause
+			pause.Parent = parent.ID
+			q.pauseJob(child, pause)
+		} else if parent.State != "paused" && child.State == "paused" && child.Pause != nil && child.Pause.Parent == parent.ID {
+			q.resumeJob(child)
 		}
 	}
 }

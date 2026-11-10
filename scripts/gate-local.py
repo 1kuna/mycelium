@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 
 REPO = Path(__file__).resolve().parent.parent
@@ -25,7 +26,7 @@ def module(name):
 
 capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
 trim_cache = module('gate-cache').trim_cache
-HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
+HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-capacity.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 
@@ -95,7 +96,7 @@ def execute(path):
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError):
         # All preparation commands use run/check_output, which reap on these
         # failures. No payload/transport has been launched. Signal death and
-        # unknown exceptions still leave no positive receipt and retain custody.
+        # unknown exceptions still leave no positive cleanup receipt.
         manifest = json.loads(path.read_text())
         receipts.publish(path.parent / 'overall-cleanup.json', manifest['identity'],
                          stopped=True, status=125, phase='preparation', no_payload_started=True)
@@ -186,7 +187,7 @@ def execute(path):
             status = status or result
         return status
     finally:
-        # Positive receipts, not exit-code guesses, authorize capacity reuse.
+        # Positive receipts authorize source deletion, never admission occupancy.
         for child in children:
             if child.poll() is None:
                 child.terminate()
@@ -214,7 +215,8 @@ def main():
     parser.add_argument('--repo', type=Path, default=REPO)
     parser.add_argument('--ref')
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
-    parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
+    parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'),
+                        help='compatibility label; all requests use FIFO; calibration qualifies isolated full measurements')
     parser.add_argument('--cores', type=int,
                         help='test slots per platform; full defaults to measured eight-slot memory capacity, otherwise four')
     parser.add_argument('--exclusive', action='store_true',
@@ -223,8 +225,10 @@ def main():
     parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
     parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--reconcile', type=Path, nargs='+', metavar='RECEIPT',
-                        help='verify abandoned measured custody and archive it without deleting scratch')
+                        help='compatibility command; admission now reclaims dead holders automatically')
     args = parser.parse_args()
+    if args.mode == 'quick' and args.priority == 'release':
+        args.priority = 'normal'
     if args.cores is None and (args.mode != 'full' or args.command):
         args.cores = 4
     if args.execute:
@@ -282,14 +286,21 @@ def main():
         confirmed = receipts.confirmed(folder / 'overall-cleanup.json', identity)
         if confirmed:
             # A terminal failure is as rebuildable as a successful source tree.
-            if (folder / 'source').exists():
-                shutil.rmtree(folder / 'source')
-            (folder / 'source.tar').unlink(missing_ok=True)
-            (folder / 'runtime.tar').unlink(missing_ok=True)
+            try:
+                if (folder / 'source').exists():
+                    shutil.rmtree(folder / 'source')
+                (folder / 'source.tar').unlink(missing_ok=True)
+                (folder / 'runtime.tar').unlink(missing_ok=True)
+            except Exception as error:
+                (folder / 'finalize-error.json').write_text(json.dumps(dict(status=125,
+                    error=str(error), traceback=traceback.format_exc())) + '\n')
+                print('gate: source cleanup failed: ' + str(error), file=sys.stderr)
+                return 125
         return status if confirmed else 125
     finally:
         if slot is not None:
             slot.release(stopped=bool(folder) and receipts.confirmed(folder / 'overall-cleanup.json', identity))
+            capacity._cache.trim_backups(slot.directory.parent / 'selfheal-backups')
         if cache is not None:
             trim_cache(cache)
         if folder:
