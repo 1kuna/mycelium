@@ -256,7 +256,8 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		cards = []MachineDevice{*w.selectedDevice}
 	}
 	for _, d := range cards {
-		if d.Platform != "cuda" {
+		root := backendFor(d.Platform).nativeReadRoot
+		if root == "" {
 			continue
 		}
 		pci := d.pciAddress
@@ -264,7 +265,7 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 			pci = d.pciFact.address
 		}
 		if pci != "" {
-			p.Read = append(p.Read, filepath.Join("/proc/driver/nvidia/gpus", normalizePCIAddress(pci)))
+			p.Read = append(p.Read, filepath.Join(root, normalizePCIAddress(pci)))
 		}
 	}
 	return p, err
@@ -321,29 +322,8 @@ func (w Worker) nativeGPUDevices(env map[string]string) ([]string, error) {
 		return nil, errors.New("native_isolation_gpu_mapping_unavailable: selected device has no verified PCI mapping")
 	}
 	pci = normalizePCIAddress(pci)
-	switch w.Machine.GPU {
-	case "cuda":
-		data, err := os.ReadFile(filepath.Join("/proc/driver/nvidia/gpus", pci, "information"))
-		if err != nil {
-			return nil, errors.New("native_isolation_gpu_mapping_unavailable: NVIDIA kernel minor unavailable")
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			if key, value, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(key) == "Device Minor" {
-				n, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
-				if err != nil {
-					break
-				}
-				return []string{fmt.Sprintf("/dev/nvidia%d", n), "/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"}, nil
-			}
-		}
-	case "xpu":
-		paths, _ := filepath.Glob("/sys/class/drm/renderD*/device")
-		for _, path := range paths {
-			resolved, err := filepath.EvalSymlinks(path)
-			if err == nil && normalizePCIAddress(filepath.Base(resolved)) == pci {
-				return []string{filepath.Join("/dev/dri", filepath.Base(filepath.Dir(path)))}, nil
-			}
-		}
+	if nodes := backendFor(w.Machine.GPU).nativeNodes; nodes != nil {
+		return nodes(pci, acceleratorNodeProbe{readFile: os.ReadFile, glob: filepath.Glob, evalSymlinks: filepath.EvalSymlinks})
 	}
 	return nil, errors.New("native_isolation_gpu_mapping_unavailable: selected device node not found")
 }

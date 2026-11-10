@@ -31,6 +31,16 @@ func TestAcceleratorBackendDescriptors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.platform, func(t *testing.T) {
 			backend := backendFor(tc.platform)
+			if !ValidPlatform(tc.platform) || PhysicalAcceleratorPlatform(tc.platform) != (tc.platform != "cpu" && tc.platform != "fake") {
+				t.Fatal("CLI platform validation changed")
+			}
+			for _, mode := range []string{"auto", "fixed", "dedicated", "unified"} {
+				want := mode != "fixed" && (tc.platform == "cuda" || tc.platform == "metal" || tc.platform == "xpu" && mode == "unified")
+				if AcceleratorMemoryMeasured(tc.platform, mode) != want {
+					t.Fatal("CLI memory provenance changed", mode)
+				}
+			}
+
 			if seen[backend.platform] || !validGPU(tc.platform) {
 				t.Fatal("missing or duplicate backend", tc.platform)
 			}
@@ -136,7 +146,7 @@ func TestAcceleratorBackendInventoryAndDetection(t *testing.T) {
 				t.Fatal("inventory", devices, err)
 			}
 			if backend.pciVendor != "" {
-				if pci[0].platform() != platform {
+				if pci[0].platform() != platform || backend.nativeNodes == nil {
 					t.Fatal("physical backend mapping missing")
 				}
 				devices[0].pciFact = &pci[0]

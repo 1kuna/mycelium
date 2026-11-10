@@ -349,8 +349,8 @@ func (q *Queue) missingVariantAdvice(j *Job) []string {
 				}
 				target := machineTarget(other)
 				device := target.Platform
-				if device == "metal" {
-					device = "mps or MLX (queue backend metal)"
+				if name := backendFor(device).variantDevice; name != "" {
+					device = name
 				}
 				advice = append(advice, fmt.Sprintf("Missing %s variant limits placement while a qualified variant waits on a scarcer host. Investigate an explicit implementation for %s with its own resources, frozen environment/lock and native check; select %s through MYCE_DEVICE/assigned visibility. Run myce portability for per-target preparation steps. Verify actual RAM/CPU/device needs and native qualification, then obtain owner-accepted MY-19 reference-output parity before production. Missing coverage is not a hard software requirement or permission to move a running attempt.", targetLabel(portabilityTarget(target)), target.OS+"/"+target.Arch, device))
 			}

@@ -223,8 +223,8 @@ func NewDeviceMemorySource(platform, device string, budget, reserve float64, mod
 
 func newDeviceMemorySource(platform, device string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
 	return newMemorySource(platform, budget, reserve, mode, goos, readFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if name == "nvidia-smi" && device != "" {
-			args = append(args, "--id="+device)
+		if backend := backendFor(platform); backend.memoryCommand != "" && name == backend.memoryCommand && device != "" {
+			args = append(args, backend.memorySelectorFlag+device)
 		}
 		return command(ctx, name, args...)
 	})

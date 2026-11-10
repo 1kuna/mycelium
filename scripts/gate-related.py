@@ -25,6 +25,13 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
     'device_detection_test.go', 'device_inventory_family_test.go',
     'probe_consolidation_test.go', 'accelerator_backend_test.go')
 
+# Backend accounting policy feeds these existing memory/placement regressions.
+SUPPLEMENTAL_CONSUMERS['internal/myce/memory_sizing_facts.go'] = (
+    'attempt_memory_facts_test.go', 'process_memory_test.go',
+    'memory_envelope_test.go', 'memory_observations_test.go')
+SUPPLEMENTAL_CONSUMERS['internal/myce/model_readiness_resources.go'] = (
+    'models_readiness_test.go', 'readiness_review_test.go', 'engine_probe_memory_test.go')
+
 # Device-use ranking extends the existing placement regressions.
 SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
     'machine_placement_test.go', 'benchmark_test.go')

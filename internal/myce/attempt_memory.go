@@ -380,7 +380,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 }
 
 func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration, attempts ...*process) func() *AttemptMemoryPeak {
-	deviceTelemetry := !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
+	deviceTelemetry := !j.Spec.Needs.cpuOnly() && backendFor(w.Machine.GPU).attemptMemory != nil
 	if a == nil && w.processMemory != nil && groups != nil {
 		return w.observeProcessMemory(groups, attempts...)
 	}
@@ -406,7 +406,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
-	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
+	gpuHost := backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
 	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
@@ -686,60 +686,8 @@ func (w Worker) attemptDeviceMemoryReading(ctx context.Context, ids map[int]bool
 	if len(w.selectedDevices) > 1 {
 		return 0, false, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
 	}
-	if w.Machine.GPU == "cuda" {
-		selector := w.Machine.Device
-		if w.selectedDevice != nil {
-			selector = w.selectedDevice.Selector
-		}
-		if !strings.HasPrefix(selector, "GPU-") {
-			return 0, false, errAttemptMemoryUnsupported
-		}
-		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
-		// A descendant can retain the query's pipes after it exits or is killed.
-		// Bound that drain too, so it cannot stop future five-second samples.
-		// Incomplete output remains unknown rather than a partial measurement.
-		cmd.WaitDelay = attemptMemorySamplePeriod
-		b, err := cmd.Output()
-		if err != nil {
-			if errors.Is(err, exec.ErrNotFound) {
-				return 0, false, errAttemptMemoryUnsupported
-			}
-			// Driver startup and query timeouts do not establish lack of support.
-			return 0, false, errAttemptMemoryPending
-		}
-		return cudaAttemptMemoryReading(b, selector, ids, resident, known...)
-	}
-	if w.Machine.GPU == "xpu" && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" {
-		clients := map[string]float64{}
-		for pid := range ids {
-			entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
-			if err != nil {
-				continue
-			}
-			for _, entry := range entries {
-				b, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
-				if err != nil {
-					continue
-				}
-				key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
-				if errors.Is(err, errAttemptMemoryUnsupported) {
-					return 0, false, err
-				}
-				if err == nil {
-					clients[key] = max(clients[key], gb)
-				}
-			}
-		}
-		total := 0.0
-		for _, gb := range clients {
-			total += gb
-		}
-		if len(clients) == 0 {
-			return 0, false, errAttemptMemoryPending
-		}
-		return total, false, nil
+	if sample := backendFor(w.Machine.GPU).attemptMemory; sample != nil {
+		return sample(w, ctx, ids, fs, resident, known...)
 	}
 	return 0, false, errAttemptMemoryUnsupported
 }
@@ -978,4 +926,64 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 		}
 	}()
 	return result
+}
+
+func cudaAttemptDeviceMemory(w Worker, ctx context.Context, ids map[int]bool, _ memoryFS, resident *float64, known ...map[int]bool) (float64, bool, error) {
+	selector := w.Machine.Device
+	if w.selectedDevice != nil {
+		selector = w.selectedDevice.Selector
+	}
+	if !strings.HasPrefix(selector, "GPU-") {
+		return 0, false, errAttemptMemoryUnsupported
+	}
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
+	// A descendant can retain the query's pipes after it exits or is killed.
+	// Bound that drain too, so it cannot stop future five-second samples.
+	// Incomplete output remains unknown rather than a partial measurement.
+	cmd.WaitDelay = attemptMemorySamplePeriod
+	b, err := cmd.Output()
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return 0, false, errAttemptMemoryUnsupported
+		}
+		// Driver startup and query timeouts do not establish lack of support.
+		return 0, false, errAttemptMemoryPending
+	}
+	return cudaAttemptMemoryReading(b, selector, ids, resident, known...)
+}
+func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, _ *float64, _ ...map[int]bool) (float64, bool, error) {
+	if w.selectedDevice == nil || w.selectedDevice.pciAddress == "" {
+		return 0, false, errAttemptMemoryUnsupported
+	}
+
+	clients := map[string]float64{}
+	for pid := range ids {
+		entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			b, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
+			if err != nil {
+				continue
+			}
+			key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
+			if errors.Is(err, errAttemptMemoryUnsupported) {
+				return 0, false, err
+			}
+			if err == nil {
+				clients[key] = max(clients[key], gb)
+			}
+		}
+	}
+	total := 0.0
+	for _, gb := range clients {
+		total += gb
+	}
+	if len(clients) == 0 {
+		return 0, false, errAttemptMemoryPending
+	}
+	return total, false, nil
 }

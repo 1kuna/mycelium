@@ -206,7 +206,7 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 	if err := singleDeviceMask(m.Device); err != nil {
 		return m, err
 	}
-	if device == "" && platform != "cpu" && platform != "fake" {
+	if device == "" && !backendFor(platform).selectWithoutDevice {
 		return m, nil
 	}
 	if m.Device != "" && m.Device != device {
@@ -219,25 +219,30 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 	}
 	m.DeviceEnv = env
 	// Select-none is explicit for every unselected accelerator family.
-	env["CUDA_VISIBLE_DEVICES"] = ""
-	env["ZE_AFFINITY_MASK"] = "2147483647"
-	env["ONEAPI_DEVICE_SELECTOR"] = "!*:*"
-	env["ZE_ENABLE_PCI_ID_DEVICE_ORDER"] = "1"
-	switch platform {
-	case "cuda":
-		env["CUDA_VISIBLE_DEVICES"] = device
-	case "xpu":
-		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:0"
-		env["ZE_AFFINITY_MASK"] = device
-	case "cpu":
-		env["CUDA_VISIBLE_DEVICES"] = ""
-	case "fake":
-	case "metal":
-		if device != "0" {
-			return m, errors.New("Metal supports only device 0")
+	for _, backend := range acceleratorBackends {
+		if backend.visibleDevicesVariable != "" {
+			env[backend.visibleDevicesVariable] = ""
+			if backend.runtimeSelectorPrefix != "" {
+				env[backend.visibleDevicesVariable] = "2147483647"
+			}
 		}
-	default:
+		if backend.runtimeSelectorPrefix != "" {
+			env["ONEAPI_DEVICE_SELECTOR"] = "!*:*"
+			env["ZE_ENABLE_PCI_ID_DEVICE_ORDER"] = "1"
+		}
+	}
+	backend := backendFor(platform)
+	if backend.platform == "" {
 		return m, errors.New("unknown device platform")
+	}
+	if backend.onlyDevice != "" && device != backend.onlyDevice {
+		return m, errors.New("Metal supports only device 0")
+	}
+	if backend.visibleDevicesVariable != "" {
+		env[backend.visibleDevicesVariable] = device
+	}
+	if backend.runtimeSelectorPrefix != "" {
+		env["ONEAPI_DEVICE_SELECTOR"] = backend.runtimeSelectorPrefix + "0"
 	}
 	return m, nil
 }
@@ -257,15 +262,15 @@ func cardsEnvironment(platform string, cards []MachineDevice) (map[string]string
 		}
 		selectors, ordinals = append(selectors, d.Selector), append(ordinals, strconv.Itoa(i))
 	}
-	switch platform {
-	case "cuda":
-		env["CUDA_VISIBLE_DEVICES"] = strings.Join(selectors, ",")
-	case "xpu":
-		env["ZE_AFFINITY_MASK"] = strings.Join(selectors, ",")
-		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + strings.Join(ordinals, ",")
-	case "fake":
-	default:
+	backend := backendFor(platform)
+	if !backend.multipleDevices {
 		return nil, errors.New("multi-card attempts need CUDA, XPU or fake cards")
+	}
+	if backend.visibleDevicesVariable != "" {
+		env[backend.visibleDevicesVariable] = strings.Join(selectors, ",")
+	}
+	if backend.runtimeSelectorPrefix != "" {
+		env["ONEAPI_DEVICE_SELECTOR"] = backend.runtimeSelectorPrefix + strings.Join(ordinals, ",")
 	}
 	return env, nil
 }

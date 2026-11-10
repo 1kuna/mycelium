@@ -538,8 +538,8 @@ func (q *Queue) portabilityWithRecipes(req PortabilityRequest, sets map[string]m
 			}
 		}
 		device := r.Target.Platform + ":N"
-		if r.Target.Platform == "metal" {
-			device = "mps (queue backend metal)"
+		if name := backendFor(r.Target.Platform).applicationDevice; name != "" {
+			device = name
 		}
 		if r.Target.Platform == "cpu" {
 			device = "cpu"
