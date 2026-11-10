@@ -2727,6 +2727,17 @@ separate authority. Allocation accounting still refuses work that cannot fit
 measured memory headroom. Transport cancellation returns retryable 503
 `status_unavailable`, rather than classifying an unavailable read as bad input.
 
+From the next queue release, cold status captures copy only active-work and
+worker-contact scalars under the queue mutex. Contact/loss derivation, retained
+history traversal, decoding, diagnostics and response encoding run outside it.
+Status still samples current log contact, pending check-ins and service grace;
+this adds no eventual-consistency interval or response-field change. Existing
+response-cache freshness and terminal-commit invalidation remain in force.
+Slow-request `mutex_wait_ms` / `mutex_hold_ms` measure the live queue mutex;
+response-cache refresh serialization is excluded. Earlier releases included
+the entire cache refresh/build in those fields, so their status/job hold figures
+alone cannot establish queue-mutex occupancy.
+
 ## Retained production admission waits (next release, #868)
 
 `admission_wait` on a production Job retains queue-clock first/latest waiting

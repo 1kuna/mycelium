@@ -539,13 +539,14 @@ type readFreshness struct {
 	unreported bool
 }
 type committedReadCapture struct {
-	generation   *readGeneration
-	models       *ModelConfig
-	environments *EnvironmentCatalog
-	runtime      *observationState
-	source       *Queue
-	ledgers      map[string]observationMachineLedger
-	fresh        map[string]readFreshness
+	generation    *readGeneration
+	models        *ModelConfig
+	environments  *EnvironmentCatalog
+	runtime       *observationState
+	source        *Queue
+	contactInputs *Queue // Immutable scalar inputs; derive contact diagnostics off-lock.
+	ledgers       map[string]observationMachineLedger
+	fresh         map[string]readFreshness
 }
 
 func (q *Queue) freezeReadCapture() *committedReadCapture {
@@ -561,8 +562,8 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
 		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
 	}
-	q.freezeContactView(source)
-	return &committedReadCapture{generation: generation, models: models, environments: environments, runtime: runtime, source: source, ledgers: ledgers, fresh: fresh}
+	return &committedReadCapture{generation: generation, models: models, environments: environments, runtime: runtime, source: source,
+		contactInputs: q.captureContactInputs(source.clock), ledgers: ledgers, fresh: fresh}
 }
 
 // Reference walks, cancellation, capacity scans and recursive copying run on
@@ -617,12 +618,16 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 // Materialize immutable committed inputs without taking the writer mutex.
 func (capture *committedReadCapture) observationQueue(ctx context.Context, id string, readAt time.Time) (*Queue, error) {
 	base := capture.source
+	// Preserve the original capture clock and service opportunity while deriving
+	// contact. A later read clock may age suspicion, but cannot renew its grace.
+	contact := &Queue{clock: base.clock, restartUntil: base.restartUntil}
+	capture.contactInputs.freezeContactView(contact)
 	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
-		restartUntil: base.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
-		contacts: base.contacts, detachedRead: true}
-	if base.mu.control != nil {
-		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: base.controlNow()}
+		restartUntil: contact.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
+		contacts: contact.contacts, detachedRead: true}
+	if contact.mu.control != nil {
+		source.mu.control = &controlClock{clock: source.clock.Now, at: source.clock.Now(), opportunity: contact.controlNow()}
 	}
 	generation, models, environments, runtime := capture.generation, capture.models, capture.environments, capture.runtime
 	ledgers, fresh := capture.ledgers, capture.fresh

@@ -54,6 +54,12 @@ func requestObservationLock(ctx context.Context, mu sync.Locker) (func(), error)
 	if err := timing.lockContext(ctx, mu); err != nil {
 		return nil, err
 	}
+	// Response-cache refresh locks serialize off-lock builds, not queue work.
+	// Including their lifetime here falsely attributes an entire status/job
+	// projection (and waits for another projection) to the live queue mutex.
+	if _, queue := mu.(*queueMutex); !queue {
+		return mu.Unlock, nil
+	}
 	return func() { unlockTimedRequest(ctx, mu, timing) }, nil
 }
 

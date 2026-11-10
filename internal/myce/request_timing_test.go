@@ -8,12 +8,40 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 const testLatencyBurst = 256
 const testRouteBurst = 128
+
+// A cache refresh encloses the whole off-lock read build. Its lifetime must
+// not be reported as queue-mutex occupancy, including when a capture is nested.
+func TestRequestTimingObservationRefresh(t *testing.T) {
+	q, _ := fixture(t)
+	span := &requestSpan{}
+	ctx := context.WithValue(context.Background(), requestSpanKey{}, span)
+	var refresh sync.Mutex
+	unlockRefresh, err := requestObservationLock(ctx, &refresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlockQueue, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		unlockRefresh()
+		t.Fatal(err)
+	}
+	unlockQueue()
+	beforeWait, beforeHold, beforeUnlock := span.wait, span.hold, span.lastUnlock
+	if !span.measured || beforeHold <= 0 {
+		t.Fatal("queue capture did not record occupancy")
+	}
+	unlockRefresh()
+	if span.wait != beforeWait || span.hold != beforeHold || span.lastUnlock != beforeUnlock {
+		t.Fatal("off-lock response build was attributed to the queue mutex")
+	}
+}
 
 func TestRequestTimingSlowHandler(t *testing.T) {
 	q, _ := fixture(t)

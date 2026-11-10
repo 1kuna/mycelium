@@ -302,3 +302,9 @@ one. Treat the response as a point-in-time observation, and retain mutation
 acknowledgements and accepted-result checks as the authority for those actions.
 Canceled reads return retryable 503 `status_unavailable`; use the client's
 existing backoff and the same job/key rather than resubmitting work.
+
+From the next queue release, status builds derive worker-contact diagnostics
+and retained history outside the queue mutex, preserving current contact and
+the existing cache freshness contract. Slow-request mutex timing excludes
+response-cache refresh/build time; older status/job mutex figures may include
+that off-lock work and need a direct queue-lock measurement for attribution.
