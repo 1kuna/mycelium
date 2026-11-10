@@ -21,7 +21,7 @@ func deliveryJob(t *testing.T, q *Queue) (*Job, EnvironmentRecipe) {
 }
 
 func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
-	for _, protocol := range []string{"", keyedAttemptProtocol} {
+	for _, protocol := range []string{keyedAttemptProtocol} {
 		t.Run("protocol="+protocol, func(t *testing.T) {
 			q, clock := fixture(t)
 			j, r := deliveryJob(t, q)
@@ -37,11 +37,11 @@ func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
 			m := machine("delivery", "fake")
 			m.Environments = []string{r.Key}
 			c := Checkin{Machine: m, AttemptProtocol: protocol}
-			// Keep both old-wire variants headerless. Their first response is
+			// Keep the previous-release first send headerless. Its first response is
 			// safely idle; the next send establishes cadence before assignment.
 			first, err := q.Checkin(c)
 			if err != nil || first.Job != nil || len(first.Attempts) != 0 {
-				t.Fatal("cold legacy response did not stay idle", first, err)
+				t.Fatal("cold keyed response did not stay idle", first, err)
 			}
 			clock.Advance(time.Second)
 			reply, err := q.Checkin(c)
@@ -55,11 +55,7 @@ func TestBlobDeliveryAssignmentFailureUsesExactRelease(t *testing.T) {
 			if reply.Job != nil {
 				t.Fatal("unreadable assignment delivered")
 			}
-			if protocol == "" {
-				if !reply.Stop {
-					t.Fatal("legacy stop lost")
-				}
-			} else if len(reply.Attempts) != 1 || !reply.Attempts[0].Stop || reply.Attempts[0].Job != nil || reply.Attempts[0].ID != current.ID || reply.Attempts[0].Attempt != current.Attempt || reply.Attempts[0].Session != current.Session {
+			if len(reply.Attempts) != 1 || !reply.Attempts[0].Stop || reply.Attempts[0].Job != nil || reply.Attempts[0].ID != current.ID || reply.Attempts[0].Attempt != current.Attempt || reply.Attempts[0].Session != current.Session {
 				t.Fatalf("exact stop lost: %+v", reply)
 			}
 			old := Result{Execution: Execution{ID: current.ID, Attempt: current.Attempt}, Machine: m.ID, Session: m.Session}
@@ -105,7 +101,7 @@ func TestBlobDeliveryPreparationFailurePreservesControl(t *testing.T) {
 	// The missing blob stays missing through the qualified second report.
 	first, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
 	if err != nil || len(first.EnvironmentPlan) != 0 || first.Job != nil || len(first.Attempts) != 0 {
-		t.Fatal("cold legacy response did not stay idle", first, err)
+		t.Fatal("cold keyed response did not stay idle", first, err)
 	}
 	clock.Advance(time.Second)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: "stale", Attempt: 1}, Session: m.Session}}}

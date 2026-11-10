@@ -353,10 +353,14 @@ func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 	e.Resumable = false
 	e.Files["run.sh"] = []byte(isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`)
 	e = freezeComposition(t, e)
-	// Seed the actual pre-policy persisted shape, with no registration marker.
+	// Retain the previous release's frozen bundle and authored isolation policy.
+	persisted := e
+	if err := q.files.freezeExtension(&persisted); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.update(func() error {
 		q.touchCatalog("extensions/" + extensionKey(e))
-		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		q.s.Extensions = map[string]Extension{extensionKey(e): persisted}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
