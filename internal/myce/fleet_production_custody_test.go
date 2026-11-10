@@ -54,7 +54,7 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	}
 }
 
-func TestFleetProductionIdleReconcilesPersistedCopyJobs(t *testing.T) {
+func TestFleetProductionIdlePersistsCopyCustody(t *testing.T) {
 	for _, recovery := range []string{"target", "newer"} {
 		for _, pending := range []bool{false, true} {
 			t.Run(recovery+"/pending-"+stringBool(pending), func(t *testing.T) {
@@ -73,12 +73,12 @@ func TestFleetProductionIdleReconcilesPersistedCopyJobs(t *testing.T) {
 				if err := q.ConfigureEnrollmentRelease(sign("v1.0.1"), pub, "https://publisher.invalid/release"); err != nil {
 					t.Fatal(err)
 				}
-				// Two old failed jobs, one with one retained attempt and one with two.
-				// Omitempty persists the unset aggregate exactly as older queues did.
+				// Current jobs carry both the aggregate and per-copy release evidence.
+				// Keep the earlier copy pending independently of the latest attempt.
 				if err := q.update(func() error {
 					now := c.Now()
 					for n := 1; n <= 2; n++ {
-						j := &Job{ID: fmt.Sprintf("failed-%d", n), Spec: spec("production"), State: "failed", Attempt: n, Queued: c.Now(), FinishedAt: &now}
+						j := &Job{ID: fmt.Sprintf("failed-%d", n), Spec: spec("production"), State: "failed", Attempt: n, ReleaseConfirmed: !pending || n == 1, Queued: c.Now(), FinishedAt: &now}
 						for attempt := 1; attempt <= n; attempt++ {
 							copy := Copy{Machine: "remote", Session: "old", Attempt: attempt, ReleaseConfirmed: true, ReleaseReason: "execution_acknowledged"}
 							if pending && n == 2 && attempt == 1 {
@@ -95,7 +95,7 @@ func TestFleetProductionIdleReconcilesPersistedCopyJobs(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				// Persist an operation already waiting on the incident's stale aggregate.
+				// Persist the operation while copy custody can still withhold its restart.
 				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true}); err != nil {
 					t.Fatal(err)
 				}
