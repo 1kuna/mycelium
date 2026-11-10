@@ -164,6 +164,7 @@ type Queue struct {
 	admissionTrace         *admissionTrace
 	admissionWaitPending   bool                                 // committed maintenance requests an off-lock observation
 	admissionWaitLast      atomic.Pointer[admissionWaitCapture] // completed observation inputs; one retained generation
+	admissionWaitBuild     admissionWaitBuilder                 // post-commit background observation, independent of q.mu
 	hostMemorySamples      map[string]map[attemptKey]hostMemorySample
 	hostMemoryLedgers      map[string]*HostMemoryLedger // Immutable after each refresh; shared by diagnostics.
 	memoryLedgerGeneration uint64
@@ -649,7 +650,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 		if waitCapture != nil {
-			q.finishAdmissionWait(waitCapture)
+			q.enqueueAdmissionWait(waitCapture)
 		}
 	}()
 	if q.stopping.Load() {

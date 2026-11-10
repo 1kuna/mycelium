@@ -7,8 +7,61 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
+
+// One build and one replaceable pending snapshot per queue. No timer or queue
+// clock advance is needed: ordinary maintenance (including Tick) starts due work.
+// A cooldown equal to the last build's measured elapsed cost prevents repeated
+// backlog planning from occupying a core continuously. Its cost is observation
+// latency: after a change, publication takes at most the remaining active build,
+// one cooldown, the next maintenance interval, and one build/commit, absent
+// control contention or a lifecycle fence. Under contention capture may yield; Latest.At and
+// DeferredAt remain the evidence's age/coverage indicators, not a freshness SLA.
+type admissionWaitBuilder struct {
+	mu      sync.Mutex
+	running bool
+	pending *admissionWaitCapture
+	next    time.Time
+	done    chan struct{}
+	latest  uint64
+}
+
+func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
+	if c.index == nil || q.stopping.Load() {
+		return
+	}
+	b := &q.admissionWaitBuild
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Post-commit hooks can arrive out of order after releasing q.mu.
+	if c.revision < b.latest {
+		return
+	}
+	b.latest = c.revision
+	if b.pending != nil {
+		c = mergeAdmissionWaitCaptures(b.pending, c)
+	}
+	b.pending = c
+	if b.running || c.queueClock.Now().Before(b.next) {
+		return
+	}
+	c, b.pending = b.pending, nil
+	b.running, b.done = true, make(chan struct{})
+	go func() {
+		started := holdNow(c.clock)
+		q.finishAdmissionWait(c)
+		elapsed := max(0, holdNow(c.clock).Sub(started))
+		b.mu.Lock()
+		// Rate decisions use the injected queue Clock; cost measurement uses
+		// the captured observational Clock, independently of scheduling time.
+		b.next = c.queueClock.Now().Add(max(elapsed, c.service))
+		b.running = false
+		close(b.done)
+		b.mu.Unlock()
+	}()
+}
 
 // The commit already freezes these inputs for supported status reads. Capturing
 // their pointers adds no backlog copy or diagnostic planner work under q.mu.
@@ -19,6 +72,8 @@ type admissionWaitCapture struct {
 	bytes      uint64
 	service    time.Duration
 	clock      Clock
+	queueClock Clock
+	revision   uint64
 	refresh    time.Time
 }
 
@@ -30,17 +85,71 @@ func (q *Queue) freezeAdmissionWait() *admissionWaitCapture {
 			if q.admissionTrace != nil {
 				admissions = q.admissionTrace.jobs
 			}
-			return &admissionWaitCapture{admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock}
+			return &admissionWaitCapture{admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock, queueClock: q.clock, revision: q.fileReferenceRevision}
 		}
 	}
 	q.admissionWaitLast.Store(nil)
 	return nil
 }
 
+// Coalesce projections, not the latest real per-target scheduler fact. A Tick
+// between check-ins must not erase a rejection that has not been published yet.
+// Input maps remain immutable; copy only the compact decision maps, off q.mu.
+func mergeAdmissionWaitCaptures(old, next *admissionWaitCapture) *admissionWaitCapture {
+	if len(old.admissions) == 0 && len(old.decisions) == 0 {
+		return next
+	}
+	copy := *next
+	copy.admissions = make(map[string]map[string]AdmissionDecision, len(next.admissions))
+	copy.decisions = make(map[string]map[string]admissionWaitDecision, len(next.decisions))
+	for id, targets := range next.admissions {
+		copy.admissions[id] = targets
+	}
+	for id, targets := range next.decisions {
+		copy.decisions[id] = targets
+	}
+	same := func(id string) bool {
+		a, b := readGet(old.index.root, "jobs/"+id), readGet(next.index.root, "jobs/"+id)
+		if a == nil || b == nil {
+			return false
+		}
+		x, xe := a.decode("jobs/" + id)
+		y, ye := b.decode("jobs/" + id)
+		return xe == nil && ye == nil && sameAdmissionWaitEpisode(x.(*Job), y.(*Job))
+	}
+	for id, targets := range old.admissions {
+		if !same(id) {
+			continue
+		}
+		merged := make(map[string]AdmissionDecision, len(targets))
+		for key, d := range targets {
+			merged[key] = d
+		}
+		for key, d := range next.admissions[id] {
+			merged[key] = d
+		}
+		copy.admissions[id] = merged
+	}
+	for id, targets := range old.decisions {
+		if !same(id) {
+			continue
+		}
+		merged := make(map[string]admissionWaitDecision, len(targets))
+		for key, d := range targets {
+			merged[key] = d
+		}
+		for key, d := range next.decisions[id] {
+			merged[key] = d
+		}
+		copy.decisions[id] = merged
+	}
+	return &copy
+}
+
 // Optional evidence construction runs after the scheduling commit unlocks.
-// Publish only distinct transitions, and only against the exact input generation.
-// A competing mutation wins; its own maintenance will capture the newer state.
-// Never retry a stale observation against a newer attempt or lifecycle state.
+// Publish only distinct transitions, fenced against each job's lifecycle.
+// Telemetry may advance during a build: its snapshot timestamp describes that
+// bounded lag. Never apply an old observation to a newer attempt or wait episode.
 func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	if c.index == nil || q.stopping.Load() {
 		return
@@ -53,8 +162,22 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 		return
 	}
 	jobs := make(map[string]*Job, len(source.s.Jobs))
+	latest := q.publishedReads.Load()
 	for id, j := range source.s.Jobs {
 		copy := *j
+		// The pending snapshot may predate the preceding builder's evidence
+		// commit. Carry its semantic endpoints and real decisions forward,
+		// without taking any newer scheduling inputs from the live queue.
+		if latest != nil {
+			if record := readGet(latest.root, "jobs/"+id); record != nil {
+				if value, err := record.decode("jobs/" + id); err == nil {
+					current := value.(*Job)
+					if sameAdmissionWaitEpisode(j, current) {
+						copy.AdmissionWait = current.AdmissionWait
+					}
+				}
+			}
+		}
 		jobs[id] = &copy
 	}
 	source.s.Jobs, source.records = jobs, nil
@@ -115,18 +238,38 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	}
 }
 
+func sameAdmissionWaitEpisode(a, b *Job) bool {
+	return a.State == "queued" && b.State == "queued" && a.Attempt == b.Attempt &&
+		a.PauseRevision == b.PauseRevision && a.Queued.Equal(b.Queued) &&
+		((a.FanOut == nil && b.FanOut == nil) ||
+			(a.FanOut != nil && b.FanOut != nil && a.FanOut.Next == b.FanOut.Next))
+}
+
 func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]*AdmissionWaitEvidence) error {
+	// Decode immutable episode identities before taking the writer mutex.
+	originals := make(map[string]*Job, len(changes))
+	for id := range changes {
+		if record := readGet(c.index.root, "jobs/"+id); record != nil {
+			value, err := record.decode("jobs/" + id)
+			if err != nil {
+				return err
+			}
+			originals[id] = value.(*Job)
+		}
+	}
 	complete := true
+	exact := false
 	return q.updateTransactionMode(context.Background(), func() error {
-		if q.publishedReads.Load() != c.index {
-			complete = false
-			// Do not publish old blockers across a competing commit. Record the
-			// missing observation, preserving any newer closure/attempt evidence.
-			for id := range changes {
-				j := q.s.Jobs[id]
-				if j == nil {
-					continue
-				}
+		exact = q.publishedReads.Load() == c.index
+		for id, next := range changes {
+			j := q.s.Jobs[id]
+			old := originals[id]
+			if j == nil || old == nil {
+				complete = false
+				continue
+			}
+			if !sameAdmissionWaitEpisode(old, j) {
+				complete = false
 				evidence := AdmissionWaitEvidence{}
 				if j.AdmissionWait != nil {
 					evidence = *j.AdmissionWait
@@ -135,18 +278,20 @@ func (q *Queue) commitAdmissionWait(c *admissionWaitCapture, changes map[string]
 				now := q.clock.Now()
 				evidence.DeferredAt = &now
 				q.touchJob(id).AdmissionWait = &evidence
+				continue
 			}
-			return nil
-		}
-		for id, evidence := range changes {
-			q.touchJob(id).AdmissionWait = evidence
-			complete = complete && evidence.DeferredAt == nil
+			q.touchJob(id).AdmissionWait = next
+			complete = complete && next.DeferredAt == nil
 		}
 		return nil
 	}, nil, false, func() {
 		if complete {
 			last := *c
-			last.index = q.publishedReads.Load()
+			// Keep the source generation when telemetry advanced during the
+			// build, so input reuse cannot hide those unobserved changes.
+			if exact {
+				last.index = q.publishedReads.Load()
+			}
 			q.admissionWaitLast.Store(&last)
 		}
 	}, false)
@@ -228,6 +373,7 @@ type admissionWaitDecision struct {
 	preemption  WaitPreemption
 	needs       ResourceNeeds
 	concurrency int
+	at          time.Time
 }
 
 type AdmissionWaitHolder struct {
@@ -271,15 +417,27 @@ func (q *Queue) noteWaitPreemption(j *Job, m *Machine, decision WaitPreemption) 
 	if j.Batch != nil {
 		concurrency = j.Batch.Concurrency
 	}
-	q.admissionWaitDecisions[j.ID][targetKey(m)] = admissionWaitDecision{decision, j.Spec.Needs, concurrency}
+	q.admissionWaitDecisions[j.ID][targetKey(m)] = admissionWaitDecision{decision, j.Spec.Needs, concurrency, q.clock.Now()}
 }
 
 func (q *Queue) closeAdmissionWait(j *Job, reason string) {
-	if j == nil || j.AdmissionWait == nil || j.AdmissionWait.Latest == nil || j.AdmissionWait.Latest.ClosedAt != nil {
+	if j == nil || j.AdmissionWait == nil || j.AdmissionWait.Latest == nil {
 		return
 	}
 	now := q.clock.Now()
 	evidence, latest := *j.AdmissionWait, *j.AdmissionWait.Latest
+	if latest.ClosedAt != nil {
+		if j.State != "queued" {
+			return
+		}
+		// Resume/retry may close again before background capture runs. Record
+		// that closure without reusing the preceding episode's blockers.
+		latest = AdmissionWaitSnapshot{At: now, Attempt: j.Attempt, Predicate: "admission"}
+		if j.FanOut != nil {
+			latest.NextPiece = j.FanOut.Next
+		}
+		evidence.CaptureGaps++
+	}
 	latest.ClosedAt, latest.ClosedReason = &now, reason
 	evidence.Latest = &latest
 	q.touchJob(j.ID).AdmissionWait = &evidence
@@ -543,7 +701,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 				}
 				if recorded {
 					target.Preemption = decision.preemption
-					target.LastPlannerDecision = &AdmissionWaitPlan{At: now, Preemption: decision.preemption, Concurrency: concurrency, RequiredCores: target.RequiredCores, RequiredHostGB: target.RequiredHostGB, RequiredDeviceGB: target.RequiredDeviceGB}
+					target.LastPlannerDecision = &AdmissionWaitPlan{At: decision.at, Preemption: decision.preemption, Concurrency: concurrency, RequiredCores: target.RequiredCores, RequiredHostGB: target.RequiredHostGB, RequiredDeviceGB: target.RequiredDeviceGB}
 				} else if len(target.Predicates) > 0 {
 					target.Preemption.Reason = "target_ineligible"
 				}
