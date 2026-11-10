@@ -98,21 +98,34 @@ func TestWaitAdaptiveRetryAfterOwnerTimeout(t *testing.T) {
 func TestWaitAdaptiveCompletedDeadlineDoesNotBoundPeer(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
 	runningReads := 0
+	expired := clock.Now().Add(-time.Hour)
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
 		clock.advance(time.Millisecond)
-		if r.Method == "POST" {
-			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		if r.URL.Path != "/api/wait" {
+			t.Fatal("unexpected diagnostic read", r.URL)
 		}
-		body := `{"id":"done","state":"succeeded","spec":{"deadline":"2026-11-05T11:00:00Z"}}`
-		if strings.Contains(r.URL.Path, "running") {
-			runningReads++
-			state := "running"
-			if runningReads > 1 {
-				state = "succeeded"
+		var request myce.WaitRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		reply := myce.WaitReply{}
+		for _, id := range request.IDs {
+			state := myce.WaitState{ID: id, State: "succeeded", Revision: 1, Spec: &myce.WaitSpec{}}
+			if id == "done" {
+				state.Spec.Deadline = &expired
+			} else {
+				runningReads++
+				if runningReads == 1 {
+					state.State = "running"
+				}
 			}
-			body = fmt.Sprintf(`{"id":"running","state":%q}`, state)
+			reply.Jobs = append(reply.Jobs, state)
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		body, err := json.Marshal(reply)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
 	})}}
 	var out bytes.Buffer
 	err := waitJobs(context.Background(), client, []string{"done", "running"}, time.Minute, &out, io.Discard, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
@@ -120,6 +133,7 @@ func TestWaitAdaptiveCompletedDeadlineDoesNotBoundPeer(t *testing.T) {
 		t.Fatal(err, out.String())
 	}
 }
+
 func TestWaitAdaptiveRefreshesPendingEvents(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	start := now.Add(time.Second)
