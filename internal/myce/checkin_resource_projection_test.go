@@ -13,6 +13,7 @@ import (
 
 func TestCandidateCostRequirementPlans(t *testing.T) {
 	q, _ := candidateCostFixture(t)
+	drainAdmissionWait(t, q)
 	for i := range 5 {
 		delete(q.s.Jobs, fmt.Sprintf("running-%d", i))
 	}
@@ -64,6 +65,7 @@ func TestCandidateCostRequirementPlans(t *testing.T) {
 
 func TestScarceHostYieldProjectionKeepsDemand(t *testing.T) {
 	q, clock, _, _, victim := yieldFixture(t, false)
+	drainAdmissionWait(t, q)
 	s := spec("experiment")
 	s.Resumable = false
 	s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
