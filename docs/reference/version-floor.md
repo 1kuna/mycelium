@@ -23,7 +23,7 @@ of this cleanup.
 | Previously adopted `legacy-state.json` attempt children, parked storage records, Docker/process identity and checkpoint generations | r6.7 can still own exact process, result or last-copy custody in retained state. Reading and refusing unsafe reuse remains necessary; adoption of the old single-attempt root spool is removed. |
 | Frozen extension isolation policy, priority aliases, optional preinstalled environments and absent hardware facts | These remain supported authored input or retained r6.7 data, rather than release migration paths. Missing telemetry remains unknown. |
 | Current install transactions and preservation | Interrupted current upgrades, address repair, verified binaries, service identity and operator settings still require these transactions. |
-| Batch-v1 waits, scalar deadline metadata, terminal payload fetches and pressure recovery | Both releases implement batch waits. Removed clients no longer poll per job when an obsolete queue lacks the endpoint. Diagnostic reads and terminal retrieval retain their current roles. |
+| Batch-v1 waits, scalar deadline metadata, terminal payload fetches and pressure recovery | Both releases implement batch waits. Clients no longer poll per job when an obsolete queue lacks the endpoint. Diagnostic reads and terminal retrieval retain their current roles. |
 
 ## Removed runtime paths
 
