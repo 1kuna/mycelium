@@ -155,7 +155,7 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 	q.captureContactInputs(v.clock).freezeContactView(v)
 	s := state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, Hosts: q.s.Hosts,
 		HostReleases: q.s.HostReleases, HostMaintenance: q.s.HostMaintenance, DeviceMaintenance: q.s.DeviceMaintenance,
-		ProductionDrains: q.s.ProductionDrains, Policies: q.s.Policies, PriorityPolicy: q.s.PriorityPolicy,
+		Policies: q.s.Policies, PriorityPolicy: q.s.PriorityPolicy,
 		ComponentExclusions: map[string]ComponentExclusion{}, Reservations: map[string]Reservation{},
 		ModelSlots: q.s.ModelSlots, Pins: q.s.Pins, SyncRequests: q.s.SyncRequests, PreparationPlans: q.s.PreparationPlans}
 	for key, r := range q.s.Reservations {
