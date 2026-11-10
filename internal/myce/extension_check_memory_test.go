@@ -104,7 +104,10 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			if tc.missingDevice {
 				wantSource += "; unknown device peak; exclusive card"
 			}
-			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || len(q.s.MemoryExplorations) != 1 {
+			q.mu.Lock()
+			explorations := len(q.s.MemoryExplorations)
+			q.mu.Unlock()
+			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || explorations != 1 {
 				t.Fatalf("single cross-family prior still blocks bounded measurement: %+v", run.MemoryEnvelope)
 			}
 			host, residual := 7.25, .25

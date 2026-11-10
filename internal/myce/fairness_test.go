@@ -78,6 +78,8 @@ func TestFairWeightsDeficitAndFit(t *testing.T) {
 	a := submit(t, q, projectSpec("verso"))
 	b := submit(t, q, projectSpec("atlas"))
 	m := machine("fake", "fake")
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 90, At: c.Now()}, fairUsageKey("experiment", "gpu", "atlas"): {Seconds: 60, At: c.Now()}}
 	if got := q.pick(&m); got.ID != a.ID {
 		t.Fatal("weighted deficit should prefer verso", got)
@@ -101,6 +103,8 @@ func TestFairnessNeverOverridesProductionOrDeadline(t *testing.T) {
 	d := spec("deadline")
 	d.Project = "verso"
 	deadline := submit(t, q, d)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 1e9, At: c.Now()}}
 	m := machine("fake", "fake")
 	if q.pick(&m).ID != production.ID {
@@ -131,7 +135,10 @@ func TestExperimentCapsAndProductionBypass(t *testing.T) {
 	if got.ID == a.ID {
 		other = b
 	}
-	if !strings.Contains(q.capReason(q.s.Jobs[other.ID]), "concurrent experiment cap") {
+	q.mu.Lock()
+	reason := q.capReason(q.s.Jobs[other.ID])
+	q.mu.Unlock()
+	if !strings.Contains(reason, "concurrent experiment cap") {
 		t.Fatal("missing cap reason")
 	}
 	n := machine("two", "fake")
@@ -154,7 +161,10 @@ func TestMemoryShareCap(t *testing.T) {
 	m := machine("one", "fake")
 	m.TotalMemoryGB = 16
 	check(t, q, m, nil)
-	if !strings.Contains(q.capReason(q.s.Jobs[j.ID]), "25%") {
+	q.mu.Lock()
+	reason := q.capReason(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	if !strings.Contains(reason, "25%") {
 		t.Fatal("memory cap not explained")
 	}
 	if e := q.ConfigureProjects(map[string]ProjectPolicy{"atlas": {Weight: 1, MaxMemoryShare: .5}}); e != nil {
@@ -168,10 +178,14 @@ func TestMemoryShareCap(t *testing.T) {
 func TestModelCallMemoryCapCountsSharedModelOnce(t *testing.T) {
 	q, _, m := modelFixture(t)
 	m.TotalMemoryGB = 8
+	q.mu.Lock()
 	q.s.Machines[m.ID].TotalMemoryGB = 8
+	q.mu.Unlock()
 	if e := q.ConfigureProjects(map[string]ProjectPolicy{"atlas": {Weight: 1, MaxMemoryShare: 1}}); e != nil {
 		t.Fatal(e)
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.calls["active"] = &ModelCall{ID: "active", Project: "atlas", Priority: "experiment", Model: "test", Machine: m.ID, Session: m.Session}
 	next := callJob(&ModelCall{ID: "next", Project: "atlas", Priority: "experiment", Model: "test"})
 	if reason := q.capReasonFor(next, &m); reason != "" {
@@ -239,7 +253,9 @@ func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
 	b := submit(t, q, projectSpec("atlas"))
 	c.Advance(time.Second)
 	d := submit(t, q, projectSpec("atlas"))
+	q.mu.Lock()
 	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
+	q.mu.Unlock()
 	s, e := q.Snapshot()
 	if e != nil {
 		t.Fatal(e)
@@ -313,6 +329,8 @@ func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
 	b := submit(t, q, s)
 	m := machine("one", "fake")
 	m.CachedModels = []string{"cached"}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.s.Machines[m.ID] = &m
 	order, _ := q.queueProjection()
 	if order[b.ID] != 1 || order[a.ID] != 2 || q.s.Jobs[b.ID].State != "queued" || q.pick(&m).ID != b.ID {
@@ -322,9 +340,13 @@ func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
 
 func TestProjectionIncludesEligibleModelCalls(t *testing.T) {
 	q, c, m := modelFixture(t)
+	q.mu.Lock()
 	q.s.Machines[m.ID] = &m
 	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: "ready", Priority: "production"}
+	q.mu.Unlock()
 	batch := submit(t, q, projectSpec("verso"))
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	call := &ModelCall{ID: "call", Model: "test", Project: "atlas", Priority: "production", Queued: c.Now()}
 	q.calls[call.ID] = call
 	order, reasons := q.queueProjection()

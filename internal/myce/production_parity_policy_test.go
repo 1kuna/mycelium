@@ -82,7 +82,10 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if got.ProductionHost == hostID(&b) {
 				t.Fatal("production hold bound demand to an unapproved host")
 			}
-			if q.productionParityKnown(q.s.Jobs[parent.ID], &b) {
+			q.mu.Lock()
+			known := q.productionParityKnown(q.s.Jobs[parent.ID], &b)
+			q.mu.Unlock()
+			if known {
 				t.Fatal("unapproved host acquired retargeting authority")
 			}
 			if assigned := check(t, q, b, nil).Job; assigned != nil {
@@ -99,15 +102,20 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
-			if q.variantParityReason(q.s.Jobs[assigned.ID], &a) == "" {
+			parityReason := func(id string, m *Machine) string {
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				return q.variantParityReason(q.s.Jobs[id], m)
+			}
+			if parityReason(assigned.ID, &a) == "" {
 				t.Fatal("accepted child bypassed live owner policy")
 			}
-			if reason := q.variantParityReason(q.s.Jobs[parent.ID], &b); reason != "" {
+			if reason := parityReason(parent.ID, &b); reason != "" {
 				t.Fatal("explicit owner approval did not admit the candidate", reason)
 			}
 			// Experiments remain available for comparing candidate outputs.
 			experiment := submit(t, q, variantSpec(e, "experiment"))
-			if reason := q.variantParityReason(q.s.Jobs[experiment.ID], &a); reason != "" {
+			if reason := parityReason(experiment.ID, &a); reason != "" {
 				t.Fatal("production list restricted an experiment", reason)
 			}
 			policy = q.PriorityPolicy()
@@ -115,12 +123,15 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
-			if q.variantParityReason(q.s.Jobs[parent.ID], &b) == "" {
+			if parityReason(parent.ID, &b) == "" {
 				t.Fatal("empty owner list admitted production")
 			}
-			checkJob := *q.s.Jobs[parent.ID]
+			checkJob := *job(t, q, parent.ID)
 			checkJob.Spec.ExtensionCheck = &ExtensionCheckRequest{Work: spec.workType()}
-			if reason := q.variantParityReason(&checkJob, &b); reason != "" {
+			q.mu.Lock()
+			reason := q.variantParityReason(&checkJob, &b)
+			q.mu.Unlock()
+			if reason != "" {
 				t.Fatal("owner list prevented a native evidence check", reason)
 			}
 		})
@@ -135,6 +146,12 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q, clock := fixture(t)
+			// Inspect saved bindings without Snapshot's maintenance/rebinding.
+			savedJob := func(id string) Job {
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				return cloneJob(q.s.Jobs[id])
+			}
 			e, a, b := variantsFixture(t, true)
 			if err := q.AddExtension(e); err != nil {
 				t.Fatal(err)
@@ -157,7 +174,7 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 			}
 			clock.Advance(time.Millisecond)
 			queued := submit(t, q, variantSpec(e, "production"))
-			if q.s.Jobs[queued.ID].ProductionHost != hostID(&a) {
+			if savedJob(queued.ID).ProductionHost != hostID(&a) {
 				t.Fatal("queued production was not bound to the reference host")
 			}
 			policy = q.PriorityPolicy()
@@ -170,7 +187,7 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 			}
 			// The policy write persists without scheduling. Reopen with the
 			// old binding still present, as it can be during an upgrade.
-			if q.s.Jobs[queued.ID].ProductionHost != hostID(&a) {
+			if savedJob(queued.ID).ProductionHost != hostID(&a) {
 				t.Fatal("fixture did not preserve the invalid saved binding")
 			}
 			clock.Advance(time.Second)
@@ -179,10 +196,10 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 			if assigned == nil || assigned.ID != queued.ID {
 				t.Fatal("newly approved idle host could not take queued production", job(t, q, queued.ID))
 			}
-			if keepHolds && q.s.Jobs[queued.ID].ProductionHost != hostID(&b) {
+			if keepHolds && savedJob(queued.ID).ProductionHost != hostID(&b) {
 				t.Fatal("new hold binding was not committed")
 			}
-			original := q.s.Jobs[running.ID]
+			original := savedJob(running.ID)
 			if original.State != "running" || original.ProductionHost != hostID(&a) || original.Machine != a.ID || original.Attempt != running.Attempt || original.Session != running.Session || original.StopAt != nil {
 				t.Fatal("policy change altered running execution custody", original)
 			}

@@ -456,11 +456,24 @@ func TestUploadCreationCancelledPressureClear(t *testing.T) {
 	if err := q.reserveDeliveryResult(context.Background(), result); err == nil {
 		t.Fatal("expected capacity refusal")
 	}
-	if !q.s.Health.Conditions["storage-write/job/"+j.ID].Active {
+	q.mu.Lock()
+	active := q.s.Health.Conditions["storage-write/job/"+j.ID].Active
+	q.mu.Unlock()
+	if !active {
 		t.Fatal("missing real pressure condition")
 	}
 	entered := make(chan struct{})
-	q.checkpointProbe = func() bool { q.mu.Lock(); close(entered); return true }
+	// Capture publication also uses this seam. Finish prior captures before
+	// installing the one-shot lock holder for the pressure-clear transaction.
+	drainAdmissionWait(t, q)
+	var blocked atomic.Bool
+	q.checkpointProbe = func() bool {
+		if blocked.CompareAndSwap(false, true) {
+			q.mu.Lock()
+			close(entered)
+		}
+		return true
+	}
 	ctx, cancel := context.WithCancel(withFileStoreAttempt(context.Background(), *assigned))
 	defer cancel()
 	done := make(chan struct{})

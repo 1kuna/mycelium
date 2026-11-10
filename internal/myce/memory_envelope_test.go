@@ -1115,6 +1115,8 @@ func floorFreeFitFixture(t *testing.T, allowance float64) (*Queue, *fakeClock, M
 	machineCheck(t, q, m)
 	s := Spec{Name: "floor-free", Project: "synthetic", Priority: "experiment", Extension: extensionKey(e), Workload: &Workload{InputShape: "small-v1", Units: 10}}
 	probe := &Job{State: "queued", Spec: s, Extensions: []Extension{e}, Machine: m.ID, Session: m.Session, AllocatedDevices: []string{"0"}}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	target = m.Devices[0].machine(*q.s.Machines[m.ID])
 	candidates := extensionJobs(probe, &target, true)
 	if len(candidates) != 1 {

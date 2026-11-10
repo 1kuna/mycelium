@@ -131,7 +131,10 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			// Both choices are eligible after a fresh two-card clear. The
 			// operator request alone never authorizes a still-quarantined card.
 			for _, id := range []string{"0", "1"} {
-				if q.deviceFaultRetryBlocked(next, allocationMachine(q.s.Machines[m.ID], []string{id})) {
+				q.mu.Lock()
+				blocked := q.deviceFaultRetryBlocked(next, allocationMachine(q.s.Machines[m.ID], []string{id}))
+				q.mu.Unlock()
+				if blocked {
 					t.Fatal("clear retained the last-healthy guard", id)
 				}
 			}

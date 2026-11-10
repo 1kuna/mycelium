@@ -388,6 +388,13 @@ func TestAdmissionWaitLifecycleAndRestart(t *testing.T) {
 	if err = q.Tick(); err != nil {
 		t.Fatal(err)
 	}
+	// A zero-duration queued episode may legitimately have unknown evidence
+	// when assignment overtakes background capture. This fixture needs a
+	// captured wait to verify its later closure, so observe it before assigning.
+	waiting := admissionWaitAPI(t, q, next.ID)
+	if waiting.Latest == nil || waiting.Latest.Predicate != "no_qualified_target" || waiting.Latest.ClosedAt != nil {
+		t.Fatalf("missing pre-assignment wait: %+v", waiting)
+	}
 	m := cpuMachine("worker", "host", "cpu", 4, 16)
 	run := check(t, q, m, nil).Job
 	if run == nil || run.ID != next.ID {
@@ -397,7 +404,7 @@ func TestAdmissionWaitLifecycleAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := admissionWaitAPI(t, q, next.ID)
-	if started.Latest.ClosedAt == nil || started.Latest.ClosedReason != "assigned" {
+	if started.Latest == nil || started.Latest.ClosedAt == nil || started.Latest.ClosedReason != "assigned" || !reflect.DeepEqual(waiting.First, started.First) {
 		t.Fatal("start did not retain closed wait")
 	}
 	// Terminal failure must close even without an intervening status read.

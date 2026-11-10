@@ -31,7 +31,7 @@ func TestQueuedReasonIgnoresIneligibleReservation(t *testing.T) {
 	j := submit(t, q, s)
 	clock.Advance(time.Second)
 	machineCheck(t, q, m)
-	for _, reason := range []string{job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
 		if strings.Contains(reason, "unrelated validation") || strings.Contains(reason, wrong.ID) || !strings.Contains(reason, "4.0 GiB needed") || !strings.Contains(reason, "0.5 GiB available") {
 			t.Fatal("reason did not name the job's eligible RAM blocker", reason)
 		}
@@ -71,7 +71,10 @@ func TestQueuedReasonMixedCPUAndRAMTargets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, receipt.Reason} {
+			q.mu.Lock()
+			waitReason := q.waitReason(q.s.Jobs[j.ID])
+			q.mu.Unlock()
+			for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, receipt.Reason} {
 				for _, want := range []string{"arm-host: CPU capacity: 2 cores needed; 0 cores unreserved of 8 admitted", "amd-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
 					if !strings.Contains(reason, want) {
 						t.Errorf("missing %q: %s", want, reason)
@@ -106,7 +109,10 @@ func TestQueuedReasonUnavailablePeerAndRAMShortage(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+	q.mu.Lock()
+	waitReason := q.waitReason(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
 		for _, want := range []string{"owner-host: hypha on battery", "ram-host: RAM envelope: 4.0 GiB needed, 0.5 GiB available"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("missing %q: %s", want, reason)
@@ -136,7 +142,7 @@ func TestQueuedReasonIgnoresReservationOnUndersizedHost(t *testing.T) {
 	j := submit(t, q, cpuSpec(8, 4))
 	clock.Advance(time.Second)
 	check(t, q, eligible, nil)
-	for _, reason := range []string{job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
 		if strings.Contains(reason, small.ID) || strings.Contains(reason, request.Reason) || !strings.Contains(reason, "eligible: 4.0 GiB needed, 0.5 GiB available") {
 			t.Fatal("incompatible CPU capacity contributed a reservation reason", reason)
 		}
@@ -175,7 +181,7 @@ func TestQueuedReasonNetworkPreparationAndMemory(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	for _, reason := range []string{job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+	for _, reason := range []string{job(t, q, j.ID).Reason, queuedStatusReason(t, q, j.ID)} {
 		for _, want := range []string{"partial: needs.network: true requires native_network", "interactive: environment not prepared on this shared host", "full: RAM envelope:", "GiB needed, 0.5 GiB available", "hint"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("missing %q: %s", want, reason)
@@ -218,7 +224,10 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, reason := range []string{q.waitReason(q.s.Jobs[j.ID]), job(t, q, j.ID).Reason, receipt.Reason} {
+			q.mu.Lock()
+			waitReason := q.waitReason(q.s.Jobs[j.ID])
+			q.mu.Unlock()
+			for _, reason := range []string{waitReason, job(t, q, j.ID).Reason, receipt.Reason} {
 				want := "device 0 shared with 2 attempts"
 				if exclusive {
 					want = "card busy"
@@ -245,4 +254,14 @@ func TestQueuedReasonCardContentionWithOtherHostRAMShortage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Like production status projection, evaluate the internal helper under q.mu
+// on a detached job; admission evidence may publish between fixture calls.
+func queuedStatusReason(t *testing.T, q *Queue, id string) string {
+	t.Helper()
+	copy := job(t, q, id)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.statusWaitingReason(copy)
 }

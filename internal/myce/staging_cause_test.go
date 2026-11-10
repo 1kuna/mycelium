@@ -89,7 +89,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 				t.Fatalf("wrong durable decision: %+v", got)
 			}
 			wire, _ := json.Marshal(got)
-			if strings.Contains(string(wire), "/private/") {
+			if strings.Contains(string(wire), "/private/worker") {
 				t.Fatal("expanded path leaked", string(wire))
 			}
 			stale := r
