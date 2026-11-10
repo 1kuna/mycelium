@@ -45,7 +45,7 @@ func TestHostMaintenancePlacementCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.advance(time.Second) // Global status may lag by one cache lifetime.
-		output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+		output, _, err := captureUsageOutput(t, []string{"status", "--history", "--queue", server.URL, "--token", "test-only"})
 		if err != nil || strings.Contains(output, "last-resort placement") != enabled {
 			t.Fatal("CLI status hid placement policy", output, err)
 		}
@@ -234,7 +234,7 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 	if err != nil || snapshot.Machines[0].ExternalMemory.Week.MaxGB != 10 {
 		t.Fatal("status missing history", snapshot, err)
 	}
-	output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+	output, _, err := captureUsageOutput(t, []string{"status", "--history", "--queue", server.URL, "--token", "test-only"})
 	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h p50/p95/max") {
 		t.Fatal(output, err)
 	}
