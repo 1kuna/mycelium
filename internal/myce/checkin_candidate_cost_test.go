@@ -174,14 +174,34 @@ func benchmarkCheckinCandidateCost(b *testing.B, q *Queue, workers []Machine) {
 // #806 intentionally changes these envelopes: physical cold headroom, measured
 // local uncertainty and uncalibrated transfers replace universal multipliers.
 // The refreshed digests retain all 402 decisions for each history shape.
+// The grouped fixture adds 480 decisions per shape, frozen before allocation
+// caching, and both fixtures freeze the five actual next-pull placements too.
 // ProbeFloorGB adds metadata in 180 retained-history envelopes; removing only
 // that field reproduces the prior digest with identical decisions/resources.
 // #1017 adds LaunchDriftGB/AvailableHostGB in those same 180 envelopes. Clearing
 // only those fields reproduces e7757cb9 with all 402 decisions/resources intact.
 func TestCandidateCostPlacementEquivalence(t *testing.T) {
-	for _, retained := range []bool{true, false} {
-		t.Run(fmt.Sprintf("retained=%v", retained), func(t *testing.T) {
+	for _, fixture := range []struct {
+		retained, grouped bool
+	}{{true, false}, {false, false}, {true, true}, {false, true}} {
+		retained := fixture.retained
+		t.Run(fmt.Sprintf("retained=%v/grouped=%v", retained, fixture.grouped), func(t *testing.T) {
 			q, _ := candidateCostFixture(t)
+			if fixture.grouped {
+				owner := q.s.Machines["worker-0"]
+				for i := 1; i < 3; i++ {
+					device := owner.Devices[0]
+					device.ID, device.Selector = fmt.Sprint(i), fmt.Sprint(i)
+					device.Identity = fmt.Sprintf("synthetic-card-%d", i)
+					device.FreeMemoryGB -= float64(i * 8)
+					owner.Devices = append(owner.Devices, device)
+				}
+				demand := *q.s.Jobs["queued-000"]
+				demand.ID = "group-demand"
+				demand.Spec.Needs.MemoryGB = 80
+				demand.MemoryFallback = &SizeHint{MemoryGB: 80, HostMemoryGB: 4}
+				q.s.Jobs[demand.ID] = &demand
+			}
 			if !retained {
 				for id, j := range q.s.Jobs {
 					if j.State == "succeeded" {
@@ -216,8 +236,29 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
 			want := map[bool]string{true: "c10fc6597e76f5bc3f0298146a20dfc62e94cd6742f1eb10cc593beec95b9f61", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
+			if fixture.grouped {
+				want = map[bool]string{true: "60e8a7095f2b2d4dceec8d575911b78f52256973c4a15f99817239512230b813", false: "7076ee26b7146d96beb0080f99f3748b16d4686251eb4551fee56bcc2d1fc285"}[retained]
+			}
 			if digest != want {
 				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
+			}
+			var placements []decision
+			plan := q.assignmentPlan(scan)
+			for _, m := range scan.machines {
+				if j := plan[targetKey(m)]; j != nil {
+					placements = append(placements, decision{targetKey(m), j.ID, j.Spec.Needs, j.MemoryEnvelope})
+				}
+			}
+			data, err = json.Marshal(placements)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want = "fbbc3c4d7b78a6932febae1378a5697cfdf9b216a5543d38cf0937b0c8fcf311"
+			if fixture.grouped {
+				want = "20e76e155167a57f7c12f38ce2f3e0de549c80530f8b85772bf5145f702de9d6"
+			}
+			if digest = fmt.Sprintf("%x", sha256.Sum256(data)); digest != want {
+				t.Fatalf("assignment digest %s (%d placements), want %s", digest, len(placements), want)
 			}
 		})
 	}

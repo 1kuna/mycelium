@@ -849,7 +849,7 @@ func (q *Queue) exploratoryMemoryStatusWithDrift(j *Job, m *Machine, drift float
 		}
 	}
 	for _, running := range q.liveJobs() {
-		owner := allocationMachine(q.s.Machines[running.Machine], running.AllocatedDevices)
+		owner := q.planningAllocationMachine(q.s.Machines[running.Machine], running.AllocatedDevices)
 		if owner == nil || hostID(owner) != hostID(m) || running.ReleaseConfirmed || (running.State != "running" && running.State != "stopping") {
 			continue
 		}

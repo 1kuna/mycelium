@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -14,6 +15,47 @@ func m3Machine() Machine {
 		{ID: "1", Platform: "fake", Identity: "fake-1", Fingerprint: "fake", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8},
 	}
 	return m
+}
+
+func TestMachinePlacementAllocationViewScope(t *testing.T) {
+	m := m3Machine()
+	m.Devices[0].CapabilityProfile = m.CapabilityProfile
+	m.Devices[1].UnifiedMemory = true
+	projected := m
+	projected.FreeHostMemoryGB = 3
+	legacy := m
+	legacy.Devices = nil
+	q := &Queue{memoryPlanning: newMemoryPlanningCache()}
+	for _, owner := range []*Machine{nil, &legacy, &m, &projected} {
+		for _, devices := range [][]string{nil, {}, {"0"}, {"1"}, {"0", "1"}, {"1", "0"}, {"missing"}, {"0", "missing"}} {
+			want := allocationMachine(owner, devices)
+			got := q.planningAllocationMachine(owner, devices)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("devices %v: cached view differs from fresh projection", devices)
+			}
+			if q.planningAllocationMachine(owner, devices) != got {
+				t.Fatalf("devices %v: immutable pass rebuilt its view", devices)
+			}
+		}
+	}
+	// Neither a different capacity projection of the same worker nor a later
+	// inventory pass may borrow the original worker's available room or identity.
+	first := q.planningAllocationMachine(&m, []string{"0"})
+	if got := q.planningAllocationMachine(&projected, []string{"0"}); got == first || got.FreeHostMemoryGB != 3 {
+		t.Fatal("capacity projection reused another owner's view")
+	}
+	m.Devices[0].FreeMemoryGB = 2
+	m.Devices[0].ExtensionFingerprint = "new-identity"
+	q.memoryPlanning = newMemoryPlanningCache()
+	next := q.planningAllocationMachine(&m, []string{"0"})
+	if next == first || next.FreeMemoryGB != 2 || next.ExtensionFingerprint != "new-identity" || first.FreeMemoryGB != 8 {
+		t.Fatal("new pass retained old inventory or mutated an earlier view")
+	}
+	q.memoryPlanning = nil
+	m.Devices[0].FreeMemoryGB = 1
+	if got := q.planningAllocationMachine(&m, []string{"0"}); got == next || got.FreeMemoryGB != 1 {
+		t.Fatal("view escaped the immutable planning scope")
+	}
 }
 
 func machineCheck(t *testing.T, q *Queue, m Machine, jobs ...*Job) Reply {
