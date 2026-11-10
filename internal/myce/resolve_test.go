@@ -155,15 +155,16 @@ func TestResolveLockedCPUJobWithStagedInputOnTwoRoots(t *testing.T) {
 // The field case: a shared interactive host refused an unprepared environment
 // with only "shared host profile prevents execution".
 func TestResolveExplainsSharedHostRefusal(t *testing.T) {
-	q, c := fixture(t)
+	q, _ := fixture(t)
 	key := strings.Repeat("b", 64)
 	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Key: key, Backend: "uv", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("# pinned\n")}}}}}
-	m := machine("shared", "cpu")
-	m.LastSeen = c.Now()
-	check(t, q, m, nil)
-	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
 	m.EnvironmentBuilder = true
-	q.s.Machines[m.ID] = &m
+	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
 	s := cpuResolveSpec()
 	s.Environment = Environment{Name: "tools"}
 	r, err := q.Resolve(ResolveRequest{Spec: s})
