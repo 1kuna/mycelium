@@ -133,6 +133,15 @@ Save the receipt's job ID and key. Changed intent needs a new key; a lost reply,
 original command/key and receipt. Keep frozen inputs and the original notifier
 binding when one was supplied. See [recovery](advanced.md#wait-and-check-status).
 
+From the queue release containing #1233, submission and worker writes take fair
+turns. Production acceptance returns its durable receipt without rebuilding
+optional planner diagnostics. `deadline_guidance.details_deferred: true` means
+read the accepted job for full current blockers; it does not weaken acceptance
+or call for resubmission. The contention regression targets responses well
+within a 20-second submit budget, not a start-time guarantee. Input verification,
+storage failure and shutdown remain separate causes; retain the same spec/key
+when a response is uncertain.
+
 Replace JOB_ID with that receipt's ID. No notifier or harness setup is needed:
 
 ```sh
