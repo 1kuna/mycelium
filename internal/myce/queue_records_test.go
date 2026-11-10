@@ -132,4 +132,44 @@ func TestQueueRecordsViewAndDecisionRollback(t *testing.T) {
 			}
 		})
 	}
+	t.Run("shared-host-derived-view", func(t *testing.T) {
+		q, clock := fixture(t)
+		m := sharedHostFixture(t, q)
+		before := q.s.Machines[m.ID].SharedHostReason
+		if before == "" {
+			t.Fatal("missing unacknowledged-profile view")
+		}
+		row := durableQueueRecord(t, q.db, "machines/"+m.ID)
+		removeProfile := func() {
+			policy := q.s.HostMaintenance[hostID(&m)]
+			policy.SharedHost = nil
+			q.s.HostMaintenance[hostID(&m)] = policy
+			q.refreshHostMemory()
+			if q.s.Machines[m.ID].SharedHostReason != "" || len(q.records.machines) != 0 {
+				t.Fatal("derived view enrolled an unchanged machine")
+			}
+		}
+		abort := errors.New("reject policy change")
+		if err := q.update(func() error { removeProfile(); return abort }); !errors.Is(err, abort) {
+			t.Fatal(err)
+		}
+		if q.s.Machines[m.ID].SharedHostReason != before {
+			t.Fatal("rollback failed to recompute shared-host view")
+		}
+		q = reopenQueue(t, q, clock)
+		if q.s.Machines[m.ID].SharedHostReason != before || q.s.HostMaintenance[hostID(&m)].SharedHost == nil {
+			t.Fatal("reopen lost original policy or its view")
+		}
+		if err := q.update(func() error { removeProfile(); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if string(row) != string(durableQueueRecord(t, q.db, "machines/"+m.ID)) {
+			t.Fatal("policy view rewrote inventory")
+		}
+		q = reopenQueue(t, q, clock)
+		if q.s.Machines[m.ID].SharedHostReason != "" || q.s.HostMaintenance[hostID(&m)].SharedHost != nil {
+			t.Fatal("reopen lost committed policy or failed to recompute its view")
+		}
+	})
+
 }
