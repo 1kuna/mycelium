@@ -195,6 +195,8 @@ available within its configured budget.
 
 ## Observe and recover
 
+The current/previous release pair uses batch-v1 waits. An older queue without
+that endpoint requires an upgrade; clients no longer fall back to per-job polling.
 Keep owned waits in the foreground. Supporting clients accept one batch of up
 to 256 distinct IDs: `myce wait JOB_A JOB_B`. A wait timeout or interruption leaves
 the jobs alive; retain the IDs. Never build per-job background wait processes,

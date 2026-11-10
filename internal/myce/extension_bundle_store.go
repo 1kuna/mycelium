@@ -31,8 +31,8 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	if *ref != nil && **ref != next {
 		return errors.New("bundle reference mismatch")
 	}
-	// Startup holds the publication fence for the whole pass. Verify every
-	// embedded copy's digest above, but repeat disk durability only once per blob.
+	// Submission holds the publication fence. Verify every authored copy's
+	// digest above, but repeat disk durability only once per blob.
 	if verified[next] {
 		*files, *ref = nil, &next
 		return nil
