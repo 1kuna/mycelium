@@ -400,7 +400,7 @@ names the store and needed/free/shortfall bytes with a recovery action. The save
 receipt retains this typed refusal and the CLI exits 75 for retry. `myce status`
 reports queue file-store used, free and reclaimable bytes.
 Deploy the queue before new CLIs: older queues return HTTP 404 for
-`/api/files/preflight`, causing profile submissions to exit 69. See [operations](operations.md#stored-job-file-retention).
+`/api/files/preflight`, causing profile submissions to exit 69. See [operations](reference/file-store.md#stored-job-file-retention).
 
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this

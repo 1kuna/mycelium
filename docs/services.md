@@ -203,7 +203,7 @@ On Linux unified CUDA devices with unsupported used/free counters, the report's
 Use its sampled load/warm-up peak and baseline delta as shared-RAM observations;
 do not add host and device figures or treat either as isolated model VRAM.
 Numeric device counters retain `basis: dedicated/host`. Failed or malformed
-probes still refuse measurement. See [joint measurement](operations.md#general-model-servers-and-joint-measurement).
+probes still refuse measurement. See [joint measurement](reference/models.md#general-model-servers-and-joint-measurement).
 
 For a LAN worker, bind its authenticated model proxy to an address reachable
 by the queue and advertise that exact URL:
@@ -242,7 +242,7 @@ are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
 a configured budget minus reserve and account for our batch/model reservations
 once. Fixed budgets cannot observe external allocations: choose and maintain a
 conservative allowance. Live probe failures block new work and appear in status;
-see [memory modes and sources](operations.md#host-ram-admission-and-ceilings).
+see [memory modes and sources](reference/host-capacity.md#host-ram-admission-and-ceilings).
 Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
 
@@ -433,7 +433,7 @@ Catalog `device` restricts placement to workers advertising that selector.
 One machine worker uses the physical `--host-id` (default OS hostname).
 Optional catalog `host_memory_gb` and batch `needs.host_memory_gb` reserve RAM
 from that shared host allowance, rather than independently per card. See
-[host admission](operations.md#host-ram-admission-and-ceilings) for the unified-memory rule.
+[host admission](reference/host-capacity.md#host-ram-admission-and-ceilings) for the unified-memory rule.
 No second worker/controller may own that card. XPU identity is PCI BDF
 or Level Zero UUID; the worker and every member force
 `ZE_ENABLE_PCI_ID_DEVICE_ORDER=1`. Verify ordinal-to-identity mapping at worker

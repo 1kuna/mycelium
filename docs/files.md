@@ -450,7 +450,7 @@ A staging failure reports `resource_limit`, operation `shared_input_admission`,
 error `cache_space`, and `capacity` (`shared_input_cache`, `file_cache`, or `disk_free_floor`),
 with required/available/limit bytes. Inputs stage before source/plan blobs.
 Omitting `--file-cache-bytes` now sizes both separate cache ceilings automatically
-from disk headroom; see [cache policy](operations.md#file-and-shared-input-cache-capacity).
+from disk headroom; see [cache policy](reference/worker-caches.md#file-and-shared-input-cache-capacity).
 An explicit saved positive limit still wins. Split work whose simultaneous inputs
 exceed all eligible cache capacities; re-uploading identical bytes cannot help.
 
@@ -501,7 +501,7 @@ unclaimed attempt directories. Positive authored retention applies to positively
 identified disposable uploads/bundles after active claims/references are gone.
 Collection releases control between objects and yields under measured contention.
 Pressure never authorizes deleting unique data. See [adaptive retention](retention.md)
-for every replacement and [owner release](operations.md#project-owner-early-file-release-465).
+for every replacement and [owner release](reference/file-store.md#project-owner-early-file-release-465).
 
 If assignment recipe or bundle bytes become unreadable after a check-in commits,
 the queue sends an exact stop and retains attempt custody until release is
@@ -932,7 +932,7 @@ It retries existing OS automount access with backoff, holds only dependent work,
 and resumes after fresh successful probes. A missing mount that requires Linux
 operator privileges or macOS owner/Keychain approval is reported with a typed
 human-action code and an existing health wake; the worker never prompts for or
-stores credentials. See [worker mount recovery](operations.md#worker-mount-recovery-linux-and-macos)
+stores credentials. See [worker mount recovery](reference/nas-mounts.md#worker-mount-recovery-linux-and-macos)
 for platform ownership, cold-start deadlines and stuck-request behavior.
 
 The worker heartbeat allows 750 ms for its checkpoint-root probe, including
@@ -978,7 +978,7 @@ The unfinished versioned worker-local output path is preserved on [`park/storage
 New `storage_protocol`, `output_destination` and `output_retention` requests are
 rejected on main. Retained fields remain readable; historical custody remains
 protected from collection. Use ordinary accepted file-store outputs or async NAS
-publication above. See [operations](operations.md#parked-native-storage-integration-564)
+publication above. See [operations](reference/file-store.md#parked-native-storage-integration-564)
 and [#504](https://github.com/1kuna/mycelium/issues/504) for future backend work.
 
 ### Client recovery ownership

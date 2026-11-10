@@ -2,7 +2,7 @@
 
 Shared interactive hosts protect their owner with measured reserves, polite CPU
 execution and pressure-triggered yield. The canonical admission, thresholds and
-native qualification guidance is in [operations](operations.md#pressure-response).
+native qualification guidance is in [operations](reference/shared-and-polite-hosts.md#pressure-response).
 
 ## Freshness during slow check-ins
 

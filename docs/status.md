@@ -482,7 +482,7 @@ Old workers without samples retain startup storage figures.
 
 Queue `file_store.projects` reports per-project retained and 24-hour added
 bytes, limits and any quota refusal; see
-[per-project quotas](operations.md#per-project-file-store-quotas-464).
+[per-project quotas](reference/file-store.md#per-project-file-store-quotas-464).
 
 Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`
 comes from the physical probe; `remaining_upload_bytes` counts only unwritten
@@ -672,7 +672,7 @@ vendor probe and queue-owned transition receipt (`observed_at`). Older queues
 receive inventory without this optional field. `attempt_history[].device_fault`
 is queue-owned host/backend loss evidence, and `blocker.code:
 device_fault_last_healthy` explains a held retry. See
-[device quarantine](operations.md#accelerator-driver-fault-quarantine) for
+[device quarantine](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine) for
 recovery conditions and mixed-version behavior.
 
 Fan-out execution may share a discrete XPU card only when every tenant opts in
@@ -1532,7 +1532,7 @@ It subtracts no RSS. Its `24h`/`7d` sample and `windows` counts expose actual
 learning opportunities; legacy history has no such provenance, so cannot tell
 how many idle windows occurred. Missing qualified history remains unknown.
 Machine `host_memory_derivation` names the opt-in allowance's evidence or authored
-fallback. See [measured host allowances](operations.md#host-ram-admission-and-ceilings).
+fallback. See [measured host allowances](reference/host-capacity.md#host-ram-admission-and-ceilings).
 The legacy suggestion below continues to be a diagnostic estimate; it does not
 activate measured policy or convert residual peaks into qualified baselines.
 
@@ -1582,7 +1582,7 @@ request it. A retained protected task holds with an explicit parked-storage
 reason, and historical local custody is never treated as ordinary `output_refs`
 or permission to discard its files. An exact persisted collected acknowledgement
 permits ordinary file release/retention and history expiry; unresolved custody
-continues to hold. See [operations](operations.md#parked-native-storage-integration-564).
+continues to hold. See [parked native storage](reference/file-store.md#parked-native-storage-integration-564).
 
 ### Shared interactive profile
 
@@ -1619,7 +1619,7 @@ unhealthy even with a yield latch set. Detached fleet snapshots freeze contact a
 than a subsequent host-status request. Missing or stale pressure makes a shared
 host unhealthy and withholds new work; it does not itself stop running work.
 See [pressure freshness](shared-hosts.md) and
-[shared-host thresholds and qualification](operations.md#pressure-response).
+[shared-host thresholds and qualification](reference/shared-and-polite-hosts.md#pressure-response).
 
 
 ## Execution elapsed time, remaining estimates, and application progress
@@ -2084,7 +2084,7 @@ separate from the retired #768 thresholds.
 
 `GET /api/models/intervals` is the supported paginated history for resident model
 attempts, including engines assigned and removed between status reads. See the
-[interval contract](operations.md#durable-model-engine-interval-history-663).
+[interval contract](reference/models.md#durable-model-engine-interval-history-663).
 Events expose `assigned_at`, first-authorized `load_started_at`, stop-intent
 `stopped_at`, exact-cleanup `released_at`, card identity and class/resolved tier
 with policy revision. `class_changed` events timestamp in-place tier changes,
@@ -2129,7 +2129,7 @@ Status snapshots use atomic temporary-file replacement without durable syncs;
 observer progress reconstructs them after an unclean host stop. Receipt, arm
 registration and delivery acknowledgement saves still sync both the file and
 its parent directory before returning success.
-See [supported recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+See [supported recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 
 ## Batched waits and consumer flood protection
 
@@ -2439,7 +2439,7 @@ Failures and confirmed stalls withhold only dependent work; three fresh
 successful completions resume it, including slow successes. Pending observations
 cannot prove recovery. `host_mount_degraded` alerts include typed `mount` evidence;
 `host_mount_unavailable` separately wakes on a stall/failure after an advisory.
-See [platform recovery](operations.md#worker-mount-recovery-linux-and-macos).
+See [platform recovery](reference/nas-mounts.md#worker-mount-recovery-linux-and-macos).
 
 ### Installed executable versus running image (#824)
 
