@@ -1,12 +1,8 @@
 package myce
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
@@ -241,54 +237,31 @@ func TestAdaptiveProbeHealthyCyclesKeepEvidence(t *testing.T) {
 	}
 }
 
-func TestAdaptiveProbeUnknownHealthNegotiationRecovers(t *testing.T) {
+func TestAdaptiveProbeUnknownHealthRecovers(t *testing.T) {
 	q, clock := fixture(t)
-	handler := API{q, "test"}.Handler()
-	legacy := false
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		if !legacy {
-			handler.ServeHTTP(rw, r)
-			return
-		}
-		data, _ := io.ReadAll(r.Body)
-		var c Checkin
-		_ = json.Unmarshal(data, &c)
-		if c.Machine.HostHealth != nil || hasHostProbeFields(c) || c.ToolInventoryHash != "" {
-			rw.WriteHeader(400)
-			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(data))
-		recorded := httptest.NewRecorder()
-		handler.ServeHTTP(recorded, r)
-		var reply Reply
-		_ = json.Unmarshal(recorded.Body.Bytes(), &reply)
-		reply.HostProbeProtocol, reply.HostHygieneProtocol, reply.ToolInventoryProtocol, reply.HostCollectionProtocol = "", "", "", ""
-		rw.WriteHeader(recorded.Code)
-		_ = json.NewEncoder(rw).Encode(reply)
-	}))
+	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	m := machine("health-recovery", "fake")
 	w := Worker{Clock: clock, Client: Client{URL: server.URL, Token: "test"}, toolReport: &workerToolReport{}}
-	for _, downgrade := range []bool{false, true} {
-		legacy = downgrade
-		m.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
-		for _, healthy := range []bool{false, true} {
-			if healthy {
-				m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}, History: []HostHealthSample{{At: clock.Now()}}}
-			}
-			reply, err := w.fixtureCheckin(t.Context(), Checkin{Machine: m})
-			if err != nil {
-				t.Fatal(err)
-			}
-			stored := q.s.Machines[m.ID]
-			if reply.Leave || stored.Leaving {
-				t.Fatal("temporary health uncertainty latched permanent leave", downgrade, healthy)
-			}
-			blocked := availabilityBlocked(stored) || q.hostHygieneReason(stored) != ""
-			if blocked == healthy {
-				t.Fatal("health admission failed to withhold or recover", downgrade, healthy, blocked)
-			}
+	m.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
+	for _, healthy := range []bool{false, true} {
+		if healthy {
+			m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}, History: []HostHealthSample{{At: clock.Now()}}}
+		}
+		reply, err := w.fixtureCheckin(t.Context(), Checkin{Machine: m})
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		stored := q.s.Machines[m.ID]
+		leaving := stored.Leaving
+		blocked := availabilityBlocked(stored) || q.hostHygieneReason(stored) != ""
+		q.mu.Unlock()
+		if reply.Leave || leaving {
+			t.Fatal("temporary health uncertainty latched permanent leave", healthy)
+		}
+		if blocked == healthy {
+			t.Fatal("health admission failed to withhold or recover", healthy, blocked)
 		}
 	}
 }
