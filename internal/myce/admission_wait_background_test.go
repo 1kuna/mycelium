@@ -24,10 +24,17 @@ func (c *admissionWaitGateClock) Now() time.Time {
 
 func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 1, 16)
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
 	s := cpuSpec(4, 1)
 	s.Priority = "production"
 	demand := submit(t, q, s)
 	drainAdmissionWait(t, q)
+	if err := q.update(func() error { q.touchJob(demand.ID).Spec.Needs.CPUCores++; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	q.mu.Lock()
 	capture := q.freezeAdmissionWait()
 	q.mu.Unlock()
@@ -46,12 +53,16 @@ func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 	b.mu.Lock()
 	firstDone := b.done
 	b.mu.Unlock()
-	m := cpuMachine("worker", "host", "cpu", 1, 16)
 	for range 5 {
-		clock.Advance(time.Millisecond)
+		clock.Advance(time.Second)
 		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	lastCheckin := clock.Now()
+	clock.Advance(time.Millisecond)
+	if _, err := q.Snapshot(); err != nil {
+		t.Fatal(err)
 	}
 	// Delayed post-commit hooks must not replace the newest pending generation.
 	q.enqueueAdmissionWait(capture)
@@ -61,6 +72,9 @@ func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 	b.mu.Unlock()
 	if !running || done != firstDone || pending == nil || pending.index != q.publishedReads.Load() {
 		t.Fatal("check-ins did not coalesce into one latest pending snapshot")
+	}
+	if len(pending.admissions[demand.ID]) == 0 {
+		t.Fatal("maintenance coalescing erased the unpublished check-in decision")
 	}
 	close(gate.release)
 	released = true
@@ -76,7 +90,7 @@ func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 	q.mu.Lock()
 	evidence := q.s.Jobs[demand.ID].AdmissionWait
 	q.mu.Unlock()
-	if evidence == nil || evidence.Latest == nil || evidence.Latest.ClosedAt != nil {
+	if evidence == nil || evidence.Latest == nil || evidence.Latest.ClosedAt != nil || len(evidence.Latest.Targets) == 0 || evidence.Latest.Targets[0].RequiredCores != 5 {
 		t.Fatal("telemetry commit prevented evidence publication")
 	}
 	q.enqueueAdmissionWait(pending)
@@ -95,6 +109,13 @@ func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 		t.Fatal("due pending capture did not start")
 	}
 	<-done
+	q.mu.Lock()
+	evidence = q.s.Jobs[demand.ID].AdmissionWait
+	q.mu.Unlock()
+	decision := evidence.Latest.Targets[0].AdmissionDecision
+	if decision == nil || !decision.At.Equal(lastCheckin) {
+		t.Fatal("coalescing lost or retimestamped the real check-in decision")
+	}
 }
 
 func TestAdmissionWaitBackgroundFencesResumeAndRetry(t *testing.T) {
