@@ -7,10 +7,11 @@ import (
 )
 
 // queueMutex keeps observation at the mutex boundary, including direct locks
-// and requestLock sections outside updateRequest. Without a pressure sensor or
-// hold callback it delegates without clock reads or additional synchronization.
+// and requestLock sections outside updateRequest. Writer turns are always fair;
+// without a pressure sensor or hold callback, telemetry needs no wall-clock reads.
 type queueMutex struct {
 	mu       sync.RWMutex
+	writers  queueWriters
 	pressure atomic.Pointer[queuePressure]
 	control  *controlClock // Set before the queue is published; injected decision clock.
 
@@ -24,7 +25,12 @@ type queueMutex struct {
 }
 
 func (m *queueMutex) Lock() {
+	m.lock(false)
+}
+
+func (m *queueMutex) lock(submission bool) {
 	p, w := m.waitPressure()
+	m.writers.acquire(submission)
 	m.mu.Lock()
 	if m.control != nil {
 		m.control.begin()
@@ -43,6 +49,7 @@ func (m *queueMutex) Unlock() {
 	} else {
 		m.mu.Unlock()
 	}
+	m.writers.release()
 }
 
 func (m *queueMutex) RLock() {
@@ -68,7 +75,11 @@ func (m *queueMutex) RUnlock() {
 }
 
 func (m *queueMutex) TryLock() bool {
+	if !m.writers.tryAcquire() {
+		return false
+	}
 	if !m.mu.TryLock() {
+		m.writers.release()
 		return false
 	}
 	if m.control != nil {
@@ -78,6 +89,83 @@ func (m *queueMutex) TryLock() bool {
 	m.enter()
 	return true
 }
+
+// Writers take turns by class, FIFO within each class. The first queued submit
+// waits for the current writer and at most one control turn, rather than every
+// queued heartbeat. Alternating when both classes are waiting
+// also preserves worker progress during a continuous stream of submissions.
+// Readers retain RWMutex's writer exclusion and concurrent-read behavior.
+type queueWriters struct {
+	mu         sync.Mutex
+	active     bool
+	submission bool
+	head, tail [2]*queueWriter
+}
+
+type queueWriter struct {
+	ready chan struct{}
+	next  *queueWriter
+}
+
+func (w *queueWriters) acquire(submission bool) {
+	w.mu.Lock()
+	if !w.active {
+		w.active, w.submission = true, submission
+		w.mu.Unlock()
+		return
+	}
+	class := 0
+	if submission {
+		class = 1
+	}
+	waiter := &queueWriter{ready: make(chan struct{})}
+	if w.tail[class] == nil {
+		w.head[class] = waiter
+	} else {
+		w.tail[class].next = waiter
+	}
+	w.tail[class] = waiter
+	w.mu.Unlock()
+	<-waiter.ready
+}
+
+func (w *queueWriters) tryAcquire() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.active {
+		return false
+	}
+	w.active, w.submission = true, false
+	return true
+}
+
+func (w *queueWriters) release() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	class := 1
+	if w.submission {
+		class = 0
+	}
+	if w.head[class] == nil {
+		class = 1 - class
+	}
+	if next := w.head[class]; next != nil {
+		w.head[class] = next.next
+		if next.next == nil {
+			w.tail[class] = nil
+		}
+		w.submission = class == 1
+		close(next.ready)
+	} else {
+		w.active = false
+	}
+}
+
+type submissionMutex struct{ *queueMutex }
+
+func (m submissionMutex) Lock() { m.queueMutex.lock(true) }
+
+type submissionTurnKey struct{}
 
 func (m *queueMutex) TryRLock() bool {
 	if !m.mu.TryRLock() {

@@ -140,8 +140,16 @@ func (q *Queue) invalidateWorkCurves() {
 			}
 		}
 		if reason != p.StaleReason {
-			p.StaleReason = reason
-			q.putWorkObservation(id, p)
+			next := p
+			next.StaleReason = reason
+			if durableWorkObservation(p).StaleReason != durableWorkObservation(next).StaleReason {
+				q.touchCatalog("work_observations/" + id)
+			} else {
+				q.touchCurveLabel(id)
+			}
+			q.s.WorkObservations[id] = next
+			q.evidenceGeneration++
+			q.memoryObservationIndex = nil
 		}
 	}
 }

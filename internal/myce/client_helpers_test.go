@@ -51,7 +51,7 @@ func TestClientJobIdentityEcho(t *testing.T) {
 	}
 	assertIdentity(c.Wait(ctx, first.ID))
 	var status Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &status); err != nil {
+	if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	if len(status.Jobs) != 1 || status.Jobs[0].Spec.SubmissionKey != "" {

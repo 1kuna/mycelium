@@ -107,6 +107,11 @@ resources, targets or isolation. Plain native commands default to unsandboxed
 under MY-25; new native extension registrations have their separate sandbox
 policy. Declare `isolation: sandboxed` when that boundary is needed.
 
+From the release implementing MY-44, declared `model_snapshots` need no queue-owner
+approval: absent model policy permits every repository. Optional explicit source
+restrictions and physical disk/cache limits still apply; snapshots need an exact
+commit and verified bytes. See [snapshot submission](advanced.md#submit).
+
 On releases with the contained-forecast correction, CPU forecast reservations
 stay within their actual hard cgroup ceiling; measured demand and probe floors
 remain protected. Hard-contained CPU remaining-growth forecasts also stay within
@@ -132,6 +137,15 @@ Save the receipt's job ID and key. Changed intent needs a new key; a lost reply,
 `submission unconfirmed` or exit 69 `input storage unconfirmed` calls for the
 original command/key and receipt. Keep frozen inputs and the original notifier
 binding when one was supplied. See [recovery](advanced.md#wait-and-check-status).
+
+From the queue release containing #1233, submission and worker writes take fair
+turns. Production acceptance returns its durable receipt without rebuilding
+optional planner diagnostics. `deadline_guidance.details_deferred: true` means
+read the accepted job for full current blockers; it does not weaken acceptance
+or call for resubmission. The contention regression targets responses well
+within a 20-second submit budget, not a start-time guarantee. Input verification,
+storage failure and shutdown remain separate causes; retain the same spec/key
+when a response is uncertain.
 
 Replace JOB_ID with that receipt's ID. No notifier or harness setup is needed:
 
@@ -201,8 +215,17 @@ the jobs alive; retain the IDs. Never build per-job background wait processes,
 repeated status/get loops or replacement submissions to obtain progress.
 
 Use `myce status JOB_ID` and `myce logs JOB_ID` for a real blocker. Default fleet
-status is a partial history page; absence from it is not a lost or incomplete job.
-Use `myce status --history` only when full retained history is needed. Follow
+status is compact current work, machines, holds and active alerts; absence is
+not proof of completion or loss. Retained evidence/telemetry is opt-in:
+`myce status --sections jobs,machines` adds detailed diagnostics;
+`--sections work,storage,health,efficiency,usage,diagnostics` selects retained
+collections. Job reasons in the compact view are last committed facts, not a
+new placement plan. `myce status --jobs all --limit N --before CURSOR --json`
+pages history at negotiated capacity; Python `client.list()` walks those pages.
+`myce status --history` / `GET /api/status?detail=full` /
+`client.status(full=True)` restores every existing field for full inspection or
+preservation. See [section coverage](../../docs/status.md#reading-myce-status).
+Use `client.status(sections="work,storage")` for a selected evidence read. Follow
 Retry-After and typed recovery diagnostics; do not change identity or trust to
 evade them. Permanent authority/TLS/integrity/configuration refusals go to their
 owner. An older observer's restart classification may require the installation

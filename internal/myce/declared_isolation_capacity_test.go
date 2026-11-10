@@ -52,6 +52,7 @@ func TestDeclaredIsolationProjectCapacity(t *testing.T) {
 				// Seed the pre-policy persisted registration shape, then exercise
 				// public registration replay without inventing a policy override.
 				if err := q.update(func() error {
+					q.touchCatalog("extensions/" + extensionKey(e))
 					q.s.Extensions = map[string]Extension{extensionKey(e): e}
 					return nil
 				}); err != nil {

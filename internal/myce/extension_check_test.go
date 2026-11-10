@@ -617,7 +617,7 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 						// #1011 waits through capacity contention on an eligible
 						// route. Loss of that route restores startup expiry.
 						if err := q.update(func() error {
-							q.s.Machines[m.ID].Gone = true
+							q.touchMachine(m.ID).Gone = true
 							return nil
 						}); err != nil {
 							t.Fatal(err)

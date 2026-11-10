@@ -140,7 +140,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 				t.Fatalf("lost original comparison: %+v", d)
 			}
 			var status Snapshot
-			if err := client.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+			if err := client.Call(context.Background(), "GET", "/api/status?jobs=recent&sections=jobs", nil, &status); err != nil {
 				t.Fatal(err)
 			}
 			public, _ := json.Marshal(status)

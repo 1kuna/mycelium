@@ -185,6 +185,7 @@ func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 	if outcome.Attempt <= j.LastHealthAlertAttempt {
 		return
 	}
+	q.touchJob(j.ID)
 	j.LastHealthAlertAttempt = outcome.Attempt
 	host := outcome.Machine
 	if m := q.s.Machines[outcome.Machine]; m != nil {

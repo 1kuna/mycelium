@@ -28,11 +28,12 @@ type ModelSnapshot struct {
 }
 
 // ModelPolicy is local queue policy: which repositories may be used and how
-// large a snapshot copy may be. Values are deployment settings, never defaults.
+// large a snapshot copy may be. Absent source restrictions permit every repository.
 type ModelPolicy struct {
-	Sources        []string `json:"sources" yaml:"sources"`
-	MaxBytes       int64    `json:"max_bytes,omitempty" yaml:"max_bytes,omitempty"`
-	FreeFloorBytes int64    `json:"free_floor_bytes,omitempty" yaml:"free_floor_bytes,omitempty"`
+	Sources  []string `json:"sources,omitempty" yaml:"sources,omitempty"`
+	MaxBytes int64    `json:"max_bytes,omitempty" yaml:"max_bytes,omitempty"`
+	// Zero derives the reserve from the worker cache volume (diskFreeFloor).
+	FreeFloorBytes int64 `json:"free_floor_bytes,omitempty" yaml:"free_floor_bytes,omitempty"`
 }
 
 // ModelLimits freezes the policy that admitted a job, so a worker enforces the
@@ -112,11 +113,12 @@ func (p *ModelPolicy) validate() error {
 	if p == nil {
 		return nil
 	}
-	if len(p.Sources) == 0 || p.MaxBytes < 0 || p.FreeFloorBytes < 0 {
-		return errors.New("models policy requires source patterns and nonnegative byte limits")
+	if p.MaxBytes < 0 || p.FreeFloorBytes < 0 {
+		return errors.New("models policy requires nonnegative byte limits")
 	}
 	for _, source := range p.Sources {
-		if _, err := path.Match(source, ""); err != nil || strings.Count(source, "/") != 1 {
+		pattern := strings.TrimPrefix(source, "!")
+		if _, err := path.Match(pattern, ""); err != nil || strings.Count(pattern, "/") != 1 || strings.HasPrefix(pattern, "/") || strings.HasSuffix(pattern, "/") {
 			return fmt.Errorf("models source %q must be an OWNER/NAME pattern", source)
 		}
 	}
@@ -130,6 +132,9 @@ func (q *Queue) modelLimits(s Spec) (*ModelLimits, error) {
 		return nil, nil
 	}
 	p := q.effectivePriorityPolicy().Models
+	if p == nil {
+		p = &ModelPolicy{}
+	}
 	names := make([]string, 0, len(s.ModelSnapshots))
 	for name := range s.ModelSnapshots {
 		names = append(names, name)
@@ -137,23 +142,23 @@ func (q *Queue) modelLimits(s Spec) (*ModelLimits, error) {
 	slices.Sort(names)
 	for _, name := range names {
 		repo := s.ModelSnapshots[name].Repo
-		permitted := false
-		for _, source := range sourcesOf(p) {
-			ok, _ := path.Match(source, repo)
-			permitted = permitted || ok
+		restricted, permitted, denied := false, false, false
+		for _, source := range p.Sources {
+			pattern, deny := strings.CutPrefix(source, "!")
+			ok, _ := path.Match(pattern, repo)
+			if deny {
+				denied = denied || ok
+			} else {
+				restricted = true
+				permitted = permitted || ok
+			}
 		}
+		permitted = !denied && (!restricted || permitted)
 		if !permitted {
-			return nil, &HTTPError{Status: 409, Code: "model_snapshot_not_permitted", Message: fmt.Sprintf("model snapshot %s: repository %s is not permitted by local model policy; the queue owner adds a models.sources pattern with myce policy set", name, repo)}
+			return nil, &HTTPError{Status: 409, Code: "model_snapshot_not_permitted", Message: fmt.Sprintf("model snapshot %s: repository %s is not permitted by explicit models.sources restrictions", name, repo)}
 		}
 	}
 	return &ModelLimits{PolicyRevision: q.policyRevision(), MaxBytes: p.MaxBytes, FreeFloorBytes: p.FreeFloorBytes}, nil
-}
-
-func sourcesOf(p *ModelPolicy) []string {
-	if p == nil {
-		return nil
-	}
-	return p.Sources
 }
 
 // resolveModelSnapshot runs on the worker, outside any queue lock. It returns a
@@ -291,6 +296,8 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 		if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
 			return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", nil))
 		}
+		// Zero uses the cache's volume-derived disk floor during admission,
+		// after inactive entries have had a chance to be evicted.
 		if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 {
 			disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
 			if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
@@ -302,7 +309,8 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 			if errors.Is(err, errCheckpointIOPending) || ctx.Err() != nil {
 				return fail(err)
 			}
-			if strings.HasPrefix(err.Error(), "disk_headroom") {
+			var capacity *stagingCapacityError
+			if errors.As(err, &capacity) || strings.HasPrefix(err.Error(), "disk_headroom") {
 				return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", err))
 			}
 			return fail(modelSnapshotError("model_snapshot_mismatch", "io_error", err))

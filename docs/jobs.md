@@ -98,6 +98,16 @@ rejects unknown fields. Its output is the job ID. No field is a hidden shell
 command: `run.command` is an argument array. Use `[sh, -c, '...']` explicitly
 when shell expansion is needed.
 
+Production `POST /api/jobs` returns after the durable submission commit without
+rebuilding optional diagnostics over retained history. Queued production receipts
+mark `deadline_guidance.details_deferred: true`; fetch the accepted job for full
+current blockers. Submission writers and other control writers alternate when
+both are waiting, FIFO within each class, so a heartbeat backlog cannot consume
+every writer turn. The contention regression checks a 20-second submit budget;
+this is not a queue-start promise or a bound on input/storage I/O. A failed input
+verification, unavailable storage/memory measurement or shutdown still reports
+its typed cause. Keep the original key/spec when recovering an uncertain reply.
+
 Check a YAML or JSON job before submission with `myce spec check job.yaml`.
 This uses submit's strict decoder and `Spec.Validate()` offline, without fleet
 authority, network requests, uploads or fleet changes. Exit status is 0 for a

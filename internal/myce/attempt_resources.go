@@ -434,6 +434,9 @@ func (w Worker) observeResources(p *process, memory *memoryAttempt) *resourceObs
 }
 
 func (q *Queue) retainAttemptResources(j *Job, r *AttemptResources) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if r == nil {
 		return
 	}

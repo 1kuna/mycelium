@@ -468,7 +468,7 @@ func TestScarceHostYieldToolsDoNotManufactureUniqueness(t *testing.T) {
 	peer := m3Machine()
 	peer.ID, peer.HostID = "peer", "peer"
 	machineCheck(t, q, peer)
-	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	s := spec("experiment")
@@ -489,7 +489,7 @@ func TestScarceHostYieldWorkerProtocolsAreNotHardwareUniqueness(t *testing.T) {
 			peer.ID, peer.HostID = "peer", "peer"
 			machineCheck(t, q, peer)
 			if err := q.update(func() error {
-				q.s.Machines[a.ID].Capabilities = append(q.s.Machines[a.ID].Capabilities, "shared_inputs_v1", modelSnapshotsCapability)
+				q.touchMachine(a.ID).Capabilities = append(q.s.Machines[a.ID].Capabilities, "shared_inputs_v1", modelSnapshotsCapability)
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -535,7 +535,7 @@ func TestScarceHostYieldDestinationProtocolRechecked(t *testing.T) {
 				if next == nil || next.ID != run.ID {
 					t.Fatal("missing resume offer", next)
 				}
-				if err := q.update(func() error { q.s.Machines[b.ID].Capabilities = []string{"native_isolation_landlock"}; return nil }); err != nil {
+				if err := q.update(func() error { q.touchMachine(b.ID).Capabilities = []string{"native_isolation_landlock"}; return nil }); err != nil {
 					t.Fatal(err)
 				}
 				if err := q.Started(result(next, false)); !errors.Is(err, ErrStale) {
@@ -548,7 +548,7 @@ func TestScarceHostYieldDestinationProtocolRechecked(t *testing.T) {
 
 func TestScarceHostYieldRechecksDemandToolsBeforeStop(t *testing.T) {
 	q, _, a, _, run := yieldFixture(t, false)
-	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = map[string][]string{"": {"node"}}; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	s := spec("experiment")
@@ -559,7 +559,7 @@ func TestScarceHostYieldRechecksDemandToolsBeforeStop(t *testing.T) {
 	if got := job(t, q, run.ID); got.State != "stopping" {
 		t.Fatal("missing initial yield", got.State, got.Reason)
 	}
-	if err := q.update(func() error { q.s.Machines[a.ID].ToolInventory = nil; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(a.ID).ToolInventory = nil; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := q.authorizeYieldStop(context.Background(), result(run, false)); ok || err != nil {
@@ -611,7 +611,7 @@ func TestScarceHostYieldRequiresRealUniquenessAndCompatibility(t *testing.T) {
 					r.Targets = append([]ResumeTarget(nil), r.Targets...)
 					r.Targets[0].Environment = "counter-runtime-v1"
 					v.Spec.ResumeCompatibility = &r
-					q.s.Machines[a.ID].Environments = []string{"counter-runtime-v1"}
+					q.touchMachine(a.ID).Environments = []string{"counter-runtime-v1"}
 					return nil
 				}); err != nil {
 					t.Fatal(err)
@@ -620,7 +620,7 @@ func TestScarceHostYieldRequiresRealUniquenessAndCompatibility(t *testing.T) {
 				if err := q.update(func() error {
 					profile := *q.s.Machines[b.ID].CapabilityProfile
 					profile.Arch = "arm64"
-					q.s.Machines[b.ID].CapabilityProfile = &profile
+					q.touchMachine(b.ID).CapabilityProfile = &profile
 					return nil
 				}); err != nil {
 					t.Fatal(err)

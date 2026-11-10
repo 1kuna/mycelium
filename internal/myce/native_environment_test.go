@@ -106,7 +106,7 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 			// input, but the submitted recipe retains independent custody.
 			if err := q.update(func() error {
 				finished := clock.Now()
-				q.s.Jobs["expired-input"] = &Job{ID: "expired-input", State: "succeeded", FinishedAt: &finished, Spec: Spec{Files: FileManifest{"old-input": *ref}}}
+				q.putJob("expired-input", &Job{ID: "expired-input", State: "succeeded", FinishedAt: &finished, Spec: Spec{Files: FileManifest{"old-input": *ref}}})
 				return nil
 			}); err != nil {
 				t.Fatal(err)

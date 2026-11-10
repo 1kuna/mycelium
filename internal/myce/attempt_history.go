@@ -54,6 +54,9 @@ func attemptOutcome(j *Job, r Result) AttemptOutcome {
 }
 
 func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if outcome.Attempt == 0 || outcome.Machine == "" || outcome.Session == "" {
 		return // Never manufacture an attempt for an unassigned job.
 	}

@@ -30,6 +30,9 @@ func TestStatusReadCheckinContention(t *testing.T) {
 	// The running attempt occupies this worker's capacity while receipts queue.
 	m.FreeMemoryGB = 0
 	contact := Checkin{Machine: m, Running: &Execution{ID: sentinel.ID, Attempt: assignment.Attempt}}
+	// Earlier transactions can still publish admission evidence in the
+	// background. Protect the bulk fixture writes with the same queue mutex.
+	q.mu.Lock()
 	for i := range 5000 {
 		id := fmt.Sprintf("history-%04d", i)
 		j := &Job{ID: id, State: "succeeded", Queued: clock.Now().Add(-time.Hour), Attempt: 1, ReleaseConfirmed: true, Spec: spec("experiment")}
@@ -55,6 +58,7 @@ func TestStatusReadCheckinContention(t *testing.T) {
 	for i := range 1000 {
 		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: ObservationKey{Work: "work", Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, Units: 100, Seconds: 20, RecordedAt: clock.Now()}
 	}
+	q.mu.Unlock()
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}

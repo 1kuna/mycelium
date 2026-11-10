@@ -35,6 +35,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 				if err := q.update(func() error {
 					old := q.s.Extensions[extensionKey(e)]
 					old.ProductionParityRequired = false
+					q.touchCatalog("extensions/" + extensionKey(e))
 					q.s.Extensions[extensionKey(e)] = old
 					return nil
 				}); err != nil {

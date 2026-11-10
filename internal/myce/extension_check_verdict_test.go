@@ -99,7 +99,7 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 							// capacity-bound. Losing that route permits expiry
 							// without creating an execution verdict.
 							if err := q.update(func() error {
-								q.s.Machines[m.ID].Gone = true
+								q.touchMachine(m.ID).Gone = true
 								return nil
 							}); err != nil {
 								t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,20 +23,34 @@ type statusOptions struct {
 	since                 time.Time
 	limit                 int
 	full                  bool
+	sections              []string
 }
 
 type statusSelection struct {
-	ids  map[string]bool
-	page StatusJobsPage
+	ids     map[string]bool
+	page    StatusJobsPage
+	compact bool
+	upgrade *FleetUpgradeStatus
 }
 
 func parseStatusOptions(v url.Values) (statusOptions, error) {
-	o := statusOptions{jobs: "recent", limit: 0}
+	o := statusOptions{jobs: "active", limit: 0}
 	if s := v.Get("jobs"); s != "" {
 		o.jobs = s
 	}
 	if o.jobs != "recent" && o.jobs != "active" && o.jobs != "all" {
 		return o, reject("status_query_invalid", nil)
+	}
+	for _, section := range strings.Split(v.Get("sections"), ",") {
+		if section == "" {
+			continue
+		}
+		switch section {
+		case "jobs", "machines", "storage", "work", "health", "efficiency", "usage", "diagnostics":
+			o.sections = append(o.sections, section)
+		default:
+			return o, reject("status_query_invalid", nil)
+		}
 	}
 	o.project, o.before = v.Get("project"), v.Get("before")
 	if s := v.Get("limit"); s != "" {

@@ -276,11 +276,11 @@ func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry
 		for _, r := range mapping {
 			if r.From == r.To {
 				if verifiedEmptySource(drains, q.s.Machines[r.From]) {
-					q.s.Machines[r.From].Gone = true
+					q.touchMachine(r.From).Gone = true
 				}
 				continue
 			}
-			m := q.s.Machines[r.From]
+			m := q.touchMachine(r.From)
 			m.Gone = true
 			m.Replacement = &MachineReplacement{Machine: r.To, Device: r.Device}
 		}
@@ -382,6 +382,7 @@ func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
 		for _, r := range plan.Mapping {
 			if r.From != r.To {
 				if m := q.s.Machines[r.To]; m != nil {
+					q.touchMachine(m.ID)
 					m.Gone = true
 				}
 			}
@@ -389,6 +390,7 @@ func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
 			copy := cloneMachine(old)
 			copy.Gone = true
 			copy.Replacement = nil
+			q.touchMachine(r.From)
 			q.s.Machines[r.From] = &copy
 		}
 		plan.RolledBack = true

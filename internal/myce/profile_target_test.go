@@ -127,7 +127,7 @@ func TestProfileTargetTemporaryHoldsStillQueue(t *testing.T) {
 	check(t, q, m, nil)
 	if err := q.update(func() error {
 		q.s.Policies = map[string]ProjectPolicy{"test": {AllowedMachines: []string{m.ID}}}
-		live := q.s.Machines[m.ID]
+		live := q.touchMachine(m.ID)
 		live.Gone, live.Leaving, live.Recovering = true, true, true
 		live.CPUCapacityReason = "CPU allowance awaiting worker acknowledgement"
 		live.CapabilityProfile.Availability = &Availability{Available: false, Reason: "owner active"}

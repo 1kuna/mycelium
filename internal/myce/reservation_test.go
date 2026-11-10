@@ -236,6 +236,7 @@ func TestReservationUnstartedAssignmentWithoutMachine(t *testing.T) {
 			if err := q.update(func() error {
 				j := q.touchJob(offer.ID)
 				if missing == "absent inventory" {
+					q.touchMachine(j.Machine)
 					delete(q.s.Machines, j.Machine)
 				} else {
 					j.Machine, j.Session = "replacement", "replacement-session"

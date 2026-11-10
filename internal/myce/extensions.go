@@ -367,6 +367,7 @@ func (q *Queue) AddExtension(e Extension, requestContexts ...context.Context) er
 			checked.SandboxDefault = old.SandboxDefault
 			checked.ProductionParityRequired = old.ProductionParityRequired
 		}
+		q.touchCatalog("extensions/" + k)
 		q.s.Extensions[k] = checked
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.extensionJob() && len(j.Extensions) == 0 {

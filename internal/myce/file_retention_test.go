@@ -74,8 +74,18 @@ func TestFileRetentionRollbackTimestampFences(t *testing.T) {
 						t.Fatal(err)
 					}
 					current, exists := marker()[ref.SHA256]
-					if !exists || !current.Equal(published) || current == published {
-						t.Fatal("rollback did not normalize the unchanged marker", current, published)
+					if !exists || !current.Equal(published) {
+						t.Fatal("rollback changed the publication instant", current, published)
+					}
+					// The in-memory journal now preserves time representation. Explicitly
+					// simulate a serialized reload so this still guards instant-based fences
+					// against equal timestamps with different location representations.
+					q.mu.Lock()
+					marker()[ref.SHA256] = current.UTC()
+					normalized := marker()[ref.SHA256]
+					q.mu.Unlock()
+					if !normalized.Equal(published) || normalized == published {
+						t.Fatal("fixture did not normalize the unchanged instant", normalized, published)
 					}
 				}
 				ctx := context.Background()
@@ -141,13 +151,14 @@ func TestFileRetention(t *testing.T) {
 	job := submit(t, q, original)
 	active := submit(t, q, Spec{Name: "active", Project: "test", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}, Files: FileManifest{"shared": shared}})
 	if err := q.update(func() error {
-		j := q.s.Jobs[job.ID]
+		j := q.touchJob(job.ID)
 		j.State = "succeeded"
 		ended := clock.Now()
 		j.FinishedAt = &ended
 		j.OutputRefs = FileManifest{"output": output}
 		j.FileCheckpoints = map[int]FileCheckpoint{1: {Generation: 1, Files: FileManifest{"save": checkpoint}}}
 		q.models.Models = append(q.models.Models, Model{SHA256: model.SHA256})
+		q.touchCatalog("extensions/kept")
 		q.s.Extensions = map[string]Extension{"kept": {Assets: FileManifest{"asset": extension}}}
 		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"kept": {"cpu": {Assets: FileManifest{"asset": environment}}}}
 		return nil
@@ -426,9 +437,10 @@ func TestFileRetentionOrphanReferences(t *testing.T) {
 	files("model")
 	files("model bundle file")
 	if err := q.update(func() error {
-		q.s.Jobs["retained"] = j
-		q.s.Jobs["pending"] = pending
-		q.s.Submissions = map[string]*submissionRecord{"retained": {Kind: submissionBinding, JobID: "removed", Job: answer}}
+		q.putJob("retained", j)
+		q.putJob("pending", pending)
+		q.putSubmission("retained", &submissionRecord{Kind: submissionBinding, JobID: "removed", Job: answer})
+		q.touchCatalog("extensions/catalog")
 		q.s.Extensions = map[string]Extension{"catalog": ext}
 		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"env": {"cpu": env}}
 		q.s.ModelSlots = map[string]*ModelSlot{"slot": {EnvironmentRecipe: &slotEnv}}

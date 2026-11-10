@@ -50,6 +50,8 @@ func bundleHistory(t *testing.T, q *Queue, payload int) {
 
 func mutationCost(t *testing.T, q *Queue, count int) (time.Duration, uint64) {
 	t.Helper()
+	recordAuditExempt.Store(q, true)
+	defer recordAuditExempt.Delete(q)
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +216,8 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 	// even if another owner has marked the same digest as an expired job input.
 	ref := *reopened.s.Extensions[extensionKey(e)].FilesRef
 	if err := reopened.update(func() error {
-		reopened.s.Submissions = map[string]*submissionRecord{"retained": {Kind: submissionBinding, JobID: j.ID, Job: reopened.s.Jobs[j.ID]}}
+		reopened.putSubmission("retained", &submissionRecord{Kind: submissionBinding, JobID: j.ID, Job: reopened.s.Jobs[j.ID]})
+		reopened.touchCatalog("extensions/" + extensionKey(e))
 		delete(reopened.s.Extensions, extensionKey(e))
 		reopened.deleteJob(j.ID)
 		reopened.s.JobInputUploads = map[string]time.Time{ref.SHA256: clock.Now()}

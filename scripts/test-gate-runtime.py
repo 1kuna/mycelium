@@ -106,6 +106,18 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 runtime.docker_inventory(self.marker, self.entry)
 
+    def test_current_unused_daemon_is_not_a_cleanup_dependency(self):
+        entry = dict(self.entry, labelled_fixtures=True)
+        self.call.side_effect = subprocess.CalledProcessError(1, ['docker'])
+        proof = runtime.docker_inventory(self.marker, entry)
+        self.assertTrue(proof[0]['unused'])
+        self.assertTrue(proof[0]['stopped'])
+        # A journal entry made before resource creation keeps a genuine failed
+        # cleanup verdict, which the gate releases without holding admission.
+        with self.assertRaisesRegex(RuntimeError, 'unknown or unreachable'):
+            runtime.docker_inventory(self.marker, entry,
+                [dict(marker=self.marker, endpoint=self.endpoint)])
+
     def test_no_runtime_requires_positive_prerequisite_absence(self):
         with (patch.object(runtime.shutil, 'which', return_value=None),
               patch.object(runtime.Path, 'exists', return_value=False)):

@@ -2,9 +2,10 @@
 
 ## Reading `myce status`
 
-`myce status` prints the queue's health, each machine and recent jobs. Add
-`--full` for full job IDs, `--history` for every retained job, or `--json` for
-the same data as JSON. For one job, `myce wait JOB_ID` prints each state change
+`myce status` prints current work, machines, holds and active health conditions.
+`--json` returns the same compact view. Add `--sections jobs,machines` for
+placement diagnostics and machine telemetry, `--jobs all` for a history page,
+or `--history` for the complete retained document. `--full` means full job IDs. For one job, `myce wait JOB_ID` prints each state change
 and `myce logs JOB_ID` prints its output.
 
 - **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)
@@ -241,42 +242,112 @@ qualification hash; `digest` identifies the extension contents. The text is a
 human diagnostic, not a machine code; `setup` and `qualified` remain the stable
 boolean verdicts. No record does not establish a hardware change.
 
-Default status keeps the existing JSON fields and job shape, but includes all
-nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
-capacity-sized page of other terminal jobs by submission time. Work curves remain included for
-existing consumer audits and release-preservation guards.
-This bounds retained-history detail without hiding control-plane custody.
+From the release containing #1120, default `GET /api/status`, `myce status`
+and `myce status --json` are compact. They contain all nonterminal jobs and
+terminal jobs with outstanding cleanup/delivery, current machine capacity and
+availability (including the latest health sample and active preparation identities), host/device holds, current
+fleet upgrade, and `summary.alerts` (active condition identity and onset).
+`summary.retained_jobs` counts all retained jobs, including calls.
+`health_alert_delivery` retains the notifier configuration and pending count.
+No installation-sized row or byte cap hides current work.
+
+The default captures maintained current facts instead of materializing the full
+retained generation, rebuilding evidence catalogs/placement plans, reading usage
+SQL, or traversing retained file references. Job reasons are the last committed
+reason; a generic capacity wait means no detailed reason was committed. Queue
+order is unknown unless recorded. Use `status JOB_ID` or `sections=jobs` for a
+fresh placement explanation. Runtime/progress ages and machine contact freshness
+still use the captured clock. These observations grant no launch or release authority.
+
+Retained diagnostic fields are absent or empty/null placeholders in the default
+JSON, **not zero evidence**. `summary.diagnostics` identifies that projection.
+Opt into comma-separated sections with `?sections=work,storage` or
+`myce status --sections work,storage --json`:
+
+| Section | Existing detail restored |
+|---|---|
+| `jobs` | Complete selected job status fields, attempts, admission/evidence, eligibility and fresh placement diagnostics |
+| `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
+| `storage` | `storage_observations` and `file_store` (including retained-file accounting) |
+| `work` | `work_curves` |
+| `health` | Retained `health_alerts`, independently of current `summary.alerts` |
+| `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
+| `usage` | Complete `usage`, including daily rows, preemptions and production starts |
+| `diagnostics` | `request_latencies`, `fleet_superseded`, `evidence_retention`, and retained `admissions` |
+
+Current fleet metadata (release, policy, holds, model slots/pins and sync requests)
+keeps its existing fields. The default omits released reservations and inactive
+exclusions; an explicit diagnostic read retains their audit records. Section
+reads may perform expensive diagnostic planning, even when returning a subset.
+`?detail=full` restores **every existing field and every retained job**, including
+all sections and audit metadata, with the existing public redaction contract.
+CLI `--history` and Python `client.status(full=True)` use that preservation view.
+Keep it explicit for release-preservation snapshots; the default is not a ledger.
+
+Job selection remains independent of section selection:
+
+- `?jobs=active` is the default: all current/cleanup-pending jobs.
+- `?jobs=recent` adds a capacity-sized terminal history page to current work.
+- `?jobs=all&limit=100` pages all retained jobs, newest submission first. Append
+  `&before=NEXT_BEFORE` until `jobs_page.next_before` is absent. `limit` is positive
+  and bounded by negotiated capacity; omission uses measured row costs, not a
+  fixed installation-sized default. See [request budgets](request-budgets.md).
+  `myce status --jobs all --limit 100 --before CURSOR --json` exposes the same
+  cursor. History modes retain complete selected job status rows.
+- `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and inclusive
+  submission timestamp. Keep mode/filters unchanged when paging. An expired or
+  unknown cursor returns HTTP 400 `status_query_invalid`; restart the listing.
+
 `jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
-filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
+filtered selection's `total`, `returned`, `mode`, and optional `next_before`.
+Absence from default status does not prove completion or loss: read known IDs or
+use one scalar batch `POST /api/wait` / `myce wait` / Python `wait_many()`.
+Completion observers continue to use that batch endpoint, not fleet polling.
 
-- `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
-- `?jobs=all&limit=100` pages all history, newest submission first; append
-  `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
-  positive and capped by current queue memory. Explicit page intent sets the
-  projection-service floor; omission chooses a page from measured job-row cost. See [request budgets](request-budgets.md). The normal status presentation order is retained
-  within each page; use the returned cursor rather than the last displayed ID.
-- `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
-  inclusive submission timestamp. Filters do not alter fleet health, eligibility
-  or queue order. Keep filters and mode unchanged when paging. Cursors require
-  their job to remain retained; an expired/unknown cursor returns HTTP 400
-  `status_query_invalid`, so restart that listing.
-- `?detail=full` restores all retained jobs and work curves without a job limit.
-  CLI `myce status --history` and Python `client.status(full=True)` use this
-  supported expensive view. `--full` still means full job IDs.
+Python `client.status(sections="work,storage")` selects detail;
+`client.list()` still walks capacity-bounded `jobs=all` pages. Older queues ignore
+unknown section parameters and return their older larger default. `full=True`
+and `detail=full` continue to provide complete inspection across the supported
+adjacent release pair. `myce view` continues sharing the compact default poll;
+it uses only current job/machine fields and the latest host load sample.
+The HTML status page also accepts explicit sections, for example
+`/?sections=jobs,machines,usage`.
+`myce host status` uses its separate host-maintenance endpoint and retains stdout
+JSON even when inventory is degraded.
 
-Python `client.status()` uses the bounded default; `client.list()` walks bounded
-`jobs=all` pages and retains its all-jobs contract. Both also work with older
-queues, which ignore the new query parameters and return their legacy snapshot.
-Old clients can decode the new status shape, but their list/status views now
-contain the bounded history. Upgrade the CLI for access to older historical IDs:
-`myce status JOB` and `myce logs JOB --follow` read the job endpoint directly,
-including prefix resolution, independently of aggregate status retention/cache.
-Logs follow polls only the selected job and drains a final log page on completion.
+### Retained-queue measurement (#1120)
 
-Release-preservation tools should request `GET /api/status?detail=full` (or
-Python `client.status(full=True)`) for both snapshots: curve provenance can
-depend on completed jobs outside the default history window. Curves remain in
-default status for existing callers, but that view is not a complete job ledger.
+A synthetic laptop fixture has 8,000 retained jobs, eight running jobs, sixteen
+workers, and 8,000 independent storage, work, health-event and efficiency rows.
+`BenchmarkStatusRetained` measures warmed builds and cache hits over 30 iterations
+with `GOMAXPROCS=2`. These are ordinary uncompressed JSON bytes and local shared-host
+measurements, not production measurements, gzip transfer sizes or timing gates.
+The before run was captured before the implementation; the after run uses the
+compact projection. Sample percentiles describe this small run (p99 uses the
+lower observed rank), not a service latency guarantee.
+
+| View | JSON bytes | Mean ms | p50 ms | p99 ms | Allocated bytes/build | Allocations/build |
+|---|---:|---:|---:|---:|---:|---:|
+| Before: refresh | 19,593,648 | 252.16 | 251.27 | 267.19 | 316,525,999 | 306,129 |
+| After: refresh | 28,166 | 4.77 | 4.75 | 5.23 | 552,573 | 1,148 |
+| Before: cache hit | 19,593,647 | 6.17 | 5.67 | 8.36 | 19,651,332 | 79 |
+| After: cache hit | 28,165 | 3.19 | 3.15 | 3.83 | 84,750 | 78 |
+
+For process CPU, the same after run replays the legacy projection with all
+sections and the old recent-job selection, reproducing its 19,593,648-byte
+response: 287.21 ms CPU/build versus 2.94 ms for compact refresh (1.39 ms for a
+compact cache hit). That replay is a CPU comparator, separate from the original
+before measurement. The retention regression compares eight versus 8,000
+retained rows with identical current work: wire size changes only with the
+retained count's digit width, and construction allocations stay independent of
+those retained diagnostic collections. Explicit section reads remain expensive.
+
+Reproduce with:
+
+```sh
+GOMAXPROCS=2 go test ./internal/myce -run '^$' \
+  -bench '^BenchmarkStatusRetained$' -benchtime=30x -count=1
+```
 
 Memory-only accepted samples increment `samples` and `memory_samples` and advance
 `memory_recorded_at`; they leave the throughput clock and rate unchanged. A

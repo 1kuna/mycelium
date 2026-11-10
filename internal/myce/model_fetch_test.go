@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const modelFetchURL = "https://huggingface.co/repo/resolve/revision/file"
+const modelFetchURL = "https://models.example/repo/resolve/revision/file"
 
 type interruptedModelFetch struct{}
 
@@ -359,4 +359,20 @@ func TestModelFetchConcurrentBundleCreation(t *testing.T) {
 	}
 	assertModelFetchBytes(t, filepath.Join(root, "bundle/nested/model.bin"), "weights")
 	assertModelFetchUnpublished(t, root, "bundle/config.json")
+}
+
+func TestModelFetchRequiresHTTPS(t *testing.T) {
+	modelFetchTransport(t, func(*http.Request) (*http.Response, error) {
+		t.Fatal("invalid model URL reached the network")
+		return nil, nil
+	})
+	for _, raw := range []string{"", "http://models.example/model", "file:///model", "https:model", "https:///model"} {
+		root := filepath.Join(t.TempDir(), "model-root")
+		if err := FetchModel(context.Background(), raw, root, "model.bin", 7, modelFetchHash("weights")); err == nil || !strings.Contains(err.Error(), "HTTPS file URL") {
+			t.Fatalf("invalid URL %q: %v", raw, err)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Fatalf("invalid URL created model storage: %v", err)
+		}
+	}
 }

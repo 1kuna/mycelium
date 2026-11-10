@@ -1382,6 +1382,7 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 				if !matched {
 					continue
 				}
+				q.touchJob(j.ID)
 				j.State = "failed"
 				now := q.clock.Now()
 				j.FinishedAt = &now

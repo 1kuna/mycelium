@@ -29,7 +29,7 @@ func TestStartAuthorizationRefusalAfterStarted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(rw, r)
 		if r.URL.Path == "/api/workers/started" {
-			if err := q.update(func() error { q.s.Machines[m.ID].Leaving = true; return nil }); err != nil {
+			if err := q.update(func() error { q.touchMachine(m.ID).Leaving = true; return nil }); err != nil {
 				t.Error(err)
 			}
 		}
@@ -86,7 +86,7 @@ func TestStartAuthorizationRefusalAfterStarted(t *testing.T) {
 	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || !got.Spec.StartBy.Equal(deadline) {
 		t.Fatalf("refusal charged or caller cutoff moved: %+v", got)
 	}
-	if err := q.update(func() error { q.s.Machines[m.ID].Leaving = false; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID).Leaving = false; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if next := check(t, q, m, nil).Job; next != nil {
@@ -122,7 +122,7 @@ func TestStartAuthorizationRefusalAccountingGuards(t *testing.T) {
 				t.Fatal(err)
 			}
 			if name != "no-refusal" {
-				if err := q.update(func() error { q.s.Machines[m.ID].Leaving = true; return nil }); err != nil {
+				if err := q.update(func() error { q.touchMachine(m.ID).Leaving = true; return nil }); err != nil {
 					t.Fatal(err)
 				}
 				if err := q.AuthorizeLaunch(HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}); !errors.Is(err, ErrStale) {
@@ -169,7 +169,7 @@ func TestStartedEndpointRecordsAdmissionRefusal(t *testing.T) {
 	m := machine("worker", "fake")
 	submit(t, q, spec("production"))
 	a := check(t, q, m, nil).Job
-	if err := q.update(func() error { q.s.Machines[m.ID].Leaving = true; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID).Leaving = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Started(result(a, false)); !errors.Is(err, ErrStale) {
@@ -179,7 +179,7 @@ func TestStartedEndpointRecordsAdmissionRefusal(t *testing.T) {
 	if reason := recordedStartRefusal(q.s.Jobs[a.ID]); reason != "host_launch" {
 		t.Fatal("Started refusal not durable", reason)
 	}
-	if err := q.update(func() error { q.s.Machines[m.ID].Leaving = false; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID).Leaving = false; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	r := result(a, false)
@@ -207,7 +207,7 @@ func TestStartAuthorizationRefusalRestoresRelativeWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second)
-	if err := q.update(func() error { q.s.Machines[m.ID].Leaving = true; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID).Leaving = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.AuthorizeLaunch(HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}); !errors.Is(err, ErrStale) {
