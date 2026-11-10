@@ -132,7 +132,7 @@ func TestRetainedMemoryLiveEvidenceAndTime(t *testing.T) {
 	}
 	if err := q.update(func() error {
 		compare(time.Time{})
-		j := q.s.Jobs[source.ID]
+		j := q.touchJob(source.ID)
 		peak := *j.MemoryAttempts[0].MemoryPeak
 		large := 60.0
 		peak.HostGB = &large

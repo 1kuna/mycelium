@@ -514,8 +514,8 @@ func TestMaintenancePreparationSidecarsAndFreshness(t *testing.T) {
 	check(t, q, b, nil)
 	maintenanceChange(t, q, "drain", false)
 	if err := q.update(func() error {
-		q.s.Machines[a.ID].EnvironmentReports = []EnvironmentReport{{Key: "build", State: "building"}}
-		q.s.Machines[b.ID].CopyReports = []CopyReport{{Model: "weights", State: "copying"}}
+		q.touchMachine(a.ID).EnvironmentReports = []EnvironmentReport{{Key: "build", State: "building"}}
+		q.touchMachine(b.ID).CopyReports = []CopyReport{{Model: "weights", State: "copying"}}
 		q.s.ModelSlots["engine"] = &ModelSlot{Machine: a.ID, Session: a.Session, Model: "engine", Attempt: "load", State: "ready"}
 		if q.s.HostReleases == nil {
 			q.s.HostReleases = map[string]HostRelease{}

@@ -20,9 +20,11 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 				for i := range hosts {
 					peer := cpuMachine(fmt.Sprintf("peer-%d", i), fmt.Sprintf("peer-%d", i), "cpu", 4, 16)
 					peer.LastSeen = c.Now()
+					q.touchMachine(peer.ID)
 					q.s.Machines[peer.ID] = &peer
 					q.acceptContactPeriod(&peer, time.Second, nil) // Accepted synthetic current-worker inventory.
 				}
+				q.touchMachine(m.ID)
 				q.s.Machines[m.ID] = &m
 				q.acceptContactPeriod(&m, time.Second, nil)
 				return nil
@@ -35,6 +37,7 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 			// Current accepted failures, with arbitrary private text that must never
 			// enter notification payloads. No live database or filesystem evidence.
 			if err := q.update(func() error {
+				q.touchMachine(m.ID)
 				m.CapabilityProfile = nil
 				m.EnvironmentReports = []EnvironmentReport{{Key: "recipe", State: "failed", FailureKind: "deterministic", Error: "private diagnostic"}}
 				m.CacheError = "private cache error"
@@ -61,6 +64,7 @@ func TestRemainingHealthReportsRecipesCachesUpdates(t *testing.T) {
 				t.Fatal("raw diagnostic exposed", string(payload))
 			}
 			if err := q.update(func() error {
+				q.touchMachine(m.ID)
 				m.CapabilityProfile = cpuMachine("worker", "worker", "cpu", 4, 16).CapabilityProfile
 				m.EnvironmentReports[0].State = "ready"
 				m.CacheError = ""
@@ -84,6 +88,7 @@ func TestRemainingHealthPinsTargetsAndHealthyOccupancy(t *testing.T) {
 				for i := range hosts {
 					m := cpuMachine(fmt.Sprintf("worker-%d", i), fmt.Sprintf("worker-%d", i), "cpu", 4, 16)
 					m.LastSeen = c.Now()
+					q.touchMachine(m.ID)
 					q.s.Machines[m.ID] = &m
 				}
 				return nil
@@ -111,7 +116,7 @@ func TestRemainingHealthPinsTargetsAndHealthyOccupancy(t *testing.T) {
 			s = cpuSpec(20, 1)
 			bad := submit(t, q, s)
 			requireIncident(t, q, "job_target_unsatisfied", "target/"+bad.ID, 1, true)
-			if err := q.update(func() error { q.s.Machines["worker-0"].CapabilityProfile.LogicalCPUs = 32; return nil }); err != nil {
+			if err := q.update(func() error { q.touchMachine("worker-0").CapabilityProfile.LogicalCPUs = 32; return nil }); err != nil {
 				t.Fatal(err)
 			}
 			requireIncident(t, q, "job_target_unsatisfied", "target/"+bad.ID, 1, false)
@@ -125,9 +130,11 @@ func TestRemainingHealthAttemptStreak(t *testing.T) {
 			q, c := fixture(t)
 			m := cpuMachine("worker", "host", "cpu", 4, 16)
 			if err := q.update(func() error {
+				q.touchMachine(m.ID)
 				q.s.Machines[m.ID] = &m
 				for i := 1; i < hosts; i++ {
 					peer := cpuMachine(fmt.Sprintf("peer-%d", i), fmt.Sprintf("peer-%d", i), "cpu", 4, 16)
+					q.touchMachine(peer.ID)
 					q.s.Machines[peer.ID] = &peer
 				}
 				return nil

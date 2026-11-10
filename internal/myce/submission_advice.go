@@ -15,6 +15,16 @@ func (q *Queue) submitWithDeadlineGuidance(ctx context.Context, s Spec) (*Job, e
 	if err != nil {
 		return j, err
 	}
+	// Production acceptance must not wait for a second planner pass over retained
+	// history (or another physical-memory probe) after its durable commit. Return
+	// the committed receipt and policy advice; the normal job GET owns full
+	// blocker diagnostics. The snapshot pins the exact accepted policy on replay.
+	if v := snapshot.view; j.State != "queued" || v.priorityMatch(j.Spec).Tier == "production" {
+		j.PriorityPolicy = v.priorityMatch(j.Spec)
+		j.DeadlineGuidance = v.deadlineGuidance(j)
+		j.DeadlineGuidance.DetailsDeferred = j.State == "queued"
+		return j, nil
+	}
 	timing := newSubmissionAdviceTiming()
 	defer func() { timing.finish(q.observeSubmissionAdvice) }()
 	// Acceptance is already durable. Request cancellation cannot turn it into

@@ -162,7 +162,7 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 				t.Fatal("missing assignment")
 			}
 			if err := q.update(func() error {
-				live := q.s.Jobs[first.ID]
+				live := q.touchJob(first.ID)
 				if tc.path == "priority-preemption" {
 					q.stopBatchFor(live, &Job{ID: "demand", Spec: spec("production")})
 				} else if strings.HasPrefix(tc.reason, "making room for ") {

@@ -14,6 +14,7 @@ type DeadlineGuidance struct {
 	DeadlinePolicy   PriorityMatch `json:"deadline_policy"`
 	PrecedenceChange string        `json:"precedence_change"`
 	Blockers         []string      `json:"blockers,omitempty"`
+	DetailsDeferred  bool          `json:"details_deferred,omitempty"`
 	ETA              string        `json:"eta"`
 	Example          string        `json:"example"`
 	NextAction       string        `json:"next_action"`

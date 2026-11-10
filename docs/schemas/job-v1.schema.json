@@ -1357,6 +1357,9 @@
         "deadline_policy": {
           "$ref": "#/$defs/PriorityMatch"
         },
+        "details_deferred": {
+          "type": "boolean"
+        },
         "eta": {
           "type": "string"
         },

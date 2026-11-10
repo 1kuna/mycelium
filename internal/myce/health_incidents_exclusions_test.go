@@ -162,7 +162,7 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 	check(t, q, peer, nil)
 	// Reproduce the queue's loss observation without making the fitting
 	// worker stale too. Qualification ignores this temporary availability.
-	if err := q.update(func() error { q.s.Machines[peer.ID].Gone = true; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(peer.ID).Gone = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	s.Needs.Memory, s.RequireTarget = "auto", true

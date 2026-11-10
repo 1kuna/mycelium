@@ -115,6 +115,9 @@ func (p *ProgressReport) aged(now time.Time) *ProgressReport {
 }
 
 func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Machine) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	p := report.ApplicationProgress
 	if report.Session != m.Session || j.Session != report.Session || !p.valid() {
 		return

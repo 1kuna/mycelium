@@ -26,7 +26,7 @@ func TestCancellationRejoinBeforeCancel(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(LossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+		q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {
@@ -66,7 +66,7 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 			for attempt := 1; attempt <= 2; attempt++ {
 				c.Advance(LossAfter)
 				if err := q.update(func() error {
-					q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+					q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 					q.maintain()
 					return nil
 				}); err != nil {
@@ -149,7 +149,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(ProductionLossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+		q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {

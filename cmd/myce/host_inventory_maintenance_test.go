@@ -27,4 +27,10 @@ func TestHostDisableStopWaitDegradedInventory(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &status); err != nil || !status.Quiescent || status.Healthy || status.Policy.Mode != "disabled" || status.Policy.StopAt == nil {
 		t.Fatalf("unexpected status: %+v %v", status, err)
 	}
+	out.Reset()
+	err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &out)
+	status = myce.HostMaintenanceStatus{}
+	if err == nil || json.Unmarshal(out.Bytes(), &status) != nil || status.Healthy || status.Host != "host" {
+		t.Fatal("degraded host status must retain stdout JSON", out.String(), err)
+	}
 }

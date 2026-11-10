@@ -184,7 +184,7 @@ func TestPieceDependencyRetention(t *testing.T) {
 	}
 	// Fail the remaining sibling; the accepted consumer remains independent.
 	if err := q.update(func() error {
-		p := q.s.Jobs[parent.ID]
+		p := q.touchJob(parent.ID)
 		p.State = "failed"
 		now := clock.Now()
 		p.FinishedAt = &now

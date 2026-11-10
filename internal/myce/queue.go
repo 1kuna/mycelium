@@ -232,6 +232,7 @@ type Queue struct {
 	jobSnapshotsMu   sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
 	jobSnapshots     map[string]*jobSnapshotCache
 	observeRead      func(string, time.Duration, time.Duration)
+	observeRequest   func(string, time.Duration, time.Duration, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB
 	persisted        map[string][]byte
@@ -251,8 +252,7 @@ type Queue struct {
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
-	persistenceEncodings    map[string]map[string]catalogEncoding
-	persistenceFieldsCache  map[string]persistenceFieldCache
+	machineRecords          bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
 	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
@@ -407,10 +407,17 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			}
 		}
 	}
-	for _, j := range q.liveJobs() {
-		if j.Timing != nil && !terminal(j.State) {
-			j.Timing.Reason = "queue restarted; occupancy unknown"
+	if err = q.update(func() error {
+		for _, j := range q.liveJobs() {
+			if j.Timing != nil && !terminal(j.State) && j.Timing.Reason != "queue restarted; occupancy unknown" {
+				q.touchJob(j.ID)
+				j.Timing.Reason = "queue restarted; occupancy unknown"
+			}
 		}
+		return nil
+	}); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
@@ -608,12 +615,16 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if timing == nil {
 		timing = &queueUpdateTiming{}
 	}
+	var writer sync.Locker = &q.mu
+	if ctx.Value(submissionTurnKey{}) != nil {
+		writer = submissionMutex{&q.mu}
+	}
 	if cancelWait {
-		if err := timing.lockContext(ctx, &q.mu); err != nil {
+		if err := timing.lockContext(ctx, writer); err != nil {
 			return err
 		}
 	} else {
-		timing.lock(&q.mu)
+		timing.lock(writer)
 	}
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
 	q.nasAvailable = available
@@ -655,6 +666,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	old, err := q.beginRecords()
 	if err != nil {
 		return err
+	}
+	var audit func() error
+	if auditQueueRecords != nil {
+		audit = auditQueueRecords(q)
 	}
 	oldCalls := map[string]*ModelCall{}
 	for id, c := range q.calls {
@@ -698,7 +713,12 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
 		hold.next(holdPersist)
-		err = q.persistUsage(timing)
+		if audit != nil {
+			err = audit()
+		}
+		if err == nil {
+			err = q.persistUsage(timing)
+		}
 	}
 	if err == nil {
 		q.fileReferenceRevision++
@@ -750,6 +770,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 
 // committed pins immutable advice inputs before releasing the commit lock.
 func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
+	ctx = context.WithValue(ctx, submissionTurnKey{}, true)
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -794,7 +815,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	}
 	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
-	unlockRequest := requestLock(ctx, &q.mu)
+	unlockRequest := requestLock(ctx, submissionMutex{&q.mu})
 	store := q.files
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
@@ -812,9 +833,21 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Validation errors are handled below in their existing order; key replay
 	// and cancellation still win over all preparation failures.
 	prepared := cloneJob(&Job{Spec: s}).Spec
-	_ = normalizeResources(&prepared)
+	normalizationErr := normalizeResources(&prepared)
+	var executionErr error
 	if !prepared.extensionJob() {
-		_ = lowerExecution(&prepared)
+		executionErr = lowerExecution(&prepared)
+	}
+	// Plain-command validation and payload normalization need no queue state.
+	// Keep their original error ordering inside the commit: replay/cancellation
+	// and live policy/custody fences still win over preparation failures.
+	var plainValidationErr error
+	if !s.extensionJob() {
+		validation := s
+		if validation.memoryOmitted() {
+			validation.Needs.Memory = "auto"
+		}
+		plainValidationErr = validation.Validate()
 	}
 	var recipes map[string]EnvironmentRecipe
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
@@ -909,7 +942,11 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			}
 			return reject("job_files_invalid", err)
 		}
-		if err := submitted.Validate(); err != nil {
+		validationErr := plainValidationErr
+		if s.extensionJob() {
+			validationErr = submitted.Validate()
+		}
+		if err := validationErr; err != nil {
 			return specRejection(err)
 		}
 		if s.OutputDelivery == asyncNAS {
@@ -943,13 +980,22 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if err != nil {
 			return err
 		}
-		if err := normalizeResources(&s); err != nil {
-			return err
-		}
-		if !s.extensionJob() {
-			if err := lowerExecution(&s); err != nil {
-				return specRejection(err)
+		if s.extensionJob() {
+			if err := normalizeResources(&s); err != nil {
+				return err
 			}
+		} else {
+			if normalizationErr != nil {
+				return normalizationErr
+			}
+			if executionErr != nil {
+				return specRejection(executionErr)
+			}
+			// The live policy only supplies memory/class defaults to plain
+			// commands. Keep those rechecked values on the prepared payload.
+			prepared.Needs.Memory = s.Needs.Memory
+			prepared.Class, prepared.Priority = s.Class, s.Priority
+			s = prepared
 		}
 		if recipeErr != nil {
 			var rule *rejectionError
@@ -1058,6 +1104,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	q.touchJob(j.ID)
 	if wallTimeStopped(j) && !cancelled(j) {
 		q.finishWallTime(j)
 		return
@@ -1072,6 +1119,7 @@ func (q *Queue) retry(j *Job, why string) {
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
+	q.touchJob(j.ID)
 	j.PendingOutputRefs = nil
 	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
@@ -1133,6 +1181,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.State = "queued"
 }
 func (q *Queue) stop(j *Job, why string) {
+	q.touchJob(j.ID)
 	if j.State != "running" {
 		return
 	}
@@ -1199,6 +1248,7 @@ func (q *Queue) maintain() {
 	}
 	for _, m := range q.s.Machines {
 		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && !hostAvailabilityFresh(m, now) {
+			q.touchMachine(m.ID)
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -1218,6 +1268,7 @@ func (q *Queue) maintain() {
 		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
+			q.touchMachine(m.ID)
 			m.Gone = true
 			q.discontinueContactCadence(m.ID)
 			q.clearPreemptionPlacements(m.ID, m.Session)
@@ -1225,6 +1276,7 @@ func (q *Queue) maintain() {
 			m.Models = nil
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
+					q.touchJob(j.ID)
 					if cancelled(j) {
 						q.finishCancellation(j)
 					} else {
@@ -1278,6 +1330,7 @@ func (q *Queue) maintain() {
 			}
 		}
 		if (j.State == "queued" || j.State == "paused") && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
+			q.touchJob(j.ID)
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 		}
@@ -1304,7 +1357,11 @@ func (q *Queue) maintain() {
 	q.admissionWaitPending = true
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) || q.startCapacityPaused(j) {
-			j.Reason = q.startStatusReason(j, scan)
+			reason := q.startStatusReason(j, scan)
+			if reason != j.Reason {
+				q.touchJobReason(j)
+				j.Reason = reason
+			}
 		}
 	}
 }
@@ -1552,6 +1609,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if old != nil && old.Session != m.Session && c.Fresh {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
+					q.touchJob(j.ID)
 					if cancelled(j) {
 						q.finishCancellation(j)
 						continue
@@ -1570,6 +1628,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		delete(q.unreported, m.ID)
 		m.Gone = false
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		m.DiskReceivedAt = m.LastSeen // Ignore worker-supplied queue timestamps.
 		// Recovery is queue-observed admission state, not worker-supplied status.
@@ -1615,6 +1674,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			(q.networkQuiet || q.fleetQuiet(m.LastSeen, false)) {
 			q.startNetworkRecovery(m.LastSeen)
 		}
+		q.touchMachine(m.ID)
 		q.s.Machines[m.ID] = &m
 		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
 			q.discontinueContactCadence(m.ID)
@@ -1812,6 +1872,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
+			q.touchMachine(m.ID)
 			m.Gone = true
 			m.Models = nil
 		}
@@ -2121,6 +2182,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.retainAttemptResources(j, r.Resources)
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
@@ -2204,6 +2266,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
 		if m := q.s.Machines[r.Machine]; m != nil {
+			q.touchMachine(m.ID)
 			for i := range m.ExtensionReports {
 				report := &m.ExtensionReports[i]
 				if report.Digest == j.Extension.Digest && report.Work == j.Spec.workType() {
@@ -2217,6 +2280,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// Qualification may change after admission. Withdraw CPU readiness and
 		// wait for fresh evidence rather than exhausting infrastructure retries.
 		if m := q.s.Machines[r.Machine]; m != nil {
+			q.touchMachine(m.ID)
 			m.CPUIsolation = cpuIsolationUnavailable
 		}
 		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
@@ -2274,6 +2338,7 @@ func (q *Queue) Leave(id string, now bool, requestContexts ...context.Context) e
 		if m == nil || m.Gone {
 			return errors.New("machine is not in the fleet")
 		}
+		q.touchMachine(m.ID)
 		m.Leaving = true
 		for _, j := range q.liveJobs() {
 			if j.Machine == id && (j.Spec.Resumable || now) {
@@ -2299,12 +2364,20 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
+	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
+	if compact {
+		out.FleetUpgrade = q.observationSelection.upgrade
+	}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
-		copy.Placement = q.modelPlacement(model)
+		if !compact {
+			copy.Placement = q.modelPlacement(model)
+		} else {
+			copy.Placement = nil
+		}
 		if s.State == "ready" && s.InFlight == 0 {
 			copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
 		}
@@ -2390,8 +2463,8 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		}
 		return a.Kind < b.Kind
 	})
-	// Existing release guards and consumer audits read curves from default
-	// status. Bound job history without changing that independent contract.
+	// Retained diagnostics are absent from compact captures; explicit section/full
+	// reads preserve every existing evidence field.
 	for _, key := range slices.Sorted(maps.Keys(q.s.StorageObservations)) {
 		out.StorageObservations = append(out.StorageObservations, q.s.StorageObservations[key])
 	}
@@ -2411,20 +2484,44 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.Reservations = q.reservations()
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
-	order, reasons := q.queueProjection()
+	order, reasons := map[string]int{}, map[string]string{}
+	if !compact {
+		order, reasons = q.queueProjection()
+	}
 	projectionSample := startStatusProjection(budgets)
 	finishJobWork := projectionSample.measure()
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
 		}
-		out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+		if compact {
+			copy := *stored
+			copy.Spec.Class = jobClass(copy.Spec)
+			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
+			if copy.State == "queued" && copy.Reason == "" {
+				copy.Reason = "waiting for capacity; inspect this job for placement diagnostics"
+			}
+			q.projectRuntime(&copy)
+			copy = statusJobValue(&copy)
+			copy.Timing = nil
+			out.Jobs = append(out.Jobs, &copy)
+		} else {
+			out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+		}
 	}
 	for _, c := range q.calls {
 		if q.observationSelection != nil && !q.observationSelection.ids[c.ID] {
 			continue
 		}
-		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+		if compact {
+			copy := statusJobValue(compactStatusCall(c))
+			copy.Spec.Class = jobClass(copy.Spec)
+			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
+			q.projectRuntime(&copy)
+			out.Jobs = append(out.Jobs, &copy)
+		} else {
+			out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+		}
 	}
 	finishJobWork()
 	for _, m := range q.s.Machines {
@@ -2457,16 +2554,20 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			}
 		}
 		copy.ModelCopySeconds = map[string]float64{}
-		for _, model := range q.models.Models {
-			if q.modelFitsMachine(model, m) {
-				copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+		if !compact {
+			for _, model := range q.models.Models {
+				if q.modelFitsMachine(model, m) {
+					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+				}
 			}
 		}
 		out.Machines = append(out.Machines, &copy)
 	}
 	finishJobWork = projectionSample.measure()
 	for _, j := range out.Jobs {
-		q.projectJobDiagnostics(j, forStatus, false)
+		if !compact {
+			q.projectJobDiagnostics(j, forStatus, false)
+		}
 	}
 	finishJobWork()
 	projectionSample.finish(out.Jobs)
@@ -2677,6 +2778,7 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 		return err
 	}
 	if m := q.s.Machines[l.Machine]; m != nil && m.Session == l.Session {
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
@@ -2773,6 +2875,7 @@ func cloneMachine(m *Machine) Machine {
 
 // Startup acknowledgements use queue time, avoiding cross-machine clock skew.
 func (q *Queue) markStarted(j *Job) {
+	q.touchJob(j.ID)
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
@@ -2852,6 +2955,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
+	q.touchJob(j.ID)
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
@@ -2956,6 +3060,7 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int)
 
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
+	q.touchJob(j.ID)
 	values := q.placementValues(q.placementScan(scans...))
 	if j.Spec.FanOut != nil {
 		q.touchJob(j.ID).PreemptionPlacement = nil
@@ -3009,6 +3114,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.FinishedAt = nil
 	j.StartLatencySeconds = 0
+	if q.s.Machines[m.ID] == m {
+		q.touchMachine(m.ID)
+	}
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 	j.Starts = max(j.Starts, j.Attempt) + 1
 	j.Attempt = j.Starts

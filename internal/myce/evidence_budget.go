@@ -278,6 +278,7 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 					deferWork = true
 				} else {
 					apply = func() {
+						q.touchCatalog("work_observations/" + id)
 						delete(q.s.WorkObservations, id)
 						q.evidenceGeneration++
 						q.memoryObservationIndex = nil
@@ -328,7 +329,7 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			if compactExternalEvidence(&ring, now, budget) {
 				host := strings.TrimPrefix(key, "external_memory/")
 				replacement, _ = json.Marshal(ring)
-				apply = func() { q.s.ExternalMemory[host] = &ring }
+				apply = func() { q.touchCatalog("external_memory/" + host); q.s.ExternalMemory[host] = &ring }
 			}
 			var next time.Time
 			for _, bucket := range ring.Buckets {

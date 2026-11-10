@@ -156,7 +156,17 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		mux.HandleFunc("POST "+path, a.modelCall)
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.cachedPublicSnapshot(r.Context())
+		var s Snapshot
+		var err error
+		if len(r.URL.Query()) == 0 {
+			s, err = a.Queue.cachedPublicSnapshot(r.Context())
+		} else {
+			var options statusOptions
+			options, err = parseStatusOptions(r.URL.Query())
+			if err == nil {
+				s, err = a.Queue.publicStatusSnapshot(&options, r.Context())
+			}
+		}
 		if err != nil {
 			http.Error(w, "status unavailable", 500)
 			return
@@ -182,6 +192,11 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				encoded, err = json.Marshal(snapshot)
 				data = string(encoded)
 			}
+		}
+		// Current work cannot be paged away to fit a smaller peer. Apply its
+		// negotiated allowance to the actual compact document, including cache hits.
+		if peer, ok := r.Context().Value(peerResponseBudgetKey{}).(int64); ok && err == nil && int64(len(data)) > peer {
+			err = &HTTPError{Status: 503, Code: "projection_capacity_exceeded", Message: fmt.Sprintf("status response requires %d bytes; fitting bytes=%d", len(data), peer)}
 		}
 		w.Header().Add("Vary", "Accept-Encoding")
 		if err == nil {

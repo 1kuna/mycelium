@@ -31,7 +31,7 @@ func TestValueCheckinCost(t *testing.T) {
 					for i := 1; i < count; i++ {
 						copy := cloneJob(template)
 						copy.ID = fmt.Sprintf("cost-%06d", i)
-						q.s.Jobs[copy.ID] = &copy
+						q.putJob(copy.ID, &copy)
 					}
 					return nil
 				}); err != nil {

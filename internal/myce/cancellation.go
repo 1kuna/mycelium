@@ -148,6 +148,9 @@ func (q *Queue) cancelJob(j *Job) {
 }
 
 func (q *Queue) finishCancellation(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	outcome := attemptOutcome(j, Result{Interrupted: true})
 	j.State, j.StopAt = "cancelled", nil
 	j.Reason = "cancel requested"

@@ -423,7 +423,7 @@ func TestLaunchCapacityInitialRouteUnavailable(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else if err := q.update(func() error {
-				q.s.Machines[m.ID].Gone = true
+				q.touchMachine(m.ID).Gone = true
 				return nil
 			}); err != nil {
 				t.Fatal(err)

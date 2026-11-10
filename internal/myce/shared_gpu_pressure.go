@@ -25,6 +25,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				if j.State != "running" {
 					continue
 				}
+				q.touchJob(j.ID)
 				s := q.hostMemorySamples[m.ID][jobKey(*j)]
 				if unifiedDeviceSampleStarting(j, s, q.clock.Now()) {
 					j.Reason = deviceUnifiedStarting
@@ -48,6 +49,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		uncertain, forecast := false, 0.0
 		var victim *Job
 		for _, j := range tenants {
+			q.touchJob(j.ID)
 			s, now := q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()
 			fresh := !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
 			measured = measured && fresh
@@ -98,9 +100,11 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		for _, j := range tenants {
 			if !uncertain && (over[j.ID] > 0 || j.ID == victim.ID) {
 				sample := q.hostMemorySamples[m.ID][jobKey(*j)]
+				q.touchJob(j.ID)
 				j.DeviceMemoryFloorGB = max(j.DeviceMemoryFloorGB, sample.deviceGB+sample.deviceGrowthGB)
 			}
 		}
+		q.touchJob(victim.ID)
 		for i := range victim.Copies {
 			c := &victim.Copies[i]
 			if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {

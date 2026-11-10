@@ -77,7 +77,6 @@ type statusCache struct {
 	expires          time.Time
 	capturedAt       time.Time
 	generation       uint64
-	historyRows      int
 	terminalRevision atomic.Uint64
 }
 
@@ -124,21 +123,13 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	defer finishBudget()
 	contexts = []context.Context{ctx}
 	c := &q.statusCache
-	// Peer capacity is a page-planning allowance, not a reason to rebuild an
-	// otherwise fitting published response on every negotiated request.
-	limit := int(^uint(0) >> 1)
-	if _, negotiated := ctx.Value(peerResponseBudgetKey{}).(int64); negotiated {
-		var err error
-		limit, err = q.requestBudgets.pageLimit(ctx, reflect.TypeFor[Job]())
-		if err != nil {
-			return "", err
-		}
-	}
+	// The shared default contains all current work and no retained history
+	// page. Response allocation/transport budgets still apply to its actual size.
 	cached := func() (string, bool, error) {
 		c.mu.Lock()
 		revision := c.terminalRevision.Load()
 		data, captured := c.data, c.capturedAt
-		hit := data != "" && c.generation == revision && q.clock.Now().Before(c.expires) && c.historyRows <= limit
+		hit := data != "" && c.generation == revision && q.clock.Now().Before(c.expires)
 		c.mu.Unlock()
 		if !hit {
 			return "", false, nil
@@ -177,7 +168,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	mark := allocation.markProjection()
 	for {
 		revision := c.terminalRevision.Load()
-		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent"}, contexts...)
+		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "active"}, contexts...)
 		if err != nil {
 			return "", err
 		}
@@ -193,15 +184,9 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			}
 			continue
 		}
-		historyRows := 0
-		for _, j := range s.Jobs {
-			if !mutableJob(j) {
-				historyRows++
-			}
-		}
 		c.mu.Lock()
 		c.data, c.expires, c.generation = string(data), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
-		c.capturedAt, c.historyRows = s.Now, historyRows
+		c.capturedAt = s.Now
 		c.mu.Unlock()
 		return q.statusJSONFreshness(string(data), s.Now, false)
 	}
@@ -727,6 +712,16 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	}
 	defer finishBudget()
 	contexts = []context.Context{ctx}
+	if options.compact() {
+		v, summary, delivery, err := q.compactStatusObservation(options, ctx)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		out := v.projectSnapshot(true)
+		out.Summary, out.HealthAlertDelivery = summary, delivery
+		out.Freshness = q.snapshotFreshness(out.Now, false)
+		return out, ctx.Err()
+	}
 	if options != nil {
 		owned := *options
 		limit, err := q.requestBudgets.pageLimit(requestContext(contexts), reflect.TypeFor[Job](), owned.limit)
@@ -755,9 +750,14 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 	v.observationScan.memory = v.memoryPlanning
 	out := v.projectSnapshot(true, &q.requestBudgets)
 	out.RequestLatencies = q.requestLatencies.snapshot()
-	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
+	if options.includes("usage") {
+		out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
+	}
+	trimStatusSections(&out, options)
 	if err == nil {
-		out.FileStore = files.status(ctx)
+		if options.includes("storage") {
+			out.FileStore = files.status(ctx)
+		}
 		err = ctx.Err()
 	}
 	out.Freshness = q.snapshotFreshness(out.Now, false)

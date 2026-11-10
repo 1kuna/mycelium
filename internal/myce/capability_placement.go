@@ -123,6 +123,10 @@ func (q *Queue) applyLearnedNeeds(j *Job) {
 	if j.Spec.Program == nil {
 		return
 	}
+	original := j
+	needsBefore := j.Spec.Needs
+	candidate := *j
+	j = &candidate
 	for _, e := range j.Extensions {
 		for _, p := range e.platforms() {
 			if len(j.Spec.Needs.Platform.Required) > 0 && !contains(j.Spec.Needs.Platform.Required, p) {
@@ -137,6 +141,12 @@ func (q *Queue) applyLearnedNeeds(j *Job) {
 				j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.HostMemoryGB)
 			}
 		}
+	}
+	if j.Spec.Needs.MemoryGB != needsBefore.MemoryGB || j.Spec.Needs.HostMemoryGB != needsBefore.HostMemoryGB {
+		if q.s.Jobs[j.ID] == original {
+			q.touchJob(j.ID)
+		}
+		original.Spec.Needs = j.Spec.Needs
 	}
 }
 
@@ -153,6 +163,9 @@ func (q *Queue) unmeasuredProgram(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) retryOOM(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.MemoryEnvelope != nil && boundedMemorySource(j.MemoryEnvelope.Source) {
 		j.State, j.Reason = "failed", j.MemoryEnvelope.Source+" exhausted after out of memory; "+memoryCapacityRemedies
 		return
@@ -226,6 +239,9 @@ func capabilityWaitingReason(j *Job) string {
 // Strictly larger floors prevent another execution of the same failed bound;
 // physical qualification, rather than an attempt count, bounds a leaking job.
 func (q *Queue) retryHostOOM(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	need := j.Spec.Needs.HostMemoryGB
 	if f := j.MemoryOOMFloor; f != nil {
 		need = max(need, f.HostMemoryGB)

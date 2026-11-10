@@ -12,10 +12,12 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -340,13 +342,24 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
-	statusHistory := f.Bool("history", false, "include all retained jobs and work curves in status")
+	statusHistory := f.Bool("history", false, "include all retained status detail (jobs, diagnostics and evidence)")
+	statusSections := f.String("sections", "", "status detail sections: jobs,machines,storage,work,health,efficiency,usage,diagnostics")
+	statusJobs := f.String("jobs", "", "status jobs: active,recent,all")
+	statusLimit := new(int)
+	if args[0] == "status" {
+		f.IntVar(statusLimit, "limit", 0, "status history page size (bounded by negotiated capacity)")
+	}
+	statusBefore := f.String("before", "", "status history cursor")
 	ledgerAfter := new(int)
 	if args[0] != "logs" {
 		f.IntVar(ledgerAfter, "after", 0, "ledger sequence cursor")
 	}
 	ledgerHigh := f.Int("high-water", -1, "ledger snapshot high water (-1 starts a snapshot)")
-	ledgerLimit := f.Int("limit", 100, "ledger page size (1..256)")
+	ledgerLimit := new(int)
+	*ledgerLimit = 100
+	if args[0] != "status" {
+		f.IntVar(ledgerLimit, "limit", 100, "ledger page size (1..256)")
+	}
 	logAfter := new(int64)
 	if args[0] == "logs" {
 		f.Int64Var(logAfter, "after", 0, "resume logs after this sequence cursor")
@@ -863,11 +876,29 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return nil
 		}
 		var err error
+		query := neturl.Values{}
 		if *statusHistory {
-			err = client.Call(ctx, "GET", "/api/status?detail=full", nil, &s)
-		} else {
-			s, err = status(ctx, client)
+			query.Set("detail", "full")
 		}
+		if *statusSections != "" {
+			query.Set("sections", *statusSections)
+		}
+		if *statusJobs != "" {
+			query.Set("jobs", *statusJobs)
+		}
+		f.Visit(func(option *flag.Flag) {
+			if option.Name == "limit" {
+				query.Set("limit", strconv.Itoa(*statusLimit))
+			}
+		})
+		if *statusBefore != "" {
+			query.Set("before", *statusBefore)
+		}
+		path := "/api/status"
+		if len(query) > 0 {
+			path += "?" + query.Encode()
+		}
+		err = client.Call(ctx, "GET", path, nil, &s)
 		if err != nil {
 			return err
 		}
@@ -958,6 +989,12 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if summary := s.Summary; summary != nil {
+		fmt.Printf("jobs: %d current / %d retained; status JOB_ID for details, --jobs all for pages, --history for full inspection\n", len(s.Jobs), summary.RetainedJobs)
+		for _, alert := range summary.Alerts {
+			fmt.Printf("alert: %s since %s\n", alert.Condition, alert.Since.UTC().Format(time.RFC3339))
+		}
+	}
 	if page := s.JobsPage; page != nil && page.NextBefore != "" {
 		fmt.Printf("jobs: %d of %d retained jobs shown; use status JOB_ID for a known job or status --history for all history\n", page.Returned, page.Total)
 	}

@@ -149,6 +149,9 @@ func submissionPlacementIntent(s Spec, j *Job) *PlacementIntent {
 }
 
 func (q *Queue) recordPlacementDecision(j *Job, m *Machine) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	intent := j.PlacementIntent
 	hostChoice, deviceChoice := "unknown", "unknown"
 	limited := []string{}

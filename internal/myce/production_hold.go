@@ -609,6 +609,7 @@ func (q *Queue) maintainHolds() {
 		// Live owner policy also fences bindings saved by older releases.
 		// Only queued demand moves; existing execution/release custody stays.
 		if j.State == "queued" && j.ProductionHost != "" && (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil && !q.productionParityHostAllowed(j, j.ProductionHost) {
+			q.touchJob(j.ID)
 			j.ProductionHost = ""
 		}
 		if !enabled {
@@ -627,11 +628,17 @@ func (q *Queue) maintainHolds() {
 	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
 		if target := q.productionSpilloverTarget(j); target != "" {
+			if j.ProductionHost != target || !j.RequireProductionParity {
+				q.touchJob(j.ID)
+			}
 			j.ProductionHost = target
 			j.RequireProductionParity = true
 		}
 		if j.State == "queued" && j.ProductionHost != "" && (q.dockerBlocker(j.ProductionHost) != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
 			if target := q.productionTarget(j, nil); target != "" {
+				if j.ProductionHost != target || j.RequireProductionParity != (j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil) {
+					q.touchJob(j.ID)
+				}
 				j.ProductionHost = target
 				j.RequireProductionParity = j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil
 			}
@@ -639,11 +646,13 @@ func (q *Queue) maintainHolds() {
 		if j.ProductionHost == "" {
 			if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
 				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.hostWide() {
+					q.touchJob(j.ID)
 					j.ProductionHost = hostID(m)
 				}
 			} else {
 				target := q.productionTarget(j, nil)
 				if h := q.s.Hosts[target]; h != nil && h.Policy.hostWide() {
+					q.touchJob(j.ID)
 					j.ProductionHost = target
 				}
 			}

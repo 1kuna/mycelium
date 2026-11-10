@@ -59,7 +59,7 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	// row cost and can legitimately replace the fixture's synthetic timing.
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/status?limit=%d", server.URL, defaultStatusJobs), nil)
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/status?jobs=recent&limit=%d", server.URL, defaultStatusJobs), nil)
 	req.Header.Set("Authorization", "Bearer test")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {

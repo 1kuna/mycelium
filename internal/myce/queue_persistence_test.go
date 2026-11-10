@@ -73,6 +73,7 @@ func TestQueuePersistenceStorageRollbackAndRemoval(t *testing.T) {
 	key := identityHash(before.Key)
 	rejected := errors.New("abort storage update")
 	if err := q.update(func() error {
+		q.touchCatalog("storage_observations/" + key)
 		point := q.s.StorageObservations[key]
 		point.Managed.Peak = 999
 		q.s.StorageObservations[key] = point
@@ -83,7 +84,11 @@ func TestQueuePersistenceStorageRollbackAndRemoval(t *testing.T) {
 	if !reflect.DeepEqual(before, onlyStorage(t, q)) {
 		t.Fatal("rollback lost accepted storage")
 	}
-	if err := q.update(func() error { delete(q.s.StorageObservations, key); return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("storage_observations/" + key)
+		delete(q.s.StorageObservations, key)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	q = storageRestart(t, q, clock)
@@ -199,56 +204,6 @@ func TestQueuePersistenceRetiredFormatsRefused(t *testing.T) {
 	}
 }
 
-func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
-	q, clock := fixture(t)
-	s := spec("experiment")
-	s.Run.Env = map[string]string{"LARGE": strings.Repeat("x", 16000)}
-	j := submit(t, q, s)
-	for range 2 {
-		if err := q.update(func() error {
-			live := q.touchJob(j.ID)
-			live.Spec.Run.Env["changed"] = "yes"
-			live.Reason = "mutated"
-			live.AdmissionWait = retainAdmissionWait(live.AdmissionWait,
-				&AdmissionWaitSnapshot{At: clock.Now(), Attempt: live.Attempt, Predicate: "admission"}, 0, true)
-			for key, value := range map[string]any{"state": q.s, "jobs/" + j.ID: live} {
-				durable := value
-				if job, ok := value.(*Job); ok && (q.startupPending(job) || q.startCapacityPaused(job)) {
-					copy := *job
-					copy.Reason = "recomputing admission diagnostics"
-					durable = &copy
-				}
-				want, err := json.Marshal(durable)
-				if err != nil {
-					return err
-				}
-				got, _, err := q.marshalPersistenceValue(key, value)
-				if err != nil {
-					return err
-				}
-				if !bytes.Equal(want, got) {
-					t.Fatal("cached serializer diverged from JSON")
-				}
-				if key == "jobs/"+j.ID {
-					// Unchanged large jobs must reuse their immutable encoding;
-					// ordinary field-cache cleanup used to discard wait evidence.
-					again, _, err := q.marshalPersistenceValue(key, value)
-					if err != nil {
-						return err
-					}
-					if len(got) == 0 || len(again) == 0 || &got[0] != &again[0] {
-						t.Fatal("unchanged large job re-encoded its admission evidence")
-					}
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		clock.Advance(time.Second)
-	}
-}
-
 // The durable waiting anchor does not move with telemetry. Reads still expose
 // elapsed time and live reasons, while transitions close the old interval.
 func TestQueuePersistenceDiagnosticAnchorRestart(t *testing.T) {
@@ -296,4 +251,105 @@ func TestQueuePersistenceDiagnosticAnchorRestart(t *testing.T) {
 	if cancelled.CancelledAt == nil || cancelled.State != "cancelled" || cancelled.Efficiency.WaitSeconds["holds"] != 2 {
 		t.Fatal("restart lost cancellation or pause interval")
 	}
+}
+
+// The previous field layout is upgraded in one FULL transaction. A failed
+// marker write must leave its machine, job and catalog decisions recoverable.
+func TestQueuePersistenceMachineRecordsMigration(t *testing.T) {
+	q, clock := fixture(t)
+	check(t, q, machine("worker", "fake"), nil)
+	j := submit(t, q, spec("experiment"))
+	drainAdmissionWait(t, q)
+	legacy := map[string][]byte{}
+	for key, data := range q.persisted {
+		if !strings.HasPrefix(key, "machines/") {
+			legacy[key] = data
+		}
+	}
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(legacy["state"], &base); err != nil {
+		t.Fatal(err)
+	}
+	base["machines"], _ = json.Marshal(q.s.Machines)
+	legacy["state"], _ = json.Marshal(base)
+	tx, err := q.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
+		t.Fatal(err)
+	}
+	for key, data := range legacy {
+		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", fieldQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	q.persisted, q.machineRecords = legacy, false
+	if _, err = q.db.Exec("CREATE TRIGGER reject_machine_migration BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'migration interrupted'); END"); err != nil {
+		t.Fatal(err)
+	}
+	change := func() error {
+		q.touchMachine("worker").Leaving = true
+		q.touchJob(j.ID).Reason = "accepted decision"
+		q.putWorkObservation("decision", WorkObservation{StaleReason: "component identity changed"})
+		return nil
+	}
+	if err = q.update(change); err == nil {
+		t.Fatal("interrupted migration committed")
+	}
+	if q.machineRecords || q.s.Machines["worker"].Leaving || q.s.Jobs[j.ID].Reason == "accepted decision" {
+		t.Fatal("failed transaction leaked a decision")
+	}
+	if _, ok := q.s.WorkObservations["decision"]; ok {
+		t.Fatal("catalog rollback leaked")
+	}
+	var marker []byte
+	if err = q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil || !bytes.Equal(marker, fieldQueueMarker) {
+		t.Fatal("marker changed", err)
+	}
+	data, err := readQueueState(q.db, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered state
+	if err = json.Unmarshal(data, &recovered); err != nil || recovered.Machines["worker"].Leaving {
+		t.Fatal("old layout not recoverable", err)
+	}
+	if _, err = q.db.Exec("DROP TRIGGER reject_machine_migration"); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.update(change); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	if !q.machineRecords || !q.s.Machines["worker"].Leaving || q.s.Jobs[j.ID].Reason != "accepted decision" || q.s.WorkObservations["decision"].StaleReason != "component identity changed" {
+		t.Fatal("restart lost committed machine, job or catalog decision")
+	}
+}
+
+// Empty v3 inventories must reopen as writable maps, including after removing
+// the final machine. A first worker after restart must not panic or lose state.
+func TestQueuePersistenceEmptyMachineRestart(t *testing.T) {
+	q, clock := fixture(t)
+	for range 2 {
+		q = reopenQueue(t, q, clock)
+		m := machine("worker", "fake")
+		check(t, q, m, nil)
+		if err := q.update(func() error {
+			q.touchMachine(m.ID)
+			delete(q.s.Machines, m.ID)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q = reopenQueue(t, q, clock)
+	check(t, q, machine("new-worker", "fake"), nil)
 }

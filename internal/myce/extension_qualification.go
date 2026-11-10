@@ -215,8 +215,10 @@ func (q *Queue) maintainExtensionQualifications() {
 		if !wanted && !retained {
 			q.cancelJob(j)
 		} else if !wanted && j.State == "queued" {
+			q.touchJob(j.ID)
 			j.State, j.Reason = "waiting", "waiting for runnable extension demand"
 		} else if wanted && j.State == "waiting" {
+			q.touchJob(j.ID)
 			j.State, j.Reason = "queued", ""
 		}
 	}

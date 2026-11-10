@@ -51,11 +51,11 @@ func TestAPIAuthenticationAndFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snap Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil || snap.Jobs[0].State != "cancelled" {
+	if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &snap); err != nil || snap.Jobs[0].State != "cancelled" {
 		t.Fatalf("snapshot %v %v", snap, err)
 	}
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest("GET", "/?jobs=recent&sections=jobs", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	API{Queue: q, Token: "secret"}.Handler().ServeHTTP(rr, req)
 	if strings.Contains(rr.Body.String(), "<script>") || !strings.Contains(rr.Body.String(), "&lt;script&gt;") {
@@ -112,7 +112,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	s.Files = FileManifest{"private-input.txt": ref}
 	j := submit(t, q, s)
 	if err := q.update(func() error {
-		stored := q.s.Jobs[j.ID]
+		stored := q.touchJob(j.ID)
 		stored.Spec.Args = []string{"private-args"}
 		stored.Spec.Environment = Environment{LockFile: "/private/recipe.lock"}
 		stored.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": {LockFile: "/private/recipe.lock"}}

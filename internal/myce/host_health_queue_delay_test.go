@@ -158,7 +158,7 @@ func TestHostHealthQueueDelayFailureAndRollback(t *testing.T) {
 	q.mu.Unlock()
 	rejected := errors.New("reject transaction")
 	if err := q.update(func() error {
-		q.s.Machines[m.ID].HostHealth = &HostHealth{}
+		q.touchMachine(m.ID).HostHealth = &HostHealth{}
 		return rejected
 	}); !errors.Is(err, rejected) {
 		t.Fatal(err)

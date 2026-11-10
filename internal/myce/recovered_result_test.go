@@ -79,7 +79,7 @@ func TestRecoveredResultFailedAttempt(t *testing.T) {
 		t.Fatalf("GET: %+v %v", got, err)
 	}
 	var status Snapshot
-	if err = c.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+	if err = c.Call(context.Background(), "GET", "/api/status?detail=full", nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	visible, err := FindJob(status.Jobs, p.ID)

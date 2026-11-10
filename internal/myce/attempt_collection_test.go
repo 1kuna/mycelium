@@ -104,7 +104,7 @@ func TestAttemptProtocolCollectionRecoveryAdmission(t *testing.T) {
 	// Recovery must obey the same one-attempt admission rule as a fresh pick.
 	if err := q.update(func() error {
 		for _, id := range []string{first.ID, second.ID} {
-			j := q.s.Jobs[id]
+			j := q.touchJob(id)
 			j.Attempt, j.Starts = 1, 1
 			j.Copies = []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session, Recoverable: true}}
 		}
@@ -161,11 +161,11 @@ func TestAttemptProtocolRecoveryAdmissionSession(t *testing.T) {
 				returning := submit(t, q, spec("experiment"))
 				other := submit(t, q, spec("experiment"))
 				if err := q.update(func() error {
-					j := q.s.Jobs[returning.ID]
+					j := q.touchJob(returning.ID)
 					j.Attempt, j.Starts = 1, 1
 					j.Copies = []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session, Recoverable: true, AllocatedDevices: []string{"0"}}}
 					q.retainRelease(&Job{ID: j.ID, Spec: j.Spec, Machine: m.ID, Session: m.Session, Attempt: 1, AllocatedDevices: []string{"0"}})
-					blocker := q.s.Jobs[other.ID]
+					blocker := q.touchJob(other.ID)
 					blocker.State, blocker.Attempt, blocker.Starts = state, 1, 1
 					blocker.Machine, blocker.Session = m.ID, m.Session
 					blocker.AllocatedDevices = []string{"0"}

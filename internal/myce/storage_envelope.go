@@ -272,6 +272,9 @@ func storageLearningReason(sample *eligibleMemorySample, reason string, j *Job, 
 
 // Diagnostics/lower bounds do not grant a learning token or change clean ranges.
 func (q *Queue) recordAttemptStorage(j *Job, r Result) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if r.ReleaseOnly || j.StartedAt == nil && r.StoragePeak == nil {
 		return
 	}
@@ -297,6 +300,7 @@ func (q *Queue) recordAttemptStorage(j *Job, r Result) {
 	if q.s.StorageObservations == nil {
 		q.s.StorageObservations = map[string]StorageObservation{}
 	}
+	q.touchCatalog("storage_observations/" + identityHash(key))
 	q.s.StorageObservations[identityHash(key)] = point
 }
 

@@ -2,21 +2,29 @@ package myce
 
 import (
 	"container/heap"
-	"encoding/json"
-	"strings"
+	"reflect"
 	"time"
 )
+
+// Set only by test builds; the product path has no full-diff checker.
+var auditQueueRecords func(*Queue) func() error
 
 // Retained answers remain addressable in s.Jobs/s.Submissions. Only live work
 // participates in ordinary transactions and scheduling. Cold mutations must
 // enter through touchJob/touchSubmission; insertions use putJob/putSubmission.
+// Touch before the first nested mutation so both rollback and the durable dirty
+// set own the original decision. Derived diagnostics use their view journals.
 // This is an in-memory index, rebuilt from the same SQLite records on startup.
 type queueRecords struct {
 	healthCount               int
 	healthChanged             map[int]bool
 	statusHistory             map[string]statusHistoryEntry
-	encodings                 map[string]catalogEncoding
-	catalog                   map[string]bool
+	catalogUndo               map[string]catalogPrevious
+	machines                  map[string]*Machine
+	reasons                   map[string]string
+	staleness                 map[string]string
+	catalogCounts             [4]int
+	machineCount              int
 	removed                   map[string]*Job
 	references                map[string]bool
 	referenceAdds             map[string]bool
@@ -178,15 +186,12 @@ func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 }
 func (q *Queue) rebuildRecords() {
 	q.invalidateRetainedMemory()
-	q.records = &queueRecords{catalog: map[string]bool{}, logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
+	q.records = &queueRecords{logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
 	for id, j := range q.s.Jobs {
 		q.indexJob(id, j)
 	}
-	for key := range q.persisted {
-		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") || strings.HasPrefix(key, "external_memory/") {
-			q.records.catalog[key] = true
-		}
-	}
+	q.records.catalogCounts = q.catalogCounts()
+	q.records.machineCount = len(q.s.Machines)
 	for id, r := range q.s.Submissions {
 		if j := q.s.Jobs[r.JobID]; j != nil {
 			r.Job = j
@@ -224,6 +229,9 @@ func (q *Queue) touchJob(id string) *Job {
 				input.AdmissionWait = nil
 				v := cloneJob(&input)
 				v.AdmissionWait = j.AdmissionWait
+				if reason, ok := q.records.reasons[id]; ok {
+					v.Reason = reason
+				}
 				old = &v
 			}
 			q.records.jobs[id] = old
@@ -305,30 +313,26 @@ func (q *Queue) putSubmission(id string, r *submissionRecord) {
 	}
 }
 
+func (q *Queue) catalogCounts() [4]int {
+	return [4]int{len(q.s.Extensions), len(q.s.WorkObservations), len(q.s.StorageObservations), len(q.s.ExternalMemory)}
+}
 func (q *Queue) beginRecords() (recordUndo, error) {
-	// Counts also let offline fixture/import code invalidate the derived index.
 	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+	catalogImport := q.records != nil && q.records.catalogCounts != q.catalogCounts()
+	machineImport := q.records != nil && q.records.machineCount != len(q.s.Machines)
 	if q.records == nil || imported {
 		q.rebuildRecords()
 	}
-	base := q.s
-	base.Jobs = nil
-	base.Submissions = nil
-	base.Extensions, base.WorkObservations, base.StorageObservations = nil, nil, nil
-	base.ExternalMemory = nil
-	base.Health.Events = nil
+	base := queueBase(q.s, false)
+	old := copyObservationValue(reflect.ValueOf(base)).Interface().(state)
 	q.records.healthChanged = map[int]bool{}
-	old, err := json.Marshal(base)
-	if err != nil {
-		return recordUndo{}, err
-	}
-	catalogs, err := q.snapshotCatalogs()
-	if err != nil {
-		return recordUndo{}, err
-	}
 	q.records.updating = true
 	q.records.jobs = map[string]*Job{}
 	q.records.submissions = map[string]*submissionRecord{}
+	q.records.catalogUndo = map[string]catalogPrevious{}
+	q.records.machines = map[string]*Machine{}
+	q.records.reasons = map[string]string{}
+	q.records.staleness = map[string]string{}
 	if imported {
 		for id := range q.s.Jobs {
 			q.touchJob(id)
@@ -337,41 +341,52 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 			q.touchSubmission(id)
 		}
 	}
-	for id := range q.records.live {
-		q.touchJob(id)
+	if catalogImport {
+		for id := range q.s.Extensions {
+			q.touchCatalog("extensions/" + id)
+		}
+		for id := range q.s.WorkObservations {
+			q.touchCatalog("work_observations/" + id)
+		}
+		for id := range q.s.StorageObservations {
+			q.touchCatalog("storage_observations/" + id)
+		}
+		for id := range q.s.ExternalMemory {
+			q.touchCatalog("external_memory/" + id)
+		}
+	}
+	if machineImport {
+		for id := range q.s.Machines {
+			q.touchMachine(id)
+		}
 	}
 	for id := range q.records.removed {
 		q.touchSubmission(q.records.bindings[id])
 	}
-	healthDeliveries := make(map[string]*hostHealthDelivery, len(q.s.Machines))
-	inventories := make(map[string]*toolInventory, len(q.s.Machines))
-	for id, m := range q.s.Machines {
-		inventories[id] = m.toolInventory
-		if m.HostHealth != nil {
-			healthDeliveries[id] = m.HostHealth.delivery
-		}
-	}
-	return recordUndo{healthDeliveries: healthDeliveries, base: old, catalogs: catalogs, inventories: inventories, health: q.s.Health.Events}, nil
+	catalogs := state{Extensions: q.s.Extensions, WorkObservations: q.s.WorkObservations, StorageObservations: q.s.StorageObservations, ExternalMemory: q.s.ExternalMemory}
+	return recordUndo{base: old, catalogs: catalogs, machines: q.s.Machines, health: q.s.Health.Events}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	q.evidenceGeneration++
 	q.memoryObservationIndex = nil
 	q.invalidateRetainedMemory()
 	jobs, submissions := q.s.Jobs, q.s.Submissions
-	var base state
-	_ = json.Unmarshal(old.base, &base)
+	base := old.base
 	base.Extensions, base.WorkObservations, base.StorageObservations = old.catalogs.Extensions, old.catalogs.WorkObservations, old.catalogs.StorageObservations
 	base.ExternalMemory = old.catalogs.ExternalMemory
 	base.Health.Events = old.health
-	q.records.encodings = nil
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
-	for id, m := range q.s.Machines {
-		m.toolInventory = old.inventories[id]
-		if m.HostHealth != nil {
-			m.HostHealth.delivery = old.healthDeliveries[id]
+	q.s.Machines = old.machines
+	for id, m := range q.records.machines {
+		if m == nil {
+			delete(q.s.Machines, id)
+		} else {
+			q.s.Machines[id] = m
 		}
 	}
+	q.restoreCatalogs()
+
 	for id, j := range q.records.jobs {
 		if j == nil {
 			delete(jobs, id)
@@ -391,18 +406,34 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 			submissions[id] = r
 		}
 	}
+	for id, reason := range q.records.reasons {
+		if _, durable := q.records.jobs[id]; durable {
+			continue
+		}
+		if j := jobs[id]; j != nil {
+			j.Reason = reason
+		}
+	}
+	for id, reason := range q.records.staleness {
+		if _, durable := q.records.catalogUndo["work_observations/"+id]; durable {
+			continue
+		}
+		if p, ok := q.s.WorkObservations[id]; ok {
+			p.StaleReason = reason
+			q.s.WorkObservations[id] = p
+		}
+	}
+
 	q.records.jobCount, q.records.submissionCount = len(q.s.Jobs), len(q.s.Submissions)
 	q.records.referenceAdds = nil
 	q.commitRecords()
+	q.refreshHostMemory()
 }
 func (q *Queue) commitRecords() {
 	q.records.healthCount = len(q.s.Health.Events)
 	q.records.healthChanged = nil
-	for key := range q.records.encodings {
-		if !q.records.catalog[key] {
-			delete(q.records.encodings, key)
-		}
-	}
+	q.records.catalogCounts = q.catalogCounts()
+	q.records.machineCount = len(q.s.Machines)
 	for id := range q.records.jobs {
 		q.indexJob(id, q.s.Jobs[id])
 	}
@@ -429,6 +460,8 @@ func (q *Queue) commitRecords() {
 		q.records.references[hash] = true
 	}
 	q.records.referenceAdds = nil
+	q.records.catalogUndo = nil
+	q.records.machines, q.records.reasons, q.records.staleness = nil, nil, nil
 	q.records.updating = false
 	q.records.jobs = nil
 	q.records.submissions = nil

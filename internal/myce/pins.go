@@ -217,6 +217,9 @@ func (q *Queue) maintainPins() {
 		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: "production", LastUsed: now}
 		q.initEnginePreemption(q.s.ModelSlots[key])
 		q.recordModelInterval(q.s.ModelSlots[key], "assigned")
+		if q.s.Machines[m.ID] == m {
+			q.touchMachine(m.ID)
+		}
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
 		p.Assigned, p.AssignedDevice = m.ID, targetDevice(m)
@@ -235,6 +238,7 @@ func (q *Queue) SetPreemptionGrace(d time.Duration) error {
 	return nil
 }
 func (q *Queue) stopFor(j *Job, priority, kind string) {
+	q.touchJob(j.ID)
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	if j.State == "running" {
 		q.s.Preemptions = append(q.s.Preemptions, Preemption{At: q.clock.Now(), Job: j.ID, Project: j.Spec.Project, For: priority})

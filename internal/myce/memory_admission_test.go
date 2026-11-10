@@ -203,7 +203,7 @@ func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
 	// Legacy/restored inventory may lack a usable observation. The current
 	// enforced-worker protocol correctly refuses that malformed check-in.
 	if err := q.update(func() error {
-		q.s.Machines[m.ID].HostMemoryError = "capacity unavailable"
+		q.touchMachine(m.ID).HostMemoryError = "capacity unavailable"
 		q.maintain()
 		return nil
 	}); err != nil {

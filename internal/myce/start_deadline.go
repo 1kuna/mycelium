@@ -139,7 +139,10 @@ func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
-			initializeStartDeadline(j, j.Queued)
+			if j.Spec.StartBy == nil || j.StartWindow == 0 {
+				q.touchJob(j.ID)
+				initializeStartDeadline(j, j.Queued)
+			}
 		}
 	}
 	// Resolve the backlog in one immutable planning pass. Deadline transitions
@@ -161,6 +164,9 @@ func (q *Queue) maintainStartDeadlines() {
 	for _, j := range q.liveJobs() {
 		faultWaiting := q.maintainDeviceFaultStartWait(j)
 		if status, ok := capacity[j]; ok && !faultWaiting {
+			if j.StartCapacityWaiting != status.waiting || j.StartCapacityWaiting && status.ready {
+				q.touchJob(j.ID)
+			}
 			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
 				// Capacity recovered before dispatch. Restore startup time without
 				// hiding a later unavailable/disabled-route diagnosis.
@@ -185,6 +191,7 @@ func (q *Queue) maintainStartDeadlines() {
 		if !expired(j.Spec.StartBy, now) && !disabled && !executionExpired {
 			continue
 		}
+		q.touchJob(j.ID)
 		reason := q.startWaitingReason(j)
 		outcome := attemptOutcome(j, Result{Interrupted: true})
 		if j.State == "queued" && expired(j.Spec.GiveUpAt, now) && j.Spec.GiveUpAt.Before(*j.Spec.StartBy) {

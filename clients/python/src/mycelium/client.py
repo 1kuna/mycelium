@@ -623,18 +623,22 @@ class Client:
 
     def status(self, *, full: bool = False, jobs: str | None = None,
                project: str | None = None, since: str | None = None,
-               limit: int | None = None, before: str | None = None) -> dict[str, Any]:
-        """Return active jobs plus a capacity-sized history page and fleet health.
+               limit: int | None = None, before: str | None = None,
+               sections: str | None = None) -> dict[str, Any]:
+        """Return compact current work, machines, holds and active health conditions.
 
-        Absence from a page does not prove a job is missing or incomplete. Use
-        get(job_id) or wait(job_id) for known jobs, or list() for all history.
-        Work curves remain included. full=True restores all jobs. jobs="all" pages history;
-        jobs="active" includes nonterminal work and pending cleanup. Optional
-        project/since (queued-at RFC3339) filters apply only to jobs.
+        No retained diagnostics or terminal history by default. Job reasons are
+        last committed facts; sections="jobs" opts into fresh diagnostic planning.
+        sections accepts a comma-separated selection of jobs,machines,storage,
+        work,health,efficiency,usage,diagnostics. full=True restores every existing
+        field and all retained jobs. jobs="recent" adds a capacity-sized terminal
+        page; jobs="all" pages history; jobs="active" keeps current/cleanup work.
+        Absence from status does not prove completion: use get() or wait_many().
+        project/since (queued-at RFC3339) filter jobs only.
         """
         query = {key: value for key, value in {
             "detail": "full" if full else None, "jobs": jobs, "project": project,
-            "since": since, "limit": limit, "before": before,
+            "since": since, "limit": limit, "before": before, "sections": sections,
         }.items() if value is not None}
         return self._call("GET", "/api/status" + ("?" + urlencode(query) if query else ""))
 

@@ -7,6 +7,7 @@ import (
 	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -139,5 +140,29 @@ func TestStatusJSONPressureView(t *testing.T) {
 				t.Errorf("status missing %q: %s", want, out)
 			}
 		}
+	}
+}
+
+func TestStatusSectionsAndHistoryFlags(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		io.WriteString(w, `{"jobs":[],"machines":[]}`)
+	}))
+	defer server.Close()
+	for _, flags := range [][]string{{"--sections", "work,storage", "--jobs", "all", "--limit", "3", "--before", "cursor"}, {"--history"}, {"--full"}} {
+		args := append([]string{"status", "--queue", server.URL, "--token", "synthetic", "--json"}, flags...)
+		out, _, err := captureUsageOutput(t, args)
+		var got myce.Snapshot
+		if err != nil || json.Unmarshal([]byte(out), &got) != nil {
+			t.Fatal("status flags lost stdout JSON", err, out)
+		}
+	}
+	first, _ := url.ParseQuery(queries[0])
+	if first.Get("sections") != "work,storage" || first.Get("jobs") != "all" || first.Get("limit") != "3" || first.Get("before") != "cursor" {
+		t.Fatal(queries)
+	}
+	if queries[1] != "detail=full" || queries[2] != "" {
+		t.Fatal("history/full-ID semantics", queries)
 	}
 }

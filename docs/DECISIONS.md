@@ -4,6 +4,17 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
 
 ## Current rulings
 
+- <a id="my-44"></a>**MY-44 — 2026-11-10 — Run whatever can run; no owner approval gates.**
+  Zach: “i don't like that things need to be approved by you. mycelium needs to be
+  able to run whatever can run on my systems. this is just excess friction”. Said
+  about the queue-policy model allowlist (`models.sources`), which refused every
+  model repository not listed by the queue owner. Consumers must not need the
+  queue owner's approval to run work their hosts can run. Physical and safety
+  protections stay: disk floors and size limits, memory and device admission,
+  secrets and token isolation. Applied the same day: queue policy revision 105
+  permits all repositories (`*/*`) and keeps a 100 GiB model-copy free floor; code
+  default follows. Received by the Mycelium orchestrator.
+
 - <a id="my-43"></a>**MY-43 — 2026-11-10 — Compute and token efficient.**
   Zach: “i want our program to be both compute and token efficient”, approving
   the orchestrator's proposal that agents report only on a state change, a fault
