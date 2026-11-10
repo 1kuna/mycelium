@@ -36,8 +36,10 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
   directly invoked local VM, with persistent caches, idle cache trimming,
   disk floors and measured capacity admission. Fleet gates are optional extra
   evidence. Supersedes the 2026-11-03 fleet-only gate location and exact-head
-  fleet-gate merge requirement for Mycelium development. Independent review,
-  real race coverage, custody and native platform proof remain required.
+  fleet-gate merge requirement for Mycelium development. Local is always
+  available as the iteration path; when the host can't run gates (for example
+  under memory pressure), use the fleet instead of waiting. Source: Zach's
+  2026-11-10 approval of ledger C9, relayed by setup-audit.
 
 - **MY-38 — 2026-11-09 — Faster tests first, faster iteration second.**
   Zach: “if you need to pause the queue to update and make iteration faster i'd
@@ -58,8 +60,7 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
   jobs finish or reach a checkpoint, never kill them, announce each pause to
   affected consumer orchestrators, then resume. Before pausing a production host,
   notify the orchestrator so it can announce the pause. Local never-admitted
-  gate waiters may be cancelled and restarted with current helpers; admitted
-  and unknown execution custody is never cleared. An admitted gate may only
+  gate waiters may be cancelled and restarted with current helpers. An admitted gate may only
   be cancelled through supported cancellation; its replacement must restart
   immediately. Release-critical work keeps priority; post each replacement
   receipt or session on its PR. Supersedes the earlier orchestrator default to
