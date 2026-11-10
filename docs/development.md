@@ -854,7 +854,7 @@ restart an existing VM after verifying it is idle. Never weaken isolation or
 disable the global AppArmor restriction to make a gate pass. Subsequent starts
 reuse the installed prerequisites without repeating package installation.
 
-The 100 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
+The 80 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
 `uv python install 3.11` inside the VM; install Docker separately for real-daemon
 focused tests. Follow upstream checksum verification for the Go archive.
 Both platforms receive the same immutable snapshot of tracked and unignored
@@ -868,6 +868,49 @@ to launch native and Linux concurrently from one snapshot after combined CPU/RAM
 admission. It waits for capacity rather than falling back to sequential legs.
 Separate `--platform native` and `--platform linux` invocations measure separate
 legs; a shell loop around them adds their walls.
+
+### Guest disk budget and reclamation
+
+The template's 80 GiB size follows the November 10, 2026 Linux full-leg disk
+samples at source `a313cfa6ed201f9b7ce8157dcffdabb38003cd67` (793.45 seconds).
+The 100 GiB virtual disk provided a 95.82 GiB root filesystem. Its lowest
+available space was 74.99 GiB: at most 20.84 GiB was unavailable, including
+filesystem reserves. Available space fell 2.52 GiB from entry to its low point.
+Reducing virtual capacity by 20 GiB projects 54.99 GiB available at that peak,
+9.99 GiB above the existing 45 GiB entry floor and 12.99 GiB above the 42 GiB
+stop floor. This leaves roughly four observed transient-growth intervals above
+entry admission. The sampled full failed tests; these are disk observations,
+not passing-suite qualification or a bound on future growth. Re-measure after
+toolchain, fixture or concurrency changes using the Linux row's
+`min_free_bytes` in `.reports/gate-local.jsonl`, alongside guest filesystem size.
+
+Virtual capacity and host allocation are different: changing the template does
+not shrink an existing VM, and an 80 GiB sparse disk need not occupy 80 GiB.
+First inspect `limactl list`, host gate custody and guest active markers. While
+idle, trim the guest's gate-owned Go objects with the frozen/current
+`scripts/gate-cache.py` under the guest cache admission lock; preserve module
+downloads, timing evidence and compatibility material still in use. Do not
+delete retained test output or unknown guest files as cache cleanup.
+Then return unused filesystem blocks through the supported guest operation:
+
+```sh
+limactl shell mycelium-gates -- df -k /
+limactl shell mycelium-gates -- lsblk -D
+limactl shell mycelium-gates -- sudo -n fstrim -v /
+```
+
+The measured VZ disk advertised discard and accepted `fstrim`. Its trimmed-byte
+count describes free guest extents, not bytes necessarily reclaimed on the host;
+compare host allocated blocks before and after. Never truncate or rewrite the
+VM image to reclaim space. If a smaller virtual capacity is still needed,
+recreate from the checked-in template only after no gate is executing and
+unique guest material has been preserved. Retain the toolchain versions and
+verified upstream installation inputs, repeat the setup above (including the
+HWE reboot), restore the documented prerequisites, and run a focused Linux gate
+before admitting the next full. Under MY-41 this is development-tool maintenance;
+it does not authorize interrupting running production worker jobs.
+
+### Focused Linux commands
 
 For a focused Linux command with the same host admission, disk supervision and
 fixture cleanup:
