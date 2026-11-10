@@ -186,7 +186,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	}
 }
 
-func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
+func TestCancellationLostAssignmentRequiresKeyedRelease(t *testing.T) {
 	for _, held := range []bool{false, true} {
 		t.Run(map[bool]string{false: "redelivery", true: "held-host"}[held], func(t *testing.T) {
 			q, _ := fixture(t)
@@ -213,8 +213,16 @@ func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
 			if reply := check(t, q, m, nil); reply.Job != nil {
 				t.Fatal("cancelled assignment was redelivered")
 			}
+			if a := cancelAck(t, q, j.ID); a.State != "stopping" || ackRelease(a) != "pending" {
+				t.Fatal("omission discharged exact attempt custody", a)
+			}
+			release := result(assigned, false)
+			release.ReleaseOnly = true
+			if err := q.Complete(release); err != nil {
+				t.Fatal(err)
+			}
 			if a := cancelAck(t, q, j.ID); a.State != "cancelled" || ackRelease(a) != "confirmed" {
-				t.Fatal("same-session empty report did not prove exact release", a)
+				t.Fatal("explicit keyed release did not settle custody", a)
 			}
 			if !q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed || len(q.s.HostReleases) != 0 {
 				t.Fatal("exact attempt evidence or release record was not settled")
@@ -223,8 +231,6 @@ func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
 		})
 	}
 }
-
-// Write the original wire shape: pre-S03 copies have no release evidence fields.
 
 func TestCancellationAcknowledgementTime(t *testing.T) {
 	q, c := fixture(t)

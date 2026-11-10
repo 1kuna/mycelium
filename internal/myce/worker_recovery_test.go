@@ -308,6 +308,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	}
 	s.stateName = "state-attempt-replay.json"
 	j := recoveryJob(t, []string{"sh", "-c", "echo recovered"})
+	j.Session, j.Machine = s.state.Session, w.Machine.ID
 	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
