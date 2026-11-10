@@ -35,7 +35,17 @@ func (q *Queue) encodeCatalog(key string, value any) (catalogEncoding, error) {
 	if old, ok := q.records.encodings[key]; ok && reflect.DeepEqual(value, old.value) {
 		return old, nil
 	}
-	data, err := json.Marshal(value)
+	durable := value
+	if point, ok := value.(WorkObservation); ok {
+		// Missing contact and allowance changes are recomputable views. A
+		// permanent identity invalidation is a decision: retain it across reopen,
+		// even if the original hardware/recipe later returns.
+		if point.StaleReason == "component unavailable" || point.StaleReason == "resource allowance or power mode changed" {
+			point.StaleReason = ""
+		}
+		durable = point
+	}
+	data, err := json.Marshal(durable)
 	if err != nil {
 		return catalogEncoding{}, err
 	}
