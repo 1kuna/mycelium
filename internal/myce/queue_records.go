@@ -213,6 +213,7 @@ func (q *Queue) liveJobs() map[string]*Job {
 	return q.records.live
 }
 func (q *Queue) touchJob(id string) *Job {
+	q.enqueueMaintenance(id, false)
 	j := q.s.Jobs[id]
 	if q.records != nil && q.records.live[id] == nil {
 		q.invalidateRetainedMemory()
@@ -255,11 +256,13 @@ func (q *Queue) putJob(id string, j *Job) {
 		q.records.jobCount++
 	}
 	q.s.Jobs[id] = j
+	q.maintenanceJob(j)
 	if q.records != nil {
 		q.records.live[id] = j
 	} // finish transitions retire at commit
 }
 func (q *Queue) deleteJob(id string) {
+	q.maintenanceRemoved(q.s.Jobs[id])
 	q.touchJob(id)
 	if q.s.Jobs[id] != nil && q.records != nil {
 		q.records.jobCount--
