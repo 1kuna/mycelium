@@ -248,14 +248,21 @@ func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
 	demand := submit(t, q, s)
 	experiment := &Job{State: "queued", Spec: spec("experiment")}
 	experiment.Spec.Needs.MemoryGB, experiment.Spec.Needs.HostMemoryGB = 16, 10
-	target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
-	reason := q.productionAdmissionReason(experiment, target)
+	// Admission can still be committing after Submit or Cancel returns. The
+	// private policy helper, like its production callers, requires q.mu.
+	admissionReason := func() string {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
+		return q.productionAdmissionReason(experiment, target)
+	}
+	reason := admissionReason()
 	// The measured bound no longer withholds a universal 25% margin.
 	if reason != "" {
 		t.Fatal("fitting measured demand withheld headroom", reason)
 	}
 	experiment.Spec.Needs.HostMemoryGB = 18
-	reason = q.productionAdmissionReason(experiment, target)
+	reason = admissionReason()
 	// Retain both measured vectors, page rounding and explicit launch slack.
 	if !strings.Contains(reason, "32.125 GiB production envelope") {
 		t.Fatal("measured production envelope or margin lost", reason)
@@ -263,7 +270,7 @@ func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
 	if err := q.Cancel(demand.ID); err != nil {
 		t.Fatal(err)
 	}
-	if reason := q.productionAdmissionReason(experiment, target); reason != "" {
+	if reason := admissionReason(); reason != "" {
 		t.Fatal("cancelled production still protects an envelope", reason)
 	}
 }
