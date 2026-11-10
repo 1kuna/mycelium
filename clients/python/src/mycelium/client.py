@@ -16,7 +16,7 @@ import ssl
 import socket
 from pathlib import Path
 import time
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -77,6 +77,10 @@ class APIError(RuntimeError):
         except (ValueError, TypeError):
             pass
         super().__init__(message)
+
+
+# Transport failures and typed HTTP refusals handled by the shared request policy.
+REQUEST_ERRORS = (APIError, URLError, TimeoutError, ConnectionError, ssl.SSLError)
 
 
 def _json_default(value: Any) -> str:
@@ -206,6 +210,78 @@ class Client:
         client._urlopen = opener
         return client
 
+    @staticmethod
+    def _retryable(error: Exception, policy: str) -> bool:
+        cause = error.reason if isinstance(error, URLError) else error
+        if isinstance(cause, ssl.SSLError):
+            # Only known broken-record/connection failures are recoverable.
+            # Unknown TLS failures (including installed pin mismatches) fail closed.
+            transient = isinstance(cause, ssl.SSLEOFError) or getattr(cause, "reason", None) in {
+                "RECORD_LAYER_FAILURE", "UNEXPECTED_EOF_WHILE_READING"}
+            if not transient:
+                return False
+        if policy == "none":
+            return False
+        if isinstance(error, APIError):
+            if policy == "upload":
+                return error.status in {408, 429, 500, 502, 503, 504} and error.code in {
+                    None, "", "request_failed", "queue_stopping", "client_rate_limited",
+                    "observation_shed_control_pressure"}
+            if policy == "wait":
+                return error.code != "job_reply_invalid" and (error.status in {408, 429} or error.status >= 500)
+            return error.status in {429, 503} and error.code != "file_blob_unavailable"
+        return policy in {"keyed", "upload", "wait"}
+
+    def _pause(self, pace: Pace, *, end: float | None = None,
+               event: float | None = None, error: Exception | None = None,
+               held: bool = False) -> None:
+        delay = pace.next(self._clock.monotonic(), event, error)
+        if held and error is None:
+            delay = 0
+        # An explicit polling floor applies only to observations. Fresh pressure
+        # must follow the current Retry-After rather than an older local floor.
+        if error is None:
+            delay = max(self.poll_interval or 0, delay)
+        if end is not None:
+            delay = min(delay, max(0, end - self._clock.monotonic()))
+        self._clock.sleep(delay)
+
+    def _request(self, operation: Callable[[float | None], Any], *,
+                 policy: str = "none", end: float | None = None,
+                 expired: Callable[[], Exception] = lambda: TimeoutError("queue request timed out")) -> Any:
+        """One retry owner; operations that reconcile writes disable inner retries."""
+        pace = Pace(jitter=self._jitter)
+        while True:
+            started = self._clock.monotonic()
+            remaining = None if end is None else end - started
+            if remaining is not None and remaining <= 0:
+                raise expired()
+            try:
+                return operation(remaining)
+            except REQUEST_ERRORS as error:
+                if not self._retryable(error, policy):
+                    raise
+                pace.observe(self._clock.monotonic() - started)
+                self._pause(pace, end=end, error=error)
+
+    def _open_request(self, request: Request, *, timeout: float | None,
+                      opener: Any = None) -> Any:
+        try:
+            return (opener or self._urlopen)(request, timeout=timeout)
+        except HTTPError as error:
+            with error:
+                body = error.read(4096).decode("utf-8", errors="replace")
+            failure = APIError(error.code, body, retry_after(error.headers.get("Retry-After"), self._clock.time()))
+            failure.code = failure.code or error.headers.get("X-Myce-Error-Code")
+            path = request.selector
+            if (error.code == 404 and not failure.code and request.method == "GET"
+                    and path.startswith("/api/jobs/") and "/" not in path[len("/api/jobs/"):]):
+                failure = APIError(404, json.dumps({
+                    "code": "queue_upgrade_required",
+                    "error": "queue too old for this client; upgrade the queue first",
+                }))
+            raise failure from None
+
     def _call(self, method: str, path: str, body: Any = None,
               *, timeout: float | None = None, raw: bool = False, retry: bool = True) -> Any:
         data = None if body is None else json.dumps(body, default=_json_default, allow_nan=False).encode()
@@ -214,35 +290,12 @@ class Client:
             "User-Agent": USER_AGENT})
         budget = self.timeout if timeout is None else timeout
         end = None if budget is None else self._clock.monotonic() + budget
-        pace = Pace(jitter=self._jitter)
-        while True:
-            started = self._clock.monotonic()
-            remaining = None if end is None else max(0, end - started)
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError("queue request timed out")
-            try:
-                with self._urlopen(request, timeout=remaining) as response:
-                    if response.headers.get("X-Myce-Wait") == "batch-v1":
-                        self._batch_supported = True
-                    return _read_reply(response) if raw else json.load(response)
-            except HTTPError as error:
-                with error:
-                    text = error.read(4096).decode("utf-8", errors="replace")
-                failure = APIError(error.code, text, retry_after(error.headers.get("Retry-After"), self._clock.time()))
-                if retry and method in {"GET", "HEAD"} and error.code in {429, 503}:
-                    pace.observe(self._clock.monotonic() - started)
-                    delay = pace.next(self._clock.monotonic(), error=failure)
-                    if end is not None:
-                        delay = min(delay, max(0, end - self._clock.monotonic()))
-                    self._clock.sleep(delay)
-                    continue
-                if (error.code == 404 and not failure.code and method == "GET"
-                        and path.startswith("/api/jobs/") and "/" not in path[len("/api/jobs/"):]):
-                    failure = APIError(404, json.dumps({
-                        "code": "queue_upgrade_required",
-                        "error": "queue too old for this client; upgrade the queue first",
-                    }))
-                raise failure from None
+        def attempt(remaining: float | None) -> Any:
+            with self._open_request(request, timeout=remaining) as response:
+                if response.headers.get("X-Myce-Wait") == "batch-v1":
+                    self._batch_supported = True
+                return _read_reply(response) if raw else json.load(response)
+        return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none", end=end)
 
     def submit(self, job: Mapping[str, Any] | str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Submit a mapping, YAML text, or a pathlib.Path to a YAML file.
@@ -280,33 +333,10 @@ class Client:
             raise ValueError("submit_and_wait requires submission_key")
         spec = _normalize(job)
         end = None if timeout is None else self._clock.monotonic() + timeout
-        pace = Pace(jitter=self._jitter)
-        while True:
-            started = self._clock.monotonic()
-            remaining = None if end is None else end - started
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError("timed out submitting keyed job; retry the same key")
-            try:
-                submitted = self.submit(spec) if remaining is None else self.submit(spec, timeout=remaining)
-                break
-            except (URLError, TimeoutError, ConnectionError) as error:
-                if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
-                    raise
-            except APIError as error:
-                if error.status not in {429, 503}:
-                    raise
-                failure = error
-                pace.observe(self._clock.monotonic() - started)
-                delay = pace.next(self._clock.monotonic(), error=failure)
-                if end is not None:
-                    delay = min(delay, max(0, end - self._clock.monotonic()))
-                self._clock.sleep(delay)
-                continue
-            pace.observe(self._clock.monotonic() - started)
-            delay = pace.next(self._clock.monotonic(), error=ConnectionError())
-            if end is not None:
-                delay = min(delay, max(0, end - self._clock.monotonic()))
-            self._clock.sleep(delay)
+        submitted = self._request(
+            lambda remaining: self.submit(spec) if remaining is None else self.submit(spec, timeout=remaining),
+            policy="keyed", end=end,
+            expired=lambda: TimeoutError("timed out submitting keyed job; retry the same key"))
         remaining = None if end is None else max(0, end - self._clock.monotonic())
         return self.wait(submitted["id"], timeout=remaining)
 
@@ -350,36 +380,23 @@ class Client:
             self.download_result(job["id"], name, destination)
         return job
 
-    def _file_request(self, method, path, data=None, headers=None, size=0, *, timing=None, deadline=None):
-        pace = Pace(jitter=self._jitter)
+    def _file_request(self, method, path, data=None, headers=None, size=0, *, timing=None, deadline=None, retry=True):
         end = deadline if deadline is not None else (None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout)
-        while True:
+        def attempt(remaining: float | None) -> Any:
             started = self._clock.monotonic()
-            remaining = None if end is None else end - started
-            if remaining is not None and remaining <= 0:
-                raise TransferStalledError("file transfer owner timeout")
             try:
                 if timing is None:
                     return self._file_request_once(method, path, data, headers, size, remaining)
-                try:
-                    response = self._file_request_once(method, path, data, headers, size, remaining, timing)
-                except APIError as error:
-                    timing.observe(self._clock.monotonic() - started, error.retry_after)
-                    raise
-                except (TransferStalledError, URLError, ConnectionError):
-                    timing.observe(self._clock.monotonic() - started)
-                    raise
-                timing.observe(self._clock.monotonic() - started,
-                               retry_after(response.headers.get("Retry-After"), self._clock.time()))
-                return response
-            except APIError as error:
-                if method not in {"GET", "HEAD"} or error.status not in {429, 503} or error.code == "file_blob_unavailable":
-                    raise
-                pace.observe(self._clock.monotonic() - started)
-                delay = pace.next(self._clock.monotonic(), error=error)
-                if end is not None:
-                    delay = min(delay, max(0, end - self._clock.monotonic()))
-                self._clock.sleep(delay)
+                response = self._file_request_once(method, path, data, headers, size, remaining, timing)
+            except REQUEST_ERRORS as error:
+                if timing is not None:
+                    timing.observe(self._clock.monotonic() - started, getattr(error, "retry_after", 0))
+                raise
+            timing.observe(self._clock.monotonic() - started,
+                           retry_after(response.headers.get("Retry-After"), self._clock.time()))
+            return response
+        return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none",
+                             end=end, expired=lambda: TransferStalledError("file transfer owner timeout"))
 
     def _file_request_once(self, method: str, path: str, data: bytes | None = None,
                       headers: Mapping[str, str] | None = None, size: int = 0, owner_timeout=None, timing=None):
@@ -402,13 +419,7 @@ class Client:
             from .transfer import file_opener
             opener = file_opener()
         try:
-            response = opener(request, timeout=budget)
-        except HTTPError as error:
-            with error:
-                body = error.read(4096).decode("utf-8", errors="replace")
-            failure = APIError(error.code, body, retry_after(error.headers.get("Retry-After"), self._clock.time()))
-            failure.code = failure.code or error.headers.get("X-Myce-Error-Code")
-            raise failure from None
+            response = self._open_request(request, timeout=budget, opener=opener)
         except (TimeoutError, socket.timeout):
             raise TransferStalledError("file transfer made no network progress") from None
         except URLError as error:
@@ -423,7 +434,7 @@ class Client:
         timing = UploadTiming()
         end = None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout
         def request(*args, **kwargs):
-            return self._file_request(*args, **kwargs, timing=timing, deadline=end)
+            return self._file_request(*args, **kwargs, timing=timing, deadline=end, retry=False)
         source = Path(source)
         digest = hashlib.sha256()
         size = 0
@@ -512,10 +523,8 @@ class Client:
 
                 try:
                     result = attempt(read)
-                except (TransferStalledError, URLError, ConnectionError, APIError) as error:
-                    if isinstance(error, APIError) and error.status not in (404, 410) and not (
-                            error.status in (408, 429, 500, 502, 503, 504) and error.code in (
-                                None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):
+                except REQUEST_ERRORS as error:
+                    if not (isinstance(error, APIError) and error.status in (404, 410)) and not self._retryable(error, "upload"):
                         raise
                     verify_source()
                     if not isinstance(error, APIError) or error.status not in (404, 410):
@@ -530,24 +539,8 @@ class Client:
                 verify_source()
                 return result
 
-        pace = Pace(jitter=self._jitter)
-        while True:
-            started = self._clock.monotonic()
-            try:
-                return reconciled_attempt()
-            except (TransferStalledError, URLError, ConnectionError, APIError) as error:
-                if isinstance(error, APIError) and (error.status not in (408, 429, 500, 502, 503, 504) or
-                        error.code not in (None, "", "request_failed", "queue_stopping", "client_rate_limited", "observation_shed_control_pressure")):
-                    raise
-                if isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError):
-                    raise
-                pace.observe(self._clock.monotonic() - started)
-                delay = pace.next(self._clock.monotonic(), error=error)
-                if end is not None:
-                    delay = min(delay, max(0, end - self._clock.monotonic()))
-                self._clock.sleep(delay)
-                if end is not None and self._clock.monotonic() >= end:
-                    raise TransferStalledError("file transfer owner timeout") from error
+        return self._request(lambda remaining: reconciled_attempt(), policy="upload", end=end,
+                             expired=lambda: TransferStalledError("file transfer owner timeout"))
 
     def recover_result(self, job_id: str, *, files: Mapping[str, str | Path],
                        key: str, requested_by: str, reason: str,
@@ -769,11 +762,6 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             return remaining if self.timeout is None else (self.timeout if remaining is None else min(self.timeout, remaining))
-        def retryable(error):
-            if isinstance(error, APIError):
-                return error.code != "job_reply_invalid" and (error.status in {408, 429} or error.status >= 500)
-            return not (isinstance(error, URLError) and isinstance(error.reason, ssl.SSLError))
-
         batch_unavailable = False
 
         def observe(original, observed):
@@ -871,16 +859,16 @@ class Client:
                                 detail = self._read_job(row["id"], timeout=detail_budget, retry=False)
                                 row = dict(detail, revision=row["revision"])
                                 full_payload = True
-                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
-                                if not retryable(error):
+                            except REQUEST_ERRORS as error:
+                                if not self._retryable(error, "wait"):
                                     raise
                                 if isinstance(error, TimeoutError):
                                     diagnostic_end = self._clock.monotonic()
                         if row["state"] in TERMINAL and not full_payload:
                             try:
                                 row = self._read_job(row["id"], timeout=request_budget(), wait=True)
-                            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
-                                if not retryable(error):
+                            except REQUEST_ERRORS as error:
+                                if not self._retryable(error, "wait"):
                                     raise
                                 failure = error
                                 continue
@@ -892,14 +880,14 @@ class Client:
                         try:
                             row = self._read_job(job_id, timeout=request_budget(),
                                                  wait=job_id in jobs, retry=False)
-                        except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
-                            if not retryable(error):
+                        except REQUEST_ERRORS as error:
+                            if not self._retryable(error, "wait"):
                                 raise
                             failure = error
                             continue
                         observe(job_id, row)
-            except (APIError, TimeoutError, URLError, IncompleteReplyError) as error:
-                if not retryable(error):
+            except REQUEST_ERRORS as error:
+                if not self._retryable(error, "wait"):
                     raise
                 failure = error
             if not pending:
@@ -908,14 +896,7 @@ class Client:
                 pace.observe(self._clock.monotonic() - started, changed)
             if failure is not None:
                 pace.observe(self._clock.monotonic() - started)
-            delay = pace.next(self._clock.monotonic(), event, failure)
-            if held and failure is None:
-                delay = 0
-            if self.poll_interval is not None:
-                delay = max(self.poll_interval, delay)
-            if end is not None:
-                delay = min(delay, max(0, end - self._clock.monotonic()))
-            self._clock.sleep(delay)
+            self._pause(pace, end=end, event=event, error=failure, held=held)
 
         return []
 
@@ -944,7 +925,7 @@ class Client:
                 follow = False
                 continue
             pace.observe(self._clock.monotonic() - started, bool(chunks))
-            self._clock.sleep(max(self.poll_interval or 0, pace.next(self._clock.monotonic())))
+            self._pause(pace)
 
     def openai(self, *, project: str, priority: str = "experiment",
                deadline: str | None = None, **kwargs: Any) -> Any:
