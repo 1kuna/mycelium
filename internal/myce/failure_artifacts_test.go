@@ -161,13 +161,20 @@ func TestFailureArtifactsFenceRetentionAndVerification(t *testing.T) {
 	if err = q.update(func() error { q.requeue(q.s.Jobs[first.ID], "retry", false); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	// The first copy still owns its legacy GPU slot while the retry runs.
+	// The first copy retains its attempt custody while the retry runs.
 	second := check(t, q, machine("retry-worker", "fake"), nil).Job
 	if second == nil || second.Attempt == first.Attempt {
 		t.Fatal("missing retry")
 	}
 	if err = q.Complete(old); !errors.Is(err, ErrStale) {
 		t.Fatalf("stale diagnostics: %v", err)
+	}
+	// Refusing stale output does not acknowledge cleanup. Release that exact
+	// copy before checking collection of its shared input/diagnostic blob.
+	release := result(first, false)
+	release.ReleaseOnly = true
+	if err = q.Complete(release); err != nil {
+		t.Fatal(err)
 	}
 	current := result(second, false)
 	current.Error = "exit status 7"
