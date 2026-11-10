@@ -595,7 +595,7 @@ func TestM4LegacyBesideInventoryRefused(t *testing.T) {
 	}
 
 	// Retire the idle legacy registration, then test the reverse order.
-	if err := q.update(func() error { delete(q.s.Machines, old.ID); return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(old.ID); delete(q.s.Machines, old.ID); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	check(t, q, modern, nil)
@@ -696,7 +696,7 @@ func TestM4RollbackRefusesUnrepresentableNewPin(t *testing.T) {
 	s.Resumable = true
 	j := submit(t, q, s)
 	for _, state := range []string{"queued", "failed", "cancelled"} {
-		if err := q.update(func() error { q.s.Jobs[j.ID].State = state; return nil }); err != nil {
+		if err := q.update(func() error { q.touchJob(j.ID).State = state; return nil }); err != nil {
 			t.Fatal(err)
 		}
 		before, _ := json.Marshal(q.s)

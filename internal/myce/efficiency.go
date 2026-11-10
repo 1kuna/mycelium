@@ -442,12 +442,25 @@ func (q *Queue) refreshEfficiency() {
 }
 
 func (q *Queue) refreshJobEfficiency(j *Job, releases []HostRelease, now time.Time) {
-	if j.Efficiency == nil {
-		j.Efficiency = &JobEfficiency{Since: now, At: now, Work: profileMemoryIdentity(j), WaitSeconds: map[string]float64{}}
+	previous := j.Efficiency
+	next := JobEfficiency{Since: now, At: now, WaitSeconds: map[string]float64{}}
+	if previous != nil {
+		next = *previous
+	} else {
+		next.Work = profileMemoryIdentity(j)
 	}
-	e := j.Efficiency
-	old := *e
-	defer func() { e.transition(old, now) }()
+	e := &next
+	defer func() {
+		if previous != nil && previous.Blocker == e.Blocker && reflect.DeepEqual(previous.Rate, e.Rate) && reflect.DeepEqual(previous.RetainedRates, e.RetainedRates) {
+			return
+		}
+		q.touchJob(j.ID)
+		copy := cloneJob(&Job{Efficiency: e})
+		if previous != nil {
+			copy.Efficiency.transition(*previous, now)
+		}
+		j.Efficiency = copy.Efficiency
+	}()
 	previousBasis := e.Rate.Basis
 	e.Rate = efficiencyRate{}
 	if j.State == "queued" && !cancelled(j) {
@@ -656,6 +669,7 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	for id, blocker := range d.blockers {
 		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Attempt == blocker.Attempt && j.Session == blocker.Session && j.Queued.Equal(blocker.Queued) && j.Efficiency != nil {
 			if j.Efficiency.Blocker != blocker.Category {
+				q.touchJob(j.ID)
 				j.Efficiency.advance(q.clock.Now())
 				j.Efficiency.Blocker = blocker.Category
 			}

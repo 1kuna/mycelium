@@ -74,7 +74,7 @@ func TestSubmissionIdentity(t *testing.T) {
 		submissionError(t, err, 409, "submission_key_conflict")
 	}
 	for _, state := range []string{"succeeded", "failed", "cancelled"} {
-		if err := q.update(func() error { q.s.Jobs[first.ID].State = state; return nil }); err != nil {
+		if err := q.update(func() error { q.touchJob(first.ID).State = state; return nil }); err != nil {
 			t.Fatal(err)
 		}
 		if got := submit(t, q, s); got.ID != first.ID || got.State != state {
@@ -264,7 +264,7 @@ func TestSubmissionCanonicalAndMutableState(t *testing.T) {
 	// Previously accepted specs must replay before current placement/catalog checks.
 	if err := q.update(func() error {
 		q.s.Policies = map[string]ProjectPolicy{s.Project: {AllowedMachines: []string{"different"}}}
-		q.s.Jobs[first.ID].Spec.Needs.MemoryGB = 64 // Resolved/learned value, not submitted identity.
+		q.touchJob(first.ID).Spec.Needs.MemoryGB = 64 // Resolved/learned value, not submitted identity.
 		return nil
 	}); err != nil {
 		t.Fatal(err)

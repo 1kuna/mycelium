@@ -41,6 +41,9 @@ func measuredSetupSeconds(j *Job, m *Machine, cold bool) (float64, bool) {
 }
 
 func (q *Queue) recordProductionBackoff(j *Job, m *Machine, demand *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if m == nil || demand.Spec.Priority != "production" || j.Spec.Priority == "production" || q.comparePriority(j.Spec, demand.Spec) <= 0 {
 		return
 	}

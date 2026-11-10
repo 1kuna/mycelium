@@ -22,7 +22,7 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	check(t, q, idle, nil)
 	var running, waiting *Job
 	if err := q.update(func() error {
-		m := q.s.Machines["large"]
+		m := q.touchMachine("large")
 		s := cpuSpec(4, 84)
 		if err := normalizeResources(&s); err != nil {
 			return err
@@ -253,7 +253,7 @@ func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := q.update(func() error { q.s.Jobs["wait"].State = "paused"; return nil }); err != nil {
+	if err := q.update(func() error { q.touchJob("wait").State = "paused"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.update(func() error { q.applyEfficiencyDiagnostics(d); return nil }); err != nil {
@@ -283,10 +283,10 @@ func TestEfficiencyStopSnapshotSurvivesCleanup(t *testing.T) {
 	}
 	c.Advance(time.Second)
 	if err := q.update(func() error {
-		q.s.Machines[m.ID].MemoryObservation.UsedGB = 15
-		q.s.Machines[m.ID].HostHealth.History[0].Pressure = 10
-		q.s.Machines[m.ID].IOPressure.Some.Avg10 = 20
-		j := q.s.Jobs["stopped"]
+		q.touchMachine(m.ID).MemoryObservation.UsedGB = 15
+		q.touchMachine(m.ID).HostHealth.History[0].Pressure = 10
+		q.touchMachine(m.ID).IOPressure.Some.Avg10 = 20
+		j := q.touchJob("stopped")
 		q.recordAttemptOutcome(j, AttemptOutcome{Attempt: 1, Machine: m.ID, Session: m.Session, Interrupted: true, Forced: true})
 		return nil
 	}); err != nil {
@@ -406,12 +406,12 @@ func TestEfficiencySiblingReportsKeepHostIdentity(t *testing.T) {
 	check(t, q, gpu, nil)
 	first := q.s.EfficiencyHosts["host"]
 	c.Advance(5 * time.Second)
-	if err := q.update(func() error { q.s.Machines[cpu.ID].LastSeen = c.Now(); return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(cpu.ID).LastSeen = c.Now(); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	second := q.s.EfficiencyHosts["host"]
 	c.Advance(5 * time.Second)
-	if err := q.update(func() error { q.s.Machines[gpu.ID].LastSeen = c.Now(); return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(gpu.ID).LastSeen = c.Now(); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	third := q.s.EfficiencyHosts["host"]

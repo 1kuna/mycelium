@@ -21,7 +21,7 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 	idle := c.Now()
 	// A worker-reported Docker blocker survives settled production demand.
 	if err := q.update(func() error {
-		q.s.Machines[a.ID].DockerCleanup = "cleanup unconfirmed: inspect"
+		q.touchMachine(a.ID).DockerCleanup = "cleanup unconfirmed: inspect"
 		return nil
 	}); err != nil {
 		t.Fatal(err)

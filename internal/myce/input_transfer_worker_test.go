@@ -186,7 +186,7 @@ func TestInputTransferRecoveringStatusDoesNotHideRefusal(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("input-worker", "", "cpu", 4, 16)
 	m.LastSeen, m.FileTransferError = clock.Now(), inputTransferRecoveringReason
-	if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID); q.s.Machines[m.ID] = &m; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	status, err := q.publicSnapshot()
@@ -203,7 +203,7 @@ func TestInputTransferRecoveringStatusDoesNotHideRefusal(t *testing.T) {
 		for _, next := range order {
 			combined = preferTransferError(combined, next)
 		}
-		if err := q.update(func() error { m.FileTransferError = combined; return nil }); err != nil {
+		if err := q.update(func() error { q.touchMachine(m.ID); m.FileTransferError = combined; return nil }); err != nil {
 			t.Fatal(err)
 		}
 		requireIncident(t, q, "staging_cache_refused", "cache/"+m.ID, 1, true)

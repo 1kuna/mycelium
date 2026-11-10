@@ -33,6 +33,9 @@ type HostAdmissions struct {
 // Record the learned comparison once per assignment, from in-memory
 // observations only, so explicit figures show what evidence would reserve.
 func (q *Queue) recordLearnedMemory(j *Job, m *Machine) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.MemoryEnvelope == nil {
 		return
 	}

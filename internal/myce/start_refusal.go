@@ -30,6 +30,7 @@ func startRefusalBeforeMain(j *Job, r Result) bool {
 }
 
 func (q *Queue) requeueStartRefusal(j *Job) {
+	q.touchJob(j.ID)
 	deadline, caller := j.Spec.StartBy, absoluteStartBy(j)
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false

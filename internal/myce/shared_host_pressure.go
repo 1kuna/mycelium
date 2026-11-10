@@ -147,6 +147,7 @@ func (q *Queue) maintainSharedHosts() {
 			if owner == nil || hostID(owner) != hostID(m) || j.State != "running" || cancelled(j) || plannedStop(j) {
 				continue
 			}
+			q.touchJob(j.ID)
 			for i := range j.Copies {
 				c := &j.Copies[i]
 				if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {

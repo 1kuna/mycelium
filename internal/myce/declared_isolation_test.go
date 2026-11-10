@@ -354,7 +354,11 @@ func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 	e.Files["run.sh"] = []byte(isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`)
 	e = freezeComposition(t, e)
 	// Seed the actual pre-policy persisted shape, with no registration marker.
-	if err := q.update(func() error { q.s.Extensions = map[string]Extension{extensionKey(e): e}; return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("extensions/" + extensionKey(e))
+		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	client := isolationClient(t, q)

@@ -59,6 +59,9 @@ func validLivenessSignal(s LivenessSignal) bool {
 // The caller already fenced job, attempt, machine and worker session. Only a
 // small immutable value is retained here; all OS work belongs to the worker.
 func (q *Queue) retainLiveness(j *Job, r *AttemptReport) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if r.Liveness == nil || !r.Started || !validLivenessSignal(r.Liveness.CPU) || !validLivenessSignal(r.Liveness.WorkDir) {
 		return
 	}

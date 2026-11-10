@@ -63,6 +63,9 @@ func (q *Queue) recordHostLaunchMemory(m, old *Machine) {
 }
 
 func (q *Queue) recordColdProbeAssignment(j *Job, m *Machine) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
 		return
 	}
@@ -96,6 +99,9 @@ func (q *Queue) coldProbeDriftMarginGB(m *Machine) float64 {
 // add that deficit so the next cold ceiling does not chase the same boundary.
 // Worker checks, member/OOM floors and each assigned ceiling remain unchanged.
 func (q *Queue) recordColdProbeRefusal(j *Job, r Result) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.StartedAt != nil || r.OutOfMemory || r.ReleaseOnly || !provenPrelaunchRefusal(j, r) || j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
 		return
 	}

@@ -26,7 +26,7 @@ func TestCancellationRejoinBeforeCancel(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(LossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+		q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {
@@ -66,7 +66,7 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 			for attempt := 1; attempt <= 2; attempt++ {
 				c.Advance(LossAfter)
 				if err := q.update(func() error {
-					q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+					q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 					q.maintain()
 					return nil
 				}); err != nil {
@@ -149,7 +149,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(ProductionLossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+		q.touchMachine("two").LastSeen, q.touchMachine("three").LastSeen = c.Now(), c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {
@@ -236,7 +236,7 @@ func legacyCancellationFixture(t *testing.T, retained bool) (*Queue, *fakeClock,
 	s.Needs.HostMemoryGB = 4
 	j := submit(t, q, s)
 	if err := q.update(func() error {
-		live := q.s.Jobs[j.ID]
+		live := q.touchJob(j.ID)
 		live.State, live.Machine, live.Session, live.Attempt = "succeeded", two.ID, two.Session, 2
 		live.ReleaseConfirmed = true
 		now := c.Now()
@@ -322,7 +322,7 @@ func TestCancellationAcknowledgementTime(t *testing.T) {
 func TestCancellationLegacyIntentPersistsOnOpen(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
-	if err := q.update(func() error { q.s.Jobs[j.ID].Reason = "cancel requested"; return nil }); err != nil {
+	if err := q.update(func() error { q.touchJob(j.ID).Reason = "cancel requested"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	q = reopenCancellationQueue(t, q, c)

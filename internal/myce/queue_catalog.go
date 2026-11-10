@@ -1,125 +1,142 @@
 package myce
 
 import (
-	"encoding/json"
 	"reflect"
+	"strings"
 )
 
-// One canonical encoding and detached value per retained catalog record. These
-// records rarely change, but used to be encoded twice per heartbeat: once for
-// undo and once for persistence. Compare against owned memory before reuse;
-// neither a shared pointer nor an unchanged map identity proves unchanged data.
-// All access is under q.mu. This never publishes state or authorizes a reader.
-type catalogEncoding struct {
-	value any
-	data  []byte
+// The journal owns detached before-values only for records a mutator touches.
+// External-memory generations are immutable and can be borrowed for undo.
+type catalogPrevious struct {
+	value  any
+	exists bool
 }
 
-func (q *Queue) encodeCatalog(key string, value any) (catalogEncoding, error) {
+func durableWorkObservation(point WorkObservation) WorkObservation {
+	if point.StaleReason == "component unavailable" || point.StaleReason == "resource allowance or power mode changed" {
+		point.StaleReason = ""
+	}
+	return point
+}
+
+func (q *Queue) touchCatalog(key string) {
+	if q.records == nil || !q.records.updating {
+		return
+	}
+	if _, touched := q.records.catalogUndo[key]; touched {
+		return
+	}
+	value, exists := q.catalogValue(key)
+	group, _, _ := strings.Cut(key, "/")
+	if exists && group != "external_memory" {
+		value = copyObservationValue(reflect.ValueOf(value)).Interface()
+	}
 	if point, ok := value.(WorkObservation); ok {
-		// Raw sampler counters are deliberately outside JSON. They can remain
-		// on accepted peaks in memory; ignore them in the encoding comparison.
-		point.MemoryPeak = catalogMemoryPeak(point.MemoryPeak)
-		if prior := point.MemoryEscalation; prior != nil {
-			copy := *prior
-			copy.Peak = catalogMemoryPeak(prior.Peak)
-			point.MemoryEscalation = &copy
-		}
-		value = point
-	}
-	if ring, ok := value.(*externalMemoryRing); ok {
-		if old, exists := q.records.encodings[key]; exists && old.value == ring {
-			return old, nil
+		_, id, _ := strings.Cut(key, "/")
+		if reason, touched := q.records.staleness[id]; touched {
+			point.StaleReason = reason
+			value = point
 		}
 	}
-	if old, ok := q.records.encodings[key]; ok && reflect.DeepEqual(value, old.value) {
-		return old, nil
-	}
-	durable := value
-	if point, ok := value.(WorkObservation); ok {
-		// Missing contact and allowance changes are recomputable views. A
-		// permanent identity invalidation is a decision: retain it across reopen,
-		// even if the original hardware/recipe later returns.
-		if point.StaleReason == "component unavailable" || point.StaleReason == "resource allowance or power mode changed" {
-			point.StaleReason = ""
-		}
-		durable = point
-	}
-	data, err := json.Marshal(durable)
-	if err != nil {
-		return catalogEncoding{}, err
-	}
-	// Preserve in-memory timestamp representation (including monotonic data)
-	// and empty containers for comparison. A JSON round trip would make an
-	// unchanged live record compare unequal on every subsequent transaction.
-	copy := value
-	if _, immutable := value.(*externalMemoryRing); !immutable {
-		copy = copyObservationValue(reflect.ValueOf(value)).Interface()
-	}
-	entry := catalogEncoding{value: copy, data: data}
-	if q.records.encodings == nil {
-		q.records.encodings = map[string]catalogEncoding{}
-	}
-	q.records.encodings[key] = entry
-	return entry, nil
+	q.records.catalogUndo[key] = catalogPrevious{value, exists}
 }
 
-func catalogMemoryPeak(peak *AttemptMemoryPeak) *AttemptMemoryPeak {
-	if peak == nil || peak.nonreclaimableSampleGB == nil && peak.pressureTotalUS == 0 && peak.pressureAvg10 == 0 {
-		return peak
+func (q *Queue) catalogValue(key string) (any, bool) {
+	group, id, _ := strings.Cut(key, "/")
+	var value any
+	var exists bool
+	switch group {
+	case "extensions":
+		value, exists = q.s.Extensions[id]
+	case "work_observations":
+		value, exists = q.s.WorkObservations[id]
+	case "storage_observations":
+		value, exists = q.s.StorageObservations[id]
+	case "external_memory":
+		value, exists = q.s.ExternalMemory[id]
 	}
-	copy := *peak
-	copy.nonreclaimableSampleGB, copy.pressureTotalUS, copy.pressureAvg10 = nil, 0, 0
-	return &copy
+	return value, exists
 }
 
-// Undo borrows only the cache's detached values, never the live catalog. A
-// rollback transfers their ownership to state and discards the encoding cache.
-func (q *Queue) snapshotCatalogs() (state, error) {
-	var out state
-	if q.s.Extensions != nil {
-		out.Extensions = make(map[string]Extension, len(q.s.Extensions))
-		for id, value := range q.s.Extensions {
-			entry, err := q.encodeCatalog("extensions/"+id, value)
-			if err != nil {
-				return state{}, err
+func (q *Queue) restoreCatalogs() {
+	for key, previous := range q.records.catalogUndo {
+		group, id, _ := strings.Cut(key, "/")
+		switch group {
+		case "extensions":
+			if previous.exists {
+				q.s.Extensions[id] = previous.value.(Extension)
+			} else {
+				delete(q.s.Extensions, id)
 			}
-			out.Extensions[id] = entry.value.(Extension)
-		}
-	}
-	if q.s.WorkObservations != nil {
-		out.WorkObservations = make(map[string]WorkObservation, len(q.s.WorkObservations))
-		for id, value := range q.s.WorkObservations {
-			entry, err := q.encodeCatalog("work_observations/"+id, value)
-			if err != nil {
-				return state{}, err
+		case "work_observations":
+			if previous.exists {
+				q.s.WorkObservations[id] = previous.value.(WorkObservation)
+			} else {
+				delete(q.s.WorkObservations, id)
 			}
-			out.WorkObservations[id] = entry.value.(WorkObservation)
-		}
-	}
-	if q.s.StorageObservations != nil {
-		out.StorageObservations = make(map[string]StorageObservation, len(q.s.StorageObservations))
-		for id, value := range q.s.StorageObservations {
-			entry, err := q.encodeCatalog("storage_observations/"+id, value)
-			if err != nil {
-				return state{}, err
+		case "storage_observations":
+			if previous.exists {
+				q.s.StorageObservations[id] = previous.value.(StorageObservation)
+			} else {
+				delete(q.s.StorageObservations, id)
 			}
-			out.StorageObservations[id] = entry.value.(StorageObservation)
+		case "external_memory":
+			if previous.exists {
+				q.s.ExternalMemory[id] = previous.value.(*externalMemoryRing)
+			} else {
+				delete(q.s.ExternalMemory, id)
+			}
 		}
 	}
-	if q.s.ExternalMemory != nil {
-		out.ExternalMemory = make(map[string]*externalMemoryRing, len(q.s.ExternalMemory))
-		for id, value := range q.s.ExternalMemory {
-			out.ExternalMemory[id] = value
+}
+
+func (q *Queue) touchMachine(id string) *Machine {
+	m := q.s.Machines[id]
+	if q.records != nil && q.records.updating {
+		if _, touched := q.records.machines[id]; !touched {
+			var old *Machine
+			if m != nil {
+				copy := cloneMachine(m)
+				old = &copy
+			}
+			q.records.machines[id] = old
 		}
 	}
-	return out, nil
+	return m
+}
+
+// View journals preserve rollback without enrolling a job or measurement in
+// durable writes. A permanent invalidation uses touchCatalog instead.
+func (q *Queue) touchJobReason(j *Job) {
+	if q.records != nil && q.records.updating {
+		if _, touched := q.records.reasons[j.ID]; !touched {
+			q.records.reasons[j.ID] = j.Reason
+		}
+	}
+}
+func (q *Queue) touchCurveLabel(id string) {
+	if q.records != nil && q.records.updating {
+		if _, touched := q.records.staleness[id]; !touched {
+			q.records.staleness[id] = q.s.WorkObservations[id].StaleReason
+		}
+	}
+}
+
+// The small global control record is always dirty: usage accounting advances
+// its transaction anchor. Jobs, inventories and catalogs have separate journals.
+func queueBase(s state, machines bool) state {
+	s.Jobs, s.Submissions = nil, nil
+	s.Extensions, s.WorkObservations, s.StorageObservations, s.ExternalMemory = nil, nil, nil, nil
+	s.Health.Events = nil
+	if !machines {
+		s.Machines = nil
+	}
+	return s
 }
 
 type recordUndo struct {
-	healthDeliveries map[string]*hostHealthDelivery
-	health           []HealthAlert
-	inventories      map[string]*toolInventory
-	base             []byte
-	catalogs         state
+	base     state
+	catalogs state // Borrow map containers; touched entries have detached undo.
+	machines map[string]*Machine
+	health   []HealthAlert
 }

@@ -48,6 +48,7 @@ func TestFairSharingUsesClockAndExplains(t *testing.T) {
 	m := machine("fake", "fake")
 	if e := q.update(func() error {
 		q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
+		q.touchMachine(m.ID)
 		q.s.Machines[m.ID] = &m
 		return nil
 	}); e != nil {

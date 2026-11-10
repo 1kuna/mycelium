@@ -67,7 +67,7 @@ func m4EmptyFixture(t *testing.T) (ServiceConfig, *fakeClock, []MachineRename, M
 	}
 	if err = q.update(func() error {
 		for _, r := range mapping {
-			q.s.Machines[r.From].Gone = true
+			q.touchMachine(r.From).Gone = true
 		}
 		return nil
 	}); err != nil {
@@ -378,10 +378,14 @@ func TestM4VerifiedEmptySameNameRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := q.s.Machines[mapping[0].From]
-	delete(q.s.Machines, mapping[0].From)
-	m.ID, m.Gone = "host", false
-	q.s.Machines[m.ID] = m
-	if err := q.update(func() error { return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchMachine(mapping[0].From)
+		q.touchMachine("host")
+		delete(q.s.Machines, mapping[0].From)
+		m.ID, m.Gone = "host", false
+		q.s.Machines[m.ID] = m
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	q.Close()

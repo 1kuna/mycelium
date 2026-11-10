@@ -331,7 +331,7 @@ func TestDockerRestartLateSuccessOnlySettlesExactCustody(t *testing.T) {
 	old := result(running, true)
 	if e := q.update(func() error {
 		q.retainRelease(q.s.Jobs[j.ID])
-		next := q.s.Jobs[j.ID]
+		next := q.touchJob(j.ID)
 		next.Attempt++
 		next.Machine = "replacement"
 		next.Session = "replacement-session"
