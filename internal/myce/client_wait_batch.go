@@ -48,10 +48,10 @@ func invalidWaitReply() error {
 	return &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid wait reply"}
 }
 
-// GetJobWaitCapability preserves one initial diagnostic read. Both supported
+// getJobWaitBootstrap preserves one initial diagnostic read. Both supported
 // releases implement batch-v1. A shed bootstrap switches to that endpoint;
 // scalar deadline metadata and caller bounds remain authoritative.
-func (c Client) GetJobWaitCapability(ctx context.Context, id string) (*Job, bool, error) {
+func (c Client) getJobWaitBootstrap(ctx context.Context, id string) (*Job, bool, error) {
 	j, err := c.GetJob(ctx, id)
 	var api *HTTPError
 	if errors.As(err, &api) && api.Status == 429 {
@@ -69,5 +69,5 @@ func (c Client) GetJobWaitCapability(ctx context.Context, id string) (*Job, bool
 		}
 		return j, true, waitErr
 	}
-	return j, true, err
+	return j, err == nil, err
 }

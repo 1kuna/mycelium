@@ -220,57 +220,55 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 			}
 			var j *myce.Job
 			var err error
-			{
-				if batchJobs == nil {
-					batchJobs = map[string]*myce.Job{}
-					var reply myce.WaitReply
-					seconds := pace.Seconds(clock.Now(), event)
-					reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
-					diagnosticDeadline = clock.Now().Add(myce.WaitBatchMaxSeconds * time.Second)
-					if batchErr == nil {
-						held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
-						for i, state := range reply.Jobs {
-							revisions[state.ID] = state.Revision
-							batchJobs[ids[i]] = state.Job()
-							batchMetadata[ids[i]] = state.Spec != nil
-							if state.Spec != nil {
-								metadata[ids[i]] = state.Job()
-							} else if known := metadata[ids[i]]; known != nil {
-								known.State = state.State
-							}
+			if batchJobs == nil {
+				batchJobs = map[string]*myce.Job{}
+				var reply myce.WaitReply
+				seconds := pace.Seconds(clock.Now(), event)
+				reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
+				diagnosticDeadline = clock.Now().Add(myce.WaitBatchMaxSeconds * time.Second)
+				if batchErr == nil {
+					held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0
+					for i, state := range reply.Jobs {
+						revisions[state.ID] = state.Revision
+						batchJobs[ids[i]] = state.Job()
+						batchMetadata[ids[i]] = state.Spec != nil
+						if state.Spec != nil {
+							metadata[ids[i]] = state.Job()
+						} else if known := metadata[ids[i]]; known != nil {
+							known.State = state.State
 						}
 					}
 				}
-				j, err = batchJobs[id], batchErr
-				if err == nil && j != nil && !clock.Now().Before(diagnosticNotBefore) &&
-					(jsonOutput && lastDetail[j.ID] != j.State+"\x00"+j.Reason || !observed[j.ID] && !batchMetadata[id] && j.State != "succeeded" && j.State != "failed" && j.State != "cancelled") {
-					// Spend at most one protocol hold interval on optional diagnostics
-					// across this whole batch, not one interval per job. This bounds the
-					// extra observation delay without an installation-specific timeout.
-					// A slow/shed read leaves details unknown; scalar progress continues.
-					deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
-					detailBudget := max(0, diagnosticDeadline.Sub(clock.Now()))
-					if !deadline.IsZero() {
-						detailBudget = min(detailBudget, max(0, deadline.Sub(clock.Now())))
-					}
-					if waitReadBudget > 0 {
-						detailBudget = min(detailBudget, waitReadBudget)
-					}
-					detailCtx, detailCancel := context.WithTimeout(requestCtx, detailBudget)
-					detail, detailErr := c.GetJob(detailCtx, j.ID)
-					if detailCtx.Err() == context.DeadlineExceeded {
-						diagnosticDeadline = clock.Now()
-					}
-					detailCancel()
-					if detailErr == nil {
-						j = detail
-					} else if !myce.RetryStatusRead(detailErr) {
-						err = detailErr
-					} else {
-						var api *myce.HTTPError
-						if errors.As(detailErr, &api) {
-							diagnosticNotBefore = clock.Now().Add(api.RetryAfter)
-						}
+			}
+			j, err = batchJobs[id], batchErr
+			if err == nil && j != nil && !clock.Now().Before(diagnosticNotBefore) &&
+				(jsonOutput && lastDetail[j.ID] != j.State+"\x00"+j.Reason || !observed[j.ID] && !batchMetadata[id] && j.State != "succeeded" && j.State != "failed" && j.State != "cancelled") {
+				// Spend at most one protocol hold interval on optional diagnostics
+				// across this whole batch, not one interval per job. This bounds the
+				// extra observation delay without an installation-specific timeout.
+				// A slow/shed read leaves details unknown; scalar progress continues.
+				deadline, event = waitPendingTimes(pending, metadata, ownerDeadline, clock.Now())
+				detailBudget := max(0, diagnosticDeadline.Sub(clock.Now()))
+				if !deadline.IsZero() {
+					detailBudget = min(detailBudget, max(0, deadline.Sub(clock.Now())))
+				}
+				if waitReadBudget > 0 {
+					detailBudget = min(detailBudget, waitReadBudget)
+				}
+				detailCtx, detailCancel := context.WithTimeout(requestCtx, detailBudget)
+				detail, detailErr := c.GetJob(detailCtx, j.ID)
+				if detailCtx.Err() == context.DeadlineExceeded {
+					diagnosticDeadline = clock.Now()
+				}
+				detailCancel()
+				if detailErr == nil {
+					j = detail
+				} else if !myce.RetryStatusRead(detailErr) {
+					err = detailErr
+				} else {
+					var api *myce.HTTPError
+					if errors.As(detailErr, &api) {
+						diagnosticNotBefore = clock.Now().Add(api.RetryAfter)
 					}
 				}
 			}

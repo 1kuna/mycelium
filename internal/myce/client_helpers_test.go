@@ -136,7 +136,7 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 			body := `{"id":"keyed-job","state":"queued"}`
 			if r.Method == "POST" && r.URL.Path == "/api/jobs" {
 				posts++
-			} else if r.Method == "GET" && r.URL.Path == "/api/jobs/keyed-job" {
+			} else if r.Method == "GET" && r.URL.Path == "/api/jobs/keyed-job" || r.URL.Path == "/api/wait" {
 				reads++
 				if reads == 2 {
 					return nil, context.DeadlineExceeded
@@ -149,13 +149,13 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 			} else {
 				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(waitFixtureBody(t, r, body)))}, nil
 		})}}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		start := time.Now()
 		j, err := c.SubmitAndWait(ctx, Spec{SubmissionKey: "one-check"})
-		if err != nil || j == nil || j.State != "succeeded" || posts != 1 || reads != 3 {
+		if err != nil || j == nil || j.State != "succeeded" || posts != 1 || reads != 4 {
 			t.Fatalf("job=%+v error=%v posts=%d reads=%d", j, err, posts, reads)
 		}
 		if time.Since(start) < 500*time.Millisecond {
@@ -262,7 +262,7 @@ func TestClientWaitSubmittedUnknownVisibility(t *testing.T) {
 func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	updates := 0
 	c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"updated-job","state":"succeeded"}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(waitFixtureBody(t, r, `{"id":"updated-job","state":"succeeded"}`)))}, nil
 	})}}
 	j, err := c.Wait(context.Background(), "updated-job", func(j *Job) error {
 		updates++
@@ -366,7 +366,7 @@ func TestClientWaitIdentityAndView(t *testing.T) {
 				t.Errorf("identity = %q", r.UserAgent())
 			}
 			wantView := "wait"
-			if reads == 0 {
+			if reads < 2 {
 				wantView = ""
 			}
 			if r.URL.Query().Get("view") != wantView {
@@ -374,13 +374,13 @@ func TestClientWaitIdentityAndView(t *testing.T) {
 			}
 			reads++
 			state := "running"
-			if reads == 2 {
+			if reads >= 2 {
 				state = "succeeded"
 			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"` + state + `"}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(waitFixtureBody(t, r, `{"id":"job","state":"`+state+`"}`))), Header: make(http.Header)}, nil
 		})}}
 		j, err := c.Wait(context.Background(), "job")
-		if err != nil || j.State != "succeeded" || reads != 2 {
+		if err != nil || j.State != "succeeded" || reads != 3 {
 			t.Fatal(j, err, reads)
 		}
 	})
@@ -395,7 +395,7 @@ func TestClientWaitRetainsInitialAdviceAfterLightweightPoll(t *testing.T) {
 			if reads == 1 {
 				reason = "no hypha has a qualified extension"
 			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"queued","reason":"` + reason + `"}`)), Header: make(http.Header)}, nil
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(waitFixtureBody(t, r, `{"id":"job","state":"queued","reason":"`+reason+`"}`))), Header: make(http.Header)}, nil
 		})}}
 		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 		defer cancel()
@@ -404,4 +404,22 @@ func TestClientWaitRetainsInitialAdviceAfterLightweightPoll(t *testing.T) {
 			t.Fatal(err, reads)
 		}
 	})
+}
+
+// waitFixtureBody renders scalar fixture facts through the current batch wire.
+// This only adapts fake data; all requests still use Client's actual transport.
+func waitFixtureBody(t *testing.T, r *http.Request, body string) string {
+	t.Helper()
+	if r.URL.Path != "/api/wait" {
+		return body
+	}
+	var j Job
+	if err := json.Unmarshal([]byte(body), &j); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(WaitReply{Jobs: []WaitState{{ID: j.ID, State: j.State, Reason: j.Reason, Revision: 1, Spec: &WaitSpec{Deadline: j.Spec.Deadline}, StartedAt: j.StartedAt}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
