@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 import traceback
+from email.utils import parsedate
 
 
 MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles.py'))]
@@ -128,7 +129,7 @@ def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, ev
     return found
 
 
-def owned_processes(marker, scratch, known, inspect_handles=False, complete_handles=False):
+def owned_processes(marker, scratch, known, inspect_handles=False, complete_handles=False, born_after=None):
     # Read privately: ps environments can contain credentials; never log them.
     # Retain start identities once ownership is proven, so TERM cannot hide a
     # scrubbed child by killing its parent or closing its inherited log handles.
@@ -151,7 +152,13 @@ def owned_processes(marker, scratch, known, inspect_handles=False, complete_hand
             owned.add(pid)
     if inspect_handles:
         if complete_handles:
-            owned.update(scratch_processes(scratch, processes, all_handles=True,
+            # A fixture cannot predate its holder. In particular Linux's
+            # non-dumpable sd-pam session helper is not a gate fixture; probing
+            # it would make every ordinary user's scratch inventory fail.
+            cutoff = parsedate(born_after or '')
+            candidates = {pid for pid, (_, birth) in processes.items()
+                          if not cutoff or not parsedate(birth) or parsedate(birth) >= cutoff}
+            owned.update(scratch_processes(scratch, candidates, all_handles=True,
                                           protected_roots=set(known), evidence=[]))
         else:
             owned.update(scratch_processes(scratch, processes))

@@ -275,6 +275,9 @@ a gate that never used Docker needs no daemon cleanup. A real cleanup failure
 never becomes a passing verdict. Source, logs and verdict receipts remain in
 the original run directory. Native process identity, marker, ancestry and handle
 checks still protect live fixtures; recovery never signals another run.
+Complete handle inventories consider process instances born no earlier than the
+holder: a fixture cannot predate the process that created it. Older system
+session helpers therefore cannot turn dead scratch into an unknown inventory.
 
 Dead scratch is renamed into `selfheal-backups` beside its original `.gate`
 directory, on the same filesystem. Its archived custody record identifies the

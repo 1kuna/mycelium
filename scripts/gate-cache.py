@@ -33,7 +33,8 @@ def scratch_idle(owner, path):
     marker = owner.get('marker') or 'GATE_RUN_ID=' + owner.get('run_marker', '')
     if budget.owned_processes(marker, str(path), {}):
         return False
-    return not budget.owned_processes(marker, str(path), {}, inspect_handles=True, complete_handles=True)
+    return not budget.owned_processes(marker, str(path), {}, inspect_handles=True, complete_handles=True,
+                                      born_after=owner.get('process_identity', owner.get('holder_start')))
 
 
 def collect_scratch(owner, archive):

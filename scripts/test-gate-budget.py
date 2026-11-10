@@ -23,6 +23,18 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_complete_handle_inventory_keeps_new_fixtures_and_excludes_older_helpers(self):
+        uid = os.getuid()
+        table = (f'10 1 {uid} S Tue Nov 10 10:00:00 2026 (sd-pam)\n'
+                 f'20 1 {uid} S Tue Nov 10 12:00:00 2026 fixture\n')
+        with (patch.object(budget.subprocess, 'check_output', return_value=table),
+              patch.object(budget, 'scratch_processes', return_value={20}) as handles):
+            owned = budget.owned_processes('GATE_RUN_ID=fixture', '/scratch', {},
+                inspect_handles=True, complete_handles=True, born_after='Tue Nov 10 11:00:00 2026')
+            self.assertEqual(owned, {20})
+            self.assertEqual(handles.call_args.args[1], {20})
+            self.assertTrue(handles.call_args.kwargs['all_handles'])
+
     def setUp(self):
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
