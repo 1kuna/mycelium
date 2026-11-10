@@ -102,7 +102,7 @@ recover automatically, preserving durable arms and pending delivery IDs. Local
 status includes retained `supervision` recovery evidence. Native login/boot and
 supervisor-process recovery remain #1166; legacy/unsupervised-owner recovery is an
 operator action that preserves all durable arms, proves exact owner exit and
-then replays the original key/binding. See [operator recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
+then replays the original key/binding. See [operator recovery](../../docs/reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 
 For queue releases containing the established-response shutdown repair in #1135,
 cutover closes interrupted TLS sockets before another encrypted record can be

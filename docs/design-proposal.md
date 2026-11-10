@@ -790,7 +790,7 @@ execution. An optional physical-host budget caps the sum of declared ceilings,
 including configurable slack, and retains unconfirmed allocations after loss.
 Managed Docker batches install and inspect daemon-side memory limits. OOM is a
 normal failure rather than infrastructure loss. The configuration, unsupported
-cases and qualification limits are in [operations](operations.md#host-ram-admission-and-ceilings).
+cases and qualification limits are in [operations](reference/host-capacity.md#host-ram-admission-and-ceilings).
 
 ## Files with or without a NAS
 
@@ -1137,7 +1137,7 @@ fingerprint, counters and checkpoint generations. Legacy sessions and a machine
 worker cannot coexist on the same host. The unkeyed adapter can retire only after
 all hosts convert and the rollback window closes; historical custody remains.
 
-Use [the supported conversion procedure](operations.md#convert-split-workers-to-one-machine-worker-m4)
+Use [the supported conversion procedure](reference/migrations.md#convert-split-workers-to-one-machine-worker-m4)
 for split installations, including explicit source configs, queue-first upgrade,
 settlement, verified-empty evidence where applicable, policy publication and
 rollback fences. Migration never promotes local-only/partial progress or rewrites
@@ -1551,7 +1551,7 @@ installs no helper, privilege grant or permission change; service privilege
 policy is unchanged. The provided unprivileged `myce gpu-telemetry-client` uses
 `/run/mycelium/gpu-telemetry.sock`: no request payload, a fresh per-connection
 JSON snapshot, and EOF. A separately installed root-owned broker supplies the
-raw counters; no sudo/setuid is used by the worker or client. See the [operations contract](operations.md#optional-privileged-gpu-telemetry-source).
+raw counters; no sudo/setuid is used by the worker or client. See the [operations contract](reference/host-capacity.md#optional-privileged-gpu-telemetry-source).
 Retain a whole-host availability-drop floor from an empty-cgroup baseline;
 unrelated RAM release can mask that net delta, so it never replaces absolute
 driver accounting. Missing DRM client identity invalidates the entire attempt.

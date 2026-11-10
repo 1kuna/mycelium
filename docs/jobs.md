@@ -250,7 +250,7 @@ For CPU-only work `memory_gb` is host RAM. The stored job lowers this to zero
 GPU memory and `host_memory_gb: 4`, with explicit CPU platform. GPU work keeps
 its existing memory meanings and can add `cpu_cores`. Several worker views on
 one physical host share a single CPU/RAM ledger. R1 runs one attempt per worker.
-See [CPU capacity and allowances](operations.md#cpu-capacity-and-allowances-r1).
+See [CPU capacity and allowances](reference/host-capacity.md#cpu-capacity-and-allowances-r1).
 
 ## Scheduling and results
 
@@ -446,7 +446,7 @@ external side effect and durable acknowledgement can require replay.
 
 `myce wait --observer-status` reads local diagnostic metadata without queue access
 or notifier execution. See [observer status](status.md#local-completion-observer-diagnostics-next-release)
-and [upgrade/recovery](operations.md#completion-observer-upgrade-and-recovery-next-release).
+and [upgrade/recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 Newer versioned clients request a cooperative handoff from supporting older
 observers at a delivery boundary, preserving all registrations and the lifetime
 lock. Legacy observers without this protocol require explicit operator recovery.
@@ -736,7 +736,7 @@ permanent quarantine, this hold fails with `device_fault_recovery_timeout` one
 existing maximum start window (one hour) after queue-recorded fault loss. Earlier
 absolute `start_by` or queued-only `give_up_at` still wins. This never clears
 quarantine, charges another retry or proves old attempt release. See
-[device-fault recovery](operations.md#accelerator-driver-fault-quarantine).
+[device-fault recovery](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
 
 Job GET exposes the authored duration at `spec.start_window`, the current cutoff
 at `spec.start_by`, and the effective original length at top-level `start_window`
@@ -1185,7 +1185,7 @@ completion. Missing DRM client identity rejects the whole GPU observation, even
 when other clients are readable. Runtime debugfs reads use the worker's existing
 permissions, or an operator-configured `--gpu-telemetry-helper` supplies fresh
 GTT-manager text through the same parser. The helper is an exact executable path,
-not a job command; see [its contract](operations.md#optional-privileged-gpu-telemetry-source).
+not a job command; see [its contract](reference/host-capacity.md#optional-privileged-gpu-telemetry-source).
 Missing, unreadable, stale or malformed GTT-manager evidence keeps conservative sizing. Absolute driver allocations are
 retained independently of net host deltas, which unrelated RAM release can mask.
 Other GPU drivers, CUDA, unified memory, older/incomplete samples and transfers

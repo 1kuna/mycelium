@@ -204,7 +204,7 @@ Native login/boot supervision, recovery of the supervisor itself and a canonical
 installed executable remain [#1166](https://github.com/1kuna/mycelium/issues/1166).
 Existing processes need an ordinary supported handoff/start to gain this behavior;
 merged source alone does not upgrade them.
-See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
+See [upgrade and recovery](../../docs/reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 Legacy or unsupervised shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 
@@ -244,7 +244,7 @@ required component must be OK; Unknown without that comparison (including a
 single-card host), stale comparison, or a monitoring gap retains quarantine.
 Successful command exit alone is not proof. Repeated-fault escalation still
 needs the maintenance owner. Do not resubmit to bypass the hold or clear real
-devices as a consumer. See [device quarantine](../../docs/operations.md#accelerator-driver-fault-quarantine).
+devices as a consumer. See [device quarantine](../../docs/reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
 
 From the release containing #1170, Go/CLI and Python recover a missing resumable
 upload session (404) by checking the content-addressed blob. Success requires

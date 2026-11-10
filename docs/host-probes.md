@@ -301,7 +301,7 @@ grants to the saved permissions and removes the rule/helper. Other installation
 owners and administrator edits are preserved. An external root-only completion
 record makes the final teardown resumable after ownership/validation metadata
 is removed; it remains until the state directory is gone. See [installation and rollout
-semantics](operations.md#accelerator-driver-fault-quarantine).
+semantics](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
 
 Rejected proofs publish sanitized `quarantine_recovery_blocked` status after
 `device-health-v1` negotiation, with the failed component or command exit status.

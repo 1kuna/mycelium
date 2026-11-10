@@ -208,7 +208,7 @@ independently. Updates use the same policy revision CAS; caps remain hard limits
 when a project is alone. Reducing a cap withholds new admissions and does not
 stop existing work. Optional `max_retained_file_bytes` and
 `max_added_file_bytes_24h` limit a project's non-production queue file-store
-use ([file-store quotas](operations.md#per-project-file-store-quotas-464)).
+use ([file-store quotas](reference/file-store.md#per-project-file-store-quotas-464)).
 
 The accounting migration is versioned and durable. Old project totals lack
 class metadata, so they are preserved once in the current catchall GPU tier.

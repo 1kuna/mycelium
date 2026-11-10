@@ -812,7 +812,7 @@ limactl autostart enable --condition=login mycelium-gates
 The checked-in template installs Ubuntu's supported HWE kernel, `bubblewrap`
 and `nsenter` from the start. The GA 6.8 kernel is insufficient: native
 isolation requires **Landlock ABI >= 6**, plus the actual confinement probe
-described in [operations](operations.md#native-payload-isolation). A kernel
+described in [operations](reference/native-execution.md#native-payload-isolation). A kernel
 version alone does not qualify confinement. Keep the previous kernel; only
 restart an existing VM after verifying it is idle. Never weaken isolation or
 disable the global AppArmor restriction to make a gate pass. Subsequent starts
@@ -1015,7 +1015,7 @@ the profile's targets, resources, environment, output contract and check. Linux 
 target per run, not an architecture matrix. The temporary architecture
 exclusion from [#527](https://github.com/1kuna/mycelium/issues/527) is removed after
 the bounded native gate-like I/O measurement described in
-[queue disk contention](operations.md#queue-disk-contention-527). The ordinary
+[queue disk contention](reference/queue-io.md#queue-disk-contention-527). The ordinary
 Linux full profile and converted adapter already included both architectures.
 Their measured 6 GiB declaration and Darwin's `memory: auto` remain as documented
 above; #767 did not establish an unconstrained Linux auto envelope.
@@ -1786,7 +1786,7 @@ remains a read-only startup fence, including the pre-index crash window.
 The usefulness verdict and future backend slice are tracked in
 [#564](https://github.com/1kuna/mycelium/issues/564) and
 [#504](https://github.com/1kuna/mycelium/issues/504). No native qualification or
-activation is implied by laptop tests. See [operations](operations.md#parked-native-storage-integration-564).
+activation is implied by laptop tests. See [operations](reference/file-store.md#parked-native-storage-integration-564).
 
 ## Machine-worker native qualification
 
