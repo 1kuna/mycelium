@@ -184,6 +184,13 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 					route = r.Pattern
 				}
 			}
+			if q.observeRequest != nil {
+				after := time.Duration(0)
+				if !lastUnlock.IsZero() {
+					after = ended.Sub(lastUnlock)
+				}
+				q.observeRequest(route, duration, wait, hold, after)
+			}
 			if route == "POST /api/workers/checkin" && response.status < 400 && measured {
 				// Occupied queue work excludes body reads, reply writes and
 				// mutex acquisition. Slow peers cannot redefine queue latency.

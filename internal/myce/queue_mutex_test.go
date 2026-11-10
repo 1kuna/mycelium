@@ -2,7 +2,9 @@ package myce
 
 import (
 	"context"
+	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -55,4 +57,52 @@ func TestQueueMutexHoldObservation(t *testing.T) {
 	if len(holds) != 4 {
 		t.Fatal("successful try-lock holds were not measured", holds)
 	}
+}
+
+// Model a fully occupied control path without wall sleeps. Pending check-ins
+// cannot bury a submit, and pending submits cannot starve worker reports. The
+// same-class FIFO order survives both handoffs and failed TryLock attempts.
+func TestQueueMutexSubmissionTurns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu queueMutex
+		mu.Lock()
+		order := make(chan int, 7)
+		for i := range 7 {
+			go func() {
+				if i >= 4 {
+					submissionMutex{&mu}.Lock()
+				} else {
+					mu.Lock()
+				}
+				order <- i
+				mu.Unlock()
+			}()
+			synctest.Wait()
+		}
+		if mu.TryLock() {
+			t.Fatal("TryLock bypassed an active writer")
+		}
+		mu.Unlock()
+		synctest.Wait()
+		var got []int
+		for range 7 {
+			got = append(got, <-order)
+		}
+		if want := []int{4, 0, 5, 1, 6, 2, 3}; !slices.Equal(got, want) {
+			t.Fatalf("writer order = %v, want %v", got, want)
+		}
+		mu.RLock()
+		if mu.TryLock() {
+			t.Fatal("writer bypassed reader")
+		}
+		mu.RUnlock()
+		if !mu.TryLock() {
+			t.Fatal("failed TryLock retained writer turn")
+		}
+		mu.Unlock()
+		if !mu.TryRLock() {
+			t.Fatal("writer retained underlying lock")
+		}
+		mu.RUnlock()
+	})
 }

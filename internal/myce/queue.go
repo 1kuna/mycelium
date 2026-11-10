@@ -234,6 +234,7 @@ type Queue struct {
 	jobSnapshotsMu   sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
 	jobSnapshots     map[string]*jobSnapshotCache
 	observeRead      func(string, time.Duration, time.Duration)
+	observeRequest   func(string, time.Duration, time.Duration, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB
 	persisted        map[string][]byte
@@ -628,12 +629,16 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if timing == nil {
 		timing = &queueUpdateTiming{}
 	}
+	var writer sync.Locker = &q.mu
+	if ctx.Value(submissionTurnKey{}) != nil {
+		writer = submissionMutex{&q.mu}
+	}
 	if cancelWait {
-		if err := timing.lockContext(ctx, &q.mu); err != nil {
+		if err := timing.lockContext(ctx, writer); err != nil {
 			return err
 		}
 	} else {
-		timing.lock(&q.mu)
+		timing.lock(writer)
 	}
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
 	q.nasAvailable = available
@@ -771,6 +776,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 
 // committed pins immutable advice inputs before releasing the commit lock.
 func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ *Job, err error) {
+	ctx = context.WithValue(ctx, submissionTurnKey{}, true)
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -815,7 +821,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	}
 	// Own all client maps/slices before the lock and across verification.
 	s = cloneJob(&Job{Spec: s}).Spec
-	unlockRequest := requestLock(ctx, &q.mu)
+	unlockRequest := requestLock(ctx, submissionMutex{&q.mu})
 	store := q.files
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
@@ -833,9 +839,21 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	// Validation errors are handled below in their existing order; key replay
 	// and cancellation still win over all preparation failures.
 	prepared := cloneJob(&Job{Spec: s}).Spec
-	_ = normalizeResources(&prepared)
+	normalizationErr := normalizeResources(&prepared)
+	var executionErr error
 	if !prepared.extensionJob() {
-		_ = lowerExecution(&prepared)
+		executionErr = lowerExecution(&prepared)
+	}
+	// Plain-command validation and payload normalization need no queue state.
+	// Keep their original error ordering inside the commit: replay/cancellation
+	// and live policy/custody fences still win over preparation failures.
+	var plainValidationErr error
+	if !s.extensionJob() {
+		validation := s
+		if validation.memoryOmitted() {
+			validation.Needs.Memory = "auto"
+		}
+		plainValidationErr = validation.Validate()
 	}
 	var recipes map[string]EnvironmentRecipe
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
@@ -930,7 +948,11 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			}
 			return reject("job_files_invalid", err)
 		}
-		if err := submitted.Validate(); err != nil {
+		validationErr := plainValidationErr
+		if s.extensionJob() {
+			validationErr = submitted.Validate()
+		}
+		if err := validationErr; err != nil {
 			return specRejection(err)
 		}
 		if s.OutputDelivery == asyncNAS {
@@ -964,13 +986,22 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if err != nil {
 			return err
 		}
-		if err := normalizeResources(&s); err != nil {
-			return err
-		}
-		if !s.extensionJob() {
-			if err := lowerExecution(&s); err != nil {
-				return specRejection(err)
+		if s.extensionJob() {
+			if err := normalizeResources(&s); err != nil {
+				return err
 			}
+		} else {
+			if normalizationErr != nil {
+				return normalizationErr
+			}
+			if executionErr != nil {
+				return specRejection(executionErr)
+			}
+			// The live policy only supplies memory/class defaults to plain
+			// commands. Keep those rechecked values on the prepared payload.
+			prepared.Needs.Memory = s.Needs.Memory
+			prepared.Class, prepared.Priority = s.Class, s.Priority
+			s = prepared
 		}
 		if recipeErr != nil {
 			var rule *rejectionError

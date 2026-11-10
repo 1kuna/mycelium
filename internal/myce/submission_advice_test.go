@@ -148,6 +148,60 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 	}
 }
 
+// A cold retained record can take arbitrarily long to decode. Production's
+// accepted receipt must finish while that decode is still blocked, including
+// keyed replay, and must keep the committed policy and frozen spec.
+func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
+	q, clock := fixture(t)
+	budgetHost(q, 64<<20, 1)
+	q.s.Jobs["retained"] = &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	admissionWaitBenchmarkSettle(q)
+	record := readGet(q.readRoot, "jobs/retained")
+	decoding, resume, decoded := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go record.once.Do(func() {
+		close(decoding)
+		<-resume
+		record.value, record.err = decodeReadJob(record.data)
+		close(decoded)
+	})
+	<-decoding
+	defer func() { close(resume); <-decoded }()
+	handler := API{Queue: q, Token: "test"}.Handler()
+	s := spec("production")
+	s.SubmissionKey = "production-receipt"
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for range 2 {
+		r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(data))
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { handler.ServeHTTP(w, r); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("production receipt waited for optional retained diagnostics")
+		}
+		var got Job
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if got.PriorityPolicy.Tier != "production" || got.DeadlineGuidance == nil || !got.DeadlineGuidance.DetailsDeferred || got.Spec.SubmissionKey != s.SubmissionKey {
+			t.Fatal("accepted receipt lost its policy/spec or implied complete diagnostics", got)
+		}
+		if id != "" && got.ID != id {
+			t.Fatal("replay created duplicate work")
+		}
+		id = got.ID
+	}
+}
+
 func TestSubmissionAdvicePreservesFields(t *testing.T) {
 	q := submissionAdviceFixture(t)
 	inputs, _, err := q.readGeneration.inputs(context.Background())
