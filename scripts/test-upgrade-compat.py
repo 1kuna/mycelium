@@ -54,7 +54,7 @@ class SupervisorTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
-    def test_expected_worker_refusal_does_not_hide_queue_failure(self):
+    def test_successful_worker_does_not_hide_queue_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             executable = root / 'fixture'
@@ -62,8 +62,7 @@ class SupervisorTests(unittest.TestCase):
                 '#!/usr/bin/env python3\n'
                 'import os, signal, sys\n'
                 'if os.environ["UPGRADE_MODE"] == "worker":\n'
-                '    print("HTTP 426: worker_protocol_invalid", flush=True)\n'
-                '    sys.exit(1)\n'
+                '    sys.exit(0)\n'
                 'signal.signal(signal.SIGTERM, lambda *args: sys.exit(66))\n'
                 'print("queue-ready", flush=True)\n'
                 'signal.pause()\n')
@@ -75,8 +74,8 @@ class SupervisorTests(unittest.TestCase):
                     while 'queue-ready' not in (root / 'queue/process.log').read_text():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(.01)
-                    with compat.process(executable, 'worker', root / 'worker', expected_refusal=True) as worker:
-                        self.assertEqual(worker.wait(timeout=5), 1)
+                    with compat.process(executable, 'worker', root / 'worker') as worker:
+                        self.assertEqual(worker.wait(timeout=5), 0)
 
 
 if __name__ == '__main__':

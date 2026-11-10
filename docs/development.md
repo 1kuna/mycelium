@@ -640,79 +640,22 @@ verification belongs to the separately authorized release after deployment.
 
 ### Release upgrade compatibility
 
-Full also runs `python3 scripts/upgrade-compat.py run`. This builds race-instrumented
-process fixtures from the candidate production sources and the deployed predecessor,
-then runs real SQLite queues and worker startup loops over authenticated loopback
-HTTP. Hardware probes and service managers are synthetic; no installed services,
-fleet authority, native GPUs, or production databases are involved. This is test
-proof, not automatic rollback machinery (MY-03) or native service qualification.
-The full gate first runs `python3 scripts/test-upgrade-compat.py`, covering
-termination of detached build commands and preservation of queue teardown failures
-when a worker's protocol refusal is expected. SIGTERM/SIGHUP unwind the supervisor
-and reap its owned commands before temporary state is removed.
+The full gate runs `scripts/upgrade-compat.py` against the current sources and
+one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.8 pair uses
+r6.7 (`f010f15abc5483c527f4226cbf298966a35f2b33`) as its only historical
+source. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a release.
+`prepare` fetches that exact public source before the offline gate; local gate
+snapshots carry only that predecessor archive.
 
-The predecessor is s071 (`v3.1.0-rc.20261104.s071.100840b`), pinned to published
-commit `100840b4094d77bbc69a80d807dba58722db877c`. No v3 release tags were published;
-the harness uses this verified release commit rather than inventing a tag or
-silently substituting current code. Update the pin/version when qualifying a new
-release predecessor. The second baseline is the inventory-supporting #790 merge,
-`8b2585e1d7edaff376e96430bc614daa9f788342`, which still sends full reports and
-strictly rejects the newer delta fields. The profile prepares both Git sources and module dependencies
-before the offline gate and declares `needs.network: true` for that preparation;
-a local checkout containing both commits needs no network.
-For a fresh offline source archive, first run:
-
-```sh
-python3 scripts/upgrade-compat.py prepare
-python3 scripts/upgrade-compat.py run
-```
-
-Completed binaries are cached beneath Go's build cache, keyed by production source
-bytes, predecessor SHA, fixture bytes, version, platform and Go toolchain. Historical
-production code is never patched to make a pairing pass. The candidate carries the
-incident's fix-forward pre-release suffix, `v3.1.0-rc.20261104.s072.abce497.1`.
-
-The fixture uses the sanitized retained read-only capture from 2026-11-05
-11:46:41 UTC: 6,286 retained jobs, 1,655 work curves and 1,384 storage observations.
-The representative large worker had 27 ready environments, 2,381 native tools,
-2,381–2,526 tools per inventory key, 67,972 repeated tool-name occurrences and
-900,438 compact inventory JSON bytes; 76 distinct environments existed across
-retained reports. The incident-size case uses 40 ready environments, 2,400 native
-tools and two synthetic device slots, asserting at least 1,871,955 transmitted
-bytes so small dev inventories cannot hide #789 again. Queue history and curves
-remain present while the worker joins and sends a second accepted check-in.
-
-Pairings cover candidate/candidate and predecessor-worker/candidate-queue. s071
-predates tool inventory and rejects the candidate's new fields in its strict JSON
-decoder; that reverse direction is an explicitly checked unsupported boundary.
-The #790 worker joins the candidate with full inventory on every heartbeat, and
-the candidate joins #790 without sending unadvertised delta fields. Another
-journey keeps one candidate worker alive across queue replacement: first reopen
-the candidate's disposable database, require its hash-only check-in to receive
-an explicit full request and verify the refresh; then start #790 with a fresh
-disposable database on the same loopback endpoint and require legacy full retry
-and subsequent accepted full heartbeats. This tests worker fallback, without
-claiming that an old queue can read a new queue's persisted data. Session and
-keyed-attempt protocol must remain unchanged throughout.
-The downgrade journey makes the candidate installer write an automatic-cache
-config, runs the actual s071 CLI installer with `--config ... --dry-run`, then
-starts an s071 worker from the same config and requires accepted check-ins.
-It does not claim explicit-cache metadata is readable by s071 (#790).
-
-The suite has a ten-minute total budget, including cold builds. Each build
-command has a three-minute deadline, each fixture process a 45-second
-test deadline, each join a 30-second deadline, and teardown eight seconds before
-killing and reporting a stuck owned fixture. These bound broken-build and startup
-costs without changing product deadlines. All cases run even after a failure.
-To reproduce the two original incidents without modifying a checkout:
-
-```sh
-python3 scripts/upgrade-compat.py run --candidate abce497c
-```
-
-That command must fail both same-source startup and saved-config downgrade on the
-original release. A passing current run requires the fixes from #790 and the
-negotiated inventory protocol from #791.
+Real loopback queue and worker processes cover both directions, retained history,
+command completion with confirmed custody release, unchanged keyed attempt identity,
+saved-config readability by the predecessor,
+and an uninterrupted worker across current/previous queue restarts with inventory
+refresh. Synthetic hardware and service managers keep the checks laptop-testable.
+The supervisor bounds execution and reaps its owned children before scratch
+cleanup. Cached binaries include source identity, fixture bytes, version and Go
+toolchain. This proves adjacent-release interoperation; native rollout and running
+customer-job preservation still require their own release checks.
 
 The committed `release-build` profile reuses this environment for Linux release
 artifacts, with literal version and commit arguments and build receipts. The
