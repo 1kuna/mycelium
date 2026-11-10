@@ -193,13 +193,17 @@ func TestAdaptiveFairnessAccountingCadenceInvariant(t *testing.T) {
 				submit(t, q, projectSpec("a"))
 				run := check(t, q, m, nil).Job
 				b := submit(t, q, projectSpec("b"))
+				q.mu.Lock()
 				q.s.FairUsage[q.fairKey(b.Spec)] = FairUsage{Seconds: 100, At: clock.Now(), HorizonSeconds: quantum, QuantumSeconds: quantum}
+				q.mu.Unlock()
 				for range steps {
 					clock.Advance(time.Minute / time.Duration(steps))
 					check(t, q, m, run)
 				}
+				q.mu.Lock()
 				aUsage := q.s.FairUsage[q.fairKey(run.Spec)].Seconds
 				bUsage := q.s.FairUsage[q.fairKey(b.Spec)].Seconds
+				q.mu.Unlock()
 				finish(t, q, run, true)
 				a := submit(t, q, projectSpec("a"))
 				got := check(t, q, m, nil).Job
