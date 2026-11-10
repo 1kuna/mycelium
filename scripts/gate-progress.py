@@ -96,11 +96,20 @@ def load_history(path):
     return None
 
 
-def run(label, command, cache, report, clock=time.monotonic):
+def history_identity(label):
     # The cache belongs to this execution environment, alongside Go's cache.
     # No hostname, address, source path or credentials are persisted in telemetry.
     identity = [label, platform.system(), platform.machine(), cpu_count(),
                 os.environ.get('GOVERSION', '')]
+    # Full shards each use one Go CPU. Four and eight competing shards must
+    # still learn separately; otherwise both appear to be the same CPU profile.
+    if slots := os.environ.get('GATE_TEST_SLOTS'):
+        identity.append(slots)
+    return identity
+
+
+def run(label, command, cache, report, clock=time.monotonic):
+    identity = history_identity(label)
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / (hashlib.sha256(json.dumps(identity).encode()).hexdigest() + '.json')
     history = load_history(path)
@@ -201,6 +210,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                 status = 125
         elapsed = clock() - progress.started
         record = dict(label=label, cpu=cpu_count(), elapsed_seconds=elapsed,
+                      shard_slots=os.environ.get('GATE_TEST_SLOTS'),
                       longest_gap_seconds=max(progress.longest_gap, clock() - progress.last),
                       expected_seconds=expected, exit=status,
                       progress_kind='test lifecycle' if is_test else 'output',

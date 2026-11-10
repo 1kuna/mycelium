@@ -25,9 +25,7 @@ class ProgressTests(unittest.TestCase):
         child.stdout.fileno.return_value = 123
         if expected is not None:
             cache.mkdir(exist_ok=True)
-            identity = ['package:selection', progress.platform.system(),
-                        progress.platform.machine(), progress.cpu_count(),
-                        os.environ.get('GOVERSION', '')]
+            identity = progress.history_identity('package:selection')
             key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected)))
         selector = Mock()
@@ -101,6 +99,17 @@ class ProgressTests(unittest.TestCase):
         with patch.dict(os.environ, GOMAXPROCS='1'):
             self.assertEqual(progress.cpu_count(), 1)
 
+    def test_shard_concurrency_does_not_reuse_another_profiles_deadline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for slots, timeout in [('4', '-timeout=1h'), ('8', '-timeout=1h'), ('4', '-timeout=0')]:
+                with patch.dict(os.environ, GOMAXPROCS='1', GATE_TEST_SLOTS=slots):
+                    code, command, record = self.execute(root, [(20, b'')])
+                self.assertEqual(code, 0)
+                self.assertIn(timeout, command)
+                self.assertEqual(record['shard_slots'], slots)
+            self.assertEqual(len(list((root / 'cache').glob('*.json'))), 2)
+
     def test_nested_execution_quota_limits_parallelism(self):
         files = {'/proc/self/cgroup': '0::/worker/job',
                  '/sys/fs/cgroup/worker/cpu.max': '150000 100000'}
@@ -130,8 +139,7 @@ class ProgressTests(unittest.TestCase):
             tool.chmod(0o755)
             cache = root / 'cache'
             cache.mkdir()
-            identity = ['hung', progress.platform.system(), progress.platform.machine(),
-                        progress.cpu_count(), os.environ.get('GOVERSION', '')]
+            identity = progress.history_identity('hung')
             key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=.05)))
             env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],

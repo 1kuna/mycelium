@@ -125,16 +125,26 @@ while read -r os arch cgo; do
   fi
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
 done < <("$scratch/bin/myce" release build-targets)
+# CLI shards share one race-instrumented synthetic child image. Outside the
+# gate, devTestBinary still builds its own image for ordinary go test users.
+step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
+export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
+# The external Docker simulator intentionally has no race runtime; assertions
+# and the adapter still run in the race test process. Share that image too.
+if [[ $mode == full ]] || grep -q 'internal/myce' "$scratch/selection"; then
+  step build-test-docker go test -c -race=false -vet=off -o "$scratch/bin/fake-docker.test" ./internal/myce
+  export GATE_TEST_DOCKER_BINARY="$scratch/bin/fake-docker.test"
+fi
 if [[ $mode == full ]]; then
   step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must
   # already be local/cached; this gate remains offline.
-  step upgrade-compat python3 scripts/upgrade-compat.py run
   # Includes the real CLI dev/checkpoint/model/onboarding e2e. A separate dev
   # pair would repeat the same tests and builds.
   go list ./... | while read -r package; do
     printf '%s\t.*\n' "$package"
   done > "$scratch/selection"
+  printf '@upgrade-compat\t\n' >> "$scratch/selection"
 fi
 # One watchdog per package; release any completed slot, not the oldest PID.
 if [[ ! -s $scratch/selection ]]; then

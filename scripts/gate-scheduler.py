@@ -102,14 +102,21 @@ def main():
         shards = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(shards)
         entries = shards.plan(entries, slots)
+        # Cross-release proof owns a normal slot and the same watchdog/custody
+        # as the tests. Start it early so it overlaps rather than extends them.
+        entries.sort(key=lambda entry: entry.split('\t', 1)[0] != '@upgrade-compat')
         Path(selection).with_suffix('.shards.json').write_text(json.dumps(entries, indent=2) + '\n')
         slots = min(9, slots)
         # Limit aggregate CPU pressure instead of giving every process the
         # entire host. Go compilation within a shard also inherits this budget.
-        environment = dict(os.environ, GOMAXPROCS='1', GOFLAGS='-p=1')
+        environment = dict(os.environ, GOMAXPROCS='1', GOFLAGS='-p=1', GATE_TEST_SLOTS=str(slots))
 
     def command(entry):
         package, names = entry.split('\t', 1)
+        if package == '@upgrade-compat':
+            return 'upgrade-compat', [sys.executable, str(Path(__file__).with_name('gate-progress.py')),
+                                     'upgrade-compat', sys.executable,
+                                     str(Path(__file__).with_name('upgrade-compat.py')), 'run']
         if mode != 'full':
             package = subprocess.check_output(['go', 'list', './' + package.removeprefix('./')],
                                               text=True).strip()

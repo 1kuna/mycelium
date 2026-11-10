@@ -19,6 +19,9 @@ var devBinary struct {
 // package fixture's, rather than the first test's temporary directory.
 func devTestBinary(t *testing.T) string {
 	t.Helper()
+	if binary := os.Getenv("GATE_TEST_CLI_BINARY"); binary != "" {
+		return binary
+	}
 	devBinary.Do(func() {
 		devBinary.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "myce-dev-test")
 		devBinary.out, devBinary.err = exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-o", devBinary.path, ".").CombinedOutput()

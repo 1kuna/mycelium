@@ -98,7 +98,12 @@ func TestDevHostHealthReportCadence(t *testing.T) {
 		name     string
 		interval time.Duration
 		slow     bool
-	}{{"1s", time.Second, false}, {"2s", 2 * time.Second, false}, {"slow-checkins", time.Second, true}} {
+		// Delivery/expiry at second-scale cadences is covered by
+		// TestHostHealthReportDeliveryAndFrozenExpiry with its injected clock.
+		// This integration test needs actual asynchronous reports, not seconds of
+		// idle wall time. Leave a second probe-control tick for asynchronous delivery:
+		// at the 100ms floor, ordinary fixture startup can consume the entire window.
+	}{{"200ms", 200 * time.Millisecond, false}, {"400ms", 400 * time.Millisecond, false}, {"slow-checkins", 200 * time.Millisecond, true}} {
 		interval := scenario.interval
 		t.Run(scenario.name, func(t *testing.T) {
 			root := newTestStateRoot(t)

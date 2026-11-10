@@ -130,6 +130,26 @@ class ShardTests(unittest.TestCase):
         child.terminate.assert_called_once()
         self.assertEqual(child.communicate.call_count, 2)
 
+    def test_compatibility_overlaps_tests_within_the_same_slot_budget(self):
+        from tempfile import TemporaryDirectory
+        import sys
+        with TemporaryDirectory() as directory:
+            selection = Path(directory) / 'selection'
+            selection.write_text('mycelium/internal/view\t.*\n@upgrade-compat\t\n')
+            with patch.object(sys, 'argv', ['scheduler', 'full', '4', str(selection)]), \
+                 patch.object(scheduler, 'run', return_value=0) as run:
+                self.assertEqual(scheduler.main(), 0)
+            entries, slots, command, environment = run.call_args.args
+            self.assertEqual(slots, 4)
+            self.assertEqual(entries[0], '@upgrade-compat\t')
+            label, argv = command(entries[0])
+            self.assertEqual(label, 'upgrade-compat')
+            self.assertEqual(Path(argv[1]).name, 'gate-progress.py')
+            self.assertEqual(Path(argv[-2]).name, 'upgrade-compat.py')
+            self.assertEqual(argv[-1], 'run')
+            self.assertEqual(entries[1:], ['mycelium/internal/view\t.*'])
+            self.assertEqual(environment['GOMAXPROCS'], '1')
+
     def test_full_nested_builds_inherit_shard_budget_and_quick_keeps_allocation(self):
         from tempfile import TemporaryDirectory
         import sys
@@ -144,6 +164,7 @@ class ShardTests(unittest.TestCase):
                 self.assertEqual(slots, 9)
                 self.assertEqual(environment['GOFLAGS'], '-p=1')
                 self.assertEqual(environment['GOMAXPROCS'], '1')
+                self.assertEqual(environment['GATE_TEST_SLOTS'], '9')
                 self.assertIn('-parallel', command(entries[0])[1])
                 with patch.object(sys, 'argv', ['scheduler', 'quick', '18', str(selection)]), \
                      patch.object(scheduler, 'run', return_value=0) as run:
