@@ -177,7 +177,17 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var id string
-	for range 2 {
+	for step := range 3 {
+		if step == 2 {
+			s.SubmissionKey = "cancelled-production-receipt"
+			if _, err := q.CancelSubmission(s.Project, s.SubmissionKey); err != nil {
+				t.Fatal(err)
+			}
+			data, err = json.Marshal(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		r := httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(data))
 		r.Header.Set("Authorization", "Bearer test")
 		w := httptest.NewRecorder()
@@ -192,10 +202,16 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
 			t.Fatal(w.Code, w.Body.String())
 		}
-		if got.PriorityPolicy.Tier != "production" || got.DeadlineGuidance == nil || !got.DeadlineGuidance.DetailsDeferred || got.Spec.SubmissionKey != s.SubmissionKey {
+		if got.DeadlineGuidance == nil || got.Spec.SubmissionKey != s.SubmissionKey {
+			t.Fatal("accepted receipt lost guidance or key", got)
+		}
+		if step < 2 && (got.PriorityPolicy.Tier != "production" || !got.DeadlineGuidance.DetailsDeferred) {
 			t.Fatal("accepted receipt lost its policy/spec or implied complete diagnostics", got)
 		}
-		if id != "" && got.ID != id {
+		if step == 2 && (got.State != "cancelled" || got.DeadlineGuidance.DetailsDeferred) {
+			t.Fatal("cancelled reservation lost its terminal receipt", got)
+		}
+		if step == 1 && got.ID != id {
 			t.Fatal("replay created duplicate work")
 		}
 		id = got.ID
