@@ -42,6 +42,19 @@ func TestHostDeviceCLI(t *testing.T) {
 	if err != nil || status.DeviceMaintenance[0].Disabled || status.DeviceMaintenance[0].Reason != "" || status.DeviceMaintenance[0].Revision != 2 {
 		t.Fatal("enable did not clear policy with retained revision", status, err)
 	}
+
+	pending := waitSubmit(t, q)
+	reply, err := q.Checkin(myce.Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"})
+	if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].ID != pending.ID {
+		t.Fatal("missing usage assignment", reply, err)
+	}
+	out.Reset()
+	if err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || len(status.DeviceUse) != 1 || status.DeviceUse[0].Identity != "fake-stable" || status.DeviceUse[0].Assignments != 1 || !status.DeviceUse[0].LastAssignedAt.Equal(clock.Now()) {
+		t.Fatal("host status hid assignment history", out.String(), err)
+	}
 	for _, args := range [][]string{{"device"}, {"device", "disable", "host"}, {"device", "enable", "host", "0", "--reason", "wrong"}, {"device", "disable", "host", "0", "--stop"}} {
 		if err := hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
 			t.Fatal("invalid device command accepted", args)

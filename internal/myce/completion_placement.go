@@ -124,7 +124,7 @@ func (q *Queue) completionBetter(j *Job, a, b *Machine, stableTie ...bool) (bett
 	if ae.seconds() != be.seconds() {
 		return ae.seconds() < be.seconds(), true
 	}
-	return (len(stableTie) == 0 || stableTie[0]) && targetKey(a) < targetKey(b), true
+	return (len(stableTie) == 0 || stableTie[0]) && q.deviceUseTieBetter(a, b, targetKey(a) < targetKey(b)), true
 }
 
 // Keep existing useful-victim selection and disruption costs authoritative.

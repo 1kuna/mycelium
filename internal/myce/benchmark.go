@@ -540,7 +540,7 @@ func (q *Queue) benchmarkBetter(j *Job, a, b *Machine, stableTie ...bool) (bette
 		return ag < bg, true
 	} // Incomparable references have a stable group order.
 	if as == bs {
-		return (len(stableTie) == 0 || stableTie[0]) && a.ID < b.ID, true
+		return (len(stableTie) == 0 || stableTie[0]) && q.deviceUseTieBetter(a, b, a.ID < b.ID), true
 	}
 	return as < bs, true
 }
@@ -566,7 +566,15 @@ func (q *Queue) capabilityPlacementBetterWithTie(j *Job, a, b *Machine, allowTie
 		return better
 	}
 	if knownValue {
-		return allowTie && targetKey(a) < targetKey(b)
+		return allowTie && q.deviceUseTieBetter(a, b, targetKey(a) < targetKey(b))
 	}
-	return q.unmeasuredProgram(j, a) && capabilityBetter(a, b)
+	if q.unmeasuredProgram(j, a) {
+		if capabilityBetter(a, b) {
+			return true
+		}
+		if !capabilityBetter(b, a) {
+			return allowTie && q.deviceUseTieBetter(a, b, false)
+		}
+	}
+	return false
 }

@@ -41,6 +41,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	DeviceUse map[string]DeviceUse `json:"device_use,omitempty"`
 	// Frozen accepted-contact validity is only for stopped-queue conversion.
 	// A running/restarted queue always requires live session contact evidence.
 	ContactEvidence        map[string]contactEvidence    `json:"contact_evidence,omitempty"`
@@ -3055,6 +3056,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now
+	if !j.Spec.Needs.cpuOnly() {
+		q.recordDeviceUse(m)
+	}
 	j.FinishedAt = nil
 	j.StartLatencySeconds = 0
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)

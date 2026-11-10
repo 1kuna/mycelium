@@ -165,6 +165,22 @@ func TestBenchmarkRankingTransferCostAndMissingRates(t *testing.T) {
 	if better, known := q.benchmarkBetter(j, &b, &a); !known || !better {
 		t.Fatal("transfer cost did not prefer 1.5s over 100.25s")
 	}
+
+	// Even on one host, a recently used card's measured advantage outranks LRU.
+	cards := m3Machine()
+	sameA, sameB := a, b
+	sameA.ID, sameA.HostID, sameA.Device, sameA.Devices = cards.ID, cards.HostID, "0", cards.Devices
+	sameB.ID, sameB.HostID, sameB.Device, sameB.Devices = cards.ID, cards.HostID, "1", cards.Devices
+	for _, target := range []*Machine{&sameA, &sameB} {
+		target.ExtensionFingerprint = "test-fingerprint"
+		r := newExtensionReport(e, target, j.Spec.workType())
+		r.Setup, r.Qualified, r.CheckID = true, true, "same-host-check"
+		target.ExtensionReports = []ExtensionReport{r}
+	}
+	q.recordDeviceUse(&sameB)
+	if better, known := q.benchmarkBetter(j, &sameB, &sameA); !known || !better {
+		t.Fatal("least recent use outranked measured fitness")
+	}
 	for _, bad := range []float64{0, math.NaN(), math.Inf(1)} {
 		b.CapabilityProfile.Benchmark.Measurements[0].Rate = bad
 		if better, known := q.benchmarkBetter(j, &b, &a); !known || better {
