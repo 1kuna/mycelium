@@ -5,34 +5,72 @@ and how to verify the loaded environment catalog.
 
 ## Worker scratch retention
 
-Each worker cleans its own state directory once a minute. Finished worker logs
-go after the worker's `--log-retention` (default 7 days). Cleared per-attempt
-state and associated process/result/diagnostic files keep that same window after
-custody clears. Live attempts, pending result replay, indexed actors and Docker
-custody awaiting the stopped-container collector are protected. Private Docker
-evidence survives container removal until this log window expires. Unknown
-orphan records are retained for recovery. Per-attempt input and
-work folders (`job-files/JOB/ATTEMPT`, including inputs, unpacked source and a
-Python job's `.venv`) go immediately through the existing collector once the
-worker confirms that the exact attempt succeeded with accepted, published
-outputs and confirmed release. The confirmation is saved with cleared custody,
-so a restart before collection does not restart a grace period. Small logs and
-process/result records keep the log-retention window. Failed attempts and
-cancelled attempts and unknown orphan folders keep **24 hours** after the worker first finds them
-without custody, timed by the worker clock. Cancellation does not collect partial
-outputs into `output_refs`: recover them from the assigned worker's
-`job-files/JOB/ATTEMPT` directory within that day, using the job's machine and
-attempt from its status or ledger. This includes only files actually present on
-that worker; logs and process state follow the separate log-retention window.
-The grace bounds retention time, not bytes: scratch may be as large as the job's
-work and inputs, and remains on the worker rather than consuming queue file-store
-capacity. A worker outage or disk loss can prevent recovery. Collect failed test logs or partial
-outputs within that day; opt-in published attempt diagnostics have their own
-file retention. A held attempt keeps its folder however long it runs. The pass refuses
-to run when `job-files` is not a real directory, for example a symlink. A folder
-it cannot remove, such as one with root-owned Docker output, gets a fresh day
-and is retried; other folders are still cleaned, and a repeated error is logged
-once rather than every minute.
+Each worker runs retention in its existing background lane, normally once a
+minute. Finished worker logs follow `--log-retention`; omitted/zero retention
+preserves them. Unique process/result/diagnostic records remain evidence even
+after custody clears. Live attempts and pending replay keep their scratch for
+however long custody lasts.
+
+From the worker and queue release containing #1227, the collector reconciles
+each unclaimed `job-files/JOB/ATTEMPT` folder with the queue by exact job ID,
+attempt number and worker identity. It also honors the existing durable local
+publication receipt, including after restart. Scratch goes automatically when:
+
+- The queue accepted that exact attempt's successful result and confirmed its
+  release, or the worker saved that publication confirmation before clearing custody.
+- The queue authorized file expiry through `myce file release apply`, or the
+  terminal job passed the queue's positive `--file-retention` duration. Physical
+  release must be confirmed, and pending delivery or protected-storage custody
+  still prevents collection. An older attempt never inherits a newer success's
+  acceptance; it needs its own release and the terminal job's expiry authority.
+
+The old fixed **24-hour** scratch promise was retired under MY-34. A saved
+24-hour file-retention policy still means 24 hours from the job's finish time;
+other saved positive durations retain their own meaning. Omitted/zero file
+retention does not expire unique failed/cancelled scratch. `--log-retention`
+does not authorize deleting scratch. The `.myce-unclaimed` marker records first
+observation for diagnosis; its age neither authorizes deletion nor prevents
+collection of accepted/released data. Eligible folders and their markers are
+removed together. Unknown jobs, unknown folder names, unmatched attempts,
+unconfirmed custody and failed queue lookups remain protected. Absence from a
+fleet status page never proves release. An older queue without this endpoint
+keeps unconfirmed folders; existing local publication receipts still work.
+
+Cancellation does not publish partial outputs into `output_refs`. Recover them
+from the exact assigned attempt before its configured file-retention deadline
+or explicit release. To release owned terminal scratch deliberately, use the
+existing reference/custody-aware flow after preserving any required files:
+
+```sh
+myce file release plan --project P JOB_ID > release-plan.json
+# Review the exact job/attempt, blockers, references and required downstream copies.
+myce file release apply --accept-expiry release-plan.json
+```
+
+The release applies to the selected terminal job's files, including scratch;
+it is not a force-delete for an unknown or live attempt. Retain the plan/apply
+receipts. `file_release_stale` requires a fresh plan. Queue references still
+protect shared blobs; scratch reclamation leaves the accepted queue manifest
+and its referenced blobs intact. The authenticated worker endpoint
+`POST /api/workers/attempt-files` takes `id`, `attempt`, and `machine` and returns
+`reclaim`, a fixed `reason`, and an optional policy deadline `until`; it is a
+read-only exact-attempt check, not an override or a paginated status lookup.
+
+Worker logs report `worker scratch retention` with allocated `retained_bytes`,
+`reclaimed_bytes`, and `retained_bytes_by_reason` (for example `local_custody`,
+`unique_unreleased`, `unknown_job`, `file_retention`, or `queue_unavailable`).
+These are filesystem-block measurements taken in the retention lane, outside
+queue locks and heartbeat work. Hardlinks across attempt folders can overstate
+physical savings; a partially failed deletion is conservatively counted as
+retained until the next pass. Measurement errors accompany the sweep error.
+The pass refuses a symlinked `job-files` root and never follows attempt symlinks.
+A failed removal is retried on the next pass without blocking other folders.
+
+This bounds disposable scratch by acceptance or the installation's authored
+retention policy, not by a universal byte cap. Protected unique data can exceed
+available capacity and requires recovery/release by its owner; disk loss or a
+worker outage can prevent recovery. No live-worker reclamation measurement or
+deployment is implied by the laptop regression tests.
 
 Successful installs keep one previous copy of each replaced artifact in the
 role's `.Trash`; older installer-owned copies are pruned after activation. The

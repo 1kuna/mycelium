@@ -35,6 +35,8 @@ func releaseTestHost(t *testing.T, cores int, ram float64, victims []releaseTest
 		}
 	}
 	q.refreshHostMemory()
+	// Callers inspect planner internals directly after this fixture returns.
+	drainAdmissionWait(t, q)
 	return q, &target
 }
 

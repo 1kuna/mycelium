@@ -201,6 +201,7 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 	for _, occupied := range []bool{true, false} {
 		t.Run(fmt.Sprint(occupied), func(t *testing.T) {
 			q, _ := candidateCostFixture(t)
+			drainAdmissionWait(t, q)
 			if !occupied {
 				for i := range 5 {
 					delete(q.s.Jobs, fmt.Sprintf("running-%d", i))

@@ -58,7 +58,7 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 // A successful process alone is insufficient: release and queue acceptance
 // belong to the exact attempt, and a cancelled success may have no accepted output.
 func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	_, ref := retentionUpload(t, c, "result")
 	s := spec("experiment")
@@ -72,7 +72,23 @@ func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
 	}
 	r := Result{Execution: Execution{ID: j.ID, Attempt: assigned.Attempt}, Machine: m.ID, Session: m.Session, Success: true, OutputRefs: FileManifest{"output": ref}}
 	st := workerState{Job: assigned, Result: &r}
-	w := Worker{Client: c}
+	w := Worker{Client: c, Clock: clock, Machine: m}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "job-files", j.ID, "1")
+	if err := os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attemptFilesExpired(path, clock.Now().Add(-48*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy scratch has no saved publication receipt. Uploaded-but-unaccepted
+	// bytes must stay; a later exact acceptance must retire even an old marker.
+	if err := w.retainWorkerFiles(context.Background(), dir, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("uploaded but unaccepted scratch lost", err)
+	}
 	confirm := func(want bool) {
 		t.Helper()
 		published, err := w.publishedAttemptFiles(context.Background(), st)
@@ -85,6 +101,15 @@ func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirm(true)
+	if err := w.retainWorkerFiles(context.Background(), dir, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("accepted legacy scratch retained", err)
+	}
+	if _, err := os.Stat(q.files.blob(ref)); err != nil {
+		t.Fatal("scratch collection lost accepted queue bytes", err)
+	}
 	r.ReleasePending = true
 	confirm(false)
 	r.ReleasePending = false

@@ -1318,7 +1318,7 @@ func (w Worker) Run(stop context.Context) error {
 			case request := <-retentionRequests:
 				w.hygieneCollector.collect(retentionCtx)
 				// Repeat a persistent error only when it changes, not every minute.
-				if e := workerRetention(s.dir, request.now, w.LogRetention); e == nil {
+				if e := w.retainWorkerFiles(retentionCtx, s.dir, request.now); e == nil {
 					lastRetentionErr = ""
 				} else if e.Error() != lastRetentionErr {
 					lastRetentionErr = e.Error()

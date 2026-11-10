@@ -79,6 +79,7 @@ func TestMemoryTransferDerivationFences(t *testing.T) {
 // Both explicit profile identities and input-derived identities must agree.
 func TestCheckinMemoryIdentityProjectionEquivalence(t *testing.T) {
 	q, _ := candidateCostFixture(t)
+	drainAdmissionWait(t, q)
 	i := 0
 	for _, j := range q.liveJobs() {
 		if j.State != "queued" {
@@ -112,6 +113,7 @@ func TestCheckinMemoryIdentityProjectionEquivalence(t *testing.T) {
 // including the permanent-capacity views used by health and waiting reasons.
 func TestMemorySizingDerivationMatchesFreshPass(t *testing.T) {
 	q, _ := candidateCostFixture(t)
+	drainAdmissionWait(t, q)
 	q.memoryPlanning = newMemoryPlanningCache()
 	for _, j := range q.liveJobs() {
 		if j.State != "queued" {
