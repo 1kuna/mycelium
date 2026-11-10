@@ -639,7 +639,7 @@ finally: slot.release()
     def test_later_release_stream_cannot_starve_a_queued_normal_quick(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
-            launcher = """import importlib.util,pathlib,sys,time
+            launcher = """import importlib.util,pathlib,sys,time,types
 s=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
@@ -648,7 +648,7 @@ original_sleep=time.sleep
 def wait(_):
  (r/'queued').touch()
  while not (r/'allow').exists(): original_sleep(.01)
-c.time.sleep=wait
+c.time=types.SimpleNamespace(sleep=wait)
 slot=c.acquire(r,mode='quick',wait=True)
 (r/'normal-admitted').touch()
 slot.release()
