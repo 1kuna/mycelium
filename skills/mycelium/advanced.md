@@ -96,7 +96,11 @@ A held lock proves ownership, not advancement, receipt delivery or receiver work
 A quiet held long-poll can be healthy without a state change. Missing legacy
 metadata or an old phase is unknown evidence, not a cause diagnosis.
 Cooperative upgrades require compatible running owners; a new CLI binary does
-not replace an existing observer image. Legacy/stalled-owner recovery is an
+not replace an existing observer image. On the release containing #919's
+supervision fix, observer child death and silent coordinator/authority reads
+recover automatically, preserving durable arms and pending delivery IDs. Local
+status includes retained `supervision` recovery evidence. Native login/boot and
+supervisor-process recovery remain #1166; legacy/unsupervised-owner recovery is an
 operator action that preserves all durable arms, proves exact owner exit and
 then replays the original key/binding. See [operator recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
 

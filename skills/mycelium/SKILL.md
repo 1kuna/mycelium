@@ -191,10 +191,21 @@ through `myce wait --observer-status`; a PID/lock proves ownership, not delivery
 From the release containing #1160, shared owners use their own session and a
 clean allowlist environment, excluding runner/job tracking and MYCE_TOKEN while
 preserving PATH/locale for legacy notifiers. Managed attempts/dev sessions keep
-their existing cleanup custody. A dead owner still recovers on the next keyed
-command; automatic supervision is deferred to [#1166](https://github.com/1kuna/mycelium/issues/1166).
+their existing cleanup custody. From the release containing #919's supervision
+fix, that detached process supervises a separate observer child: death or silent coordinator/authority reads
+trigger automatic adoption of durable arms without another keyed command.
+`--observer-status` includes `supervision`, with restart count, exit signal/code
+when known, and the retained pre-recovery diagnostic. A pending notifier payload
+survives replacement with the same delivery ID; receivers must deduplicate that
+ID if acknowledgement was interrupted. No compute is resubmitted.
+Recovery allowances grow from protocol holds, existing notifier deadlines and
+measured service cost; intentional Retry-After waits are preserved.
+Native login/boot supervision, recovery of the supervisor itself and a canonical
+installed executable remain [#1166](https://github.com/1kuna/mycelium/issues/1166).
+Existing processes need an ordinary supported handoff/start to gain this behavior;
+merged source alone does not upgrade them.
 See [upgrade and recovery](../../docs/operations.md#completion-observer-upgrade-and-recovery-next-release).
-Legacy or stalled shared-observer recovery belongs to its operator. Keep stable
+Legacy or unsupervised shared-observer recovery belongs to its operator. Keep stable
 receipts and delivery IDs; do not kill a shared observer or edit its registry.
 
 If blocked, record expected/observed behavior, component version, job/attempt,

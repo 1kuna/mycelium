@@ -97,6 +97,15 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	if r.DeliveryStatus == "delivered" && r.ObservationError == "" && (r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled") {
 		return nil
 	}
+	if r.PendingNotification != nil {
+		// An interrupted delivery is already frozen. Preserve its original arm,
+		// payload and notifier even when a keyed caller arrives during recovery.
+		var saved profileObserver
+		if err := readProfileJSON(filepath.Join(dir, "observer.json"), &saved); err != nil {
+			return err
+		}
+		return registerSharedObserver(ctx, dir, saved, token)
+	}
 	var saved profileObserver
 	if e := readProfileJSON(filepath.Join(dir, "observer.json"), &saved); e == nil && cfg.Notify == "" {
 		cfg.Notify = saved.Notify
@@ -195,30 +204,39 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 }
 
 func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
-	r.Observation = "not_armed"
-	r.Delivery = "not_configured"
-	if cfg.Notify != "" {
-		r.Delivery = "not_armed"
-	}
-	notification := profileNotification{JobID: r.JobID, Key: r.Key}
-	if waitErr != nil {
-		r.ObservationError = "transport_error"
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(waitErr, context.DeadlineExceeded) {
-			r.ObservationError = "timeout"
-		} else if errors.Is(ctx.Err(), context.Canceled) || errors.Is(waitErr, context.Canceled) {
-			r.ObservationError = "interrupted"
-		} else if myce.IsTLSIdentityError(waitErr) {
-			r.ObservationError = "tls_identity"
-		}
-		notification.Status, notification.ObservationError = "observation_failed", r.ObservationError
+	var notification profileNotification
+	if r.PendingNotification != nil {
+		notification = *r.PendingNotification
 	} else {
-		r.Status, r.ResultReference = j.State, j.OutputRefs
-		r.FilesExpired = j.FilesExpired
-		notification.Status, notification.ResultReference = r.Status, r.ResultReference
+		r.Observation = "not_armed"
+		r.Delivery = "not_configured"
+		if cfg.Notify != "" {
+			r.Delivery = "not_armed"
+		}
+		notification = profileNotification{JobID: r.JobID, Key: r.Key}
+		if waitErr != nil {
+			r.ObservationError = "transport_error"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(waitErr, context.DeadlineExceeded) {
+				r.ObservationError = "timeout"
+			} else if errors.Is(ctx.Err(), context.Canceled) || errors.Is(waitErr, context.Canceled) {
+				r.ObservationError = "interrupted"
+			} else if myce.IsTLSIdentityError(waitErr) {
+				r.ObservationError = "tls_identity"
+			}
+			notification.Status, notification.ObservationError = "observation_failed", r.ObservationError
+		} else {
+			r.Status, r.ResultReference = j.State, j.OutputRefs
+			r.FilesExpired = j.FilesExpired
+			notification.Status, notification.ResultReference = r.Status, r.ResultReference
+		}
+		notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})
+		if waitErr != nil {
+			notification.DeliveryID = profileHash([]string{notification.DeliveryID, r.ArmNonce})
+		}
 	}
-	notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})
-	if waitErr != nil {
-		notification.DeliveryID = profileHash([]string{notification.DeliveryID, r.ArmNonce})
+	if cfg.Notify != "" {
+		r.PendingNotification = &notification
+		r.DeliveryStatus = "pending"
 	}
 	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
@@ -227,7 +245,7 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 		b, _ := json.Marshal(notification)
 		// Observation cancellation must still report its failure. The notifier owns
 		// delivery deadlines/retries and gets no fleet token or diagnostic text.
-		deliveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		deliveryCtx, cancel := context.WithTimeout(context.Background(), observerNotifierBudget)
 		defer cancel()
 		cmd := exec.CommandContext(deliveryCtx, cfg.Notify)
 		cmd.Stdin = strings.NewReader(string(b))
@@ -236,6 +254,7 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 			cmd.Env = notifyEnv[0]
 		}
 		deliveryErr := cmd.Run()
+		r.PendingNotification = nil
 		r.DeliveryStatus = "delivered"
 		if deliveryErr != nil {
 			r.DeliveryStatus = "failed"

@@ -157,11 +157,16 @@ func waitSharedProfiles(ctx context.Context, root string) error {
 	}
 	log.SetOutput(&observerLogWriter{root: root})
 	syscall.CloseOnExec(3)
+	syscall.CloseOnExec(4)
 	lock := os.NewFile(3, "observer.lock")
 	defer lock.Close()
 	ready := os.NewFile(4, "ready")
 	defer ready.Close()
-	err := serveSharedProfiles(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
+	serve := serveSharedProfiles
+	if os.Getenv("MYCE_OBSERVER_CHILD") != "1" {
+		serve = superviseSharedProfiles
+	}
+	err := serve(ctx, root, lock, func() error { _, err := ready.Write([]byte{1}); return err })
 	if err != nil && ctx.Err() == nil {
 		_ = (&observerLogWriter{root: root}).event(struct {
 			At    time.Time `json:"at"`
@@ -451,7 +456,7 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 				receiptLock.Close()
 				continue
 			}
-			if receipt.Observation != "armed" {
+			if receipt.Observation != "armed" && receipt.PendingNotification == nil {
 				_ = os.Remove(entry)
 				receiptLock.Close()
 				continue
@@ -459,7 +464,7 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 			if receipt.Spec.Deadline != nil && (reg.Expires.IsZero() || receipt.Spec.Deadline.Before(reg.Expires)) {
 				reg.Expires = *receipt.Spec.Deadline
 			}
-			watches[entry] = &sharedProfileWatch{registration: reg, receipt: receipt, lock: receiptLock}
+			watches[entry] = &sharedProfileWatch{registration: reg, receipt: receipt, lock: receiptLock, finishing: receipt.PendingNotification != nil}
 			key := sharedProfileAuthority(reg)
 			if group := groups[key]; group != nil {
 				if group.pending {
@@ -576,6 +581,12 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 		pending, due := nextWake()
 		diagnostics.update(func(state *observerDiagnostic) {
 			state.NextReadAt, state.NextDeliveryAt = time.Time{}, time.Time{}
+			state.NextWakeAt = clock.Now().Add(delay)
+			if pending {
+				state.NextWakeAt = due
+			} else if !due.IsZero() && due.Before(state.NextWakeAt) {
+				state.NextWakeAt = due
+			}
 			for _, group := range groups {
 				if !group.pending && clock.Now().Before(group.next) && (state.NextReadAt.IsZero() || group.next.Before(state.NextReadAt)) {
 					state.NextReadAt = group.next
