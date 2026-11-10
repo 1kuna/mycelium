@@ -237,8 +237,17 @@ func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Jobs["wait"].Efficiency.WaitSeconds["unknown"] != 2 {
+	view := cloneJob(q.s.Jobs["wait"])
+	q.projectEfficiency(&view)
+	if view.Efficiency.WaitSeconds["unknown"] != 2 {
 		t.Fatal("rollback lost or doubled elapsed time")
+	}
+	// Reopening at the same clock must reconstruct the unmaterialized span.
+	q = reopenQueue(t, q, c)
+	view = cloneJob(q.s.Jobs["wait"])
+	q.projectEfficiency(&view)
+	if view.Efficiency.WaitSeconds["unknown"] != 2 {
+		t.Fatal("restart lost accounting anchor")
 	}
 	d, err := q.prepareEfficiencyDiagnostics(context.Background())
 	if err != nil {
@@ -469,7 +478,9 @@ func TestEfficiencyReservationUsesLiveAdmissionCharge(t *testing.T) {
 	if err := q.update(func() error { q.refreshHostMemory(); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if got := j.Efficiency.Allocations[0].ReservedMemoryGBSeconds; got != charge {
+	view := cloneJob(j)
+	q.projectEfficiency(&view)
+	if got := view.Efficiency.Allocations[0].ReservedMemoryGBSeconds; got != charge {
 		t.Fatalf("integrated ceiling instead of admission charge: got %g want %g", got, charge)
 	}
 }

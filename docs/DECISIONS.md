@@ -4,6 +4,28 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
 
 ## Current rulings
 
+- <a id="my-43"></a>**MY-43 — 2026-11-10 — Compute and token efficient.**
+  Zach: “i want our program to be both compute and token efficient”, approving
+  the orchestrator's proposal that agents report only on a state change, a fault
+  or a needed decision, plus one final summary, and that default status output be
+  small. Applies to Mycelium's product (control-plane cost per check-in; small
+  default status and one batched wait for consumer agents, #1120/#1053) and to
+  how Mycelium's agents report. Received by the Mycelium orchestrator, which carries it into worker briefs.
+
+- <a id="my-42"></a>**MY-42 — 2026-11-10 — Current and previous release only.**
+  Source: Zach, answering refactor review finding 10: “yes drop old migration code”.
+  The review proposed the floor “current and previous release only”; Zach approved
+  that proposal in this answer. Relayed in the implementation brief and received
+  by the version-floor implementation sub-agent on 2026-11-10.
+  For the r6.8 release (`v3.1.0-rc.20261110.s076r6.8`), the floor is r6.7
+  (`v3.1.0-rc.20261110.s076r6.7`), the immediate predecessor. MY-35 requires
+  interoperation across that adjacent pair during rolling upgrades. Older
+  protocols, importers, converters and persistence formats belong in tagged
+  source history. Before deleting their runtime paths, verify that every active
+  installation and the production database meet the floor. This narrows
+  MY-03's compatibility
+  prohibition only for the adjacent release pair required by MY-35.
+
 - <a id="my-41"></a>**MY-41 — 2026-11-09 — Fast iteration; development tooling is changeable.**
   Source: Zach, 2026-11-09, relayed in the implementation brief and received by
   the merge-policy documentation worker. Quote lightly redacted for this public
@@ -36,8 +58,10 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
   directly invoked local VM, with persistent caches, idle cache trimming,
   disk floors and measured capacity admission. Fleet gates are optional extra
   evidence. Supersedes the 2026-11-03 fleet-only gate location and exact-head
-  fleet-gate merge requirement for Mycelium development. Independent review,
-  real race coverage, custody and native platform proof remain required.
+  fleet-gate merge requirement for Mycelium development. Local is always
+  available as the iteration path; when the host can't run gates (for example
+  under memory pressure), use the fleet instead of waiting. Source: Zach's
+  2026-11-10 approval of ledger C9, relayed by setup-audit.
 
 - **MY-38 — 2026-11-09 — Faster tests first, faster iteration second.**
   Zach: “if you need to pause the queue to update and make iteration faster i'd
@@ -58,8 +82,7 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
   jobs finish or reach a checkpoint, never kill them, announce each pause to
   affected consumer orchestrators, then resume. Before pausing a production host,
   notify the orchestrator so it can announce the pause. Local never-admitted
-  gate waiters may be cancelled and restarted with current helpers; admitted
-  and unknown execution custody is never cleared. An admitted gate may only
+  gate waiters may be cancelled and restarted with current helpers. An admitted gate may only
   be cancelled through supported cancellation; its replacement must restart
   immediately. Release-critical work keeps priority; post each replacement
   receipt or session on its PR. Supersedes the earlier orchestrator default to

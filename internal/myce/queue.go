@@ -696,7 +696,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
-	q.accountEfficiency(q.clock.Now())
 	err = fn()
 	// A request that loses the shutdown race retries from durable worker state.
 	// Do not publish its speculative loss/maintenance decisions after the fence.
@@ -2638,6 +2637,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	q.projectEfficiency(j)
 	j.YieldPlan = q.yieldProjection(j)
 	if j.State == "queued" && strings.HasPrefix(j.Reason, memoryEvidenceRecovering+":") {
 		j.DiagnosticCode = memoryEvidenceRecovering

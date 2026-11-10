@@ -107,7 +107,7 @@ def predecessors(repo, source):
     revisions = [node.value.value for node in tree.body
                  if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
                  and any(isinstance(t, ast.Name) and t.id in
-                         ('PREVIOUS', 'INVENTORY_BASELINE', 'CADENCE_BASELINE') for t in node.targets)]
+                         ('PREVIOUS',) for t in node.targets)]
     destination = source / '.gate-predecessors'
     destination.mkdir()
     result = []
