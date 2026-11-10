@@ -20,6 +20,7 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 					run := check(t, q, machine("worker", "fake"), nil).Job
 					finish(t, q, run, true)
 				}
+				drainAdmissionWait(t, q)
 				before, err := json.Marshal(q.s)
 				if err != nil {
 					t.Fatal(err)

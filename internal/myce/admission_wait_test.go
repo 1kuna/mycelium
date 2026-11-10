@@ -260,6 +260,7 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 // scheduler decision or mutate retained evidence.
 func admissionWaitAPI(t *testing.T, q *Queue, id string) *AdmissionWaitEvidence {
 	t.Helper()
+	drainAdmissionWait(t, q)
 	before, _ := json.Marshal(q.s.Jobs[id].AdmissionWait)
 	handler := API{Queue: q, Token: "fixture"}.Handler()
 	var found *AdmissionWaitEvidence
@@ -303,6 +304,33 @@ func admissionWaitAPI(t *testing.T, q *Queue, id string) *AdmissionWaitEvidence 
 		t.Fatal("status read mutated durable evidence")
 	}
 	return found
+}
+
+// Evidence is asynchronous. Flush committed pending captures explicitly in
+// tests that inspect their contents; never advance scheduling time to wait for
+// a goroutine, and never make a status read perform capture in production.
+func drainAdmissionWait(t *testing.T, q *Queue) {
+	t.Helper()
+	b := &q.admissionWaitBuild
+	for {
+		b.mu.Lock()
+		running, done, pending := b.running, b.done, b.pending
+		if !running {
+			b.next = time.Time{}
+		}
+		b.mu.Unlock()
+		if running {
+			select {
+			case <-done:
+			case <-t.Context().Done():
+				t.Fatal("admission wait build did not finish")
+			}
+		} else if pending != nil {
+			q.enqueueAdmissionWait(pending)
+		} else {
+			return
+		}
+	}
 }
 
 func TestAdmissionWaitLifecycleAndRestart(t *testing.T) {
@@ -377,6 +405,7 @@ func TestAdmissionWaitLifecycleAndRestart(t *testing.T) {
 	until := clock.Now().Add(time.Second)
 	expiry.GiveUpAt = &until
 	expired := submit(t, q, expiry)
+	drainAdmissionWait(t, q)
 	clock.Advance(time.Second)
 	if err = q.Tick(); err != nil {
 		t.Fatal(err)
@@ -483,6 +512,7 @@ func TestAdmissionWaitPublicationFencesLifecycle(t *testing.T) {
 	j := submit(t, q, s)
 	// Capture an actual committed wait, then let a competing lifecycle commit
 	// win before its off-lock evidence is ready to publish.
+	drainAdmissionWait(t, q)
 	q.mu.Lock()
 	capture := q.freezeAdmissionWait()
 	q.mu.Unlock()
@@ -509,6 +539,7 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	s := cpuSpec(1, 1)
 	s.Priority = "production"
 	j := submit(t, q, s)
+	drainAdmissionWait(t, q)
 	// Learn an ordinary-control service quantum, then make observational work
 	// consume it. Queue time is independent and never advances here.
 	limit := newObservationLimit(clock, q)
@@ -528,6 +559,7 @@ func TestAdmissionWaitCaptureYieldsAndRetainedHistoryShrinks(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	drainAdmissionWait(t, q)
 	q.holdClock = nil
 	gaps := admissionWaitAPI(t, q, j.ID)
 	if gaps.CaptureGaps == 0 || gaps.DeferredAt == nil || !clock.Now().Equal(before) {
