@@ -252,7 +252,6 @@ type Queue struct {
 	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
-	fragmented              bool
 	persistencePageBytes    int
 	persistenceEncodings    map[string]map[string]catalogEncoding
 	persistenceFieldsCache  map[string]persistenceFieldCache
@@ -281,7 +280,7 @@ func ID() string {
 // QueueOption configures a queue before its startup transactions run.
 type QueueOption func(*Queue)
 
-// WithFileStore selects storage before startup migrates embedded bundle bytes.
+// WithFileStore selects storage before startup verifies frozen bundle references.
 // An empty root uses the queue database's .files directory.
 func WithFileStore(root string, limit int64, checkpoints bool) QueueOption {
 	return func(q *Queue) {
@@ -327,7 +326,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
@@ -353,6 +352,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	var data []byte
 	err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
 	if err == nil {
+		q.s.FairUsageVersion = 0
 		data, err = readQueueState(db, data)
 		if err == nil {
 			err = json.Unmarshal(data, &q.s)
@@ -362,7 +362,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
-	// Inventories are refreshed by workers after restart, including legacy state.
+	if q.s.FairUsageVersion != 1 {
+		db.Close()
+		return nil, errors.New("unsupported fair-usage format; current and previous releases require version 1")
+	}
+	// Inventories are refreshed by workers after restart.
 	for _, m := range q.s.Machines {
 		m.ToolInventory = nil
 	}
@@ -393,7 +397,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		fileRoot = path + ".files"
 	}
 	if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
-		err = q.migrateBundleFiles()
+		err = q.verifyBundleFiles()
 	}
 	if err != nil {
 		db.Close()
@@ -425,20 +429,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
 		db.Close()
 		return nil, err
-	}
-	if q.importCancellationEvidence() || q.s.FairUsageVersion == 0 {
-		if err = q.update(func() error {
-			for id := range q.s.Jobs {
-				q.touchJob(id)
-			}
-			for id := range q.s.Submissions {
-				q.touchSubmission(id)
-			}
-			return nil
-		}); err != nil {
-			db.Close()
-			return nil, err
-		}
 	}
 	q.usageReader, err = openUsageReader(path)
 	if err != nil {

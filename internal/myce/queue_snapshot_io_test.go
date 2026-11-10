@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -9,8 +8,8 @@ import (
 	"time"
 )
 
-// Replay the 26 MB retained-history trigger with real SQLite, including upgrade
-// from the existing full-state format. A timestamp-only update must not rewrite
+// Replay the retained-history trigger with real SQLite and current frozen refs.
+// A timestamp-only update must not rewrite
 // the unchanged history to the WAL. No wall-clock performance assertion is used.
 func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 	q, c := fixture(t)
@@ -27,16 +26,19 @@ func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 		e.Name = name
 		e.Files["fixture"] = make([]byte, 600<<10)
 		e = freezeComposition(t, e)
+		if err := q.files.freezeExtension(&e); err != nil {
+			t.Fatal(err)
+		}
 		q.s.Extensions[extensionKey(e)] = e
 	}
-	want := q.s.Extensions
-	legacy, err := json.Marshal(q.s)
-	if err != nil {
+	want := map[string]Extension{}
+	for key := range q.s.Extensions {
+		want[key] = registeredExtension(t, q, key)
+	}
+	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = q.db.Exec("UPDATE queue SET data=? WHERE id=1", legacy); err != nil {
-		t.Fatal(err)
-	}
+	var err error
 	q.Close()
 	q, err = Open(path, root, c)
 	if err != nil {
@@ -44,12 +46,12 @@ func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 	}
 	for key, expected := range want {
 		if !reflect.DeepEqual(registeredExtension(t, q, key), expected) {
-			t.Fatal("legacy history changed during upgrade")
+			t.Fatal("retained history changed during restart")
 		}
 	}
 	if err = q.Tick(); err != nil {
 		t.Fatal(err)
-	} // First write may migrate all legacy history.
+	}
 	if _, err = q.db.Exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0"); err != nil {
 		t.Fatal(err)
 	}

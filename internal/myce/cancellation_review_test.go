@@ -225,74 +225,6 @@ func TestCancellationLostAssignmentEmptyCheckin(t *testing.T) {
 }
 
 // Write the original wire shape: pre-S03 copies have no release evidence fields.
-func legacyCancellationFixture(t *testing.T, retained bool) (*Queue, *fakeClock, *Job, Machine) {
-	t.Helper()
-	q, c := fixture(t)
-	one, two := machine("one", "fake"), machine("two", "fake")
-	one.HostMemoryMeasured, one.HostAvailableMemoryGB, one.HostMemoryBudgetGB = true, 16, 16
-	check(t, q, one, nil)
-	check(t, q, two, nil)
-	s := spec("production")
-	s.Needs.HostMemoryGB = 4
-	j := submit(t, q, s)
-	if err := q.update(func() error {
-		live := q.s.Jobs[j.ID]
-		live.State, live.Machine, live.Session, live.Attempt = "succeeded", two.ID, two.Session, 2
-		live.ReleaseConfirmed = true
-		now := c.Now()
-		live.FinishedAt = &now
-		live.Copies = []Copy{{Machine: one.ID, Session: "old-one", Attempt: 1}, {Machine: two.ID, Session: two.Session, Attempt: 2}}
-		if retained {
-			r := HostRelease{Job: j.ID, Host: one.ID, Machine: one.ID, Session: "old-one", Attempt: 1, HostChargeGB: 4}
-			q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenCancellationQueue(t, q, c)
-	fakeCheckpointAvailability(t, q, true)
-	return q, c, q.s.Jobs[j.ID], one
-}
-
-func TestCancellationLegacyCopies(t *testing.T) {
-	for _, retained := range []bool{false, true} {
-		t.Run(map[bool]string{false: "released", true: "retained"}[retained], func(t *testing.T) {
-			q, _, j, one := legacyCancellationFixture(t, retained)
-			want := "confirmed"
-			if retained {
-				want = "pending"
-			}
-			if a := cancelAck(t, q, j.ID); ackRelease(a) != want {
-				t.Fatal("legacy release", a)
-			}
-			if retained {
-				r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: one.ID, Session: "old-one", ReleaseOnly: true}
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-					t.Fatal(a)
-				}
-			} else {
-				data, _ := json.Marshal(j.Copies[0])
-				if !strings.Contains(string(data), "legacy_no_retained_custody") {
-					t.Fatal("missing legacy diagnostic", string(data))
-				}
-				if blocker := q.startupReleaseBlocker(one.ID); blocker != "" {
-					t.Fatal(blocker)
-				}
-				s := spec("production")
-				s.AllowedMachines = []string{one.ID}
-				s.Needs.HostMemoryGB = 4
-				next := submit(t, q, s)
-				if got := check(t, q, one, nil).Job; got == nil || got.ID != next.ID {
-					t.Fatal("terminal cancellation blocked unrelated placement", got)
-				}
-			}
-		})
-	}
-}
 
 func TestCancellationAcknowledgementTime(t *testing.T) {
 	q, c := fixture(t)
@@ -316,34 +248,6 @@ func TestCancellationAcknowledgementTime(t *testing.T) {
 	bound := submit(t, q, s)
 	if a := cancelAck(t, q, bound.ID); !a.AcknowledgedAt.Equal(*reserved.AcknowledgedAt) {
 		t.Fatal("bound reservation changed acknowledgement")
-	}
-}
-
-func TestCancellationLegacyIntentPersistsOnOpen(t *testing.T) {
-	q, c := fixture(t)
-	j := submit(t, q, spec("experiment"))
-	if err := q.update(func() error { q.s.Jobs[j.ID].Reason = "cancel requested"; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenCancellationQueue(t, q, c)
-	first := *q.s.Jobs[j.ID].CancelledAt
-	var saved []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&saved); err != nil {
-		t.Fatal(err)
-	}
-	decoded, decodeErr := readQueueState(q.db, saved)
-	if decodeErr != nil {
-		t.Fatal(decodeErr)
-	}
-	saved = decoded
-	var persisted state
-	if err := json.Unmarshal(saved, &persisted); err != nil || persisted.Jobs[j.ID].CancelledAt == nil {
-		t.Fatal("Open did not persist cancellation import", err)
-	}
-	c.Advance(time.Second)
-	q = reopenCancellationQueue(t, q, c)
-	if !q.s.Jobs[j.ID].CancelledAt.Equal(first) {
-		t.Fatal("legacy cancellation time moved on reopen")
 	}
 }
 

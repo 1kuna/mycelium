@@ -122,7 +122,7 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 				t.Fatal("sweep did not expire the old input")
 			}
 			before := q.persisted
-			if err := q.migrateBundleFiles(); err != nil || !reflect.DeepEqual(before, q.persisted) {
+			if err := q.verifyBundleFiles(); err != nil || !reflect.DeepEqual(before, q.persisted) {
 				t.Fatal("startup safety net found new embedded recipe bytes", err)
 			}
 		})
