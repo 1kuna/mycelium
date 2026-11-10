@@ -231,7 +231,7 @@ func TestAttemptProtocolWrongStopIgnored(t *testing.T) {
 	}
 	a := AttemptDirective{Execution: key.Execution, Session: key.Session, Stop: true, GraceSeconds: 10}
 	reply, err := workerAttemptReply(c, Reply{AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptDirective{a}})
-	if err != nil || !reply.Stop || reply.GraceSeconds != 10 {
+	if err != nil || len(reply.Attempts) != 1 || !reply.Attempts[0].Stop || reply.Attempts[0].GraceSeconds != 10 || reply.Stop {
 		t.Fatal("correct stop lost")
 	}
 }

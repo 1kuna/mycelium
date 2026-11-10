@@ -17,7 +17,7 @@ func fixtureReply(c Checkin, r Reply) Reply {
 		if a.Job != nil {
 			r.Job = a.Job
 		}
-		if len(c.Attempts) == 1 && c.Attempts[0].Execution == a.Execution && c.Attempts[0].Session == a.Session {
+		if len(c.Attempts) == 1 && c.Attempts[0].ID == a.ID && c.Attempts[0].Attempt == a.Attempt && c.Attempts[0].Session == a.Session {
 			r.Stop, r.Kill, r.Hold = a.Stop, a.Kill, a.Hold
 			r.GraceSeconds, r.PriorityStop, r.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
 		}
