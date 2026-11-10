@@ -3,6 +3,7 @@ package myce
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -594,5 +595,65 @@ func TestWorkCurveMemorySurvivesIncompleteUpgradeInventory(t *testing.T) {
 				t.Fatalf("post-upgrade learning: envelope=%+v timing=%+v", actual.MemoryEnvelope, actual.Timing)
 			}
 		})
+	}
+}
+
+func TestWorkCurveHeartbeatLabelsDoNotRewriteMeasurements(t *testing.T) {
+	q, workers := candidateCostFixture(t)
+	drainAdmissionWait(t, q)
+	reasons := map[string]string{}
+	for id, p := range q.s.WorkObservations {
+		reasons[id] = p.StaleReason
+	}
+	for n := range 4 {
+		q.clock.(*workerFakeClock).Advance(time.Second)
+		m := workers[n%len(workers)]
+		_, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", n%len(workers)), Attempt: 1}, Session: m.Session, Started: true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drainAdmissionWait(t, q)
+		for id, p := range q.s.WorkObservations {
+			// The round-robin fixture deliberately ages other reporters past
+			// their advertised cadence. Availability can change; identity cannot.
+			want := reasons[id]
+			if owner := q.s.Machines[p.Key.Host]; owner != nil && owner.Gone {
+				want = "component unavailable"
+			}
+			if p.StaleReason != want {
+				t.Fatalf("heartbeat label %s: want %q, got %q", id, want, p.StaleReason)
+			}
+			var durable WorkObservation
+			if err := json.Unmarshal(durableQueueRecord(t, q.db, "work_observations/"+id), &durable); err != nil {
+				t.Fatal(err)
+			}
+			if durable.StaleReason != "" || curveMeasurementDigest(durable) != curveMeasurementDigest(p) {
+				t.Fatal("diagnostic label changed accepted measurement")
+			}
+		}
+	}
+}
+
+func TestWorkCurvePermanentInvalidationSurvivesRestart(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	first := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	if err := q.Complete(result(&first, true)); err != nil {
+		t.Fatal(err)
+	}
+	changed := cloneMachine(&m)
+	changed.ExtensionFingerprint = "replacement-backend"
+	check(t, q, changed, nil)
+	for _, p := range q.s.WorkObservations {
+		if p.StaleReason != "driver or backend fingerprint changed" {
+			t.Fatal("missing identity invalidation")
+		}
+	}
+	q = reopenQueue(t, q, clock)
+	check(t, q, m, nil)
+	for _, p := range q.s.WorkObservations {
+		if p.StaleReason != "driver or backend fingerprint changed" {
+			t.Fatal("restart forgot permanent invalidation")
+		}
 	}
 }
