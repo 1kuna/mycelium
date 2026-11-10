@@ -206,19 +206,23 @@ func TestDeviceFaultStartBudgetRecoveryBound(t *testing.T) {
 }
 
 func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
-	for _, cutoffKind := range []string{"recovery_bound", "start_by", "give_up_at"} {
+	for _, cutoffKind := range []string{"recovery_bound", "start_by", "give_up_at", "recovery_bound_before_give_up_at", "start_by_before_give_up_at"} {
 		t.Run(cutoffKind, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := spec("production")
 			s.StartWindow = "600s"
 			cutoff := clock.Now().Add(2 * time.Minute)
-			if cutoffKind == "start_by" {
+			if cutoffKind == "start_by" || cutoffKind == "start_by_before_give_up_at" {
 				s.StartBy = &cutoff
 			} else if cutoffKind == "give_up_at" {
 				s.GiveUpAt = &cutoff
 			}
+			if cutoffKind == "recovery_bound_before_give_up_at" || cutoffKind == "start_by_before_give_up_at" {
+				later := clock.Now().Add(MaxProductionStartWindow + 3*time.Minute)
+				s.GiveUpAt = &later
+			}
 			m, j := deviceFaultStartBudgetFixture(t, q, clock, s, true)
-			if cutoffKind == "start_by" {
+			if cutoffKind == "start_by" || cutoffKind == "start_by_before_give_up_at" {
 				// Started loss renews the original two-minute window. The
 				// subsequent wait must still honor that absolute recovery cutoff.
 				cutoff = clock.Now().Add(2 * time.Minute)
@@ -230,6 +234,8 @@ func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
 					t.Fatal("hold expired before its bound", got.State, got.Reason)
 				}
 				clock.Advance(2 * time.Second)
+			} else if strings.Contains(cutoffKind, "before_give_up_at") {
+				clock.Advance(2 * MaxProductionStartWindow)
 			} else {
 				clock.Advance(MaxProductionStartWindow + time.Second)
 			}
@@ -243,13 +249,20 @@ func TestDeviceFaultStartBudgetLateClear(t *testing.T) {
 			if got.State != "failed" || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) || got.InfrastructureRetries != 1 || got.Losses != 1 {
 				t.Fatal("late-clear expiry missing or charged another retry", got.State, got.Reason)
 			}
-			if cutoffKind == "recovery_bound" {
+			if cutoffKind == "recovery_bound" || cutoffKind == "recovery_bound_before_give_up_at" {
 				if got.DiagnosticCode != deviceFaultRecoveryTimeout || got.ExecutionCause == nil || got.ExecutionCause.Predicate != deviceFaultRecoveryTimeout {
 					t.Fatal("late clear lost the typed recovery timeout", got.DiagnosticCode, got.ExecutionCause)
 				}
 			} else if got.DiagnosticCode == deviceFaultRecoveryTimeout || cutoffKind == "start_by" && !got.Spec.StartBy.Equal(cutoff) ||
 				cutoffKind == "give_up_at" && got.Reason != "give-up time reached" {
 				t.Fatal("late clear overrode the earlier absolute cutoff", got.Reason, got.Spec.StartBy)
+			}
+			if cutoffKind == "start_by_before_give_up_at" && (!got.Spec.StartBy.Equal(cutoff) || !strings.HasPrefix(got.Reason, "production start deadline exceeded")) {
+				t.Fatal("later give-up replaced the earlier start deadline", got.Reason, got.Spec.StartBy)
+			}
+			q = reopenCancellationQueue(t, q, clock)
+			if reopened := job(t, q, j.ID); reopened.State != got.State || reopened.Reason != got.Reason || reopened.DiagnosticCode != got.DiagnosticCode || reopened.FinishedAt == nil || !reopened.FinishedAt.Equal(*got.FinishedAt) || reopened.InfrastructureRetries != got.InfrastructureRetries || reopened.Losses != got.Losses {
+				t.Fatal("reopen lost the terminal cutoff decision", reopened)
 			}
 		})
 	}
@@ -279,6 +292,10 @@ func TestDeviceFaultStartBudgetAbsoluteCutoffs(t *testing.T) {
 			got := job(t, q, j.ID)
 			if got.State != "failed" || got.FinishedAt == nil || !got.FinishedAt.Equal(cutoff) || got.DiagnosticCode == deviceFaultRecoveryTimeout {
 				t.Fatal("device recovery pause overrode the earlier caller cutoff", got.State, got.Reason)
+			}
+			q = reopenCancellationQueue(t, q, clock)
+			if reopened := job(t, q, j.ID); reopened.State != got.State || reopened.Reason != got.Reason || reopened.FinishedAt == nil || !reopened.FinishedAt.Equal(cutoff) {
+				t.Fatal("reopen lost the absolute cutoff decision", reopened)
 			}
 		})
 	}

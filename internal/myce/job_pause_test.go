@@ -174,6 +174,10 @@ func TestJobPauseDeadlinesContinue(t *testing.T) {
 			if got := job(t, q, j.ID); got.State != "failed" {
 				t.Fatal("pause froze deadline", got)
 			}
+			q = reopenCancellationQueue(t, q, clock)
+			if got := job(t, q, j.ID); got.State != "failed" || got.FinishedAt == nil || !got.FinishedAt.Equal(until) {
+				t.Fatal("reopen lost the paused deadline decision", got)
+			}
 		})
 	}
 }
