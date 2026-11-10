@@ -121,7 +121,7 @@ func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices 
 		return
 	}
 	eligible := func(d MachineDevice) bool {
-		return backendFor(d.Platform).telemetry != nil && !d.UnifiedMemory && d.pciAddress != "" && d.Reason == ""
+		return d.Platform == "xpu" && !d.UnifiedMemory && d.pciAddress != "" && d.Reason == ""
 	}
 	if !slices.ContainsFunc(devices, eligible) {
 		return

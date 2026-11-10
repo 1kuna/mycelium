@@ -236,7 +236,7 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 		return m, errors.New("unknown device platform")
 	}
 	if backend.onlyDevice != "" && device != backend.onlyDevice {
-		return m, errors.New("Metal supports only device 0")
+		return m, errors.New(backend.onlyDeviceError)
 	}
 	if backend.visibleDevicesVariable != "" {
 		env[backend.visibleDevicesVariable] = device

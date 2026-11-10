@@ -55,7 +55,7 @@ func newMemorySource(platform string, budget, reserve float64, mode, goos string
 		return nil, fmt.Errorf("unknown GPU memory platform %q", platform)
 	}
 	if backend.unifiedMemory && mode == "dedicated" {
-		return nil, fmt.Errorf("metal always uses unified memory; use auto, unified or fixed")
+		return nil, fmt.Errorf("%s always uses unified memory; use auto, unified or fixed", platform)
 	}
 	fixed := mode == "fixed" || backend.simulated || (backend.fixedMemoryDefault && mode != "unified")
 	if fixed && budget <= 0 && !backend.simulated {

@@ -21,6 +21,7 @@ type acceleratorBackend struct {
 	resolveDevice                                        func(context.Context, string) (string, error)
 
 	hostOS, hostArch          string
+	telemetryPendingSource    string
 	optionalIntegratedRuntime bool
 	detect                    func(MachineProbe, context.Context, MachineDevice, Detection) (Detection, error)
 	inventory                 func(MachineProbe, context.Context, []pciAccelerator) ([]MachineDevice, error)
@@ -28,6 +29,7 @@ type acceleratorBackend struct {
 	fingerprint               func(context.Context, MachineProbe, string, []byte, func(context.Context) ([]MachineDevice, error)) ([]byte, [][]string, error)
 
 	visibleDevicesVariable, runtimeSelectorPrefix, onlyDevice string
+	onlyDeviceError                                           string
 	selectWithoutDevice, multipleDevices, isolateTiers        bool
 	accessNodes, nativeReadRoot, isolationPresence            string
 	nativeNodes                                               func(string, acceleratorNodeProbe) ([]string, error)
@@ -64,7 +66,8 @@ func init() {
 		},
 		{
 			platform: "xpu", pciVendor: "0x8086", extensionDevice: "xpu:0", resourceName: "Intel (XPU)",
-			fixedMemoryDefault: true, optionalIntegratedRuntime: true, isolateTiers: true, multipleDevices: true, deviceHostMemory: true, repeatedTeardownAttention: true,
+			telemetryPendingSource: "XPU telemetry not yet sampled",
+			fixedMemoryDefault:     true, optionalIntegratedRuntime: true, isolateTiers: true, multipleDevices: true, deviceHostMemory: true, repeatedTeardownAttention: true,
 			attemptMemory: xpuAttemptDeviceMemory, measureMemory: measureXPUDeviceMemory, isolationPresence: "dev/dri/renderD*",
 			visibleDevicesVariable: "ZE_AFFINITY_MASK", runtimeSelectorPrefix: "level_zero:", accessNodes: "/dev/dri/renderD*",
 			detect: detectXPUAccelerator, inventory: xpuAccelerators, prepareServiceProbe: xpuServiceProbe,
@@ -74,7 +77,7 @@ func init() {
 		},
 		{
 			platform: "metal", extensionDevice: "mps", resourceName: "Apple Metal",
-			unifiedMemory: true, onlyDevice: "0", cooperativeCPUIsolation: true, applicationDevice: "mps (queue backend metal)", variantDevice: "mps or MLX (queue backend metal)", inventory: metalAccelerators, hostOS: "darwin", hostArch: "arm64",
+			unifiedMemory: true, onlyDevice: "0", onlyDeviceError: "Metal supports only device 0", cooperativeCPUIsolation: true, applicationDevice: "mps (queue backend metal)", variantDevice: "mps or MLX (queue backend metal)", inventory: metalAccelerators, hostOS: "darwin", hostArch: "arm64",
 			verifyCPUIsolation: verifyMetalSelectNone, fingerprint: metalFingerprint,
 		},
 		{
