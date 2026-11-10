@@ -35,9 +35,7 @@ type HostGrowthContributor struct {
 	SampleFresh      bool     `json:"sample_fresh"`
 }
 
-// A strict predecessor queue can reject this additive diagnostic after a
-// rollback. Strip only the wire copy: local outcome/release replay must keep
-// its complete evidence, including through saved-result and saved-log delivery.
+type admissionError struct{ detail AdmissionDetail }
 
 func (e *admissionError) Error() string {
 	check := e.detail.Subcheck
