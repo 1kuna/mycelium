@@ -9,6 +9,7 @@ type memoryPlanningCache struct {
 	history      *memoryHistoryCache
 	constrained  map[constrainedMemoryKey]float64
 	components   map[memoryComponentKey]*Machine
+	allocations  map[allocationViewKey]*Machine
 }
 
 type memoryComponentKey struct {

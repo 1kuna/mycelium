@@ -407,7 +407,7 @@ func (q *Queue) batchResourceProjectionWithPlan(j *Job, m *Machine, plan *placem
 			}
 		}
 		for _, v := range plan.jobs {
-			projected.FreeHostMemoryGB += hostNeed(allocationMachine(q.s.Machines[v.Machine], v.AllocatedDevices), v.Spec.Needs.MemoryGB, v.Spec.Needs.HostMemoryGB)
+			projected.FreeHostMemoryGB += hostNeed(q.planningAllocationMachine(q.s.Machines[v.Machine], v.AllocatedDevices), v.Spec.Needs.MemoryGB, v.Spec.Needs.HostMemoryGB)
 		}
 	}
 	return batchResourceRoom{machine: projected, memory: memory, ok: true, plan: plan}

@@ -371,10 +371,48 @@ func deviceAllowed(j *Job, m *Machine) bool {
 // Use the component's memory layout when charging the one host pool. Several
 // cards are one group view, so host RAM and cores are charged once.
 func allocationMachine(m *Machine, devices []string) *Machine {
+	return allocationMachineCached(m, devices, nil)
+}
+
+type allocationViewKey struct {
+	owner   *Machine
+	devices string
+	group   bool
+}
+
+// Raw inventory projections differ from machineTargets' reservation-adjusted
+// views. Reuse them only inside the existing immutable memory-planning pass;
+// callers outside a pass still get fresh views after inventory changes.
+func (q *Queue) planningAllocationMachine(m *Machine, devices []string) *Machine {
+	return allocationMachineCached(m, devices, q.memoryPlanning)
+}
+
+func allocationMachineCached(m *Machine, devices []string, cache *memoryPlanningCache) *Machine {
+	if m == nil || m.Devices == nil || len(devices) == 0 {
+		return m
+	}
+	var key allocationViewKey
+	if cache != nil {
+		key = allocationViewKey{owner: m, devices: strings.Join(devices, ","), group: len(devices) > 1}
+		if target := cache.allocations[key]; target != nil {
+			return target
+		}
+	}
+	target := buildAllocationMachine(m, devices, cache)
+	if cache != nil {
+		if cache.allocations == nil {
+			cache.allocations = map[allocationViewKey]*Machine{}
+		}
+		cache.allocations[key] = target
+	}
+	return target
+}
+
+func buildAllocationMachine(m *Machine, devices []string, cache *memoryPlanningCache) *Machine {
 	if m != nil && m.Devices != nil && len(devices) > 1 {
 		members := []*Machine{}
 		for _, id := range devices {
-			if card := allocationMachine(m, []string{id}); card != m {
+			if card := allocationMachineCached(m, []string{id}, cache); card != m {
 				members = append(members, card)
 			}
 		}

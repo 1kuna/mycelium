@@ -223,7 +223,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	var jobs []*Job
 	var slots []*ModelSlot
 	for _, j := range q.liveJobs() {
-		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 			executions[j.Machine]++
 		}
@@ -258,7 +258,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	ramDeficit := max(0, need-room)
 	// Fresh unified over-use is freed too, up to the shortfall (#596).
 	freedRAM := func(j *Job) float64 {
-		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 		charge, _ := jobHostMemoryCharge(j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 		return charge + min(q.unifiedOveruseGB(j), ramDeficit)
 	}
