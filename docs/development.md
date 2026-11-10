@@ -100,7 +100,7 @@ active process limit is the available CPU count, capped at nine, with
 run each package intact. Quick selection and its parallelism are unchanged.
 Cross-release upgrade compatibility starts in one of the same slots, alongside
 the test chunks, and its failure contributes to the final gate verdict. An
-unconfirmed cleanup still stops further admission.
+unconfirmed cleanup fails that gate and retains diagnostics while releasing local admission.
 
 Each gate builds one race-instrumented `myce_test` CLI for its dev journeys and
 shares its absolute path through `GATE_TEST_CLI_BINARY`. Ordinary `go test` builds
