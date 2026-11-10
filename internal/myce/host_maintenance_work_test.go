@@ -16,6 +16,11 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 		}{{"drain", "drain", false}, {"disable", "disable", false}, {"disable-stop", "disable", true}} {
 			t.Run(kind+"/"+action.name, func(t *testing.T) {
 				q, clock, m := modelFixture(t, "host")
+				obligationCount := func() int {
+					q.mu.Lock()
+					defer q.mu.Unlock()
+					return len(q.hostObligations("host"))
+				}
 				q.models.Wait = time.Hour // isolate maintenance from the ordinary load timeout
 				m.ModelConfigHash = modelConfigHash(q.models)
 				m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
@@ -130,7 +135,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					if len(check(t, q, m, nil).EnvironmentPlan) != 1 {
 						t.Fatal("no pending plan")
 					}
-					if len(q.hostObligations("host")) == 0 {
+					if obligationCount() == 0 {
 						t.Fatal("pending plan not enumerated")
 					}
 				case "environment-build":
@@ -175,7 +180,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				}
 				if kind == "engine-failed-pinned" {
 					attempt := slot.Attempt
-					if !status.Quiescent || status.Sidecars != 0 || len(q.hostObligations("host")) != 0 {
+					if !status.Quiescent || status.Sidecars != 0 || obligationCount() != 0 {
 						t.Fatal("cleaned pin counted as work", status)
 					}
 					clock.Advance(2 * StopGrace)
@@ -192,7 +197,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					}
 					return
 				}
-				if status.Quiescent || len(q.hostObligations("host")) == 0 {
+				if status.Quiescent || obligationCount() == 0 {
 					t.Fatal("wait ignored active work", status)
 				}
 				deadline := clock.Now().Add(StopGrace)
@@ -354,7 +359,7 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				}
 				check(t, q, m, nil)
 				status, err = q.HostMaintenanceStatus("host")
-				if err != nil || !status.Quiescent || len(q.hostObligations("host")) != 0 {
+				if err != nil || !status.Quiescent || obligationCount() != 0 {
 					t.Fatal("exact completion did not settle wait", status, err)
 				}
 			})
