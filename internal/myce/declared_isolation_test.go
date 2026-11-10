@@ -64,7 +64,7 @@ func isolationObserve(t *testing.T, q *Queue, client Client, id, state, reason s
 		t.Fatal("isolation observation exposed execution payload")
 	}
 	var status Snapshot
-	if err := client.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+	if err := client.Call(context.Background(), "GET", "/api/status?jobs=recent&sections=jobs", nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range status.Jobs {

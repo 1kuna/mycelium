@@ -34,9 +34,9 @@ func TestStatusViewAvailabilityAndWaiting(t *testing.T) {
 			m.CapabilityProfile = &CapabilityProfile{OS: "darwin", Arch: "arm64", LogicalCPUs: 8, Benchmark: &BenchmarkResult{State: "complete", Measurements: []Throughput{{Resource: "cpu", Work: "sha256", Rate: 123, Unit: "bytes/s"}}}, MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, Accelerators: []AcceleratorProfile{{Type: "fake"}}, Availability: &Availability{Mode: "daily", Reason: tc.reason, CheckedAt: c.Now(), Signals: OwnerSignals{Power: "ac"}}}
 			check(t, q, m, nil)
 			submit(t, q, spec("experiment"))
-			for _, path := range []string{"/", "/api/status"} {
+			for _, path := range []string{"/?sections=jobs,machines", "/api/status?sections=jobs,machines"} {
 				body := statusViewResponse(t, q, path)
-				if path == "/api/status" {
+				if strings.HasPrefix(path, "/api/status") {
 					var snapshot Snapshot
 					if err := json.Unmarshal([]byte(body), &snapshot); err != nil {
 						t.Fatal(err)
@@ -45,7 +45,7 @@ func TestStatusViewAvailabilityAndWaiting(t *testing.T) {
 						t.Errorf("waiting job missing %q", tc.want)
 					}
 				}
-				if path == "/" && !strings.Contains(body, "cpu sha256 123.00 bytes/s") {
+				if strings.HasPrefix(path, "/?") && !strings.Contains(body, "cpu sha256 123.00 bytes/s") {
 					t.Errorf("%s missing measured benchmark rate", path)
 				}
 				if !strings.Contains(body, tc.want) {
@@ -93,7 +93,7 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/", "/api/status"} {
+	for _, path := range []string{"/?sections=jobs,machines", "/api/status?sections=jobs,machines"} {
 		body := statusViewResponse(t, q, path)
 		for _, bad := range []string{"synthetic-private-secret", "/private/example", "extension.yaml", "baseline/input"} {
 			if strings.Contains(body, bad) {
@@ -105,7 +105,7 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 		}
 	}
 	var snap Snapshot
-	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status")), &snap); err != nil {
+	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status?sections=jobs,machines")), &snap); err != nil {
 		t.Fatal(err)
 	}
 	if snap.Machines[0].Disabled == "" || snap.Machines[0].ExtensionReports[0].Qualified {
@@ -180,7 +180,7 @@ func TestStatusViewProfilesAndRunningWork(t *testing.T) {
 	s.Name = "needs more room"
 	s.Needs.MemoryGB = 24
 	submit(t, q, s)
-	body := statusViewResponse(t, q, "/")
+	body := statusViewResponse(t, q, "/?sections=jobs,machines")
 	for _, want := range []string{"Hyphae", "Capability profile", "separate system and accelerator memory", "64.0 GiB", "24.0 GiB", "sample@1", "kind of work sample", "qualified", "program sample-script", "running sample", "running · attempt 1", "waiting for reserved capacity"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q; jobs=%v", want, func() []string {
@@ -246,7 +246,7 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	machineCheck(t, q, m)
 	j := submit(t, q, s)
 	// The status fit must identify an otherwise fitting, unavailable host.
-	body := statusViewResponse(t, q, "/api/status")
+	body := statusViewResponse(t, q, "/api/status?sections=jobs")
 	if !strings.Contains(body, "hypha on battery") {
 		t.Errorf("availability hidden: %s", body)
 	}

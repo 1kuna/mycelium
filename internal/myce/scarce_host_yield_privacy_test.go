@@ -27,7 +27,7 @@ func TestScarceHostYieldRequirementPrivacy(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
 	defer server.Close()
 	c := Client{URL: server.URL, Token: "fixture"}
-	for _, endpoint := range []string{"/api/jobs/" + demand.ID, "/api/status"} {
+	for _, endpoint := range []string{"/api/jobs/" + demand.ID, "/api/status?sections=jobs"} {
 		var raw json.RawMessage
 		if err := c.Call(context.Background(), "GET", endpoint, nil, &raw); err != nil {
 			t.Fatal(err)
@@ -36,7 +36,7 @@ func TestScarceHostYieldRequirementPrivacy(t *testing.T) {
 			t.Fatal("yield observation leaked arbitrary requirement keys or prose", endpoint)
 		}
 		var got *Job
-		if endpoint == "/api/status" {
+		if endpoint == "/api/status?sections=jobs" {
 			var snapshot Snapshot
 			if err := json.Unmarshal(raw, &snapshot); err != nil {
 				t.Fatal(err)

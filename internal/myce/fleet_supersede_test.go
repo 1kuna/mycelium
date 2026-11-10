@@ -62,7 +62,7 @@ func TestFleetUpgradeRefusalNamesStoppedOperationAndSupersedes(t *testing.T) {
 		t.Fatalf("supersession changed drain custody: %+v", p)
 	}
 	var snapshot Snapshot
-	if err = client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil || snapshot.FleetUpgrade != nil || len(snapshot.FleetSuperseded) != 1 || snapshot.FleetSuperseded[0].Reason != record.Reason {
+	if err = client.Call(ctx, "GET", "/api/status?sections=diagnostics", nil, &snapshot); err != nil || snapshot.FleetUpgrade != nil || len(snapshot.FleetSuperseded) != 1 || snapshot.FleetSuperseded[0].Reason != record.Reason {
 		t.Fatalf("status lost the audit record: %+v %v", snapshot.FleetSuperseded, err)
 	}
 	// The worker's durable receipt for the retired operation is refused as stale.

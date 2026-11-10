@@ -50,7 +50,7 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 		id := j.ID
 		await(t, func() bool {
 			var snap Snapshot
-			if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+			if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &snap); err != nil {
 				t.Fatal(err)
 			}
 			for _, job := range snap.Jobs {

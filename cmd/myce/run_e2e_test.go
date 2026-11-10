@@ -191,7 +191,7 @@ check: [test, -s, result]
 	}
 	wait(t, ctx, func() bool {
 		var s myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status", nil, &s); err != nil {
+		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &s); err != nil {
 			t.Fatal(err)
 		}
 		for _, j := range s.Jobs {

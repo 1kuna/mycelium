@@ -43,7 +43,7 @@ func TestExecutionEvidenceDisabledHost(t *testing.T) {
 	}
 	assert(got)
 	var snapshot Snapshot
-	if err := client.Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+	if err := client.Call(context.Background(), "GET", "/api/status?jobs=recent&sections=jobs", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	found := false

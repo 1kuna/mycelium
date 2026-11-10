@@ -131,9 +131,10 @@ func TestQueueShutdownShedsBlockedObservations(t *testing.T) {
 		}()
 	}
 	client := Client{URL: server.URL, Token: "test"}
-	start(client, "/api/status")
+	// Retained usage is opt-in; the compact default never waits for usage SQL.
+	start(client, "/api/status?sections=usage")
 	await(t, func() bool { return q.usageReader.Stats().InUse == 1 && q.usageReader.Stats().WaitCount > 0 })
-	start(client, "/api/status")
+	start(client, "/api/status?sections=usage")
 	start(Client{URL: joining.URL, Token: "test", HTTP: joining.Client()}, "/api/inspection")
 
 	q.mu.Lock()

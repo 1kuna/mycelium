@@ -28,7 +28,7 @@ func TestDiskHeadroomHoldsAndRecovers(t *testing.T) {
 		t.Fatalf("low-space host admitted job: %s", got.ID)
 	}
 	var snap Snapshot
-	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status")), &snap); err != nil {
+	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status?sections=jobs")), &snap); err != nil {
 		t.Fatal(err)
 	}
 	if len(snap.Machines) != 1 || len(snap.Machines[0].DiskVolumes) != 1 || snap.Machines[0].DiskVolumes[0].FreeBytes != 2<<30 {

@@ -628,6 +628,9 @@ class StatusPagingTests(unittest.TestCase):
             call.assert_called_with("GET", "/api/status")
             client.status(full=True)
             call.assert_called_with("GET", "/api/status?detail=full")
+        with patch.object(client, "_call", return_value={}) as call:
+            client.status(sections="work,storage")
+            call.assert_called_with("GET", "/api/status?sections=work%2Cstorage")
         with patch.object(client, "_call", side_effect=[
                 {"jobs": [{"id": "new"}], "jobs_page": {"next_before": "new"}},
                 {"jobs": [{"id": "old"}], "jobs_page": {}},

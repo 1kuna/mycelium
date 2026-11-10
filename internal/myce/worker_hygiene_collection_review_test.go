@@ -102,7 +102,7 @@ func TestWorkerHygieneCollectionPublicDiagnostics(t *testing.T) {
 	m := machine("collector-status", "fake")
 	m.HygieneCollection = &WorkerHygieneCollection{FileCache: CacheCollection{Error: "synthetic-private-file"}, Environments: CacheCollection{Error: "synthetic-private-environment"}, StagingError: "synthetic-private-staging"}
 	check(t, q, m, nil)
-	request := httptest.NewRequest("GET", "/api/status", nil)
+	request := httptest.NewRequest("GET", "/api/status?sections=machines", nil)
 	request.Header.Set("Authorization", "Bearer test")
 	response := httptest.NewRecorder()
 	API{Queue: q, Token: "test"}.Handler().ServeHTTP(response, request)

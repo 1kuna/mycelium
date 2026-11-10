@@ -361,12 +361,12 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
   </section>
 
   <section aria-labelledby="usage-title">
-    <div class="section-head"><h2 id="usage-title">Last 7 days</h2><p>Observed usage samples</p></div>
+    <div class="section-head"><h2 id="usage-title">Last 7 days</h2><p>{{if .Summary}}Retained diagnostics are opt-in{{else}}Observed usage samples{{end}}</p></div>
     <div class="samples" aria-hidden="true">{{range .Usage.Daily}}<i data-day="{{.Date}}" data-project="{{.Project}}" data-machine="{{.Machine}}" data-gpu-hours="{{.GPUHours}}" data-busy-percent="{{.BusyPercent}}"></i>{{end}}</div>
     {{if or .Usage.Projects .Usage.Machines}}<div class="usage-grid">
 	      {{range .Usage.Projects}}<article class="card chart-card" data-chart-kind="project" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Project GPU time</span></div><strong>{{printf "%.1f" .GPUHours}}h</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
 	      {{range .Usage.Machines}}<article class="card chart-card" data-chart-kind="machine" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Allocation occupancy</span></div><strong>{{printf "%.0f" .BusyPercent}}%</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
-    </div>{{else}}<div class="empty">No usage samples yet. Charts appear after the first recorded interval.</div>{{end}}
+    </div>{{else}}<div class="empty">{{if .Summary}}Usage is omitted from this compact view. Use myce status --sections usage or --history.{{else}}No usage samples yet. Charts appear after the first recorded interval.{{end}}</div>{{end}}
   </section>
 </main>
 <script type="module">

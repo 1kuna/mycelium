@@ -216,7 +216,7 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 		return false
 	})
 	var started myce.Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &started); err != nil {
+	if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &started); err != nil {
 		t.Fatal(err)
 	}
 	if len(started.Jobs) != 2 {

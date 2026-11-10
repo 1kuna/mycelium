@@ -2417,12 +2417,20 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
+	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
+	if compact {
+		out.FleetUpgrade = q.observationSelection.upgrade
+	}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
-		copy.Placement = q.modelPlacement(model)
+		if !compact {
+			copy.Placement = q.modelPlacement(model)
+		} else {
+			copy.Placement = nil
+		}
 		if s.State == "ready" && s.InFlight == 0 {
 			copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
 		}
@@ -2508,8 +2516,8 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		}
 		return a.Kind < b.Kind
 	})
-	// Existing release guards and consumer audits read curves from default
-	// status. Bound job history without changing that independent contract.
+	// Retained diagnostics are absent from compact captures; explicit section/full
+	// reads preserve every existing evidence field.
 	for _, key := range slices.Sorted(maps.Keys(q.s.StorageObservations)) {
 		out.StorageObservations = append(out.StorageObservations, q.s.StorageObservations[key])
 	}
@@ -2529,20 +2537,44 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.Reservations = q.reservations()
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
-	order, reasons := q.queueProjection()
+	order, reasons := map[string]int{}, map[string]string{}
+	if !compact {
+		order, reasons = q.queueProjection()
+	}
 	projectionSample := startStatusProjection(budgets)
 	finishJobWork := projectionSample.measure()
 	for _, stored := range q.s.Jobs {
 		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
 			continue
 		}
-		out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+		if compact {
+			copy := *stored
+			copy.Spec.Class = jobClass(copy.Spec)
+			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
+			if copy.State == "queued" && copy.Reason == "" {
+				copy.Reason = "waiting for capacity; inspect this job for placement diagnostics"
+			}
+			q.projectRuntime(&copy)
+			copy = statusJobValue(&copy)
+			copy.Timing = nil
+			out.Jobs = append(out.Jobs, &copy)
+		} else {
+			out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+		}
 	}
 	for _, c := range q.calls {
 		if q.observationSelection != nil && !q.observationSelection.ids[c.ID] {
 			continue
 		}
-		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+		if compact {
+			copy := statusJobValue(compactStatusCall(c))
+			copy.Spec.Class = jobClass(copy.Spec)
+			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
+			q.projectRuntime(&copy)
+			out.Jobs = append(out.Jobs, &copy)
+		} else {
+			out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+		}
 	}
 	finishJobWork()
 	for _, m := range q.s.Machines {
@@ -2575,16 +2607,20 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			}
 		}
 		copy.ModelCopySeconds = map[string]float64{}
-		for _, model := range q.models.Models {
-			if q.modelFitsMachine(model, m) {
-				copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+		if !compact {
+			for _, model := range q.models.Models {
+				if q.modelFitsMachine(model, m) {
+					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+				}
 			}
 		}
 		out.Machines = append(out.Machines, &copy)
 	}
 	finishJobWork = projectionSample.measure()
 	for _, j := range out.Jobs {
-		q.projectJobDiagnostics(j, forStatus, false)
+		if !compact {
+			q.projectJobDiagnostics(j, forStatus, false)
+		}
 	}
 	finishJobWork()
 	projectionSample.finish(out.Jobs)
