@@ -69,6 +69,7 @@ def priority_waiting(directory, priority):
 
 
 def full_waiters(directory):
+    """Live FIFO tickets; the historical filename now covers every mode."""
     rows = []
     for path in directory.glob('local-go-wait-*.json'):
         row = json.loads(path.read_text())
@@ -76,9 +77,8 @@ def full_waiters(directory):
             # This is a never-admitted queue ticket, not execution custody.
             path.unlink()
             continue
-        rows.append(({'calibration': 0, 'release': 1, 'normal': 2}[row['priority']],
-                     row['sequence'], path))
-    return [path for _, _, path in sorted(rows)]
+        rows.append((row['sequence'], path))
+    return [path for _, path in sorted(rows)]
 
 
 def root(repo):
@@ -457,26 +457,26 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     _cache.trim_backups(directory / 'selfheal-backups')
     if priority == 'calibration' and mode != 'full':
         raise ValueError('calibration priority reserves a full lane only')
-    prefix = 'local-go-calibration-wait-' if priority == 'calibration' else 'local-go-release-wait-'
-    ticket = directory / (prefix + uuid.uuid4().hex)
+    if mode == 'quick':
+        priority = 'normal'  # A flag or inherited environment is no release authority.
     queue_ticket = None
     checked_config, resources, slot_profile = None, None, None
     host_memory = total_memory()
     if type(host_memory) is not int or host_memory <= 0:
         raise RuntimeError('host physical memory capacity is unknown')
     try:
-        if priority in ('release', 'calibration'):
-            with admission_lock(directory):
-                publish_waiting(ticket, json.dumps(dict(pid=os.getpid(),
-                    process_identity=process_identity(os.getpid()))) + '\n')
-        if mode == 'full' or exclusive:
-            with admission_lock(directory):
-                sequence_path = directory / 'queue-sequence'
-                sequence = int(sequence_path.read_text()) + 1 if sequence_path.exists() else 1
-                publish_waiting(sequence_path, str(sequence))
-                queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
-                publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
-                    priority=priority, sequence=sequence, exclusive=exclusive)) + '\n')
+        with admission_lock(directory):
+            # Every request joins the same FIFO, including quick and command
+            # runs. Zero overtaking prevents an endless release stream from
+            # starving ordinary work, without a timer or an arbitrary wait cap.
+            sequence_path = directory / 'queue-sequence'
+            previous = [json.loads(path.read_text())['sequence'] for path in full_waiters(directory)]
+            previous.append(int(sequence_path.read_text()) if sequence_path.exists() else 0)
+            sequence = max(previous) + 1
+            publish_waiting(sequence_path, str(sequence))
+            queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
+            publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
+                priority=priority, mode=mode, sequence=sequence, exclusive=exclusive)) + '\n')
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
         while True:
@@ -520,25 +520,12 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 slots = ((os.cpu_count() or 1) + 2 if resources else
                          min(2, max(1, int(config.get('heavy_slots', 2)))))
                 fulls = min(2, max(1, int(config.get('full_slots', 1))))
-                release_waiting = priority_waiting(directory, 'release')
-                calibration_waiting = priority_waiting(directory, 'calibration')
-                pending_release = priority not in ('release', 'calibration') and release_waiting
-                pending_calibration = (mode == 'full' and priority != 'calibration'
-                                       and calibration_waiting)
+                # Retire dead pre-FIFO tickets; live legacy priority labels no
+                # longer reserve capacity ahead of the actual queue.
+                priority_waiting(directory, 'release')
+                priority_waiting(directory, 'calibration')
                 queue = full_waiters(directory)
-                queue_first = not queue_ticket or not queue or queue[0] == queue_ticket
-                front = json.loads(queue[0].read_text()) if queue else {}
-                rank = {'calibration': 0, 'release': 1, 'normal': 2}
-                exclusive_waiting = (front.get('exclusive') and
-                                     rank[priority] >= rank[front['priority']])
-                if exclusive_waiting and queue_ticket != queue[0]:
-                    queue_first = False
-                if queue_ticket is None and any(
-                        row.get('exclusive') and rank[priority] >= rank[row['priority']]
-                        for row in (json.loads(path.read_text()) for path in queue)):
-                    # An earlier full can precede an exclusive ticket, but
-                    # newly arriving quick work must not keep its drain busy.
-                    queue_first = False
+                queue_first = bool(queue) and queue[0] == queue_ticket
                 batch_done = not after_identity or process_identity(after_pid) != after_identity
                 full_marker = None
                 if not resources and mode == 'full' and not legacy and not native_full_custody():
@@ -631,7 +618,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
                                        and vm_memory + vm_peak <= resources['vm_memory_bytes'])
-                ready = (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
+                ready = (queue_first and batch_done and occupied < slots
                         and cpu_ok and memory_ok and resource_ok
                         and (resources or mode != 'full' or full_marker))
                 if ready:
@@ -690,21 +677,20 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         return Slot(slot, owner, full_marker, group)
             if not wait:
                 reason = (f'capacity busy: available memory below {admission_memory / GIB:.2f} GiB measured entry requirement'
-                          if not memory_ok else 'capacity busy or reserved for release/calibration')
+                          if not memory_ok else 'capacity busy or waiting behind an earlier FIFO request')
                 raise RuntimeError('local ' + reason + '; no work started')
             position = queue.index(queue_ticket) + 1 if queue_ticket else None
             if announced != (position, batch_done, memory_ok, admission_memory):
-                detail = f'full queue position {position}' if position else 'waiting for local capacity'
+                detail = f'FIFO queue position {position}' if position else 'waiting for local capacity'
                 if not memory_ok:
                     detail += (f'; waiting for memory: {available / GIB:.2f} GiB available, '
                                f'{admission_memory / GIB:.2f} GiB required (pressure normal)')
                 if not batch_done:
                     detail += '; waiting for the named comparison batch to exit'
-                print('gate: ' + detail + ' (calibration/release priority first)', flush=True)
+                print('gate: ' + detail, flush=True)
                 announced = (position, batch_done, memory_ok, admission_memory)
             time.sleep(.5)
     finally:
         with admission_lock(directory):
-            ticket.unlink(missing_ok=True)
             if queue_ticket:
                 queue_ticket.unlink(missing_ok=True)

@@ -319,9 +319,15 @@ an idle host.
 Swap-baseline calibration excludes local gate lanes, while the fleet worker and
 its current job remain measured background. Record that job and its usage with
 the baseline; do not wait for the fleet worker to become idle.
-Ordinary fulls wait in FIFO order by default and print their queue position;
-no polling or relay is needed. Release and calibration fulls take priority over
-ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
+All local requests share one FIFO and print their queue position: quick, full,
+focused commands, release builds and calibration. Later requests cannot overtake
+an earlier waiter. A FIFO head reserves the next opportunity; smaller later runs
+wait even when they could fit, allowing headroom to accumulate for the oldest
+request. This prevents the observed starvation of ordinary quicks by successive
+release-labelled requests. Quick requests always use normal admission, including
+when `--priority release` or `GATE_PRIORITY=release` is supplied. Release labels
+on fulls also give no queue precedence; calibration labels only qualify isolated
+measurements. No polling or relay is needed. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
 removed only after OS process identity proves it has exited or is a zombie. Execution slots
 and unknown holder custody are separate from that queue cleanup. There is
 no queue timeout. With normal pressure, insufficient available memory is
@@ -346,15 +352,13 @@ before an in-flight release's Mac leg has released capacity.
 For comparable timings, `./scripts/gate.sh full --exclusive` (or
 `gate-local.py full --exclusive`) drains all local gate work and reserves all
 local capacity until verified cleanup. A queued exclusive waiter also blocks
-new ordinary quick work, even behind an older full, so it can drain. Higher
-priority release/calibration work retains priority. Permanent fleet jobs and other projects
-remain measured background; exclusive is not a promise of an idle workstation.
-Release waiters take the next free lane through `GATE_PRIORITY=release` for a
-gate, or the supported release command wrapper (use an absolute output path
-because source runs in a snapshot):
+later work through the same FIFO, so it can drain. Permanent fleet jobs and other
+projects remain measured background; exclusive is not a promise of an idle
+workstation. Release builds use the same admitted command wrapper (use an
+absolute output path because source runs in a snapshot):
 
 ```sh
-python3 scripts/gate-local.py --priority release --command \
+python3 scripts/gate-local.py --command \
   go build -o "$PWD/.reports/release-myce" ./cmd/myce
 ```
 
@@ -738,7 +742,7 @@ python3 scripts/gate-local.py --platform linux --command \
 For exact-head release proof, use:
 
 ```sh
-python3 scripts/gate-local.py full --repo DIR --ref SHA --priority release
+python3 scripts/gate-local.py full --repo DIR --ref SHA
 ```
 
 `gate-linux.py` is the transport helper; call the admitted wrapper above for work.

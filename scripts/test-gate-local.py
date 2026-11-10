@@ -71,7 +71,7 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 with (patch.object(capacity, 'root', return_value=root),
                       patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
                     peer = capacity.acquire(root, mode='full')
-                    waiter = root / 'local-go-wait-peer.json'
+                    waiter = root / 'local-go-release-wait-peer'
                     waiter.write_text(json.dumps(dict(pid=os.getpid(),
                         process_identity=capacity.process_identity(os.getpid()),
                         priority='normal', sequence=0)))
@@ -427,12 +427,12 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 self.assertEqual(tickets[0].read_bytes(), ticket_bytes)
                 self.assertEqual(len(capacity.execution_lanes(root)), 1)
                 if waits == 1:
-                    # A smaller full fits RAM but cannot pass the FIFO head;
-                    # an ordinary fitting quick may still use spare capacity.
+                    # Neither a smaller full nor a fitting quick may overtake
+                    # the FIFO head and keep it waiting indefinitely.
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root, mode='full', platform='native')
-                    quick = capacity.acquire(root, mode='quick', platform='native', cores=1)
-                    quick.release()
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='quick', platform='native', cores=1)
                     available = 21 * capacity.GIB
                 if waits == 2:
                     reviewer.release()
@@ -446,7 +446,7 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 full = capacity.acquire(root, mode='full', platform='both', wait=True)
                 try:
                     self.assertEqual(waits, 2)
-                    self.assertIn('full queue position 1; waiting for memory:', output.getvalue())
+                    self.assertIn('FIFO queue position 1; waiting for memory:', output.getvalue())
                     self.assertIn('pressure normal', output.getvalue())
                     self.assertEqual(full.owner['memory_requirement_at_entry_bytes'],
                         capacity.memory_requirement(config, 'both'))
@@ -519,10 +519,9 @@ finally: slot.release()
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root)
                     self.assertFalse((root / 'exclusive-ready').exists())
-                    # Higher-priority release assembly goes before the ordinary
-                    # exclusive waiter; it still respects an active exclusive.
-                    release = capacity.acquire(root, priority='release')
-                    release.release()
+                    # Release labels cannot jump an earlier exclusive waiter.
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, priority='release')
                     held.release()
                     deadline = time.monotonic() + 5
                     while not (root / 'exclusive-ready').exists():
@@ -607,8 +606,8 @@ finally: slot.release()
                 self.assertEqual(capacity.full_waiters(root), [older, exclusive])
                 with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                     capacity.acquire(root)
-                release = capacity.acquire(root, priority='release')
-                release.release()
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, priority='release')
                 self.assertTrue(older.exists())
                 self.assertTrue(exclusive.exists())
 
@@ -637,32 +636,65 @@ finally: slot.release()
                 self.assertTrue(custody.exists())
             finally: child.wait(timeout=5)
 
-    def test_release_waiter_gets_next_lane_before_normal_work(self):
+    def test_later_release_stream_cannot_starve_a_queued_normal_quick(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            waiter = root / 'local-go-release-wait-other'
-            waiter.touch()
+            root = Path(folder).resolve()
+            launcher = """import importlib.util,pathlib,sys,time
+s=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
+c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
+original_sleep=time.sleep
+def wait(_):
+ (r/'queued').touch()
+ while not (r/'allow').exists(): original_sleep(.01)
+c.time.sleep=wait
+slot=c.acquire(r,mode='quick',wait=True)
+(r/'normal-admitted').touch()
+slot.release()
+"""
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
-                with self.assertRaisesRegex(RuntimeError, 'reserved for release'):
-                    capacity.acquire(root)
-                release = capacity.acquire(root, priority='release')
-                release.release()
-            self.assertTrue(waiter.exists())
+                first, second = capacity.acquire(root), capacity.acquire(root)
+                child = subprocess.Popen([sys.executable, '-c', launcher, capacity.__file__, str(root)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (root / 'queued').exists():
+                        if time.monotonic() > deadline: self.fail('normal quick did not queue')
+                        time.sleep(.01)
+                    first.release()  # A lane now fits every following request.
+                    for mode, priority in [('quick', 'release'), ('full', 'release'),
+                                           ('full', 'calibration')] * 3:
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode=mode, priority=priority)
+                    self.assertEqual(len(capacity.full_waiters(root)), 1)
+                    (root / 'allow').touch()
+                    output, error = child.communicate(timeout=5)
+                    self.assertEqual(child.returncode, 0, error)
+                    self.assertIn(b'FIFO queue position 1', output)
+                    self.assertTrue((root / 'normal-admitted').exists())
+                    release = capacity.acquire(root, priority='release')
+                    self.assertEqual(release.owner['priority'], 'normal')
+                    release.release()
+                finally:
+                    for slot in (first, second):
+                        if slot.directory.exists(): slot.release()
+                    if child.poll() is None: child.kill()
+                    child.wait(timeout=5)
+                    child.stdout.close(); child.stderr.close()
 
-    def test_calibration_gets_next_full_lane_ahead_of_release_full(self):
+    def test_legacy_calibration_label_is_not_an_execution_reservation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'local-go-calibration-wait-owner').touch()
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
-                with self.assertRaisesRegex(RuntimeError, 'reserved'):
-                    capacity.acquire(root, mode='full', priority='release')
-                # The full reservation does not block native release assembly.
-                build = capacity.acquire(root, priority='release')
-                build.release()
-                full = capacity.acquire(root, mode='full', priority='calibration')
+                full = capacity.acquire(root, mode='full', priority='release')
                 full.release()
+                build = capacity.acquire(root, priority='release')
+                self.assertEqual(build.owner['priority'], 'normal')
+                build.release()
 
     def test_disk_refusal_starts_nothing(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -709,7 +741,7 @@ slot.release()
                     for child in children[:-1]:
                         output, error = child.communicate(timeout=8)
                         self.assertEqual(child.returncode, 0, error)
-                        self.assertIn(b'full queue position', output)
+                        self.assertIn(b'FIFO queue position', output)
                     self.assertEqual((root / 'order').read_text().splitlines(), ['first', 'second'])
                 finally:
                     for child in children:
@@ -1308,7 +1340,7 @@ sys.exit(m.main())
             self.assertEqual(row['phase'], 'host')
             self.assertLess(row['min_free_bytes'], capacity.STOP_FLOOR)
 
-    def test_release_command_uses_priority_admission_and_host_supervision(self):
+    def test_command_cannot_claim_release_priority_and_keeps_host_supervision(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             slot = Mock()
@@ -1338,7 +1370,7 @@ sys.exit(m.main())
                   patch.object(Path, 'unlink'),
                   patch.object(local.subprocess, 'Popen', side_effect=supervised)):
                 self.assertEqual(local.main(), 0)
-            self.assertEqual(admission.call_args.kwargs['priority'], 'release')
+            self.assertEqual(admission.call_args.kwargs['priority'], 'normal')
             self.assertTrue(admission.call_args.kwargs['wait'])
             slot.release.assert_called_once_with(stopped=True)
 

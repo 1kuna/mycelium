@@ -215,7 +215,8 @@ def main():
     parser.add_argument('--repo', type=Path, default=REPO)
     parser.add_argument('--ref')
     parser.add_argument('--platform', choices=('native', 'linux', 'both'))
-    parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'))
+    parser.add_argument('--priority', choices=('normal', 'release', 'calibration'), default=os.environ.get('GATE_PRIORITY', 'normal'),
+                        help='compatibility label; all requests use FIFO; calibration qualifies isolated full measurements')
     parser.add_argument('--cores', type=int,
                         help='test slots per platform; full defaults to measured eight-slot memory capacity, otherwise four')
     parser.add_argument('--exclusive', action='store_true',
@@ -226,6 +227,8 @@ def main():
     parser.add_argument('--reconcile', type=Path, nargs='+', metavar='RECEIPT',
                         help='compatibility command; admission now reclaims dead holders automatically')
     args = parser.parse_args()
+    if args.mode == 'quick' and args.priority == 'release':
+        args.priority = 'normal'
     if args.cores is None and (args.mode != 'full' or args.command):
         args.cores = 4
     if args.execute:
