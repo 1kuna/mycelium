@@ -259,12 +259,21 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 	if st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }, "mount-metadata"); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount")
 	}
-	for _, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
-		if !filepath.IsAbs(path) || !withinNAS(mount, path) {
-			return preflightError("nas_root_outside_mount", "storage", "checkpoint, model and environment roots must stay on the mounted NAS")
+	for role, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		base := mount
+		if role == 2 && !withinNAS(mount, path) && filepath.IsAbs(path) {
+			// Model acquisition may use local disk; checkpoint/environment mount
+			// selection and health checks retain their existing contract.
+			local, err := validateLocalModelVolume(ctx, abort, path)
+			if err != nil {
+				return err
+			}
+			base = local
+		} else if !filepath.IsAbs(path) || !withinNAS(mount, path) {
+			return preflightError("nas_root_outside_mount", "storage", "checkpoint and environment roots must stay on the mounted NAS; model roots may also use verified local disk")
 		}
-		rel, _ := filepath.Rel(mount, path)
-		at := mount
+		rel, _ := filepath.Rel(base, path)
+		at := base
 		for _, part := range strings.Split(rel, string(filepath.Separator)) {
 			if part == "." {
 				continue

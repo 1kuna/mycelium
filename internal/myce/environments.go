@@ -482,6 +482,8 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
+	budget      *workerDiskBudget
+	references  func(context.Context, string) (bool, error)
 	Tools       *EnvironmentToolSource
 	once        sync.Once
 	initErr     error
@@ -798,7 +800,11 @@ func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 	}
 	return ctx.Err()
 }
-func (c *EnvironmentCache) admit(key string, size int64) error {
+func (c *EnvironmentCache) admit(key string, size int64, contexts ...context.Context) error {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	_, e := c.purgeRetired()
 	if e != nil {
 		return e
@@ -816,7 +822,14 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 		if total <= c.Limit {
 			break
 		}
-		removed, e := c.evict(v.Key, "cache_limit", nil)
+		var check func() (bool, error)
+		if c.references != nil {
+			check = func() (bool, error) {
+				referenced, err := c.references(ctx, v.Key)
+				return !referenced, err
+			}
+		}
+		removed, e := c.evict(v.Key, "cache_limit", check)
 		if e != nil {
 			return e
 		}
@@ -901,6 +914,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	if c.ready(r.Key) {
 		return nil
 	}
+	releaseBudget, err := c.budget.reserve(ctx, c.Root, 0, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseBudget()
 	// Install at the final prefix: conda and managed Python can embed it in binaries.
 	// Readiness alone is atomically published after every build step succeeds.
 	partial := filepath.Join(c.Root, r.Key)
@@ -919,6 +937,10 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				if retain, ok := ctx.Value(preparationCustodyKey{}).(func(string) error); ok {
 					ensureErr = errors.Join(ensureErr, errWorkerReleasePending, err, retain(filepath.Join(partial, "build-state.json")))
 				}
+				return
+			}
+			if err := os.RemoveAll(filepath.Join(partial, ".compiler-cache")); err != nil {
+				ensureErr = errors.Join(ensureErr, err)
 				return
 			}
 			if errors.Is(e, errEnvironmentBuildStalled) {
@@ -944,6 +966,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	// documented UV_LINK_MODE, but never uv credentials (buildUVVariables).
 	env := environmentList(buildEnvironmentFrom(os.Environ()))
 	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
+	env = append(env, "GOCACHE="+filepath.Join(partial, ".compiler-cache", "go-build"))
 	run := c.Run
 	if run == nil {
 		run = c.runBuild
@@ -1014,8 +1037,17 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 					var gate *os.File
 					gate, e = c.lock(buildCtx, "admission", syscall.LOCK_EX)
 					if e == nil {
-						e = c.admit(r.Key, 0)
+						e = c.admit(r.Key, 0, buildCtx)
 						unlockEnvironment(gate)
+					}
+				}
+				if e == nil {
+					if c.budget != nil {
+						var release func()
+						release, e = c.budget.reserve(buildCtx, c.Root, 0, 0)
+						if e == nil {
+							release()
+						}
 					}
 				}
 				if e == nil {
@@ -1126,6 +1158,12 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return fmt.Errorf("environment %s build failed: %w (log %s)", r.Key, e, output.Name())
 	}
 	report := EnvironmentReport{Key: r.Key, State: "ready", BuildSeconds: c.Clock.Now().Sub(start).Seconds()}
+	if err := c.cleanupBuild(partial); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(partial, ".compiler-cache")); err != nil {
+		return err
+	}
 	// Reserve one filesystem block for ready.json before publishing readiness.
 	var fs syscall.Statfs_t
 	if e = syscall.Statfs(partial, &fs); e != nil {
@@ -1137,7 +1175,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return e
 	}
 	defer unlockEnvironment(gate)
-	if e = c.admit(r.Key, size); e != nil {
+	if e = c.admit(r.Key, size, ctx); e != nil {
 		return e
 	}
 	if e = syncEnvironmentFiles(partial); e != nil {

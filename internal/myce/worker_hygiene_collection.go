@@ -24,11 +24,15 @@ type CacheCollection struct {
 }
 
 type WorkerHygieneCollection struct {
-	At           time.Time       `json:"at"`
-	NextAt       time.Time       `json:"next_at"`
-	FileCache    CacheCollection `json:"file_cache"`
-	Environments CacheCollection `json:"environments"`
-	StagingError string          `json:"staging_error,omitempty"`
+	DiskBudget             []DiskBudgetVolume      `json:"disk_budget,omitempty"`
+	Scratch                *AttemptFilesCollection `json:"scratch,omitempty"`
+	CompilerWarning        string                  `json:"compiler_warning,omitempty"`
+	UnmanagedCompilerBytes int64                   `json:"unmanaged_compiler_bytes,omitempty"`
+	At                     time.Time               `json:"at"`
+	NextAt                 time.Time               `json:"next_at"`
+	FileCache              CacheCollection         `json:"file_cache"`
+	Environments           CacheCollection         `json:"environments"`
+	StagingError           string                  `json:"staging_error,omitempty"`
 }
 
 type workerHygieneCollector struct {
@@ -59,6 +63,17 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 		return
 	}
 	r := WorkerHygieneCollection{At: started}
+	c.w.reclaimPendingDisk(ctx)
+	r.DiskBudget = c.w.diskBudget.collect(ctx)
+	if c.w.compilerCache != nil && c.w.compilerCache.external.Load() {
+		r.CompilerWarning = "external_compiler_cache_unmanaged"
+	}
+	if c.w.compilerCache != nil {
+		if bytes, err := c.w.compilerCache.externalUsage(ctx); err == nil && bytes > 0 {
+			r.UnmanagedCompilerBytes = bytes
+			r.CompilerWarning = "external_compiler_cache_unmanaged"
+		}
+	}
 	// Refresh while idle as well as at admission: freeing unrelated disk must
 	// wake cache-blocked placement without a worker restart or a new attempt.
 	if c.w.sharedInputs != nil {
@@ -87,6 +102,23 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 	c.mu.Lock()
 	c.report = r
 	c.mu.Unlock()
+}
+
+func (w Worker) environmentReferenced(ctx context.Context, key string) (bool, error) {
+	var state struct {
+		Referenced bool `json:"referenced"`
+	}
+	err := w.Client.Call(ctx, "GET", "/api/environments/"+key+"/reference", nil, &state)
+	return state.Referenced, err
+}
+
+func (c *workerHygieneCollector) recordScratch(report AttemptFilesCollection) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.report.Scratch = &report
 }
 
 func (c *FileCache) collectionLock(ctx context.Context) (*os.File, error) {
@@ -201,6 +233,12 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 		if err != nil || !os.SameFile(v.info, info) || !info.Mode().IsRegular() {
 			r.Error = "file_cache_collect_changed"
 			return r
+		}
+		if c.budget != nil {
+			if err := c.Client.HasFile(ctx, FileRef{SHA256: v.name, SizeBytes: info.Size()}); err != nil {
+				r.Protected = true
+				continue
+			}
 		}
 		if err := os.Remove(path); err != nil {
 			r.Error = "file_cache_collect_failed"
@@ -341,6 +379,8 @@ func (c *EnvironmentCache) collectionUsage(ctx context.Context) (int64, error) {
 	return collectionAllocatedBytes(ctx, paths...)
 }
 
+type collectionDeviceKey struct{}
+
 func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, error) {
 	seen := map[[2]uint64]bool{}
 	var size int64
@@ -366,7 +406,16 @@ func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, erro
 			if !ok {
 				return errors.New("environment disk accounting unavailable")
 			}
+			if device, limited := ctx.Value(collectionDeviceKey{}).(uint64); limited && uint64(stat.Dev) != device {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			id := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
+			if seen[id] && d.IsDir() {
+				return filepath.SkipDir
+			}
 			if !seen[id] {
 				size += stat.Blocks * 512
 				seen[id] = true
@@ -449,5 +498,27 @@ func publicWorkerCollection(m *Machine) {
 	r.FileCache.Error = code(r.FileCache.Error, "file_cache_collect_failed", "file_cache_collect_failed", "file_cache_collect_interrupted", "file_cache_collect_changed")
 	r.Environments.Error = code(r.Environments.Error, "environment_collect_failed", "environment_collect_failed", "environment_collect_interrupted", "environment_references_unavailable")
 	r.StagingError = code(r.StagingError, "installer_staging_retained", "installer_staging_retained")
+	r.CompilerWarning = code(r.CompilerWarning, "external_compiler_cache_unmanaged", "external_compiler_cache_unmanaged")
+	r.DiskBudget = slices.Clone(r.DiskBudget)
+	for i := range r.DiskBudget {
+		v := &r.DiskBudget[i]
+		if !sha256Name.MatchString(v.ID) {
+			v.ID = ""
+		}
+		v.Roots = slices.Clone(v.Roots)
+		for j := range v.Roots {
+			v.Roots[j] = code(v.Roots[j], "unknown", "attempts", "files", "shared_inputs", "model_snapshots", "environments", "models", "compiler")
+		}
+		v.Warning = code(v.Warning, "disk_inventory_unavailable", "foreign_disk_growth", "disk_inventory_unavailable")
+	}
+	if r.Scratch != nil {
+		s := *r.Scratch
+		s.Reasons = map[string]int64{}
+		for reason, bytes := range r.Scratch.Reasons {
+			name := code(reason, "unknown", "unknown_job", "unresolved_custody", "parked_storage_custody", "pending_delivery", "unique_unreleased", "file_retention", "unknown_folder", "active", "pending_replay", "queue_unavailable", "local_custody", "collection_failed")
+			s.Reasons[name] += bytes
+		}
+		r.Scratch = &s
+	}
 	m.HygieneCollection = &r
 }

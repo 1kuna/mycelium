@@ -111,6 +111,9 @@ func TestDockerLaunchHeartbeatRetainsFences(t *testing.T) {
 				q.s.Machines[sibling.ID] = &sibling
 			case "old-copy":
 				r := HostRelease{Host: hostID(owner), Machine: j.Machine, Session: "old-session", Job: j.ID, Attempt: 1, Docker: true}
+				if q.s.HostReleases == nil {
+					q.s.HostReleases = map[string]HostRelease{}
+				}
 				q.s.HostReleases[releaseKey(r)] = r
 			case "attempt":
 				launch.Attempt = "2"

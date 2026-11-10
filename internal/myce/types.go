@@ -723,6 +723,7 @@ type Reply struct {
 	HostMemorySampleProtocol   string                       `json:"host_memory_sample_protocol,omitempty"`
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
+	WorkerDiskBudgetProtocol   string                       `json:"worker_disk_budget_protocol,omitempty"`
 	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	HostMountProgressProtocol  string                       `json:"host_mount_progress_protocol,omitempty"`

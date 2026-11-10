@@ -19,6 +19,8 @@ import (
 
 // ModelCache reserves complete copy sizes under one admission lock.
 type ModelCache struct {
+	budget        *workerDiskBudget
+	knownModels   sync.Map
 	ApprovalRoot  string
 	storedModels  sync.Map
 	FileClient    *Client
@@ -82,6 +84,27 @@ func (c *ModelCache) discard(path string) error {
 func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 	if e := ctx.Err(); e != nil {
 		return e
+	}
+	if c.budget != nil {
+		key := strings.TrimSuffix(filepath.Base(path), ".partial")
+		known, ok := c.knownModels.Load(key)
+		if !ok {
+			return errors.New("model source unknown; preserving cache copy")
+		}
+		model := known.(Model)
+		if !model.FileStore {
+			source, err := c.source(model)
+			if err != nil {
+				return err
+			}
+			if !independentCacheSource(source, path) {
+				return errors.New("source is the cache copy")
+			}
+			if err = verifyModelContext(ctx, source, model); err != nil {
+				return err
+			}
+			return os.RemoveAll(path)
+		}
 	}
 	if model, ok := c.storedModels.Load(strings.TrimSuffix(filepath.Base(path), ".partial")); ok && c.FileClient != nil {
 		m := model.(Model)
@@ -243,6 +266,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		}
 	}
 	key := cacheKey(m)
+	c.knownModels.Store(key, m)
 	if m.FileStore {
 		c.storedModels.Store(key, m)
 	}
@@ -301,6 +325,15 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	if e := ctx.Err(); e != nil {
 		return "", e
 	}
+	needWrite := uint64(max(0, m.SizeBytes))
+	if cached {
+		needWrite = 0
+	}
+	release, e := c.budget.reserve(ctx, c.Root, needWrite, 0)
+	if e != nil {
+		return "", e
+	}
+	defer release()
 	c.mu.Lock()
 	if _, e = os.Lstat(dest); e == nil && !cached {
 		c.verified.Delete(key)

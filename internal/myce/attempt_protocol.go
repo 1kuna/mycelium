@@ -65,6 +65,13 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
+	if hasDiskBudgetWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		c = legacyDiskBudgetCheckin(c)
+		if w.hygieneWire != nil {
+			w.hygieneWire.diskBudgetSupported = false
+		}
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
 	if hasMountProgressWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// A queue downgraded to hygiene v1 can still consume health and
 		// collection. Retry without only the newly negotiated mount evidence;

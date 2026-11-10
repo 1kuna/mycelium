@@ -20,7 +20,11 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	// Positive EnvironmentCache Limit initializes storage/locks only; automatic
 	// input admission computes the effective budget on every scan.
 	w.fileCache = &FileCache{Root: root, Limit: limit, automatic: limit == 0, Clock: w.Clock, Client: w.Client}
+	w.fileCache.budget = w.diskBudget
+	w.fileCache.diskProbe = w.DiskProbe
 	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: max(1, limit), Clock: w.Clock}, automatic: limit == 0, Client: w.Client}
+	w.sharedInputs.budget = w.diskBudget
+	w.sharedInputs.diskProbe = w.DiskProbe
 	w.sharedInputs.refreshCapacity()
 	// Model snapshots are tens of gigabytes, so they share the model cache's
 	// size setting rather than the small file cache's.
@@ -29,6 +33,16 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 		models = defaultModelCacheBytes
 	}
 	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "model-snapshots"), Limit: models, Clock: w.Clock}, Client: w.Client}
+	w.modelSnapshots.budget = w.diskBudget
+	w.modelSnapshots.diskProbe = w.DiskProbe
+	if err := w.modelSnapshots.cache.init(); err != nil {
+		return err
+	}
+	if w.diskBudget != nil {
+		w.diskBudget.add(diskBudgetRoot{name: "files", path: root, candidates: w.fileCache.budgetCandidates})
+		w.diskBudget.add(diskBudgetRoot{name: "shared_inputs", path: w.sharedInputs.cache.Root, candidates: w.sharedInputs.budgetCandidates})
+		w.diskBudget.add(diskBudgetRoot{name: "model_snapshots", path: w.modelSnapshots.cache.Root, candidates: w.modelSnapshots.budgetCandidates})
+	}
 	if w.fileCheckpoints {
 		if w.CheckpointRoot != "" {
 			return errors.New("NAS checkpoint-root cannot be combined with queue file-store checkpoints")

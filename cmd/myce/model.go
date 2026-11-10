@@ -31,7 +31,7 @@ func modelCommand(args []string) error {
 	timezone := f.String("timezone", "UTC", "IANA time zone")
 	weekdays := f.String("weekdays", "", "comma-separated 0=Sunday through 6=Saturday")
 	url := f.String("url", "", "Hugging Face HTTPS file URL")
-	root := f.String("model-root", "", "NAS model folder")
+	root := f.String("model-root", "", "model folder on NAS or local disk")
 	size := f.Int64("size-bytes", 0, "expected size")
 	sum := f.String("sha256", "", "expected SHA-256")
 	approvalRoot := f.String("model-approval-root", "", "worker-local approval directory")
@@ -82,7 +82,7 @@ func modelCommand(args []string) error {
 	if args[0] == "fetch" {
 		p := filepath.Clean(f.Arg(0))
 		if *root == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
-			return errors.New("fetch needs NAS --model-root and a relative destination")
+			return errors.New("fetch needs --model-root and a relative destination")
 		}
 		return myce.FetchModel(context.Background(), *url, *root, p, *size, *sum)
 	}

@@ -115,6 +115,7 @@ func (w Worker) retainWorkerFiles(ctx context.Context, dir string, now time.Time
 		return d, err
 	}
 	err := errors.Join(pruneWorkerLogs(dir, "", now, w.LogRetention), pruneAttemptFiles(dir, now, c), pruneAttemptState(dir, now, w.LogRetention))
+	w.hygieneCollector.recordScratch(c.report)
 	log.Printf("worker scratch retention: retained_bytes=%d reclaimed_bytes=%d retained_bytes_by_reason=%v", c.report.RetainedBytes, c.report.ReclaimedBytes, c.report.Reasons)
 	return err
 }

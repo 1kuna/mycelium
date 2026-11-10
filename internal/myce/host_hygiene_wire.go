@@ -5,6 +5,7 @@ import "slices"
 const hostHygieneProtocol = "host-hygiene-v1"
 const hostCollectionProtocol = "worker-collection-v1"
 const hostMountProgressProtocol = "mount-progress-v1"
+const workerDiskBudgetProtocol = "worker-disk-budget-v1"
 
 // Negotiated by the serialized check-in lane. Older queues strictly decode
 // requests, so local evidence stays durable without sending unknown fields.
@@ -14,6 +15,7 @@ type workerHygieneWire struct {
 	supported              bool
 	collectionSupported    bool
 	mountProgressSupported bool
+	diskBudgetSupported    bool
 }
 
 func (w Worker) hygieneCheckin(c Checkin) Checkin {
@@ -26,6 +28,9 @@ func (w Worker) hygieneCheckin(c Checkin) Checkin {
 		}
 		if !r.collectionSupported {
 			c.Machine.HygieneCollection = nil
+		}
+		if !r.diskBudgetSupported {
+			c = legacyDiskBudgetCheckin(c)
 		}
 		if r.supported {
 			if !r.mountProgressSupported {
@@ -92,11 +97,27 @@ func (w Worker) acceptHygieneReply(reply Reply) {
 		w.hygieneWire.supported = reply.HostHygieneProtocol == hostHygieneProtocol
 		w.hygieneWire.collectionSupported = reply.HostCollectionProtocol == hostCollectionProtocol
 		w.hygieneWire.mountProgressSupported = reply.HostMountProgressProtocol == hostMountProgressProtocol
+		w.hygieneWire.diskBudgetSupported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
 	}
 }
 
 func hasHygieneWireFields(c Checkin) bool {
 	return c.Machine.HostHealth != nil || c.Machine.HygieneCollection != nil || hasHostProbeFields(c)
+}
+
+func legacyDiskBudgetCheckin(c Checkin) Checkin {
+	if c.Machine.HygieneCollection != nil {
+		r := *c.Machine.HygieneCollection
+		r.DiskBudget, r.Scratch, r.CompilerWarning = nil, nil, ""
+		r.UnmanagedCompilerBytes = 0
+		c.Machine.HygieneCollection = &r
+	}
+	return c
+}
+
+func hasDiskBudgetWireFields(c Checkin) bool {
+	r := c.Machine.HygieneCollection
+	return r != nil && (len(r.DiskBudget) > 0 || r.Scratch != nil || r.CompilerWarning != "" || r.UnmanagedCompilerBytes != 0)
 }
 
 // Copy the nested records before stripping negotiated fields. Local freshness
