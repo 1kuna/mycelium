@@ -3,6 +3,9 @@ package myce
 import "strings"
 
 func (q *Queue) chargeLoss(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	for i := range j.Copies {
 		if j.Copies[i].Attempt == j.Attempt {
 			j.Copies[i].LossCharged = true

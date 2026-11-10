@@ -592,6 +592,9 @@ func (q *Queue) maintainModels() {
 		}
 		q.initEnginePreemption(s)
 		q.recordModelInterval(s, "assigned")
+		if q.s.Machines[m.ID] == m {
+			q.touchMachine(m.ID)
+		}
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
 	}

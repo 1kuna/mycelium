@@ -255,8 +255,7 @@ type Queue struct {
 
 	fragmented              bool
 	persistencePageBytes    int
-	persistenceEncodings    map[string]map[string]catalogEncoding
-	persistenceFieldsCache  map[string]persistenceFieldCache
+	machineRecords          bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
 	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
@@ -414,10 +413,17 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			}
 		}
 	}
-	for _, j := range q.liveJobs() {
-		if j.Timing != nil && !terminal(j.State) {
-			j.Timing.Reason = "queue restarted; occupancy unknown"
+	if err = q.update(func() error {
+		for _, j := range q.liveJobs() {
+			if j.Timing != nil && !terminal(j.State) && j.Timing.Reason != "queue restarted; occupancy unknown" {
+				q.touchJob(j.ID)
+				j.Timing.Reason = "queue restarted; occupancy unknown"
+			}
 		}
+		return nil
+	}); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
@@ -681,6 +687,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if err != nil {
 		return err
 	}
+	var audit func() error
+	if auditQueueRecords != nil {
+		audit = auditQueueRecords(q)
+	}
 	oldCalls := map[string]*ModelCall{}
 	for id, c := range q.calls {
 		copy := *c
@@ -723,7 +733,12 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
 		hold.next(holdPersist)
-		err = q.persistUsage(timing)
+		if audit != nil {
+			err = audit()
+		}
+		if err == nil {
+			err = q.persistUsage(timing)
+		}
 	}
 	if err == nil {
 		q.fileReferenceRevision++
@@ -1109,6 +1124,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	q.touchJob(j.ID)
 	if wallTimeStopped(j) && !cancelled(j) {
 		q.finishWallTime(j)
 		return
@@ -1123,6 +1139,7 @@ func (q *Queue) retry(j *Job, why string) {
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
+	q.touchJob(j.ID)
 	j.PendingOutputRefs = nil
 	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
@@ -1184,6 +1201,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.State = "queued"
 }
 func (q *Queue) stop(j *Job, why string) {
+	q.touchJob(j.ID)
 	if j.State != "running" {
 		return
 	}
@@ -1250,6 +1268,7 @@ func (q *Queue) maintain() {
 	}
 	for _, m := range q.s.Machines {
 		if a := machineAvailability(m); a != nil && a.Available && (a.Mode == "daily" || a.Signals.Laptop) && !hostAvailabilityFresh(m, now) {
+			q.touchMachine(m.ID)
 			a.Available = false
 			a.Reason = "owner signals stale"
 		}
@@ -1269,6 +1288,7 @@ func (q *Queue) maintain() {
 		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
+			q.touchMachine(m.ID)
 			m.Gone = true
 			q.discontinueContactCadence(m.ID)
 			q.clearPreemptionPlacements(m.ID, m.Session)
@@ -1276,6 +1296,7 @@ func (q *Queue) maintain() {
 			m.Models = nil
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
+					q.touchJob(j.ID)
 					if cancelled(j) {
 						q.finishCancellation(j)
 					} else {
@@ -1329,6 +1350,7 @@ func (q *Queue) maintain() {
 			}
 		}
 		if (j.State == "queued" || j.State == "paused") && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
+			q.touchJob(j.ID)
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 		}
@@ -1355,7 +1377,11 @@ func (q *Queue) maintain() {
 	q.admissionWaitPending = true
 	for _, j := range q.liveJobs() {
 		if q.startupPending(j) || q.startCapacityPaused(j) {
-			j.Reason = q.startStatusReason(j, scan)
+			reason := q.startStatusReason(j, scan)
+			if reason != j.Reason {
+				q.touchJobReason(j)
+				j.Reason = reason
+			}
 		}
 	}
 }
@@ -1621,6 +1647,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if old != nil && old.Session != m.Session && c.Fresh {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
+					q.touchJob(j.ID)
 					if cancelled(j) {
 						q.finishCancellation(j)
 						continue
@@ -1639,6 +1666,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		delete(q.unreported, m.ID)
 		m.Gone = false
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		m.DiskReceivedAt = m.LastSeen // Ignore worker-supplied queue timestamps.
 		// Recovery is queue-observed admission state, not worker-supplied status.
@@ -1684,6 +1712,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			(q.networkQuiet || q.fleetQuiet(m.LastSeen, false)) {
 			q.startNetworkRecovery(m.LastSeen)
 		}
+		q.touchMachine(m.ID)
 		q.s.Machines[m.ID] = &m
 		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
 			q.discontinueContactCadence(m.ID)
@@ -1896,6 +1925,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 		if m.Leaving && reply.Job == nil && len(q.modelPlan(m.ID)) == 0 {
+			q.touchMachine(m.ID)
 			m.Gone = true
 			m.Models = nil
 		}
@@ -2205,6 +2235,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.retainAttemptResources(j, r.Resources)
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
@@ -2288,6 +2319,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
 		if m := q.s.Machines[r.Machine]; m != nil {
+			q.touchMachine(m.ID)
 			for i := range m.ExtensionReports {
 				report := &m.ExtensionReports[i]
 				if report.Digest == j.Extension.Digest && report.Work == j.Spec.workType() {
@@ -2301,6 +2333,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// Qualification may change after admission. Withdraw CPU readiness and
 		// wait for fresh evidence rather than exhausting infrastructure retries.
 		if m := q.s.Machines[r.Machine]; m != nil {
+			q.touchMachine(m.ID)
 			m.CPUIsolation = cpuIsolationUnavailable
 		}
 		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
@@ -2358,6 +2391,7 @@ func (q *Queue) Leave(id string, now bool, requestContexts ...context.Context) e
 		if m == nil || m.Gone {
 			return errors.New("machine is not in the fleet")
 		}
+		q.touchMachine(m.ID)
 		m.Leaving = true
 		for _, j := range q.liveJobs() {
 			if j.Machine == id && (j.Spec.Resumable || now) {
@@ -2761,6 +2795,7 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 		return err
 	}
 	if m := q.s.Machines[l.Machine]; m != nil && m.Session == l.Session {
+		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
@@ -2857,6 +2892,7 @@ func cloneMachine(m *Machine) Machine {
 
 // Startup acknowledgements use queue time, avoiding cross-machine clock skew.
 func (q *Queue) markStarted(j *Job) {
+	q.touchJob(j.ID)
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
@@ -2936,6 +2972,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
+	q.touchJob(j.ID)
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
 	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
@@ -3040,6 +3077,7 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int)
 
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
+	q.touchJob(j.ID)
 	values := q.placementValues(q.placementScan(scans...))
 	if j.Spec.FanOut != nil {
 		q.touchJob(j.ID).PreemptionPlacement = nil
@@ -3093,6 +3131,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.FinishedAt = nil
 	j.StartLatencySeconds = 0
+	if q.s.Machines[m.ID] == m {
+		q.touchMachine(m.ID)
+	}
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 	j.Starts = max(j.Starts, j.Attempt) + 1
 	j.Attempt = j.Starts

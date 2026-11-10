@@ -94,6 +94,7 @@ func (q *Queue) recordExternalMemory(m *Machine) {
 		q.s.ExternalMemory = map[string]*externalMemoryRing{}
 	}
 	host := hostID(m)
+	q.touchCatalog("external_memory/" + host)
 	r := q.s.ExternalMemory[host]
 	if r == nil {
 		r = &externalMemoryRing{Buckets: map[int]*externalMemoryBucket{}}

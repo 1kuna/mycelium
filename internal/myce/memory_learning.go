@@ -223,5 +223,6 @@ func (q *Queue) recordStorageNeeds(sample eligibleMemorySample) {
 	if q.s.StorageObservations == nil {
 		q.s.StorageObservations = map[string]StorageObservation{}
 	}
+	q.touchCatalog("storage_observations/" + id)
 	q.s.StorageObservations[id] = old
 }

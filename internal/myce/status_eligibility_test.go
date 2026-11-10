@@ -194,7 +194,7 @@ func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 	// model's memory: same-tier demand is allowed to reclaim that residency.
 	s.Needs.MemoryGB = 16
 	j := submit(t, q, s)
-	if err := q.update(func() error { q.s.Jobs[j.ID].Checkpoint = "private-checkpoint"; return nil }); err != nil {
+	if err := q.update(func() error { q.touchJob(j.ID).Checkpoint = "private-checkpoint"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -306,7 +306,7 @@ func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
 	}
 	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b"}, false)
-	if err := q.update(func() error { q.s.Jobs[j.ID].ProductionHost = "host-production"; return nil }); err != nil {
+	if err := q.update(func() error { q.touchJob(j.ID).ProductionHost = "host-production"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	c.Advance(time.Second)

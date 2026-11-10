@@ -170,7 +170,7 @@ func TestQueueShutdownRollsBackUncommittedControl(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- q.update(func() error {
-			q.s.Jobs[j.ID].State = "failed"
+			q.touchJob(j.ID).State = "failed"
 			close(entered)
 			<-release
 			return nil

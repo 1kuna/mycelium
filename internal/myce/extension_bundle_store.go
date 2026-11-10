@@ -414,6 +414,9 @@ func (q *Queue) migrateBundleFiles() error {
 		return nil
 	}
 	return q.update(func() error {
+		for id := range q.s.Extensions {
+			q.touchCatalog("extensions/" + id)
+		}
 		for id := range q.s.Jobs {
 			q.touchJob(id)
 		}

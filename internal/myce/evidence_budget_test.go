@@ -69,6 +69,7 @@ func TestEvidenceRetentionCapacityValueAndPins(t *testing.T) {
 			}
 			if err := q.update(func() error {
 				for i := range hosts {
+					q.touchMachine(fmt.Sprint(i))
 					q.s.Machines[fmt.Sprint(i)] = &Machine{ID: fmt.Sprint(i)}
 				}
 				for i := range 25 {

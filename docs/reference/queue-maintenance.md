@@ -185,8 +185,8 @@ snapshots), `usage_accounting_ms`, `fn_body_ms` (mutation plus health/maintenanc
 `persist_commit_ms` (usage writes, state serialization and SQLite commit), and
 `notify_ms` (wake notification and final commit/rollback bookkeeping). These
 non-overlapping phases cover the measured hold, including failed updates.
-Persistence additionally reports `persist_marshal_ms` (encoding, detached-value
-comparison and fragment preparation), `persist_sql_ms` (transaction setup/usage
+Persistence additionally reports `persist_marshal_ms` (dirty-record encoding
+and fragment preparation), `persist_sql_ms` (transaction setup/usage
 writes and state statements), and `persist_sync_commit_ms` (SQLite commit with
 FULL synchronization, not isolated fsync). `persist_payload_bytes` and
 `persist_records` count changed state payloads/rows submitted to SQL; they exclude
@@ -202,6 +202,15 @@ the format marker commit atomically in the existing FULL-synchronous transaction
 Startup reads whole-state and normalized-v1 databases and converts them once;
 older readers refuse v2 instead of silently losing fields. Preserve a compatible
 binary with the backup when planning recovery; do not open v2 with an older binary.
+
+Normalized state v3 stores each machine in its own record. Transaction mutators
+explicitly journal jobs, machines and catalog entries before changing decisions;
+unchanged records are neither cloned nor encoded for change detection. Derived
+reason text and temporary measurement labels have separate in-memory journals.
+Startup upgrades v2 in the same atomic FULL transaction as its first decisions.
+A failed upgrade retains the previous layout and marker. Readers predating v3
+refuse the new layout; recovery needs a compatible binary or a consistent backup
+from before the upgrade.
 
 `BenchmarkCheckinPersistence` reports control-hold and persistence phases,
 changed payload bytes and private-fixture WAL growth for retained-history and

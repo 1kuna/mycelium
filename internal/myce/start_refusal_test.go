@@ -40,7 +40,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 					q.s.Hosts = map[string]*HostState{hostID(&m): {Policy: HostPolicy{ProductionHold: priority == "production"}, Active: true}}
 					q.s.HostReleases = map[string]HostRelease{}
 					if priority == "experiment" {
-						q.s.Machines[m.ID].Leaving = true
+						q.touchMachine(m.ID).Leaving = true
 					}
 					q.s.HostReleases[releaseKey(release)] = release
 					return nil
@@ -75,7 +75,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 						t.Fatal("blocking release was not retained")
 					}
 					q.s.Hosts[hostID(&m)].Active = false
-					q.s.Machines[m.ID].Leaving = false
+					q.touchMachine(m.ID).Leaving = false
 					return nil
 				}); err != nil {
 					t.Fatal(err)
@@ -131,7 +131,7 @@ func TestStartFenceStillChargesRealFailure(t *testing.T) {
 			launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}
 			setLeaving := func(leaving bool) {
 				t.Helper()
-				if err := q.update(func() error { q.s.Machines[m.ID].Leaving = leaving; return nil }); err != nil {
+				if err := q.update(func() error { q.touchMachine(m.ID).Leaving = leaving; return nil }); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -74,12 +74,12 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.CapabilityProfile.Availability = &Availability{Reason: "synthetic-private-secret", CheckedAt: c.Now()}
-	if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID); q.s.Machines[m.ID] = &m; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	s := Spec{Name: "kind job", Project: "test", Priority: "experiment", Kind: "sample"}
 	kind := submit(t, q, s)
-	if err := q.update(func() error { q.s.Jobs[kind.ID].RequeuedByOperator = true; return nil }); err != nil {
+	if err := q.update(func() error { q.touchJob(kind.ID).RequeuedByOperator = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	s = spec("experiment")
@@ -88,7 +88,7 @@ func TestStatusViewReadOnlyAndTokenProtected(t *testing.T) {
 	s.Run.Workdir = "/private/example"
 	j := submit(t, q, s)
 	if err := q.update(func() error {
-		q.s.Jobs[j.ID].Spec.Environment = Environment{LockFile: "/private/example", Python: "3.11"}
+		q.touchJob(j.ID).Spec.Environment = Environment{LockFile: "/private/example", Python: "3.11"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestStatusViewDisabledAndResourceConstraints(t *testing.T) {
 			m.TotalMemoryGB = 8
 			m.LastSeen = c.Now()
 			tc.change(&m)
-			if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
+			if err := q.update(func() error { q.touchMachine(m.ID); q.s.Machines[m.ID] = &m; return nil }); err != nil {
 				t.Fatal(err)
 			}
 			if tc.name == "maintenance" {

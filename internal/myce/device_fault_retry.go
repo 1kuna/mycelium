@@ -37,12 +37,18 @@ func deviceFaultRecoveryDeadline(j *Job) *time.Time {
 }
 
 func (q *Queue) resumeDeviceFaultStartBudget(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if wait := j.DeviceFaultStartWait; wait != nil {
 		if j.Spec.StartBy != nil && !absoluteStartBy(j) {
 			deadline := q.clock.Now().Add(wait.Remaining)
 			j.Spec.StartBy = &deadline
 			remaining := wait.Remaining
 			j.StartCapacityBudget = &remaining
+		}
+		if j.DeviceFaultStartWait != nil {
+			q.touchJob(j.ID)
 		}
 		j.DeviceFaultStartWait = nil
 	}
@@ -53,6 +59,9 @@ func (q *Queue) resumeDeviceFaultStartBudget(j *Job) {
 // at entry. A disappearing route resumes the ordinary unavailable-route budget.
 func (q *Queue) maintainDeviceFaultStartWait(j *Job) bool {
 	if terminal(j.State) || cancelled(j) {
+		if j.DeviceFaultStartWait != nil {
+			q.touchJob(j.ID)
+		}
 		j.DeviceFaultStartWait = nil
 		return false
 	}
@@ -64,6 +73,7 @@ func (q *Queue) maintainDeviceFaultStartWait(j *Job) bool {
 	if !waiting && j.DeviceFaultStartWait == nil {
 		return false
 	}
+	q.touchJob(j.ID)
 	now := q.clock.Now()
 	if j.DeviceFaultStartWait == nil {
 		remaining := time.Duration(0)

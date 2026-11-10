@@ -206,7 +206,7 @@ func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
 	checkpoint := capacityPartial(t, c, "recoverable checkpoint", jobInputUploadPurpose)
 	catalog := capacityPartial(t, c, "catalog model", jobInputUploadPurpose)
 	if err := q.update(func() error {
-		q.s.Jobs["recovery"] = &Job{State: "lost", Spec: Spec{Files: FileManifest{"input": live}}, FileCheckpoints: map[int]FileCheckpoint{1: {Files: FileManifest{"save": checkpoint}}}}
+		q.putJob("recovery", &Job{State: "lost", Spec: Spec{Files: FileManifest{"input": live}}, FileCheckpoints: map[int]FileCheckpoint{1: {Files: FileManifest{"save": checkpoint}}}})
 		q.models.Models = []Model{{SHA256: catalog.SHA256}}
 		return nil
 	}); err != nil {

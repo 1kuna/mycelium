@@ -57,6 +57,9 @@ func (q *Queue) launchCapacityEvidence(j *Job, m *Machine) string {
 }
 
 func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if m != nil && j.Spec.Needs.cpuOnly() {
 		m = cpuMachineView(m)
@@ -77,6 +80,9 @@ func (q *Queue) waitLaunchCapacity(j *Job, r Result) {
 }
 
 func (q *Queue) requeueLaunchCapacity(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	// Fence every copy for every tier. Missing Started is never release proof.
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false

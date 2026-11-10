@@ -12,12 +12,14 @@ import (
 
 // Catalog values contain mutable nested facts. Exercise reuse, a failed body,
 // a failed SQLite write after encoding, another mutation after rollback, and
-// restart so cached encodings can neither leak nor lose an accepted change.
+// restart so lazy before-values can neither leak nor lose an accepted change.
 func TestQueueCatalogRollbackAndRestart(t *testing.T) {
 	q, clock := fixture(t)
 	peak := 3.0
 	e := fakeExtension(t)
 	if err := q.update(func() error {
+		q.touchCatalog("work_observations/curve")
+		q.touchCatalog("extensions/example")
 		q.s.WorkObservations = map[string]WorkObservation{"curve": {MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}}
 		q.s.Extensions = map[string]Extension{"example": e}
 		return nil
@@ -44,6 +46,8 @@ func TestQueueCatalogRollbackAndRestart(t *testing.T) {
 			}
 		}
 		err := q.update(func() error {
+			q.touchCatalog("work_observations/curve")
+			q.touchCatalog("extensions/example")
 			*q.s.WorkObservations["curve"].MemoryPeak.HostGB = 99
 			q.s.Extensions["example"].Run[0] = "changed"
 			if storageFailure {
@@ -64,7 +68,10 @@ func TestQueueCatalogRollbackAndRestart(t *testing.T) {
 		}
 	}
 	if err := q.update(func() error {
+		q.touchCatalog("work_observations/curve")
+		q.touchCatalog("extensions/example")
 		*q.s.WorkObservations["curve"].MemoryPeak.HostGB = 7
+		q.touchCatalog("extensions/" + "example")
 		delete(q.s.Extensions, "example")
 		return nil
 	}); err != nil {

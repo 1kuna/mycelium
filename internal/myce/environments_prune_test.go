@@ -185,13 +185,14 @@ func TestEnvironmentPruneRetainedReferences(t *testing.T) {
 			}
 			j := submit(t, q, spec("experiment"))
 			if err := q.update(func() error {
-				stored := q.s.Jobs[j.ID]
+				stored := q.touchJob(j.ID)
 				switch source {
 				case "sidecar":
 					stored.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{"helper": {"fake": r}}
 				case "extension":
 					stored.Extensions = []Extension{{Variants: []ExtensionVariant{{Environments: map[string]EnvironmentRecipe{"main": r}}}}}
 				case "setup":
+					q.touchMachine(m.ID)
 					q.s.Machines[m.ID] = &m
 					stored.Extensions = []Extension{e}
 				case "unreleased":
@@ -209,7 +210,7 @@ func TestEnvironmentPruneRetainedReferences(t *testing.T) {
 				t.Fatal("lost reference", source)
 			}
 			if err := q.update(func() error {
-				stored := q.s.Jobs[j.ID]
+				stored := q.touchJob(j.ID)
 				stored.State = "succeeded"
 				stored.ReleaseConfirmed = true
 				q.s.PreparationPlans = nil

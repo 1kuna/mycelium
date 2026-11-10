@@ -46,6 +46,7 @@ func (q *Queue) retainPlacementReleases(p *placementPlan, demand *Job) {
 	add := func(o HostObligation) {
 		key := obligationKey(o)
 		if !slices.Contains(demand.PreemptionPlacement.Releases, key) {
+			q.touchJob(demand.ID)
 			demand.PreemptionPlacement.Releases = append(demand.PreemptionPlacement.Releases, key)
 		}
 	}
@@ -162,6 +163,7 @@ func (q *Queue) preemption(demand *Job, victim string) *PriorityPreemption {
 	return &PriorityPreemption{Cause: priorityPreemptionCause, Demand: demand.ID, Victim: victim, Policy: q.priorityMatch(demand.Spec)}
 }
 func (q *Queue) stopBatchFor(j *Job, demand *Job) {
+	q.touchJob(j.ID)
 	if !q.batchPreemptible(j, demand.Spec) {
 		return
 	}

@@ -83,6 +83,7 @@ func TestBlobGCBundlePrunedAfterRetainedAnswer(t *testing.T) {
 		j := &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Extensions: []Extension{e}}
 		q.putJob(j.ID, j)
 		q.putSubmission("answer", &submissionRecord{Kind: submissionBinding, JobID: j.ID, Job: j})
+		q.touchCatalog("extensions/" + extensionKey(e))
 		delete(q.s.Extensions, extensionKey(e))
 		return nil
 	}); err != nil {
@@ -223,9 +224,9 @@ func TestBlobGCConcurrentUploadAndReferences(t *testing.T) {
 		}
 		j := submit(t, q, Spec{Name: "open", Project: "test", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}, Files: FileManifest{"input": ref}})
 		if err = q.update(func() error {
-			q.s.Jobs[j.ID].State = "succeeded"
+			q.touchJob(j.ID).State = "succeeded"
 			ended := clock.Now()
-			q.s.Jobs[j.ID].FinishedAt = &ended
+			q.touchJob(j.ID).FinishedAt = &ended
 			return nil
 		}); err != nil {
 			t.Fatal(err)

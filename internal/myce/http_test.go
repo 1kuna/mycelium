@@ -109,7 +109,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	s.Files = FileManifest{"private-input.txt": ref}
 	j := submit(t, q, s)
 	if err := q.update(func() error {
-		stored := q.s.Jobs[j.ID]
+		stored := q.touchJob(j.ID)
 		stored.Spec.Args = []string{"private-args"}
 		stored.Spec.Environment = Environment{LockFile: "/private/recipe.lock"}
 		stored.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": {LockFile: "/private/recipe.lock"}}
