@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import traceback
 import uuid
 
 REPO = Path(__file__).resolve().parent.parent
@@ -282,10 +283,16 @@ def main():
         confirmed = receipts.confirmed(folder / 'overall-cleanup.json', identity)
         if confirmed:
             # A terminal failure is as rebuildable as a successful source tree.
-            if (folder / 'source').exists():
-                shutil.rmtree(folder / 'source')
-            (folder / 'source.tar').unlink(missing_ok=True)
-            (folder / 'runtime.tar').unlink(missing_ok=True)
+            try:
+                if (folder / 'source').exists():
+                    shutil.rmtree(folder / 'source')
+                (folder / 'source.tar').unlink(missing_ok=True)
+                (folder / 'runtime.tar').unlink(missing_ok=True)
+            except Exception as error:
+                (folder / 'finalize-error.json').write_text(json.dumps(dict(status=125,
+                    error=str(error), traceback=traceback.format_exc())) + '\n')
+                print('gate: source cleanup failed: ' + str(error), file=sys.stderr)
+                return 125
         return status if confirmed else 125
     finally:
         if slot is not None:

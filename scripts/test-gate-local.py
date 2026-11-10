@@ -808,7 +808,8 @@ sys.exit(m.main())
                 local.trim_cache(cache, limit=-1)
 
     def test_entry_exit_trim_and_terminal_source_cleanup(self):
-        for status, confirmed in ((0, True), (1, True), (125, False)):
+        for status, confirmed, cleanup_fails in ((0, True, False), (1, True, False),
+                                                (125, False, False), (125, True, True)):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 slot = Mock(directory=root / 'lane', owner={})
@@ -839,11 +840,15 @@ sys.exit(m.main())
                       patch.object(local.capacity, 'execution_lanes', return_value=[root / 'other']),
                       patch.object(local.capacity, 'native_full_custody', return_value=True),
                       patch.object(local, 'trim_cache', side_effect=trim),
+                      patch.object(local.shutil, 'rmtree', wraps=shutil.rmtree,
+                                   side_effect=PermissionError('source cleanup failed') if cleanup_fails else None),
                       patch.object(local.subprocess, 'Popen', side_effect=supervised)):
                     self.assertEqual(local.main(), status)
                 self.assertEqual(events, ['trim', 'payload', 'trim'])
                 for name in ('source', 'source.tar', 'runtime.tar'):
-                    self.assertEqual((run_folder / name).exists(), not confirmed)
+                    self.assertEqual((run_folder / name).exists(), not confirmed or cleanup_fails)
+                if cleanup_fails:
+                    self.assertIn('source cleanup failed', (run_folder / 'finalize-error.json').read_text())
                 self.assertTrue((run_folder / 'manifest.json').exists())
                 slot.release.assert_called_once_with(stopped=confirmed)
 
