@@ -67,7 +67,7 @@ func TestHostMemoryDelayedCachedSampleRetainsExpiry(t *testing.T) {
 	for _, missing := range []bool{false, true} {
 		t.Run(map[bool]string{false: "cached", true: "missing then cached"}[missing], func(t *testing.T) {
 			_, clock := fixture(t)
-			r := AttemptReport{Execution: Execution{ID: "holder", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 0, NonreclaimableGB: 2, GrowthObserved: true}}
+			r := AttemptReport{Execution: Execution{ID: "holder", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, NonreclaimableGB: 2, GrowthObserved: true}}
 			key := attemptKey{"holder", 1, "session"}
 			samples := currentHostMemorySamples([]AttemptReport{r}, clock.Now())
 			clock.Advance(20 * time.Second)
