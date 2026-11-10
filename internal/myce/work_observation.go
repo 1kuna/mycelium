@@ -256,6 +256,9 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	defer q.calibrateWorkTiming(j)
 	if j.Spec.Workload == nil && !plainCommandWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
@@ -323,22 +326,26 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 		return
 	}
 	if t.Execution.ID != j.ID || t.Execution.Attempt != j.Attempt || t.Machine != j.Machine || t.Session != j.Session {
+		q.touchJob(j.ID)
 		t.Reason = "attempt changed; timing unknown"
 		return
 	}
 	key, reason := q.workObservationKey(j)
 	if reason != "" || key == nil || *key != *t.Key {
+		q.touchJob(j.ID)
 		t.Reason = "reference, qualification or configuration changed"
 		return
 	}
 	if t.RepeatedKey != nil {
 		current, reason := q.repeatedObservationKey(j)
 		if reason != "" || current == nil || *current != *t.RepeatedKey {
+			q.touchJob(j.ID)
 			t.Reason = "exact command/source/input configuration changed"
 			return
 		}
 		if m := q.s.Machines[j.Machine]; q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 			if reason := q.hostPressureReason(m); reason != "" {
+				q.touchJob(j.ID)
 				t.Reason = "host pressure unknown or contended"
 				return
 			}
@@ -347,6 +354,7 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 	for _, p := range obligations {
 		r := p.Result
 		if p.Launch != nil || p.Engine != nil || p.Call != nil || p.Preparation || r.ID != j.ID || r.Attempt != j.Attempt || r.Machine != j.Machine || r.Session != j.Session {
+			q.touchJob(j.ID)
 			t.Reason = "mixed or unknown host occupancy"
 			return
 		}
@@ -360,6 +368,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
 	if t.RepeatedKey != nil && t.Reason == "" {
+		q.touchJob(j.ID)
 		t.Reason = repeatedContentionReason(r)
 		if t.Reason == "" {
 			q.recordRepeatedObservation(j, r)

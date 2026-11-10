@@ -36,6 +36,7 @@ func seedBackfillPeers(t *testing.T, q *Queue, exemplar string, hosts int) {
 			peer.CapabilityProfile, peer.Devices = inventory.CapabilityProfile, inventory.Devices
 			peer.ID = fmt.Sprintf("peer-%03d", i)
 			peer.HostID, peer.Session = peer.ID, "session-"+peer.ID
+			q.touchMachine(peer.ID)
 			q.s.Machines[peer.ID] = &peer
 			// These peers have the same accepted cadence/session evidence,
 			// rather than becoming cold workers that placement cannot use.

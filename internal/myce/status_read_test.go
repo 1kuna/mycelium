@@ -292,7 +292,7 @@ func TestStatusReadCPUReservation(t *testing.T) {
 		t.Fatal("fixture must exhaust CPU capacity")
 	}
 	handler := API{Queue: q, Token: "test"}.Handler()
-	for _, path := range []string{"/api/jobs/" + second.ID, "/api/status", "/api/inspection"} {
+	for _, path := range []string{"/api/jobs/" + second.ID, "/api/status", "/api/status?sections=jobs", "/api/inspection"} {
 		t.Run(path, func(t *testing.T) {
 			r := httptest.NewRequest("GET", path, nil)
 			r.Header.Set("Authorization", "Bearer test")
@@ -320,6 +320,12 @@ func TestStatusReadCPUReservation(t *testing.T) {
 			if got == nil {
 				t.Fatal("waiting job missing from response")
 			}
+			if path == "/api/status" {
+				if got.Reason == "" || got.QueueOrder != 0 {
+					t.Fatal("summary must state waiting without inventing a queue order")
+				}
+				return
+			}
 			if !strings.Contains(got.Reason, "1 cores unreserved of 4 admitted") || got.QueueOrder != 0 {
 				t.Fatalf("occupied CPU capacity lost: reason=%q queue_order=%d", got.Reason, got.QueueOrder)
 			}
@@ -346,12 +352,16 @@ func TestStatusReadTerminalCommitInvalidatesCache(t *testing.T) {
 	// a running projection after the terminal/release transaction commits.
 	for _, query := range []string{"", "?jobs=all", "?detail=full"} {
 		s := readStatusOptions(t, q, query)
-		if len(s.Jobs) != 1 || s.Jobs[0].State != "succeeded" || !s.Jobs[0].ReleaseConfirmed {
-			t.Errorf("%s: terminal released job projected as active: %+v", query, s.Jobs)
+		if query == "" {
+			if len(s.Jobs) != 0 {
+				t.Errorf("terminal released job stayed current: %+v", s.Jobs)
+			}
+		} else if len(s.Jobs) != 1 || s.Jobs[0].State != "succeeded" || !s.Jobs[0].ReleaseConfirmed {
+			t.Errorf("%s lost completed history", query)
 		}
 	}
 	page, err := q.cachedPublicSnapshot()
-	if err != nil || len(page.Jobs) != 1 || page.Jobs[0].State != "succeeded" {
+	if err != nil || len(page.Jobs) != 0 {
 		t.Fatal("HTML snapshot retained running job", err)
 	}
 }
@@ -375,11 +385,19 @@ func TestStatusReadTerminalCommitDuringProjection(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer reader.Close()
-			captured := make(chan struct{})
+			captured, release := make(chan struct{}), make(chan struct{})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
 			var captures atomic.Int32
 			q.observeRead = func(kind string, _, _ time.Duration) {
 				if kind == "status" && captures.Add(1) == 1 {
 					close(captured)
+					<-release
 				}
 			}
 			done := make(chan struct{})
@@ -399,16 +417,24 @@ func TestStatusReadTerminalCommitDuringProjection(t *testing.T) {
 			}
 			finish(t, q, a, true)
 			// Reproduce the incident's 41 seconds with the injected clock while
-			// the detached observation waits for usage I/O, outside q.mu.
+			// the detached observation is delayed outside q.mu.
 			clock.Advance(41 * time.Second)
 			reader.Close()
+			close(release)
 			select {
 			case <-done:
 			case <-ctx.Done():
 				t.Fatal("status did not finish")
 			}
-			if err != nil || len(got.Jobs) != 1 || got.Jobs[0].State != "succeeded" || !got.Jobs[0].ReleaseConfirmed {
-				t.Fatalf("delayed status returned pre-completion state: %+v, %v", got.Jobs, err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cached {
+				if len(got.Jobs) != 0 {
+					t.Fatal("default retained finished work")
+				}
+			} else if len(got.Jobs) != 1 || got.Jobs[0].State != "succeeded" || !got.Jobs[0].ReleaseConfirmed {
+				t.Fatalf("delayed status returned pre-completion state: %+v", got.Jobs)
 			}
 		})
 	}
@@ -542,8 +568,8 @@ func TestStatusReadPreservesDeadlineReason(t *testing.T) {
 	if err != nil || receipt.State != "failed" || receipt.Reason != "production start deadline exceeded" {
 		t.Fatal("receipt lost deadline diagnostic", receipt, err)
 	}
-	status, err := q.cachedPublicSnapshot()
-	if err != nil || len(status.Jobs) != 1 || status.Jobs[0].Reason != receipt.Reason {
+	status := readStatusOptions(t, q, "?jobs=recent&sections=jobs")
+	if len(status.Jobs) != 1 || status.Jobs[0].Reason != receipt.Reason {
 		t.Fatal("global status lost deadline diagnostic", err)
 	}
 }
@@ -575,8 +601,8 @@ func TestStatusInspectionRemainsFresh(t *testing.T) {
 	}
 }
 
-// A coalesced refresh can wait for its isolated usage snapshot while both start
-// gates and cancellation continue. Its stale observation never authorizes work.
+// A coalesced refresh may be delayed after capture while both start gates and
+// cancellation continue. Its stale observation never authorizes work.
 func TestStatusReadCoalescesAndDoesNotAuthorize(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("production"))
@@ -586,16 +612,19 @@ func TestStatusReadCoalescesAndDoesNotAuthorize(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	reader, err := q.usageReader.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reader.Close()
-	captured := make(chan struct{})
+	captured, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	var captures atomic.Int32
 	q.observeRead = func(kind string, _, _ time.Duration) {
 		if kind == "status" && captures.Add(1) == 1 {
 			close(captured)
+			<-release
 		}
 	}
 	type answer struct {
@@ -629,9 +658,9 @@ func TestStatusReadCoalescesAndDoesNotAuthorize(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-ctx.Done():
-		t.Fatal("usage observation blocked a control transaction")
+		t.Fatal("delayed observation blocked a control transaction")
 	}
-	reader.Close()
+	close(release)
 	for range 8 {
 		select {
 		case got := <-answers:

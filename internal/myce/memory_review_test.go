@@ -44,6 +44,7 @@ func TestMemoryReviewLegacyObservationKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := q.update(func() error {
+		q.touchCatalog("work_observations/" + identityHash(legacy))
 		q.s.WorkObservations = map[string]WorkObservation{identityHash(legacy): {Key: restored, Forbidden: true, RecordedAt: clock.Now()}}
 		return nil
 	}); err != nil {

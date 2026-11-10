@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 )
@@ -14,10 +13,11 @@ import (
 // A JSON string deliberately fails closed in older binaries expecting a state
 // object. All fragments and this marker commit in the same SQLite transaction.
 var legacyNormalizedQueueMarker = []byte(`"myce-normalized-state-v1"`)
-var normalizedQueueMarker = []byte(`"myce-normalized-state-v2"`)
+var fieldQueueMarker = []byte(`"myce-normalized-state-v2"`)
+var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
 func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
-	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, legacyNormalizedQueueMarker) {
+	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, legacyNormalizedQueueMarker) && !bytes.Equal(data, fieldQueueMarker) {
 		return data, nil
 	}
 	records, err := readQueueRecords(db)
@@ -25,7 +25,7 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 		return nil, err
 	}
 	var base map[string]json.RawMessage
-	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}, "external_memory": {}, "health_events": {}}
+	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}, "storage_observations": {}, "external_memory": {}, "health_events": {}, "machines": {}}
 	for key, value := range records {
 		if key == "state" {
 			if err = json.Unmarshal(value, &base); err != nil {
@@ -89,7 +89,7 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 	}
 	delete(groups, "health_events")
 	for key, group := range groups {
-		if len(group) == 0 && key != "jobs" {
+		if len(group) == 0 && key != "jobs" && (key != "machines" || !bytes.Equal(data, normalizedQueueMarker)) {
 			continue
 		}
 		base[key], err = json.Marshal(group)
@@ -101,7 +101,7 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 }
 
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
-// Compare canonical JSON in memory; SQLite sees only changed logical records.
+// Encode only journaled decisions; SQLite sees only changed logical records.
 func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[string][]byte, error) {
 	if q.persistencePageBytes <= 0 {
 		return nil, fmt.Errorf("queue persistence page size is not initialized")
@@ -146,15 +146,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 		}
 		return putData(key, data, fields)
 	}
-	putCatalog := func(key string, value any) error {
-		started := holdNow(q.holdClock)
-		entry, err := q.encodeCatalog(key, value)
-		measured.Marshal += holdNow(q.holdClock).Sub(started)
-		if err != nil {
-			return err
-		}
-		return putData(key, entry.data)
-	}
+
 	if q.persisted == nil {
 		if _, err := exec("CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
 			return nil, err
@@ -163,17 +155,29 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	base := q.s
-	base.Jobs = nil
-	base.Submissions = nil
-	base.Extensions = nil
-	base.WorkObservations = nil
-	base.StorageObservations = nil
-	base.ExternalMemory = nil
-	base.Health.Events = nil
+	base := queueBase(q.s, false)
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
+	machines := q.s.Machines
+	if q.machineRecords && q.persisted != nil {
+		machines = map[string]*Machine{}
+		for id := range q.records.machines {
+			machines[id] = q.s.Machines[id]
+		}
+	}
+	for id, m := range machines {
+		key := "machines/" + id
+		if m == nil {
+			next[key] = nil
+			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
+				return nil, err
+			}
+		} else if err := put(key, m); err != nil {
+			return nil, err
+		}
+	}
+
 	jobs := q.s.Jobs
 	if q.persisted != nil {
 		jobs = map[string]*Job{}
@@ -213,26 +217,41 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	for key, value := range q.s.Extensions {
-		if err := putCatalog("extensions/"+key, value); err != nil {
+	catalogs := map[string]bool{}
+	for key := range q.records.catalogUndo {
+		catalogs[key] = true
+	}
+	if q.persisted == nil {
+		for id := range q.s.Extensions {
+			catalogs["extensions/"+id] = true
+		}
+		for id := range q.s.WorkObservations {
+			catalogs["work_observations/"+id] = true
+		}
+		for id := range q.s.StorageObservations {
+			catalogs["storage_observations/"+id] = true
+		}
+		for id := range q.s.ExternalMemory {
+			catalogs["external_memory/"+id] = true
+		}
+	}
+	for key := range catalogs {
+		value, exists := q.catalogValue(key)
+		if !exists {
+			next[key] = nil
+			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if point, ok := value.(WorkObservation); ok {
+			value = durableWorkObservation(point)
+		}
+		if err := put(key, value); err != nil {
 			return nil, err
 		}
 	}
-	for key, value := range q.s.WorkObservations {
-		if err := putCatalog("work_observations/"+key, value); err != nil {
-			return nil, err
-		}
-	}
-	for key, value := range q.s.StorageObservations {
-		if err := putCatalog("storage_observations/"+key, value); err != nil {
-			return nil, err
-		}
-	}
-	for key, value := range q.s.ExternalMemory {
-		if err := putCatalog("external_memory/"+key, value); err != nil {
-			return nil, err
-		}
-	}
+
 	for index := q.records.healthCount; index < len(q.s.Health.Events); index++ {
 		if err := put("health_events/"+strconv.Itoa(index), q.s.Health.Events[index]); err != nil {
 			return nil, err
@@ -243,14 +262,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	for key := range q.records.catalog {
-		if _, ok := next[key]; !ok {
-			next[key] = nil
-			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
-				return nil, err
-			}
-		}
-	}
+
 	if !q.fragmented {
 		// Convert every old logical record atomically with the new format marker.
 		// Unchanged cold jobs must migrate too, without touching scheduling state.
@@ -272,7 +284,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			}
 		}
 	}
-	if !q.fragmented {
+	if !q.fragmented || !q.machineRecords {
 		if _, err := exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
 			return nil, err
 		}
@@ -287,7 +299,7 @@ func (q *Queue) loadPersistedState() error {
 	} else if err != nil {
 		return err
 	}
-	if !bytes.Equal(marker, normalizedQueueMarker) && !bytes.Equal(marker, legacyNormalizedQueueMarker) {
+	if !bytes.Equal(marker, normalizedQueueMarker) && !bytes.Equal(marker, legacyNormalizedQueueMarker) && !bytes.Equal(marker, fieldQueueMarker) {
 		return nil
 	}
 	records, err := readQueueRecords(q.db)
@@ -295,7 +307,8 @@ func (q *Queue) loadPersistedState() error {
 		return err
 	}
 	q.persisted = records
-	q.fragmented = bytes.Equal(marker, normalizedQueueMarker)
+	q.fragmented = !bytes.Equal(marker, legacyNormalizedQueueMarker)
+	q.machineRecords = bytes.Equal(marker, normalizedQueueMarker)
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)
@@ -361,17 +374,9 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 	}
 	var before map[string]json.RawMessage
 	if old != nil {
-		cached := q.persistenceFieldsCache[key]
-		if len(cached.data) > 0 && &cached.data[0] == &old[0] {
-			before = cached.fields
-		} else {
-			before, err = persistenceFields(old, q.persistencePageBytes)
-		}
+		before, err = persistenceFields(old, q.persistencePageBytes)
 	}
-	if q.persistenceFieldsCache == nil {
-		q.persistenceFieldsCache = map[string]persistenceFieldCache{}
-	}
-	q.persistenceFieldsCache[key] = persistenceFieldCache{data: data, fields: next}
+
 	measured.Marshal += holdNow(q.holdClock).Sub(started)
 	if err != nil {
 		return err
@@ -506,165 +511,13 @@ func readQueueRecords(db *sql.DB, only ...string) (map[string][]byte, error) {
 	return records, nil
 }
 
-type persistenceFieldCache struct {
-	data   []byte
-	fields map[string]json.RawMessage
-}
-
-type waitPersistenceInput struct {
-	evidence *AdmissionWaitEvidence
-	base     []byte
-}
-
-// Cache detached multi-page fields and immutable admission evidence. Ordinary
-// mutable fields compare against owned values, never dirty tracking. Immutable
-// evidence can compare by identity. Speculative encodings confer no durability:
-// writeFields always compares against the last committed bytes.
+// Dirty records are encoded exactly once. No whole-state comparison caches.
 func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
 	if j, ok := value.(*Job); ok && j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
 		copy := *j
 		copy.Reason = "recomputing admission diagnostics"
 		value = &copy
 	}
-
-	if j, ok := value.(*Job); ok && j != nil && j.AdmissionWait != nil {
-		// Immutable wait history must not turn every small live job into a
-		// full per-field reflection/cache walk on every heartbeat. Encode the
-		// ordinary job at its own size and reuse the immutable evidence bytes.
-		if q.persistenceEncodings == nil {
-			q.persistenceEncodings = map[string]map[string]catalogEncoding{}
-		}
-		if q.persistenceEncodings[key] == nil {
-			q.persistenceEncodings[key] = map[string]catalogEncoding{}
-		}
-		cache := q.persistenceEncodings[key]
-		entry := cache["admission_wait"]
-		if entry.value != j.AdmissionWait {
-			raw, err := json.Marshal(j.AdmissionWait)
-			if err != nil {
-				return nil, nil, err
-			}
-			entry = catalogEncoding{value: j.AdmissionWait, data: raw}
-			cache["admission_wait"] = entry
-		}
-		input := *j
-		input.AdmissionWait = nil
-		// These entries describe the excluded immutable evidence, not fields
-		// in input. Keep them outside the ordinary field-cache cleanup below.
-		whole := cache["$admission_wait_job"]
-		rest, _, err := q.marshalPersistenceSized(key, &input, max(0, len(q.persisted[key])-len(entry.data)))
-		cache["admission_wait"] = entry
-		if whole.value != nil {
-			cache["$admission_wait_job"] = whole
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		if old, ok := whole.value.(waitPersistenceInput); ok && old.evidence == j.AdmissionWait && bytes.Equal(old.base, rest) {
-			return whole.data, nil, nil
-		}
-		data := make([]byte, 0, len(rest)+len(entry.data)+18)
-		data = append(data, `{"admission_wait":`...)
-		data = append(data, entry.data...)
-		if len(rest) > 2 {
-			data = append(data, ',')
-		}
-		data = append(data, rest[1:]...)
-		cache["$admission_wait_job"] = catalogEncoding{value: waitPersistenceInput{j.AdmissionWait, rest}, data: data}
-		return data, nil, nil
-	}
-	return q.marshalPersistenceSized(key, value, len(q.persisted[key]))
-}
-
-func (q *Queue) marshalPersistenceSized(key string, value any, previousBytes int) ([]byte, map[string]json.RawMessage, error) {
-	if !splitPersistenceKey(key) || previousBytes <= q.persistencePageBytes {
-		data, err := json.Marshal(value)
-		return data, nil, err
-	}
-	v := reflect.ValueOf(value)
-	if v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			return []byte("null"), nil, nil
-		}
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		data, err := json.Marshal(value)
-		return data, nil, err
-	}
-	if q.persistenceEncodings == nil {
-		q.persistenceEncodings = map[string]map[string]catalogEncoding{}
-	}
-	cache := q.persistenceEncodings[key]
-	if cache == nil {
-		cache = map[string]catalogEncoding{}
-		q.persistenceEncodings[key] = cache
-	}
-	fields := map[string]json.RawMessage{}
-	data := []byte{'{'}
-	typ := v.Type()
-	for i := 0; i < v.NumField(); i++ {
-		field := typ.Field(i)
-		_, options, _ := strings.Cut(field.Tag.Get("json"), ",")
-		if field.Anonymous || options != "" && options != "omitempty" {
-			data, err := json.Marshal(value)
-			return data, nil, err
-		}
-	}
-	for i := 0; i < v.NumField(); i++ {
-		field := typ.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
-		if name == "-" {
-			continue
-		}
-		if name == "" {
-			name = field.Name
-		}
-		member := v.Field(i)
-		empty := false
-		switch member.Kind() {
-		case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
-			empty = member.Len() == 0
-		case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.Interface, reflect.Pointer:
-			empty = member.IsZero()
-		}
-		if options == "omitempty" && empty {
-			continue
-		}
-		owned, ok := cache[name]
-		var raw []byte
-		if ok && reflect.DeepEqual(member.Interface(), owned.value) {
-			raw = owned.data
-		} else {
-			var err error
-			raw, err = json.Marshal(member.Interface())
-			if err != nil {
-				return nil, nil, err
-			}
-			if len(raw) > q.persistencePageBytes {
-				cache[name] = catalogEncoding{value: copyObservationValue(member).Interface(), data: raw}
-			} else {
-				delete(cache, name)
-			}
-		}
-		fields[name] = raw
-		if len(data) > 1 {
-			data = append(data, ',')
-		}
-		encodedName, _ := json.Marshal(name)
-		data = append(data, encodedName...)
-		data = append(data, ':')
-		data = append(data, raw...)
-	}
-	for name := range cache {
-		if _, ok := fields[name]; !ok {
-			delete(cache, name)
-		}
-	}
-	data = append(data, '}')
-	split, err := splitPersistenceFields(fields, q.persistencePageBytes)
-	return data, split, err
+	data, err := json.Marshal(value)
+	return data, nil, err
 }

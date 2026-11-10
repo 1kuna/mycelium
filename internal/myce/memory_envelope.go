@@ -106,6 +106,9 @@ type AttemptMemoryFacts struct {
 }
 
 func (q *Queue) recordAttemptMemory(j *Job, r Result) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
 		return
 	}

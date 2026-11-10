@@ -372,6 +372,9 @@ func valueReason(h *hostValue, m *Machine) string {
 	return prefix + fmt.Sprintf("preserve scarce machines: host %s scarcity %v (1-host bands first), usable RAM %g GiB; currently admissible targets only", hostID(m), h.vector, h.ram)
 }
 func (q *Queue) recordValuePlacement(j *Job, m *Machine, values map[string]*hostValue) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	reason := valueReason(values[hostID(m)], m)
 	if j.Timing == nil || j.Timing.Execution.Attempt != j.Attempt {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session}

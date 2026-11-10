@@ -353,6 +353,7 @@ func (q *Queue) maintainFanOut() {
 			continue
 		}
 		if parent.FanOut.Results == nil {
+			q.touchJob(parent.ID)
 			parent.FanOut.Results = map[string]PieceResult{}
 		}
 		failed := false
@@ -370,6 +371,10 @@ func (q *Queue) maintainFanOut() {
 				continue
 			}
 			for _, piece := range child.Batch.Pieces {
+				if old, ok := parent.FanOut.Results[piece.Key]; ok && old.Execution == (Execution{ID: child.ID, Attempt: child.Attempt}) {
+					continue
+				}
+				q.touchJob(parent.ID)
 				r := PieceResult{Execution: Execution{ID: child.ID, Attempt: child.Attempt}, OutputRefs: FileManifest{}, OutputFiles: map[string]string{}}
 				for name := range parent.Spec.Outputs {
 					local := name
@@ -387,8 +392,10 @@ func (q *Queue) maintainFanOut() {
 			}
 		}
 		if failed {
+			q.touchJob(parent.ID)
 			parent.State, parent.Reason = "failed", "declared piece failed"
 		} else if len(parent.FanOut.Results) == len(parent.Spec.FanOut.Pieces) {
+			q.touchJob(parent.ID)
 			parent.State, parent.Reason = "succeeded", ""
 			parent.OutputRefs = FileManifest{}
 			parent.OutputFiles = map[string]string{}
@@ -405,7 +412,11 @@ func (q *Queue) maintainFanOut() {
 			now := q.clock.Now()
 			parent.FinishedAt = &now
 		} else {
-			parent.Reason = fmt.Sprintf("declared pieces: %d/%d accepted", len(parent.FanOut.Results), len(parent.Spec.FanOut.Pieces))
+			reason := fmt.Sprintf("declared pieces: %d/%d accepted", len(parent.FanOut.Results), len(parent.Spec.FanOut.Pieces))
+			if parent.Reason != reason {
+				q.touchJob(parent.ID)
+				parent.Reason = reason
+			}
 		}
 	}
 }

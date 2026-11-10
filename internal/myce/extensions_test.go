@@ -316,7 +316,7 @@ chmod +x "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
 	}
 	await(t, func() bool {
 		var snap Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		for _, out := range snap.Jobs {
@@ -350,7 +350,7 @@ chmod +x "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
 	id := j.ID
 	await(t, func() bool {
 		var snap Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		for _, out := range snap.Jobs {

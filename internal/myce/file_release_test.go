@@ -299,6 +299,7 @@ func TestFileReleaseRegistryCheckpointAndBundleProtection(t *testing.T) {
 		j := q.touchJob(j.ID)
 		j.FileCheckpoints = map[int]FileCheckpoint{1: {Files: FileManifest{"save": ref}}}
 		j.ResumeFiles = &FileCheckpoint{Files: FileManifest{"resume": ref}}
+		q.touchCatalog("extensions/registered")
 		q.s.Extensions = map[string]Extension{"registered": {Assets: FileManifest{"asset": ref}, FilesRef: &ref}}
 		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"registered": {"cpu": {Assets: FileManifest{"asset": ref}}}}
 		q.models.Models = append(q.models.Models, Model{SHA256: ref.SHA256})

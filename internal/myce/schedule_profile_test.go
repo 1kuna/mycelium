@@ -17,7 +17,7 @@ func TestProfileTargetChangedBeforeStart(t *testing.T) {
 	if !q.startPlacementAllowed(j) {
 		t.Fatal("original target not allowed")
 	}
-	if err := q.update(func() error { q.s.Machines[m.ID].CapabilityProfile.Arch = "arm64"; return nil }); err != nil {
+	if err := q.update(func() error { q.touchMachine(m.ID).CapabilityProfile.Arch = "arm64"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if q.startPlacementAllowed(j) {

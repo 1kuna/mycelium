@@ -57,3 +57,79 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 		}
 	}
 }
+
+// A heartbeat enrolls its inventory, never the entire runnable backlog.
+func TestQueueRecordsExplicitDirtySet(t *testing.T) {
+	q, clock := fixture(t)
+	check(t, q, machine("one", "fake"), nil)
+	check(t, q, machine("two", "fake"), nil)
+	s := spec("experiment")
+	s.AllowedMachines = []string{"unavailable"}
+	for range 12 {
+		submit(t, q, s)
+	}
+	drainAdmissionWait(t, q)
+	before := durableQueueRecord(t, q.db, "machines/two")
+	if err := q.update(func() error {
+		if len(q.records.jobs) != 0 || len(q.records.catalogUndo) != 0 || len(q.records.machines) != 0 {
+			t.Fatal("transaction pre-touched unchanged records")
+		}
+		q.touchMachine("one").Leaving = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := durableQueueRecord(t, q.db, "machines/two"); string(before) != string(after) {
+		t.Fatal("unrelated machine rewritten")
+	}
+	q = reopenQueue(t, q, clock)
+	if !q.s.Machines["one"].Leaving || q.s.Machines["two"].Leaving {
+		t.Fatal("restart lost the isolated machine decision")
+	}
+}
+
+// Diagnostic and decision journals may enroll the same record in either order.
+func TestQueueRecordsViewAndDecisionRollback(t *testing.T) {
+	for _, viewFirst := range []bool{false, true} {
+		t.Run(map[bool]string{true: "view-first", false: "decision-first"}[viewFirst], func(t *testing.T) {
+			q, _ := fixture(t)
+			j := submit(t, q, spec("experiment"))
+			if err := q.update(func() error {
+				q.putWorkObservation("curve", WorkObservation{StaleReason: "original identity changed"})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			drainAdmissionWait(t, q)
+			reason := q.s.Jobs[j.ID].Reason
+			rejected := errors.New("reject mixed journals")
+			if err := q.update(func() error {
+				decision := func() {
+					q.touchJob(j.ID).DiagnosticCode = "decision"
+					q.touchCatalog("work_observations/curve")
+				}
+				view := func() {
+					q.touchJobReason(q.s.Jobs[j.ID])
+					q.s.Jobs[j.ID].Reason = "diagnostic"
+					q.touchCurveLabel("curve")
+					p := q.s.WorkObservations["curve"]
+					p.StaleReason = "component unavailable"
+					q.s.WorkObservations["curve"] = p
+				}
+				if viewFirst {
+					view()
+					decision()
+				} else {
+					decision()
+					view()
+				}
+				return rejected
+			}); !errors.Is(err, rejected) {
+				t.Fatal(err)
+			}
+			if q.s.Jobs[j.ID].Reason != reason || q.s.Jobs[j.ID].DiagnosticCode != "" || q.s.WorkObservations["curve"].StaleReason != "original identity changed" {
+				t.Fatal("mixed diagnostic and decision rollback lost the original")
+			}
+		})
+	}
+}

@@ -506,6 +506,7 @@ func (q *Queue) quarantineDeviceAttempts(m *Machine) {
 		}) {
 			continue
 		}
+		q.touchJob(j.ID)
 		q.retainRelease(j)
 		if q.launchCapacityPending(j) {
 			// Diagnostic verification may still be outside the queue lock. A

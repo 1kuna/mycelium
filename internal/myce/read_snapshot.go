@@ -273,17 +273,41 @@ func (r *readRecord) decode(key string) (any, error) {
 // Only successful commits publish. Rollback neither advances the root nor
 // discards a reader's lazy decoded records. No SQLite access is used by reads.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
+	if q.records != nil && (len(q.records.reasons) > 0 || len(q.records.staleness) > 0) {
+		next = maps.Clone(next)
+		for id := range q.records.reasons {
+			if q.s.Jobs[id] != nil {
+				next["jobs/"+id] = []byte("view")
+			}
+		}
+		for id := range q.records.staleness {
+			if _, ok := q.s.WorkObservations[id]; ok {
+				next["work_observations/"+id] = []byte("view")
+			}
+		}
+	}
 	for key, data := range next {
+		// The immutable read schema remains assembled; durable inventories are rows.
+		if strings.HasPrefix(key, "machines/") {
+			continue
+		}
+		if key == "state" {
+			data, _ = json.Marshal(queueBase(q.s, true))
+		}
+
 		// Read snapshots include recomputable diagnostics; SQLite keeps decisions.
 		// Encode only the records already selected by the transaction journal.
 		if len(data) > 0 {
 			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
-				if j := q.s.Jobs[id]; j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
+				_, view := q.records.reasons[id]
+				if j := q.s.Jobs[id]; j != nil && (view || q.startupPending(j) || q.startCapacityPaused(j)) {
+					q.invalidateJobSnapshot(id)
 					data, _ = json.Marshal(j)
 				}
 			}
 			if id, ok := strings.CutPrefix(key, "work_observations/"); ok {
-				if p, exists := q.s.WorkObservations[id]; exists && p.StaleReason != "" {
+				_, view := q.records.staleness[id]
+				if p, exists := q.s.WorkObservations[id]; exists && (view || p.StaleReason != "") {
 					data, _ = json.Marshal(p)
 				}
 			}

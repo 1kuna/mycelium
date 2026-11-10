@@ -169,6 +169,9 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		s.RetryReserved = false
 		debt := min(model.MemoryGB, m.modelReservationDebtGB)
 		m.modelReservationDebtGB -= debt
+		if q.s.Machines[m.ID] == m {
+			q.touchMachine(m.ID)
+		}
 		m.FreeMemoryGB += model.MemoryGB - debt
 		q.refreshHostMemory()
 	}
@@ -233,6 +236,9 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 
 	if !s.RetryReserved {
 		s.RetryReserved = true
+		if q.s.Machines[m.ID] == m {
+			q.touchMachine(m.ID)
+		}
 		m.FreeMemoryGB -= model.MemoryGB
 	}
 	q.refreshHostMemory()

@@ -46,9 +46,14 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 		}
 	}
 	// Existing ordinary timing must not become a prediction for the child.
-	for id, p := range q.s.WorkObservations {
-		p.Rate, p.Units, p.Seconds = 10, 10, 1
-		q.s.WorkObservations[id] = p
+	if err := q.update(func() error {
+		for id, p := range q.s.WorkObservations {
+			p.Rate, p.Units, p.Seconds = 10, 10, 1
+			q.putWorkObservation(id, p)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	next := start()
 	if timing := job(t, q, next.ID).Timing; timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Reason != "declared wave; serial occupancy is not comparable" {

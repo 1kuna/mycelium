@@ -54,7 +54,7 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 	q.s.Jobs["active"] = &Job{ID: "active", State: "running", Spec: Spec{Project: "active"}}
 	q.s.WorkObservations = map[string]WorkObservation{"point": {Job: "history-0000"}}
 	s := readStatusOptions(t, q, "")
-	if len(s.Jobs) != defaultStatusJobs+2 || s.JobsPage.Total != history+2 || len(s.WorkCurves) != 1 || s.WorkCurves[0].Job != "history-0000" {
+	if len(s.Jobs) != 2 || s.Summary.RetainedJobs != history+2 || len(s.WorkCurves) != 0 {
 		t.Fatalf("unbounded summary: %+v", s.JobsPage)
 	}
 	data, _ := json.Marshal(s)
@@ -82,12 +82,16 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 		}
 	}
 	active := readStatusOptions(t, q, "?jobs=active")
-	if len(active.Jobs) != 2 || len(active.WorkCurves) != 1 {
+	if len(active.Jobs) != 2 || len(active.WorkCurves) != 0 {
 		t.Fatalf("active/cleanup hidden: %d", len(active.Jobs))
 	}
 	full := readStatusOptions(t, q, "?detail=full")
 	if len(full.Jobs) != 10*history+2 || len(full.WorkCurves) != 1 {
 		t.Fatal("full detail lost history or curves")
+	}
+	recent := readStatusOptions(t, q, "?jobs=recent&sections=work")
+	if len(recent.Jobs) <= 2 || len(recent.Jobs) >= recent.JobsPage.Total || len(recent.WorkCurves) != 1 {
+		t.Fatal("explicit recent page/curves lost", recent.JobsPage)
 	}
 	// Historical IDs remain readable independently of the bounded summary.
 	got, err := q.jobSnapshot(fmt.Sprintf("history-%04d", history-1))
@@ -128,7 +132,7 @@ func TestStatusOptionsPaging(t *testing.T) {
 }
 
 func TestStatusOptionsRejectInvalidQuery(t *testing.T) {
-	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing"} {
+	for _, query := range []string{"jobs=unknown", "limit=0", "limit=-1", "since=invalid", "detail=unknown", "before=missing", "sections=unknown"} {
 		q, _ := fixture(t)
 		r := httptest.NewRequest("GET", "/api/status?"+query, nil)
 		r.Header.Set("Authorization", "Bearer test")
@@ -152,7 +156,11 @@ func TestStatusOptionsFileIOOutsideQueueLock(t *testing.T) {
 		return DiskReading{TotalBytes: 100 << 30, FreeBytes: 90 << 30}, nil
 	}
 	done := make(chan error, 1)
-	go func() { _, err := q.cachedStatusJSON(); done <- err }()
+	go func() {
+		options, _ := parseStatusOptions(url.Values{"sections": {"storage"}})
+		_, err := q.publicStatusSnapshot(&options)
+		done <- err
+	}()
 	defer func() {
 		close(release)
 		if err := <-done; err != nil {

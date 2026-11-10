@@ -191,7 +191,7 @@ func TestToolInventoryFencesAndRollback(t *testing.T) {
 	}
 	accepted = q.s.Machines[m.ID].toolInventory
 	sentinel := errors.New("abort")
-	if err := q.update(func() error { q.s.Machines[m.ID].toolInventory = nil; return sentinel }); !errors.Is(err, sentinel) {
+	if err := q.update(func() error { q.touchMachine(m.ID).toolInventory = nil; return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatal(err)
 	}
 	if q.s.Machines[m.ID].toolInventory != accepted {

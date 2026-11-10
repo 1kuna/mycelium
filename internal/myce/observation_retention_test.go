@@ -23,7 +23,9 @@ func TestObservationRetentionDropsOnlyUnreadRows(t *testing.T) {
 	runMemory(t, q, clock, m, named("limited"), 6, constrained)
 	forbidden := WorkObservation{Key: ObservationKey{Work: "synthetic-forbidden"}, Forbidden: true, RecordedAt: clock.Now()}
 	if err := q.update(func() error {
+		q.touchCatalog("work_observations/" + identityHash(forbidden.Key))
 		q.s.WorkObservations[identityHash(forbidden.Key)] = forbidden
+		q.touchCatalog("storage_observations/stale")
 		q.s.StorageObservations = map[string]StorageObservation{"stale": {RecordedAt: clock.Now()}}
 		return nil
 	}); err != nil {

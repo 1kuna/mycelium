@@ -68,6 +68,9 @@ func (q *Queue) maintainWallTimeLimits() {
 // Use ordinary command-failure policy (no automatic retry), never loss policy.
 // Terminal state is not release proof: the existing copies/releases retain custody.
 func (q *Queue) finishWallTime(j *Job) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	now := q.clock.Now()
 	j.State, j.Reason, j.FinishedAt = "failed", "execution failed: execution: wall_time_limit", &now
 	j.StopAt = nil

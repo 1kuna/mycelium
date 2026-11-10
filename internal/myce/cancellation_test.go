@@ -311,7 +311,7 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 			}
 			if path == "terminal-refund" {
 				if err := q.update(func() error {
-					live := q.s.Jobs[j.ID]
+					live := q.touchJob(j.ID)
 					live.State = "failed"
 					live.Losses = 3
 					live.Reason = "failed after 3 infrastructure losses: test"
@@ -331,8 +331,8 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 				check(t, q, machine("healthy-b", "fake"), nil)
 				c.Advance(LossAfter)
 				if err := q.update(func() error {
-					q.s.Machines["healthy-a"].LastSeen = c.Now()
-					q.s.Machines["healthy-b"].LastSeen = c.Now()
+					q.touchMachine("healthy-a").LastSeen = c.Now()
+					q.touchMachine("healthy-b").LastSeen = c.Now()
 					q.maintain()
 					return nil
 				}); err != nil {
@@ -445,8 +445,8 @@ func TestCancellationReleaseCustody(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(LossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen = c.Now()
-		q.s.Machines["three"].LastSeen = c.Now()
+		q.touchMachine("two").LastSeen = c.Now()
+		q.touchMachine("three").LastSeen = c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {
@@ -575,8 +575,8 @@ func TestCancellationQueuedLostCopyRelease(t *testing.T) {
 	check(t, q, machine("three", "fake"), nil)
 	c.Advance(LossAfter)
 	if err := q.update(func() error {
-		q.s.Machines["two"].LastSeen = c.Now()
-		q.s.Machines["three"].LastSeen = c.Now()
+		q.touchMachine("two").LastSeen = c.Now()
+		q.touchMachine("three").LastSeen = c.Now()
 		q.maintain()
 		return nil
 	}); err != nil {

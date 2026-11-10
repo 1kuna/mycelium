@@ -38,7 +38,7 @@ func TestPlacementStatusAuthoredAndScheduler(t *testing.T) {
 			server := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
 			defer server.Close()
 			client := Client{URL: server.URL, Token: "fixture"}
-			for _, path := range []string{"/api/jobs/" + submitted.ID, "/api/inspection", "/api/status", "/api/status?detail=full"} {
+			for _, path := range []string{"/api/jobs/" + submitted.ID, "/api/inspection", "/api/status?jobs=recent&sections=jobs", "/api/status?detail=full"} {
 				var got Job
 				if strings.HasPrefix(path, "/api/jobs/") {
 					if err := client.Call(context.Background(), "GET", path, nil, &got); err != nil {

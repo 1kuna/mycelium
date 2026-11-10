@@ -97,7 +97,7 @@ func TestProductionDevQueueCrash(t *testing.T) {
 	readJob := func(client myce.Client) myce.Job {
 		t.Helper()
 		var snap myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		for _, j := range snap.Jobs {
@@ -143,7 +143,7 @@ func TestProductionDevQueueCrash(t *testing.T) {
 		t.Fatal("late old result accepted")
 	}
 	var snapshot myce.Snapshot
-	if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0].State != "succeeded" || snapshot.Jobs[0].Attempt != 2 {
+	if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &snapshot); err != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0].State != "succeeded" || snapshot.Jobs[0].Attempt != 2 {
 		t.Fatal("duplicate completion", snapshot.Jobs, err)
 	}
 	checkpoint := commandFixturePath(t, ctx, client, accepted.ID, "checkpoint")

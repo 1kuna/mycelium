@@ -206,7 +206,7 @@ func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
 	checkpoint := capacityPartial(t, c, "recoverable checkpoint", jobInputUploadPurpose)
 	catalog := capacityPartial(t, c, "catalog model", jobInputUploadPurpose)
 	if err := q.update(func() error {
-		q.s.Jobs["recovery"] = &Job{State: "lost", Spec: Spec{Files: FileManifest{"input": live}}, FileCheckpoints: map[int]FileCheckpoint{1: {Files: FileManifest{"save": checkpoint}}}}
+		q.putJob("recovery", &Job{State: "lost", Spec: Spec{Files: FileManifest{"input": live}}, FileCheckpoints: map[int]FileCheckpoint{1: {Files: FileManifest{"save": checkpoint}}}})
 		q.models.Models = []Model{{SHA256: catalog.SHA256}}
 		return nil
 	}); err != nil {
@@ -256,7 +256,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 1 << 30}, nil
 	}
 	var snap Snapshot
-	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status?sections=storage", nil, &snap); err != nil {
 		t.Fatal(err)
 	}
 	fs := snap.FileStore
@@ -273,7 +273,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second) // Allow the observational status cache to expire.
-	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status?sections=storage", nil, &snap); err != nil {
 		t.Fatal(err)
 	}
 	if fs := snap.FileStore; fs.UsedBytes != 4 || fs.FreeBytes != 60 || fs.ReclaimableBytes != 0 {

@@ -421,7 +421,7 @@ func TestDiskHeadroomFreshnessUsesReceiveTimeAndReportedAge(t *testing.T) {
 			}
 			c.Advance(11 * time.Second)
 			// Other worker traffic must not refresh the disk report's receive time.
-			if err := q.update(func() error { q.s.Machines[m.ID].LastSeen = c.Now(); return nil }); err != nil {
+			if err := q.update(func() error { q.touchMachine(m.ID).LastSeen = c.Now(); return nil }); err != nil {
 				t.Fatal(err)
 			}
 			if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
@@ -537,7 +537,7 @@ func TestDiskHeadroomStaleReadingDoesNotRefuseStartFence(t *testing.T) {
 	}
 	// Keep worker contact fresh while the disk sampler stops making progress.
 	if err := q.update(func() error {
-		q.s.Machines[m.ID].DiskVolumes[0].AgeSeconds = 31
+		q.touchMachine(m.ID).DiskVolumes[0].AgeSeconds = 31
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -567,7 +567,7 @@ func TestDiskHeadroomStartFenceRefusalIsNotLoss(t *testing.T) {
 		t.Fatal("production not assigned")
 	}
 	if err := q.update(func() error {
-		owner := q.s.Machines[a.Machine]
+		owner := q.touchMachine(a.Machine)
 		owner.DiskVolumes[0].FreeBytes, owner.DiskVolumes[0].SampledAt, owner.DiskReceivedAt = 512<<20, c.Now(), c.Now()
 		return nil
 	}); err != nil {
@@ -620,7 +620,7 @@ func TestDiskHeadroomStartFenceUsesCurrentFloor(t *testing.T) {
 				t.Fatal("production not assigned")
 			}
 			if err := q.update(func() error {
-				owner := q.s.Machines[a.Machine]
+				owner := q.touchMachine(a.Machine)
 				v := &owner.DiskVolumes[0]
 				v.FreeBytes, v.SampledAt, owner.DiskReceivedAt = tc.free, c.Now(), c.Now()
 				if tc.retained {

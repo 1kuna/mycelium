@@ -134,7 +134,7 @@ func TestPlacementPlanLostAttemptRetainsResourceClass(t *testing.T) {
 		check(t, q, observer(), nil)
 		// Model the retry's concrete CPU variant, independently of the old copy.
 		if err := q.update(func() error {
-			q.s.Jobs[gpu.ID].Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
+			q.touchJob(gpu.ID).Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
 			return nil
 		}); err != nil {
 			t.Fatal(err)

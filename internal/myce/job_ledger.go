@@ -47,6 +47,9 @@ type JobLedgerPage struct {
 }
 
 func (q *Queue) appendJobLedger(j *Job, e JobLedgerEntry) {
+	if j != nil && q.s.Jobs[j.ID] == j {
+		q.touchJob(j.ID)
+	}
 	if j.Ledger == nil {
 		j.Ledger = &JobLedgerInfo{}
 	} // Older history cannot be reconstructed.
@@ -304,6 +307,7 @@ func (q *Queue) checkLedgerNativeCoverage(j *Job) {
 		}
 	}
 	if j.Ledger != nil {
+		q.touchJob(j.ID)
 		j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 	}
 }
