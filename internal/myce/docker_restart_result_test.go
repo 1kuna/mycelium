@@ -15,6 +15,10 @@ import (
 func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
 	t.Helper()
 	w, s, c, root := dockerFixture(t)
+	// Seed durable running custody through the shared in-process daemon. These
+	// tests freeze the adapter and exercise recovery, not CLI startup latency;
+	// recovery still uses the external CLI against the same daemon files.
+	w.dockerCommand = fakeDockerGroupCommand(root)
 	p, err := startDockerFixture(w, s, dockerGroupJob(t))
 	if err != nil {
 		t.Fatal(err)

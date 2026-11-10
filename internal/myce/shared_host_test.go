@@ -428,9 +428,11 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, SharedPressureSource: func(context.Context) (SharedHostPressure, error) {
+	// This journey checks payload priority and inheritance. Keep queue custody
+	// fresh across HTTP observations even when the parent is backgrounded.
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, SharedPressureSource: func(context.Context) (SharedHostPressure, error) {
 		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
-	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond})
+	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
 	if err != nil {
 		t.Fatal(err)
 	}

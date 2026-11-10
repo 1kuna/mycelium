@@ -785,14 +785,20 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(root, "calls"))
 		return strings.Contains(string(data), "network rm")
 	})
-	c.advance(2 * time.Minute)
-	snap, e := q.Snapshot()
-	if e != nil {
-		t.Fatal(e)
+	// A daemon call proves dispatch, not that the worker has reported pending
+	// cleanup. Cross the queue's actual stop deadline and wait for that report.
+	stopping := job(t, q, j.ID)
+	if stopping.StopAt == nil {
+		t.Fatal("cancel did not establish a stop deadline")
 	}
-	if !strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required") {
-		t.Fatalf("network hold not escalated: %v", snap.HostHolds)
-	}
+	c.advance(stopping.StopAt.Sub(c.Now()) + 2*time.Minute)
+	await(t, func() bool {
+		snap, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required")
+	})
 	requireState(t, q, j.ID, "stopping")
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
 	await(t, func() bool { c.advance(time.Millisecond); return job(t, q, j.ID).State == "cancelled" })
