@@ -247,17 +247,7 @@ func cleanExtensionEnv(extra map[string]string) []string {
 	return out
 }
 func ExtensionDevice(platform string) string {
-	switch platform {
-	case "metal":
-		return "mps"
-	case "xpu":
-		return "xpu:0"
-	case "cuda":
-		return "cuda:0"
-	case "fake", "cpu":
-		return "cpu"
-	}
-	return ""
+	return backendFor(platform).extensionDevice
 }
 func extensionEnvironment(root string, e Extension, platform, device string) (map[string]string, error) {
 	folder, err := filepath.Abs(extensionFolder(root, e))

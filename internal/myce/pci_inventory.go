@@ -18,11 +18,10 @@ type pciAccelerator struct {
 }
 
 func (d pciAccelerator) platform() string {
-	switch d.vendor {
-	case "0x10de":
-		return "cuda"
-	case "0x8086":
-		return "xpu"
+	for _, backend := range acceleratorBackends {
+		if backend.pciVendor != "" && backend.pciVendor == d.vendor {
+			return backend.platform
+		}
 	}
 	return ""
 }
@@ -150,7 +149,7 @@ func reconcilePCI(pci []pciAccelerator, runtime []MachineDevice) (map[string]pci
 		if d.platform() == "" || matched[d.address] {
 			continue
 		}
-		if d.platform() == "xpu" && d.topologyKnown && d.integrated {
+		if backendFor(d.platform()).optionalIntegratedRuntime && d.topologyKnown && d.integrated {
 			continue
 		} // Optional absent iGPU runtime; existing CPU-only contract.
 		failures = append(failures, preflightError("gpu_driver_missing", d.address, "GPU hardware has no supported runtime inventory; repair the driver and re-detect"))

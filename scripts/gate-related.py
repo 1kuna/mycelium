@@ -20,6 +20,11 @@ SUPPLEMENTAL_CONSUMERS = {
 # child-process launch and synthetic-probe boundary, including in quick mode.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)
 
+# PCI facts feed onboarding, worker inventory and backend descriptor dispatch.
+SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
+    'device_detection_test.go', 'device_inventory_family_test.go',
+    'probe_consolidation_test.go', 'accelerator_backend_test.go')
+
 # Device-use ranking extends the existing placement regressions.
 SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
     'machine_placement_test.go', 'benchmark_test.go')

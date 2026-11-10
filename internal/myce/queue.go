@@ -1973,9 +1973,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	}
 	return reply, err
 }
-func validGPU(s string) bool {
-	return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" || s == "cpu"
-}
 func (q *Queue) current(r Result) (*Job, error) {
 	j := q.touchJob(r.ID)
 	if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || (j.State != "running" && j.State != "stopping") {

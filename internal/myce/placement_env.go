@@ -8,8 +8,8 @@ import (
 // Placement is worker-owned and cannot be overridden by the payload/catalog.
 func placementEnvironment(m Machine) map[string]string {
 	platform := m.GPU
-	if platform == "fake" {
-		platform = "cpu-fake"
+	if name := backendFor(platform).placementName; name != "" {
+		platform = name
 	}
 	// MYCE_GPU_COUNT is the number of visible cards, for example vLLM's
 	// --tensor-parallel-size; HF device_map="auto" uses every visible card.

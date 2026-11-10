@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -18,90 +19,34 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	if p.Command == nil {
 		return nil, preflightError("gpu_inventory_unavailable", "gpu", "inventory command runner missing")
 	}
-	if p.OS == "darwin" && p.Arch == "arm64" {
-		b, err := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
-		if err != nil || !strings.Contains(string(b), "Metal") {
-			return nil, preflightError("gpu_driver_unavailable", "metal", "Apple Silicon Metal unavailable; repair runtime access and re-detect")
+	for _, backend := range acceleratorBackends {
+		if backend.hostOS == p.OS && backend.hostArch == p.Arch && backend.inventory != nil {
+			return backend.inventory(p, ctx, nil)
 		}
-		return []MachineDevice{{ID: "0", Platform: "metal", Identity: "Apple Silicon", Selector: "0", Fingerprint: "Apple Silicon"}}, nil
 	}
 	pci, pciErr := p.pciAccelerators()
 	failures := &acceleratorProbeError{}
 	if pciErr != nil {
 		failures.causes = append(failures.causes, pciErr)
 	}
-	intel, nvidia := false, false
 	for _, d := range pci {
-		intel = intel || d.platform() == "xpu"
-		nvidia = nvidia || d.platform() == "cuda"
 		if d.platform() == "" && p.Info != nil {
 			p.Info("Ignoring display device " + d.address + " (PCI " + d.vendor + ":" + d.device + "); no supported accelerator backend")
 		}
 	}
-	if !intel && nvidia && p.Info != nil {
-		p.Info("No Intel PCI display/accelerator device; no XPU devices (runtime not required)")
-	}
 	out := []MachineDevice{}
-	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version,pci.bus_id", "--format=csv,noheader,nounits")
-	if err != nil {
-		if nvidia {
-			failures.cuda = true
-			code := "gpu_driver_unavailable"
-			if probeAbsent(err) {
-				code = "gpu_driver_missing"
-			}
-			failures.causes = append(failures.causes, preflightError(code, "cuda", "NVIDIA runtime unavailable; install or repair the driver and re-detect"))
-		} else if !probeAbsent(err) && p.Info != nil {
-			p.Info("nvidia-smi failed without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
+	for _, backend := range acceleratorBackends {
+		if backend.pciVendor == "" || backend.inventory == nil {
+			continue
 		}
-	} else if strings.TrimSpace(string(b)) != "" {
-		cuda := []MachineDevice{}
-		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-			fields := strings.Split(line, ",")
-			if len(fields) < 2 || len(fields) > 3 || !strings.HasPrefix(strings.TrimSpace(fields[0]), "GPU-") {
-				failures.cuda = true
-				break
+		devices, err := backend.inventory(p, ctx, pci)
+		out = append(out, devices...)
+		if err != nil {
+			if failures.families == nil {
+				failures.families = map[string]bool{}
 			}
-			uuid := strings.TrimSpace(fields[0])
-			d := MachineDevice{ID: strconv.Itoa(len(cuda)), Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(fields[1])}
-			if len(fields) == 3 {
-				d.pciAddress = strings.TrimSpace(fields[2])
-			}
-			cuda = append(cuda, d)
-		}
-		if validateInventory(cuda) != nil {
-			failures.cuda = true
-		}
-		if failures.cuda {
-			failures.cuda = nvidia
-			if nvidia {
-				failures.causes = append(failures.causes, preflightError("gpu_inventory_invalid", "cuda", "invalid CUDA UUID inventory"))
-			} else if p.Info != nil {
-				p.Info("Invalid CUDA UUID inventory without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
-			}
-		} else {
-			out = append(out, cuda...)
-		}
-	}
-	if intel {
-		xpu, e := p.levelZeroDevices(ctx)
-		if e != nil {
-			optional := true
-			for _, d := range pci {
-				if d.platform() == "xpu" && (!d.topologyKnown || !d.integrated) {
-					optional = false
-				}
-			}
-			if !(optional && len(pci) > 0 && (probeAbsent(e) || installExit(e, 78))) {
-				failures.xpu = true
-				code := "gpu_driver_unavailable"
-				if probeAbsent(e) || installExit(e, 78) {
-					code = "gpu_driver_missing"
-				}
-				failures.causes = append(failures.causes, preflightError(code, "xpu", "cannot enumerate Level Zero UUIDs; install or repair the runtime"))
-			}
-		} else {
-			out = append(out, xpu...)
+			failures.families[backend.platform] = true
+			failures.causes = append(failures.causes, err)
 		}
 	}
 	facts, completeErr := reconcilePCI(pci, out)
@@ -131,7 +76,7 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 			d.Reason = "gpu_inventory_invalid"
 		}
 	}
-	if failures.cuda || failures.xpu || len(failures.causes) > 0 {
+	if len(failures.families) > 0 || len(failures.causes) > 0 {
 		return out, failures
 	}
 	return out, nil
@@ -167,20 +112,19 @@ func (p MachineProbe) levelZeroDevices(ctx context.Context) ([]MachineDevice, er
 // A partial probe error withholds only its failed families. The public message
 // contains fixed reason codes, never subprocess output or host paths.
 type acceleratorProbeError struct {
-	cuda, xpu bool
-	causes    []error
+	families map[string]bool
+	causes   []error
 }
 
 func (e *acceleratorProbeError) failed(platform string) bool {
-	return platform == "cuda" && e.cuda || platform == "xpu" && e.xpu
+	return e.families[platform]
 }
 func (e *acceleratorProbeError) Error() string {
 	reasons := []string{}
-	if e.cuda {
-		reasons = append(reasons, "cuda: device_probe_unavailable")
-	}
-	if e.xpu {
-		reasons = append(reasons, "xpu: device_probe_unavailable")
+	for _, backend := range acceleratorBackends {
+		if e.failed(backend.platform) {
+			reasons = append(reasons, backend.platform+": device_probe_unavailable")
+		}
 	}
 	if len(reasons) == 0 && len(e.causes) > 0 {
 		reasons = append(reasons, "gpu: device_probe_unavailable")
@@ -241,3 +185,104 @@ for driver in drivers:
 if len(drivers)>1 and result: raise RuntimeError("ambiguous Level Zero drivers")
 print(json.dumps(result))
 `
+
+func metalAccelerators(p MachineProbe, ctx context.Context, _ []pciAccelerator) ([]MachineDevice, error) {
+
+	b, err := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
+	if err != nil || !strings.Contains(string(b), "Metal") {
+		return nil, preflightError("gpu_driver_unavailable", "metal", "Apple Silicon Metal unavailable; repair runtime access and re-detect")
+	}
+	return []MachineDevice{{ID: "0", Platform: "metal", Identity: "Apple Silicon", Selector: "0", Fingerprint: "Apple Silicon"}}, nil
+}
+
+func cudaAccelerators(p MachineProbe, ctx context.Context, pci []pciAccelerator) ([]MachineDevice, error) {
+	nvidia, intel := false, false
+	for _, d := range pci {
+		nvidia = nvidia || d.platform() == "cuda"
+		intel = intel || d.platform() == "xpu"
+	}
+	if !intel && nvidia && p.Info != nil {
+		p.Info("No Intel PCI display/accelerator device; no XPU devices (runtime not required)")
+	}
+	failed := false
+	var causes []error
+	out := []MachineDevice{}
+	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version,pci.bus_id", "--format=csv,noheader,nounits")
+	if err != nil {
+		if nvidia {
+			failed = true
+			code := "gpu_driver_unavailable"
+			if probeAbsent(err) {
+				code = "gpu_driver_missing"
+			}
+			causes = append(causes, preflightError(code, "cuda", "NVIDIA runtime unavailable; install or repair the driver and re-detect"))
+		} else if !probeAbsent(err) && p.Info != nil {
+			p.Info("nvidia-smi failed without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
+		}
+	} else if strings.TrimSpace(string(b)) != "" {
+		cuda := []MachineDevice{}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			fields := strings.Split(line, ",")
+			if len(fields) < 2 || len(fields) > 3 || !strings.HasPrefix(strings.TrimSpace(fields[0]), "GPU-") {
+				failed = true
+				break
+			}
+			uuid := strings.TrimSpace(fields[0])
+			d := MachineDevice{ID: strconv.Itoa(len(cuda)), Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(fields[1])}
+			if len(fields) == 3 {
+				d.pciAddress = strings.TrimSpace(fields[2])
+			}
+			cuda = append(cuda, d)
+		}
+		if validateInventory(cuda) != nil {
+			failed = true
+		}
+		if failed {
+			failed = nvidia
+			if nvidia {
+				causes = append(causes, preflightError("gpu_inventory_invalid", "cuda", "invalid CUDA UUID inventory"))
+			} else if p.Info != nil {
+				p.Info("Invalid CUDA UUID inventory without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
+			}
+		} else {
+			out = append(out, cuda...)
+		}
+	}
+	if failed {
+		return out, errors.Join(causes...)
+	}
+	return out, nil
+}
+
+func xpuAccelerators(p MachineProbe, ctx context.Context, pci []pciAccelerator) ([]MachineDevice, error) {
+	if !slices.ContainsFunc(pci, func(d pciAccelerator) bool { return d.platform() == "xpu" }) {
+		return nil, nil
+	}
+	failed := false
+	var causes []error
+	out := []MachineDevice{}
+
+	xpu, e := p.levelZeroDevices(ctx)
+	if e != nil {
+		optional := true
+		for _, d := range pci {
+			if d.platform() == "xpu" && (!d.topologyKnown || !d.integrated) {
+				optional = false
+			}
+		}
+		if !(optional && len(pci) > 0 && (probeAbsent(e) || installExit(e, 78))) {
+			failed = true
+			code := "gpu_driver_unavailable"
+			if probeAbsent(e) || installExit(e, 78) {
+				code = "gpu_driver_missing"
+			}
+			causes = append(causes, preflightError(code, "xpu", "cannot enumerate Level Zero UUIDs; install or repair the runtime"))
+		}
+	} else {
+		out = append(out, xpu...)
+	}
+	if failed {
+		return out, errors.Join(causes...)
+	}
+	return out, nil
+}
