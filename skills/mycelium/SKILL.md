@@ -314,6 +314,15 @@ after the worker release; it does not observe arbitrary consumer syscalls.
 Keep the same job while the root recovers;
 do not work around the hold by pinning a host or changing mounts.
 
+From the worker/queue release containing #1227, accepted exact-attempt scratch
+is reclaimed automatically; terminal failed/cancelled scratch follows the queue's
+positive file-retention policy or explicit owner file release. The former fixed
+24-hour scratch promise is retired under MY-34. Unknown data and pending
+upload/replay/custody remain protected. Recover required partial files before
+the configured deadline or release; use the existing reviewed file-release
+plan/apply flow only after preserving them. See
+[worker scratch retention](../../docs/reference/worker-caches.md#worker-scratch-retention).
+
 ## Read for the relevant branch
 
 - **One-off commands, GPU/memory, variants, models, checkpoints or NAS inputs:**

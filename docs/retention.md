@@ -59,7 +59,11 @@ sample adds to their retained counts.
   collection forgets them only when the corresponding payload leaves.
   the longest observed claim-to-submission delay supplies additional publication
   protection. There is no universal six-hour promise. Unknown imports and
-  unclaimed attempt directories have no age-based collection authority.
+  unclaimed attempt directories have no age-based collection authority. From
+  #1227, worker scratch checks exact-attempt acceptance/release with the queue;
+  terminal scratch follows an explicit positive file-retention policy or owner
+  file release. Marker age alone never authorizes collection. See
+  [worker scratch retention](reference/worker-caches.md#worker-scratch-retention).
 - External RAM telemetry's readers request 24-hour and seven-day windows. These
   existing public query horizons explain their coverage; they are not job-data
   expiry defaults. Capacity and measured serialization cost size time subdivisions.
