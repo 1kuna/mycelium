@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -295,16 +296,29 @@ func (h *EfficiencyHost) advance(now time.Time) {
 	}
 	h.At = now
 }
-func (q *Queue) accountEfficiency(now time.Time) {
-	for _, j := range q.liveJobs() {
-		if j.Efficiency != nil {
-			j.Efficiency.advance(now)
-		}
+
+// projectEfficiency owns its counters; advancing a read cannot mutate the
+// accounting anchor or a previously published read generation.
+func (q *Queue) projectEfficiency(j *Job) {
+	if j.Efficiency == nil || !mutableJob(j) {
+		return
 	}
-	for host, h := range q.s.EfficiencyHosts {
-		h.advance(now)
-		q.s.EfficiencyHosts[host] = h
+	copy := cloneJob(&Job{Efficiency: j.Efficiency})
+	copy.Efficiency.advance(q.clock.Now())
+	j.Efficiency = copy.Efficiency
+}
+
+// Account only at a rate or blocker transition. Reads advance detached copies,
+// so the durable anchor reconstructs elapsed time after a restart without a
+// write for every waiting job on every heartbeat.
+func (e *JobEfficiency) transition(old JobEfficiency, now time.Time) {
+	if old.Blocker == e.Blocker && reflect.DeepEqual(old.Rate, e.Rate) && reflect.DeepEqual(old.RetainedRates, e.RetainedRates) {
+		return
 	}
+	rate, retained, blocker := e.Rate, e.RetainedRates, e.Blocker
+	e.Rate, e.RetainedRates, e.Blocker = old.Rate, old.RetainedRates, old.Blocker
+	e.advance(now)
+	e.Rate, e.RetainedRates, e.Blocker = rate, retained, blocker
 }
 func efficiencyBasis(j *Job) string {
 	if j.MemoryEnvelope != nil && j.MemoryEnvelope.Basis != "" {
@@ -325,51 +339,7 @@ func (q *Queue) refreshEfficiency() {
 		}
 	}
 	for _, j := range q.liveJobs() {
-		if j.Efficiency == nil {
-			j.Efficiency = &JobEfficiency{Since: now, At: now, Work: profileMemoryIdentity(j), WaitSeconds: map[string]float64{}}
-		}
-		e := j.Efficiency
-		previousBasis := e.Rate.Basis
-		e.Rate = efficiencyRate{}
-		if j.State == "queued" && !cancelled(j) {
-			if e.Blocker == "" {
-				e.Blocker = "unknown"
-			}
-		} else if j.State == "paused" {
-			e.Blocker = "holds"
-		} else {
-			e.Blocker = ""
-		}
-		oldRetained := e.RetainedRates
-		e.RetainedRates = nil
-		for _, release := range releases[j.ID] {
-			if batchReservesCapacity(j) && release.Machine == j.Machine && release.Session == j.Session && release.Attempt == j.Attempt {
-				continue // The current execution already carries this charge.
-			}
-			basis := previousBasis
-			for _, old := range oldRetained {
-				if old.Release == releaseKey(release) {
-					basis = old.Basis
-					break
-				}
-			}
-			if basis == "" {
-				basis = efficiencyBasis(j)
-			}
-			rate := efficiencyRate{Release: releaseKey(release), Host: release.Host, Basis: basis, ReservedMemoryGB: release.HostChargeGB, ReservedCPUCores: float64(max(1, release.CPUCores)), ReservedDeviceGB: release.MemoryGB * float64(max(1, len(release.Devices)))}
-			q.efficiencySample(&rate, release.Machine, attemptKey{release.Job, release.Attempt, release.Session}, now)
-			e.RetainedRates = append(e.RetainedRates, rate)
-		}
-		slices.SortFunc(e.RetainedRates, func(a, b efficiencyRate) int { return strings.Compare(a.Release, b.Release) })
-		if !batchReservesCapacity(j) {
-			continue
-		}
-		m := q.s.Machines[j.Machine]
-		if m == nil {
-			continue
-		}
-		e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: q.hostJobCharge(j), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
-		q.efficiencySample(&e.Rate, j.Machine, jobKey(*j), now)
+		q.refreshJobEfficiency(j, releases[j.ID], now)
 	}
 	if q.s.EfficiencyHosts == nil {
 		q.s.EfficiencyHosts = map[string]EfficiencyHost{}
@@ -415,6 +385,7 @@ func (q *Queue) refreshEfficiency() {
 		seen[host] = true
 		identity := efficiencyHostIdentity(hostMachines[host])
 		h, ok := q.s.EfficiencyHosts[host]
+		old := h
 		if !ok || h.Identity != identity {
 			h = EfficiencyHost{Host: host, Since: now, At: now, Identity: identity}
 		}
@@ -457,6 +428,10 @@ func (q *Queue) refreshEfficiency() {
 			h.Rate.MeasuredDeviceGB = &deviceUsed
 			h.Rate.DeviceValidUntil = deviceUntil
 		}
+		if old.Identity == h.Identity && !reflect.DeepEqual(old.Rate, h.Rate) {
+			old.advance(now)
+			h.ResourceIntegral, h.At = old.ResourceIntegral, old.At
+		}
 		q.s.EfficiencyHosts[host] = h
 	}
 	for host := range q.s.EfficiencyHosts {
@@ -464,6 +439,56 @@ func (q *Queue) refreshEfficiency() {
 			delete(q.s.EfficiencyHosts, host)
 		}
 	}
+}
+
+func (q *Queue) refreshJobEfficiency(j *Job, releases []HostRelease, now time.Time) {
+	if j.Efficiency == nil {
+		j.Efficiency = &JobEfficiency{Since: now, At: now, Work: profileMemoryIdentity(j), WaitSeconds: map[string]float64{}}
+	}
+	e := j.Efficiency
+	old := *e
+	defer func() { e.transition(old, now) }()
+	previousBasis := e.Rate.Basis
+	e.Rate = efficiencyRate{}
+	if j.State == "queued" && !cancelled(j) {
+		if e.Blocker == "" {
+			e.Blocker = "unknown"
+		}
+	} else if j.State == "paused" {
+		e.Blocker = "holds"
+	} else {
+		e.Blocker = ""
+	}
+	oldRetained := e.RetainedRates
+	e.RetainedRates = nil
+	for _, release := range releases {
+		if batchReservesCapacity(j) && release.Machine == j.Machine && release.Session == j.Session && release.Attempt == j.Attempt {
+			continue // The current execution already carries this charge.
+		}
+		basis := previousBasis
+		for _, old := range oldRetained {
+			if old.Release == releaseKey(release) {
+				basis = old.Basis
+				break
+			}
+		}
+		if basis == "" {
+			basis = efficiencyBasis(j)
+		}
+		rate := efficiencyRate{Release: releaseKey(release), Host: release.Host, Basis: basis, ReservedMemoryGB: release.HostChargeGB, ReservedCPUCores: float64(max(1, release.CPUCores)), ReservedDeviceGB: release.MemoryGB * float64(max(1, len(release.Devices)))}
+		q.efficiencySample(&rate, release.Machine, attemptKey{release.Job, release.Attempt, release.Session}, now)
+		e.RetainedRates = append(e.RetainedRates, rate)
+	}
+	slices.SortFunc(e.RetainedRates, func(a, b efficiencyRate) int { return strings.Compare(a.Release, b.Release) })
+	if !batchReservesCapacity(j) {
+		return
+	}
+	m := q.s.Machines[j.Machine]
+	if m == nil {
+		return
+	}
+	e.Rate = efficiencyRate{Host: hostID(m), Basis: efficiencyBasis(j), ReservedMemoryGB: q.hostJobCharge(j), ReservedCPUCores: float64(j.Spec.Needs.cores()), ReservedDeviceGB: j.Spec.Needs.MemoryGB}
+	q.efficiencySample(&e.Rate, j.Machine, jobKey(*j), now)
 }
 
 func (q *Queue) efficiencySample(rate *efficiencyRate, machine string, key attemptKey, now time.Time) {
@@ -630,7 +655,10 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	}
 	for id, blocker := range d.blockers {
 		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Attempt == blocker.Attempt && j.Session == blocker.Session && j.Queued.Equal(blocker.Queued) && j.Efficiency != nil {
-			j.Efficiency.Blocker = blocker.Category
+			if j.Efficiency.Blocker != blocker.Category {
+				j.Efficiency.advance(q.clock.Now())
+				j.Efficiency.Blocker = blocker.Category
+			}
 		}
 	}
 	q.s.EfficiencyAt = d.report.At

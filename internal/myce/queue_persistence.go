@@ -521,6 +521,12 @@ type waitPersistenceInput struct {
 // evidence can compare by identity. Speculative encodings confer no durability:
 // writeFields always compares against the last committed bytes.
 func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
+	if j, ok := value.(*Job); ok && j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
+		copy := *j
+		copy.Reason = "recomputing admission diagnostics"
+		value = &copy
+	}
+
 	if j, ok := value.(*Job); ok && j != nil && j.AdmissionWait != nil {
 		// Immutable wait history must not turn every small live job into a
 		// full per-field reflection/cache walk on every heartbeat. Encode the

@@ -264,7 +264,13 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 			live.AdmissionWait = retainAdmissionWait(live.AdmissionWait,
 				&AdmissionWaitSnapshot{At: clock.Now(), Attempt: live.Attempt, Predicate: "admission"}, 0, true)
 			for key, value := range map[string]any{"state": q.s, "jobs/" + j.ID: live} {
-				want, err := json.Marshal(value)
+				durable := value
+				if job, ok := value.(*Job); ok && (q.startupPending(job) || q.startCapacityPaused(job)) {
+					copy := *job
+					copy.Reason = "recomputing admission diagnostics"
+					durable = &copy
+				}
+				want, err := json.Marshal(durable)
 				if err != nil {
 					return err
 				}
@@ -292,5 +298,54 @@ func TestQueuePersistenceCachedEncodingMatchesJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		clock.Advance(time.Second)
+	}
+}
+
+// The durable waiting anchor does not move with telemetry. Reads still expose
+// elapsed time and live reasons, while transitions close the old interval.
+func TestQueuePersistenceDiagnosticAnchorRestart(t *testing.T) {
+	q, clock := fixture(t)
+	s := cpuSpec(2, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	drainAdmissionWait(t, q)
+	before := durableQueueRecord(t, q.db, "jobs/"+j.ID)
+	for range 3 {
+		clock.Advance(time.Second)
+		if err := q.update(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := durableQueueRecord(t, q.db, "jobs/"+j.ID)
+	if !bytes.Equal(before, after) {
+		t.Fatal("idle waiting job was rewritten")
+	}
+	view := cloneJob(q.s.Jobs[j.ID])
+	q.projectEfficiency(&view)
+	if view.Efficiency.WaitSeconds["unknown"] != 3 {
+		t.Fatal("missing read-time wait")
+	}
+	q = reopenQueue(t, q, clock)
+	view = cloneJob(q.s.Jobs[j.ID])
+	q.projectEfficiency(&view)
+	if view.Efficiency.WaitSeconds["unknown"] != 3 {
+		t.Fatal("restart lost anchored wait")
+	}
+	if _, err := q.PauseJob(j.ID, PauseJobRequest{Reason: "input review"}); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	paused := q.s.Jobs[j.ID]
+	if paused.State != "paused" || paused.Pause == nil || paused.Pause.Reason != "input review" || paused.Efficiency.WaitSeconds["unknown"] != 3 {
+		t.Fatal("restart lost pause decision or closed interval")
+	}
+	clock.Advance(2 * time.Second)
+	if _, err := q.CancelJob(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	cancelled := q.s.Jobs[j.ID]
+	if cancelled.CancelledAt == nil || cancelled.State != "cancelled" || cancelled.Efficiency.WaitSeconds["holds"] != 2 {
+		t.Fatal("restart lost cancellation or pause interval")
 	}
 }

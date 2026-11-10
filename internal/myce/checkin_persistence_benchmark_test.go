@@ -18,8 +18,8 @@ func BenchmarkCheckinPersistence(b *testing.B) {
 
 func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 	q, workers := candidateCostFixture(b)
-	clock := &workerFakeClock{now: q.clock.Now()}
-	q.clock = clock
+	admissionWaitBenchmarkSettle(q)
+	clock := q.clock.(*workerFakeClock)
 	if manifests {
 		// The #661 fixture used 768 input references per job. Add them only to
 		// occupied work here, isolating unchanged payload writes from queued planning.
@@ -43,6 +43,7 @@ func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 	if err := q.update(func() error { return nil }); err != nil {
 		b.Fatal(err)
 	}
+	admissionWaitBenchmarkSettle(q)
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(q.persisted["state"], &fields); err != nil {
 		b.Fatal(err)
@@ -77,6 +78,7 @@ func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 			phases[i] += v
 		}
 	}
+	cpu := benchmarkCPU()
 	b.ResetTimer()
 	for i := range b.N {
 		clock.Advance(time.Second)
@@ -86,12 +88,15 @@ func benchmarkCheckinPersistence(b *testing.B, manifests bool) {
 			b.Fatal(err)
 		}
 	}
+	admissionWaitBenchmarkSettle(q)
 	b.StopTimer()
+	usedCPU := benchmarkCPU() - cpu
 	info, err := os.Stat(dbPath + "-wal")
 	if err != nil {
 		b.Fatal(err)
 	}
 	n := float64(b.N)
+	b.ReportMetric(float64(usedCPU)/1e6/n, "CPU-ms/checkin")
 	b.ReportMetric(float64(info.Size()-32)/n, "WAL-B/checkin")
 	b.ReportMetric(float64(sum.Bytes)/n, "payload-B/checkin")
 	b.ReportMetric(float64(sum.Records)/n, "records/checkin")
