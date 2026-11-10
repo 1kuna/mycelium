@@ -66,6 +66,7 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 			}
 			// Force each possible initial tie winner without changing policy or
 			// elapsed service. Subsequent comparisons must repay the authored 3:1 share.
+			drainAdmissionWait(t, q)
 			for _, j := range q.liveJobs() {
 				if j.Spec.Project == first {
 					j.Front = 1

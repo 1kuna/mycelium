@@ -186,10 +186,12 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	demand := spec("production")
 	demand.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
 	winner := submit(t, q, demand)
+	drainAdmissionWait(t, q)
 	q.stopBatchFor(q.s.Jobs[a.ID], winner)
 	if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Interrupted: true}); err != nil {
 		t.Fatal(err)
 	}
+	drainAdmissionWait(t, q)
 	if len(q.s.BatchReleases) != 1 {
 		t.Fatal("missing confirmed release credit", q.s.BatchReleases)
 	}
@@ -199,6 +201,7 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 		}
 	}
 	machineCheck(t, q, m)
+	drainAdmissionWait(t, q)
 	if len(q.s.BatchReleases) != 0 {
 		t.Fatal("fresh inventory retained speculative release credit", q.s.BatchReleases)
 	}
