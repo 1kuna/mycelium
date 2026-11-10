@@ -490,6 +490,12 @@ func TestNativeWorkerCancellationPreparation(t *testing.T) {
 	q.clock = &workerFakeClock{now: q.clock.Now()}
 	j := submit(t, q, s)
 	run := workerFixture(t, q)
+	// Advance advertised sender opportunities while the real worker bootstraps.
+	// A frozen delivery clock cannot qualify a cold arrival for assignment.
+	await(t, func() bool {
+		q.clock.(*workerFakeClock).Advance(time.Millisecond)
+		return job(t, q, j.ID).Machine != ""
+	})
 	dir := nativeWorkerWork(t, run.state)
 	nativeFile(t, dir, "child.pid")
 	if value := job(t, q, j.ID); value.StartedAt != nil {
