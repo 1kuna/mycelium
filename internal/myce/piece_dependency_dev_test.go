@@ -12,194 +12,201 @@ import (
 
 // This is the myce dev runtime, real authenticated API, qualification, command
 // runner and verified artifact transfer; no queue result is fabricated.
-func TestPieceDependencyDevCPU(t *testing.T) {
-	for _, transport := range []string{"file-store", "nas"} {
-		t.Run(transport, func(t *testing.T) {
-			root := newTestStateRoot(t)
-			// Dependency transport uses normal worker cadence; 10ms heartbeats contend with file-store commits.
-			c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "piece-dev-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: defaultWorkerInterval}
-			if transport == "file-store" {
-				c.FileStore = filepath.Join(root, "files")
-			} else {
-				c.NASCheckpoints = true
-			}
-			if err := os.MkdirAll(c.JobFileRoot, 0700); err != nil {
+func TestPieceDependencyDevCPUFileStore(t *testing.T) {
+	pieceDependencyDevCPU(t, "file-store")
+}
+
+func TestPieceDependencyDevCPUNAS(t *testing.T) {
+	pieceDependencyDevCPU(t, "nas")
+}
+
+func pieceDependencyDevCPU(t *testing.T, transport string) {
+	t.Helper()
+	t.Run(transport, func(t *testing.T) {
+		root := newTestStateRoot(t)
+		// Dependency transport uses normal worker cadence; 10ms heartbeats contend with file-store commits.
+		c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: filepath.Join(root, "extensions"), JobFileRoot: filepath.Join(root, "nas"), Token: "piece-dev-test", GPU: "cpu", Workers: 2, CPUBudgetCores: 4, Interval: defaultWorkerInterval}
+		if transport == "file-store" {
+			c.FileStore = filepath.Join(root, "files")
+		} else {
+			c.NASCheckpoints = true
+		}
+		if err := os.MkdirAll(c.JobFileRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("MYCE_TOKEN", c.Token)
+		// Two plain commands use an external fixture marker to hold the final piece.
+		// The marker is test coordination, never a readiness/dispatch signal.
+		e := compositionExtension(t, false)
+		e.Kinds = nil
+		e.Name = "piece-dev"
+		e.Version = "1"
+		v := &e.Variants[0]
+		v.Target = ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}
+		v.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}
+		v.Execution.Main.Command = []string{"sh", "{extension}/produce.sh"}
+		v.Baselines = map[string]ExtensionBaseline{"extension:piece-dev": e.Variants[0].Baselines["extension:sample"]}
+		v.References = map[string]WorkReference{"extension:piece-dev": {InputShape: "tiny", Unit: "piece", Units: 1}}
+		e.Files["produce.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nif [ \"$1\" = tail ]; then while [ ! -f \"$2\" ]; do sleep .02; done; fi\nprintf '%s' \"$1\" > out\n")
+		e = freezeComposition(t, e)
+		if err := InstallExtension(c.ExtensionRoot, e); err != nil {
+			t.Fatal(err)
+		}
+		sink := compositionExtension(t, false)
+		sink.Kinds = nil
+		sink.Name = "piece-sink"
+		sink.Version = "1"
+		sv := &sink.Variants[0]
+		sv.Target = v.Target
+		sv.Needs = v.Needs
+		sv.Execution.Main.Command = []string{"sh", "{extension}/consume.sh"}
+		sv.Baselines = map[string]ExtensionBaseline{"extension:piece-sink": sv.Baselines["extension:sample"]}
+		sink.Files["consume.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nif [ -n \"$1\" ]; then cat \"$1/input\" > final; else cat input > final; fi\n")
+		sink = freezeComposition(t, sink)
+		if err := InstallExtension(c.ExtensionRoot, sink); err != nil {
+			t.Fatal(err)
+		}
+		const fixtureBudget = 45 * time.Second
+		// Non-loss transport uses its outer budget; TestControlClockDeadWorkerDetection covers loss.
+		configureLossTiming := func(q *Queue) {
+			if err := q.SetLossTimeouts(fixtureBudget, fixtureBudget, fixtureBudget); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("MYCE_TOKEN", c.Token)
-			// Two plain commands use an external fixture marker to hold the final piece.
-			// The marker is test coordination, never a readiness/dispatch signal.
-			e := compositionExtension(t, false)
-			e.Kinds = nil
-			e.Name = "piece-dev"
-			e.Version = "1"
-			v := &e.Variants[0]
-			v.Target = ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}
-			v.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}
-			v.Execution.Main.Command = []string{"sh", "{extension}/produce.sh"}
-			v.Baselines = map[string]ExtensionBaseline{"extension:piece-dev": e.Variants[0].Baselines["extension:sample"]}
-			v.References = map[string]WorkReference{"extension:piece-dev": {InputShape: "tiny", Unit: "piece", Units: 1}}
-			e.Files["produce.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nif [ \"$1\" = tail ]; then while [ ! -f \"$2\" ]; do sleep .02; done; fi\nprintf '%s' \"$1\" > out\n")
-			e = freezeComposition(t, e)
-			if err := InstallExtension(c.ExtensionRoot, e); err != nil {
-				t.Fatal(err)
-			}
-			sink := compositionExtension(t, false)
-			sink.Kinds = nil
-			sink.Name = "piece-sink"
-			sink.Version = "1"
-			sv := &sink.Variants[0]
-			sv.Target = v.Target
-			sv.Needs = v.Needs
-			sv.Execution.Main.Command = []string{"sh", "{extension}/consume.sh"}
-			sv.Baselines = map[string]ExtensionBaseline{"extension:piece-sink": sv.Baselines["extension:sample"]}
-			sink.Files["consume.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nif [ -n \"$1\" ]; then cat \"$1/input\" > final; else cat input > final; fi\n")
-			sink = freezeComposition(t, sink)
-			if err := InstallExtension(c.ExtensionRoot, sink); err != nil {
-				t.Fatal(err)
-			}
-			const fixtureBudget = 45 * time.Second
-			// Non-loss transport uses its outer budget; TestControlClockDeadWorkerDetection covers loss.
-			configureLossTiming := func(q *Queue) {
-				if err := q.SetLossTimeouts(fixtureBudget, fixtureBudget, fixtureBudget); err != nil {
-					t.Fatal(err)
+		}
+		d, err := startDev(c, configureLossTiming)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if d != nil {
+				if err := d.Close(); err != nil {
+					t.Error(err)
 				}
 			}
-			d, err := startDev(c, configureLossTiming)
-			if err != nil {
-				t.Fatal(err)
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), fixtureBudget)
+		defer cancel()
+		probeWait(t, ctx, func() bool { snap, err := d.Queue.Snapshot(); return err == nil && len(snap.Machines) == 2 })
+		cache := &EnvironmentCache{Root: filepath.Join(root, "workers", "fake-1", "environment-cache"), Limit: 1 << 30}
+		if _, err := CheckExtension(ctx, c.ExtensionRoot, e, "cpu", "", "dev-host", io.Discard, cache, d.Client()); err != nil {
+			t.Fatal("CPU qualification", err)
+		}
+		if _, err := CheckExtension(ctx, c.ExtensionRoot, sink, "cpu", "", "dev-host", io.Discard, cache, d.Client()); err != nil {
+			t.Fatal("consumer CPU qualification", err)
+		}
+		gate := filepath.Join(root, "finish-tail")
+		producer := Spec{Name: "producer", Project: "pieces", Priority: "experiment", SubmissionKey: "producer", Extension: extensionKey(e), Workload: &Workload{InputShape: "tiny", Units: 1}, Outputs: map[string]string{"out": "results"}, FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first", Args: []string{"first", gate}}, {Key: "tail", Args: []string{"tail", gate}}}}}
+		p, err := d.Client().Submit(ctx, producer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer := Spec{Name: "consumer", Project: "pieces", Priority: "experiment", SubmissionKey: "consumer", After: &PieceDependency{Job: p.ID, Piece: "first", Outputs: map[string]string{"input": "out"}}, Run: RunSpec{Command: []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat input > final"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Outputs: map[string]string{"final": "results"}}
+		consumer.Extension = extensionKey(sink)
+		consumer.Run = RunSpec{}
+		consumer.Needs = ResourceNeeds{}
+		// Register an entire fan-out -> fan-out -> ordinary gather before waiting.
+		// Every child uses explicitly keyed immutable inputs through normal staging.
+		stage := Spec{Name: "dependent-stage", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-stage", Extension: extensionKey(sink), Workload: producer.Workload, Outputs: map[string]string{"final": "results"}, After: &PieceDependency{Job: p.ID, Outputs: map[string]string{"first/input": "first/out", "tail/input": "tail/out"}}, FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first", Args: []string{"first"}}, {Key: "tail", Args: []string{"tail"}}}}}
+		next, err := d.Client().Submit(ctx, stage)
+		if err != nil {
+			t.Fatal("dependent fan-out submission", err)
+		}
+		gatherSpec := Spec{Name: "dependent-gather", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-gather", Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, After: &PieceDependency{Job: next.ID, Outputs: map[string]string{"first/input": "first/final", "tail/input": "tail/final"}}, Run: RunSpec{Command: []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat first/input tail/input > joined"}}, Outputs: map[string]string{"joined": "results"}}
+		gather, err := d.Client().Submit(ctx, gatherSpec)
+		if err != nil {
+			t.Fatal("whole-parent gather submission", err)
+		}
+		first, err := d.Client().SubmitAndWait(ctx, consumer)
+		if err != nil || first.State != "succeeded" {
+			t.Fatalf("consumer %v %+v", err, first)
+		}
+		pending, err := d.Client().GetJob(ctx, p.ID)
+		if err != nil || pending.State != "queued" || len(pending.FanOut.Results) != 1 {
+			t.Fatal("consumer did not precede gather", pending, err)
+		}
+		output := filepath.Join(root, "consumed")
+		if transport == "file-store" {
+			err = d.Client().DownloadResult(ctx, first.ID, "final", output)
+		} else {
+			var b []byte
+			b, err = os.ReadFile(filepath.Join(c.JobFileRoot, first.OutputFiles["final"]))
+			if err == nil {
+				err = os.WriteFile(output, b, 0600)
 			}
-			defer func() {
-				if d != nil {
-					if err := d.Close(); err != nil {
-						t.Error(err)
-					}
-				}
-			}()
-			ctx, cancel := context.WithTimeout(context.Background(), fixtureBudget)
-			defer cancel()
-			probeWait(t, ctx, func() bool { snap, err := d.Queue.Snapshot(); return err == nil && len(snap.Machines) == 2 })
-			cache := &EnvironmentCache{Root: filepath.Join(root, "workers", "fake-1", "environment-cache"), Limit: 1 << 30}
-			if _, err := CheckExtension(ctx, c.ExtensionRoot, e, "cpu", "", "dev-host", io.Discard, cache, d.Client()); err != nil {
-				t.Fatal("CPU qualification", err)
+		}
+		data, readErr := os.ReadFile(output)
+		if err != nil || readErr != nil || string(data) != "first" {
+			t.Fatalf("consumed bytes %q %v %v", data, err, readErr)
+		}
+		blocked, err := d.Client().GetJob(ctx, next.ID)
+		if err != nil || blocked.Dependency.State != "blocked" || len(blocked.FanOut.Children) != 0 {
+			t.Fatal("partial producer admitted dependent fan-out", blocked, err)
+		}
+		if err := os.WriteFile(gate, []byte("release"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if p, err = d.Client().Wait(ctx, p.ID); err != nil || p.State != "succeeded" {
+			t.Fatal("gather", err)
+		}
+		joined, err := d.Client().Wait(ctx, gather.ID)
+		if err != nil || joined.State != "succeeded" {
+			t.Fatal("dependent gather", joined, err)
+		}
+		var joinedBytes []byte
+		if transport == "file-store" {
+			output := filepath.Join(root, "joined")
+			err = d.Client().DownloadResult(ctx, joined.ID, "joined", output)
+			if err == nil {
+				joinedBytes, err = os.ReadFile(output)
 			}
-			if _, err := CheckExtension(ctx, c.ExtensionRoot, sink, "cpu", "", "dev-host", io.Discard, cache, d.Client()); err != nil {
-				t.Fatal("consumer CPU qualification", err)
-			}
-			gate := filepath.Join(root, "finish-tail")
-			producer := Spec{Name: "producer", Project: "pieces", Priority: "experiment", SubmissionKey: "producer", Extension: extensionKey(e), Workload: &Workload{InputShape: "tiny", Units: 1}, Outputs: map[string]string{"out": "results"}, FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first", Args: []string{"first", gate}}, {Key: "tail", Args: []string{"tail", gate}}}}}
-			p, err := d.Client().Submit(ctx, producer)
-			if err != nil {
-				t.Fatal(err)
-			}
-			consumer := Spec{Name: "consumer", Project: "pieces", Priority: "experiment", SubmissionKey: "consumer", After: &PieceDependency{Job: p.ID, Piece: "first", Outputs: map[string]string{"input": "out"}}, Run: RunSpec{Command: []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat input > final"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Outputs: map[string]string{"final": "results"}}
-			consumer.Extension = extensionKey(sink)
-			consumer.Run = RunSpec{}
-			consumer.Needs = ResourceNeeds{}
-			// Register an entire fan-out -> fan-out -> ordinary gather before waiting.
-			// Every child uses explicitly keyed immutable inputs through normal staging.
-			stage := Spec{Name: "dependent-stage", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-stage", Extension: extensionKey(sink), Workload: producer.Workload, Outputs: map[string]string{"final": "results"}, After: &PieceDependency{Job: p.ID, Outputs: map[string]string{"first/input": "first/out", "tail/input": "tail/out"}}, FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first", Args: []string{"first"}}, {Key: "tail", Args: []string{"tail"}}}}}
-			next, err := d.Client().Submit(ctx, stage)
-			if err != nil {
-				t.Fatal("dependent fan-out submission", err)
-			}
-			gatherSpec := Spec{Name: "dependent-gather", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-gather", Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, After: &PieceDependency{Job: next.ID, Outputs: map[string]string{"first/input": "first/final", "tail/input": "tail/final"}}, Run: RunSpec{Command: []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat first/input tail/input > joined"}}, Outputs: map[string]string{"joined": "results"}}
-			gather, err := d.Client().Submit(ctx, gatherSpec)
-			if err != nil {
-				t.Fatal("whole-parent gather submission", err)
-			}
-			first, err := d.Client().SubmitAndWait(ctx, consumer)
-			if err != nil || first.State != "succeeded" {
-				t.Fatalf("consumer %v %+v", err, first)
-			}
-			pending, err := d.Client().GetJob(ctx, p.ID)
-			if err != nil || pending.State != "queued" || len(pending.FanOut.Results) != 1 {
-				t.Fatal("consumer did not precede gather", pending, err)
-			}
-			output := filepath.Join(root, "consumed")
-			if transport == "file-store" {
-				err = d.Client().DownloadResult(ctx, first.ID, "final", output)
-			} else {
-				var b []byte
-				b, err = os.ReadFile(filepath.Join(c.JobFileRoot, first.OutputFiles["final"]))
-				if err == nil {
-					err = os.WriteFile(output, b, 0600)
-				}
-			}
-			data, readErr := os.ReadFile(output)
-			if err != nil || readErr != nil || string(data) != "first" {
-				t.Fatalf("consumed bytes %q %v %v", data, err, readErr)
-			}
-			blocked, err := d.Client().GetJob(ctx, next.ID)
-			if err != nil || blocked.Dependency.State != "blocked" || len(blocked.FanOut.Children) != 0 {
-				t.Fatal("partial producer admitted dependent fan-out", blocked, err)
-			}
-			if err := os.WriteFile(gate, []byte("release"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if p, err = d.Client().Wait(ctx, p.ID); err != nil || p.State != "succeeded" {
-				t.Fatal("gather", err)
-			}
-			joined, err := d.Client().Wait(ctx, gather.ID)
-			if err != nil || joined.State != "succeeded" {
-				t.Fatal("dependent gather", joined, err)
-			}
-			var joinedBytes []byte
-			if transport == "file-store" {
-				output := filepath.Join(root, "joined")
-				err = d.Client().DownloadResult(ctx, joined.ID, "joined", output)
-				if err == nil {
-					joinedBytes, err = os.ReadFile(output)
-				}
-			} else {
-				joinedBytes, err = os.ReadFile(filepath.Join(c.JobFileRoot, joined.OutputFiles["joined"]))
-			}
-			if err != nil || string(joinedBytes) != "firsttail" || len(joined.Dependency.Executions) != 2 {
-				t.Fatalf("dependent gather bytes/provenance: %q %+v %v", joinedBytes, joined.Dependency, err)
-			}
-			t.Logf("%s dependent gather: producer=%s stage=%s gather=%s producing_executions=%+v", transport, p.ID, next.ID, joined.ID, joined.Dependency.Executions)
-			accepted := first.Dependency.Execution
-			if err := d.Close(); err != nil {
-				t.Fatal(err)
-			}
-			d = nil
-			d, err = startDev(c, configureLossTiming)
-			if err != nil {
-				t.Fatal(err)
-			}
-			replay, err := d.Client().Submit(ctx, consumer)
-			if err != nil || replay.ID != first.ID || replay.Dependency.Execution != accepted {
-				t.Fatal("restart/replay lost immutable binding", err)
-			}
-			// Abort a running registered consumer even though producer gather succeeded.
-			abort := consumer
-			abort.Name = "abort-consumer"
-			abort.SubmissionKey = "abort-consumer"
-			abort.Outputs = nil
-			abort.Extension = ""
-			abort.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}
-			abort.Run.Command = []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat input >/dev/null; while :; do sleep .02; done"}
-			running, err := d.Client().Submit(ctx, abort)
-			if err != nil {
-				t.Fatal(err)
-			}
-			probeWait(t, ctx, func() bool { j, err := d.Client().GetJob(ctx, running.ID); return err == nil && j.StartedAt != nil })
-			ack, err := d.Client().Cancel(ctx, p.ID)
-			if err != nil || !ack.WillNotRun || *ack.Release != "pending" {
-				t.Fatal("abort did not aggregate downstream custody", ack, err)
-			}
-			probeWait(t, ctx, func() bool { ack, err := d.Client().Cancel(ctx, p.ID); return err == nil && *ack.Release != "pending" })
-			stopped, err := d.Client().GetJob(ctx, running.ID)
-			if err != nil || stopped.State != "cancelled" || !stopped.ReleaseConfirmed || stopped.DiagnosticCode != "upstream_cancelled" || stopped.Reason != "upstream parent cancelled" {
-				t.Fatal("downstream cleanup", stopped, err)
-			}
-			future := consumer
-			future.SubmissionKey = "after-abort"
-			bound, err := d.Client().SubmitAndWait(ctx, future)
-			if err != nil || bound.State != "succeeded" || !dependencyReady(bound) || bound.Dependency.Execution != accepted || cancelled(bound) {
-				t.Fatal("late consumer lost succeeded parent's outputs", bound, err)
-			}
-			t.Logf("%s: consumed %q before gather; bound execution %s attempt %d survived restart/replay; parent abort confirmed downstream cleanup", transport, data, accepted.ID, accepted.Attempt)
-		})
-	}
+		} else {
+			joinedBytes, err = os.ReadFile(filepath.Join(c.JobFileRoot, joined.OutputFiles["joined"]))
+		}
+		if err != nil || string(joinedBytes) != "firsttail" || len(joined.Dependency.Executions) != 2 {
+			t.Fatalf("dependent gather bytes/provenance: %q %+v %v", joinedBytes, joined.Dependency, err)
+		}
+		t.Logf("%s dependent gather: producer=%s stage=%s gather=%s producing_executions=%+v", transport, p.ID, next.ID, joined.ID, joined.Dependency.Executions)
+		accepted := first.Dependency.Execution
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d = nil
+		d, err = startDev(c, configureLossTiming)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replay, err := d.Client().Submit(ctx, consumer)
+		if err != nil || replay.ID != first.ID || replay.Dependency.Execution != accepted {
+			t.Fatal("restart/replay lost immutable binding", err)
+		}
+		// Abort a running registered consumer even though producer gather succeeded.
+		abort := consumer
+		abort.Name = "abort-consumer"
+		abort.SubmissionKey = "abort-consumer"
+		abort.Outputs = nil
+		abort.Extension = ""
+		abort.Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}
+		abort.Run.Command = []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat input >/dev/null; while :; do sleep .02; done"}
+		running, err := d.Client().Submit(ctx, abort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probeWait(t, ctx, func() bool { j, err := d.Client().GetJob(ctx, running.ID); return err == nil && j.StartedAt != nil })
+		ack, err := d.Client().Cancel(ctx, p.ID)
+		if err != nil || !ack.WillNotRun || *ack.Release != "pending" {
+			t.Fatal("abort did not aggregate downstream custody", ack, err)
+		}
+		probeWait(t, ctx, func() bool { ack, err := d.Client().Cancel(ctx, p.ID); return err == nil && *ack.Release != "pending" })
+		stopped, err := d.Client().GetJob(ctx, running.ID)
+		if err != nil || stopped.State != "cancelled" || !stopped.ReleaseConfirmed || stopped.DiagnosticCode != "upstream_cancelled" || stopped.Reason != "upstream parent cancelled" {
+			t.Fatal("downstream cleanup", stopped, err)
+		}
+		future := consumer
+		future.SubmissionKey = "after-abort"
+		bound, err := d.Client().SubmitAndWait(ctx, future)
+		if err != nil || bound.State != "succeeded" || !dependencyReady(bound) || bound.Dependency.Execution != accepted || cancelled(bound) {
+			t.Fatal("late consumer lost succeeded parent's outputs", bound, err)
+		}
+		t.Logf("%s: consumed %q before gather; bound execution %s attempt %d survived restart/replay; parent abort confirmed downstream cleanup", transport, data, accepted.ID, accepted.Attempt)
+	})
 }

@@ -31,8 +31,10 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 				m = backfillMachine("large", tc.ram)
 			}
 			machineCheck(t, q, m)
-			for i := 1; i < tc.hosts; i++ {
-				machineCheck(t, q, cpuBackfillMachine(fmt.Sprintf("peer-%03d", i), tc.ram/8))
+			if tc.hosts > 1 {
+				peer := cpuBackfillMachine("peer-001", tc.ram/8)
+				machineCheck(t, q, peer)
+				seedBackfillPeers(t, q, peer.ID, tc.hosts)
 			}
 			small := cpuSpec(1, 3*tc.ram/8)
 			if tc.cores {

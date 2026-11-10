@@ -839,8 +839,12 @@ source files, including uncommitted edits; host HOME/NAS directories are not mou
 fixture I/O use the guest-native filesystem. Persistent guest caches are
 `~/.cache/mycelium-gates/go-build` and `~/.cache/mycelium-gates/go-mod`.
 Preparation downloads dependencies before the offline gate. `GATE_VM` selects a
-separately provisioned Lima instance. The initial gate CPU budget is four cores
-per platform leg; the wrapper runs the legs sequentially pending capacity proof.
+separately provisioned Lima instance. The default gate CPU budget is four cores per platform leg. Run
+`./scripts/gate.sh full` (or `python3 scripts/gate-local.py full --platform both`)
+to launch native and Linux concurrently from one snapshot after combined CPU/RAM
+admission. It waits for capacity rather than falling back to sequential legs.
+Separate `--platform native` and `--platform linux` invocations measure separate
+legs; a shell loop around them adds their walls.
 
 For a focused Linux command with the same host admission, disk supervision and
 fixture cleanup:

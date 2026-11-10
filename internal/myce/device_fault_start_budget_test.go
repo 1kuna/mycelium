@@ -89,10 +89,15 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			}
 			m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
 			wantDevice := "0"
+			// Exercise the recovered card explicitly. Persisted device-use
+			// rotation otherwise prefers its equally ready, unused sibling
+			// (#1211); rotation itself is covered by
+			// TestM3SerializedDevicesAlternate.
+			m.Devices[1].FreeMemoryGB = 0
 			if mode == "operator-clear" {
 				// A recovered but busy card still preserves healthy capacity;
 				// the retry can promptly use its otherwise last-healthy sibling.
-				m.Devices[0].FreeMemoryGB, wantDevice = 0, "1"
+				m.Devices[0].FreeMemoryGB, m.Devices[1].FreeMemoryGB, wantDevice = 0, 8, "1"
 			}
 			if mode == "health-proven" {
 				m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: strings.Repeat("a", 64), HealthySince: clock.Now().Add(-time.Minute), ClearedAt: clock.Now(), ObservationSeconds: 60, Probe: "vendor health"}
