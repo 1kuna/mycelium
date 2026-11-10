@@ -36,31 +36,25 @@ class Reply(io.BytesIO):
 class AdaptiveTests(unittest.TestCase):
     def test_unchanged_waits_at_different_installation_latencies(self):
         for latency in (.002, 2):
-            for batch in (False, True):
-                with self.subTest(latency=latency, batch=batch):
-                    clock = Clock()
-                    client = Client(token="fixture")
-                    client._clock = clock
-                    calls, holds = [], []
-                    def respond(request, **kwargs):
-                        if request.selector == "/api/wait" and not batch:
-                            raise HTTPError(request.full_url, 404, "unsupported", {}, Reply({}))
-                        calls.append(request)
-                        clock.now += latency
-                        state = "succeeded" if len(calls) >= 7 else "queued"
-                        job = {"id": "job", "state": state}
-                        if request.selector == "/api/wait":
-                            holds.append(json.loads(request.data)["seconds"])
-                            job["revision"] = 1
-                            job = {"jobs": [job]}
-                        return Reply(job, {"X-Myce-Wait": "batch-v1"} if batch else {})
-                    client._urlopen = respond
-                    self.assertEqual(client.wait("job")["state"], "succeeded")
-                    if not batch:
-                        self.assertGreater(clock.sleeps[3], clock.sleeps[1])
-                    if batch:
-                        self.assertTrue(holds)
-                        self.assertGreaterEqual(holds[-1], holds[0])
+            with self.subTest(latency=latency):
+                clock = Clock()
+                client = Client(token="fixture")
+                client._clock = clock
+                calls, holds = [], []
+                def respond(request, **kwargs):
+                    calls.append(request)
+                    clock.now += latency
+                    state = "succeeded" if len(calls) >= 7 else "queued"
+                    job = {"id": "job", "state": state}
+                    if request.selector == "/api/wait":
+                        holds.append(json.loads(request.data)["seconds"])
+                        job["revision"] = 1
+                        job = {"jobs": [job]}
+                    return Reply(job)
+                client._urlopen = respond
+                self.assertEqual(client.wait("job")["state"], "succeeded")
+                self.assertTrue(holds)
+                self.assertGreaterEqual(holds[-1], holds[0])
 
     def test_retry_after_no_retry_count_limit_and_owner_timeout(self):
         for status in (429, 503):

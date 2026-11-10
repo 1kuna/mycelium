@@ -183,7 +183,6 @@ class Client:
         self.poll_interval = poll_interval
         self._clock = time
         self._jitter = None
-        self._batch_supported = False
         self._urlopen = urlopen
         # Tests shorten the file transfer budgets; None uses the defaults.
         self._transfer_idle: float | None = None
@@ -292,8 +291,6 @@ class Client:
         end = None if budget is None else self._clock.monotonic() + budget
         def attempt(remaining: float | None) -> Any:
             with self._open_request(request, timeout=remaining) as response:
-                if response.headers.get("X-Myce-Wait") == "batch-v1":
-                    self._batch_supported = True
                 return _read_reply(response) if raw else json.load(response)
         return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none", end=end)
 
@@ -709,8 +706,16 @@ class Client:
         })
 
     def _wait_batch(self, job_ids, after, seconds, timeout):
-        reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
-                           "seconds": seconds}, timeout=timeout, retry=False, raw=True)
+        try:
+            reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
+                               "seconds": seconds}, timeout=timeout, retry=False, raw=True)
+        except APIError as error:
+            if error.status == 404 and not error.code or error.status == 405:
+                raise APIError(error.status, json.dumps({
+                    "code": "queue_upgrade_required",
+                    "error": "queue too old for this client; upgrade the queue first",
+                })) from None
+            raise
         try:
             reply = json.loads(reply.decode("utf-8"))
         except (ValueError, AttributeError):

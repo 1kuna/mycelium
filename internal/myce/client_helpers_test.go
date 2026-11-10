@@ -391,6 +391,7 @@ func TestClientWaitRetainsInitialAdviceAfterLightweightPoll(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reads := 0
 		c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			time.Sleep(100 * time.Millisecond) // Model completed server holds so synctest time advances.
 			reads++
 			reason := ""
 			if reads == 1 {
