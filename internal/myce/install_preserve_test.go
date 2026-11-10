@@ -441,7 +441,7 @@ func TestServiceConfigVersionAndSanitizedDiff(t *testing.T) {
 	}
 }
 
-func TestServiceConfigRetiredHostSettingsOverlay(t *testing.T) {
+func TestServiceConfigRetiredHostSettingsRefused(t *testing.T) {
 	c, _ := preserveWorkerFixture(t)
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -464,18 +464,12 @@ func TestServiceConfigRetiredHostSettingsOverlay(t *testing.T) {
 	if err = os.WriteFile(c.Config, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadServiceConfig(c.Config)
-	if err != nil || !reflect.DeepEqual(got, c) {
-		t.Fatal("saved settings lost during retired-field overlay", err)
+	if _, err := ReadServiceConfig(c.Config); err == nil {
+		t.Fatal("retired settings accepted")
 	}
-	current, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"host_state_dir", "start_disabled", "required_workers"} {
-		if bytes.Contains(current, []byte(key)) {
-			t.Fatal("retired setting written", key)
-		}
+	after, err := os.ReadFile(c.Config)
+	if err != nil || !bytes.Equal(data, after) {
+		t.Fatal("refused config changed", err)
 	}
 }
 
