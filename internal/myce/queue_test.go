@@ -53,13 +53,18 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 // Scheduling and recovery tests model availability without timing filesystem I/O.
 func fakeCheckpointAvailability(t *testing.T, q *Queue, available bool) {
 	t.Helper()
+	// Evidence publication also calls the probe, outside q.mu. Join it before
+	// replacing the callback; locking only the state write cannot protect it.
+	drainAdmissionWait(t, q)
 	// Join Open's pending observation before replacing its probe seam.
 	await(t, func() bool {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
 		return err == nil
 	})
 	q.checkpointProbe = func() bool { return available }
+	q.mu.Lock()
 	q.nasAvailable = available
+	q.mu.Unlock()
 }
 
 func spec(priority string) Spec {

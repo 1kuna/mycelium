@@ -781,7 +781,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 		t.Fatal(err)
 	}
 	// Queue and worker NAS admission fail while the payload's save blocks on a FIFO.
-	q.checkpointProbe = func() bool { return false }
+	fakeCheckpointAvailability(t, q, false)
 	a.CheckpointUnavailable, b.CheckpointUnavailable = true, true
 	prodSpec := spec("production")
 	prodSpec.Resumable = false
@@ -857,7 +857,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	if check(t, q, spark, nil).Job != nil {
 		t.Fatal("experiment resumed before NAS recovered")
 	}
-	q.checkpointProbe = func() bool { return true }
+	fakeCheckpointAvailability(t, q, true)
 	resumed := check(t, q, spark, nil).Job
 	if resumed == nil || resumed.ID != y.ID || resumed.Attempt != 2 || resumed.Losses != 0 || resumed.ProductionHost != "" {
 		t.Fatalf("displaced experiment did not migrate: %+v", resumed)
@@ -920,7 +920,7 @@ func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
 	p.Resumable = false
 	p.AllowedMachines = []string{a.ID}
 	submit(t, q, p)
-	q.checkpointProbe = func() bool { return false }
+	fakeCheckpointAvailability(t, q, false)
 	b.CheckpointUnavailable = true
 	reply := check(t, q, b, x)
 	if !reply.Kill || reply.Hold {
@@ -1081,7 +1081,9 @@ func TestProductionHoldFloorFreeAutoMemory(t *testing.T) {
 			q, clock, m, s := floorFreeFitFixture(t, allowance)
 			policies := map[string]HostPolicy{hostID(&m): {ProductionHold: true}}
 			if mode == "allowance exploratory" {
+				q.mu.Lock()
 				q.s.WorkObservations = nil
+				q.mu.Unlock()
 			}
 			if mode == "unmeasured decoy" {
 				decoy := m
@@ -1100,20 +1102,24 @@ func TestProductionHoldFloorFreeAutoMemory(t *testing.T) {
 			}
 			s.Priority = "production"
 			j := submit(t, q, s)
-			stored := q.s.Jobs[j.ID]
-			if stored.ProductionHost != hostID(&m) || !q.held(hostID(&m)) {
-				t.Errorf("auto hold bound to %q; want %q active", stored.ProductionHost, hostID(&m))
-			}
-			// A numeric declaration of the same sized work chooses the same host.
-			target := m.Devices[0].machine(*q.s.Machines[m.ID])
-			candidate := q.memoryCandidates(stored, &target)[0]
-			numeric := *candidate
-			numeric.Spec.Extension, numeric.Spec.ExtensionDigest, numeric.Extensions, numeric.MemoryEnvelope = "", "", nil, nil
-			numeric.Spec.Needs.Memory = ""
-			numeric.ProductionHost = ""
-			if target := q.productionTarget(&numeric, nil); target != hostID(&m) {
-				t.Errorf("numeric target %q envelope=%+v", target, candidate.MemoryEnvelope)
-			}
+			func() {
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				stored := q.s.Jobs[j.ID]
+				if stored.ProductionHost != hostID(&m) || !q.held(hostID(&m)) {
+					t.Errorf("auto hold bound to %q; want %q active", stored.ProductionHost, hostID(&m))
+				}
+				// A numeric declaration of the same sized work chooses the same host.
+				target := m.Devices[0].machine(*q.s.Machines[m.ID])
+				candidate := q.memoryCandidates(stored, &target)[0]
+				numeric := *candidate
+				numeric.Spec.Extension, numeric.Spec.ExtensionDigest, numeric.Extensions, numeric.MemoryEnvelope = "", "", nil, nil
+				numeric.Spec.Needs.Memory = ""
+				numeric.ProductionHost = ""
+				if target := q.productionTarget(&numeric, nil); target != hostID(&m) {
+					t.Errorf("numeric target %q envelope=%+v", target, candidate.MemoryEnvelope)
+				}
+			}()
 			clock.Advance(time.Second)
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil || run.ID != j.ID || run.ProductionHost != hostID(&m) || run.Spec.Needs.HostMemoryGB <= 0 {

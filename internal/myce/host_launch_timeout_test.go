@@ -57,7 +57,7 @@ func TestHostLaunchAmbiguousTimeoutReconciles(t *testing.T) {
 		t.Fatal("control retry changed execution or charged loss", calls, pauses, got)
 	}
 	data, _ := json.Marshal(got)
-	if strings.Contains(string(data), "private") || strings.Contains(string(data), "restarted") {
+	if strings.Contains(string(data), "private transport detail") || strings.Contains(string(data), "private.invalid") || strings.Contains(string(data), "restarted") {
 		t.Error("private text or invented restart in job diagnostics", string(data))
 	}
 }

@@ -146,6 +146,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		t.Fatal("cold legacy response did not stay idle", first, err)
 	}
 	clock.Advance(time.Second) // The faulted check-in is the measured second send.
+	drainAdmissionWait(t, q)
 	// Drain a probe left pending by setup before replacing the fault seam.
 	await(t, func() bool {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })

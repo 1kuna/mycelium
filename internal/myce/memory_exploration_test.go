@@ -90,7 +90,10 @@ func memoryExplorationRefused(t *testing.T, q *Queue, s Spec) {
 		return
 	}
 	queued := submit(t, q, s)
-	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+	q.mu.Lock()
+	why := q.memoryEvidenceWaitingReason(queued)
+	q.mu.Unlock()
+	if !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 		t.Fatalf("sizing-only mismatch must wait: %s", why)
 	}
 }

@@ -16,7 +16,12 @@ import (
 func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 	for _, mode := range []string{"one", "none", "two", "override"} {
 		t.Run(mode, func(t *testing.T) {
-			home := t.TempDir()
+			// A legitimate local path can contain "private"; confidentiality
+			// assertions must identify the injected mount password itself.
+			home := filepath.Join(t.TempDir(), "private")
+			if err := os.Mkdir(home, 0700); err != nil {
+				t.Fatal(err)
+			}
 			first, second := filepath.Join(home, "mounted first"), filepath.Join(home, "mounted second")
 			identity := fmt.Sprintf("%x", sha256.Sum256([]byte("smb://storage.invalid/share")))
 			authority := map[string]any{"version": 1, "fingerprint": strings.Repeat("a", 64), "token": "fixture", "address": "https://queue.invalid", "nas_identity": map[string]string{"fingerprint": identity, "checkpoint_path": "mycelium/checkpoints"}}
@@ -25,7 +30,8 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			inventory := "//fixture:private@storage.invalid/share on " + first + " (smbfs, nodev)\n"
+			const password = "private-mount-password-marker"
+			inventory := "//fixture:" + password + "@storage.invalid/share on " + first + " (smbfs, nodev)\n"
 			if mode == "none" {
 				inventory = "//storage.invalid/other on " + first + " (smbfs, nodev)\n"
 			}
@@ -52,7 +58,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 				if result == nil || !strings.Contains(result.Error(), code) || !strings.Contains(result.Error(), "--nas") {
 					t.Fatalf("expected %s refusal with override hint: %v", code, result)
 				}
-				if strings.Contains(result.Error(), "private") {
+				if strings.Contains(result.Error(), password) {
 					t.Fatal("mount credentials disclosed")
 				}
 				return
@@ -69,7 +75,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 					t.Fatalf("selected wrong storage; missing %q in %s", line, output)
 				}
 			}
-			if strings.Contains(output, "private") {
+			if strings.Contains(output, password) {
 				t.Fatal("mount credentials disclosed")
 			}
 		})
