@@ -2818,3 +2818,14 @@ lifecycle closure as production evidence. No status read records a decision.
 Per-target endpoints are bounded by current inventory; optional transitions
 share measured evidence headroom across all observed waiting jobs. Missing or
 dropped history cannot explain a past event retroactively.
+
+## Accelerator placement history (#1210, next release)
+
+`myce host status HOST` includes `device_use`: each used accelerator's stable
+`platform` and `identity`, `last_assigned_at`, and cumulative batch `assignments`.
+These queue-owned records survive queue reopen, worker sessions and inventory
+ordinal changes. Among otherwise tied single-card targets on the same host,
+placement prefers the least recently assigned card; assignment counts break ties
+within one clock instant. Fitness, readiness, memory fit, quarantine and operator
+maintenance remain authoritative. History records offers, including preparation,
+rather than claiming measured runtime or successful execution.

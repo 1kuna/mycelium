@@ -55,6 +55,7 @@ type MaintenanceAttempt struct {
 }
 
 type HostMaintenanceStatus struct {
+	DeviceUse         []DeviceUse         `json:"device_use"`
 	DeviceMaintenance []DeviceMaintenance `json:"device_maintenance"`
 
 	MigrationReady bool                   `json:"migration_ready,omitempty"`
@@ -159,7 +160,7 @@ func (q *Queue) HostMaintenanceStatus(host string, requestContexts ...context.Co
 	return q.hostMaintenanceStatus(host), nil
 }
 func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
-	out := HostMaintenanceStatus{Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
+	out := HostMaintenanceStatus{DeviceUse: q.deviceUseStatus(host), Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}

@@ -308,7 +308,7 @@ func (q *Queue) placementBetterWithTie(j *Job, a, b *Machine, allowTie bool, sca
 	if ac != bc {
 		return ac < bc
 	}
-	return allowTie && knownValue && targetKey(a) < targetKey(b)
+	return allowTie && q.deviceUseTieBetter(a, b, knownValue && targetKey(a) < targetKey(b))
 }
 
 // Keep all target projections on the same qualified-work comparator.

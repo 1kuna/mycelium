@@ -73,6 +73,63 @@ func TestM3ConcurrentDeviceSlotsAndCPU(t *testing.T) {
 	requireState(t, q, third.ID, "queued")
 }
 
+// Host RAM serializes these otherwise equal cards. History must survive queue
+// reopen, worker sessions, inventory ordering and ordinal changes.
+func TestM3SerializedDevicesAlternate(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	m.HostMemoryBudgetGB = 24
+	s := spec("experiment")
+	s.Needs.HostMemoryGB = 13
+	for i := 0; i < 6; i++ {
+		pending := submit(t, q, s)
+		a := assignedJob(machineCheck(t, q, m))
+		want := m.Devices[i%2].ID
+		if a == nil || a.ID != pending.ID || !slices.Equal(a.AllocatedDevices, []string{want}) {
+			t.Fatalf("placement %d: got %+v, want device %s", i, a, want)
+		}
+		next := submit(t, q, s)
+		if got := assignedJob(machineCheck(t, q, m, a)); got != nil {
+			t.Fatal("host RAM did not serialize devices", got)
+		}
+		if err := q.Cancel(next.ID); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}}); err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 {
+			path, root := q.dbPathForTest(t), q.root
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			q, err = Open(path, root, clock, WithCheckpointAvailability(func() bool { return true }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { q.Close() })
+			previous := m.Session
+			m.Session = "new-session"
+			m.Devices[0].ID, m.Devices[1].ID = "1", "0"
+			m.Devices[0].Selector, m.Devices[1].Selector = "1", "0"
+			if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous, AttemptProtocol: keyedAttemptProtocol, period: time.Second}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	status, err := q.HostMaintenanceStatus(hostID(&m))
+	if err != nil || len(status.DeviceUse) != 2 {
+		t.Fatalf("device usage status: %+v, %v", status, err)
+	}
+	for _, use := range status.DeviceUse {
+		if use.Assignments != 3 || use.LastAssignedAt.IsZero() {
+			t.Fatalf("usage lost: %+v", use)
+		}
+	}
+}
+
 func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
@@ -190,5 +247,42 @@ func TestM3SettledReportsDrainBeforeNewAssignment(t *testing.T) {
 	}
 	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.Attempt != a.Attempt+1 {
 		t.Fatal("fresh admission did not resume after settled report drained", next)
+	}
+}
+
+func TestM3DeviceUseKeepsExclusions(t *testing.T) {
+	for _, exclusion := range []string{"quarantine", "memory", "device-disabled", "host-maintenance", "selector"} {
+		t.Run(exclusion, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := m3Machine()
+			machineCheck(t, q, m)
+			// Device 0 is unused; the tie-break would prefer it over device 1.
+			recent := m.Devices[1].machine(m)
+			q.recordDeviceUse(&recent)
+			s := spec("experiment")
+			switch exclusion {
+			case "quarantine":
+				m.Devices[0].Reason = "device_fault_xe"
+			case "memory":
+				m.Devices[0].FreeMemoryGB = 1
+			case "device-disabled":
+				changeDevice(t, q, m.HostID, "0", "disable")
+			case "host-maintenance":
+				if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
+					t.Fatal(err)
+				}
+			case "selector":
+				s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+			}
+			pending := submit(t, q, s)
+			got := assignedJob(machineCheck(t, q, m))
+			if exclusion == "host-maintenance" {
+				if got != nil {
+					t.Fatal("usage bypassed maintenance", got)
+				}
+			} else if got == nil || got.ID != pending.ID || !slices.Equal(got.AllocatedDevices, []string{"1"}) {
+				t.Fatal("usage bypassed exclusion", got)
+			}
+		})
 	}
 }

@@ -16,6 +16,10 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# Device-use ranking extends the existing placement regressions.
+SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
+    'machine_placement_test.go', 'benchmark_test.go')
+
 # Platform clone helpers are exercised through model snapshot staging.
 for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
