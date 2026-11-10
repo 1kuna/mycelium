@@ -31,9 +31,10 @@
 - `internal/myce`: queue/HTTP API, scheduler, worker, queue maintenance, installer, dev.
 - `clients/python`: submission/cancellation and checkpoint client.
 - `skills/mycelium`: the consumer skill (setup, harness and T3 binding references beside it).
-- `docs/operations.md`: canonical install, queue maintenance and recovery.
+- `docs/operations.md`: current runbook (install, upgrade, queue maintenance, recovery).
+- `docs/reference/`: explanations, field semantics, tuning and finished migrations.
 - `docs/status.md`: worker freshness, maintenance and status fields.
-- `deploy`: manual service templates; `docs/operations.md`: old-state archives.
+- `deploy`: manual service templates; `docs/reference/migrations.md`: old-state archives.
 - `docs/files.md`: checkpoint contract and Python example.
 
 ## Merge and verify
