@@ -716,21 +716,35 @@ for example `hf download OWNER/NAME --revision COMMIT` with `HF_HUB_CACHE` set t
 the model root's `hub` folder recorded in your fleet's local notes, then
 resubmit. Mycelium does not download models during job preparation.
 
-Local queue policy decides which repositories may be declared. Submission refuses
-an unlisted repository with `model_snapshot_not_permitted`; with no `models`
-policy every declaration is refused. The admitting policy revision and its byte
-limits are frozen into the job, and the worker enforces them before copying:
+From the release implementing [MY-44](DECISIONS.md#my-44), every repository is
+permitted by default. No `models` policy or `models.sources` entry is needed.
+An owner may optionally restrict repositories with positive `sources` patterns,
+or deny repositories with `!` patterns. With only deny patterns, everything else
+is permitted; a matching deny always wins. An absent or empty `sources` list
+permits everything. Explicit restrictions refuse a disallowed repository with
+`model_snapshot_not_permitted`.
+
+The admitting policy revision and byte limits are frozen into the job, including
+when no custom policy exists. Workers enforce `max_bytes` before copying. An
+absent or zero `free_floor_bytes` derives the cold-copy reserve from the worker's
+actual cache volume: 1% of total capacity, at least 256 MiB, using the existing
+disk headroom rule. This leaves room for filesystem metadata, control logs and
+other writers without imposing one deployment's disk size on smaller systems.
+A positive value requests an explicit reserve; the ordinary cache disk floor
+still applies. Cache capacity, verified identities and read-only staging remain
+required.
 
 ```yaml
-models:
-  sources: ["OWNER/*", "OTHER/EXACT-NAME"]  # repository patterns
-  max_bytes: 0                              # per snapshot; 0 means no extra limit
-  free_floor_bytes: 0                       # free disk to keep after a cold copy
+models:                                    # optional
+  sources: ["OWNER/*", "!OWNER/EXCLUDED"]   # optional restriction and deny patterns
+  max_bytes: 0                             # per snapshot; 0 means no extra limit
+  free_floor_bytes: 0                      # omitted/0: derive from cache volume
 ```
 
-Set it with `myce policy get --yaml`, edit the `models` mapping, then
-`myce policy set FILE --if-revision N`. Values are deployment settings and stay
-in the queue database.
+Custom restrictions and limits can be set with `myce policy get --yaml`, then
+`myce policy set FILE --if-revision N`. They are deployment settings stored in
+the queue database. See the [execution gate audit](execution-gates.md) for the
+remaining safety boundaries and consumer quality contracts.
 
 ## Complete from queue storage, deliver to NAS later (#349)
 

@@ -516,7 +516,7 @@ def legacy_endpoints():
 
 
 def docker_inventory(marker, entry=None, used=(), guest=False):
-    """Never remove resources: an unresolved daemon retains the reservation."""
+    """Never remove resources or turn uncertainty into affirmative cleanup."""
     if not isinstance(marker, str) or not re.fullmatch('[0-9a-f]{32}', marker):
         raise RuntimeError('Docker gate identity is malformed')
     if entry is not None and (not isinstance(entry, dict) or entry.get('schema') != 1 or
@@ -526,6 +526,10 @@ def docker_inventory(marker, entry=None, used=(), guest=False):
             entry['reachable'] and (not entry['configured'] or
                 not isinstance(entry.get('daemon_identity'), str) or not entry['daemon_identity'])):
         raise RuntimeError('Docker entry evidence is malformed')
+    if entry is not None and entry['labelled_fixtures'] and not used:
+        # Current fixtures journal before creating any daemon resource. Merely
+        # having Docker configured does not mean this gate used its daemon.
+        return [dict(stopped=True, unused=True, endpoint=entry['endpoint'])]
     discovery = None
     if entry is None:
         endpoints, discovery = legacy_endpoints()

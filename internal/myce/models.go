@@ -445,6 +445,7 @@ func (q *Queue) maintainModels() {
 	}
 	now := q.clock.Now()
 	q.maintainPins()
+	removedSlot := false
 	for k, s := range q.s.ModelSlots {
 		m := slotMachine(q.s.Machines[s.Machine], s)
 		if m == nil || m.Gone || m.Session != s.Session {
@@ -452,6 +453,7 @@ func (q *Queue) maintainModels() {
 				continue
 			}
 			delete(q.s.ModelSlots, k)
+			removedSlot = true
 			continue
 		}
 		model, exists := q.model(s.Model)
@@ -463,6 +465,9 @@ func (q *Queue) maintainModels() {
 		if s.State != "unloading" && s.State != "unload_failed" && ((!exists || !q.modelUsableMachine(model, m)) || availabilityBlocked(m) || m.Leaving || !q.slotPinned(s) && s.State == "ready" && s.InFlight == 0 && q.modelIdleExpired(s)) {
 			s.State = "draining"
 		}
+	}
+	if removedSlot {
+		q.refreshHostMemory()
 	}
 	if q.networkQuiet {
 		return

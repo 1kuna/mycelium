@@ -24,8 +24,8 @@ func FetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 
 func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum string, syncDir func(string) error, report io.Writer) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host != "huggingface.co" {
-		return errors.New("fetch requires an HTTPS huggingface.co file URL")
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return errors.New("fetch requires an HTTPS file URL")
 	}
 	hash, err := hex.DecodeString(sum)
 	if size < 0 || err != nil || len(hash) != sha256.Size {

@@ -106,65 +106,63 @@ func (q *Queue) validatePieceSource(s Spec) error {
 	return nil
 }
 
-func (q *Queue) maintainPieceDependencies() {
-	for _, j := range q.liveJobs() {
-		if j.Spec.After == nil {
-			continue
+func (q *Queue) maintainPieceDependency(j *Job) {
+	if j.Spec.After == nil {
+		return
+	}
+	a := j.Spec.After
+	p := q.retainedJob(a.Job)
+	if j.DiagnosticCode == "upstream_cancelled" && j.Reason == "cancel requested" {
+		q.touchJob(j.ID)
+		j.Reason = "upstream parent cancelled"
+	}
+	// A later cancellation intent excludes new producer attempts, but
+	// does not invalidate outputs from a succeeded producer.
+	if p != nil && p.State != "succeeded" && cancelled(p) {
+		q.cancelJob(j)
+		if j.Reason == "cancel requested" {
+			j.DiagnosticCode, j.Reason = "upstream_cancelled", "upstream parent cancelled"
 		}
-		a := j.Spec.After
-		p := q.retainedJob(a.Job)
-		if j.DiagnosticCode == "upstream_cancelled" && j.Reason == "cancel requested" {
+		return
+	}
+	if terminal(j.State) || cancelled(j) || j.Dependency != nil && j.Dependency.ReadyAt != nil {
+		return
+	}
+	if j.Dependency == nil {
+		q.touchJob(j.ID)
+		j.Dependency = &PieceBinding{Job: a.Job, Piece: a.Piece, State: "blocked"}
+	}
+	if b := bindPieceDependency(p, a); b != nil {
+		q.touchJob(j.ID)
+		now := q.clock.Now()
+		b.ReadyAt = &now
+		j.Dependency = b
+		j.WaitingSince = now
+		j.Reason = ""
+		if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+			initializeStartDeadline(j, now)
+		}
+		return
+	}
+	if p == nil || terminal(p.State) {
+		q.touchJob(j.ID)
+		now := q.clock.Now()
+		j.State, j.DiagnosticCode, j.Reason = "failed", "upstream_failed", "producer piece has no accepted outputs"
+		if p != nil && p.FilesExpired {
+			j.DiagnosticCode, j.Reason = "result_expired", "producer outputs expired"
+		}
+		if a.Piece == "" && j.DiagnosticCode == "upstream_failed" {
+			j.Reason = fmt.Sprintf("upstream fan-out parent %s did not succeed", a.Job)
+		}
+		j.FinishedAt = &now
+	} else {
+		reason := "waiting for accepted producer piece"
+		if a.Piece == "" {
+			reason = "waiting for upstream fan-out parent success"
+		}
+		if j.Reason != reason {
 			q.touchJob(j.ID)
-			j.Reason = "upstream parent cancelled"
-		}
-		// A later cancellation intent excludes new producer attempts, but
-		// does not invalidate outputs from a succeeded producer.
-		if p != nil && p.State != "succeeded" && cancelled(p) {
-			q.cancelJob(j)
-			if j.Reason == "cancel requested" {
-				j.DiagnosticCode, j.Reason = "upstream_cancelled", "upstream parent cancelled"
-			}
-			continue
-		}
-		if terminal(j.State) || cancelled(j) || j.Dependency != nil && j.Dependency.ReadyAt != nil {
-			continue
-		}
-		if j.Dependency == nil {
-			q.touchJob(j.ID)
-			j.Dependency = &PieceBinding{Job: a.Job, Piece: a.Piece, State: "blocked"}
-		}
-		if b := bindPieceDependency(p, a); b != nil {
-			q.touchJob(j.ID)
-			now := q.clock.Now()
-			b.ReadyAt = &now
-			j.Dependency = b
-			j.WaitingSince = now
-			j.Reason = ""
-			if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-				initializeStartDeadline(j, now)
-			}
-			continue
-		}
-		if p == nil || terminal(p.State) {
-			q.touchJob(j.ID)
-			now := q.clock.Now()
-			j.State, j.DiagnosticCode, j.Reason = "failed", "upstream_failed", "producer piece has no accepted outputs"
-			if p != nil && p.FilesExpired {
-				j.DiagnosticCode, j.Reason = "result_expired", "producer outputs expired"
-			}
-			if a.Piece == "" && j.DiagnosticCode == "upstream_failed" {
-				j.Reason = fmt.Sprintf("upstream fan-out parent %s did not succeed", a.Job)
-			}
-			j.FinishedAt = &now
-		} else {
-			reason := "waiting for accepted producer piece"
-			if a.Piece == "" {
-				reason = "waiting for upstream fan-out parent success"
-			}
-			if j.Reason != reason {
-				q.touchJob(j.ID)
-				j.Reason = reason
-			}
+			j.Reason = reason
 		}
 	}
 }

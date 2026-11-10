@@ -40,6 +40,22 @@ Declare tool, environment, network and model dependencies through their
 [supported adapter fields](../../docs/adapter.md); hidden shell dependencies
 cannot be inferred by Mycelium. Model snapshots need immutable identity and
 verified bytes; qualification/parity is separate from loading a snapshot.
+From the release implementing MY-44, no `models` policy is needed: every model
+repository is permitted by default. Optional `models.sources` positive patterns
+restrict repositories; `!OWNER/NAME` patterns deny them, with deny taking
+precedence. Empty sources impose no restriction. `myce model fetch` also accepts
+any HTTPS file URL with the required exact size and SHA-256, rather than a fixed
+download host. Size/cache limits still apply;
+omitted/zero `free_floor_bytes` uses the worker cache volume's physical headroom
+rule (1% of capacity, at least 256 MiB). See [model snapshots](../../docs/files.md#declared-model-snapshots-553).
+
+Extension registration is content freezing, not an owner review; native checks
+run automatically on first demand against the author's baseline. A failed check
+still holds that extension. `unsandboxed: legacy extension registration` is a
+status diagnostic, not an approval request; authors can choose explicit isolation
+for new versions. Consumer result checks, production output parity and explicit
+host restrictions retain their contracts. The [execution gate audit](../../docs/execution-gates.md)
+explains the remaining protections.
 
 Stage NAS inputs locally before processing for every size (MY-36). Declare
 read-only shared inputs with relative NAS source, SHA-256 and size, then read
