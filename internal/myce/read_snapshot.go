@@ -274,6 +274,21 @@ func (r *readRecord) decode(key string) (any, error) {
 // discards a reader's lazy decoded records. No SQLite access is used by reads.
 func (q *Queue) publishReadRecords(next map[string][]byte) {
 	for key, data := range next {
+		// Read snapshots include recomputable diagnostics; SQLite keeps decisions.
+		// Encode only the records already selected by the transaction journal.
+		if len(data) > 0 {
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				if j := q.s.Jobs[id]; j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
+					data, _ = json.Marshal(j)
+				}
+			}
+			if id, ok := strings.CutPrefix(key, "work_observations/"); ok {
+				if p, exists := q.s.WorkObservations[id]; exists && p.StaleReason != "" {
+					data, _ = json.Marshal(p)
+				}
+			}
+		}
+
 		mutable := false
 		if len(data) > 0 {
 			if id, ok := strings.CutPrefix(key, "jobs/"); ok {

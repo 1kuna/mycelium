@@ -3,6 +3,7 @@ package myce
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -594,5 +595,55 @@ func TestWorkCurveMemorySurvivesIncompleteUpgradeInventory(t *testing.T) {
 				t.Fatalf("post-upgrade learning: envelope=%+v timing=%+v", actual.MemoryEnvelope, actual.Timing)
 			}
 		})
+	}
+}
+
+func TestWorkCurveDiagnosticStability(t *testing.T) {
+	q, _ := candidateCostFixture(t)
+	drainAdmissionWait(t, q)
+	reasons := map[string]string{}
+	for id, p := range q.s.WorkObservations {
+		reasons[id] = p.StaleReason
+	}
+	for range 4 {
+		if err := q.update(func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for id, p := range q.s.WorkObservations {
+			if p.StaleReason != reasons[id] {
+				t.Fatalf("unchanged identity toggled staleness for %s: %q -> %q", id, reasons[id], p.StaleReason)
+			}
+			var durable WorkObservation
+			if err := json.Unmarshal(durableQueueRecord(t, q.db, "work_observations/"+id), &durable); err != nil {
+				t.Fatal(err)
+			}
+			if durable.StaleReason != "" || curveMeasurementDigest(durable) != curveMeasurementDigest(p) {
+				t.Fatal("diagnostic label changed accepted measurement")
+			}
+		}
+	}
+}
+
+func TestWorkCurvePermanentInvalidationSurvivesRestart(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	first := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	if err := q.Complete(result(&first, true)); err != nil {
+		t.Fatal(err)
+	}
+	changed := cloneMachine(&m)
+	changed.ExtensionFingerprint = "replacement-backend"
+	check(t, q, changed, nil)
+	for _, p := range q.s.WorkObservations {
+		if p.StaleReason != "driver or backend fingerprint changed" {
+			t.Fatal("missing identity invalidation")
+		}
+	}
+	q = reopenQueue(t, q, clock)
+	check(t, q, m, nil)
+	for _, p := range q.s.WorkObservations {
+		if p.StaleReason != "driver or backend fingerprint changed" {
+			t.Fatal("restart forgot permanent invalidation")
+		}
 	}
 }
