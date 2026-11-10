@@ -295,22 +295,31 @@ func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
 	s := spec("production")
 	s.Project = "atlas"
 	run := submit(t, q, s)
-	q.s.Jobs[run.ID].State = "stopping"
-	q.s.Jobs[run.ID].Machine = m.ID
-	call := callJob(&ModelCall{ID: "next", Project: "atlas", Priority: "production", Model: "test"})
-	if reason := q.capReasonFor(call, &m); !strings.Contains(reason, "concurrent work cap") {
-		t.Fatal(reason)
-	}
-	q.s.Jobs[run.ID].State = "succeeded"
-	q.calls["active"] = &ModelCall{ID: "active", Project: "atlas", Priority: "production", Model: "test", Machine: m.ID}
+	// Private cap helpers share state with asynchronous admission capture.
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		q.s.Jobs[run.ID].State = "stopping"
+		q.s.Jobs[run.ID].Machine = m.ID
+		call := callJob(&ModelCall{ID: "next", Project: "atlas", Priority: "production", Model: "test"})
+		if reason := q.capReasonFor(call, &m); !strings.Contains(reason, "concurrent work cap") {
+			t.Fatal(reason)
+		}
+		q.s.Jobs[run.ID].State = "succeeded"
+		q.calls["active"] = &ModelCall{ID: "active", Project: "atlas", Priority: "production", Model: "test", Machine: m.ID}
+	}()
 	queued := submit(t, q, s)
-	if reason := q.capReason(q.s.Jobs[queued.ID]); !strings.Contains(reason, "concurrent work cap") {
-		t.Fatal(reason)
-	}
-	q.calls["active"].Error = "finished"
-	if reason := q.capReason(q.s.Jobs[queued.ID]); reason != "" {
-		t.Fatal(reason)
-	}
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if reason := q.capReason(q.s.Jobs[queued.ID]); !strings.Contains(reason, "concurrent work cap") {
+			t.Fatal(reason)
+		}
+		q.calls["active"].Error = "finished"
+		if reason := q.capReason(q.s.Jobs[queued.ID]); reason != "" {
+			t.Fatal(reason)
+		}
+	}()
 	policy.Projects["atlas"] = ProjectPolicy{MaxConcurrent: -1}
 	if _, err = q.SetPriorityPolicy(1, policy); err == nil {
 		t.Fatal("negative cap accepted")
