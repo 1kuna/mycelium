@@ -4,7 +4,6 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
 	"math"
 	"math/rand"
@@ -12,6 +11,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type SimFleet struct {
@@ -705,6 +706,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 						outcome := simResult(t, worker, success)
 						outcome.Interrupted = !success && j.State == "stopping"
+						outcome.ReleaseOnly = terminal(j.State)
 						if e = q.Complete(outcome); e != nil && !(errors.Is(e, ErrStale) && j.State == "queued") {
 							return r, e
 						}
@@ -754,6 +756,16 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				reply, err := q.CheckinKeyed(c)
 				if err != nil {
 					return r, err
+				}
+				// Controls remain keyed even when cancellation has already made
+				// the queue's job terminal during input preparation.
+				if t := worker.task; t != nil {
+					for _, control := range reply.Attempts {
+						if control.ID == t.id && control.Attempt == t.attempt && control.Session == c.Machine.Session && control.Stop && math.IsInf(t.stopAt, 1) {
+							t.stopAt = now + min(1, max(0, control.GraceSeconds))
+							changed = true
+						}
+					}
 				}
 				var directive AttemptDirective
 				if len(reply.Attempts) > 0 {
