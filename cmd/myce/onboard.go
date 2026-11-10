@@ -108,7 +108,7 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 		return err
 	}
 	if hasEnrollmentFlag(o.forward, "--dry-run") || hasEnrollmentFlag(o.forward, "--joining-file") || hasEnrollmentFlag(o.forward, "--environment-file") || hasEnrollmentFlag(o.forward, "--from-worker-config") {
-		return errors.New("enrollment owns joining authority; use the normal installer for previews or explicit M4 conversion")
+		return errors.New("enrollment owns joining authority; use the normal installer for previews")
 	}
 	if o.version != myce.BuildVersion {
 		return errors.New("release version mismatch before install")

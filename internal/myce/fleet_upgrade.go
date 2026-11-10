@@ -180,7 +180,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		qh := &fleetUpgradeHost{FleetHostStatus: FleetHostStatus{Host: queue.Host, Phase: "pending"}, Queue: true, QueueBefore: cloneFleetProof(queue.Proof)}
 		byHost := map[string]*fleetUpgradeHost{queue.Host: qh}
 		for _, m := range q.s.Machines {
-			if request.QueueOnly || m.Replacement != nil || q.migrationHistoricalMachine(m) {
+			if request.QueueOnly || m.Replacement != nil {
 				continue
 			}
 			h := byHost[hostID(m)]
@@ -348,7 +348,7 @@ func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
 	if h.Machine == "" {
 		// Queue-only operations still require fresh custody from colocated workers.
 		for _, m := range q.s.Machines {
-			if hostID(m) == h.Host && m.Replacement == nil && !q.migrationHistoricalMachine(m) {
+			if hostID(m) == h.Host && m.Replacement == nil {
 				return q.hostMaintenanceStatus(h.Host).Quiescent
 			}
 		}
@@ -382,7 +382,7 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 	}
 	found := false
 	for _, m := range q.s.Machines {
-		if hostID(m) == h.Host && m.Replacement == nil && !q.migrationHistoricalMachine(m) {
+		if hostID(m) == h.Host && m.Replacement == nil {
 			found = true
 			break
 		}

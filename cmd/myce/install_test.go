@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -504,69 +503,5 @@ func TestUninstallWithoutPasswdEntry(t *testing.T) {
 		return myce.WorkerAccount{}, myce.ErrHostIdentity
 	}); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestM4InstallCLIConversionDryRunAndGate(t *testing.T) {
-	home := t.TempDir()
-	base, err := myce.PlanInstall("worker", home, "", home, "http://queue.invalid", "host", myce.Detection{OS: "linux", Arch: "amd64", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	base.HostID = "host"
-	base.EnvironmentCacheBytes = 1 << 20
-	args := []string{"install", "worker", "--config", base.Config, "--dry-run"}
-	for _, device := range []string{"0", "1"} {
-		c := base
-		if err := c.WorkerInstance("gpu" + device); err != nil {
-			t.Fatal(err)
-		}
-		c.Device = device
-		c.Name = "host-gpu" + device
-		if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Dir(c.Service), 0700); err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(c)
-		if err := os.WriteFile(c.Config, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(c.Service, []byte("legacy"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		args = append(args, "--from-worker-config", c.Config)
-	}
-	probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("dry run invoked service/probe")
-		return nil, nil
-	}}
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = original }()
-	captured := make(chan []byte, 1)
-	go func() { output, _ := io.ReadAll(r); r.Close(); captured <- output }()
-	err = setupCommandWithProbe(args, probe, home)
-	os.Stdout = original
-	w.Close()
-	output := <-captured
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"fresh spool", "gpu0 cache", "myce-worker.service", "--device-settings"} {
-		if !strings.Contains(string(output), want) {
-			t.Fatalf("missing %s: %s", want, output)
-		}
-	}
-	if _, err := os.Stat(base.Config); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("dry run wrote destination", err)
-	}
-	if err := setupCommandWithProbe([]string{"install", "worker", "--config", args[6], "--dry-run"}, probe, home); err == nil || !strings.Contains(err.Error(), "machine_worker_conflict") {
-		t.Fatal("deploy gate", err)
 	}
 }

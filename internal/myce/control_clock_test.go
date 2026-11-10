@@ -350,29 +350,6 @@ func TestControlClockLegacyRejoinRetainsEngine(t *testing.T) {
 	}
 }
 
-func TestControlClockOfflineContactValidityExpires(t *testing.T) {
-	c, clock, mapping := m4OfflineQueue(t)
-	q, err := openConversionQueue(c, clock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var allowance time.Duration
-	for _, m := range q.s.Machines {
-		if !q.workerFresh(m, clock.Now()) {
-			t.Fatal("stopped queue lost committed contact evidence")
-		}
-		allowance = max(allowance, q.machineLossTimeout(m.ID))
-	}
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(allowance)
-	err = ConvertQueueInstall(context.Background(), c, mapping, true, false, clock, func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
-	if err == nil {
-		t.Fatal("offline conversion renewed expired worker evidence")
-	}
-}
-
 func TestControlClockDevQueueStall(t *testing.T) {
 	d, _, ctx := devProbe(t)
 	release := filepath.Join(t.TempDir(), "release")

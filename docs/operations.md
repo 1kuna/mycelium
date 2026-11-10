@@ -231,9 +231,7 @@ Omitted flags preserve saved values, including false/zero/empty settings,
 queue/NAS addresses, Docker opt-in, GPU runtime environment, catalogs and secret
 references. Explicit flags overlay only their setting. Identity cannot be moved
 over an existing installation. Fresh Linux installs use one `myce-worker.service` and spool per machine;
-`--device` restricts its inventory. Existing split installations require the archived
-[M4 conversion](reference/migrations.md#convert-split-workers-to-one-machine-worker-m4)
-before installing this version.
+`--device` restricts its inventory. Split installations are below the [supported release floor](DECISIONS.md#my-42); archive their state and install a current machine worker.
 Docker is optional (`--docker-host` opts in); ambient `DOCKER_HOST` is not adopted.
 
 The queue saves its selected TLS joining bind as `discovery_listen` in the queue
@@ -1193,40 +1191,8 @@ this containment contract.
 
 Stopped-container retention defaults to 24 hours **after the queue result is
 acknowledged**, rather than after container exit. The normal collector covers
-the current worker's spool and identity. A completed conversion from per-device
-workers leaves their historical spools intact, so their retained containers
-need a one-time reconciliation:
-
-```sh
-myce reconcile-docker-retention --config /absolute/path/to/MACHINE_CONFIG
-```
-
-Run as the ordinary worker account. This command removes containers; it does not
-stop or restart workers or containers. It verifies the completed
-`MACHINE_CONFIG.m4-rollback.json` journal against the successor config, inventories
-only its explicitly retired worker identities on the configured Docker endpoint,
-and exclusively locks each retired spool. The successor may remain running.
-Conversions that kept the same worker name are refused by design; clean up those
-containers by hand with verified ownership and release custody, or leave them
-as they are.
-Removal uses the normal collector's exact attempt/worker label checks, matching
-acknowledgement, elapsed retention, confirmed released custody, stopped state,
-no-restart policy and private exit evidence. Removal never uses force.
-Containers without matching `myce.attempt` and `myce.worker` ownership labels
-are never removed; container names do not determine ownership.
-
-The JSON report lists every inventoried container, whether removal was confirmed,
-and a reason for each hold. Missing or invalid custody/acknowledgements, active
-containers and incomplete evidence stay held. Earlier archived spools are not
-searched or adopted; containers without reachable custody remain held and
-reported. After successful removal, the normal collector also deletes that
-attempt's retired-spool custody record, acknowledgement, result and cidfiles.
-Private evidence files survive removal. If a multi-container removal partly
-fails, the report confirms each ID Docker reported as removed and retains the
-attempt's custody for retry. An operational/verification error returns nonzero
-after collecting the other results; inspect the report
-before retrying. The command never loads fleet credentials or contacts the queue,
-and adds no cross-identity scan to the steady-state collector.
+the current worker's spool and identity. Retired conversion tooling is available
+only in source history for installations below the supported release floor.
 
 Each managed attempt also retains a private `ATTEMPT_ID.docker-events.json`
 in its worker spool, including with `logs: none`. A separate `docker events`
@@ -1264,10 +1230,6 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="per-project-file-store-quotas-464"></a>[Per-project file-store quotas (#464)](reference/file-store.md#per-project-file-store-quotas-464)
 - <a id="parked-native-storage-integration-564"></a>[Parked native storage integration (#564)](reference/file-store.md#parked-native-storage-integration-564)
 - <a id="project-owner-early-file-release-465"></a>[Project-owner early file release (#465)](reference/file-store.md#project-owner-early-file-release-465)
-- <a id="convert-split-workers-to-one-machine-worker-m4"></a>[Convert split workers to one machine worker (M4)](reference/migrations.md#convert-split-workers-to-one-machine-worker-m4)
-- <a id="verified-empty-conversion-and-publication"></a>[Verified-empty conversion and publication](reference/migrations.md#verified-empty-conversion-and-publication)
-- <a id="additional-rollback-fences"></a>[Additional rollback fences](reference/migrations.md#additional-rollback-fences)
-- <a id="roll-back-without-losing-accepted-intent"></a>[Roll back without losing accepted intent](reference/migrations.md#roll-back-without-losing-accepted-intent)
 - <a id="worker-scratch-retention"></a>[Worker scratch retention](reference/worker-caches.md#worker-scratch-retention)
 - <a id="model-master-folder-worker-cache-and-production-reservations"></a>[Model master folder, worker cache, and production reservations](reference/models.md#model-master-folder-worker-cache-and-production-reservations)
 - <a id="general-model-servers-and-joint-measurement"></a>[General model servers and joint measurement](reference/models.md#general-model-servers-and-joint-measurement)

@@ -106,7 +106,7 @@ func (q *Queue) fleetProofGaps(request FleetUpgradeRequest) []string {
 	}
 	var workers []string
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		why := q.fleetProofGap(m.Fleet)

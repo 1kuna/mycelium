@@ -32,7 +32,7 @@ func (q *Queue) detectRemainingHealth() {
 	toolNeeded := map[string]bool{}
 	observe := func(key string, bad bool, e HealthAlert) { seen[key] = true; q.observeCurrentHealth(key, bad, e) }
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		mode := q.s.HostMaintenance[hostID(m)].Mode
@@ -77,7 +77,7 @@ func (q *Queue) detectRemainingHealth() {
 		}
 		known, fit, unknown := false, false, false
 		q.evaluateTargets(j, func(f targetFit, candidate *Job, m *Machine) bool {
-			if q.s.HostMaintenance[hostID(m)].Mode == "disabled" || m.Replacement != nil || q.migrationHistoricalMachine(m) {
+			if q.s.HostMaintenance[hostID(m)].Mode == "disabled" || m.Replacement != nil {
 				return true
 			}
 			// Absent reports cannot prove a permanent capacity mismatch. Their own
@@ -100,7 +100,7 @@ func (q *Queue) detectRemainingHealth() {
 		observe("target/"+j.ID, known && !fit && !unknown, HealthAlert{Kind: "job_target_unsatisfied", Project: j.Spec.Project, JobID: j.ID, Reason: "no_enabled_target"})
 	}
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		mode := q.s.HostMaintenance[hostID(m)].Mode

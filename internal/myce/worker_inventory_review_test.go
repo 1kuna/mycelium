@@ -375,7 +375,7 @@ func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	defer server.Close()
 	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}, nil)
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.Status != 409 || httpErr.Code != "machine_worker_conflict" || !strings.Contains(httpErr.Message, "run one machine worker per host; see M4 install conversion") {
+	if !errors.As(err, &httpErr) || httpErr.Status != 409 || httpErr.Code != "machine_worker_conflict" || !strings.Contains(httpErr.Message, "run one machine worker per host") {
 		t.Fatalf("split worker diagnostic: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

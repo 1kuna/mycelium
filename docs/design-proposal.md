@@ -408,7 +408,7 @@ no dependency types or graph scheduler.
 
 v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the M1 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.
 
-**Pre-v3 formats are refused; operators archive and install fresh.** Pre-marker queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no pre-v3 converter or dual runtime decoder. The separately gated M4 conversion below starts from marked v3 state. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
+**Pre-v3 formats are refused; operators archive and install fresh.** Pre-marker queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no pre-v3 converter or dual runtime decoder. Split-worker conversion is retired under MY-42. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
 Installation overlays explicit options on saved current configuration, preserving
 queue address, NAS, names, Docker endpoint, GPU environment and secret references.
@@ -1137,12 +1137,10 @@ fingerprint, counters and checkpoint generations. Legacy sessions and a machine
 worker cannot coexist on the same host. The unkeyed adapter can retire only after
 all hosts convert and the rollback window closes; historical custody remains.
 
-Use [the supported conversion procedure](reference/migrations.md#convert-split-workers-to-one-machine-worker-m4)
-for split installations, including explicit source configs, queue-first upgrade,
-settlement, verified-empty evidence where applicable, policy publication and
-rollback fences. Migration never promotes local-only/partial progress or rewrites
-accepted keyed intent. Keep native device isolation, reboot/manager, driver fault
-and simultaneous memory qualification separate from laptop proof in
+Split-worker conversion and rollback are below the [MY-42 release floor](DECISIONS.md#my-42)
+and remain only in source history. Retained historical identities and exact custody
+still bind. Keep native device isolation, reboot/manager, driver fault and
+simultaneous memory qualification separate from laptop proof in
 [development](development.md#native-acceptance-checklist).
 
 ## CPU and shared host resources (R1, #98/#22)

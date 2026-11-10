@@ -379,7 +379,7 @@ func (q *Queue) refreshEfficiency() {
 	hostMachines := map[string][]*Machine{}
 	reservedDevices := map[string]float64{}
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		host := hostID(m)
