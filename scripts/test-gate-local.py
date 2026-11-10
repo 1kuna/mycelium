@@ -50,6 +50,127 @@ def qualified_config(root):
 
 
 class LocalGateTests(unittest.TestCase):
+    def test_killed_holder_is_reclaimed_with_live_peer_and_waiter(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            qualified_config(root)
+            script = str(Path(__file__).with_name('gate-capacity.py').resolve())
+            launcher = '''import importlib.util,json,pathlib,signal,sys
+s=importlib.util.spec_from_file_location('capacity',sys.argv[1]); c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[]
+c.local_worker_usage=lambda:None;c.native_full_custody=lambda:False;c.check_pressure=lambda:None
+c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.os.cpu_count=lambda:18
+slot=c.acquire(r,mode='full',source_root=r/'dead'/'source')
+p=pathlib.Path(slot.owner['scratch']);p.mkdir(parents=True);(p/'fixture').write_text('rebuildable')
+print(json.dumps(slot.owner),flush=True);signal.pause()
+'''
+            child = subprocess.Popen([sys.executable, '-c', launcher, script, str(root)],
+                                     stdout=subprocess.PIPE, text=True)
+            try:
+                dead = json.loads(child.stdout.readline())
+                with (patch.object(capacity, 'root', return_value=root),
+                      patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                    peer = capacity.acquire(root, mode='full')
+                    waiter = root / 'local-go-release-wait-peer'
+                    waiter.write_text(json.dumps(dict(pid=os.getpid(),
+                        process_identity=capacity.process_identity(os.getpid()),
+                        priority='normal', sequence=0)))
+                    child.kill()
+                    child.wait(timeout=5)
+                    next_gate = capacity.acquire(root)
+                    try:
+                        self.assertTrue(peer.directory.exists())
+                        self.assertFalse(waiter.exists())  # Retired priority label, not its live process.
+                        self.assertNotEqual(peer.owner['run_id'], next_gate.owner['run_id'])
+                        self.assertFalse(Path(dead['scratch']).exists())
+                        archives = list((root / 'selfheal-backups').iterdir())
+                        self.assertEqual(len(archives), 1)
+                        saved = json.loads((archives[0] / 'recovery.json').read_text())
+                        self.assertEqual(saved['owner'], dead)
+                        moved = Path(json.loads((archives[0] / 'scratch.json').read_text())['backup'])
+                        self.assertEqual((moved / 'fixture').read_text(), 'rebuildable')
+                    finally:
+                        next_gate.release()
+                        peer.release()
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+                child.stdout.close()
+
+    def test_reused_pid_reclaims_but_unknown_or_live_identity_does_not(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            for index, birth in enumerate(('old-start', 'current-start', None)):
+                lane = root / f'local-go-slot-{index + 1}'
+                lane.mkdir()
+                owner = dict(pid=12345)
+                if birth:
+                    owner['process_identity'] = birth
+                (lane / 'owner.json').write_text(json.dumps(owner))
+            with capacity.admission_lock(root), patch.object(capacity, 'process_identity', return_value='current-start'):
+                capacity.reclaim_dead(root)
+            self.assertFalse((root / 'local-go-slot-1').exists())
+            self.assertTrue((root / 'local-go-slot-2').exists())
+            self.assertTrue((root / 'local-go-slot-3').exists())
+
+    def test_live_mapped_fixture_protects_scratch_without_holding_admission(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                slot = capacity.acquire(root, source_root=root / 'source')
+                scratch = Path(slot.owner['scratch'])
+                scratch.mkdir(parents=True)
+                (scratch / 'held').write_bytes(b'x' * 4096)
+                fixture = subprocess.Popen([sys.executable, '-c',
+                    'import mmap,os,signal,sys; f=open(sys.argv[1],"rb"); '
+                    'm=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ); f.close(); '
+                    'os.environ.clear(); print("ready",flush=True); signal.pause()',
+                    str(scratch / 'held')], cwd='/', stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(fixture.stdout.readline().strip(), 'ready')
+                    slot.release(stopped=False)
+                    self.assertFalse(slot.directory.exists())
+                    self.assertTrue(scratch.exists())
+                    next_gate = capacity.acquire(root)
+                    next_gate.release()
+                    self.assertIsNone(fixture.poll())
+                    fixture.terminate()
+                    fixture.wait(timeout=5)
+                    next_gate = capacity.acquire(root)
+                    next_gate.release()
+                    self.assertFalse(scratch.exists())
+                finally:
+                    if fixture.poll() is None:
+                        fixture.kill()
+                    fixture.wait(timeout=5)
+                    fixture.stdout.close()
+
+    def test_scratch_backups_expire_by_age_count_and_bytes_preserving_verdicts(self):
+        cache = load('gate-cache')
+        for bound in ('age', 'count', 'bytes'):
+            with self.subTest(bound=bound), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                backups = root / 'control/selfheal-backups'
+                scratch = root / 'source/.gate/run.dead'
+                scratch.mkdir(parents=True)
+                (scratch / 'fixture').write_bytes(b'0123456789')
+                verdict = root / 'source/cleanup-error.json'
+                verdict.write_text('real failure')
+                archive = backups / 'backup'
+                archive.mkdir(parents=True)
+                (archive / 'recovery.json').write_text(json.dumps(dict(owner={})))
+                moved = cache.backup_scratch(str(scratch), archive)
+                options = dict(age=100, count=8, limit=100)
+                options.update(dict(age=0) if bound == 'age' else
+                               dict(count=0) if bound == 'count' else dict(limit=1))
+                with patch.object(cache, 'scratch_idle', return_value=True):
+                    cache.trim_backups(backups, **options)
+                self.assertFalse(archive.exists())
+                self.assertFalse(moved.exists())
+                self.assertEqual(verdict.read_text(), 'real failure')
+
     def setUp(self):
         fakehome = tempfile.TemporaryDirectory()
         self.addCleanup(fakehome.cleanup)
@@ -85,7 +206,7 @@ class LocalGateTests(unittest.TestCase):
                 slot.release()
             self.assertEqual((legacy / 'owner').read_text(), 'another owner')
 
-    def test_full_is_serial_until_measured_and_custody_failure_holds_capacity(self):
+    def test_full_is_serial_until_measured_and_cleanup_failure_releases_capacity(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             with (patch.object(capacity, 'root', return_value=root),
@@ -95,9 +216,10 @@ class LocalGateTests(unittest.TestCase):
                     capacity.acquire(root, mode='full')
                 with contextlib.redirect_stdout(io.StringIO()):
                     first.release(stopped=False)
-                self.assertTrue(first.directory.exists())
-                self.assertTrue(first.full.exists())
-                first.release()
+                self.assertFalse(first.directory.exists())
+                self.assertFalse(first.full.exists())
+                replacement = capacity.acquire(root, mode='full')
+                replacement.release()
 
     def test_measured_fulls_share_resources_and_old_clients_see_both_lanes_reserved(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -117,8 +239,7 @@ class LocalGateTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root, mode='full')
                     runs[0].release(stopped=False)
-                    self.assertTrue(runs[0].directory.exists())
-                    runs[0].release()
+                    self.assertFalse(runs[0].directory.exists())
                     self.assertTrue((root / 'local-go-slot').exists())
                     config_path = root / 'gate-capacity.json'
                     original = config_path.read_text()
@@ -306,12 +427,12 @@ class LocalGateTests(unittest.TestCase):
                 self.assertEqual(tickets[0].read_bytes(), ticket_bytes)
                 self.assertEqual(len(capacity.execution_lanes(root)), 1)
                 if waits == 1:
-                    # A smaller full fits RAM but cannot pass the FIFO head;
-                    # an ordinary fitting quick may still use spare capacity.
+                    # Neither a smaller full nor a fitting quick may overtake
+                    # the FIFO head and keep it waiting indefinitely.
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root, mode='full', platform='native')
-                    quick = capacity.acquire(root, mode='quick', platform='native', cores=1)
-                    quick.release()
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='quick', platform='native', cores=1)
                     available = 21 * capacity.GIB
                 if waits == 2:
                     reviewer.release()
@@ -325,7 +446,7 @@ class LocalGateTests(unittest.TestCase):
                 full = capacity.acquire(root, mode='full', platform='both', wait=True)
                 try:
                     self.assertEqual(waits, 2)
-                    self.assertIn('full queue position 1; waiting for memory:', output.getvalue())
+                    self.assertIn('FIFO queue position 1; waiting for memory:', output.getvalue())
                     self.assertIn('pressure normal', output.getvalue())
                     self.assertEqual(full.owner['memory_requirement_at_entry_bytes'],
                         capacity.memory_requirement(config, 'both'))
@@ -398,10 +519,9 @@ finally: slot.release()
                     with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                         capacity.acquire(root)
                     self.assertFalse((root / 'exclusive-ready').exists())
-                    # Higher-priority release assembly goes before the ordinary
-                    # exclusive waiter; it still respects an active exclusive.
-                    release = capacity.acquire(root, priority='release')
-                    release.release()
+                    # Release labels cannot jump an earlier exclusive waiter.
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, priority='release')
                     held.release()
                     deadline = time.monotonic() + 5
                     while not (root / 'exclusive-ready').exists():
@@ -460,11 +580,12 @@ finally: slot.release()
                         capacity.acquire(root, mode='full')
                     self.assertTrue(first.directory.exists())
                     first.release(stopped=False)
-                    with self.assertRaisesRegex(RuntimeError, 'configuration changed'):
-                        capacity.acquire(root)
+                    replacement = capacity.acquire(root)
+                    replacement.release()
                 finally:
                     (root / 'gate-capacity.json').write_text(original)
-                    first.release()
+                    if first.directory.exists():
+                        first.release()
                 config['memory_measurement']['headroom_bytes'] = 1
                 (root / 'gate-capacity.json').write_text(json.dumps(config))
                 replacement = capacity.acquire(root, mode='full')
@@ -485,8 +606,8 @@ finally: slot.release()
                 self.assertEqual(capacity.full_waiters(root), [older, exclusive])
                 with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                     capacity.acquire(root)
-                release = capacity.acquire(root, priority='release')
-                release.release()
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, priority='release')
                 self.assertTrue(older.exists())
                 self.assertTrue(exclusive.exists())
 
@@ -511,36 +632,93 @@ finally: slot.release()
                 custody = root / 'local-go-full-unknown.custody'
                 custody.write_text(json.dumps(record))
                 self.assertEqual(capacity.full_waiters(root), [])
-                self.assertFalse(capacity.priority_waiting(root, 'release'))
                 self.assertTrue(custody.exists())
             finally: child.wait(timeout=5)
 
-    def test_release_waiter_gets_next_lane_before_normal_work(self):
+    def test_later_release_stream_cannot_starve_a_queued_normal_quick(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            waiter = root / 'local-go-release-wait-other'
-            waiter.touch()
+            root = Path(folder).resolve()
+            launcher = """import importlib.util,pathlib,sys,time,types
+s=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
+c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
+original_sleep=time.sleep
+def wait(_):
+ (r/'queued').touch()
+ while not (r/'allow').exists(): original_sleep(.01)
+c.time=types.SimpleNamespace(sleep=wait)
+slot=c.acquire(r,mode='quick',wait=True)
+(r/'normal-admitted').touch()
+slot.release()
+"""
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
-                with self.assertRaisesRegex(RuntimeError, 'reserved for release'):
-                    capacity.acquire(root)
-                release = capacity.acquire(root, priority='release')
-                release.release()
-            self.assertTrue(waiter.exists())
+                first, second = capacity.acquire(root), capacity.acquire(root)
+                child = subprocess.Popen([sys.executable, '-c', launcher, capacity.__file__, str(root)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (root / 'queued').exists():
+                        if time.monotonic() > deadline: self.fail('normal quick did not queue')
+                        time.sleep(.01)
+                    first.release()  # A lane now fits every following request.
+                    # Pre-FIFO quick callers had no ticket of their own and
+                    # used this rank/exclusive predicate to honor a drain.
+                    # They must not bypass the new FIFO during an upgrade.
+                    rank = {'calibration': 0, 'release': 1, 'normal': 2}
+                    waiting = [json.loads(path.read_text()) for path in capacity.full_waiters(root)]
+                    for priority in rank:
+                        self.assertTrue(any(row.get('exclusive') and
+                            rank[priority] >= rank[row['priority']] for row in waiting))
+                    self.assertEqual(waiting[0]['requested_priority'], 'normal')
+                    self.assertFalse(waiting[0]['requested_exclusive'])
+                    # Migrate older full tickets too: a frozen caller sorts
+                    # priority before sequence, which must agree with FIFO.
+                    older = root / 'local-go-wait-older.json'
+                    older.write_text(json.dumps(dict(pid=os.getpid(),
+                        process_identity=capacity.process_identity(os.getpid()),
+                        priority='normal', sequence=0, exclusive=False)))
+                    try:
+                        queue = capacity.full_waiters(root)
+                        legacy = sorted(queue, key=lambda path: (
+                            rank[json.loads(path.read_text())['priority']],
+                            json.loads(path.read_text())['sequence']))
+                        self.assertEqual(queue, legacy)
+                        self.assertEqual(queue[0], older)
+                    finally:
+                        older.unlink()
+                    for mode, priority in [('quick', 'release'), ('full', 'release'),
+                                           ('full', 'calibration')] * 3:
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode=mode, priority=priority)
+                    self.assertEqual(len(capacity.full_waiters(root)), 1)
+                    (root / 'allow').touch()
+                    output, error = child.communicate(timeout=5)
+                    self.assertEqual(child.returncode, 0, error)
+                    self.assertIn(b'FIFO queue position 1', output)
+                    self.assertTrue((root / 'normal-admitted').exists())
+                    release = capacity.acquire(root, priority='release')
+                    self.assertEqual(release.owner['priority'], 'normal')
+                    release.release()
+                finally:
+                    for slot in (first, second):
+                        if slot.directory.exists(): slot.release()
+                    if child.poll() is None: child.kill()
+                    child.wait(timeout=5)
+                    child.stdout.close(); child.stderr.close()
 
-    def test_calibration_gets_next_full_lane_ahead_of_release_full(self):
+    def test_legacy_calibration_label_is_not_an_execution_reservation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'local-go-calibration-wait-owner').touch()
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
-                with self.assertRaisesRegex(RuntimeError, 'reserved'):
-                    capacity.acquire(root, mode='full', priority='release')
-                # The full reservation does not block native release assembly.
-                build = capacity.acquire(root, priority='release')
-                build.release()
-                full = capacity.acquire(root, mode='full', priority='calibration')
+                full = capacity.acquire(root, mode='full', priority='release')
                 full.release()
+                build = capacity.acquire(root, priority='release')
+                self.assertEqual(build.owner['priority'], 'normal')
+                build.release()
 
     def test_disk_refusal_starts_nothing(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -587,7 +765,7 @@ slot.release()
                     for child in children[:-1]:
                         output, error = child.communicate(timeout=8)
                         self.assertEqual(child.returncode, 0, error)
-                        self.assertIn(b'full queue position', output)
+                        self.assertIn(b'FIFO queue position', output)
                     self.assertEqual((root / 'order').read_text().splitlines(), ['first', 'second'])
                 finally:
                     for child in children:
@@ -686,7 +864,8 @@ sys.exit(m.main())
                 local.trim_cache(cache, limit=-1)
 
     def test_entry_exit_trim_and_terminal_source_cleanup(self):
-        for status, confirmed in ((0, True), (1, True), (125, False)):
+        for status, confirmed, cleanup_fails in ((0, True, False), (1, True, False),
+                                                (125, False, False), (125, True, True)):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 slot = Mock(directory=root / 'lane', owner={})
@@ -717,11 +896,15 @@ sys.exit(m.main())
                       patch.object(local.capacity, 'execution_lanes', return_value=[root / 'other']),
                       patch.object(local.capacity, 'native_full_custody', return_value=True),
                       patch.object(local, 'trim_cache', side_effect=trim),
+                      patch.object(local.shutil, 'rmtree', wraps=shutil.rmtree,
+                                   side_effect=PermissionError('source cleanup failed') if cleanup_fails else None),
                       patch.object(local.subprocess, 'Popen', side_effect=supervised)):
                     self.assertEqual(local.main(), status)
                 self.assertEqual(events, ['trim', 'payload', 'trim'])
                 for name in ('source', 'source.tar', 'runtime.tar'):
-                    self.assertEqual((run_folder / name).exists(), not confirmed)
+                    self.assertEqual((run_folder / name).exists(), not confirmed or cleanup_fails)
+                if cleanup_fails:
+                    self.assertIn('source cleanup failed', (run_folder / 'finalize-error.json').read_text())
                 self.assertTrue((run_folder / 'manifest.json').exists())
                 slot.release.assert_called_once_with(stopped=confirmed)
 
@@ -1181,7 +1364,7 @@ sys.exit(m.main())
             self.assertEqual(row['phase'], 'host')
             self.assertLess(row['min_free_bytes'], capacity.STOP_FLOOR)
 
-    def test_release_command_uses_priority_admission_and_host_supervision(self):
+    def test_command_cannot_claim_release_priority_and_keeps_host_supervision(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             slot = Mock()
@@ -1211,7 +1394,7 @@ sys.exit(m.main())
                   patch.object(Path, 'unlink'),
                   patch.object(local.subprocess, 'Popen', side_effect=supervised)):
                 self.assertEqual(local.main(), 0)
-            self.assertEqual(admission.call_args.kwargs['priority'], 'release')
+            self.assertEqual(admission.call_args.kwargs['priority'], 'normal')
             self.assertTrue(admission.call_args.kwargs['wait'])
             slot.release.assert_called_once_with(stopped=True)
 
@@ -1419,6 +1602,17 @@ sys.exit(m.main())
                 self.assertEqual(path.read_text(), original)
                 path.write_text('{unknown')
                 self.assertTrue(real.native_full_custody())
+                # A dead local reserved holder has no scratch yet. Its cache
+                # record must not survive forever after host custody is gone.
+                path.write_text(json.dumps(dict(holder_pid=99999999,
+                    holder_start='old-start', phase='reserved')))
+                with patch.object(real, 'process_identity', return_value=None):
+                    with path.with_suffix('.lock').open('a') as live_lock:
+                        real.fcntl.flock(live_lock, real.fcntl.LOCK_EX)
+                        self.assertTrue(real.native_full_custody())
+                        self.assertTrue(path.exists())
+                    self.assertFalse(real.native_full_custody())
+                    self.assertFalse(path.exists())
 
     def test_nonpositive_requested_or_recorded_cpu_demand_cannot_bypass_ledger(self):
         with tempfile.TemporaryDirectory() as folder:

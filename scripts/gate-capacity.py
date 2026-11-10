@@ -20,11 +20,15 @@ _spec = importlib.util.spec_from_file_location('gate_memory', Path(__file__).wit
 _memory = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_memory)
 local_worker_usage = _memory.local_worker_usage
+_spec = importlib.util.spec_from_file_location('gate_cache', Path(__file__).with_name('gate-cache.py'))
+_cache = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_cache)
 
 
 def process_identity(pid):
     result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=,lstart='],
-                            capture_output=True, text=True, timeout=5)
+                            capture_output=True, text=True, timeout=5,
+                            env=dict(os.environ, LC_ALL='C'))
     if result.returncode not in (0, 1):
         raise RuntimeError('waiting process identity is unknown')
     fields = result.stdout.strip().split(None, 1)
@@ -41,30 +45,8 @@ def publish_waiting(path, text):
     pending.replace(path)
 
 
-def priority_waiting(directory, priority):
-    active = False
-    for path in directory.glob('local-go-' + priority + '-wait-*'):
-        raw = path.read_text()
-        try:
-            row = json.loads(raw)
-        except ValueError:
-            row = None
-        if isinstance(row, dict):
-            dead = process_identity(row['pid']) != row['process_identity']
-        elif raw.strip().isdigit():
-            # Older waiting records contained only PID: absence proves death;
-            # an extant/reused PID lacks start identity and remains unknown.
-            dead = process_identity(int(raw)) is None
-        else:
-            dead = False  # Preserve unknown legacy waiting records.
-        if dead:
-            path.unlink()
-        else:
-            active = True
-    return active
-
-
 def full_waiters(directory):
+    """Live FIFO tickets; the historical filename now covers every mode."""
     rows = []
     for path in directory.glob('local-go-wait-*.json'):
         row = json.loads(path.read_text())
@@ -72,9 +54,16 @@ def full_waiters(directory):
             # This is a never-admitted queue ticket, not execution custody.
             path.unlink()
             continue
-        rows.append(({'calibration': 0, 'release': 1, 'normal': 2}[row['priority']],
-                     row['sequence'], path))
-    return [path for _, _, path in sorted(rows)]
+        # Migrate the whole waiting queue together: older callers sort by
+        # priority before sequence, so upgrading only our own ticket would
+        # put it ahead of an older full and make the two orderings deadlock.
+        if row.get('admission_protocol') != 3:
+            row.update(requested_priority=row['priority'],
+                       requested_exclusive=row.get('exclusive', False),
+                       admission_protocol=3, priority='calibration', exclusive=True)
+            publish_waiting(path, json.dumps(row) + '\n')
+        rows.append((row['sequence'], path))
+    return [path for _, path in sorted(rows)]
 
 
 def root(repo):
@@ -99,6 +88,87 @@ def legacy_directories(repo):
 
 def occupied_lanes(directory):
     return [p for p in directory.glob('local-go-slot*') if p.is_dir()]
+
+
+def dead_holder(row):
+    """Absence works for old PID-only records; reuse needs a start identity."""
+    pid = row.get('pid', row.get('holder_pid'))
+    birth = row.get('process_identity', row.get('holder_start'))
+    if type(pid) is not int or pid <= 0:
+        return False
+    current = process_identity(pid)
+    return current is None or isinstance(birth, str) and bool(birth.strip()) and current != birth
+
+
+def archive_custody(directory, paths, row, reason):
+    """Caller holds admission_lock. A crash leaves independently reclaimable records."""
+    archive = directory / 'selfheal-backups' / uuid.uuid4().hex
+    archive.mkdir(parents=True, mode=0o700)
+    (archive / 'recovery.json').write_text(json.dumps(dict(owner=row, reason=reason)) + '\n')
+    if row.get('scratch'):
+        (archive / 'scratch-pending.json').write_text(json.dumps(row) + '\n')
+    for path in paths:
+        path.rename(archive / path.name)
+    # Scratch is separate from admission. A live child or failed observation
+    # leaves it in place, with a diagnostic, but cannot hold other gates' slots.
+    if row.get('scratch'):
+        try:
+            _cache.collect_scratch(row, archive)
+        except Exception as error:
+            (archive / 'scratch-retained.txt').write_text(str(error) + '\n')
+    print('gate: released local custody (' + reason + ')', flush=True)
+    return archive
+
+
+def clear_empty_group(directory):
+    group = directory / 'local-go-resource-group.custody'
+    if not group.exists():
+        return
+    row = json.loads(group.read_text())
+    expected = dict(protocol_guard=True, resource_group=row.get('resource_group'))
+    guards = []
+    for lane in occupied_lanes(directory):
+        owner = lane / 'owner.json'
+        if not owner.exists() or json.loads(owner.read_text()) != expected:
+            return  # Live or unknown execution, never a waiter, keeps the guards.
+        guards.append(lane)
+    for lane in guards:
+        (lane / 'owner.json').unlink()
+        lane.rmdir()
+    group.unlink()
+
+
+def reclaim_dead(directory):
+    """Admission-lock transaction: reclaim dead holders without global quiet."""
+    for lane in [*occupied_lanes(directory), *directory.glob('.slot-pending-*')]:
+        owner = lane / 'owner.json'
+        if lane.is_symlink() or not owner.is_file() or owner.is_symlink():
+            continue
+        try:
+            row = json.loads(owner.read_text())
+            if not isinstance(row, dict) or not dead_holder(row):
+                continue
+        except (ValueError, OSError, subprocess.SubprocessError):
+            continue  # Unknown liveness is not evidence of death.
+        paths = [lane]
+        for full in directory.glob('local-go-full-*.custody'):
+            try:
+                if not full.is_symlink() and json.loads(full.read_text()) == row:
+                    paths.append(full)
+            except (OSError, ValueError):
+                continue
+        archive_custody(directory, paths, row, 'dead holder')
+    for path in [*directory.glob('local-go-full-*.custody'),
+                 *directory.glob('local-go-native-full-*.custody')]:
+        if path.is_symlink():
+            continue
+        try:
+            row = json.loads(path.read_text())
+            if isinstance(row, dict) and dead_holder(row):
+                archive_custody(directory, [path], row, 'dead holder')
+        except (ValueError, OSError, subprocess.SubprocessError):
+            continue
+    clear_empty_group(directory)
 
 
 def execution_lanes(directory):
@@ -174,8 +244,8 @@ def admission_config_digest(config):
 def native_full_custody(*, include_fleet=False):
     """Local custody binds local admission; installed-worker custody is separate.
 
-    Never alter either kind. Cache eviction asks for both kinds, since custody
-    scope must not silently shrink the shared-cache idle boundary.
+    Dead local cache records are reclaimed under their cache/slot locks. Fleet
+    custody remains outside local development recovery.
     """
     control = Path.home() / '.cache/mycelium-gates/control'
     if any(control.glob('local-go-native-full-*.custody')):
@@ -187,9 +257,21 @@ def native_full_custody(*, include_fleet=False):
         for path in cache.glob('mycelium-full-gate-[0-9].custody'):
             try:
                 row = json.loads(path.read_text())
-                fleet = Path(row['scratch']).resolve().is_relative_to(worker_files.resolve())
+                fleet = bool(row.get('scratch')) and Path(row['scratch']).resolve().is_relative_to(worker_files.resolve())
             except (OSError, ValueError, KeyError, TypeError):
                 fleet = False  # Unknown custody remains binding.
+                row = {}
+            if not fleet and not include_fleet and dead_holder(row):
+                with (cache / 'mycelium-full-gate-admission.lock').open('a') as admission:
+                    fcntl.flock(admission, fcntl.LOCK_EX)
+                    with path.with_suffix('.lock').open('a') as slot:
+                        try:
+                            fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            return True
+                        if path.exists() and json.loads(path.read_text()) == row and dead_holder(row):
+                            archive_custody(cache, [path], row, 'dead native cache holder')
+                            continue
             if include_fleet or not fleet:
                 return True
     return False
@@ -234,9 +316,6 @@ class Slot:
         self.directory, self.owner, self.full, self.group = directory, owner, full, group
 
     def release(self, stopped=True):
-        if not stopped:
-            print('gate: custody uncertain; local capacity retained', flush=True)
-            return
         with admission_lock(self.directory.parent):
             if self.group:
                 execution_lanes(self.directory.parent)  # Verify guards before any removal.
@@ -248,10 +327,15 @@ class Slot:
                 raise RuntimeError('local gate slot ownership changed; retained')
             if self.full and json.loads(self.full.read_text()) != self.owner:
                 raise RuntimeError('local full custody changed; retained')
-            path.unlink()
-            self.directory.rmdir()
-            if self.full:
-                self.full.unlink()
+            if stopped:
+                path.unlink()
+                self.directory.rmdir()
+                if self.full:
+                    self.full.unlink()
+            else:
+                archive_custody(self.directory.parent,
+                    [self.directory] + ([self.full] if self.full else []),
+                    self.owner, 'cleanup unconfirmed; verdict retained')
             if self.group and not execution_lanes(self.directory.parent):
                 for name in ('local-go-slot', 'local-go-slot-2'):
                     guard = self.directory.parent / name
@@ -355,28 +439,35 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     host_cores = cores * (2 if platform == 'both' else 1)
     directory = root(repo)
     directory.mkdir(parents=True, exist_ok=True)
+    _cache.trim_backups(directory / 'selfheal-backups')
     if priority == 'calibration' and mode != 'full':
         raise ValueError('calibration priority reserves a full lane only')
-    prefix = 'local-go-calibration-wait-' if priority == 'calibration' else 'local-go-release-wait-'
-    ticket = directory / (prefix + uuid.uuid4().hex)
+    if mode == 'quick':
+        priority = 'normal'  # A flag or inherited environment is no release authority.
     queue_ticket = None
     checked_config, resources, slot_profile = None, None, None
     host_memory = total_memory()
     if type(host_memory) is not int or host_memory <= 0:
         raise RuntimeError('host physical memory capacity is unknown')
     try:
-        if priority in ('release', 'calibration'):
-            with admission_lock(directory):
-                publish_waiting(ticket, json.dumps(dict(pid=os.getpid(),
-                    process_identity=process_identity(os.getpid()))) + '\n')
-        if mode == 'full' or exclusive:
-            with admission_lock(directory):
-                sequence_path = directory / 'queue-sequence'
-                sequence = int(sequence_path.read_text()) + 1 if sequence_path.exists() else 1
-                publish_waiting(sequence_path, str(sequence))
-                queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
-                publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
-                    priority=priority, sequence=sequence, exclusive=exclusive)) + '\n')
+        with admission_lock(directory):
+            # Every request joins the same FIFO, including quick and command
+            # runs. Zero overtaking prevents an endless release stream from
+            # starving ordinary work, without a timer or an arbitrary wait cap.
+            sequence_path = directory / 'queue-sequence'
+            previous = [json.loads(path.read_text())['sequence'] for path in full_waiters(directory)]
+            previous.append(int(sequence_path.read_text()) if sequence_path.exists() else 0)
+            sequence = max(previous) + 1
+            publish_waiting(sequence_path, str(sequence))
+            queue_ticket = directory / ('local-go-wait-' + uuid.uuid4().hex + '.json')
+            # Frozen older quick callers only honor an exclusive calibration
+            # waiter. Encode that drain in the waiting ticket so they cannot
+            # overtake this FIFO either. It reserves no execution capacity;
+            # actual admission/owner priority and exclusivity stay unchanged.
+            publish_waiting(queue_ticket, json.dumps(dict(pid=os.getpid(), process_identity=process_identity(os.getpid()),
+                admission_protocol=3, priority='calibration', exclusive=True,
+                requested_priority=priority, requested_exclusive=exclusive,
+                mode=mode, sequence=sequence)) + '\n')
         after_identity = process_identity(after_pid) if after_pid else None
         announced = None
         while True:
@@ -384,7 +475,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
             if shutil.disk_usage(repo).free < ENTRY_FLOOR:
                 raise RuntimeError('local disk below 45 GiB entry floor')
             with admission_lock(directory):
-                legacy = [p for folder in legacy_directories(repo) for p in occupied_lanes(folder)]
+                legacy_roots = legacy_directories(repo)
+                for folder in [directory, *legacy_roots]:
+                    reclaim_dead(folder)
+                legacy = [p for folder in legacy_roots for p in occupied_lanes(folder)]
                 config_path = directory / 'gate-capacity.json'
                 config = json.loads(config_path.read_text()) if config_path.exists() else {}
                 if config != checked_config:
@@ -417,25 +511,13 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 slots = ((os.cpu_count() or 1) + 2 if resources else
                          min(2, max(1, int(config.get('heavy_slots', 2)))))
                 fulls = min(2, max(1, int(config.get('full_slots', 1))))
-                release_waiting = priority_waiting(directory, 'release')
-                calibration_waiting = priority_waiting(directory, 'calibration')
-                pending_release = priority not in ('release', 'calibration') and release_waiting
-                pending_calibration = (mode == 'full' and priority != 'calibration'
-                                       and calibration_waiting)
+                # These old labels contain no execution custody. Retire them
+                # without probing their PIDs: they grant no queue precedence.
+                for label in ('release', 'calibration'):
+                    for path in directory.glob('local-go-' + label + '-wait-*'):
+                        path.unlink(missing_ok=True)
                 queue = full_waiters(directory)
-                queue_first = not queue_ticket or not queue or queue[0] == queue_ticket
-                front = json.loads(queue[0].read_text()) if queue else {}
-                rank = {'calibration': 0, 'release': 1, 'normal': 2}
-                exclusive_waiting = (front.get('exclusive') and
-                                     rank[priority] >= rank[front['priority']])
-                if exclusive_waiting and queue_ticket != queue[0]:
-                    queue_first = False
-                if queue_ticket is None and any(
-                        row.get('exclusive') and rank[priority] >= rank[row['priority']]
-                        for row in (json.loads(path.read_text()) for path in queue)):
-                    # An earlier full can precede an exclusive ticket, but
-                    # newly arriving quick work must not keep its drain busy.
-                    queue_first = False
+                queue_first = bool(queue) and queue[0] == queue_ticket
                 batch_done = not after_identity or process_identity(after_pid) != after_identity
                 full_marker = None
                 if not resources and mode == 'full' and not legacy and not native_full_custody():
@@ -528,7 +610,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
                                        and vm_memory + vm_peak <= resources['vm_memory_bytes'])
-                ready = (not pending_release and not pending_calibration and queue_first and batch_done and occupied < slots
+                ready = (queue_first and batch_done and occupied < slots
                         and cpu_ok and memory_ok and resource_ok
                         and (resources or mode != 'full' or full_marker))
                 if ready:
@@ -539,19 +621,20 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         else:
                             group = dict(admission_protocol=2, resource_group=uuid.uuid4().hex,
                                          admission_config_sha256=config_digest)
-                            group_path.write_text(json.dumps(group) + '\n')
+                            publish_waiting(group_path, json.dumps(group) + '\n')
                             for name in ('local-go-slot', 'local-go-slot-2'):
                                 guard = directory / name
-                                guard.mkdir(mode=0o700)
-                                (guard / 'owner.json').write_text(json.dumps(dict(
+                                pending = directory / ('.guard-pending-' + uuid.uuid4().hex)
+                                pending.mkdir(mode=0o700)
+                                (pending / 'owner.json').write_text(json.dumps(dict(
                                     protocol_guard=True, resource_group=group['resource_group'])) + '\n')
+                                pending.rename(guard)
                     for index in range(2 if resources else 0, slots):
                         slot = directory / ('local-go-slot' + (f'-{index + 1}' if index else ''))
-                        try:
-                            slot.mkdir(mode=0o700)
-                        except FileExistsError:
+                        if slot.exists():
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
+                                     process_identity=process_identity(os.getpid()),
                                      mode=mode, priority=priority, cores=host_cores, per_leg_cores=cores,
                                      automatic_slots=automatic, cpu_share_per_leg=cpu_share,
                                      local_worker_usage_at_entry=worker,
@@ -560,21 +643,25 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      available_memory_at_entry_bytes=available,
                                      memory_requirement_at_entry_bytes=admission_memory,
                                      host_physical_memory_bytes=host_memory)
+                        marker = uuid.uuid4().hex
+                        owner.update(source_root=str((source_root or repo).resolve()), run_marker=marker,
+                                     scratch=str((source_root or repo).resolve() / '.gate' / ('run.' + marker)))
                         if resources:
-                            marker = uuid.uuid4().hex
                             owner.update(admission_protocol=2, uid=os.getuid(), resource_group=group['resource_group'],
                                          admission_config_sha256=config_digest,
                                          platform=platform, peak_bytes=peak, vm_peak_bytes=vm_peak, exclusive=exclusive,
-                                         calibration=bool(calibration),
-                                         source_root=str((source_root or repo).resolve()),
-                                         process_identity=process_identity(os.getpid()), run_marker=marker,
-                                         scratch=str((source_root or repo).resolve() / '.gate' / ('run.' + marker)))
+                                         calibration=bool(calibration))
                             if mode == 'full':
                                 full_marker = directory / ('local-go-full-' + owner['run_id'] + '.custody')
                         owner = json.loads(json.dumps(owner))  # Freeze observation dictionaries too.
-                        (slot / 'owner.json').write_text(json.dumps(owner) + '\n')
+                        # Publish a complete identity atomically. Death between
+                        # mkdir and owner.json must not create an unknown slot.
+                        pending = directory / ('.slot-pending-' + owner['run_id'])
+                        pending.mkdir(mode=0o700)
+                        (pending / 'owner.json').write_text(json.dumps(owner) + '\n')
+                        pending.rename(slot)
                         if full_marker:
-                            full_marker.write_text(json.dumps(owner) + '\n')
+                            publish_waiting(full_marker, json.dumps(owner) + '\n')
                         if automatic:
                             print(f'gate: full selected {cores} slots per leg; CPU share {cpu_share} per leg; '
                                   f'{admission_memory / GIB:.2f} GiB measured memory required, '
@@ -582,21 +669,20 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         return Slot(slot, owner, full_marker, group)
             if not wait:
                 reason = (f'capacity busy: available memory below {admission_memory / GIB:.2f} GiB measured entry requirement'
-                          if not memory_ok else 'capacity busy or reserved for release/calibration')
+                          if not memory_ok else 'capacity busy or waiting behind an earlier FIFO request')
                 raise RuntimeError('local ' + reason + '; no work started')
             position = queue.index(queue_ticket) + 1 if queue_ticket else None
             if announced != (position, batch_done, memory_ok, admission_memory):
-                detail = f'full queue position {position}' if position else 'waiting for local capacity'
+                detail = f'FIFO queue position {position}' if position else 'waiting for local capacity'
                 if not memory_ok:
                     detail += (f'; waiting for memory: {available / GIB:.2f} GiB available, '
                                f'{admission_memory / GIB:.2f} GiB required (pressure normal)')
                 if not batch_done:
                     detail += '; waiting for the named comparison batch to exit'
-                print('gate: ' + detail + ' (calibration/release priority first)', flush=True)
+                print('gate: ' + detail, flush=True)
                 announced = (position, batch_done, memory_ok, admission_memory)
             time.sleep(.5)
     finally:
         with admission_lock(directory):
-            ticket.unlink(missing_ok=True)
             if queue_ticket:
                 queue_ticket.unlink(missing_ok=True)
