@@ -521,3 +521,37 @@ func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
 		t.Fatalf("prelaunch RAM refusal must wait in the queue without a loss: %+v", got)
 	}
 }
+
+func TestAttemptStoresRefusesRetiredRootWithoutImport(t *testing.T) {
+	s := &workerStore{dir: t.TempDir(), state: workerState{Session: "session", Job: &Job{ID: "retired", Attempt: 1}}}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir, "state.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.attemptStores(); err == nil || !strings.Contains(err.Error(), "retired single-attempt") {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("refused root changed", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "legacy-state.json")); !os.IsNotExist(err) {
+		t.Fatal("refusal imported a child", err)
+	}
+}
+
+func TestAttemptStoresRetainsPreviouslyAdoptedCustody(t *testing.T) {
+	s := &workerStore{dir: t.TempDir(), state: workerState{Session: "session", Attempts: []string{"legacy-state.json"}}}
+	child := workerState{Session: "session", Job: &Job{ID: "retained", Attempt: 1, Session: "session"}}
+	if err := saveWorkerJSON(s.dir, "legacy-state.json", child); err != nil {
+		t.Fatal(err)
+	}
+	stores, err := s.attemptStores()
+	if err != nil || len(stores) != 1 || stores[0].state.Job.ID != "retained" || stores[0].state.Job.Session != "session" {
+		t.Fatal(stores, err)
+	}
+}

@@ -704,37 +704,22 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 			return nil, fmt.Errorf("saved attempt custody unavailable: %w", err)
 		}
 	}
-	if s.state.Job != nil { // Adopt the bounded old single-attempt spool in place.
-		child := &workerStore{dir: s.dir, state: s.state, stateName: "legacy-state.json"}
-		child.state.Attempts = nil
-		// The singular spool predates assignment session fields. Only this
-		// bounded adoption may recover the absent field from saved custody.
-		if child.state.Job.Session == "" {
-			child.state.Job.Session = child.state.Session
-		}
-		if err := child.save(); err != nil {
+	if s.state.Job != nil {
+		return nil, errors.New("retired single-attempt root spool; archive it and install a current worker")
+	}
+	// r6.7 may retain a child already adopted before the release floor. Its
+	// exact process/result custody must still be recovered, never imported anew.
+	data, err := os.ReadFile(filepath.Join(s.dir, "legacy-state.json"))
+	if err == nil {
+		child := &workerStore{dir: s.dir, stateName: "legacy-state.json"}
+		if err = decodeWorkerState(data, &child.state); err != nil {
 			return nil, err
 		}
-		stores = append(stores, child)
-		s.state.Job, s.state.Result = nil, nil
-		s.state.Identity, s.state.Log = "", ""
-		s.state.PID = 0
-		if err := s.save(); err != nil {
-			return nil, err
+		if child.state.Job != nil {
+			stores = append(stores, child)
 		}
-	} else {
-		data, err := os.ReadFile(filepath.Join(s.dir, "legacy-state.json"))
-		if err == nil {
-			child := &workerStore{dir: s.dir, stateName: "legacy-state.json"}
-			if err = decodeWorkerState(data, &child.state); err != nil {
-				return nil, err
-			}
-			if child.state.Job != nil {
-				stores = append(stores, child)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	paths, err := filepath.Glob(filepath.Join(s.dir, "state-attempt-*.json"))
 	if err != nil {
