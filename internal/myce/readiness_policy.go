@@ -146,6 +146,21 @@ func (p *readinessProgress) advance() {
 	p.inactive = false
 }
 
+// pause excludes control-plane waits from the model's silence interval. Nested
+// launch gates preserve an enclosing preparation phase's suspension.
+func (p *readinessProgress) pause() func() {
+	p.mu.Lock()
+	wasSuspended := p.suspended
+	p.suspended = true
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		p.last, p.realLast = p.clock.Now(), RealClock{}.Now()
+		p.suspended = wasSuspended
+		p.mu.Unlock()
+	}
+}
+
 func (p *readinessProgress) state() (time.Duration, bool) {
 	p.mu.Lock()
 	source := p.source

@@ -876,7 +876,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
 	}
 	identity.Platforms, identity.Device = []string{platform}, device
-	ctx, progress, finishReadiness := superviseModelLoad(ctx, identity, rt.dir, rt.clock)
+	ctx, progress, finishReadiness := superviseModelLoadPhase(ctx, identity, rt.dir, rt.clock, true)
 	rt.mu.Lock()
 	m.progress = progress
 	rt.mu.Unlock()
@@ -905,6 +905,8 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	parent := ctx
 	priorGate := launchGateFrom(parent)
 	ctx = withLaunchGate(parent, func(ctx context.Context) error {
+		resume := progress.pause()
+		defer resume()
 		if err := priorGate(ctx); err != nil {
 			return err
 		}
@@ -940,16 +942,15 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 			}
 			// Environment preparation has its own progress/ownership protocol;
 			// a model-load timer cannot classify a queued builder as stalled.
-			progress.mu.Lock()
-			progress.suspended = true
-			progress.mu.Unlock()
 			model, m.releaseEnvironment, e = PrepareModelEnvironment(ctx, model, recipe.Platform, EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{model.Environment: {recipe.Platform: recipe}}}, rt.environmentCache)
-			progress.advance()
-			progress.mu.Lock()
-			progress.suspended = false
-			progress.mu.Unlock()
 		}
 	}
+	// Only cache/model work can be classified by model-load progress. Start a
+	// fresh silence interval after admission and environment preparation.
+	progress.mu.Lock()
+	progress.last, progress.realLast = progress.clock.Now(), RealClock{}.Now()
+	progress.suspended = false
+	progress.mu.Unlock()
 	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {
 		model.Path, e = rt.cache.Prepare(ctx, model)
 	}
