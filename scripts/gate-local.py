@@ -232,7 +232,7 @@ def main():
     if args.after_pid and args.priority != 'calibration':
         parser.error('--after-pid is only for the reserved calibration full')
     repo = args.repo.resolve()
-    slot, folder, child = None, None, None
+    slot, folder, child, cache = None, None, None, None
     interrupted = []
     def interrupt(signum, frame):
         interrupted.append(signum)
@@ -244,12 +244,14 @@ def main():
     try:
         identity = uuid.uuid4().hex
         planned_folder = repo / '.reports/local-gates' / identity
+        cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
+        cache.mkdir(parents=True, exist_ok=True)
+        # Reclaim rebuildable objects before admission checks disk headroom.
+        trim_cache(cache)
         slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
                                 wait=True, after_pid=args.after_pid,
                                 exclusive=args.exclusive, source_root=planned_folder / 'source',
                                 platform=args.platform or ('native' if args.command else 'both'))
-        cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
-        cache.mkdir(parents=True, exist_ok=True)
         folder = planned_folder
         folder.mkdir(parents=True)
         report = repo / '.reports/gate-local.jsonl'
@@ -262,11 +264,6 @@ def main():
                         local_worker_usage_at_entry=slot.owner.get('local_worker_usage_at_entry'))
         path = folder / 'manifest.json'
         path.write_text(json.dumps(manifest) + '\n')
-        with capacity.admission_lock(capacity.root(repo)):
-            legacy = [p for d in capacity.legacy_directories(repo) for p in capacity.occupied_lanes(d)]
-            others = [p for p in capacity.execution_lanes(capacity.root(repo)) if p != slot.directory]
-            if not others and not legacy and not capacity.native_full_custody(include_fleet=True):
-                trim_cache(cache)
         env = dict(os.environ, GOCACHE=str(cache))
         if slot.owner.get('run_marker'):
             env.update(GATE_CUSTODY_ID=slot.owner['run_marker'], GATE_SCRATCH=slot.owner['scratch'])
@@ -278,14 +275,18 @@ def main():
         child = subprocess.Popen(command, cwd=repo, env=env)
         status = child.wait()
         confirmed = receipts.confirmed(folder / 'overall-cleanup.json', identity)
-        if confirmed and status == 0:
-            shutil.rmtree(folder / 'source')
-            (folder / 'source.tar').unlink()
-            (folder / 'runtime.tar').unlink()
+        if confirmed:
+            # A terminal failure is as rebuildable as a successful source tree.
+            if (folder / 'source').exists():
+                shutil.rmtree(folder / 'source')
+            (folder / 'source.tar').unlink(missing_ok=True)
+            (folder / 'runtime.tar').unlink(missing_ok=True)
         return status if confirmed else 125
     finally:
         if slot is not None:
             slot.release(stopped=bool(folder) and receipts.confirmed(folder / 'overall-cleanup.json', identity))
+        if cache is not None:
+            trim_cache(cache)
         if folder:
             print('local gate receipts:', folder, flush=True)
         for sig, handler in handlers.items():
