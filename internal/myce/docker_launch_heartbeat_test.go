@@ -94,34 +94,45 @@ func TestDockerLaunchHeartbeatRetainsFences(t *testing.T) {
 			if j == nil {
 				t.Fatal("missing assignment")
 			}
-			owner := q.s.Machines[m.ID]
-			owner.DockerCleanup = "start pending"
 			launch := HostLaunch{Machine: j.Machine, Session: j.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)}
+			if err := q.update(func() error {
+				owner := q.touchMachine(m.ID)
+				owner.DockerCleanup = "start pending"
+				switch fence {
+				case "cleanup":
+					owner.DockerCleanup = "cleanup unconfirmed: inspect"
+				case "stopping":
+					owner.DockerCleanup = "stop pending"
+				case "unknown":
+					owner.DockerCleanup = "unknown operation"
+				case "sibling":
+					sibling := dockerMachine("sibling", "fake")
+					sibling.HostID = hostID(owner)
+					sibling.DockerCleanup = "start pending"
+					q.touchMachine(sibling.ID)
+					q.s.Machines[sibling.ID] = &sibling
+				case "old-copy":
+					r := HostRelease{Host: hostID(owner), Machine: j.Machine, Session: "old-session", Job: j.ID, Attempt: 1, Docker: true}
+					if q.s.HostReleases == nil {
+						q.s.HostReleases = map[string]HostRelease{}
+					}
+					q.s.HostReleases[releaseKey(r)] = r
+				case "attempt":
+					launch.Attempt = "2"
+				case "session":
+					launch.Session = "old-session"
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			switch fence {
-			case "cleanup":
-				owner.DockerCleanup = "cleanup unconfirmed: inspect"
-			case "stopping":
-				owner.DockerCleanup = "stop pending"
-			case "unknown":
-				owner.DockerCleanup = "unknown operation"
-			case "sibling":
-				sibling := dockerMachine("sibling", "fake")
-				sibling.HostID = hostID(owner)
-				sibling.DockerCleanup = "start pending"
-				q.s.Machines[sibling.ID] = &sibling
-			case "old-copy":
-				r := HostRelease{Host: hostID(owner), Machine: j.Machine, Session: "old-session", Job: j.ID, Attempt: 1, Docker: true}
-				q.s.HostReleases[releaseKey(r)] = r
-			case "attempt":
-				launch.Attempt = "2"
-			case "session":
-				launch.Session = "old-session"
 			case "cancelled":
 				if err := q.Cancel(j.ID); err != nil {
 					t.Fatal(err)
 				}
 			case "maintenance":
-				setMaintenance(t, q, hostID(owner), "drain")
+				setMaintenance(t, q, hostID(&m), "drain")
 			}
 			if err := q.AuthorizeLaunch(launch); !errors.Is(err, ErrStale) {
 				t.Fatalf("%s fence bypassed: %v", fence, err)
