@@ -14,7 +14,7 @@ import (
 
 func statusJobs(t *testing.T, q *Queue) map[string]map[string]json.RawMessage {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/api/status", nil)
+	req := httptest.NewRequest("GET", "/api/status?detail=full", nil)
 	req.Header.Set("Authorization", "Bearer fixture-secret")
 	w := httptest.NewRecorder()
 	API{Queue: q, Token: "fixture-secret"}.Handler().ServeHTTP(w, req)

@@ -257,8 +257,12 @@ custody generations and exact releases, without diagnostic row caps. See the
 [ledger contract](../../docs/jobs.md#retained-per-job-ledger) for fields,
 retention and explicit HTTP 410 expiration.
 
-Status defaults to active/cleanup-pending work and the newest 100 terminal jobs.
-Work curves remain included in default status. `client.status(full=True)` restores all history.
+Status defaults to compact active/cleanup-pending work, machines, holds and
+active health conditions. `client.status(sections="work,storage")` restores
+selected retained diagnostics; supported sections are `jobs`, `machines`,
+`storage`, `work`, `health`, `efficiency`, `usage`, and `diagnostics`.
+`client.status(full=True)` restores every existing field and all history.
+`jobs="recent"` adds a history page sized by negotiated capacity.
 `client.status(jobs="active", project="example")` filters work;
 `jobs="all"`, `limit=100`, and `before=reply["jobs_page"]["next_before"]`
 page history. `since` accepts an inclusive submission timestamp in RFC3339.

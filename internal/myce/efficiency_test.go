@@ -94,7 +94,7 @@ func TestEfficiencyNovemberReplay(t *testing.T) {
 	if !got.At.Equal(report.At) || len(got.Stranded) != 1 {
 		t.Fatalf("endpoint=%+v", got)
 	}
-	for _, path := range []string{"/api/status", "/api/inspection"} {
+	for _, path := range []string{"/api/status?sections=efficiency", "/api/inspection"} {
 		var snapshot Snapshot
 		if err := client.Call(context.Background(), http.MethodGet, path, nil, &snapshot); err != nil {
 			t.Fatal(err)

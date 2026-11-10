@@ -129,7 +129,7 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 		t.Fatal("missing ledger outcomes", outcomes)
 	}
 	var status Snapshot
-	if err := client.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+	if err := client.Call(context.Background(), "GET", "/api/status?jobs=recent&sections=jobs", nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := json.Marshal(status)

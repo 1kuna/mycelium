@@ -460,3 +460,16 @@ func TestFreshnessLearnsHeartbeatCadence(t *testing.T) {
 		t.Fatal("a returning heartbeat is fresh again")
 	}
 }
+
+func TestFrameCompactStatus(t *testing.T) {
+	// The shared default needs no retained work, usage, efficiency or health-event
+	// collection. Its latest current health sample still supplies host load.
+	d, err := decodeStatus([]byte(`{"now":"2026-11-10T12:00:00Z","summary":{"retained_jobs":8000},"machines":[{"id":"worker","last_seen":"2026-11-10T12:00:00Z","host_health":{"history":[{"load":2.5}]}}],"jobs":[{"id":"current","state":"running","machine":"worker","spec":{"name":"work","project":"example"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newProjector().project(d, time.Second)
+	if len(f.Machines) != 1 || f.Machines[0].Load == nil || *f.Machines[0].Load != 2.5 || len(f.Jobs) != 1 || f.Jobs[0].ID != "current" {
+		t.Fatalf("compact default lost view facts: %+v", f)
+	}
+}

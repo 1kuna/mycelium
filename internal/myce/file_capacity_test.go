@@ -256,7 +256,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 1 << 30}, nil
 	}
 	var snap Snapshot
-	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status?sections=storage", nil, &snap); err != nil {
 		t.Fatal(err)
 	}
 	fs := snap.FileStore
@@ -273,7 +273,7 @@ func TestFileCapacityStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second) // Allow the observational status cache to expire.
-	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status?sections=storage", nil, &snap); err != nil {
 		t.Fatal(err)
 	}
 	if fs := snap.FileStore; fs.UsedBytes != 4 || fs.FreeBytes != 60 || fs.ReclaimableBytes != 0 {

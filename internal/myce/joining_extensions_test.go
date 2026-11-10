@@ -82,7 +82,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 			completed = &current
 			clock.Advance(time.Second)
 			var snap Snapshot
-			if err := client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+			if err := client.Call(ctx, "GET", "/api/status?sections=machines", nil, &snap); err != nil {
 				t.Fatal(err)
 			}
 			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {

@@ -201,8 +201,17 @@ the jobs alive; retain the IDs. Never build per-job background wait processes,
 repeated status/get loops or replacement submissions to obtain progress.
 
 Use `myce status JOB_ID` and `myce logs JOB_ID` for a real blocker. Default fleet
-status is a partial history page; absence from it is not a lost or incomplete job.
-Use `myce status --history` only when full retained history is needed. Follow
+status is compact current work, machines, holds and active alerts; absence is
+not proof of completion or loss. Retained evidence/telemetry is opt-in:
+`myce status --sections jobs,machines` adds detailed diagnostics;
+`--sections work,storage,health,efficiency,usage,diagnostics` selects retained
+collections. Job reasons in the compact view are last committed facts, not a
+new placement plan. `myce status --jobs all --limit N --before CURSOR --json`
+pages history at negotiated capacity; Python `client.list()` walks those pages.
+`myce status --history` / `GET /api/status?detail=full` /
+`client.status(full=True)` restores every existing field for full inspection or
+preservation. See [section coverage](../../docs/status.md#reading-myce-status).
+Use `client.status(sections="work,storage")` for a selected evidence read. Follow
 Retry-After and typed recovery diagnostics; do not change identity or trust to
 evade them. Permanent authority/TLS/integrity/configuration refusals go to their
 owner. An older observer's restart classification may require the installation

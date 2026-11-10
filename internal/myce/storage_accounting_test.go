@@ -49,7 +49,7 @@ func TestStorageAccountingRestartAndLegacyGuards(t *testing.T) {
 		t.Helper()
 		clock.Advance(time.Second) // Expire only the observational status cache.
 		var snap Snapshot
-		if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+		if err := c.Call(context.Background(), http.MethodGet, "/api/status?sections=storage", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		fs := snap.FileStore

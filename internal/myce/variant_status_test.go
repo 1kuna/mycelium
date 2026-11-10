@@ -71,7 +71,7 @@ func TestVariantStatusPlacementAndAPI(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
 	defer server.Close()
 	c := Client{URL: server.URL, Token: "fixture"}
-	for _, endpoint := range []string{"/api/jobs/" + j.ID, "/api/status"} {
+	for _, endpoint := range []string{"/api/jobs/" + j.ID, "/api/status?sections=jobs"} {
 		var got Job
 		if strings.HasPrefix(endpoint, "/api/jobs/") {
 			if err := c.Call(context.Background(), "GET", endpoint, nil, &got); err != nil {

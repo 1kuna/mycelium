@@ -106,7 +106,11 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 			}
 		}
 	}
-	snapshot := func() Snapshot { var s Snapshot; _ = client.Call(ctx, "GET", "/api/status", nil, &s); return s }
+	snapshot := func() Snapshot {
+		var s Snapshot
+		_ = client.Call(ctx, "GET", "/api/status?detail=full", nil, &s)
+		return s
+	}
 	wait(func() bool { return len(snapshot().Machines) == 2 })
 	submitAPI := func(s Spec) *Job {
 		t.Helper()
