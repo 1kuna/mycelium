@@ -25,7 +25,7 @@ type PriorityPolicy struct {
 	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
-	// Models is local acquisition policy for declared model snapshots; absent denies them.
+	// Models is local acquisition policy for declared model snapshots; absent permits all repositories.
 	Models *ModelPolicy `json:"models,omitempty" yaml:"models,omitempty"`
 	// Nil hosts stay off the wire and out of exports, so an older queue accepts
 	// the request and a file exported from it never clears holds after upgrade.

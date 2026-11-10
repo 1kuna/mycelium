@@ -337,86 +337,84 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	return &copy
 }
 
-func (q *Queue) maintainFanOut() {
-	for _, parent := range q.liveJobs() {
-		if parent.Spec.FanOut == nil || parent.FanOut == nil {
+func (q *Queue) maintainFanOutJob(parent *Job) {
+	if parent.Spec.FanOut == nil || parent.FanOut == nil {
+		return
+	}
+	if terminal(parent.State) {
+		if parent.State != "succeeded" {
+			for _, id := range parent.FanOut.Children {
+				if child := q.s.Jobs[id]; child != nil && !terminal(child.State) {
+					q.cancelJob(child)
+				}
+			}
+		}
+		return
+	}
+	if parent.FanOut.Results == nil {
+		q.touchJob(parent.ID)
+		parent.FanOut.Results = map[string]PieceResult{}
+	}
+	failed := false
+	for _, id := range parent.FanOut.Children {
+		child := q.s.Jobs[id]
+		if child == nil {
+			failed = true
 			continue
 		}
-		if terminal(parent.State) {
-			if parent.State != "succeeded" {
-				for _, id := range parent.FanOut.Children {
-					if child := q.s.Jobs[id]; child != nil && !terminal(child.State) {
-						q.cancelJob(child)
-					}
-				}
-			}
+		if child.State == "failed" || child.State == "cancelled" {
+			failed = true
 			continue
 		}
-		if parent.FanOut.Results == nil {
-			q.touchJob(parent.ID)
-			parent.FanOut.Results = map[string]PieceResult{}
+		if child.State != "succeeded" {
+			continue
 		}
-		failed := false
-		for _, id := range parent.FanOut.Children {
-			child := q.s.Jobs[id]
-			if child == nil {
-				failed = true
+		for _, piece := range child.Batch.Pieces {
+			if old, ok := parent.FanOut.Results[piece.Key]; ok && old.Execution == (Execution{ID: child.ID, Attempt: child.Attempt}) {
 				continue
 			}
-			if child.State == "failed" || child.State == "cancelled" {
-				failed = true
-				continue
-			}
-			if child.State != "succeeded" {
-				continue
-			}
-			for _, piece := range child.Batch.Pieces {
-				if old, ok := parent.FanOut.Results[piece.Key]; ok && old.Execution == (Execution{ID: child.ID, Attempt: child.Attempt}) {
-					continue
+			q.touchJob(parent.ID)
+			r := PieceResult{Execution: Execution{ID: child.ID, Attempt: child.Attempt}, OutputRefs: FileManifest{}, OutputFiles: map[string]string{}}
+			for name := range parent.Spec.Outputs {
+				local := name
+				if child.Batch.Run {
+					local = filepath.Join(piece.Key, name)
 				}
-				q.touchJob(parent.ID)
-				r := PieceResult{Execution: Execution{ID: child.ID, Attempt: child.Attempt}, OutputRefs: FileManifest{}, OutputFiles: map[string]string{}}
-				for name := range parent.Spec.Outputs {
-					local := name
-					if child.Batch.Run {
-						local = filepath.Join(piece.Key, name)
-					}
-					if ref, ok := child.OutputRefs[local]; ok {
-						r.OutputRefs[name] = ref
-					}
-					if path, ok := child.OutputFiles[local]; ok {
-						r.OutputFiles[name] = path
-					}
+				if ref, ok := child.OutputRefs[local]; ok {
+					r.OutputRefs[name] = ref
 				}
-				parent.FanOut.Results[piece.Key] = r
+				if path, ok := child.OutputFiles[local]; ok {
+					r.OutputFiles[name] = path
+				}
+			}
+			parent.FanOut.Results[piece.Key] = r
+		}
+	}
+	if failed {
+		q.touchJob(parent.ID)
+		parent.State, parent.Reason = "failed", "declared piece failed"
+	} else if len(parent.FanOut.Results) == len(parent.Spec.FanOut.Pieces) {
+		q.touchJob(parent.ID)
+		parent.State, parent.Reason = "succeeded", ""
+		parent.OutputRefs = FileManifest{}
+		parent.OutputFiles = map[string]string{}
+		for key, r := range parent.FanOut.Results {
+			for name, ref := range r.OutputRefs {
+				parent.OutputRefs[filepath.Join(key, name)] = ref
+			}
+			for name, path := range r.OutputFiles {
+				parent.OutputFiles[filepath.Join(key, name)] = path
 			}
 		}
-		if failed {
+	}
+	if terminal(parent.State) {
+		now := q.clock.Now()
+		parent.FinishedAt = &now
+	} else {
+		reason := fmt.Sprintf("declared pieces: %d/%d accepted", len(parent.FanOut.Results), len(parent.Spec.FanOut.Pieces))
+		if parent.Reason != reason {
 			q.touchJob(parent.ID)
-			parent.State, parent.Reason = "failed", "declared piece failed"
-		} else if len(parent.FanOut.Results) == len(parent.Spec.FanOut.Pieces) {
-			q.touchJob(parent.ID)
-			parent.State, parent.Reason = "succeeded", ""
-			parent.OutputRefs = FileManifest{}
-			parent.OutputFiles = map[string]string{}
-			for key, r := range parent.FanOut.Results {
-				for name, ref := range r.OutputRefs {
-					parent.OutputRefs[filepath.Join(key, name)] = ref
-				}
-				for name, path := range r.OutputFiles {
-					parent.OutputFiles[filepath.Join(key, name)] = path
-				}
-			}
-		}
-		if terminal(parent.State) {
-			now := q.clock.Now()
-			parent.FinishedAt = &now
-		} else {
-			reason := fmt.Sprintf("declared pieces: %d/%d accepted", len(parent.FanOut.Results), len(parent.Spec.FanOut.Pieces))
-			if parent.Reason != reason {
-				q.touchJob(parent.ID)
-				parent.Reason = reason
-			}
+			parent.Reason = reason
 		}
 	}
 }

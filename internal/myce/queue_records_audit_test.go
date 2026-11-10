@@ -99,7 +99,7 @@ func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte, machine
 			var before, after map[string]any
 			_ = json.Unmarshal(beforeRecords["machines/"+id], &before)
 			_ = json.Unmarshal(data, &after)
-			for _, key := range []string{"host_memory_derivation", "host_memory_policy_mismatch", "memory_allowance_bytes", "memory_allowance_qualification", "effective_host_memory_budget_gb", "host_memory_in_use_gb", "free_host_memory_gb", "tool_inventory", "effective_cpu_cores", "cpu_in_use_cores", "free_cpu_cores", "cpu_capacity_reason"} {
+			for _, key := range []string{"host_memory_derivation", "host_memory_policy_mismatch", "memory_allowance_bytes", "memory_allowance_qualification", "effective_host_memory_budget_gb", "host_memory_in_use_gb", "free_host_memory_gb", "tool_inventory", "effective_cpu_cores", "cpu_in_use_cores", "free_cpu_cores", "cpu_capacity_reason", "shared_host_reason"} {
 				delete(before, key)
 				delete(after, key)
 			}

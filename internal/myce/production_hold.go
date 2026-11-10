@@ -757,24 +757,6 @@ func (q *Queue) maintainHolds() {
 				}
 			}
 		}
-		unsettled := false
-		for _, r := range q.s.HostReleases {
-			if r.Host == host {
-				unsettled = true
-			}
-		}
-		for _, s := range q.s.ModelSlots {
-			m := q.s.Machines[s.Machine]
-			if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "loading" || s.State == "draining" || s.State == "unloading" || s.State == "unload_failed" || s.InFlight > 0) {
-				unsettled = true
-			}
-		}
-		if demand[host] || unsettled {
-			continue
-		}
-		// Ready idle residency remains available under the engine's own idle
-		// timer. Only actual demand or unresolved releases keep takeover.
-		h.Active = false
 	}
 }
 
@@ -896,5 +878,55 @@ func dockerStartingOrRunning(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// Finalize release-only state after this transaction's decisions. This never
+// chooses a target or preempts more work.
+func (q *Queue) finalizeHolds() {
+	enabled := false
+	for _, h := range q.s.Hosts {
+		enabled = enabled || h.Active && h.Policy.hostWide()
+	}
+	if !enabled {
+		return
+	}
+	demand := map[string]bool{}
+	now := q.clock.Now()
+	for _, j := range q.liveJobs() {
+		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+			continue
+		}
+		if dependencyReady(j) && j.Spec.Priority == "production" && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
+			demand[j.ProductionHost] = true
+		}
+	}
+	for _, c := range q.calls {
+		if c.Priority == "production" && c.Error == "" {
+			demand[c.ProductionHost] = true
+		}
+	}
+	for host, h := range q.s.Hosts {
+		if !h.Active || !h.Policy.hostWide() {
+			continue
+		}
+		unsettled := false
+		for _, r := range q.s.HostReleases {
+			if r.Host == host {
+				unsettled = true
+			}
+		}
+		for _, s := range q.s.ModelSlots {
+			m := q.s.Machines[s.Machine]
+			if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "loading" || s.State == "draining" || s.State == "unloading" || s.State == "unload_failed" || s.InFlight > 0) {
+				unsettled = true
+			}
+		}
+		if demand[host] || unsettled {
+			continue
+		}
+		// Ready idle residency remains available under the engine's own idle
+		// timer. Only actual demand or unresolved releases keep takeover.
+		h.Active = false
 	}
 }

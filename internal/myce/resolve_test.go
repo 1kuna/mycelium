@@ -159,6 +159,8 @@ func TestResolveExplainsSharedHostRefusal(t *testing.T) {
 	key := strings.Repeat("b", 64)
 	q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Key: key, Backend: "uv", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte("# pinned\n")}}}}}
 	m := sharedHostFixture(t, q)
+	// A shared profile must be configured and acknowledged before testing
+	// environment readiness; directly editing inventory leaves a profile hold.
 	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
 	m.EnvironmentBuilder = true
 	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {

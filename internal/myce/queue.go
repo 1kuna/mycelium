@@ -256,6 +256,7 @@ type Queue struct {
 	machineRecords          bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
+	maintenance             *queueMaintenance
 	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
 	observeUpdatePhases     func([5]time.Duration)      // Optional transaction phase observer.
 	observeSubmissionAdvice func(submissionAdviceTiming)
@@ -657,12 +658,19 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if q.stopping.Load() {
 		return queueStopping()
 	}
+	previousMaintenance := q.maintenance
+	q.maintenance = &queueMaintenance{}
+	defer func() { q.maintenance = previousMaintenance }()
 	if q.simulation {
 		hold.next(holdUsage)
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
 		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
+		if err == nil {
+			q.settleMaintenance()
+			q.finalizeHolds()
+		}
 		if err == nil && committed != nil {
 			committed()
 		}
@@ -708,6 +716,8 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		err = queueStopping()
 	}
 	if err == nil {
+		q.settleMaintenance()
+		q.finalizeHolds()
 		q.refreshEfficiency()
 	}
 	if err == nil {
@@ -1224,11 +1234,21 @@ func (q *Queue) fleetQuiet(now time.Time, includePending bool) bool {
 	return q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= quietFor)
 }
 
+// Run time/custody fences before offering work. Later mutations close only
+// affected relations; the transaction settles them again before persistence.
 func (q *Queue) maintain() {
-	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	if q.stopping.Load() {
 		return
 	}
+	if q.maintenance != nil && q.maintenance.ran {
+		q.settleMaintenance()
+		return
+	}
+	if q.maintenance == nil {
+		defer func() { q.maintenance = nil }()
+	}
+	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
+	q.beginMaintenance()
 	previousCapture := q.memoryAdmissionCapture
 	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
 	defer func() {
@@ -1236,17 +1256,12 @@ func (q *Queue) maintain() {
 		q.memoryAdmissionCapture = previousCapture
 	}()
 	q.maintainWallTimeLimits()
-	q.maintainJobPauses()
 	q.maintainFleetUpgrade()
-	q.maintainFanOut()
-	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
 	q.maintainDeviceMaintenance()
-	q.maintainReservations()
 	q.maintainExtensionQualifications()
-	q.maintainSubmissions()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.State == "queued" {
@@ -1265,8 +1280,6 @@ func (q *Queue) maintain() {
 		q.withdrawUnavailable(m)
 	}
 	q.maintainApprovalGrace()
-	q.maintainStartDeadlines()
-	q.maintainHolds()
 	for machine, release := range q.s.BatchReleases {
 		if !now.Before(release.Until) {
 			delete(q.s.BatchReleases, machine)
@@ -1345,20 +1358,21 @@ func (q *Queue) maintain() {
 			j.Reason = "give-up time reached"
 		}
 	}
+	q.settleMaintenance()
 	q.maintainStartDeadlines()
-	q.maintainHolds()
-	q.refreshHostMemory()
-	q.maintainFanOut()
-	q.maintainPieceDependencies()
-	q.maintainJobPauses()
-	q.maintainModels()
+	q.settleMaintenance()
 	q.maintainReservations()
-	q.escalateDockerCleanup()
+	q.settleMaintenance()
 	q.refreshHostMemory()
 	q.maintainHolds()
+	q.settleMaintenance()
+	q.maintainModels()
+	q.settleMaintenance()
+	q.escalateDockerCleanup()
+	q.finalizeHolds()
 	// Only display reasons change in this final read-only planning pass.
 	// Share memory evidence across the backlog, then discard it before the
-	// next mutation (a check-in can call maintain again in the same update).
+	// next mutation. Subsequent decisions settle only affected relations.
 	previous := q.memoryPlanning
 	q.memoryPlanning = newMemoryPlanningCache()
 	defer func() { q.memoryPlanning = previous }()
@@ -1832,7 +1846,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		if c.AttemptProtocol != "" && m.Devices != nil {
 			q.checkinMachineAttempts(&m, reports, progresses, c.Recovering, &reply)
-			q.maintain()
+			q.settleMaintenance()
 			return nil
 		}
 
@@ -1916,7 +1930,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			m.Gone = true
 			m.Models = nil
 		}
-		q.maintain()
+		q.settleMaintenance()
 		return nil
 	}, nil)
 	if reply.Job != nil {

@@ -14,12 +14,26 @@ import sys
 import tempfile
 import time
 import uuid
+import traceback
+from email.utils import parsedate
 
 
 MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles.py'))]
 spec = importlib.util.spec_from_file_location('gate_runtime', Path(__file__).with_name('gate-runtime.py'))
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
+
+
+def admission_module():
+    # Package watchdogs import this module without using host admission.
+    spec = importlib.util.spec_from_file_location('gate_capacity', Path(__file__).with_name('gate-capacity.py'))
+    capacity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(capacity)
+    return capacity
+
+
+def archive_custody(*args):
+    return admission_module().archive_custody(*args)
 
 
 def interrupted(signum, frame):
@@ -78,8 +92,8 @@ def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, ev
                    scratch, *map(str, sorted(pids))]
         # Keep native inspection in a bounded subprocess: an unavailable kernel
         # probe costs retained scratch, never fixture signals or deletion.
-        with tempfile.TemporaryFile(mode='w+t') as output_file:
-            probe = subprocess.Popen(command, stdout=output_file, stderr=subprocess.DEVNULL)
+        with tempfile.TemporaryFile(mode='w+t') as output_file, tempfile.TemporaryFile(mode='w+t') as error_file:
+            probe = subprocess.Popen(command, stdout=output_file, stderr=error_file)
             failure, status = None, None
             try:
                 # Complete recovery inventories exceeded the old 5s cap under
@@ -96,6 +110,8 @@ def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, ev
                     pass  # Do not wait for uninterruptible kernel I/O to return.
             output_file.seek(0)
             output = output_file.read()
+            error_file.seek(0)
+            probe_error = error_file.read()
         pid = None
         for line in output.splitlines():
             if line.startswith('p'):
@@ -109,11 +125,11 @@ def scratch_processes(scratch, pids, all_handles=False, protected_roots=None, ev
         if failure is not None:
             raise failure
         if status != 0:
-            raise subprocess.CalledProcessError(status, command)
+            raise subprocess.CalledProcessError(status, command, stderr=probe_error)
     return found
 
 
-def owned_processes(marker, scratch, known, inspect_handles=False):
+def owned_processes(marker, scratch, known, inspect_handles=False, complete_handles=False, born_after=None):
     # Read privately: ps environments can contain credentials; never log them.
     # Retain start identities once ownership is proven, so TERM cannot hide a
     # scrubbed child by killing its parent or closing its inherited log handles.
@@ -135,7 +151,17 @@ def owned_processes(marker, scratch, known, inspect_handles=False):
         if (known.get(pid) == birth or marker in fields[9].split() or state.search(fields[9])):
             owned.add(pid)
     if inspect_handles:
-        owned.update(scratch_processes(scratch, processes))
+        if complete_handles:
+            # A fixture cannot predate its holder. In particular Linux's
+            # non-dumpable sd-pam session helper is not a gate fixture; probing
+            # it would make every ordinary user's scratch inventory fail.
+            cutoff = parsedate(born_after or '')
+            candidates = {pid for pid, (_, birth) in processes.items()
+                          if not cutoff or not parsedate(birth) or parsedate(birth) >= cutoff}
+            owned.update(scratch_processes(scratch, candidates, all_handles=True,
+                                          protected_roots=set(known), evidence=[]))
+        else:
+            owned.update(scratch_processes(scratch, processes))
     # Capture descendants before delivering any signal, even when they scrub
     # all environment and put their own cwd/output outside the scratch tree.
     while True:
@@ -225,16 +251,21 @@ def write_full_custody(slot, marker=None, scratch=None):
     slot.custody_record = record
 
 
-def full_custody_idle(record):
+def full_custody_idle(record, dead_releases=True):
     if 'holder_pid' in record:
-        pid, birth = record['holder_pid'], record['holder_start']
-        if not isinstance(pid, int) or pid <= 0 or not isinstance(birth, str) or not birth:
+        pid, birth = record['holder_pid'], record.get('holder_start')
+        if type(pid) is not int or pid <= 0:
+            return False
+        current = process_start(pid)
+        if dead_releases:
+            return current is None or isinstance(birth, str) and bool(birth.strip()) and current != birth
+        if not isinstance(birth, str) or not birth:
             return False
         if (record.get('phase') not in ('reserved', 'running')
                 or (record['phase'] == 'running' and 'marker' not in record)
                 or (record['phase'] == 'reserved' and ('marker' in record or 'scratch' in record))):
             return False
-        if process_start(pid) == birth:
+        if current == birth:
             return False
     elif 'marker' not in record:
         return False  # Old incomplete/unknown records need owner recovery.
@@ -252,18 +283,17 @@ def full_custody_idle(record):
     return True
 
 
-def reconcile_full_custody(slot):
-    """Reclaim both records only after proving every recorded fixture exited."""
+def reconcile_full_custody(slot, local=True):
+    """Reclaim dead holders automatically; preserve live/unknown ownership."""
     try:
         paths = [path for path in full_custody_paths(slot) if path.exists()]
-        if not all(full_custody_idle(json.loads(path.read_text())) for path in paths):
+        if not all(full_custody_idle(json.loads(path.read_text()), dead_releases=local) for path in paths):
             return False
         # The caller holds host/cache admission and the cache-slot lock. Keep
         # both old records as evidence; age alone never releases custody.
-        for path in paths:
-            path.rename(path.with_name(path.name + '.reconciled-' + uuid.uuid4().hex))
         if paths:
-            print('gate: reconciled abandoned full-suite custody', flush=True)
+            row = json.loads(paths[-1].read_text())
+            archive_custody(Path(slot.name).parent, paths, row, 'dead full holder')
         return True
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return False  # Unknown ownership/inventory keeps the slot occupied.
@@ -288,7 +318,7 @@ def try_full_slot(cache, control):
                     handle.host_custody = control / ('local-go-native-full-' + key + '.custody')
                 try:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    if not reconcile_full_custody(handle):
+                    if not reconcile_full_custody(handle, local=control is not None):
                         handle.close()
                     else:
                         available.append(handle)
@@ -311,6 +341,7 @@ def acquire_full_slot():
     """Legacy native fulls share host admission; fleet jobs remain background."""
     cache = Path(subprocess.check_output(['go', 'env', 'GOCACHE'], text=True).strip())
     cache.mkdir(parents=True, exist_ok=True)
+    admission_module()._cache.trim_backups(cache / 'selfheal-backups')
     worker_files = (Path.home() / '.local/share/mycelium/worker/state/job-files').resolve()
     fleet = Path.cwd().resolve().is_relative_to(worker_files)
     control = Path.home() / '.cache/mycelium-gates/control'
@@ -328,6 +359,7 @@ def acquire_full_slot():
                 slot = (None if (control / 'local-go-resource-group.custody').exists()
                         else try_full_slot(cache, control))
         if slot is not None:
+            slot.local_development = not fleet
             return slot
         if not announced:
             print('waiting for a full-race slot (two-suite custody boundary)', flush=True)
@@ -336,17 +368,23 @@ def acquire_full_slot():
 
 
 def release_full_slot(slot, stopped):
+    if not stopped and not getattr(slot, 'local_development', True):
+        print('gate: fleet full cleanup unconfirmed; custody retained', file=sys.stderr)
+        slot.close()
+        return
+    paths = full_custody_paths(slot)
+    expected = getattr(slot, 'custody_record', None)
+    if expected is not None and any(json.loads(path.read_text()) != expected for path in paths):
+        raise RuntimeError('native full custody changed; retained')
     if stopped:
-        paths = full_custody_paths(slot)
-        expected = getattr(slot, 'custody_record', None)
-        if expected is not None and any(json.loads(path.read_text()) != expected for path in paths):
-            raise RuntimeError('native full custody changed; retained')
         # Removing cache custody first leaves host custody binding until last.
         for path in reversed(paths):
             path.unlink()
     else:
-        print('gate: full-suite custody unconfirmed; admission slot retained', file=sys.stderr)
+        archive_custody(Path(slot.name).parent, paths, expected or {},
+                        'cleanup unconfirmed; verdict retained')
     slot.close()
+    admission_module()._cache.trim_backups(Path(slot.name).parent / 'selfheal-backups')
 
 
 def local_resource_admission():
@@ -407,8 +445,16 @@ def main():
         Path(scratch).mkdir(mode=0o700)
         marker = 'GATE_RUN_ID=' + admitted['run_marker']
     else:
-        scratch = tempfile.mkdtemp(prefix='run.', dir=root)
-        marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
+        identity = os.environ.get('GATE_CUSTODY_ID')
+        if identity and re.fullmatch('[0-9a-f]{32}', identity):
+            scratch = str(root / ('run.' + identity))
+            if scratch != os.environ.get('GATE_SCRATCH'):
+                raise RuntimeError('admitted scratch identity changed')
+            Path(scratch).mkdir(mode=0o700)
+            marker = 'GATE_RUN_ID=' + identity
+        else:
+            scratch = tempfile.mkdtemp(prefix='run.', dir=root)
+            marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
     if slot is not None:
         write_full_custody(slot, marker, scratch)
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
@@ -458,14 +504,21 @@ def main():
             stopped = stop_fixtures(marker, scratch, child)
             runtime_proof = runtime.runtime_cleanup(runtime_dir, child_env['GATE_RUN_ID'])
             (runtime_dir / 'cleanup.json').write_text(json.dumps(dict(stopped=stopped, docker=runtime_proof)) + '\n')
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            if stopped:
+                remove_scratch(scratch)
+        except Exception as error:
             stopped = False
-            print('quick: fixture inventory failed; scratch retained', file=sys.stderr)
-        if stopped:
-            remove_scratch(scratch)
-        else:
+            diagnostic = dict(error_type=type(error).__name__, error=str(error),
+                              traceback=traceback.format_exc(),
+                              stderr=getattr(error, 'stderr', None))
+            try:
+                (runtime_dir / 'cleanup-error.json').write_text(json.dumps(diagnostic) + '\n')
+            except OSError:
+                print(json.dumps(diagnostic), file=sys.stderr)
+            print('quick: fixture inventory failed; scratch retained: ' + str(error), file=sys.stderr)
+        if not stopped:
             print(f'gate scratch retained: {scratch}', file=sys.stderr)
-            status = 125  # Unconfirmed custody prevents capacity reuse.
+            status = 125  # Cleanup failure is a real verdict, not a capacity reservation.
         if slot is not None:
             release_full_slot(slot, stopped)
         if receipt_path and receipt_identity:
