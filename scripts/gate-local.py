@@ -25,7 +25,7 @@ def module(name):
 
 capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
 trim_cache = module('gate-cache').trim_cache
-HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
+HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-capacity.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 
@@ -95,7 +95,7 @@ def execute(path):
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError):
         # All preparation commands use run/check_output, which reap on these
         # failures. No payload/transport has been launched. Signal death and
-        # unknown exceptions still leave no positive receipt and retain custody.
+        # unknown exceptions still leave no positive cleanup receipt.
         manifest = json.loads(path.read_text())
         receipts.publish(path.parent / 'overall-cleanup.json', manifest['identity'],
                          stopped=True, status=125, phase='preparation', no_payload_started=True)
@@ -186,7 +186,7 @@ def execute(path):
             status = status or result
         return status
     finally:
-        # Positive receipts, not exit-code guesses, authorize capacity reuse.
+        # Positive receipts authorize source deletion, never admission occupancy.
         for child in children:
             if child.poll() is None:
                 child.terminate()
@@ -223,7 +223,7 @@ def main():
     parser.add_argument('--command', nargs=argparse.REMAINDER, default=[])
     parser.add_argument('--execute', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--reconcile', type=Path, nargs='+', metavar='RECEIPT',
-                        help='verify abandoned measured custody and archive it without deleting scratch')
+                        help='compatibility command; admission now reclaims dead holders automatically')
     args = parser.parse_args()
     if args.cores is None and (args.mode != 'full' or args.command):
         args.cores = 4
@@ -290,6 +290,7 @@ def main():
     finally:
         if slot is not None:
             slot.release(stopped=bool(folder) and receipts.confirmed(folder / 'overall-cleanup.json', identity))
+            capacity._cache.trim_backups(slot.directory.parent / 'selfheal-backups')
         if cache is not None:
             trim_cache(cache)
         if folder:

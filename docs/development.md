@@ -40,7 +40,7 @@ between these scans. Module downloads, timing and compatibility records, and
 custody receipts are retained; symlinked directories are never traversed.
 After affirmative cleanup, successful and failed runs both remove their frozen
 source tree and source/runtime archives. Unconfirmed cleanup retains the tree
-for recovery; verdicts and receipts remain available in either case.
+for diagnosis without retaining admission; verdicts and receipts remain available in either case.
 
 ## Laptop test gates
 
@@ -184,7 +184,7 @@ Local development admission uses an atomic directory per heavy run, shared
 across Git worktrees and ordinary clones under
 `~/.cache/mycelium-gates/control`. It registers legacy checkout report roots,
 recognizes both existing `local-go-slot` lanes and
-preserves unknown/abandoned ownership. Qualified hosts admit full and quick runs
+preserves unknown/live ownership and automatically reclaims dead holders. Qualified hosts admit full and quick runs
 from their measured per-leg CPU/RAM and live capacity, rather than a fixed full
 count. The four-core qualification observed native peak 7.01 GiB and Linux/VM
 peak 10.57 GiB. With the measured 5.43 GiB host-memory variation reserve, single-run
@@ -258,173 +258,43 @@ evidence falls back to the full envelope. This optional quick envelope may be
 refreshed while runs are active: existing reservations keep their original
 charges and only new requests use the new measurement.
 
-MY-41 supersedes the development-custody recovery restrictions below. Operators
-may stop the gate-owned VM and move stale gate custody into a dated backup when
-it blocks iteration. Preserve source, logs and real verdicts; production job
-custody is outside this development-tool reset authority.
+Local admission automatically archives a slot or custody record when its holder
+PID is absent (including a zombie), or its recorded start identity differs from
+the live process. The host admission lock serializes reclamation and new
+reservations across checkouts. Live or unverifiable holders remain protected;
+never-admitted waiters are queue tickets, not supervisors. No global quiet,
+Docker/guest inventory or manual reconciliation is required to release dead
+holder capacity. `--reconcile` remains a compatibility entry point for the same
+automatic operation.
 
-Before enabling or re-enabling measured admission, any never-admitted waiter
-started with a pre-change helper must have exited or been restarted by its owner
-with the current helper. Preserve admitted and unknown execution custody;
-restarting a waiter never authorizes clearing that custody.
-Unqualified hosts retain two heavy lanes and one full. Frozen older helpers see
-both old lane directories reserved while the measured allocator is active;
-new helpers wait for old/unknown execution owners to finish. Protocol guards
-leave only after every admitted run has affirmative cleanup. Active resource
-custody binds the normalized capacity configuration and evidence digest;
-configuration changes refuse new admission until that group has cleaned up.
-Measured owners persist the holder PID and start identity, unique run marker,
-and planned private scratch before launching work. Native supervisors and guest
-cleanup nonces are journaled separately in the run's retained receipt folder.
-Repeated termination signals cannot interrupt the budget's cleanup or its
-receipt publication.
+Cleanup and inventory failures produce exit 125, a negative cleanup receipt and
+`cleanup-error.json` with the exception and traceback. They release admission
+anyway, including when a Docker daemon becomes unreachable after creating a
+container. Current labelled fixtures journal daemon use before creating resources;
+a gate that never used Docker needs no daemon cleanup. A real cleanup failure
+never becomes a passing verdict. Source, logs and verdict receipts remain in
+the original run directory. Native process identity, marker, ancestry and handle
+checks still protect live fixtures; recovery never signals another run.
 
-After supervisor death, use the supported zero-workload recovery command:
+Dead scratch is renamed into `selfheal-backups` beside its original `.gate`
+directory, on the same filesystem. Its archived custody record identifies the
+backup. At subsequent admissions and gate exit, backup collection keeps at most
+eight runs and 2 GiB of rebuildable scratch, expiring it after 24 hours. These
+bounds provide a short debugging window without accumulating abandoned test
+homes. A live fixture or unavailable scratch inventory preserves scratch in
+place; later invocations retry its collection after the fixture exits. Protected
+live scratch is excluded from the disposable backup bounds; that observation
+does not reserve capacity. Unknown holder records are
+preserved rather than guessed dead. Production job custody is outside this
+local development-tool recovery.
 
-```sh
-python3 scripts/gate-local.py --reconcile RECEIPT_FOLDER [RECEIPT_FOLDER ...]
-```
+Unqualified hosts retain two heavy lanes and one full. Qualified hosts retain
+measured CPU/RAM admission and compatibility guards for older helpers. Guards
+leave once all execution reservations release or are reclaimed. Configuration
+and evidence digests still bind each live resource group. New reservations
+persist PID start identity and planned scratch before launching work. Termination
+signals cannot interrupt the budget's cleanup or receipt publication.
 
-It holds the host admission lock, verifies the immutable owner/full/group
-bindings and absent recorded PID, and inventories markers, known supervisors
-and descendants over the whole process table. The complete process/file-handle
-inventory for the gate owner's UID must succeed, with no handle or mapped file
-into the entire retained source/scratch tree. This includes closed-descriptor
-mappings (macOS `PROC_PIDREGIONPATHINFO`, Linux `/proc/PID/maps`); an unavailable
-mapping inventory retains custody. Guest active markers must be empty, with a nonce-bound
-positive guest observation and matching affirmative cleanup for every guest
-leg. A second host inventory and binding check precede archiving. Bound records
-are archived under `.reconciled-UUID`; source and scratch are retained. Each
-attempt writes `reconcile-UUID.json` in the control directory, including the
-decision, proof phase and evidence. Recovery never signals another run.
-
-The complete native handle/mapping probe has a 30-second deadline, derived from
-the measured host recovery-probe maximum of 5.39 seconds with roughly fourfold
-load allowance, rounded up. The previous five-second cap refused under ordinary
-load. This is the orchestrator's MY-34 application (2026-11-09), not a relaxation
-of inventory completeness: a timeout still retains occupancy, terminates only
-the observer, and refuses recovery. Ordinary cleanup keeps its separate bound.
-
-Custody protects gate capacity: CPU, RAM, VM residency and scratch used by
-gate-owned processes. Gate runs, ordinary fixtures and supervisors execute as the
-gate owner's UID, so complete file-handle and mapping inspection covers that UID. Another UID's
-file handle (for example a backup or indexing daemon reading a 0755 tree) is not
-gate-run liveness and does not consume the reservation. No directory ownership
-or 0700 mode precondition applies, and recovery never changes permissions or
-requests privilege. This ownership-model interpretation is an orchestrator
-default, not a maintainer ruling (2026-11-09).
-
-Daemon-backed fixtures require separate positive evidence: Docker containers,
-volumes and networks can outlive their test and run outside the gate UID. Before
-creating resources, the real-Docker fixtures journal their endpoint and label
-resources with `myce.gate=RUN_MARKER`. Before launching work, the budget journals
-the effective endpoint selected by `DOCKER_CONTEXT`, `DOCKER_HOST` or Docker's
-configured current context, together with daemon availability and identity.
-Normal cleanup and recovery query each recorded
-daemon for remaining labelled containers, volumes and networks; a changed daemon,
-unreachable configured daemon, malformed journal or failed listing retains
-custody. For new runs, a missing Docker CLI and default socket can establish absent
-prerequisites only when no entry observation or fixture journal requires that
-daemon. Older sources without labels additionally require the Mycelium fixture
-label/name namespace to be empty. Recovery applies the same checks inside the guest,
-alongside its source-bound, nonce-bound positive cleanup. It never removes Docker
-resources or assumes a killed client stopped its containers.
-
-Legacy endpoint recovery is an orchestrator agent default (2026-11-09, received
-by the landing worker), not a maintainer ruling. Old helpers inherited their
-environment; retained bytes do not prove that Docker overrides were absent.
-Recovery therefore enumerates every configured Docker context and known local
-Docker socket, resolves every endpoint to its daemon ID, and requires every
-endpoint reachable and each distinct daemon empty of Mycelium fixture resources.
-Known socket locations include system and rootless sockets and the user socket
-locations for Docker Desktop (including its raw engine socket), every named
-Colima profile, OrbStack, Rancher Desktop and every Lima instance's `sock/*.sock`;
-context endpoints supplement them. Directory enumeration errors refuse recovery.
-Unknown contexts, unreachable endpoints, dangling socket links or failed
-inventories retain custody. Missing current prerequisites cannot qualify an old run.
-
-Readable same-UID launch ancestors are inspected with `ps eww`; Docker endpoint
-overrides refuse legacy recovery. Command arguments are removed before examining
-the appended environment, so a shell command mentioning a variable is not an
-environment observation. The receipt records inspected and unreadable ancestors
-and any inventory uncertainty. Historical launch environments were not retained:
-even when current ancestors show no overrides, a historical non-local, TCP or
-arbitrary local Unix-socket `DOCKER_HOST` may be undiscoverable from current
-contexts and standard sockets. The orchestrator extended the legacy default on
-2026-11-09 only with a further positive bound: a complete, whole-table `ps`
-command/argv inventory must account for every live Docker-API daemon/runtime.
-Classification uses each process's real executable identity, resolved through
-`proc_pidpath` on Darwin and `/proc/PID/exe` on Linux, including parent/child
-checks. An argv basename or symlink alias is never executable proof. Unresolved
-identities refuse; Darwin retains only the reviewed sealed-system EPERM rule.
-The process instance is bound by its birth identity before and after reading
-fresh arguments and the executable, rather than combining a `ps` snapshot's
-arguments with a later PID lookup. Darwin uses `PROC_PIDTBSDINFO` start seconds
-and microseconds; where libproc denies cross-UID access, the unprivileged
-`KERN_PROC_PID` sysctl supplies the same timeval. Linux uses `/proc/PID/stat`
-field22. Parent/child links also require the same captured parent birth.
-Changed or vanished instances are re-observed, with refusal after three
-unstable observations; a failed birth lookup for a still-live PID refuses.
-The unprivileged sysctl route is an orchestrator implementation default
-(2026-11-09), not an expansion of the protected-process exclusion.
-A process that exits after the snapshot may be omitted only after a new `ps`
-positively confirms that PID is absent; an unresolvable live process still refuses.
-`dockerd` hosts and daemon configuration must all resolve to inventoried endpoints;
-socket activation also requires a matching service PID and socket-unit binding.
-Docker Desktop's backend/service/fork group must expose an inventoried Unix
-socket, positively read through macOS process socket metadata. Its private raw
-engine socket is also inventoried. A Lima hostagent requires matching live PID
-and parsed forwarding configuration; forwarding configurations currently refuse
-as unsupported. Other detected API runtimes (including Colima, OrbStack, Rancher
-Desktop, Podman services/machines, nerdctl daemons and buildkitd) retain custody
-until their process-to-endpoint binding has supported positive proof. A containerd
-child is bound to its independently checked dockerd parent; standalone containerd
-is not a Docker API. Failed process/configuration/socket observations refuse.
-
-The remaining residual is a historical daemon that has since exited. Each legacy
-receipt records it alongside the orchestrator's observed facts: the launcher had
-no `DOCKER_*` environment at about 19:00Z, and gate entrypoints do not set
-`DOCKER_HOST`. This is an orchestrator agent default, not a maintainer ruling.
-Host and guest both apply the discovery and process bound. New runs use their
-journaled effective and fixture endpoints instead. Recovery never changes a
-daemon, runtime configuration or another project's resources.
-
-Guest executable attestation is a further orchestrator agent default received
-2026-11-09. Linux kernel threads are excluded only with positive PF_KTHREAD
-(`0x00200000`) evidence from `/proc/PID/stat` field9, never from a missing exe
-link. A missing exe for a non-kernel process refuses. Only inside the configured,
-gate-owned Lima guest, inaccessible root-owned executable identities may use
-read-only `sudo -n readlink /proc/PID/exe` (and `sudo -n cat /proc/PID/stat` when
-needed). Each use, success or failure is recorded in the receipt. Unavailable or
-failed non-interactive attestation refuses. This does not authorize sudo on the
-development host, prompting, signals or any guest mutation.
-
-Orchestrator default (2026-11-09): macOS can deny `libproc` inspection of
-platform-protected processes even under the same UID. Gate binaries, Python,
-shell fixtures and VM helpers are not platform-protected. An `EPERM` process may
-therefore be excluded only with independent, readable `ps` evidence proving all
-three conditions: its executable realpath is under `/System/`, `/usr/libexec/`,
-`/usr/bin/`, `/usr/sbin/`, `/sbin/` or `/bin/` (never `/usr/local/`), and `statfs64`
-positively reports mount `/` with `MNT_RDONLY`; its complete
-parent chain contains no recorded or known gate supervisor; and its command line
-has no gate marker, gate path or retained source/scratch path. Every exclusion
-and its executable/mount/ancestry evidence is recorded in the recovery receipt.
-All `/System/Volumes/` paths are refused, including the writable Data volume;
-a `/System/` prefix alone proves nothing about sealed-volume residency. An
-unknown ancestry, non-system executable, gate descendant or failed `ps` inventory
-retains occupancy. This is a narrow ownership-model application, not a maintainer
-ruling or a privileged recovery path.
-
-Both formats require global gate quiet: every recorded PID number must be
-entirely absent, and no host process may carry any gate marker or known
-gate-supervisor identity. A live or reused recorded PID blocks recovery even
-when a new record has a different start identity. Only old-format records
-lacking all execution-identity fields may use legacy guest cleanup discovery;
-their requested batch must include a source-bound positive guest cleanup.
-New records use their persisted identity and exact guest nonce bindings.
-Partial identities, malformed records,
-live fixtures, incomplete inventories and any uncertainty retain occupancy;
-elapsed age never releases it. There is no force flag or scratch deletion.
 The installed local fleet worker can coexist with local gates. CPU admission
 adds the static `fleet_worker_cpu_reserve_cores` from private local gate config,
 declared local gate cores and the host-qualified workstation reserve. The
@@ -450,7 +320,7 @@ Ordinary fulls wait in FIFO order by default and print their queue position;
 no polling or relay is needed. Release and calibration fulls take priority over
 ordinary waiters. Ctrl-C/SIGTERM cleans a waiting ticket; a killed waiter is
 removed only after OS process identity proves it has exited or is a zombie. Execution slots
-and unknown fixture custody are never removed by that queue cleanup. There is
+and unknown holder custody are separate from that queue cleanup. There is
 no queue timeout. With normal pressure, insufficient available memory is
 transient capacity: keep the FIFO ticket and print available/required GiB until
 memory frees. Active-run future peaks remain reserved. Disk below the floor,
@@ -539,15 +409,13 @@ accounts for older standalone full race commands before entering a slot. The
 slot also has a `mycelium-full-gate-N.custody` record beside its lock in
 `GOCACHE`, containing the holder PID and process start identity, then the run
 marker and scratch directory before fixtures start. Records publish atomically.
-Verified fixture exit removes the record on normal cleanup. After supervisor
-death, a new supervisor holding both admission and slot locks checks the recorded
-holder identity and verifies that no marked, descendant or scratch-holding
-fixtures remain. It then archives the abandoned record as `.reconciled-UUID`
-and reuses the slot. Legacy marker/scratch records receive the same fixture-exit
-check. Live holders, live fixtures, malformed records and inventory uncertainty
-retain occupancy; elapsed age never releases custody. Reconciliation never
-signals another run or removes its scratch. Development gate records may be reset under MY-41; preserve running production
-customer jobs.
+Normal cleanup releases the record even if fixture or daemon inventory fails;
+the failed verdict and diagnostic remain. At the next admission, a dead or
+reused holder is archived automatically under the admission/slot locks. Scratch
+collection has the separate live-process and bounded-backup checks described
+above. Old marker-only records without a holder identity still require scoped
+fixture-exit proof. Live or unverifiable holders remain protected, without a
+global-quiet or manual-reconciliation step. Fleet custody remains separate.
 The
 two-suite boundary preserves the repository's observed Mac safety rule: more
 concurrent full suites caused false failures. Linux fleet gates rely on the

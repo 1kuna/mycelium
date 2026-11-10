@@ -65,6 +65,8 @@ class GateBudgetTests(unittest.TestCase):
                 fleet.mkdir(parents=True)
                 with patch.object(budget.Path, 'cwd', return_value=fleet):
                     slot = budget.acquire_full_slot()
+                    budget.release_full_slot(slot, False)
+                    self.assertTrue(all(p.exists() for p in budget.full_custody_paths(slot)))
                     budget.release_full_slot(slot, True)
                 self.assertTrue(group.exists())
                 group.unlink()
@@ -80,9 +82,9 @@ class GateBudgetTests(unittest.TestCase):
                     spec.loader.exec_module(capacity)
                     self.assertTrue(capacity.native_full_custody())
                     budget.release_full_slot(slot, False)
-                    self.assertTrue(all(path.exists() for path in paths))
+                    self.assertFalse(any(path.exists() for path in paths))
                 finally:
-                    budget.release_full_slot(slot, True)
+                    slot.close()
                 self.assertFalse(any(control.glob('local-go-native-full-*.custody')))
 
     def test_host_resource_admission_replaces_legacy_count_only_for_owned_source_and_ancestor(self):
@@ -180,7 +182,7 @@ class GateBudgetTests(unittest.TestCase):
             real_check_output = subprocess.check_output
 
             def inventory(args, **kwargs):
-                return folder if args[0] == 'go' else real_check_output(args, **kwargs)
+                return folder if args[0] == 'go' else '' if args == ['ps', '-axo', 'pid=,command='] else real_check_output(args, **kwargs)
 
             try:
                 with patch.object(budget.subprocess, 'check_output', side_effect=inventory):
@@ -191,7 +193,7 @@ class GateBudgetTests(unittest.TestCase):
                         saved = json.loads((cache / 'mycelium-full-gate-0.custody').read_text())
                         self.assertEqual(saved['holder_pid'], os.getpid())
                         self.assertEqual(saved['holder_start'], budget.process_start(os.getpid()))
-                        self.assertEqual(len(list(cache.glob('*.reconciled-*'))), 1)
+                        self.assertEqual(len(list((cache / 'selfheal-backups').iterdir())), 1)
                         with (cache / 'mycelium-full-gate-1.lock').open('a') as held:
                             budget.fcntl.flock(held, budget.fcntl.LOCK_EX | budget.fcntl.LOCK_NB)
                             self.assertFalse(budget.reconcile_full_custody(held))
@@ -200,7 +202,7 @@ class GateBudgetTests(unittest.TestCase):
                         fixture.wait(timeout=5)
                         second = budget.acquire_full_slot()
                         budget.release_full_slot(second, True)
-                        self.assertEqual(len(list(cache.glob('*.reconciled-*'))), 2)
+                        self.assertEqual(len(list((cache / 'selfheal-backups').iterdir())), 2)
                         self.assertTrue(all(p.exists() for p in scratches))
                     finally:
                         budget.release_full_slot(first, True)
@@ -223,8 +225,9 @@ class GateBudgetTests(unittest.TestCase):
                 fixtures.assert_not_called()
             with (patch.object(budget, 'process_start', return_value='reused PID birth'),
                   patch.object(budget, 'owned_processes', side_effect=PermissionError('unknown'))):
-                self.assertFalse(budget.reconcile_full_custody(slot))
-                self.assertEqual(json.loads(path.read_text()), record)
+                self.assertTrue(budget.reconcile_full_custody(slot))
+                self.assertFalse(path.exists())
+                path.write_text(json.dumps(record))
             with (patch.object(budget, 'process_start', return_value='reused PID birth'),
                   patch.object(budget, 'owned_processes', return_value=set())):
                 self.assertTrue(budget.reconcile_full_custody(slot))
@@ -290,7 +293,7 @@ class GateBudgetTests(unittest.TestCase):
                 admitted = budget.acquire_full_slot()
                 budget.release_full_slot(admitted, True)
 
-    def test_unconfirmed_cleanup_retains_admission_after_owner_exit(self):
+    def test_unconfirmed_cleanup_releases_admission_and_retains_verdict(self):
         with tempfile.TemporaryDirectory() as folder:
             gate = Path(folder) / 'scripts/gate.sh'
             processes = '123 go test -race -run .* mycelium/pkg\n'
@@ -312,12 +315,44 @@ class GateBudgetTests(unittest.TestCase):
                           contextlib.redirect_stderr(io.StringIO())):
                         self.assertEqual(budget.main(), 125)
                     self.assertTrue(first.closed)
-                    with patch.object(budget.time, 'sleep', side_effect=RuntimeError('blocked')):
-                        with self.assertRaisesRegex(RuntimeError, 'blocked'):
-                            budget.acquire_full_slot()
+                    replacement = budget.acquire_full_slot()
+                    budget.release_full_slot(replacement, True)
                 finally:
                     first.close()
                     budget.release_full_slot(peer, True)
+
+    def test_failed_docker_inventory_releases_slot_and_preserves_diagnostic(self):
+        for failure in ('docker', 'scratch'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder).resolve()
+                gate = root / 'scripts/gate.sh'
+                child = unittest.mock.Mock()
+                child.wait.return_value = 0
+                receipt = root / 'native-cleanup.json'
+                with (patch.object(budget, 'process_start', return_value='owner start'),
+                      patch.object(budget.subprocess, 'check_output', side_effect=lambda args, **_: folder if args[0] == 'go' else ''),
+                      patch.object(budget.os, 'uname') as uname):
+                    uname.return_value.sysname = 'Darwin'
+                    slot = budget.acquire_full_slot()
+                    with (patch.object(sys, 'platform', 'darwin'),
+                          patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
+                          patch.object(budget, 'acquire_full_slot', return_value=slot),
+                          patch.object(budget.subprocess, 'Popen', return_value=child),
+                          patch.object(budget.runtime, 'docker_snapshot', return_value={}),
+                          patch.object(budget.runtime, 'runtime_cleanup',
+                              return_value=[], side_effect=RuntimeError('Docker daemon cleanup is unknown or unreachable') if failure == 'docker' else None),
+                          patch.object(budget, 'remove_scratch', side_effect=PermissionError('scratch removal failed') if failure == 'scratch' else None),
+                          patch.object(budget, 'stop_fixtures', return_value=True),
+                          patch.dict(os.environ, GATE_CLEANUP_RECEIPT=str(receipt), GATE_CLEANUP_ID='docker-failure')):
+                        self.assertEqual(budget.main(), 125)
+                    verdict = json.loads(receipt.read_text())
+                    self.assertFalse(verdict['stopped'])
+                    self.assertEqual(verdict['status'], 125)
+                    diagnostic = next((root / '.reports/gate-runtime').glob('*/cleanup-error.json'))
+                    self.assertIn('Docker daemon cleanup' if failure == 'docker' else 'scratch removal failed', diagnostic.read_text())
+                    self.assertTrue(list((root / '.gate').iterdir()))
+                    replacement = budget.acquire_full_slot()
+                    budget.release_full_slot(replacement, True)
 
     def test_quick_overlaps_packages_and_collects_failure(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -331,6 +366,8 @@ class GateBudgetTests(unittest.TestCase):
             shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
             shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
             shutil.copyfile(Path(__file__).with_name('gate-runtime.py'), scripts / 'gate-runtime.py')
+            for name in ('gate-capacity.py', 'gate-cache.py', 'gate-memory.py'):
+                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
             shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
             (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
             bin_dir = root / 'bin'
@@ -595,6 +632,8 @@ with patch.object(subprocess.Popen, 'wait', wait):
             shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
             shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
             shutil.copyfile(scripts / "gate-runtime.py", root / "scripts/gate-runtime.py")
+            for name in ("gate-capacity.py", "gate-cache.py", "gate-memory.py"):
+                shutil.copyfile(scripts / name, root / "scripts" / name)
             shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")
             # This fixture exercises shell/budget termination, not nested
             # regression suites. Their real child-process timing consumes the
