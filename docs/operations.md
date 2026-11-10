@@ -1137,7 +1137,9 @@ Never put that token in URLs or copy private payloads into reports.
 Worker scratch, failed-attempt folders and installer `.Trash` copies follow
 [worker scratch retention](reference/worker-caches.md#worker-scratch-retention):
 recover a failed or cancelled attempt's partial outputs from the worker's
-`job-files/JOB/ATTEMPT` within 24 hours. For a slow queue, capture
+`job-files/JOB/ATTEMPT` before the configured file-retention deadline or explicit
+release. The former fixed 24-hour scratch promise is retired; unknown/unreleased
+data stays protected. For a slow queue, capture
 [live queue profiles](reference/queue-maintenance.md#opt-in-live-queue-profiling)
 and read the [queue timing log lines](reference/queue-maintenance.md#benchmarks-outages-and-control-timing).
 
