@@ -146,6 +146,39 @@ Success requires a succeeded job, verified output size/SHA-256 from `result`,
 and this application comparison (23 bytes including newline). A wake, terminal
 receipt or command exit alone is insufficient.
 
+Python callers can submit, wait and fetch the same CPU fixture directly. Keep
+the submission key and spec unchanged when retrying an uncertain reply. Run in
+a fresh directory; `Client.from_installed()` uses the installed authority.
+
+```python
+from pathlib import Path
+from mycelium import Client
+
+client = Client.from_installed()
+source = Path("README.txt")
+source.write_text("First-run source fixture\n")
+input_ref = client.upload_file(source, project="example")
+job = client.submit_and_wait({
+    "name": "ease-audit",
+    "project": "example",
+    "class": "experiment",
+    "submission_key": "ease-audit-python-01",
+    "files": {"README.txt": input_ref},
+    "run": {"command": ["sh", "-c", "printf 'mycelium-ease-audit-ok\\n' > result.txt"]},
+    "needs": {"platform": "cpu", "cpu_cores": 1, "memory_gb": 0.125},
+    "outputs": {"result.txt": "results"},
+}, timeout=60)
+assert job["state"] == "succeeded", job.get("reason")
+result = client.download_result(job["id"], "result.txt", Path("accepted/result.txt"))
+assert result.read_bytes() == b"mycelium-ease-audit-ok\n"
+```
+
+The Python client shares retry classification and pacing across requests.
+Overload retries follow the current Retry-After plus positive jitter, bounded
+by the caller's deadline. Keyed submissions and waits recover transient TLS
+record/EOF failures; certificate, identity and protocol refusals remain fatal.
+Unkeyed writes and model calls are not automatically replayed.
+
 From the queue release containing #1164, a new `after:` consumer can bind
 retained, unexpired accepted outputs from a succeeded fan-out parent even if
 the parent later received a cancellation intent. A parent cancelled before
