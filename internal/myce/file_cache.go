@@ -13,6 +13,7 @@ import (
 // FileCache contains only reproducible store copies. Attempt folders hold private
 // copies, so commands cannot mutate shared blobs and cache eviction cannot race use.
 type FileCache struct {
+	budget    *workerDiskBudget
 	Root      string
 	Limit     int64
 	Clock     Clock
@@ -23,8 +24,23 @@ type FileCache struct {
 }
 
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stageErr error) {
-	operation := "cache_init"
+	if err := ref.validate(); err != nil {
+		return err
+	}
+	operation := "cache_admission"
 	defer func() { stageErr = withStagingCause("", ref, operation, stageErr) }()
+	// Reserve before any cache mutex: pressure collection only tries cache locks.
+	release, err := c.budget.reserve(ctx, c.Root, uint64(ref.SizeBytes), 0)
+	if err != nil {
+		return err
+	}
+	defer release()
+	releaseCopy, err := c.budget.reserve(ctx, filepath.Dir(dest), uint64(ref.SizeBytes), 0)
+	if err != nil {
+		return err
+	}
+	defer releaseCopy()
+	operation = "cache_init"
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ref.validate(); err != nil {
@@ -128,6 +144,14 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		// transient HEAD failure for an unrelated victim must not block new
 		// inputs. The requested blob was verified above before any eviction.
 		operation = "cache_evict"
+		if c.budget != nil {
+			if strings.HasSuffix(v.name, ".partial") {
+				continue
+			}
+			if err := c.Client.HasFile(ctx, FileRef{SHA256: hash, SizeBytes: v.size}); err != nil {
+				continue
+			}
+		}
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}

@@ -204,6 +204,20 @@ available within its configured budget.
 
 ## Observe and recover
 
+From the worker/queue release containing #811, filesystem pressure reclaims
+inactive rebuildable caches automatically across cache classes. Keep the same
+job while pending demand triggers cleanup; active readers, queued references,
+exact-attempt custody and last unique sources stay protected. Machine
+`hygiene_collection.disk_budget` reports physical headroom/reservations and
+`foreign_disk_growth`; `scratch.retained_bytes_by_reason` explains preserved
+attempt storage. Foreign or explicit external compiler caches are warned about
+and never deleted. Installation owners can select verified local snapshot
+acquisition with supported `myce install worker --config CONFIG --model-root PATH`
+on the #1248 worker release. This leaves NAS checkpoints, environment sources
+and immutable masters under their existing contracts. See
+[worker budgets](../../docs/reference/worker-caches.md#shared-filesystem-budget-811-next-release)
+and [local acquisition](../../docs/reference/models.md#local-acquisition-root-1248-next-release).
+
 Keep owned waits in the foreground. Supporting clients accept one batch of up
 to 256 distinct IDs: `myce wait JOB_A JOB_B`. A wait timeout or interruption leaves
 the jobs alive; retain the IDs. Never build per-job background wait processes,

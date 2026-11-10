@@ -3,6 +3,77 @@
 Worker scratch retention, the file and shared-input cache, the environment cache,
 and how to verify the loaded environment catalog.
 
+## Shared filesystem budget (#811, next release)
+
+Each worker shares one physical-filesystem ledger across model copies and
+snapshots, private-file/shared-input caches, prepared environments, shared
+package downloads and its own Go build cache. Different configured directories
+on the same filesystem cannot reserve the same free blocks. Existing explicit
+cache ceilings still apply. Automatic shared-input feasibility uses physical
+capacity; temporary occupation by another cache is a wait, not a permanent
+size refusal.
+
+Admission measures available blocks and reserves pending writes above the
+existing disk floor (1% of the volume, at least 256 MiB), plus measured growth
+of the worker's small control files. A model-copy policy can require a larger
+floor; other concurrent writers honor that floor until its transfer joins.
+Reservations remain charged through detached cancellation tails. To avoid
+overcommit during concurrent writes, a transfer's full remaining reservation
+stays charged until completion, even as statfs starts reflecting those writes.
+This can temporarily withhold a transfer that would fit after another finishes.
+
+Before refusing capacity, the ledger reclaims inactive entries across cache
+classes, oldest successful use first. Model/snapshot copies require a verified
+recoverable source; source loss, unknown provenance, loaded models, queue pins,
+queued snapshot/shared-input references, reader/build locks and durable
+exact-attempt pins preserve them. New local recovery records contain source
+paths and never enter public status. Older snapshots gain provenance on a
+successful acquisition; unknown old copies remain protected. Failed reference
+or source checks retain data. Catalog masters and arbitrary acquisition/model
+folders are source data, never automatic deletion candidates.
+
+Environment reclamation reuses supported prune and its live queue references,
+use/build locks and existing recent-use protection. Shared downloads use uv's
+`cache prune --ci` or Pixi's `clean cache --yes` with the exclusive download
+lock; workers never unlink a package manager's live objects manually. Retained
+shared/model partial stages count toward occupancy and are reclaimable only
+with their build lock and source proof. Unknown partials remain protected.
+Hardlink unions account allocated blocks, and new admission remeasures free
+space after each eviction rather than assuming a removed hardlink freed bytes.
+
+The existing retention lane also requests pending disk demand from the queue.
+This lets a worker reclaim enough inactive cache for a job held before staging,
+then advertise recovered free space at its next ordinary check-in. It adds no
+polling daemon. Neither filesystem scans nor remote source/reference checks run
+under the queue mutex or on the heartbeat path. Collection retains the existing
+measured 10% duty budget and minimum minute cadence.
+
+Default unsandboxed native jobs receive a worker-owned `GOCACHE`, shared between
+jobs and protected until exact process cleanup, including durable restart pins.
+Environment builders use a private compiler cache removed after their helper
+custody clears. Authored `GOCACHE`, sandbox/container caches and historical Go
+caches in the user's default cache directory remain external: report them and
+leave them intact. Changing an arbitrary cache path inside payload code cannot
+make it a managed cache.
+
+`hygiene_collection.disk_budget` reports per-volume allocated Mycelium bytes,
+free/floor/reserved bytes, measured control growth, last-pass physical free-space
+recovery, pressure and unexplained growth. A positive unexplained delta raises
+`foreign_disk_growth`; a falling free-space trend supplies an exhaustion
+forecast. These are observations, not attribution to a particular application.
+Recovery clears the warning. Foreign models, Docker data, other projects and
+unique scratch are never victims. A private `disk-inventory.json` in worker state
+maps the role names to local paths for its owner; public diagnostics contain
+only roles and opaque volume IDs. `compiler_warning` and
+`unmanaged_compiler_bytes` expose known external compiler storage without paths.
+Scratch bytes/reasons come from the exact-attempt collector below.
+
+These are admission and sampled-pressure protections, not a filesystem quota
+on arbitrary payload/foreign writes. Active or unique data can exhaust a volume
+and requires its owner's recovery/release; the worker cannot safely delete it.
+The laptop fake-clock/race tests do not establish a deployed idle-worker
+before/after allocated-byte receipt. That receipt belongs to the later rollout.
+
 ## Worker scratch retention
 
 Each worker runs retention in its existing background lane, normally once a

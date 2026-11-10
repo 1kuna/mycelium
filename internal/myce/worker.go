@@ -37,6 +37,8 @@ type Worker struct {
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
+	diskBudget           *workerDiskBudget
+	compilerCache        *workerCompilerCache
 	rootMonitor          *workerRootMonitor
 	MountRoots           func(context.Context) ([]string, error)
 	AcceleratorStopGrace time.Duration
@@ -492,7 +494,14 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 		return nil, w.stagingFailure(s, j, sharedErr)
 	}
-	if sharedReaders(j.Spec) && !j.Spec.Run.Docker {
+	compilerPath, compilerRelease, compilerErr := w.compilerCache.acquire(ctx, s, j)
+	if compilerErr != nil {
+		sharedRelease()
+		return nil, compilerErr
+	}
+	inputRelease := sharedRelease
+	sharedRelease = func() { compilerRelease(); inputRelease() }
+	if !j.Spec.Run.Docker {
 		s.sharedRelease = sharedRelease // Docker releases when its observer exits.
 	}
 	w.modelMounts = dockerModelMounts(j, sharedEnv)
@@ -648,6 +657,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return p, e
 	}
 	env := jobBaseEnvironment()
+	if compilerPath != "" {
+		env["GOCACHE"] = compilerPath
+	}
 	for k, v := range j.Spec.Run.Env {
 		env[k] = v
 	}
@@ -656,6 +668,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	for k, v := range extensionEnv {
 		env[k] = v
+	}
+	if compilerPath != "" && env["GOCACHE"] != compilerPath {
+		w.compilerCache.external.Store(true)
 	}
 	if environmentPath != "" {
 		bindEnvironment(env, environmentPath)
@@ -1202,6 +1217,14 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
+	w.diskBudget = newWorkerDiskBudget(w.Clock, w.DiskProbe)
+	w.diskBudget.inventoryDir = s.dir
+	w.diskBudget.add(diskBudgetRoot{name: "attempts", path: s.dir})
+	w.compilerCache = &workerCompilerCache{cache: EnvironmentCache{Root: filepath.Join(s.dir, "compiler-cache"), Clock: w.Clock}}
+	if err := w.compilerCache.cache.initStorage(); err != nil {
+		return err
+	}
+	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates})
 	if err = w.initFileTransfers(stop, s); err != nil {
 		return err
 	}
@@ -1217,9 +1240,12 @@ func (w Worker) Run(stop context.Context) error {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
 	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit}
+	w.environmentCache.budget = w.diskBudget
+	w.environmentCache.references = w.environmentReferenced
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
+	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.environmentCache.Root, candidates: w.environmentCache.budgetCandidates})
 	environments := &environmentRuntime{authorize: w.authorizeLaunchContext, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {
 		return err

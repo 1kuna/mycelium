@@ -221,7 +221,7 @@ func InstallSettings() []InstallSetting {
 		installStateSetting(),
 		installPath("checkpoint-root", "Checkpoints", "worker checkpoint root", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("checkpoints", "Checkpoints", "queue checkpoint root (alias of checkpoint-root)", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
-		installPath("model-root", "ModelRoot", "NAS model root", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
+		installPath("model-root", "ModelRoot", "model source/acquisition root (mounted NAS or verified local disk)", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
 		installSetting("native-read-root", "NativeReadRoots", "operator-granted native read-only root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeReadRoots }, validateNativeRootPaths),
 		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
 		installSetting("gpu-telemetry-helper", "GPUTelemetryHelper", "optional read-only GPU telemetry executable (absolute path; empty disables helper)", func(c *ServiceConfig) *string { return &c.GPUTelemetryHelper }, validateGPUTelemetryHelper),
