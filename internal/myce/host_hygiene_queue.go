@@ -1,6 +1,10 @@
 package myce
 
-import "slices"
+import (
+	"maps"
+	"slices"
+	"strings"
+)
 
 func validHostDrainReason(reason string) bool {
 	return slices.Contains([]string{"", "host_memory_pressure", "host_swap_growth", "host_load_latency", "host_heartbeat_latency", "host_disk_pressure", "host_probe_unknown"}, reason)
@@ -42,6 +46,7 @@ func (q *Queue) detectHostHygiene() {
 		if reason != "host_probe_unknown" || !q.unreported[m.ID] || !q.inRestartGrace(now) {
 			q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
 		}
+		q.detectDiskExhaustionForecast(m)
 		if m.HostHealth == nil || len(m.HostHealth.History) == 0 {
 			continue
 		}
@@ -65,5 +70,31 @@ func (q *Queue) detectHostHygiene() {
 			// Escalation must wake even if a generic degradation already alerted.
 			q.observeHealth("hygiene-mount-action/"+m.ID+"/"+role, action, 0, HealthAlert{Kind: "host_mount_action_required", Host: hostID(m), Store: role, Reason: cause})
 		}
+	}
+}
+
+// A sustained decline mostly explained by writes outside Mycelium's own
+// allocation wakes the host owner once it has run at least as long as the
+// space it leaves would last at its average rate: at a constant rate, once it
+// has consumed half the space above the floor that was free when it began.
+// Mycelium's own growth stays bounded by its filesystem budget and floor, so
+// it never raises this. Context only: no drain, no cleanup of foreign data.
+func (q *Queue) detectDiskExhaustionForecast(m *Machine) {
+	forecast := map[string]bool{}
+	if m.HygieneCollection != nil {
+		for _, v := range m.HygieneCollection.DiskBudget {
+			forecast[v.ID] = v.ID != "" && v.DeclineCause == "foreign_disk_growth" && v.ExhaustionSeconds != nil && v.DecliningSeconds > 0 && v.DecliningSeconds >= *v.ExhaustionSeconds
+		}
+	}
+	prefix := "hygiene-disk-forecast/" + m.ID + "/"
+	for key, c := range q.s.Health.Conditions {
+		if id, ok := strings.CutPrefix(key, prefix); ok && c.Active {
+			if _, reported := forecast[id]; !reported {
+				forecast[id] = false // A volume no longer reported clears.
+			}
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(forecast)) {
+		q.observeHealth(prefix+id, forecast[id], 0, HealthAlert{Kind: "host_disk_exhaustion_forecast", Host: hostID(m), Store: id, Reason: "foreign_disk_growth"})
 	}
 }

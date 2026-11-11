@@ -74,6 +74,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
 		w.diskBudgetWire.headroom = reply.WorkerDiskHeadroomProtocol == workerDiskHeadroomProtocol
 		w.diskBudgetWire.foreign = reply.HostForeignProtocol == hostForeignProtocol
+		w.diskBudgetWire.trend = reply.WorkerDiskTrendProtocol == workerDiskTrendProtocol
 	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)

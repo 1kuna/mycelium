@@ -65,3 +65,38 @@ func TestHostHygieneQueueDrainPreservesRunningAndOperatorPolicy(t *testing.T) {
 		})
 	}
 }
+
+// One wake per foreign decline that has run as long as its remaining runway;
+// owned growth and a recovered or vanished volume clear it.
+func TestHostHygieneDiskExhaustionForecastAlert(t *testing.T) {
+	q, c := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 4, 16)
+	check(t, q, m, nil)
+	volume := func(declining, exhaustion float64, cause string) *WorkerHygieneCollection {
+		return &WorkerHygieneCollection{DiskBudget: []DiskBudgetVolume{{ID: identityHash("v"), DecliningSeconds: declining, ExhaustionSeconds: &exhaustion, DeclineCause: cause}}}
+	}
+	report := func(r *WorkerHygieneCollection) {
+		t.Helper()
+		c.Advance(time.Second)
+		q.mu.Lock()
+		q.s.Machines[m.ID].HygieneCollection = r
+		q.detectHostHygiene()
+		q.mu.Unlock()
+	}
+	report(volume(3600, 7200, "foreign_disk_growth"))
+	report(volume(7200, 3600, "owned_disk_growth"))
+	if n := len(alertsOf(q, "host_disk_exhaustion_forecast")); n != 0 {
+		t.Fatal("early or owned decline alerted", n)
+	}
+	report(volume(7200, 3600, "foreign_disk_growth"))
+	report(volume(7300, 3500, "foreign_disk_growth"))
+	alerts := alertsOf(q, "host_disk_exhaustion_forecast")
+	if len(alerts) != 1 || alerts[0].Host != "host" || alerts[0].Reason != "foreign_disk_growth" {
+		t.Fatal("want one causal alert", alerts)
+	}
+	report(&WorkerHygieneCollection{})
+	report(volume(7200, 3600, "foreign_disk_growth"))
+	if len(alertsOf(q, "host_disk_exhaustion_forecast")) != 2 {
+		t.Fatal("a vanished volume did not clear, or a new episode did not wake")
+	}
+}
