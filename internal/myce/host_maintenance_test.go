@@ -78,7 +78,7 @@ func TestHostMaintenanceLastResortPersistsAcrossWorkerSessions(t *testing.T) {
 		}
 	}
 }
-func TestHostMaintenancePlacementPreservesDrainOwner(t *testing.T) {
+func TestHostMaintenancePlacementAndBudgetPreserveDrainOwner(t *testing.T) {
 	q, clock := fixture(t)
 	a, _ := maintenanceMachines()
 	check(t, q, a, nil)
@@ -86,12 +86,35 @@ func TestHostMaintenancePlacementPreservesDrainOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clock.Advance(time.Second)
+	gib := 12.0
+	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &gib}); err != nil {
+		t.Fatal(err)
+	}
+	// MY-45 roles: services is accepted without disturbing the drain; an
+	// unknown role, a role riding on another action, and interactive without
+	// the shared profile it implies are refused.
+	for _, r := range []struct {
+		request HostMaintenanceRequest
+		ok      bool
+	}{
+		{HostMaintenanceRequest{Action: "role", Role: roleRef("services")}, true},
+		{HostMaintenanceRequest{Action: "role", Role: roleRef("gpu")}, false},
+		{HostMaintenanceRequest{Action: "role", Role: roleRef("interactive")}, false},
+		{HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &gib, Role: roleRef("node")}, false},
+	} {
+		clock.Advance(time.Second)
+		status, err := q.ChangeHostMaintenance(a.HostID, r.request)
+		if (err == nil) != r.ok || r.ok && status.Policy.Role != *r.request.Role {
+			t.Fatal("role request", *r.request.Role, r.request.Action, status.Policy, err)
+		}
+	}
 	for _, enabled := range []bool{true, false} {
 		clock.Advance(time.Second)
 		lastResortPolicy(t, q, a.HostID, enabled)
 		status, err := q.HostMaintenanceStatus(a.HostID)
 		if err != nil || status.Policy.Mode != "drained" || status.Policy.DrainOwner != drained.Policy.DrainOwner || !status.Policy.UpdatedAt.Equal(drained.Policy.UpdatedAt) || status.Policy.LastResort != enabled {
-			t.Fatal("placement edit invalidated drain receipt", status.Policy, err)
+			t.Fatal("placement or allowance edit invalidated drain receipt", status.Policy, err)
 		}
 	}
 	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &drained.Policy.UpdatedAt, IfDrainOwner: drained.Policy.DrainOwner}); err != nil {
@@ -960,3 +983,5 @@ func TestMaintenanceNotQuiescentInCompactStatus(t *testing.T) {
 		t.Fatalf("quiet host still listed: %+v", view.NotQuiescent)
 	}
 }
+
+func roleRef(role string) *string { return &role }

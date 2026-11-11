@@ -2,7 +2,13 @@
 
 package myce
 
-import "syscall"
+import (
+	"syscall"
+	"time"
+)
+
+// The cgroup sampler has its own cadence; this paces learned-guard windows.
+const processMemorySamplePeriod = time.Second
 
 // Linux attempts use cgroup accounting; other hosts have no sampler.
 func localProcessMemory() *processMemoryProbe { return nil }

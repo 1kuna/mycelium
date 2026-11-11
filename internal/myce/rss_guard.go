@@ -11,8 +11,9 @@ import (
 )
 
 // Reuse the process-memory observer. Three observations over two periods
-// distinguish sustained growth from a brief spike without another polling loop.
-const processMemorySamplePeriod = time.Second
+// distinguish sustained growth from a brief spike (such as a fork's shared
+// pages before exec) without another polling loop. processMemorySamplePeriod
+// is per platform: it follows what the process probe costs to run.
 const processMemoryGrace = 2 * processMemorySamplePeriod
 const rssLimitExceeded = "rss_limit_exceeded"
 const darwinRSSGuardStatus = "sampled RSS guard (native CPU); no kernel memory ceiling"
@@ -58,9 +59,11 @@ func (g *rssGuard) observe(now time.Time, roots map[int]string, bytes uint64, me
 		g.samples = 0
 		return nil
 	}
-	// A replaced supervisor, backward clock or missed observation starts a new
-	// window. Two periods allow ordinary probe/scheduler jitter, not a long gap.
-	if g.samples == 0 || !maps.Equal(roots, g.roots) || now.Before(g.last) || now.Sub(g.last) > 2*processMemorySamplePeriod {
+	// A replaced supervisor or backward clock starts a new window; a failed or
+	// under-limit observation already did. A late sample is not evidence of a
+	// dip: sampling slowed by host load, which is when a runaway thrashes the
+	// host, must not postpone enforcement indefinitely.
+	if g.samples == 0 || !maps.Equal(roots, g.roots) || now.Before(g.last) {
 		g.since, g.samples, g.roots = now, 0, maps.Clone(roots)
 	}
 	g.last = now
