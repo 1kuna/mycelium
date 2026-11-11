@@ -88,7 +88,8 @@ func TestReadSnapshotLogRefreshesMachineWithoutControlCommit(t *testing.T) {
 	if j == nil {
 		t.Fatal("no assignment")
 	}
-	// Restart/report recovery can be cleared by accepted logs alone.
+	// An accepted log is contact, not a report: only a check-in rebuilds the
+	// reported half after restart, so the machine stays unreported.
 	if err := q.update(func() error { q.unreported[m.ID] = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestReadSnapshotLogRefreshesMachineWithoutControlCommit(t *testing.T) {
 		t.Fatal("test requires no control commit after log")
 	}
 	v, _, err := q.captureReadObservation("", nil)
-	if err != nil || v.unreported[m.ID] || !v.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
+	if err != nil || !v.unreported[m.ID] || !v.s.Machines[m.ID].LastSeen.Equal(clock.Now()) {
 		t.Fatal("fresh capture missed accepted log contact", err)
 	}
 }

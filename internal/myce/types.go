@@ -608,6 +608,8 @@ type Job struct {
 	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
 }
 type Machine struct {
+	// Durable identity, enrolment, settings and session fence, plus the
+	// reported half each check-in replaces; durableMachine is the stored split.
 	Suspect           bool                     `json:"suspect,omitempty"` // Status-only; uncertainty never proves loss.
 	IOPressure        *IOPressure              `json:"io_pressure,omitempty"`
 	HygieneCollection *WorkerHygieneCollection `json:"hygiene_collection,omitempty"`

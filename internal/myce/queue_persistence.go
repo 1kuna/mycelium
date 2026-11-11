@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A JSON string deliberately fails closed in older binaries expecting a state
@@ -173,7 +175,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
 				return nil, err
 			}
-		} else if err := put(key, m); err != nil {
+		} else if err := put(key, durableMachine(m)); err != nil {
 			return nil, err
 		}
 	}
@@ -304,8 +306,80 @@ func (q *Queue) loadPersistedState() error {
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)
 	}
+	q.restoreLastSeen()
 	q.rebuildRecords()
 	return nil
+}
+
+// A machine record holds what must survive a restart: identity, enrolment,
+// settings, the session fence and queue decisions carried between check-ins.
+// Each check-in replaces the fields cleared here, so they stay in memory.
+// Restart marks every machine unreported, which keeps placement off it until
+// its next check-in rebuilds them. A steady heartbeat then rewrites nothing.
+func durableMachine(m *Machine) *Machine {
+	d := *m
+	d.LastSeen = time.Time{} // Contact evidence keeps it (restoreLastSeen).
+	d.DiskReceivedAt, d.DiskVolumes = time.Time{}, nil
+	d.HostHealth, d.IOPressure, d.SharedHostPressure, d.MemoryObservation, d.Fleet = nil, nil, nil, nil, nil
+	d.HostAvailableMemoryGB, d.FreeMemoryGB, d.MemoryUsedGB, d.CacheFreeBytes = 0, 0, 0, 0
+	d.SharedInputEvidence, d.SharedInputCache, d.CopyBytesPerSecond = nil, nil, 0
+	if d.CopyReports != nil {
+		// Failed copies stay durable for staging alerts; progress does not.
+		d.CopyReports = slices.Clone(d.CopyReports)
+		for i := range d.CopyReports {
+			d.CopyReports[i].Bytes, d.CopyReports[i].BytesPerSecond = 0, 0
+		}
+	}
+	if d.EnvironmentReports != nil {
+		// Workers list these from a map; store one order so it is not a change.
+		d.EnvironmentReports = slices.Clone(d.EnvironmentReports)
+		slices.SortStableFunc(d.EnvironmentReports, func(a, b EnvironmentReport) int { return strings.Compare(a.Key, b.Key) })
+	}
+	// Recomputed for every machine by refreshHostMemory and status.
+	d.HostMemoryDerivation, d.HostMemoryPolicyMismatch, d.HostMemoryAllowanceBytes, d.HostMemoryQualification = nil, false, 0, ""
+	d.EffectiveHostMemoryBudgetGB, d.HostMemoryInUseGB, d.FreeHostMemoryGB = 0, 0, 0
+	d.EffectiveCPUCores, d.CPUInUseCores, d.FreeCPUCores, d.CPUCapacityReason = 0, 0, 0, ""
+	d.SharedHostReason, d.ToolInventory, d.ExternalMemory = "", nil, nil
+	d.CapabilityProfile = withoutAvailability(d.CapabilityProfile)
+	if d.Devices != nil {
+		d.Devices = slices.Clone(d.Devices)
+		for i := range d.Devices {
+			device := &d.Devices[i]
+			device.Telemetry, device.FreeMemoryGB = nil, 0
+			device.CapabilityProfile = withoutAvailability(device.CapabilityProfile)
+		}
+	}
+	return &d
+}
+
+// Owner signals carry their own receipt time; a stored copy would read as
+// stale after restart and withdraw running work before the worker reports.
+func withoutAvailability(p *CapabilityProfile) *CapabilityProfile {
+	if p == nil || p.Availability == nil {
+		return p
+	}
+	copy := *p
+	copy.Availability = nil
+	return &copy
+}
+
+// LastSeen rides in each session's contact evidence, which every check-in
+// already rewrites with the small control record. Keep the later of the two.
+func (q *Queue) restoreLastSeen() {
+	for id, m := range q.s.Machines {
+		e, ok := q.s.ContactEvidence[id]
+		if ok && e.Session == m.Session && e.Seen.After(m.LastSeen) {
+			m.LastSeen = e.Seen
+		}
+		if !m.LastSeen.IsZero() && (!ok || e.Session == m.Session && e.Seen.IsZero()) {
+			// Records written before contact evidence held LastSeen carry it.
+			if q.s.ContactEvidence == nil {
+				q.s.ContactEvidence = map[string]contactEvidence{}
+			}
+			e.Session, e.Seen = m.Session, m.LastSeen
+			q.s.ContactEvidence[id] = e
+		}
+	}
 }
 
 // Fields share the existing SQLite transaction, FULL sync, and attempt fences.

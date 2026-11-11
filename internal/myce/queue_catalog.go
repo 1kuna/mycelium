@@ -96,13 +96,25 @@ func (q *Queue) touchMachine(id string) *Machine {
 		if _, touched := q.records.machines[id]; !touched {
 			var old *Machine
 			if m != nil {
-				copy := cloneMachine(m)
+				copy := undoMachine(m)
 				old = &copy
 			}
 			q.records.machines[id] = old
 		}
 	}
 	return m
+}
+
+// Each check-in journals its machine. Copy it in memory, as catalogs do; a
+// JSON round trip of the whole worker report held q.mu on every heartbeat.
+// Private fields are dropped as JSON dropped them, except the two cloneMachine keeps.
+func undoMachine(m *Machine) Machine {
+	out := copyObservationValue(reflect.ValueOf(*m)).Interface().(Machine)
+	out.toolInventory = m.toolInventory
+	if out.HostHealth != nil {
+		out.HostHealth.delivery = m.HostHealth.delivery
+	}
+	return out
 }
 
 // View journals preserve rollback without enrolling a job or measurement in

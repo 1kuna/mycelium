@@ -66,15 +66,17 @@ func init() {
 				put(group+id, v)
 			}
 		}
-		return func() error { return checkQueueRecordsAgainst(q, before) }
+		return func() error { return checkQueueRecordsAgainst(q, before, false) }
 	}
 }
 
 func checkQueueRecords(q *Queue) error {
-	return checkQueueRecordsAgainst(q, q.persisted)
+	return checkQueueRecordsAgainst(q, q.persisted, true)
 }
 
-func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte) error {
+// Stored machine records hold only the durable half; the in-memory audit
+// still diffs whole machines, since rollback must restore reported fields too.
+func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte, stored bool) error {
 	if beforeRecords == nil {
 		return nil
 	}
@@ -95,6 +97,9 @@ func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte) error {
 		}
 		// These fields are recomputed by refreshHostMemory, never decisions.
 		data, _ := json.Marshal(m)
+		if stored {
+			data, _ = json.Marshal(durableMachine(m))
+		}
 		var before, after map[string]any
 		_ = json.Unmarshal(beforeRecords["machines/"+id], &before)
 		_ = json.Unmarshal(data, &after)
