@@ -139,3 +139,62 @@ func TestHealthAlertDeliveryFailedHookRemainsUnacknowledged(t *testing.T) {
 		t.Fatalf("failed-hook status: %+v", snapshot.HealthAlertDelivery)
 	}
 }
+
+// A condition that flapped while no receiver listened delivers once with its
+// repeat count (live: 12,453 identical host_probe_unknown events), and every
+// retained member is acknowledged; nothing is dropped from history.
+func TestHealthAlertDeliveryGroupsIdenticalPendingAlerts(t *testing.T) {
+	q, clock := fixture(t)
+	dir := t.TempDir()
+	hook, out := filepath.Join(dir, "notify"), filepath.Join(dir, "payloads")
+	script := "#!/bin/sh\n[ \"$1\" = --check ] && exit 0\ncat >> '" + out + "'\necho >> '" + out + "'\n"
+	if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	first := clock.Now()
+	if err := q.update(func() error {
+		for range 3 {
+			q.appendHealthAlert(HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "a"})
+			clock.Advance(time.Minute)
+		}
+		q.appendHealthAlert(HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "b"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureHealthNotifier(context.Background(), hook); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); q.runHealthNotifier(ctx) }()
+	defer func() { cancel(); <-done }()
+	await(t, func() bool {
+		q.mu.RLock()
+		defer q.mu.RUnlock()
+		for _, e := range q.s.Health.Events {
+			if !e.Delivered {
+				return false
+			}
+		}
+		return true
+	})
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []HealthAlert
+	for _, line := range strings.Fields(string(data)) {
+		var e HealthAlert
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, e)
+	}
+	if len(got) != 2 || got[0].Host != "a" || got[0].Repeats != 2 || got[0].FirstAt == nil || !got[0].FirstAt.Equal(first) || got[1].Host != "b" || got[1].Repeats != 0 || got[1].FirstAt != nil {
+		t.Fatalf("grouped deliveries: %s", data)
+	}
+	if len(q.s.Health.Events) != 4 {
+		t.Fatal("grouped delivery changed retained history")
+	}
+}

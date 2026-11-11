@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,7 +36,47 @@ type HealthAlert struct {
 	At          time.Time        `json:"at"`
 	Delivered   bool             `json:"delivered"`
 	Mount       *HostMountHealth `json:"mount,omitempty"`
+	// Delivery payload only: identical pending alerts this notification covers
+	// beyond itself, and the first one's time. Every member stays retained.
+	Repeats int        `json:"repeats,omitempty"`
+	FirstAt *time.Time `json:"first_at,omitempty"`
 }
+
+// healthAlertIdentity is everything a receiver can tell apart. Two pending
+// alerts with one identity differ only in time, so they deliver once.
+func healthAlertIdentity(e HealthAlert) string {
+	return strings.Join([]string{e.Kind, e.Reason, e.Host, e.Machine, e.Device, e.Project, e.ClientKind, e.Store, e.Reservation, e.JobID, strconv.Itoa(e.Attempt), strings.Join(e.Recipients, ",")}, "\x00")
+}
+
+type healthDelivery struct {
+	alert HealthAlert
+	ids   []string
+}
+
+// groupHealthDeliveries keeps first-seen order and sends each identity's latest
+// event (its recovery receipt is the current one) with the repeat count.
+func groupHealthDeliveries(pending []HealthAlert) []healthDelivery {
+	index := map[string]int{}
+	var out []healthDelivery
+	for _, e := range pending {
+		key := healthAlertIdentity(e)
+		i, ok := index[key]
+		if !ok {
+			index[key] = len(out)
+			out = append(out, healthDelivery{alert: e, ids: []string{e.DeliveryID}})
+			continue
+		}
+		d := &out[i]
+		first := d.alert.At
+		if d.alert.FirstAt != nil {
+			first = *d.alert.FirstAt
+		}
+		d.alert, d.ids = e, append(d.ids, e.DeliveryID)
+		d.alert.FirstAt, d.alert.Repeats = &first, len(d.ids)-1
+	}
+	return out
+}
+
 type healthCondition struct {
 	Endings     []healthEnding `json:"endings,omitempty"`
 	Since       time.Time      `json:"since"`
@@ -243,7 +284,8 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 			return
 		}
 		failed := false
-		for _, e := range pending {
+		for _, delivery := range groupHealthDeliveries(pending) {
+			e := delivery.alert
 			data, _ := json.Marshal(e)
 			// Bound a wedged local hook so health delivery cannot strand shutdown.
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -259,7 +301,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 				failed = true
 				break
 			}
-			err = q.ackHealthEvent(ctx, e.DeliveryID)
+			err = q.ackHealthEvents(ctx, delivery.ids)
 			if err != nil {
 				failed = true
 				break
@@ -295,7 +337,11 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 
 // Clone a delivered generation outside control. Concurrent append/delivery
 // invalidates the plan; retry against the current immutable slice.
-func (q *Queue) ackHealthEvent(ctx context.Context, id string) error {
+func (q *Queue) ackHealthEvents(ctx context.Context, ids []string) error {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -303,18 +349,19 @@ func (q *Queue) ackHealthEvent(ctx context.Context, id string) error {
 		q.mu.RLock()
 		events := q.s.Health.Events
 		q.mu.RUnlock()
-		copy := slices.Clone(events)
-		index := -1
-		for i, e := range copy {
-			if e.DeliveryID == id {
-				index = i
-				break
+		var changed []int
+		for i, e := range events {
+			if want[e.DeliveryID] && !e.Delivered {
+				changed = append(changed, i)
 			}
 		}
-		if index < 0 || copy[index].Delivered {
+		if len(changed) == 0 {
 			return nil
 		}
-		copy[index].Delivered = true
+		copy := slices.Clone(events)
+		for _, i := range changed {
+			copy[i].Delivered = true
+		}
 		applied := false
 		err := q.updateRequest(ctx, func() error {
 			current := q.s.Health.Events
@@ -322,7 +369,9 @@ func (q *Queue) ackHealthEvent(ctx context.Context, id string) error {
 				return nil
 			}
 			q.s.Health.Events = copy
-			q.records.healthChanged[index] = true
+			for _, i := range changed {
+				q.records.healthChanged[i] = true
+			}
 			applied = true
 			return nil
 		}, nil)

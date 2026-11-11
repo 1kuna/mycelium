@@ -11,13 +11,89 @@ import (
 // StatusSummary identifies the deliberate projection. A missing diagnostic is
 // not absent evidence; detail=full and sections recover the existing document.
 type StatusSummary struct {
-	RetainedJobs int               `json:"retained_jobs"`
-	Alerts       []StatusCondition `json:"alerts"`
-	Diagnostics  string            `json:"diagnostics"`
+	RetainedJobs int                `json:"retained_jobs"`
+	Alerts       []StatusAlertGroup `json:"alert_groups"`
+	Diagnostics  string             `json:"diagnostics"`
 }
-type StatusCondition struct {
-	Condition string    `json:"condition"`
-	Since     time.Time `json:"since"`
+
+// StatusAlertGroup folds active conditions of one kind into one row: the same
+// regression on 18 work profiles is one fact with a count, not 18 lines.
+// Scopes count members per host or project; hash-like subjects (work profiles,
+// targets, recipes) are counted only. The owning section names each member.
+type StatusAlertGroup struct {
+	Kind   string         `json:"kind"`
+	Count  int            `json:"count"`
+	Since  time.Time      `json:"since"`
+	Scopes map[string]int `json:"scopes,omitempty"`
+}
+
+// statusAlertKind splits a condition key into its kind and member scope.
+// "efficiency/<subject>/<metric>" and "reports/<host>/<code>" are kinded by
+// their final code; other keys by their first segment, scoped by the second.
+func statusAlertKind(key string) (kind, scope string) {
+	parts := strings.Split(key, "/")
+	kind = parts[0]
+	if len(parts) >= 3 && (kind == "efficiency" || kind == "reports") {
+		kind += "/" + parts[len(parts)-1]
+		scope = strings.Join(parts[1:len(parts)-1], "/")
+	} else if len(parts) >= 2 {
+		scope = parts[1]
+	}
+	if strings.HasPrefix(scope, "work:") || hashLikeStatusScope(scope) {
+		scope = ""
+	}
+	return kind, scope
+}
+func hashLikeStatusScope(s string) bool {
+	if len(s) < 16 {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	return true
+}
+func statusAlertGroups(conditions map[string]healthCondition) []StatusAlertGroup {
+	groups := map[string]*StatusAlertGroup{}
+	for key, c := range conditions {
+		if !c.Active {
+			continue
+		}
+		kind, scope := statusAlertKind(key)
+		g := groups[kind]
+		if g == nil {
+			g = &StatusAlertGroup{Kind: kind, Since: c.Since}
+			groups[kind] = g
+		}
+		g.Count++
+		if c.Since.Before(g.Since) {
+			g.Since = c.Since
+		}
+		if scope != "" {
+			if g.Scopes == nil {
+				g.Scopes = map[string]int{}
+			}
+			g.Scopes[scope]++
+		}
+	}
+	out := make([]StatusAlertGroup, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, *g)
+	}
+	slices.SortFunc(out, func(a, b StatusAlertGroup) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count
+		}
+		return strings.Compare(a.Kind, b.Kind)
+	})
+	return out
+}
+
+// A replaced per-card identity is history, not a host; the default omits it.
+func dropReplacedStatusMachines(machines []*Machine) []*Machine {
+	return slices.DeleteFunc(machines, func(m *Machine) bool { return m.Replacement != nil })
 }
 
 func (o *statusOptions) compact() bool {
@@ -196,17 +272,7 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		copy := compactStatusMachine(m)
 		s.Machines[id] = &copy
 	}
-	summary := &StatusSummary{RetainedJobs: len(q.s.Jobs) + len(q.calls), Alerts: []StatusCondition{}, Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
-	for key, c := range q.s.Health.Conditions {
-		if c.Active {
-			if rest, ok := strings.CutPrefix(key, "recipe/"); ok {
-				host, recipe, _ := strings.Cut(rest, "/")
-				key = "recipe/" + host + "/" + statusEnvironmentName(recipe)
-			}
-			summary.Alerts = append(summary.Alerts, StatusCondition{Condition: key, Since: c.Since})
-		}
-	}
-	slices.SortFunc(summary.Alerts, func(a, b StatusCondition) int { return strings.Compare(a.Condition, b.Condition) })
+	summary := &StatusSummary{RetainedJobs: len(q.s.Jobs) + len(q.calls), Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
 	selection.page.Total, selection.page.Returned = len(selection.ids), len(selection.ids)
 	inputs := observationState{State: s, Models: q.models, Calls: q.calls, Unreported: q.unreported}
 	if err := chargeProjectionValue(ctx, inputs); err != nil {
