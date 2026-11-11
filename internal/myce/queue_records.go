@@ -135,14 +135,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 		delete(q.records.live, id)
 		q.indexStatusHistory(id, j)
 	}
-	var at time.Time
-	if q.fileRetention > 0 && terminal(j.State) && hasJobFiles(j) && !j.FilesExpired && !deliveryPending(j) {
-		at = q.clock.Now()
-		if j.FinishedAt != nil {
-			at = j.FinishedAt.Add(q.fileRetention)
-		}
-	}
-	q.records.files.set(id, at)
+	q.records.files.set(id, q.fileExpiryDeadline(j))
 	var history, logs time.Time
 	if terminal(j.State) && (q.fileRetention > 0 || q.logRetention > 0) {
 		ended := q.clock.Now()

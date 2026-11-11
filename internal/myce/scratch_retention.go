@@ -76,10 +76,11 @@ func (q *Queue) attemptFilesDisposition(r AttemptFilesRequest) AttemptFilesDispo
 	if j.FilesExpired {
 		return AttemptFilesDisposition{Reclaim: true, Reason: "files_released"}
 	}
-	if q.fileRetention == 0 || j.FinishedAt == nil {
+	retention := q.jobFileRetention(j)
+	if retention == 0 || j.FinishedAt == nil {
 		return keep("unique_unreleased")
 	}
-	until := j.FinishedAt.Add(q.fileRetention)
+	until := j.FinishedAt.Add(retention)
 	return AttemptFilesDisposition{Reclaim: !q.clock.Now().Before(until), Reason: "file_retention", Until: &until}
 }
 

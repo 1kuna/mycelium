@@ -297,7 +297,9 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		learned := *p.LearnedMemory
 		p.LearnedMemory = &learned
 	}
-	err := q.updateRequest(requestCtx, func() error {
+	var previous map[string]ProjectPolicy
+	err := q.updateTransaction(requestCtx, func() error {
+		previous = q.s.Policies
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
 		}
@@ -313,6 +315,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 				v.MaxRetainedFileBytes = cmp.Or(v.MaxRetainedFileBytes, old.MaxRetainedFileBytes)
 				v.MaxAddedFileBytes24h = cmp.Or(v.MaxAddedFileBytes24h, old.MaxAddedFileBytes24h)
 				v.ReservedFileBytes = cmp.Or(v.ReservedFileBytes, old.ReservedFileBytes)
+				v.FileRetention = cmp.Or(v.FileRetention, old.FileRetention)
 				projects[name] = v
 			}
 		}
@@ -331,7 +334,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		}
 		out = q.priorityPolicyRecord()
 		return nil // Normal planner reevaluates on its next decision; no bulk stop here.
-	}, nil)
+	}, nil, false, func() { q.reindexProjectFileDeadlines(previous) })
 	return out, err
 }
 

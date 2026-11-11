@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -157,35 +159,135 @@ func isResultExpired(err error) bool {
 
 // Called in the ordinary queue transaction. Expiry is durable, including keyed
 // answers; increasing retention later cannot restore deleted bytes.
-func (q *Queue) maintainFileExpiry() {
+func (q *Queue) maintainFileExpiry() { q.expireDueFiles(0) }
+
+// Caller is inside a queue transaction. An ordinary pass expires one due record
+// (fileReclaimBatch). A capacity-refused write passes the bytes it needs: due
+// records keep expiring until their manifests cover that need or none remain.
+// Only records whose retention deadline has already passed are expired, so this
+// does now what later ordinary passes would do; it never widens what expires.
+func (q *Queue) expireDueFiles(need uint64) (expired uint64) {
 	now := q.clock.Now()
-	if q.fileRetention == 0 {
-		return
-	}
 	if q.records == nil {
 		q.rebuildRecords()
 	}
-	for _, id := range q.records.files.due(now) {
-		j := q.touchJob(id)
-		if j == nil || !terminal(j.State) || !hasJobFiles(j) {
-			continue
+	for {
+		ids := q.records.files.due(now)
+		if len(ids) == 0 {
+			return expired
 		}
-		if parkedStorageCustody(j) || deliveryPending(j) {
-			continue
+		for _, id := range ids {
+			expired = addDiskBytes(expired, q.expireJobFiles(id, now))
 		}
-		if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
-			continue
+		if expired >= need {
+			return expired
 		}
-		// Some historical terminal paths did not stamp FinishedAt. Start their
-		// window when first observed, rather than guessing from submission time.
-		if j.FinishedAt == nil {
-			ended := now
-			j.FinishedAt = &ended
+	}
+}
+
+// Returns the manifest bytes of files newly expired by this call.
+func (q *Queue) expireJobFiles(id string, now time.Time) uint64 {
+	j := q.s.Jobs[id]
+	if j == nil || !terminal(j.State) || !hasJobFiles(j) {
+		return 0
+	}
+	if parkedStorageCustody(j) || deliveryPending(j) {
+		return 0
+	}
+	if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
+		return 0
+	}
+	retention := q.jobFileRetention(j)
+	if retention == 0 {
+		return 0
+	}
+	if j.FinishedAt != nil && now.Before(j.FinishedAt.Add(retention)) {
+		// A policy change can leave an early index entry; keep the real deadline.
+		q.records.files.set(id, j.FinishedAt.Add(retention))
+		return 0
+	}
+	j = q.touchJob(id)
+	// Some historical terminal paths did not stamp FinishedAt. Start their
+	// window when first observed, rather than guessing from submission time.
+	if j.FinishedAt == nil {
+		ended := now
+		j.FinishedAt = &ended
+	}
+	newly := !j.FilesExpired && !now.Before(j.FinishedAt.Add(retention))
+	if newly {
+		j.FilesExpired = true
+	}
+	enrollFileReclamation(j)
+	if !newly {
+		return 0
+	}
+	var bytes uint64
+	seen := map[string]bool{}
+	for _, files := range jobFileManifests(j) {
+		for _, ref := range files {
+			if !seen[ref.SHA256] {
+				seen[ref.SHA256] = true
+				bytes = addDiskBytes(bytes, uint64(ref.SizeBytes))
+			}
 		}
-		if !now.Before(j.FinishedAt.Add(q.fileRetention)) {
-			j.FilesExpired = true
+	}
+	return bytes
+}
+
+// Validates a project's optional file_retention policy.
+func parseProjectFileRetention(v string) (time.Duration, error) {
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, errors.New("project file_retention must be a positive duration such as 72h")
+	}
+	return d, nil
+}
+
+// Caller holds q.mu. A project's policy can only shorten the queue-wide window:
+// the project owns its own data, and the operator's window still bounds it.
+func (q *Queue) jobFileRetention(j *Job) time.Duration {
+	r := q.fileRetention
+	if p, _ := parseProjectFileRetention(q.s.Policies[j.Spec.Project].FileRetention); p > 0 && (r == 0 || p < r) {
+		r = p
+	}
+	return r
+}
+
+// Caller holds q.mu. Zero means no deadline: retained until explicit release.
+func (q *Queue) fileExpiryDeadline(j *Job) time.Time {
+	retention := q.jobFileRetention(j)
+	if retention == 0 || !terminal(j.State) || !hasJobFiles(j) || j.FilesExpired || deliveryPending(j) {
+		return time.Time{}
+	}
+	if j.FinishedAt == nil {
+		return q.clock.Now()
+	}
+	return j.FinishedAt.Add(retention)
+}
+
+// Runs under q.mu after a committed project-policy change. Re-derives expiry
+// deadlines only for projects whose file_retention changed.
+func (q *Queue) reindexProjectFileDeadlines(previous map[string]ProjectPolicy) {
+	if q.records == nil {
+		return
+	}
+	changed := map[string]bool{}
+	for name, p := range q.s.Policies {
+		changed[name] = previous[name].FileRetention != p.FileRetention
+	}
+	for name, p := range previous {
+		changed[name] = changed[name] || q.s.Policies[name].FileRetention != p.FileRetention
+	}
+	if !slices.Contains(slices.Collect(maps.Values(changed)), true) {
+		return
+	}
+	for id, j := range q.s.Jobs {
+		if j != nil && changed[j.Spec.Project] {
+			q.records.files.set(id, q.fileExpiryDeadline(j))
 		}
-		enrollFileReclamation(j)
 	}
 }
 
@@ -421,7 +523,14 @@ func (q *Queue) reclaimPublishedFiles() error {
 }
 
 func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
+	_, err := q.reclaimPublishedFilesUntil(requestContext(requestContexts), 0)
+	return err
+}
+
+// With need zero, an ordinary pass yields to measured control pressure. A
+// capacity-refused write passes its need instead: collection of already
+// authorized bytes continues for that writer until it has freed that many.
+func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
@@ -449,7 +558,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 	}
 	requestUnlock1()
 	if store == nil {
-		return nil
+		return 0, nil
 	}
 	gone := map[string]bool{}
 	deferred := false
@@ -493,6 +602,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 				err = os.Remove(path)
 				if err == nil {
 					gone[hash] = true
+					freed = addDiskBytes(freed, uint64(st.Size()))
 				}
 			}
 			if errors.Is(err, os.ErrNotExist) {
@@ -506,19 +616,19 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		}
 	}
 	for _, hash := range candidates {
-		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
+		if q.stopReclaim(requestCtx, deferred, need, freed) {
 			break
 		}
 		reclaim(hash, false, false)
 	}
 	for hash := range orphans {
-		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
+		if q.stopReclaim(requestCtx, deferred, need, freed) {
 			break
 		}
 		reclaim(hash, true, false)
 	}
 	for hash := range bundles {
-		if deferred || requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
+		if q.stopReclaim(requestCtx, deferred, need, freed) {
 			break
 		}
 		reclaim(hash, false, true)
@@ -531,9 +641,9 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		log.Printf("file retention deferred: publication or reference verification in progress; retrying next tick")
 	}
 	if len(gone) == 0 {
-		return nil
+		return 0, nil
 	}
-	return q.updateRequest(requestCtx, func() error {
+	return freed, q.updateRequest(requestCtx, func() error {
 		if q.files != store {
 			return nil
 		}
@@ -607,3 +717,13 @@ func hasJobFiles(j *Job) bool {
 // measured waiting control request yields the rest; an idle queue drains its
 // backlog without an arbitrary producer-count limit.
 func (q *Queue) fileReclaimUnderPressure() bool { busy, _ := q.evidencePressure(); return busy }
+
+func (q *Queue) stopReclaim(ctx context.Context, deferred bool, need, freed uint64) bool {
+	if deferred || ctx.Err() != nil {
+		return true
+	}
+	if need > 0 {
+		return freed >= need
+	}
+	return q.fileReclaimUnderPressure()
+}
