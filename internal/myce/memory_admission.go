@@ -320,9 +320,19 @@ func (q *Queue) yieldMemoryOvercommit() {
 			// Growth expected until a stop releases memory: the last measured
 			// increment plus the rate over the stop grace and one sample
 			// interval, but never past the job's own enforced ceiling.
-			room := max(0, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-max(sample.gb, sample.footprintGB))
+			used := max(sample.gb, sample.footprintGB)
+			expected := sample.growthGB + sample.rateGB*(horizon+sample.freshFor()).Seconds()
+			if unifiedDeviceWork(j, owner) {
+				// Unified CUDA device memory escapes the cgroup; add its own
+				// measured increment and rate until the stop lands. Host and
+				// device residency overlap by an unknown amount (#424): their
+				// union is at least the larger share.
+				used = max(used, sample.deviceGB)
+				expected += sample.deviceGrowthGB + sample.deviceRateGB*(horizon+deviceMemorySampleFreshFor).Seconds()
+			}
+			room := max(0, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-used)
 			h.lentGB += room
-			h.growthGB += min(room, sample.growthGB+sample.rateGB*(horizon+sample.freshFor()).Seconds())
+			h.growthGB += min(room, expected)
 		}
 		if j.State == "running" && !cancelled(j) && !plannedStop(j) && batchReservesCapacity(j) {
 			h.jobs = append(h.jobs, j)

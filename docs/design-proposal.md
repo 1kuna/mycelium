@@ -235,9 +235,17 @@ Darwin RSS guard, with learned evidence for that work on that target and a fresh
 exact-attempt sample. The charge is the larger of the learned need, the
 attempt's high water and its live forecast, plus the measured overshoot before
 containment acts (on Darwin, growth rate times the guard's reaction window),
-bounded by the enforced ceiling. First runs, accelerator work (Metal, unified
-CUDA, driver-pinned host memory: outside the cgroup and RSS guard), Docker,
-interactive hosts and missing or stale samples keep the envelope. When by-use
+bounded by the enforced ceiling. On a unified CUDA host with cgroup v2
+ceilings, GPU work is charged by use too: measured on a GB10, the cgroup
+contains host, managed and pinned allocations, while device allocations
+(`cudaMalloc`) escape it and RSS but appear in the per-process NVML sample and
+in host availability. Each share is charged the larger of its accepted peak on
+that target (without the envelope's uncertainty), the attempt's high water and
+its forecast, from a fresh per-process device sample, bounded by the envelope.
+First runs, Metal (its buffers are invisible to the RSS guard, and no
+per-process sample exists), discrete accelerators, multi-card attempts, Docker,
+interactive hosts and missing, stale or estimated samples keep the envelope.
+When by-use
 jobs grow back into memory lent to their neighbours and live free memory can
 no longer absorb the growth expected before a stop completes, one job yields
 through the planned-stop path: the lowest tier first, then by-use work, then

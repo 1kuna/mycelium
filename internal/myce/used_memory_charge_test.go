@@ -295,3 +295,220 @@ func TestUsedMemoryOvercommitProductionRules(t *testing.T) {
 		})
 	}
 }
+
+// A unified CUDA host with a measured allowance, cgroup ceilings and room for
+// one naming-sized envelope.
+func unifiedUsedChargeMachine() Machine {
+	m := unifiedCUDAAdmissionMachine()
+	m.MemoryEnforcement, m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = cgroupEnforced, 100.06, 100
+	m.FreeMemoryGB, m.TotalMemoryGB = 100, 100
+	return m
+}
+
+// Accepted peaks of the work on this target, as recordLearnedMemory stores them.
+func unifiedPeaks(host, device float64) *LearnedMemory {
+	return &LearnedMemory{HostGB: host, Evidence: 7, Source: "test", PeakHostGB: host, PeakDeviceGB: device}
+}
+
+// The live #1044 naming stage on the unified CUDA host: envelope host
+// 38.731987 (peak 20.391857 + spread) and device 44.519424 (peak 22.318359 +
+// growth) plus 0.125 slack = 83.376411 GiB. Running, it uses 2.290314 GiB in
+// its cgroup and 22.318359 GiB of device memory (24.608673 GiB). Before, it
+// is charged the envelope, 3.39x its use. After, it is charged its accepted
+// peaks plus the drift margin, 42.835216 GiB (1.74x), so the reserved
+// GiB-hours of a run fall by 49%. A job without peaks, or without a fresh
+// per-process device sample, keeps the envelope.
+func TestUnifiedUsedMemoryChargeAuditFixture(t *testing.T) {
+	const host, device, cgroup, used = 38.731987, 44.519424, 2.290314, 22.318359
+	for _, tc := range []struct {
+		name         string
+		peaks        bool
+		deviceSample bool
+		charge       float64
+	}{
+		{"before: envelope", false, true, 83.376411},
+		{"no device sample keeps envelope", true, false, 83.376411},
+		{"after: charged by use", true, true, 20.391857 + 22.318359 + .125},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := unifiedUsedChargeMachine()
+			s := spec("experiment")
+			s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, host
+			submit(t, q, s)
+			a := assignedJob(check(t, q, m, nil))
+			if a == nil {
+				t.Fatal("naming-sized job not assigned")
+			}
+			if err := q.Started(result(a, false)); err != nil {
+				t.Fatal(err)
+			}
+			q.mu.Lock()
+			e := *q.s.Jobs[a.ID].MemoryEnvelope
+			e.Learned = &LearnedMemory{HostGB: host, Evidence: 7, Source: "test"}
+			if tc.peaks {
+				e.Learned = unifiedPeaks(20.391857, 22.318359)
+				e.Learned.HostGB = host
+			}
+			q.s.Jobs[a.ID].MemoryEnvelope = &e
+			q.mu.Unlock()
+			clock.Advance(time.Second)
+			fp, dev := cgroup, used
+			sample := &CurrentHostMemory{NonreclaimableGB: cgroup, FootprintGB: &fp, GrowthObserved: true, sampledAt: clock.Now()}
+			if tc.deviceSample {
+				sample.DeviceGB = &dev
+			}
+			c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Session: a.Session, Started: true, CurrentHostMemory: sample}}}
+			c.Machine.HostAvailableMemoryGB = 100 - cgroup - used
+			if _, err := q.Checkin(c); err != nil {
+				t.Fatal(err)
+			}
+			q.mu.Lock()
+			l := q.hostMemoryLedgers[m.ID]
+			q.mu.Unlock()
+			if len(l.Owners) != 1 || !near(l.Owners[0].ChargeGB, tc.charge) {
+				t.Fatalf("owners %+v, want charge %g", l.Owners, tc.charge)
+			}
+		})
+	}
+}
+
+// Each share is charged its accepted peak, high water or forecast; growth past
+// the peaks raises the charge with each sample up to the envelope; observed
+// use above the envelope is kept; only the cgroup's host vector earns credit.
+func TestUnifiedUsedMemoryChargeGrowth(t *testing.T) {
+	_, clock := fixture(t)
+	m := unifiedUsedChargeMachine()
+	j := Job{ID: "j", Attempt: 1, Session: "s", State: "running", Spec: spec("experiment")}
+	j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB = 40, 20
+	started := clock.Now()
+	j.StartedAt = &started
+	j.MemoryEnvelope = &JobMemoryEnvelope{Basis: "learned", HostGB: 60.125, DeviceGB: 40, Learned: unifiedPeaks(10, 20)}
+	ceiling := hostNeed(&m, 40, 20)
+	at := clock.Now()
+	for _, tc := range []struct {
+		name           string
+		sample         hostMemorySample
+		age            time.Duration
+		charge, growth float64
+	}{
+		// Model not loaded yet: the accepted peaks hold its share.
+		{"below peaks", hostMemorySample{gb: 1, footprintGB: 1, peakGB: 1, deviceGB: .5, at: at, deviceAt: at}, 0, 30.125, 29.125},
+		// Device 26 + 2 increment + 1 GiB/s over 2 s; host at its peak.
+		{"device past peak", hostMemorySample{gb: 2, footprintGB: 2, peakGB: 2, deviceGB: 26, deviceGrowthGB: 2, deviceRateGB: 1, at: at, deviceAt: at}, 2 * time.Second, 40.125, 38.125},
+		// A falling device share keeps its attempt high water.
+		{"device high water", hostMemorySample{gb: 2, footprintGB: 2, peakGB: 2, deviceGB: 5, devicePeakGB: 33, at: at, deviceAt: at}, 0, 43.125, 41.125},
+		// A forecast never reserves past the envelope.
+		{"forecast bounded", hostMemorySample{gb: 2, footprintGB: 2, peakGB: 2, deviceGB: 39, deviceGrowthGB: 9, deviceRateGB: 5, at: at, deviceAt: at}, time.Second, ceiling, ceiling - 2},
+		// cudaMalloc is not contained: real use above the envelope stays charged.
+		{"observed above envelope", hostMemorySample{gb: 3, footprintGB: 3, peakGB: 3, deviceGB: 70, at: at, deviceAt: at}, 0, 73, 70},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, tc.sample, at.Add(tc.age))
+			if !near(charge, tc.charge) || !near(growth, tc.growth) {
+				t.Fatalf("charge=%g growth=%g, want %g/%g", charge, growth, tc.charge, tc.growth)
+			}
+		})
+	}
+
+	// Without per-process device evidence, or off unified CUDA, GPU work keeps
+	// the envelope.
+	fresh := hostMemorySample{gb: 2, footprintGB: 2, peakGB: 2, deviceGB: 20, at: at, deviceAt: at}
+	for _, tc := range []struct {
+		name string
+		edit func(*Job, *Machine, *hostMemorySample)
+	}{
+		{"no accepted peaks", func(j *Job, _ *Machine, _ *hostMemorySample) { j.MemoryEnvelope.Learned.PeakDeviceGB = 0 }},
+		{"RSS fallback estimate", func(_ *Job, _ *Machine, s *hostMemorySample) { s.source = deviceUnifiedResidentSource }},
+		{"exclusive attribution", func(_ *Job, _ *Machine, s *hostMemorySample) { s.exclusive = true }},
+		{"stale device sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.deviceAt = at.Add(-deviceMemorySampleFreshFor) }},
+		{"missing device sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.deviceAt = time.Time{} }},
+		{"stale host sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.at = at.Add(-2 * hostMemorySampleFreshFor) }},
+		{"multi-card attempt", func(j *Job, _ *Machine, _ *hostMemorySample) { j.AllocatedDevices = []string{"0", "1"} }},
+		{"docker", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Run.Docker = true }},
+		{"no cgroup ceilings", func(_ *Job, m *Machine, _ *hostMemorySample) { m.MemoryEnforcement = "memory ceiling not enforced on this host (x)" }},
+		{"discrete CUDA", func(_ *Job, m *Machine, _ *hostMemorySample) { m.UnifiedMemory = false }},
+		{"Metal", func(_ *Job, m *Machine, _ *hostMemorySample) {
+			m.GPU, m.CapabilityProfile.OS, m.MemoryEnforcement = "metal", "darwin", darwinRSSGuardStatus
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jj, mm, s := j, m, fresh
+			l := *j.MemoryEnvelope.Learned
+			e := *j.MemoryEnvelope
+			e.Learned = &l
+			jj.MemoryEnvelope = &e
+			cp := *m.CapabilityProfile
+			mm.CapabilityProfile = &cp
+			tc.edit(&jj, &mm, &s)
+			if _, _, ok := usedMemoryCharge(&jj, &mm, ceiling, s, at); ok {
+				t.Fatal("GPU work charged by use without measured device memory")
+			}
+		})
+	}
+}
+
+// Device growth alone, with flat host samples, trips the backstop: the
+// experiment GPU job yields before its uncontained device allocations exhaust
+// memory that production work on the host still needs.
+func TestUnifiedUsedMemoryOvercommitYieldsOnDeviceGrowth(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedUsedChargeMachine()
+	m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", Identity: "GPU-test", Fingerprint: "cuda-test", Selector: "0", MemoryMode: "unified", UnifiedMemory: true, TotalMemoryGB: 100, BudgetGB: 100, FreeMemoryGB: 100, MemoryMeasured: true}}
+	prod := cpuSpec(2, 30)
+	prod.Priority, prod.Project = "production", "prod"
+	gpu := spec("experiment")
+	gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB = 40, 4
+	var jobs []*Job
+	for _, s := range []Spec{prod, gpu} {
+		j := submit(t, q, s)
+		a := assignedJob(machineCheck(t, q, m, jobs...))
+		if a == nil {
+			t.Fatal("job not assigned", job(t, q, j.ID).Reason)
+		}
+		if err := q.Started(result(a, false)); err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		e := *q.s.Jobs[a.ID].MemoryEnvelope
+		e.Learned = unifiedPeaks(4, 10)
+		q.s.Jobs[a.ID].MemoryEnvelope = &e
+		q.mu.Unlock()
+		jobs = append(jobs, job(t, q, a.ID))
+		clock.Advance(time.Second)
+	}
+	report := func(device, rate, available float64) {
+		t.Helper()
+		clock.Advance(time.Second)
+		c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}
+		c.Machine.HostAvailableMemoryGB = available
+		for i, j := range jobs {
+			fp := 4.0
+			s := &CurrentHostMemory{NonreclaimableGB: 4, FootprintGB: &fp, GrowthObserved: true, sampledAt: clock.Now()}
+			if i == 1 {
+				d := device
+				s.DeviceGB, s.DeviceGrowthGB, s.DeviceGrowthRateGB = &d, rate, rate
+			}
+			c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: s})
+		}
+		if _, err := q.Checkin(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// At its accepted device peak with ample free memory, nothing yields.
+	report(10, 0, 60)
+	for _, j := range jobs {
+		if got := job(t, q, j.ID); got.State != "running" {
+			t.Fatal("steady work yielded", got.ID, got.State, got.Reason)
+		}
+	}
+	// The device share grows at 1 GiB/s while free memory falls to 6 GiB.
+	report(30, 1, 6)
+	if got := job(t, q, jobs[0].ID); got.State != "running" {
+		t.Fatal("production stopped", got.State, got.Reason)
+	}
+	victim := job(t, q, jobs[1].ID)
+	if stop := priorityStop(victim); victim.State != "stopping" || stop == nil || stop.Cause != memoryOvercommitCause {
+		t.Fatalf("growing GPU experiment did not yield: %s %+v %q", victim.State, stop, victim.Reason)
+	}
+}
