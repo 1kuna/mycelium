@@ -54,12 +54,9 @@ func validOutputDeclaration(decl string) bool {
 	return true
 }
 
-// ValidOutputDeclaration and OutputDeclarationCovers let clients (adapter
-// entries, recovery) accept the same folder and glob declarations.
+// ValidOutputDeclaration lets clients (adapter entries) accept the same folder
+// and glob declarations.
 func ValidOutputDeclaration(decl string) bool { return validOutputDeclaration(decl) }
-func OutputDeclarationCovers(decl, name string) bool {
-	return validOutputDeclaration(decl) && outputCovers(decl, name)
-}
 
 func outputPatterns(outputs map[string]string) bool {
 	for decl := range outputs {

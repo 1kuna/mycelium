@@ -82,7 +82,7 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		}
 		declared := false
 		for _, output := range plan.Outputs {
-			if name == output || myce.OutputDeclarationCovers(output, name) {
+			if name == output {
 				declared = true
 			}
 		}
