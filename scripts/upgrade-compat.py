@@ -218,7 +218,7 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, conf
             # without requiring one unbounded response to finish in ten seconds.
             seen, before = set(), ""
             while True:
-                query = urllib.parse.urlencode(dict(jobs="all", limit=1000, before=before))
+                query = urllib.parse.urlencode(dict(jobs="all", limit=1000, before=before, sections="jobs,machines,work"))
                 request = urllib.request.Request(url + "/api/status?" + query,
                                                  headers={"Authorization": "Bearer upgrade-fixture"})
                 try:
@@ -366,9 +366,12 @@ def validate_inventory_receipts(rows, allow_disk_budget_retry=False):
         error = json.loads(rows[0].get("error", "{}"))
         fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes")
         message = error.get("error", "")
-        if error.get("code") == "request_invalid" and any('unknown field "' + f + '"' in message for f in fields):
+        unknown_fields = (message == "body must be one JSON object with known fields and valid field types"
+                          or any('unknown field "' + f + '"' in message for f in fields))
+        if error.get("code") == "request_invalid" and unknown_fields and rows[0].get("disk_budget_fields"):
             if len(rows) > 1:
-                for key in ("session", "attempt_protocol", "hash"):
+                assert not rows[1]["disk_budget_fields"], "disk-budget retry retained rejected fields"
+                for key in ("session", "attempt_protocol", "hash", "disk_budget_baseline_sha256"):
                     assert rows[1][key] == rows[0][key], "disk-budget retry changed " + key
             return
     raise RuntimeError(f"inventory check-in refused: {rows}")
