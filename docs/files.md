@@ -872,7 +872,7 @@ work and never wait for NAS I/O under the queue lock. Restoring destination
 configuration resumes pending tasks; changing the configured path does not
 silently redirect already accepted deliveries.
 
-Pending/failed delivery pins outputs through ordinary seven-day expiry and
+Pending/failed delivery pins outputs through ordinary file-retention expiry (`72h` by default) and
 restart. Once verified, ordinary retrieval retention measured from compute
 completion applies, so an already overdue result may expire on the next tick.
 Verification never requests early removal. Status capacity includes pending

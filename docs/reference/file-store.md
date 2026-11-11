@@ -43,9 +43,9 @@ projects:
 
 It applies to the project's terminal jobs, including jobs that finished before
 the policy was set, and to their [worker scratch](worker-caches.md#worker-scratch-retention).
-It can only shorten the queue-wide window: with `--file-retention 168h`, a project
-`file_retention: 24h` expires after 24 hours, and `1000h` still expires after 168
-hours. Empty keeps the queue-wide policy. As with the limits below, a policy PUT
+It can only shorten the queue-wide window: with the default `--file-retention 72h`,
+a project `file_retention: 24h` expires after 24 hours, and `1000h` still expires
+after 72 hours. Empty keeps the queue-wide policy. As with the limits below, a policy PUT
 from an older CLI keeps the stored value; a current CLI's file can clear it.
 
 Job records and keyed answers stay, including their file identities and

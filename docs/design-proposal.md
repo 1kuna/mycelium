@@ -373,7 +373,8 @@ offline compaction operation, never an automatic `VACUUM` on the live queue.
 The retention choice was checked against the verified pre-upgrade backup: 1,898
 jobs, approximately eight days of terminal history, 500,056,064 database bytes;
 logs occupied roughly 445 MB. Keeping full history indefinitely was unnecessary
-for the seven-day result and thirty-day post-removal replay contracts.
+for the result-retention (`--file-retention`, `72h` by default) and thirty-day
+post-removal replay contracts.
 
 A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key within retention. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
 
