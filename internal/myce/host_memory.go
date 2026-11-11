@@ -37,9 +37,6 @@ func hostFits(m *Machine, gpu, host float64) bool {
 }
 
 func hostFitFailure(m *Machine, gpu, host float64) string {
-	if m.HostMemoryPolicyMismatch {
-		return "host memory allowance awaiting worker acknowledgement"
-	}
 	if host == 0 {
 		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 || m.HostMemoryDerivation != nil || m.HostMemoryBudgetMeasured {
 			return "host memory declaration is 0 GiB; allowance or enforced ceilings require a positive declaration"
