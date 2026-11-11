@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -216,6 +217,18 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 	if !info.IsDir() {
 		return fmt.Errorf("attempt files: %s is not a real directory; refusing to clean it", root)
 	}
+	files, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer files.Close()
+	opened, err := files.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return errors.New("attempt files root changed during collection")
+	}
 	jobs, err := os.ReadDir(root)
 	if err != nil {
 		return err
@@ -312,7 +325,7 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 				result = errors.Join(result, err)
 				continue
 			}
-			if err := os.RemoveAll(path); err != nil {
+			if err := removeAttemptFiles(files, filepath.Join(job.Name(), name)); err != nil {
 				result = errors.Join(result, err)
 				// A partial removal can take the marker; restore its diagnostic.
 				_, markErr := attemptFilesExpired(path, now, false)
@@ -329,6 +342,57 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 		}
 	}
 	return result
+}
+
+// Called only after local custody and exact-attempt collection authority pass.
+// Confine traversal to this tree and chmod open directory descriptors: staged
+// inputs can be read-only, while symlink targets and hardlinked files stay intact.
+func removeAttemptFiles(files *os.Root, name string) error {
+	info, err := files.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return files.Remove(name)
+	}
+	tree, err := files.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer tree.Close()
+	opened, err := tree.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return errors.New("attempt files changed during collection")
+	}
+	if err := fs.WalkDir(tree.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		dir, err := tree.Open(path)
+		if err != nil {
+			return err
+		}
+		info, err := dir.Stat()
+		if err == nil && !info.IsDir() {
+			err = errors.New("attempt directory changed during collection")
+		}
+		if err == nil && info.Mode().Perm()&0200 == 0 {
+			err = dir.Chmod(info.Mode() | 0200)
+		}
+		return errors.Join(err, dir.Close())
+	}); err != nil {
+		return err
+	}
+	return files.RemoveAll(name)
 }
 
 // attemptFilesExpired records first observation, and collects only with exact

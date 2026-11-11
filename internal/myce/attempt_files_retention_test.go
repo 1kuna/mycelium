@@ -59,6 +59,9 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 // belong to the exact attempt, and a cancelled success may have no accepted output.
 func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
 	q, clock := fixture(t)
+	if err := q.ConfigureFileRetention(7 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	c := retentionClient(t, q)
 	_, ref := retentionUpload(t, c, "result")
 	s := spec("experiment")
@@ -214,39 +217,97 @@ func TestAttemptFilesRetentionRefusesLinkedRoot(t *testing.T) {
 	}
 }
 
-// Root-owned Docker output cannot be removed; it must not stop other cleanup
-// or report the same failure every minute.
-func TestAttemptFilesRetentionRetriesStuckFolderDaily(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can remove read-only folders")
-	}
-	dir := t.TempDir()
-	stuck := filepath.Join(dir, "job-files", "stuck", "1", "out")
-	if err := os.MkdirAll(stuck, 0700); err != nil {
+// Staged inputs and compiler modules have owner-read-only directories. Restore
+// write access only for disposable scratch, without touching linked targets.
+func TestAttemptFilesRetentionReadOnlyDirectories(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	clock := &fakeClock{now: time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)}
+	target := filepath.Join(outside, "kept")
+	if err := os.Mkdir(target, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stuck, "root-owned"), nil, 0600); err != nil {
+	file := filepath.Join(target, "data")
+	if err := os.WriteFile(file, []byte("unique"), 0400); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(stuck, 0500); err != nil {
+	if err := os.Chmod(target, 0500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(stuck, 0700) })
-	if err := os.MkdirAll(filepath.Join(dir, "job-files", "done", "1"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
-	if err := pruneAttemptFiles(dir, now); err != nil {
-		t.Fatal(err)
-	}
-	for _, age := range []time.Duration{AttemptFilesGrace, 2 * AttemptFilesGrace} {
-		if err := pruneAttemptFiles(dir, now.Add(age)); err != nil {
+	t.Cleanup(func() { _ = os.Chmod(target, 0700) })
+	for _, name := range []string{"accepted", "live", "pending", "unknown"} {
+		path := filepath.Join(dir, "job-files", name, "1")
+		nested := filepath.Join(path, "inputs", "modules")
+		if err := os.MkdirAll(nested, 0700); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"stuck", "done"} {
-			if _, err := os.Stat(filepath.Join(dir, "job-files", name, "1")); err != nil {
-				t.Fatal("unknown data retired on age", name, err)
+		if err := os.Link(file, filepath.Join(nested, "data")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(nested, "directory-link")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(file, filepath.Join(nested, "file-link")); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{nested, filepath.Dir(nested)} {
+			if err := os.Chmod(p, 0500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(p, 0700) })
+		}
+		if name == "accepted" {
+			if err := os.Chmod(path, 0500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, 0700) })
+		}
+		if name == "unknown" {
+			continue
+		}
+		st := workerState{PublishedAttempt: &Execution{ID: name, Attempt: 1}}
+		if name == "live" {
+			st.Job = &Job{ID: name, Attempt: 1}
+		}
+		if name == "pending" {
+			st.Result = &Result{Execution: Execution{ID: name, Attempt: 1}, ReleasePending: true}
+		}
+		if err := saveWorkerJSON(dir, "state-attempt-"+name+".json", st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linked := filepath.Join(dir, "job-files", "linked")
+	if err := os.Mkdir(linked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(linked, "1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveWorkerJSON(dir, "state-attempt-linked.json", workerState{PublishedAttempt: &Execution{ID: "linked", Attempt: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "job-files", "accepted")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("accepted read-only scratch retained", err)
+	}
+	if _, err := os.Lstat(linked); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("accepted attempt link retained", err)
+	}
+	for _, name := range []string{"live", "pending", "unknown"} {
+		for _, relative := range []string{"inputs", "inputs/modules"} {
+			path := filepath.Join(dir, "job-files", name, "1", relative)
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0500 {
+				t.Fatal("protected directory removed or permissions changed", path, err)
 			}
 		}
+	}
+	for path, mode := range map[string]os.FileMode{target: 0500, file: 0400} {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != mode {
+			t.Fatal("outside target removed or permissions changed", path, err)
+		}
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "unique" {
+		t.Fatal("outside data changed", err)
 	}
 }
