@@ -221,25 +221,36 @@ func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
 		// A second interval outside q.mu exercises cold recovery inference.
 		clock.Advance(2 * period)
 	}
-	if reply.Job == nil || reply.Job.ID != j.ID || !q.workerFresh(q.s.Machines[m.ID], clock.Now()) {
+	q.mu.Lock()
+	fresh := q.workerFresh(q.s.Machines[m.ID], clock.Now())
+	launchAllowed := q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session)
+	lossTimeout := q.machineLossTimeout(m.ID)
+	q.contactMu.Lock()
+	cadence := q.contacts[m.ID].cadence.Mean
+	q.contactMu.Unlock()
+	q.mu.Unlock()
+	if reply.Job == nil || reply.Job.ID != j.ID || !fresh {
 		t.Fatal("measured slow control path withheld a live worker")
 	}
-	if !q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session) || q.contacts[m.ID].cadence.Mean == 0 {
+	if !launchAllowed || cadence == 0 {
 		t.Fatal("cold control cost repeatedly discarded healthy arrival cadence")
 	}
 	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(reply.Job.Attempt)}); err != nil {
 		t.Fatal("accepted slow contact could not authorize its offer", err)
 	}
-	if got := q.machineLossTimeout(m.ID); got >= service {
+	if got := lossTimeout; got >= service {
 		t.Fatalf("wall service cost inflated confirmed-loss opportunities: %s", got)
 	}
 	// Opportunities alone cannot confirm loss before the actual delivered
 	// cadence is missed. This is ordinary available service after a slow reply.
-	clock.Advance(q.machineLossTimeout(m.ID))
+	clock.Advance(lossTimeout)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if q.s.Machines[m.ID].Gone || q.s.Jobs[j.ID].Losses != 0 || !q.workerFresh(q.s.Machines[m.ID], clock.Now()) {
+	q.mu.Lock()
+	prematureLoss := q.s.Machines[m.ID].Gone || q.s.Jobs[j.ID].Losses != 0 || !q.workerFresh(q.s.Machines[m.ID], clock.Now())
+	q.mu.Unlock()
+	if prematureLoss {
 		t.Fatal("available service charged a worker before its expected arrival")
 	}
 	// Learning this completed path must still leave a finite wall-silence
@@ -249,7 +260,7 @@ func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
 	q.maintain()
 	suspect := q.workerSuspect(q.s.Machines[m.ID], clock.Now())
 	q.mu.Unlock()
-	got := q.s.Jobs[j.ID]
+	got := job(t, q, j.ID)
 	if !suspect || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 {
 		t.Fatal("dead sender did not become suspect without a false charge", got)
 	}
