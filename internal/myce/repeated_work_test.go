@@ -384,8 +384,13 @@ func TestRepeatedWorkRealCommandProof(t *testing.T) {
 	got := job(t, q, run.ID)
 	samples := measured[run.Machine]
 	want := (samples[0] + samples[1]) / 2
-	if got.Timing == nil || got.Timing.Samples != 2 || got.Timing.PredictedSeconds == nil || math.Abs(*got.Timing.PredictedSeconds-want) > 1e-9 {
-		t.Fatalf("supervised measurements did not teach the next command: timing=%+v samples=%v", got.Timing, samples)
+	if got.Timing == nil {
+		t.Fatal("next supervised command has no timing evidence")
 	}
-	t.Logf("four supervised commands returned identical output; two measured samples per machine; next selected %s with measured prediction %.4fs; contention counters synthetic", run.Machine, want)
+	// Prediction also includes the independently covered learned correction.
+	// The raw service estimate is the mean of these two real measurements.
+	if got.Timing.Samples != 2 || got.Timing.ServiceEstimate == nil || got.Timing.PredictedSeconds == nil || !validRate(*got.Timing.PredictedSeconds) || math.Abs(got.Timing.ServiceEstimate.RawSeconds-want) > 1e-9 {
+		t.Fatalf("supervised measurements did not teach the next command: timing=%+v service=%+v samples=%v", got.Timing, got.Timing.ServiceEstimate, samples)
+	}
+	t.Logf("four supervised commands returned identical output; two measured samples per machine; next selected %s with measured raw prediction %.4fs; contention counters synthetic", run.Machine, want)
 }
