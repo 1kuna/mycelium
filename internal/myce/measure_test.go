@@ -29,8 +29,13 @@ func measureTestOptions(t *testing.T) MeasureOptions {
 func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
 	o := measureTestOptions(t)
 	usage := MemoryReading{DeviceGB: 1, HostGB: 2}
+	var usageMu sync.Mutex // Sampling overlaps the fake engine's load.
 	var engines []*measurementEngine
-	o.ReadMemory = func(context.Context) (MemoryReading, error) { return usage, nil }
+	o.ReadMemory = func(context.Context) (MemoryReading, error) {
+		usageMu.Lock()
+		defer usageMu.Unlock()
+		return usage, nil
+	}
 	o.NewEngine = func(m Model, _ string, _ Clock) Engine {
 		e := &measurementEngine{}
 		e.load = func(context.Context, Model) error {
@@ -39,8 +44,10 @@ func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
 					t.Error("earlier model unloaded before combined measurement")
 				}
 			}
+			usageMu.Lock()
 			usage.DeviceGB += 3
 			usage.HostGB += 4
+			usageMu.Unlock()
 			return nil
 		}
 		engines = append(engines, e)
