@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -432,7 +433,7 @@ func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, erro
 // The durable fleet receipt proves ownership of exactly one staging path.
 // Never scan arbitrary binaries, recovery archives, rollback copies or unknown
 // staging. The updater's transaction lock and helper-absence check both bind.
-func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (result error) {
 	unlock, err := commandLock(c.State, "fleet-update.lock", false)
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 		return nil
@@ -453,6 +454,8 @@ func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command fun
 	if err != nil {
 		return err
 	}
+	superseded := collectSupersededFleetStaging(c, fleetStagingPath(c, r.Instruction))
+	defer func() { result = errors.Join(result, superseded) }()
 	if r.Phase != "failed" {
 		return nil
 	}
@@ -480,6 +483,37 @@ func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command fun
 		return errors.New("installer staging is not a regular file")
 	}
 	return os.Remove(path)
+}
+
+var fleetStagingName = regexp.MustCompile(`^\.myce-fleet-[0-9a-f]{24}\.partial$`)
+
+// A receipt naming a different operation proves this install moved on: an
+// earlier operation's partial is rebuildable from its frozen release and has no
+// writer, because helpers write staging only while holding the update lock the
+// caller holds. Only a binary directory that also holds this install's config
+// is exclusively this install's; a shared directory could hold another
+// install's live staging, so it is never scanned. Links, directories and other
+// names are never candidates.
+func collectSupersededFleetStaging(c ServiceConfig, current string) error {
+	dir := filepath.Dir(c.Binary)
+	if filepath.Clean(dir) != filepath.Clean(filepath.Dir(c.Config)) {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var result error
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if !fleetStagingName.MatchString(entry.Name()) || path == current || !entry.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
 }
 
 // Worker diagnostics are untrusted even when the stock collector emits codes.
