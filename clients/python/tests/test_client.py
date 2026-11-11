@@ -460,6 +460,27 @@ class DevTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((root / "accepted/result.txt").read_bytes(),
                              b"mycelium-ease-audit-ok\n")
+        # The guide's CLI journey: declare, resolve and submit, one wait, fetch
+        # and verify, executed block by block with the receipt's job ID.
+        blocks = re.findall(r"^```sh\n(.*?)^```$", guide.read_text(), re.M | re.S)
+        self.assertEqual(len(blocks), 4, "consumer guide CLI journey changed shape")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "HOME": str(root), "MYCE_QUEUE": self.client.url,
+                           "MYCE_TOKEN": "dev-token",
+                           "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
+            job = None
+            for block in blocks:
+                if job:
+                    block = block.replace("JOB_ID", job)
+                result = subprocess.run(["sh", "-ec", block], cwd=root, env=environment,
+                                        capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if job is None and "--key" in block:
+                    job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
+            self.assertTrue(job, "CLI journey must submit a job")
+            self.assertEqual((root / "accepted/result.txt").read_bytes(),
+                             b"mycelium-ease-audit-ok\n")
 
     def test_cancel_running_by_key(self):
         spec = self.spec([sys.executable, "-u", "-c",
