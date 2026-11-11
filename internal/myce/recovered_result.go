@@ -67,7 +67,7 @@ func recoveryFence(j *Job, p RecoveryRequest) error {
 		return recoveryError(409, "recovery_stale", "recovery requires the exact retained failed execution")
 	}
 	for name := range p.Files {
-		if _, ok := j.Spec.Outputs[name]; !ok {
+		if _, ok := outputDeclarationFor(j.Spec.Outputs, name); !ok {
 			return recoveryError(400, "recovery_invalid", "recovery file must name a declared output")
 		}
 	}

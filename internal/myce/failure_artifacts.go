@@ -10,11 +10,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type DiagnosticSpec struct {
@@ -24,6 +29,37 @@ type DiagnosticReport struct {
 	Path   string `json:"path" yaml:"path"`
 	Format string `json:"format" yaml:"format"`
 }
+
+// KeepFile is one keep_on_failure entry: a file, folder ("dir/") or glob, given
+// as a plain string or as {path, format}; replies use the object form. An
+// optional pytest-junit or vitest-junit format also parses failed test
+// identifiers into summary.json.
+type KeepFile struct {
+	Path   string `json:"path" yaml:"path"`
+	Format string `json:"format,omitempty" yaml:"format,omitempty"`
+}
+
+func (k *KeepFile) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		*k = KeepFile{}
+		return json.Unmarshal(data, &k.Path)
+	}
+	type plain KeepFile
+	return json.Unmarshal(data, (*plain)(k))
+}
+func (k *KeepFile) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		*k = KeepFile{}
+		return node.Decode(&k.Path)
+	}
+	type plain KeepFile
+	return node.Decode((*plain)(k))
+}
+
+func (s Spec) capturesFailure() bool { return s.Diagnostics != nil || len(s.KeepOnFailure) > 0 }
+
+func junitFormat(format string) bool { return format == "pytest-junit" || format == "vitest-junit" }
+
 type AttemptDiagnostics struct {
 	Files FileManifest `json:"files"`
 	// Queue-owned safe metadata, available even without optional artifact capture.
@@ -47,16 +83,25 @@ type FailureSummary struct {
 }
 
 func validateDiagnosticSpec(s Spec) error {
-	if s.Diagnostics == nil {
+	if !s.capturesFailure() {
 		return nil
 	}
 	if len(s.Files) == 0 || s.Run.Docker || s.Execution != nil || s.extensionJob() {
-		return errors.New("diagnostics require a plain command with stored input files")
+		return errors.New("diagnostics and keep_on_failure require a plain command with stored input files")
 	}
-	for _, r := range s.Diagnostics.Reports {
-		if !safeRelative(r.Path) || (r.Format != "pytest-junit" && r.Format != "vitest-junit") {
-			return errors.New("diagnostic reports require a relative path and pytest-junit or vitest-junit format")
+	if s.Diagnostics != nil {
+		for _, r := range s.Diagnostics.Reports {
+			if !safeRelative(r.Path) || !junitFormat(r.Format) {
+				return errors.New("diagnostic reports require a relative path and pytest-junit or vitest-junit format")
+			}
 		}
+	}
+	seen := map[string]bool{}
+	for _, k := range s.KeepOnFailure {
+		if !validOutputDeclaration(k.Path) || k.Format != "" && !junitFormat(k.Format) || seen[k.Path] {
+			return errors.New("keep_on_failure requires unique relative files, folders (dir/) or globs, with optional pytest-junit or vitest-junit format")
+		}
+		seen[k.Path] = true
 	}
 	return nil
 }
@@ -180,7 +225,7 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 			err = finalizationErrorFor("diagnostic_publication", "", err)
 		}
 	}()
-	if j.Spec.Diagnostics == nil || result.Success || result.ReleaseOnly {
+	if !j.Spec.capturesFailure() || result.Success || result.ReleaseOnly {
 		return result, nil
 	}
 	if result.Diagnostics != nil {
@@ -214,7 +259,11 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 	}
 	files["log-tail.txt"] = tail
 	remaining -= int64(len(tail))
-	for i, report := range j.Spec.Diagnostics.Reports {
+	var reports []DiagnosticReport
+	if j.Spec.Diagnostics != nil {
+		reports = j.Spec.Diagnostics.Reports
+	}
+	for i, report := range reports {
 		path, e := confinedPath(j.Spec.Run.Workdir, report.Path)
 		var data []byte
 		if e == nil {
@@ -233,6 +282,13 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 		}
 		summary.FailedTests = append(summary.FailedTests, tests...)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ctx = withFileStoreAttempt(ctx, j)
+	kept, keptRefs, err := w.collectKeptFiles(ctx, j, &summary, &remaining)
+	if err != nil {
+		return result, err
+	}
 	files["summary.json"], err = json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return result, err
@@ -246,8 +302,13 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 		}
 	}
 	refs := FileManifest{}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	for _, name := range slices.Sorted(maps.Keys(kept)) {
+		// Kept files stream from the workdir; their identity was taken above.
+		if err = w.Client.UploadJobInput(ctx, kept[name], keptRefs[name]); err != nil {
+			return result, err
+		}
+		refs["kept/"+name] = keptRefs[name]
+	}
 	for name, data := range files {
 		path := filepath.Join(stage, filepath.FromSlash(name))
 		if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -261,7 +322,7 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 			return result, e
 		}
 		// Job-input upload eligibility also reclaims diagnostics orphaned before completion.
-		if err = w.Client.UploadJobInput(withFileStoreAttempt(ctx, j), path, ref); err != nil {
+		if err = w.Client.UploadJobInput(ctx, path, ref); err != nil {
 			return result, err
 		}
 		refs[name] = ref
@@ -270,7 +331,59 @@ func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath s
 	return result, nil
 }
 
-func validateDiagnosticManifest(d *AttemptDiagnostics) error {
+// collectKeptFiles resolves keep_on_failure entries one at a time, so one
+// missing entry never drops the others, and preflights the whole kept set:
+// a set the file store cannot admit is dropped with one summary refusal.
+// Formatted entries are parsed within the diagnostic memory budget.
+func (w Worker) collectKeptFiles(ctx context.Context, j Job, summary *FailureSummary, remaining *int64) (map[string]string, FileManifest, error) {
+	kept, refs := map[string]string{}, FileManifest{}
+	for i, k := range j.Spec.KeepOnFailure {
+		sources, err := collectOutputFiles(j.Spec.Run.Workdir, map[string]string{k.Path: ""}, jobInputFiles(&j))
+		if err != nil {
+			summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("keep_on_failure %d matched no regular files or is unreadable", i))
+			continue
+		}
+		for _, name := range slices.Sorted(maps.Keys(sources)) {
+			if _, ok := refs[name]; ok {
+				continue
+			}
+			ref, err := IdentifyFile(sources[name])
+			if err != nil {
+				summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("keep_on_failure %d has an unreadable file", i))
+				continue
+			}
+			kept[name], refs[name] = sources[name], ref
+			if k.Format == "" {
+				continue
+			}
+			data, err := readDiagnostic(sources[name], *remaining, false)
+			if err != nil {
+				summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("keep_on_failure %d report oversized for parsing", i))
+				continue
+			}
+			*remaining -= int64(len(data))
+			tests, err := junitFailures(data, k.Format)
+			if err != nil {
+				summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("keep_on_failure %d report invalid or lacks exact identifiers", i))
+				continue
+			}
+			summary.FailedTests = append(summary.FailedTests, tests...)
+		}
+	}
+	if len(refs) == 0 {
+		return kept, refs, nil
+	}
+	if err := w.Client.PreflightFileStore(ctx, refs); fileStoreLimitRefusal(err) {
+		log.Printf("job %s kept files refused by the file store (%d files): %v", ShortID(j.ID), len(refs), err)
+		summary.ReportErrors = append(summary.ReportErrors, fmt.Sprintf("keep_on_failure files exceed file-store limits (%d files); none kept", len(refs)))
+		return map[string]string{}, FileManifest{}, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+	return kept, refs, nil
+}
+
+func validateDiagnosticManifest(keep []KeepFile, d *AttemptDiagnostics) error {
 	if d == nil {
 		return nil
 	}
@@ -284,6 +397,16 @@ func validateDiagnosticManifest(d *AttemptDiagnostics) error {
 		switch name {
 		case "log-tail.txt", "summary.json":
 		default:
+			if kept, ok := strings.CutPrefix(name, "kept/"); ok {
+				covered := false
+				for _, k := range keep {
+					covered = covered || outputCovers(k.Path, kept)
+				}
+				if !covered {
+					return errors.New("kept file is not declared by keep_on_failure")
+				}
+				continue
+			}
 			index, ok := strings.CutPrefix(name, "reports/")
 			index, suffix := strings.CutSuffix(index, ".xml")
 			n, err := strconv.Atoi(index)

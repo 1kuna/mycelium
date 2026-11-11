@@ -4036,6 +4036,20 @@
       ],
       "type": "object"
     },
+    "KeepFile": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "LaunchCapacityWait": {
       "properties": {
         "admission": {
@@ -5937,6 +5951,16 @@
         },
         "isolation": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "keep_on_failure": {
+          "items": {
+            "$ref": "#/$defs/KeepFile"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "kind": {

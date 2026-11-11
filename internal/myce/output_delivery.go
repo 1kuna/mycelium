@@ -91,7 +91,7 @@ func validateOutputDelivery(s Spec) error {
 		return errors.New("async_nas requires individual tasks")
 	}
 	for name, prefix := range s.Outputs {
-		if !safeRelative(name) || !safeRelative(prefix) || (strings.Split(name, "/")[0] == deliveryReceiptName || strings.Split(name, "/")[0] == ".myce-result-spool") {
+		if !validOutputDeclaration(name) || !safeRelative(prefix) || (strings.Split(name, "/")[0] == deliveryReceiptName || strings.Split(name, "/")[0] == ".myce-result-spool") {
 			return errors.New("async_nas requires relative output names/prefixes without the receipt name")
 		}
 	}
@@ -265,11 +265,16 @@ func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...fu
 	defer root.Close()
 	progress()
 	groups := map[string]FileManifest{}
-	for name, prefix := range j.Spec.Outputs {
+	for name, ref := range j.OutputRefs {
+		decl, ok := outputDeclarationFor(j.Spec.Outputs, name)
+		if !ok {
+			return ErrStale
+		}
+		prefix := j.Spec.Outputs[decl]
 		if groups[prefix] == nil {
 			groups[prefix] = FileManifest{}
 		}
-		groups[prefix][name] = j.OutputRefs[name]
+		groups[prefix][name] = ref
 	}
 	for _, prefix := range slices.Sorted(maps.Keys(groups)) {
 		files := groups[prefix]

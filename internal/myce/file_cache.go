@@ -205,8 +205,14 @@ func validateJobFiles(s Spec) error {
 		all[n] = f
 	}
 	for n, p := range s.Outputs {
-		if !safeRelative(n) || !safeRelative(p) {
-			return errors.New("outputs require clean relative names and prefixes")
+		if !validOutputDeclaration(n) || !safeRelative(p) {
+			return errors.New("outputs require clean relative names, folders (dir/) or globs, and prefixes")
+		}
+		if kind, _ := outputKind(n); kind != outputFile {
+			if err := validateOutputPatternSpec(s); err != nil {
+				return err
+			}
+			continue
 		}
 		if _, ok := all[n]; ok {
 			return errors.New("input and output names overlap")

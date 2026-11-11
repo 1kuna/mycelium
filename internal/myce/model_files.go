@@ -25,7 +25,9 @@ func ModelFilesIdentity(files []ModelFile) (int64, string, error) {
 	sorted := append([]ModelFile(nil), files...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	tuples := make([][3]any, 0, len(sorted))
-	seen := map[string]bool{}
+	// dirs holds every ancestor of a seen path, so collisions are found in
+	// O(depth) per file; folder outputs make manifests of thousands of files.
+	seen, dirs := map[string]bool{}, map[string]bool{}
 	var total int64
 	for _, f := range sorted {
 		if f.Path == "" || f.Path == "." || f.Path == ".." || path.IsAbs(f.Path) || path.Clean(f.Path) != f.Path || strings.ContainsAny(f.Path, "\\\x00") || strings.HasPrefix(f.Path, "../") {
@@ -41,12 +43,13 @@ func ModelFilesIdentity(files []ModelFile) (int64, string, error) {
 				return 0, "", errors.New("bundle file/directory collision")
 			}
 		}
-		for p := range seen {
-			if strings.HasPrefix(p, key+"/") {
-				return 0, "", errors.New("bundle file/directory collision")
-			}
+		if dirs[key] {
+			return 0, "", errors.New("bundle file/directory collision")
 		}
 		seen[key] = true
+		for p := path.Dir(key); p != "." && !dirs[p]; p = path.Dir(p) {
+			dirs[p] = true
+		}
 		if f.SizeBytes < 0 || f.SizeBytes > math.MaxInt64-total {
 			return 0, "", errors.New("invalid bundle file size")
 		}

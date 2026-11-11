@@ -1994,12 +1994,13 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
-	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
+	verify := err == nil && !(r.Success && wallTimeExpired(j, q.clock.Now())) && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && (quotaFailure || plannedPriorityStop(j) || wallTimeStopped(j)) || wallTimeDiagnosticsAllowed(j, r)) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.capturesFailure()) && !r.ReleaseOnly
 	var yieldPath string
 	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
 		yieldPath = attemptCheckpoint(*j)
 	}
 	var outputs map[string]string
+	var keep []KeepFile
 	var host string
 	if verify {
 		host = q.executionHost(r.Machine)
@@ -2009,7 +2010,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 				unlockRequest()
 				return errors.New("async_nas requires the reserved immutable output manifest")
 			}
-			outputs = maps.Clone(j.Spec.Outputs)
+			outputs, keep = maps.Clone(j.Spec.Outputs), slices.Clone(j.Spec.KeepOnFailure)
 			r.OutputRefs = maps.Clone(r.OutputRefs)
 			if r.Diagnostics != nil {
 				r.Diagnostics = &AttemptDiagnostics{Files: maps.Clone(r.Diagnostics.Files)}
@@ -2037,12 +2038,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	if verify {
-		if r.Success && len(outputs) != len(r.OutputRefs) {
-			return errors.New("complete output manifest required")
-		}
-		for name := range outputs {
-			if _, ok := r.OutputRefs[name]; r.Success && !ok {
-				return errors.New("missing output")
+		if r.Success {
+			if err := validateOutputManifest(outputs, r.OutputRefs); err != nil {
+				return err
 			}
 		}
 		verificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -2052,7 +2050,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 				return err
 			}
 		} else {
-			if err := validateDiagnosticManifest(r.Diagnostics); err != nil {
+			if err := validateDiagnosticManifest(keep, r.Diagnostics); err != nil {
 				return err
 			}
 			if err := q.verifyManifest(verificationCtx, r.Diagnostics.Files); err != nil {
@@ -2383,7 +2381,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		now := q.clock.Now()
 		j.FinishedAt = &now
 	}
-	if j.State == "failed" && filesVerified && !r.Success && j.Spec.Diagnostics != nil {
+	if j.State == "failed" && filesVerified && !r.Success && j.Spec.capturesFailure() {
 		outcome.Diagnostics = r.Diagnostics
 	}
 	q.recordAttemptOutcome(j, outcome)

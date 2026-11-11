@@ -43,25 +43,23 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	}
 	if data, err := os.ReadFile(filepath.Join(dest, "manifest.json")); err == nil {
 		var receipt deliveryReceipt
-		if json.Unmarshal(data, &receipt) != nil || receipt.Execution != (Execution{ID: j.ID, Attempt: j.Attempt}) || receipt.Machine != j.Machine || receipt.Session != j.Session || receipt.Policy != "local-spool/1" || len(receipt.Files) != len(j.Spec.Outputs) {
+		if json.Unmarshal(data, &receipt) != nil || receipt.Execution != (Execution{ID: j.ID, Attempt: j.Attempt}) || receipt.Machine != j.Machine || receipt.Session != j.Session || receipt.Policy != "local-spool/1" || validateOutputManifest(j.Spec.Outputs, receipt.Files) != nil {
 			return "", nil, errors.New("conflicting local result spool")
 		}
 		if err = receipt.Files.validate(); err != nil {
 			return "", nil, err
 		}
 		for name, ref := range receipt.Files {
-			if _, ok := j.Spec.Outputs[name]; !ok {
-				return "", nil, errors.New("conflicting local result spool")
-			}
+			decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
 			if err = verifyFile(context.Background(), filepath.Join(dest, "data", name), ref); err != nil {
-				return "", nil, finalizationErrorFor("output_spool", name, err)
+				return "", nil, finalizationErrorFor("output_spool", decl, err)
 			}
 			f, e := os.Open(filepath.Join(dest, "data", name))
 			if e != nil {
-				return "", nil, finalizationErrorFor("output_spool", name, e)
+				return "", nil, finalizationErrorFor("output_spool", decl, e)
 			}
 			if e = errors.Join(f.Sync(), f.Close()); e != nil {
-				return "", nil, finalizationErrorFor("output_spool", name, e)
+				return "", nil, finalizationErrorFor("output_spool", decl, e)
 			}
 		}
 		if err = syncModelDirectory(dest); err != nil {
@@ -76,18 +74,17 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	}
 	// Estimate from actual local files before allocating a second copy. The worker
 	// admission hint already budgets work + spool; this handles underestimated output.
-	sources := map[string]string{}
+	sources, err := collectOutputFiles(j.Spec.Run.Workdir, j.Spec.Outputs, jobInputFiles(&j))
+	if err != nil {
+		return "", nil, errors.Join(errRequiredDeliveryOutput, err)
+	}
 	var bytes uint64
-	for name := range j.Spec.Outputs {
-		src, err := confinedPath(j.Spec.Run.Workdir, name)
-		if err != nil {
-			return "", nil, requiredOutputError("output_path", name, err)
-		}
+	for name, src := range sources {
+		decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
 		st, err := os.Stat(src)
 		if err = regularOutputError(st, err); err != nil {
-			return "", nil, requiredOutputError("output_validation", name, err)
+			return "", nil, requiredOutputError("output_validation", decl, err)
 		}
-		sources[name] = src
 		bytes = addDiskBytes(bytes, uint64(st.Size()))
 	}
 	disk, err := workerDiskProbe(parent)
@@ -111,12 +108,13 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	files := FileManifest{}
 	for name, src := range sources {
 		path := filepath.Join(stage, "data", name)
+		decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
 		if err = copyJobFile(src, path); err != nil {
-			return "", nil, finalizationErrorFor("output_spool", name, err)
+			return "", nil, finalizationErrorFor("output_spool", decl, err)
 		}
 		ref, e := IdentifyFile(path)
 		if e != nil {
-			return "", nil, finalizationErrorFor("output_spool", name, e)
+			return "", nil, finalizationErrorFor("output_spool", decl, e)
 		}
 		files[name] = ref
 	}
