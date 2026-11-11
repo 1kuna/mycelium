@@ -1456,6 +1456,56 @@ component can safely admit that count and its resource envelope. Late attempts
 cannot replace accepted results. Parent cancellation stops its children and
 reports outstanding cleanup. Persisted membership/results survive queue restart.
 
+### Plain-command pieces
+
+A plain adapter entry, with no extension, runs one command over many inputs with
+`pieces:`. This replaces a submit-and-wait loop or one entry per input:
+
+```yaml
+entries:
+  score:
+    run: {command: [python, score.py]}
+    needs: {cpu_cores: 2, host_memory_gb: 4}
+    targets: [{os: linux}]
+    inputs: {model.bin: weights/model.bin}   # every piece
+    outputs: {score.json: results}
+    pieces:
+      - {key: slot-a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}
+      - {key: slot-b, args: [--slot, b], inputs: {slot.yaml: slots/b.yaml}}
+```
+
+`myce run --entry score` is one submission. It returns one parent job; wait on
+that parent once.
+
+- **Arguments:** each piece runs the base command, then any CLI arguments, then
+  the piece's `args`.
+- **Inputs:** a piece's `inputs` reach only that piece, at their destination
+  names. They are frozen, uploaded and keyed with the entry's other inputs.
+- **Wire form:** they are stored files named `.myce-pieces/KEY/DEST`. A raw job
+  spec may declare `fan_out: {pieces: [{key, args}]}` on a plain command and use
+  that prefix itself.
+
+At submission the queue creates one ordinary child job per piece. There is no
+measured-batch planning. The usual scheduler places, retries and recovers each
+child. Each child's `batch.parent` names the parent, and its `batch.pieces`
+holds its one key.
+
+- **Results:** the parent succeeds when every piece succeeds. `fan_out.results`
+  is keyed by piece. The parent's outputs are `KEY/OUTPUT_NAME`, so
+  `myce result PARENT --out DIR` returns one folder per key.
+- **Stale attempts** cannot replace a piece's accepted result.
+- **Failure:** a failed or cancelled piece does not stop the others. The parent
+  fails once every piece has settled, and its reason names the failed keys.
+  The accepted pieces stay in `fan_out.results`, and each child keeps its own
+  outputs.
+- **Cancel:** cancelling the parent cancels every unfinished piece, and
+  `cancellation_scope` lists them all. Pausing the parent pauses its children.
+
+Limits: 1 to 256 pieces, with unique lowercase keys. A piece input must not
+overlap a common input or an output. Omit `max_concurrency` and `share_xpu`.
+Plain pieces cannot be combined with `after:`, Docker, `workdir`,
+kind/program, `workload` or `fan_out:`. Native entries keep `fan_out:`.
+
 ## Observing parents and native children
 
 Save the parent job ID returned by submission. For a keyed submission, bind that
@@ -1467,7 +1517,8 @@ materialized so far; more can appear as dispatch proceeds. Fetch those jobs by I
 Each child's top-level `batch.parent` is the parent job ID, and `batch.pieces`
 identifies the original piece keys in that fixed wave. A child has its own job
 ID and no `spec.submission_key`; the parent's key is not copied to children.
-One child may execute several pieces, so do not assume one child per piece.
+A measured extension wave may execute several pieces, so do not assume one
+child per piece; plain-command pieces always have one child each.
 
 An assigned child's top-level `extension` reports the selected `name`, `version`
 and frozen `digest`. This identifies the executable selection, not the parent:

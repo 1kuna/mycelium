@@ -55,6 +55,8 @@ type adapterEntry struct {
 	ProgramTypes []string          `yaml:"program_types,omitempty"`
 	Assets       myce.FileManifest `yaml:"assets,omitempty"`
 	Notes        string            `yaml:"notes,omitempty"`
+	// Plain-command pieces (#1341): see adapter_pieces.go.
+	Pieces []adapterPiece `yaml:"pieces,omitempty"`
 	// Legacy native recipes are converted to exact variants. These shared fields
 	// also make a flat native recipe possible, using the same recipe types.
 	Environments map[string]myce.EnvironmentRecipe `yaml:"environments,omitempty"`
@@ -281,6 +283,9 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 		p.Needs = myce.ResourceNeeds{}
 		p.Environment = myce.Environment{}
 		p.Check = nil
+	}
+	if err := lowerAdapterPieces(&p, e.Pieces); err != nil {
+		return p, nil, err
 	}
 	// Canonical selected source authoring is separate from its frozen bytes.
 	b, err := yaml.Marshal(struct {

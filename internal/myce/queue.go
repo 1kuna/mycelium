@@ -1097,6 +1097,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
 		q.putJob(id, j)
+		q.materializePlainPieces(j)
 		q.settleFileInputClaims(s)
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
