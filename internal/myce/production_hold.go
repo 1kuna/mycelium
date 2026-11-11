@@ -277,7 +277,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionPass(j, m, q.sharedHostBackoffReason(j, m) == "", predicateSharedHostBackoff) || !q.admissionPass(j, m, q.storageRootReason(j, m) == "", predicateStorageRoot)) {
 		return false
 	}
-	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, dockerRuntimeFits(j, m), predicateDockerRuntime) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, !m.HostMemoryPolicyMismatch, predicateHostMemoryPolicy) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
+	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, dockerRuntimeFits(j, m), predicateDockerRuntime) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {

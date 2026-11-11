@@ -68,7 +68,7 @@ func sharedHostRefusal(j *Job, m *Machine) string {
 
 // Only bounded in-memory history is read here. Existing live reserves and static
 // budgets remain upper bounds; an empty history never means zero external use.
-func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float64 {
+func (q *Queue) sharedHostRoom(m *Machine, room, reserved float64) float64 {
 	m.SharedHostReason = ""
 	p := q.s.HostMaintenance[hostID(m)].SharedHost
 	if p == nil {
@@ -115,11 +115,9 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 	// This profile requires a measured additional burst reserve. The external
 	// peak already contains observed owner growth; a percentage of that whole
 	// baseline is not another independent burst measurement (#389).
+	// The live reading already keeps the owner reserve as its margin.
 	historical := math.Floor(max(0, o.TotalGB-h.Week.MaxGB-p.InteractiveReserveGB)*4) / 4
-	// Raw live availability subtracts the protected reserve once. The existing
-	// after-reserve availability can only tighten this bound, never relax it.
-	live := o.TotalGB - o.UsedGB - p.InteractiveReserveGB - growth
-	return min(room, historical-reserved, live)
+	return min(room, historical-reserved)
 }
 
 func validHostMemoryObservation(o *HostMemoryObservation) bool {

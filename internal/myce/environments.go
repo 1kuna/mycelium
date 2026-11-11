@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,8 @@ import (
 )
 
 var errEnvironmentInputTooLarge = errors.New("environment input exceeds 1 MiB")
+
+const maxEnvironmentInput = 1 << 20
 
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
@@ -98,10 +101,83 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	return c, nil
 }
 func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecipe, error) {
-	return snapshotEnvironmentAt(r, platform, "queue-working-directory", "")
+	return snapshotEnvironmentFiles(r, platform, "queue-working-directory", "", nil)
 }
 
 func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (EnvironmentRecipe, error) {
+	return snapshotEnvironmentFiles(r, platform, base, label, nil)
+}
+
+// EnvironmentLockInputs validates an inline lock basename and returns every
+// file its backend freezes, in the lock's directory.
+func EnvironmentLockInputs(backend, lockFile string) (string, []string, error) {
+	name := filepath.Base(lockFile)
+	switch {
+	case backend == "pixi" && name != "pixi.lock":
+		return name, nil, errors.New("pixi requires pixi.lock")
+	case backend == "pixi":
+		return name, []string{"pixi.lock", "pixi.toml"}, nil
+	case name == "requirements.txt":
+		return name, []string{"requirements.txt"}, nil
+	case name == "uv.lock" || name == "pyproject.toml":
+		return name, []string{"uv.lock", "pyproject.toml"}, nil
+	}
+	return name, nil, errors.New("lock_file must be uv.lock, pyproject.toml, or requirements.txt")
+}
+
+// ReadEnvironmentLock reads an inline lock and its required companions from
+// resolved, reporting failures against the authored path on side/base.
+func ReadEnvironmentLock(backend, lockFile, resolved, authored, side, base string) (map[string][]byte, error) {
+	name, names, err := EnvironmentLockInputs(backend, lockFile)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string][]byte{}
+	for _, n := range names {
+		b, e := os.ReadFile(filepath.Join(filepath.Dir(resolved), n))
+		if e == nil && len(b) > maxEnvironmentInput {
+			e = errEnvironmentInputTooLarge
+		}
+		if e != nil {
+			field, companion := "environment.lock_file", ""
+			if n != name {
+				companion = n
+			}
+			if n == "pixi.toml" {
+				field = "environment.manifest"
+			}
+			return nil, PathReadError(field, side, authored, base, companion, e)
+		}
+		files[n] = b
+	}
+	return files, nil
+}
+
+// uploadedEnvironmentLock checks submitter-uploaded lock bytes with the same
+// names and per-file limit as a queue-side read.
+func uploadedEnvironmentLock(backend, lockFile string, uploaded map[string][]byte) (map[string][]byte, error) {
+	_, names, err := EnvironmentLockInputs(backend, lockFile)
+	if err != nil {
+		return nil, err
+	}
+	if len(uploaded) != len(names) {
+		return nil, fmt.Errorf("uploaded environment files must be exactly %s", strings.Join(names, " and "))
+	}
+	files := map[string][]byte{}
+	for _, n := range names {
+		b, ok := uploaded[n]
+		if !ok {
+			return nil, fmt.Errorf("uploaded environment files must be exactly %s", strings.Join(names, " and "))
+		}
+		if len(b) > maxEnvironmentInput {
+			return nil, fmt.Errorf("uploaded %s: %w", n, errEnvironmentInputTooLarge)
+		}
+		files[n] = b
+	}
+	return files, nil
+}
+
+func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string, uploaded map[string][]byte) (EnvironmentRecipe, error) {
 	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
 		return r, errors.New("unsupported environment backend")
 	}
@@ -115,43 +191,21 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 		if r.Backend != "pixi" && r.Python == "" {
 			return r, errors.New("Python lock file requires python version")
 		}
-		name := filepath.Base(r.LockFile)
-		if r.Backend == "pixi" {
-			if name != "pixi.lock" {
-				return r, errors.New("pixi requires pixi.lock")
-			}
-		} else if name != "uv.lock" && name != "pyproject.toml" && name != "requirements.txt" {
-			return r, errors.New("lock_file must be uv.lock, pyproject.toml, or requirements.txt")
+		if r.Backend == "pixi" && r.Manifest != "" && filepath.Clean(r.Manifest) != filepath.Join(filepath.Dir(r.LockFile), "pixi.toml") {
+			return r, errors.New("pixi manifest must be pixi.toml beside pixi.lock")
 		}
-		names := []string{"requirements.txt"}
-		if name != "requirements.txt" {
-			names = []string{"uv.lock", "pyproject.toml"}
+		authored := r.LockFile
+		if label != "" {
+			authored = label
 		}
-		if r.Backend == "pixi" {
-			names = []string{"pixi.lock", "pixi.toml"}
-			if r.Manifest != "" && filepath.Clean(r.Manifest) != filepath.Join(filepath.Dir(r.LockFile), "pixi.toml") {
-				return r, errors.New("pixi manifest must be pixi.toml beside pixi.lock")
-			}
+		var e error
+		if uploaded != nil {
+			r.Files, e = uploadedEnvironmentLock(r.Backend, r.LockFile, uploaded)
+		} else {
+			r.Files, e = ReadEnvironmentLock(r.Backend, r.LockFile, r.LockFile, authored, "queue", base)
 		}
-		for _, n := range names {
-			b, e := os.ReadFile(filepath.Join(filepath.Dir(r.LockFile), n))
-			if e == nil && len(b) > 1<<20 {
-				e = errEnvironmentInputTooLarge
-			}
-			if e != nil {
-				field, authored, companion := "environment.lock_file", r.LockFile, ""
-				if n != name {
-					companion = n
-				}
-				if label != "" {
-					authored = label
-				}
-				if n == "pixi.toml" {
-					field = "environment.manifest"
-				}
-				return r, PathReadError(field, "queue", authored, base, companion, e)
-			}
-			r.Files[n] = b
+		if e != nil {
+			return r, e
 		}
 	} else if r.Binary != "" {
 		// Binaries stay on NAS; include verified content identity, not its mount path.
@@ -191,6 +245,25 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 	r.Key = hex.EncodeToString(h[:])
 	return r, nil
 }
+
+// environmentLock digests the frozen lock inputs of resolved recipes. Every
+// platform recipe of one lock_file environment freezes the same files.
+func environmentLock(recipes map[string]EnvironmentRecipe) *EnvironmentLock {
+	for _, platform := range slices.Sorted(maps.Keys(recipes)) {
+		r := recipes[platform]
+		if r.LockFile == "" || len(r.Files) == 0 {
+			continue
+		}
+		lock := &EnvironmentLock{Backend: r.Backend, SHA256: map[string]string{}}
+		for name, data := range r.Files {
+			sum := sha256.Sum256(data)
+			lock.SHA256[name] = hex.EncodeToString(sum[:])
+		}
+		return lock
+	}
+	return nil
+}
+
 func (q *Queue) ConfigureEnvironments(c EnvironmentCatalog) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -230,11 +303,18 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}
-		r, err := snapshotEnvironment(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p)
+		r, err := snapshotEnvironmentFiles(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p, "queue-working-directory", "", e.Files)
 		if err != nil {
 			return nil, err
 		}
 		out[p] = r
+	}
+	// Every platform recipe freezes the same lock; check it once.
+	for _, r := range out {
+		if err := checkInlinePixiLock(context.Background(), r); err != nil {
+			return nil, rejectFieldRule("job_environment_invalid", err)
+		}
+		break
 	}
 	return out, nil
 }

@@ -30,6 +30,7 @@ type Worker struct {
 	hygieneCollector     *workerHygieneCollector
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
 	diskBudgetWire       *workerDiskBudgetWire
+	checkpointExpiry     *workerCheckpointExpiry
 	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
 	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver
@@ -140,6 +141,7 @@ type Worker struct {
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
 	nativeSharedInputs          []string // Verified executable shared inputs, never authored paths.
 	nativeModelInputs           []string // Verified model data: reads only, including custom-code sources.
+	nativeCI                    bool     // Current attempt declared isolation: ci (#1298).
 	modelMounts                 []dockerFileMount
 	CacheLimit                  int64
 	SecretRoot                  string
@@ -805,6 +807,20 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
+	if nativeCIRequired(&j) {
+		// The worker user's home is hidden from ci jobs; tools that write
+		// config and caches under HOME (git, Go, npm, pip) use attempt scratch.
+		home := filepath.Join(executionWork, ".home")
+		if err := os.MkdirAll(home, 0700); err != nil {
+			return nil, err
+		}
+		env["HOME"] = home
+		// Git discovery must not climb into a hidden parent repository (a
+		// dotfiles home, say), where a denied read is fatal rather than skipped.
+		if env["GIT_CEILING_DIRECTORIES"] == "" {
+			env["GIT_CEILING_DIRECTORIES"] = filepath.Dir(executionWork)
+		}
+	}
 	w.storageObserver = w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
 	s.storageObserver = w.storageObserver
 	defer func() {
@@ -1206,6 +1222,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.controlLatency = &workerControlLatency{}
 	w.toolReport = &workerToolReport{}
 	w.diskBudgetWire = &workerDiskBudgetWire{}
+	w.checkpointExpiry = newWorkerCheckpointExpiry()
 	if w.rootMonitor == nil {
 		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	}

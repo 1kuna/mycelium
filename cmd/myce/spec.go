@@ -193,6 +193,9 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		return myce.ResolveRequest{Spec: p.Spec, Recipe: p.Native, SourceUnverified: sourceUnverified, RequirementReasons: p.RequirementReasons}, found, nil
 	}
 	lowerInputs(&p.Spec, root, "project-root", &found)
+	if err := attachEnvironmentLock(&p.Spec, root); err != nil {
+		found.missing("environment.lock_file", "", "Put the lock and its companion file together under the project root, or use an absolute queue-readable path.", err)
+	}
 	for name, input := range p.SharedInputs {
 		if input.Local == "" {
 			continue

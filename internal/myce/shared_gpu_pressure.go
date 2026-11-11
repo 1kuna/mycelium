@@ -85,9 +85,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		}
 		physicalPressure := false
 		if unifiedCUDA(&card) && forecast > 0 && validHostMemoryObservation(m.MemoryObservation) {
-			if floor, ok := unifiedCUDAFloor(m); ok {
-				physicalPressure = m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-floor <= forecast
-			}
+			physicalPressure = m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-q.hostMemoryMargin(m, m) <= forecast
 		}
 		if fanOut && backendFor(card.GPU).deviceHostMemory && !card.UnifiedMemory && forecast > 0 && deviceTelemetryReady(d.Telemetry, q.clock.Now()) {
 			physicalPressure = *d.Telemetry.FreeGB <= forecast

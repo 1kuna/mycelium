@@ -1684,6 +1684,16 @@
         "backend": {
           "type": "string"
         },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "lock_file": {
           "type": "string"
         },
@@ -1703,6 +1713,26 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "EnvironmentLock": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sha256"
+      ],
       "type": "object"
     },
     "EnvironmentRecipe": {
@@ -2826,6 +2856,9 @@
         "available_known": {
           "type": "boolean"
         },
+        "capacity_gb": {
+          "type": "number"
+        },
         "captured_at": {
           "format": "date-time",
           "type": "string"
@@ -2864,6 +2897,7 @@
         "observed_at",
         "available_known",
         "available_gb",
+        "capacity_gb",
         "allowance_gb",
         "reserved_gb",
         "growth_gb",
@@ -3014,6 +3048,11 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "checkpoint_expired": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause",
           "x-contract": "diagnostic"
@@ -3090,6 +3129,11 @@
         },
         "environment_failure_log": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "environment_lock": {
+          "$ref": "#/$defs/EnvironmentLock",
+          "description": "Single-job replies only: the lock_file environment's frozen inputs as sha256 by basename (for Pixi, pixi.lock and pixi.toml) and backend, recorded at acceptance. spec.environment stays projected away.",
           "x-contract": "diagnostic"
         },
         "environment_recipes": {
@@ -3946,6 +3990,12 @@
           "type": "integer"
         },
         "host_gb": {
+          "type": "number"
+        },
+        "peak_device_gb": {
+          "type": "number"
+        },
+        "peak_host_gb": {
           "type": "number"
         },
         "source": {

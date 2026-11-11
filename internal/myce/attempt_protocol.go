@@ -45,11 +45,15 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 		c = w.toolReport.checkin(c)
 	}
 	c = w.diskBudgetCheckin(c)
+	c, expirySent := w.checkpointExpiryCheckin(c)
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if hasDiskBudgetWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		c = withoutDiskBudgetFields(c)
+	if (hasDiskBudgetWireFields(c) || c.CheckpointExpiryProtocol != "") && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		// A strict predecessor queue (for example after a queue rollback)
+		// refuses both additive field sets; retry once with neither.
+		c = withoutCheckpointExpiryFields(withoutDiskBudgetFields(c))
+		expirySent = 0
 		if w.diskBudgetWire != nil {
 			w.diskBudgetWire.supported = false
 		}
@@ -73,6 +77,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)
 	}
+	w.acceptCheckpointExpiryReply(expirySent, reply)
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session
 	// keys; omission alone is never the queue's release evidence.

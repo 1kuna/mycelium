@@ -279,6 +279,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
+	checkpointExpiryGrace := f.Duration("checkpoint-expiry-grace", myce.DefaultCheckpointExpiryGrace, "keep a settled job's NAS checkpoint folder this long after the job ends")
 	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (0 retains until explicit release)")
 	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
@@ -551,7 +552,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *healthStorageDelay <= 0 {
 			return errors.New("health-storage-delay must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay))
+		if *checkpointExpiryGrace <= 0 {
+			return errors.New("checkpoint-expiry-grace must be positive")
+		}
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
 		if err != nil {
 			return err
 		}
@@ -866,6 +870,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
 			fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
 			printCancellationScope(os.Stdout, j)
+			if l := j.EnvironmentLock; l != nil {
+				fmt.Print("  environment lock")
+				if l.Backend != "" {
+					fmt.Print(" (", l.Backend, ")")
+				}
+				for _, name := range slices.Sorted(maps.Keys(l.SHA256)) {
+					fmt.Print(" ", name, "=sha256:", l.SHA256[name])
+				}
+				fmt.Println()
+			}
 			for _, a := range j.AttemptHistory {
 				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
 				if a.PriorityStop != nil {

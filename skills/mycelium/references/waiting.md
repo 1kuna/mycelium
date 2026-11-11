@@ -73,7 +73,8 @@ Keep the job ID and key: another host, spare healthy capacity or a health-proven
 recovery can make it eligible. The hold pauses the remaining relative
 start/recovery budget (status: `paused for device recovery`), and the saved
 amount persists through later capacity waiting and restart. Explicit absolute
-`start_by` and queued-only `give_up_at` still bind. A started infrastructure
+`start_by` and queued-only `give_up_at` still bind. A queue start-fence refusal before your command ran gives back its
+assignment-to-refusal time to an explicit `start_by`. A started infrastructure
 interruption renews the original first-start window; unstarted losses never do.
 If recovery never becomes eligible, the hold ends one maximum start window (one
 hour) after the recorded fault loss with `diagnostic_code:

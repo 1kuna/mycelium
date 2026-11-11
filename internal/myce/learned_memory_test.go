@@ -186,7 +186,7 @@ func unifiedGPUFixture(t *testing.T, unified bool) (*Queue, *fakeClock, Machine)
 	q, clock := fixture(t)
 	m := unifiedCUDAAdmissionMachine()
 	m.ExtensionFingerprint = "cuda-v1"
-	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", BudgetGB: 96, FreeMemoryGB: 96, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "cuda-v1"}
+	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", BudgetGB: 96, FreeMemoryGB: 96, ReserveMemoryGB: 25, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "cuda-v1"}
 	if !unified {
 		m.UnifiedMemory, m.CapabilityProfile.MemoryLayout = false, "separate"
 		d.MemoryMode, d.UnifiedMemory = "separate", false
@@ -236,6 +236,22 @@ func TestLearnedMemoryUnifiedGPUFirstRunIsBounded(t *testing.T) {
 	next := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
 	if next.MemoryEnvelope.Basis != "exploratory" || next.MemoryEnvelope.Evidence != 0 || next.MemoryEnvelope.HostGB != 80.875 {
 		t.Fatal("missing device sample became accepted", next.MemoryEnvelope)
+	}
+	// A complete host and device sample is exact evidence. The next run records
+	// its accepted peaks, without uncertainty, for the by-use charge (#1044).
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	device := 20.0
+	r = result(next, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, DeviceGB: &device}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	learned := assignGPU(t, q, m, submit(t, q, plainGPUSpec())).MemoryEnvelope.Learned
+	if learned == nil || learned.PeakHostGB != peak || learned.PeakDeviceGB != device || learned.DeviceGB == nil || *learned.DeviceGB < device {
+		t.Fatalf("accepted peaks not recorded: %+v", learned)
 	}
 }
 

@@ -51,6 +51,9 @@ func (q *Queue) recordLearnedMemory(j *Job, m *Machine) {
 	if p := estimate.device; !j.Spec.Needs.cpuOnly() && p != nil && p.DeviceGB != nil && validRate(*p.DeviceGB*estimate.deviceFactor) {
 		gb := *p.DeviceGB * estimate.deviceFactor
 		learned.DeviceGB = &gb
+		if estimate.exact && !estimate.uncalibrated && !estimate.deviceUncalibrated && estimate.source != spentMemoryExploration && validRate(*p.DeviceGB) {
+			learned.PeakHostGB, learned.PeakDeviceGB = hostMemoryPeakGB(estimate.host), *p.DeviceGB
+		}
 	}
 	envelope := *j.MemoryEnvelope
 	envelope.Learned = learned

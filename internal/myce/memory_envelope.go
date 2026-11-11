@@ -196,6 +196,11 @@ type LearnedMemory struct {
 	DeviceGB *float64 `json:"device_gb,omitempty"`
 	Evidence int      `json:"evidence"`
 	Source   string   `json:"source"`
+	// The accepted peaks of this work on this target, without the measured
+	// uncertainty above. A unified CUDA job charged by use never drops below
+	// them; the yield backstop covers growth past them (#1044).
+	PeakHostGB   float64 `json:"peak_host_gb,omitempty"`
+	PeakDeviceGB float64 `json:"peak_device_gb,omitempty"`
 }
 
 // Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
@@ -220,7 +225,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
 		out.DeviceSource = ""
-		if next.DeviceSource == deviceHostDeltaSource || next.DeviceSource == deviceUnifiedResidentSource {
+		if next.DeviceSource == deviceHostDeltaSource || next.DeviceSource == deviceUnifiedResidentSource || next.DeviceSource == deviceFootprintSource {
 			out.DeviceSource = next.DeviceSource
 		}
 	}
@@ -558,6 +563,7 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 type memoryEstimate struct {
 	key                      *ObservationKey
 	foreign                  bool
+	exact                    bool // Device evidence is this exact work on this target.
 	uncalibrated             bool
 	deviceUncalibrated       bool
 	refusal                  string
@@ -715,6 +721,7 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 	switch {
 	case exact != nil:
 		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = exact, 1, "accepted peak + measured uncertainty", exactN
+		estimate.exact = true
 	case family != nil:
 		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = family, 1, "cross-machine estimate", familyN
 	case sameOS != nil:
@@ -838,7 +845,7 @@ func (q *Queue) exploratoryMemoryStatusWithDrift(j *Job, m *Machine, drift float
 	if allowance <= 0 && m.CapabilityProfile != nil {
 		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
 	}
-	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" || m.HostMemoryPolicyMismatch {
+	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
 	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
@@ -920,12 +927,7 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				why += "; " + memoryCapacityRemedies
 			}
 			if unifiedCUDA(m) {
-				if floor, ok := unifiedCUDAFloor(m); ok {
-					why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", floor)
-				}
-			}
-			if m.HostMemoryPolicyMismatch {
-				why += "; host allowance policy mismatch"
+				why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", q.hostMemoryMargin(m, m))
 			}
 			if !m.HostMemoryMeasured || m.HostMemoryError != "" {
 				why += "; host telemetry unavailable"

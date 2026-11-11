@@ -155,3 +155,70 @@ func TestRSSGuardLinuxKeepsCgroupAccounting(t *testing.T) {
 		t.Fatal("Linux acquired a process RSS guard")
 	}
 }
+
+// Metal work is guarded on phys_footprint, which counts Metal buffers that RSS
+// misses (#1044). The limit is the whole unified envelope (device + host +
+// slack); the stop carries footprint evidence and the peak is labelled so
+// learning can tell footprint evidence from RSS-era peaks.
+func TestFootprintGuardStopsMetalAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		footprint uint64
+		stopped   bool
+	}{
+		{"within envelope", 4 << 30, false},
+		{"past envelope", 6 << 30, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := recoveryWorker(t)
+			w.Machine.GPU, w.Machine.MemoryCeilingSlackGB = "metal", .125
+			clock := &workerFakeClock{now: time.Unix(100, 0)}
+			w.Clock = clock
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			w.processMemory = &processMemoryProbe{
+				Pressure: func(context.Context) (*gpuHostState, error) { return &gpuHostState{available: 64, level: 1}, nil },
+				// RSS never sees the buffers; a guard on it would never act.
+				OwnedResident: func(map[int]string) (uint64, int, error) { return 64 << 20, 1, nil },
+				OwnedFootprint: func(map[int]string) (uint64, uint64, int, error) {
+					clock.Advance(time.Second)
+					return tc.footprint, 64 << 20, 1, nil
+				},
+			}
+			if !w.footprintGuarded(Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 4, HostMemoryGB: 1, Platform: Platform{Required: []string{"metal"}}}}}) {
+				t.Fatal("declared Metal job not footprint guarded")
+			}
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			duration := "0.3"
+			if tc.stopped {
+				duration = "60"
+			}
+			j := recoveryJob(t, []string{"sleep", duration})
+			j.Spec.Resumable = false
+			j.Spec.Needs = ResourceNeeds{MemoryGB: 4, HostMemoryGB: 1, Platform: Platform{Required: []string{"metal"}}}
+			p, err := startAfterFixtureInputs(t, w, store, j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { p.stopDirective(clock.Now(), 0, true, true) })
+			r := d5Finish(t, p)
+			// RSS is the host share; the footprint beyond it is the device share.
+			if p := r.MemoryPeak; p == nil || p.HostGB == nil || *p.HostGB != 1.0/16 || p.DeviceGB == nil || *p.DeviceGB != float64(tc.footprint)/(1<<30)-1.0/16 || p.DeviceSource != deviceFootprintSource {
+				t.Fatalf("peak: %+v", r.MemoryPeak)
+			}
+			if !tc.stopped {
+				if !r.Success || r.ExecutionCause != nil {
+					t.Fatalf("stopped within envelope: %+v", r)
+				}
+				return
+			}
+			e := r.ExecutionCause
+			if r.Success || !r.OutOfMemory || e == nil || e.Class != rssLimitExceeded || e.RSSLimit == nil || e.RSSLimit.Quality != footprintGuardQuality || e.RSSLimit.LimitBytes != int64(5.125*(1<<30)) {
+				t.Fatalf("footprint guard outcome: %+v %+v", r, e)
+			}
+		})
+	}
+}

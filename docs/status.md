@@ -1109,7 +1109,13 @@ uses that cause in its reason, without implying a worker restart. Actual fresh
 worker-session recovery retains its separate restart diagnostic. Authorization
 failures still consume the existing infrastructure retry/loss budget, except
 when the queue's start fence refused placement: that attempt requeues without a
-loss or retry charge. The queue log line `event=launch_placement_rejected`
+loss or retry charge. After Started authorization, that exemption needs the
+worker's `execution_evidence` for that exact attempt with `main: not_started`.
+A refusal with missing, `unknown`, `may_have_run` or other-attempt evidence is
+charged as an ordinary loss and infrastructure retry: the queue's refusal record
+names the fence predicate, not whether it refused main's gate or a helper's
+custody, and a helper gate can be refused after main started. Current workers
+send that evidence; older workers' post-Started refusals are charged. The queue log line `event=launch_placement_rejected`
 names the failed `predicate` (`disk_floor`, `machine_unavailable`,
 `preparation_stopping`, `execution_target`, `cpu_fit` or `placement_policy`).
 
@@ -1355,19 +1361,17 @@ capacity do not withhold co-tenants indefinitely. A dependent-stage forecast
 expires when the measured producer overruns. No prediction of future,
 unsubmitted jobs is made.
 
-The physical free-RAM floor is **max(existing unified-CUDA reserve, physical RAM
-minus the configured host allowance)**. The existing OS/driver reserve is at
-least 16 GiB; a larger configured device reserve is retained. Similarly,
-a tighter operator allowance retains the larger remainder, providing additional
-room for driver allocations, fragmentation and outside growth. For example,
-121.064556 GiB physical RAM and a 96 GiB allowance yield a 25.064556 GiB floor
-(9.064556 GiB beyond the existing reserve). This is a conservative admission
-policy, not a measured guarantee against driver allocation failures. It costs
-co-tenancy capacity when unmanaged memory uses that remainder. Native
-coexistence/fragmentation qualification remains separate. A measured allowance
-on a host without a shared-interactive profile already excludes the idle
-footprint that live used RAM contains, so its floor is the reserve alone; the
-allowance still caps reservations.
+The physical free-RAM floor is the existing unified-CUDA reserve: the OS/driver
+reserve is at least 16 GiB, and a larger configured device reserve is retained.
+An allowance, measured or authored, caps reservations and is never a floor:
+live used RAM already contains the idle footprint it excludes, so physical RAM
+minus the allowance would withhold that footprint twice. For example, 121.06 GiB
+physical RAM, 4 GiB idle use, a 16 GiB reserve and a 96 GiB authored allowance
+offer 96 GiB at idle (previously 92). Only a shared-interactive host keeps the
+larger of its reserve and physical RAM minus its allowance. This is a
+conservative admission policy, not a measured guarantee against driver
+allocation failures; native coexistence/fragmentation qualification remains
+separate.
 
 The queue checks raw physical availability from the existing host-memory
 observation, subtracting this floor and outstanding reservation growth; the

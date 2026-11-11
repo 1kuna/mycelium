@@ -353,28 +353,52 @@ func TestMaintenanceBudgetMismatchAndStarted(t *testing.T) {
 	a.HostMemoryBudgetGB = 4
 	check(t, q, a, nil)
 	maintenanceChange(t, q, "resume", false)
+	// b has not acknowledged yet. Each worker enforces its own acknowledged
+	// allowance, so admission continues within the lower of the new policy and
+	// every acknowledgement instead of pausing; readiness still reports it.
+	status, err := q.HostMaintenanceStatus("host")
+	if err != nil || status.Healthy || !status.Workers[0].Machine.HostMemoryPolicyMismatch {
+		t.Fatal("pending acknowledgement not reported", status, err)
+	}
+	b.HostMemoryBudgetGB = 3 // A lower acknowledged allowance binds at once.
+	check(t, q, b, nil)
+	if got := q.s.Machines[a.ID].EffectiveHostMemoryBudgetGB; got != 3 {
+		t.Fatal("effective allowance is not the lower acknowledgement", got)
+	}
 	s := spec("experiment")
 	s.Needs.HostMemoryGB = 2
 	submit(t, q, s)
-	if check(t, q, a, nil).Job != nil || check(t, q, b, nil).Job != nil {
-		t.Fatal("mismatched cards admitted")
+	j := check(t, q, a, nil).Job
+	if j == nil {
+		j = check(t, q, b, nil).Job
+	}
+	if j == nil {
+		t.Fatal("pending acknowledgement paused admission")
+	}
+	if err := q.Started(result(j, false)); err != nil {
+		t.Fatal("pending acknowledgement refused a start within both allowances", err)
+	}
+	big := spec("experiment")
+	big.Needs.HostMemoryGB = 1.5 // 2.125 + 1.625 > 3 acknowledged, < 4 policy.
+	submit(t, q, big)
+	owner, other := a, b
+	if j.Machine == b.ID {
+		owner, other = b, a
+	}
+	if check(t, q, owner, j).Job != nil || check(t, q, other, nil).Job != nil {
+		t.Fatal("admitted above an acknowledged allowance", q.s.Machines[a.ID].FreeHostMemoryGB)
 	}
 	b.HostMemoryBudgetGB = 4
-	j := check(t, q, b, nil).Job
-	if j == nil {
-		j = check(t, q, a, nil).Job
+	var running *Job
+	if j.Machine == b.ID {
+		running = j
 	}
-	if j == nil {
-		t.Fatal("matching cards refused")
+	check(t, q, b, running)
+	if got := q.s.Machines[a.ID].EffectiveHostMemoryBudgetGB; got != 4 || q.s.Machines[a.ID].HostMemoryPolicyMismatch {
+		t.Fatal("acknowledged policy did not apply", got)
 	}
-	b.HostMemoryBudgetGB = 3
-	check(t, q, b, nil)
-	if err := q.Started(result(j, false)); !errors.Is(err, ErrStale) {
-		t.Fatal("Started ignored sibling policy mismatch", err)
-	}
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil || status.Healthy || !status.Workers[0].Machine.HostMemoryPolicyMismatch {
-		t.Fatal(status, err)
+	if status, err := q.HostMaintenanceStatus("host"); err != nil || status.Workers[0].Machine.HostMemoryPolicyMismatch {
+		t.Fatal("acknowledged policy still pending", status, err)
 	}
 }
 func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {

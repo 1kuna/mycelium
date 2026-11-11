@@ -15,6 +15,7 @@ func unifiedCUDAAdmissionMachine() Machine {
 	m.CapabilityProfile.SystemMemoryBytes = 121 << 30
 	m.FreeMemoryGB, m.TotalMemoryGB = 96, 96
 	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 96, 90
+	m.ReservedMemoryGB = 25 // The physical floor is the reserve; the allowance caps charges.
 	m.MemoryCeilingSlackGB = .125
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 15}
 	return m
@@ -89,11 +90,19 @@ func TestUnifiedCUDAAdmissionModelLaunchRechecksFloor(t *testing.T) {
 	if err := rt.checkLoadMemory(t.Context(), loading); err != nil {
 		t.Fatal("physical recovery did not permit model", err)
 	}
+	// The runtime reads a changed allowance at once. An authored allowance
+	// caps the charge; it is never a floor on free RAM.
 	rt.mu.Lock()
-	rt.memoryMachine.HostMemoryBudgetGB = 64 // New floor = 121 - 64 = 57 GiB.
+	rt.memoryMachine.HostMemoryBudgetGB = 64
 	rt.mu.Unlock()
-	if err := rt.checkLoadMemory(t.Context(), loading); err == nil || !strings.Contains(err.Error(), "insufficient host RAM") {
-		t.Fatal("model retained a stale allowance floor", err)
+	if err := rt.checkLoadMemory(t.Context(), loading); err != nil {
+		t.Fatal("authored allowance became a physical floor", err)
+	}
+	rt.mu.Lock()
+	rt.memoryMachine.HostMemoryBudgetGB = 30 // Below the 32.125 GiB charge.
+	rt.mu.Unlock()
+	if err := rt.checkLoadMemory(t.Context(), loading); admissionDetail(err, Job{}) == nil || admissionDetail(err, Job{}).Subcheck != "configured_host_allowance" {
+		t.Fatal("model retained a stale allowance", err)
 	}
 	// Legacy admission-only models may omit host RAM; CUDA still uses physical RAM.
 	rt.mu.Lock()
@@ -327,6 +336,10 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	live := func(m *Machine) float64 {
+		capacity, _, _, _ := q.hostLiveCapacity(m)
+		return capacity
+	}
 	report(0)
 	clock.Advance(10700 * time.Millisecond)
 	accepted := q.s.Machines[m.ID]
@@ -335,12 +348,12 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 	}
 	// 102 GiB cannot fit a 96 GiB allowance. Refuse only the real shortfall,
 	// rather than manufacturing 102 GiB debt from a fixed freshness cutoff.
-	if got := q.unifiedCUDAHostRoom(accepted, 92.1-102, 102); math.Abs(got-(-9.9)) > 1e-9 {
+	if got := live(accepted) - 102; math.Abs(got-(-9.9)) > 1e-9 {
 		t.Fatalf("healthy slow observation charged fictitious debt: room=%g, want -9.9", got)
 	}
 	// Once #1117 removes the unused cold-probe promotion, the smaller real
 	// outstanding demand fits under the same physical observation and reserve.
-	if got := q.unifiedCUDAHostRoom(accepted, 92.1-72, 72); math.Abs(got-20.1) > 1e-9 {
+	if got := live(accepted) - 72; math.Abs(got-20.1) > 1e-9 {
 		t.Fatalf("healthy slow observation refused fitting growth: room=%g", got)
 	}
 	// A continuing heartbeat carrying the same expired sensor observation
@@ -351,7 +364,7 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 	if !q.workerFresh(accepted, clock.Now()) {
 		t.Fatal("stopped sensor fixture also lost worker contact")
 	}
-	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+	if got := live(accepted) - 72; got != -72 {
 		t.Fatalf("expired observation granted physical credit: %g", got)
 	}
 	// New successful evidence restores room; invalid physical data does not.
@@ -359,24 +372,25 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 	report(0)
 	accepted = q.s.Machines[m.ID]
 	accepted.HostHealth.History[0].Error = "sensor failed"
-	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+	if got := live(accepted) - 72; got != -72 {
 		t.Fatalf("failed sensor granted physical credit: %g", got)
 	}
 	accepted.HostHealth.History[0].Error = ""
 	accepted.MemoryObservation = nil
-	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+	if got := live(accepted) - 72; got != -72 {
 		t.Fatalf("missing physical observation granted credit: %g", got)
 	}
 	accepted.MemoryObservation = m.MemoryObservation
 	clock.Advance(q.workerArrivalAllowance(accepted))
-	if got := q.unifiedCUDAHostRoom(accepted, 20.1, 72); got != -72 {
+	if got := live(accepted) - 72; got != -72 {
 		t.Fatalf("silent worker granted physical credit: %g", got)
 	}
 }
 
 // Live numbers from the measured unified host (2026-11-11): 121.06 GiB, idle
-// maximum 5.00, explicit reserve 16, measured allowance 100.06. Live used RAM
-// already holds the idle footprint, so the floor is the reserve alone (not 21).
+// maximum 5.00, explicit reserve 16, allowance 100.06. Live used RAM already
+// holds the idle footprint, so with a measured or authored allowance the floor
+// is the reserve alone (not 21). Only the shared-interactive host keeps 21.
 func TestUnifiedCUDAFloorMeasuredAllowanceCountsBaselineOnce(t *testing.T) {
 	m := unifiedCUDAAdmissionMachine()
 	total := 121.06
@@ -389,7 +403,7 @@ func TestUnifiedCUDAFloorMeasuredAllowanceCountsBaselineOnce(t *testing.T) {
 		floor    float64
 	}{
 		{"measured", true, false, 16},
-		{"authored", false, false, 21},
+		{"authored", false, false, 16},
 		{"measured-shared", true, true, 21},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

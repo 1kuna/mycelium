@@ -201,12 +201,9 @@ func TestExtensionRoutingKindProgramAndWaiting(t *testing.T) {
 			if check(t, q, m, nil).Job != nil {
 				t.Fatal("unqualified assignment")
 			}
-			snap, err := q.Snapshot()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(snap.Jobs[0].Reason, "qualified") {
-				t.Fatal(snap.Jobs[0].Reason)
+			observed := job(t, q, j.ID)
+			if !strings.Contains(observed.Reason, "qualified") {
+				t.Fatal(observed.Reason)
 			}
 			m.ExtensionReports = installQualified(t, t.TempDir(), e, "")
 			reply := check(t, q, m, nil)
@@ -494,11 +491,7 @@ func TestExtensionQualificationChangeBeforeStartRequeuesWithoutLoss(t *testing.T
 	if err := q.Complete(result); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := q.Snapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snap.Jobs[0].State != "queued" || snap.Jobs[0].Losses != 0 {
+	if observed := job(t, q, j.ID); observed.State != "queued" || observed.Losses != 0 {
 		t.Fatal("qualification failure charged loss or failed job")
 	}
 	second := check(t, q, b, nil).Job

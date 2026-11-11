@@ -39,11 +39,11 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 		budget = m.hostBudgetGB
 	}
 	// The floor is compared with live used RAM, which already contains the
-	// OS, driver and idle-service footprint. A measured allowance has already
-	// excluded that footprint, so physical-minus-allowance would subtract it a
-	// second time; the allowance still caps reservations on its own. Authored
-	// allowances and shared-interactive hosts keep the complement as a floor.
-	if budget > 0 && !(m.HostMemoryBudgetMeasured && m.SharedHost == nil) {
+	// OS, driver and idle-service footprint. Any allowance, measured or
+	// authored, is a cap on charges: physical-minus-allowance as a floor would
+	// subtract that footprint a second time. Only the shared-interactive host
+	// keeps the complement, as its stricter owner protection (MY-45).
+	if budget > 0 && m.SharedHost != nil {
 		floor = max(floor, total-budget)
 	}
 	return floor, true
@@ -60,32 +60,6 @@ func remainingAllocationGrowth(m *Machine, device, reservation float64, sample h
 		growth = max(growth, device)
 	}
 	return growth
-}
-
-// Read only check-in snapshots under q.mu. Raw available RAM already includes
-// all managed and unmanaged allocations: never add the external-RSS history.
-// Subtract only outstanding growth and the reserve, once each.
-func (q *Queue) unifiedCUDAHostRoom(m *Machine, room, growth float64) float64 {
-	if !hostHasUnifiedCUDA(m) {
-		return room
-	}
-	for _, sibling := range q.s.Machines {
-		if hostID(sibling) != hostID(m) || sibling.Gone {
-			continue
-		}
-		o := sibling.MemoryObservation
-		floor, ok := unifiedCUDAFloor(sibling)
-		now := q.clock.Now()
-		// Physical RAM is sampled for each accepted check-in. Reuse that
-		// session's adaptive contact and frozen host-health delivery evidence;
-		// an unrelated fixed age must not turn healthy slow control into debt.
-		// Continuing contact still cannot renew expired/failed sensor evidence.
-		if !ok || !validHostMemoryObservation(o) || !q.workerFresh(sibling, now) || !q.hostHealthEvidenceValid(sibling, now) {
-			return min(room, -growth)
-		}
-		room = min(room, o.TotalGB-o.UsedGB-floor-growth)
-	}
-	return room
 }
 
 // Existing holds still own takeover/preemption. This additional admission-only

@@ -668,7 +668,7 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 				target := AdmissionWaitTarget{Host: hostID(m), Machine: m.ID, Session: m.Session, Device: m.Device, Resolution: resolution, Concurrency: concurrency,
 					RequiredCores: n.cores(), AvailableCores: m.FreeCPUCores, RequiredHostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), AvailableHostGB: m.FreeHostMemoryGB,
 					HostDebtGB: m.hostReservationDebtGB, RequiredDeviceGB: n.MemoryGB, AvailableDeviceGB: m.FreeMemoryGB,
-					HostMemoryKnown:   m.HostMemoryMeasured && m.HostMemoryError == "" && !m.HostMemoryPolicyMismatch,
+					HostMemoryKnown:   m.HostMemoryMeasured && m.HostMemoryError == "",
 					DeviceMemoryKnown: m.MemoryMeasured && m.MemoryError == "",
 					Preemption:        WaitPreemption{Source: "diagnostic_projection", Reason: "not_scheduler_turn"}}
 				var fit targetFit
