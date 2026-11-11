@@ -2,8 +2,8 @@
 
 Before using an optional contract below, check its installed components against
 [capability evidence](references/release-behavior.md#capability-evidence).
-“Next release” describes source intent, not installed availability; a dependency
-lock does not establish application compatibility or production output parity.
+A dependency lock does not establish application compatibility or production
+output parity.
 
 
 For new reusable work, follow [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md):
@@ -13,15 +13,15 @@ supporting files together when installing it.
 
 Before choosing targets, run `myce portability`, inspect `myce env get NAME`,
 then run `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` on the
-authored entry. Repeat after inventory or recipe changes. From the next release,
-resolve and portability compare authored eligibility with dependency candidates
+authored entry. Repeat after inventory or recipe changes. Resolve and
+portability compare authored eligibility with dependency candidates
 from the selected immutable lock environment, including all command members.
 The report names missing lock coverage, unknown build support, preparation and
 current admission separately. uv/installed-tool/binary coverage stays unknown
 without matching native evidence. A Pixi lock's platform keys are dependency
 metadata, not proof that payload binaries, downloads or shell commands work.
 
-From the next release, non-production native CPU entries/profiles may declare
+Non-production native CPU entries/profiles may declare
 `portable: true` and omit targets when their main environment is a managed Pixi
 recipe with machine-readable selected-lock coverage. All sidecar environments
 must cover the same target; sidecars without an environment inherit main's.

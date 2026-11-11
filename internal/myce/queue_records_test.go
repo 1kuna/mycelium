@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -21,7 +20,7 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 					finish(t, q, run, true)
 				}
 				drainAdmissionWait(t, q)
-				before, err := json.Marshal(q.s)
+				before, err := marshalQueueState(t, q)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -39,7 +38,7 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 				}); !errors.Is(err, rejected) {
 					t.Fatal(err)
 				}
-				after, err := json.Marshal(q.s)
+				after, err := marshalQueueState(t, q)
 				if err != nil {
 					t.Fatal(err)
 				}

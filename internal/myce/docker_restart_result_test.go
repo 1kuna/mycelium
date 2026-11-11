@@ -15,11 +15,7 @@ import (
 // Freeze the live adapter before driving terminal observations synchronously.
 func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
 	t.Helper()
-	w, s, c, root := dockerFixture(t)
-	// Recovery/outcome tests drive daemon state, not external CLI scheduling.
-	// Reuse the serialized daemon seam; logs still exercise the external CLI.
-	// Transport startup, timeouts and lost replies have dedicated regressions.
-	w.dockerDaemon = fakeDockerGroupCommand(root)
+	w, s, c, root := dockerGroupFixture(t)
 	p, err := startDockerFixture(w, s, dockerGroupJob(t))
 	if err != nil {
 		t.Fatal(err)
@@ -34,15 +30,10 @@ func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *
 		}
 		p.docker.close()
 	})
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	// A daemon start effect precedes the adapter's durable start receipt.
 	// Closing before that receipt can interrupt launch, rather than freezing
 	// the running execution this fixture promises to recover.
-	await(t, func() bool {
-		p.docker.mu.Lock()
-		defer p.docker.mu.Unlock()
-		return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
-	})
 	p.docker.close()
 	return w, s, p.docker, c, root
 }

@@ -33,3 +33,13 @@ still govern healthy production runs, signed/approved rolling updates, exact
 custody, stopped unhealthy advancement and operator rollback. An optional
 release feature or shorter consumer guide grants no deployment or hardware
 authority. Private installation policy and destination bindings stay private.
+
+## Mycelium repository merges
+
+Read [the repository merge procedure](../../../docs/development.md#local-merge-proof)
+and [current rulings](../../../docs/DECISIONS.md#my-41). Under MY-41, merge on quick
+plus targeted tests, run the full suite once per release batch, and fix breakage
+forward; no independent review or per-PR full is required. Development gates,
+admission and stale custody may be repaired or reset when they block iteration;
+protect running production jobs and secrets. Keep actual failed, interrupted and
+skipped results. This reference grants no deployment authority.

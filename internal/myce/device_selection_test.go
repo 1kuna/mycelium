@@ -216,7 +216,7 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
 	for _, device := range []string{"0", "1"} {
 		t.Run(device, func(t *testing.T) {
-			w, s, c, root := dockerFixture(t)
+			w, s, c, root := dockerGroupFixture(t)
 			w.Machine.GPU, w.Machine.Device = "xpu", device
 			j := dockerGroupJob(t)
 			mapping := []string{"docker", "run", "--device", "/dev/dri/renderD128", "--device", "/dev/dri/renderD129"}
@@ -238,6 +238,7 @@ func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
 				_, err := os.Stat(filepath.Join(root, "running"))
 				return err == nil
 			})
+			awaitDockerMainStarted(t, p)
 			p.stop(c.Now(), 0, true)
 			expireDockerStop(t, p)
 			<-p.done

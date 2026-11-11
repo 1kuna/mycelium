@@ -19,7 +19,7 @@ func TestMaintenanceDelayedDockerGroupLaunch(t *testing.T) {
 	}{{"network", 1, "network create", "drain"}, {"sidecar-start", 3, "start sidecar-sortformer", "disable"}, {"main-start", 7, "start id1", "disable-stop"}} {
 		action := boundary.action
 		t.Run(boundary.name+"/"+action, func(t *testing.T) {
-			w, store, _, root := dockerFixture(t)
+			w, store, _, root := dockerGroupFixture(t)
 			q, _ := fixture(t)
 			w.Machine.HostID = "host"
 			w.Machine.HostMemoryMeasured, w.Machine.HostAvailableMemoryGB = true, 32

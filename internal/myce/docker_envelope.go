@@ -55,6 +55,14 @@ func (w Worker) dockerEnvelopeSupported() bool {
 }
 
 func (d *dockerAttempt) envelope() *memoryAttempt {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.envelopeLocked()
+}
+
+// Callers already holding the execution mutex must use the same snapshot.
+// Stop delivery can replace the entire execution, including unchanged fields.
+func (d *dockerAttempt) envelopeLocked() *memoryAttempt {
 	if d.memory != nil {
 		return d.memory
 	}
@@ -67,7 +75,7 @@ func (d *dockerAttempt) envelope() *memoryAttempt {
 // Persist OOM and peaks before removing counters, also during restart cleanup.
 // The daemon must first prove every labeled member stopped.
 func (d *dockerAttempt) releaseEnvelope() error {
-	a := d.envelope()
+	a := d.envelopeLocked()
 	if a == nil {
 		return nil
 	}

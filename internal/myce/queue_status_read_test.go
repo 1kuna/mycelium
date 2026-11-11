@@ -35,7 +35,7 @@ func retainedStatusQueue(t testing.TB) *Queue {
 func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	q := retainedStatusQueue(t)
 	setStatusTestCapacity(q)
-	before, _ := json.Marshal(q.s)
+	before, _ := marshalQueueState(t, q)
 	// Any persistence attempt now fails; status still has to work.
 	if _, err := q.db.Exec("PRAGMA query_only=ON"); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	if err != nil || len(s.Jobs) != 300 {
 		t.Fatalf("read-only status failed: %v", err)
 	}
-	after, _ := json.Marshal(q.s)
+	after, _ := marshalQueueState(t, q)
 	if string(before) != string(after) {
 		t.Fatal("status mutated durable state")
 	}

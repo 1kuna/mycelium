@@ -204,6 +204,7 @@ work and must survive their own restarts, see
 
 | Task | Reference |
 | --- | --- |
+| Using Mycelium from a coding agent | [Agent skill](../skills/mycelium/SKILL.md) |
 | Commands, job YAML, waiting, cancelling, fan-out and dependencies | [Jobs](jobs.md) |
 | One reusable instruction file per project | [Adapter](adapter.md) |
 | Software environments prepared on each machine | [Environments](environments.md) |

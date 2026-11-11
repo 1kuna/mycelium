@@ -5,10 +5,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Stop delivery publishes a complete execution while the attempt actor samples
+// memory. Even unchanged envelope fields belong to that mutex-protected state.
+func TestDockerHostMemoryConcurrentStopState(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1000, 0)}
+	d, fs := dockerHostMemoryFixture(t, clock)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 1000 {
+			d.mu.Lock()
+			next := d.state
+			next.Stopped = i%2 == 0
+			d.state = next // Same publication as signalContainer's durable intent.
+			d.mu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+	defer func() { <-done }()
+	for range 1000 {
+		if sample := d.currentHostMemory(clock, fs); sample != nil && sample.NonreclaimableGB != 40 {
+			t.Fatal("stop publication changed exact-container memory credit", sample)
+		}
+		runtime.Gosched()
+	}
+	await(t, func() bool { return d.currentHostMemory(clock, fs) != nil })
+}
 
 type dockerHostMemoryFS struct {
 	osMemoryFS
