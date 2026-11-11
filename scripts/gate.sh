@@ -119,6 +119,12 @@ step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
 if [[ -f scripts/test-gate-shards.py ]]; then
   step gate-shards-regressions python3 scripts/test-gate-shards.py
 fi
+if [[ -f scripts/test-gate-revert-check.py ]]; then
+  step gate-revert-check-regressions python3 scripts/test-gate-revert-check.py
+fi
+if [[ -f scripts/test-gate-default-cache.py ]]; then
+  step gate-default-cache-regressions python3 scripts/test-gate-default-cache.py
+fi
 step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
