@@ -174,10 +174,6 @@ func (q *Queue) discontinueContactCadence(id string) {
 // credit. Rejection removes its credit; cancellation grants only a measured
 // reconnect opportunity, never refreshing accepted LastSeen. An abandoned arrival
 // cannot hide silence after the queue has had enough service opportunities.
-func (q *Queue) beginCheckin(machine, session string, contexts ...context.Context) func(accepted bool) {
-	return q.beginWorkerCheckin(machine, session, 0, false, contexts...)
-}
-
 func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration, active bool, contexts ...context.Context) func(accepted bool) {
 	_, settle := q.trackWorkerCheckin(machine, session, period, active, contexts...)
 	return settle
@@ -275,6 +271,18 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 // loss, while wall-clock suspicion remains independent. Callers hold q.mu.
 func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
 	return q.contactTime(m, now, true)
+}
+
+// checkinDeliveryUpper predicts, in seconds, how long this session's next
+// check-in takes from arrival to completion (mean plus four deviations of
+// completed check-ins). Zero until a check-in of the session has completed.
+func (q *Queue) checkinDeliveryUpper(m *Machine) float64 {
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
+		return c.delivery.upper()
+	}
+	return 0
 }
 
 // Pending requests protect their sender, but cannot identify a continuously

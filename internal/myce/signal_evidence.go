@@ -78,11 +78,6 @@ func crashSignal(s syscall.Signal) string {
 	}
 	return ""
 }
-func (w Worker) captureSignalEvidence(cmd *exec.Cmd, e *memberExit) {
-	if cmd.Process != nil {
-		w.captureSignalEvidencePID(cmd.Process.Pid, cmd.Dir, e, false)
-	}
-}
 func (w Worker) captureSignalEvidencePID(pid int, dir string, e *memberExit, candidate bool, scopes ...SignalCapture) {
 	if e == nil {
 		return
@@ -277,9 +272,6 @@ func kernelSignalRecord(data []byte, pid int) (string, time.Time) {
 		}
 	}
 	return "", time.Time{}
-}
-func applyCoreMetadata(e *SignalEvidence, data []byte, pid int, at time.Time) {
-	applyCoreMetadataFor(e, data, SignalCapture{PID: pid, StartedAt: at, ObservedAt: at})
 }
 func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture) {
 	for _, line := range bytes.Split(data, []byte("\n")) {

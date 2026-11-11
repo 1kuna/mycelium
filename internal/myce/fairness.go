@@ -346,9 +346,6 @@ func resourceKey(j *Job) batchResourceKey {
 	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j)}
 }
 
-func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
-	return q.batchResourcesFitWithScan(j, m, nil)
-}
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
 	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
 		return false

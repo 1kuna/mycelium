@@ -104,12 +104,6 @@ func (e *evidenceExpiries) set(key string, at time.Time) {
 	}
 }
 
-// WithRetentionCapacity supplies local measurements, including deterministic
-// laptop fixtures. It does not change retention or confer release authority.
-func WithRetentionCapacity(read func(context.Context) (RetentionCapacity, error)) QueueOption {
-	return func(q *Queue) { q.evidenceMaintenance.capacity = read }
-}
-
 var queueHostMemorySource = NewHostMemorySource
 
 // SetQueueHostMemorySource supplies the queue process's own host-memory probe

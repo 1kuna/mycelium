@@ -74,8 +74,7 @@ func (q *Queue) hostMemoryLedger(m *Machine) *HostMemoryLedger {
 	for _, j := range q.liveJobs() {
 		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 		if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-			need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-			charge, growth := jobHostMemoryCharge(j, owner, need, q.hostMemorySamples[j.Machine][jobKey(*j)], l.CapturedAt)
+			charge, growth := q.hostJobChargeGrowth(j)
 			add(HostMemoryOwner{Kind: "attempt", Execution: &Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: j.State, ChargeGB: charge, GrowthGB: growth})
 		}
 	}

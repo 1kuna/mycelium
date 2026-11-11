@@ -826,21 +826,14 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger
 // and release predicates; the normal planner alone can authorize stops.
 func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
-	return q.exploratoryMemoryWithDrift(j, m, q.jobProbeDriftMarginGB(j, m))
-}
-
-func (q *Queue) exploratoryMemoryWithDrift(j *Job, m *Machine, drift float64) (float64, string) {
-	room, why, _ := q.exploratoryMemoryStatusWithDrift(j, m, drift)
+	room, why, _ := q.exploratoryMemoryStatus(j, m)
 	return room, why
 }
 
 // The boolean identifies temporary physical contention, not unknown telemetry or
 // a structural inability to run. Startup waiting uses this same sizing evidence.
 func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bool) {
-	return q.exploratoryMemoryStatusWithDrift(j, m, q.jobProbeDriftMarginGB(j, m))
-}
-
-func (q *Queue) exploratoryMemoryStatusWithDrift(j *Job, m *Machine, drift float64) (float64, string, bool) {
+	drift := q.jobProbeDriftMarginGB(j, m)
 	allowance := m.EffectiveHostMemoryBudgetGB
 	if allowance <= 0 && m.CapabilityProfile != nil {
 		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
@@ -863,10 +856,8 @@ func (q *Queue) exploratoryMemoryStatusWithDrift(j *Job, m *Machine, drift float
 		if owner == nil || hostID(owner) != hostID(m) || running.ReleaseConfirmed || (running.State != "running" && running.State != "stopping") {
 			continue
 		}
-		charge := hostNeed(owner, running.Spec.Needs.MemoryGB, running.Spec.Needs.HostMemoryGB)
-		charge, _ = jobHostMemoryCharge(running, owner, charge, q.hostMemorySamples[running.Machine][jobKey(*running)], q.clock.Now())
 		if q.batchPreemptible(running, j.Spec) {
-			room += charge
+			room += q.hostJobCharge(running)
 		}
 	}
 	for _, slot := range q.s.ModelSlots {

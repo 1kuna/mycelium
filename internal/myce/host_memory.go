@@ -196,9 +196,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	ramDeficit := max(0, need-room)
 	// Fresh unified over-use is freed too, up to the shortfall (#596).
 	freedRAM := func(j *Job) float64 {
-		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-		charge, _ := jobHostMemoryCharge(j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
-		return charge + min(q.unifiedOveruseGB(j), ramDeficit)
+		return q.hostJobCharge(j) + min(q.unifiedOveruseGB(j), ramDeficit)
 	}
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
 	jobs = slices.DeleteFunc(jobs, func(j *Job) bool {
@@ -708,8 +706,14 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	}
 }
 
+// hostJobCharge is the ledger's one charge for a live attempt; growth is the
+// part of it that may still consume live RAM. Every caller uses this.
 func (q *Queue) hostJobCharge(j *Job) float64 {
-	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+	charge, _ := q.hostJobChargeGrowth(j)
 	return charge
+}
+
+func (q *Queue) hostJobChargeGrowth(j *Job) (charge, growth float64) {
+	m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+	return jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 }

@@ -325,8 +325,6 @@ func (q *Queue) startEligibleHosts(j *Job) []string {
 	return hosts
 }
 
-func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementRejection(j) == "" }
-
 // startPlacementRejection names the failed start-fence predicate, or "". The
 // names are fixed labels, safe to log without host, path or volume detail.
 func (q *Queue) startPlacementRejection(j *Job) string {

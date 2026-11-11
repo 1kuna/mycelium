@@ -245,13 +245,13 @@ class ExtensionClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(client, "upload_file", return_value=ref) as upload, \
                  patch.object(client, "submit_and_wait", return_value=job) as submit, \
-                 patch.object(client, "download_result") as download:
+                 patch.object(client, "_download_ref") as download:
                 self.assertEqual(client.run("example@1", inputs={"input.json": "local.json"},
                     outputs=directory, project="demo", class_="batch", key="stable", timeout=5), job)
                 upload.assert_called_once_with("local.json", project="demo", class_="batch")
                 submit.assert_called_once_with({"name": "example@1", "project": "demo", "class": "batch",
                     "extension": "example@1", "submission_key": "stable", "authoring_origin": "extension", "files": {"input.json": ref}}, timeout=5)
-                download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")
+                download.assert_called_once_with(ref, Path(directory).absolute() / "result.json")
 
     def test_run_consumes_whole_parent_binding(self):
         client = Client(token="fixture")
@@ -269,7 +269,7 @@ class ExtensionClientTests(unittest.TestCase):
     def test_run_failed_job_points_to_logs_and_never_downloads(self):
         client = Client(token="fixture")
         with patch.object(client, "submit_and_wait", return_value={"id": "12345678abcdef", "state": "failed", "reason": "execution failed"}), \
-             patch.object(client, "download_result") as download:
+             patch.object(client, "_download_ref") as download:
             with self.assertRaises(APIError) as caught:
                 client.run("example@1", inputs={}, outputs="results", project="demo", key="stable")
             self.assertEqual(caught.exception.code, "job_failed")
@@ -288,7 +288,7 @@ class ExtensionClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for name in ("../escape", "/absolute", "a/../b", "a\\b", "a:b"):
                 with patch.object(client, "submit_and_wait", return_value={"id": "job", "state": "succeeded", "output_refs": {name: {}}}), \
-                     patch.object(client, "download_result") as download:
+                     patch.object(client, "_download_ref") as download:
                     with self.assertRaisesRegex(ValueError, "relative"):
                         client.run("example@1", inputs={}, outputs=directory, project="demo", key="stable")
                     download.assert_not_called()

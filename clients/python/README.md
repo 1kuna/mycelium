@@ -88,6 +88,46 @@ A cancelled key reservation returns its terminal cancelled job for any spec.
 Keep the exact original submitted spec for retries; generated defaults in the
 returned job are not part of that original request.
 
+## Run an adapter entry
+
+A project with `.mycelium/adapter.yaml` runs an entry the way `myce run --entry`
+does, with the whole trip in one call:
+
+```python
+from mycelium import Client
+
+client = Client.from_installed()
+outcome = client.run_entry("train", out="accepted", key="train-2026-11-11", args=["--epochs", "3"])
+print(outcome.files)  # {"model.bin": PosixPath(".../accepted/model.bin")}
+```
+
+Submission runs the installed `myce run --entry` (on PATH, or `myce=`), so the
+source snapshot, generated or explicit key, environment lock upload and local
+receipt are the CLI's own: the same entry and key from Python or the CLI is one
+job, and rerunning after a lost reply resumes it. The CLI gets this client's
+authority (`from_installed()`, or `MYCE_TOKEN` in the environment); the client
+never passes a credential to it, and a client built with an explicit token is
+refused. Options: `inputs={DEST: PATH}` per-submission files, `class_`, `root`
+(project directory, default the current one) and `adapter` (another adapter file).
+
+The client then waits, downloads every accepted output into `out`, checks each
+file's size and SHA-256, and returns `EntryOutcome(job, receipt, exit_code,
+files)`. `exit_code` matches the CLI: 0 on success, the command's own status when
+it failed with one, otherwise 1. A failed or cancelled job raises
+`EntryFailedError` (with `outcome` and `exit_code`) unless `check=False`.
+`EntryPreparationError` keeps the CLI's exit code, reason and any receipt (64
+invalid entry or input, 65 changed intent, 69 queue unavailable, 75 busy).
+`timeout` raises `TimeoutError` and leaves the job running. Ctrl-C during the wait
+cancels the job by key and raises `EntryInterrupted` (`cancelled` is True when
+the queue acknowledged it). `wait=False` returns the receipt after submission.
+
+`client.download_results(job, DIR)` fetches every accepted output of a succeeded
+job (an ID or a Job reply) the same way and returns `{name: path}`.
+
+Mappings submitted through `submit` and `submit_and_wait` are recorded with
+`authoring_origin: python`; on a queue that predates that label they are resent
+unlabelled and recorded as `api`.
+
 ## Installed queue authority
 
 `Client.from_installed()` reads the installed worker/queue authority and retains

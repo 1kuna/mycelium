@@ -68,7 +68,6 @@ func TestEnrollmentReadinessContract(t *testing.T) {
 			p.RunnerSmoke = false
 			o.Machine.Enrollment = &p
 		}},
-		{"policy-mismatch", func(o *EnrollmentObservation) { o.Machine.HostMemoryPolicyMismatch = true }},
 		{"ram-policy-unacknowledged", func(o *EnrollmentObservation) { o.Machine.HostMemoryBudgetGB = 2 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

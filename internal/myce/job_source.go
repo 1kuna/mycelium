@@ -44,9 +44,6 @@ func removeSourceInput(root, name string) error {
 	return os.Remove(p)
 }
 
-func extractJobSource(archive, root string) error {
-	return extractJobSourceContext(context.Background(), archive, root)
-}
 func extractJobSourceContext(ctx context.Context, archive, root string) error {
 	if err := ctx.Err(); err != nil {
 		return err

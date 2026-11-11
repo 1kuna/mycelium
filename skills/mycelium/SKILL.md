@@ -84,6 +84,10 @@ The key makes submission safe to repeat. After a lost reply, `submission
 unconfirmed` or exit 69 `input storage unconfirmed`, rerun the same command with
 the same key and frozen inputs and you get the same job. Changed intent needs a
 new key. A one-off without inputs or outputs can use `myce run --cpu N -- CMD`.
+To run one command over many inputs, add `pieces:` to the entry, for example
+`- {key: a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}`. Then one
+`run` and one wait cover them all, and results come back as `KEY/OUTPUT`. Don't
+loop or keep one entry per input ([plain pieces](../../docs/jobs.md#plain-command-pieces)).
 Don't add your own short timeout. Calls wait while the queue makes progress and
 fail with `queue_stalled` if it stops; then check `myce status` and repeat the
 same command ([slow or stalled queue](references/wait-and-status.md#slow-or-stalled-queue)).
@@ -149,6 +153,8 @@ result = client.download_result(job["id"], "result.txt", Path("accepted/result.t
 assert result.read_bytes() == b"mycelium-ease-audit-ok\n"
 ```
 
+For an adapter entry, `client.run_entry(NAME, out=DIR, key=KEY)` does the
+whole trip (submit like `myce run --entry`, wait, fetch, verify) in one call.
 Keep the key and spec unchanged when retrying an uncertain reply. Batch waits
 use `client.wait_many([JOB_A, JOB_B])`. The client retries overload and
 transient TLS failures within your deadline; unkeyed writes and model calls are
@@ -182,7 +188,9 @@ explains each blocker, admission evidence, reservations and pausing.
 Default `myce status` is a compact view of current work, not proof that a job
 finished or was lost; details, history and paging are opt-in through
 [wait and status](references/wait-and-status.md). Status and job reads show the
-last committed state; `freshness.age_seconds` says how old it is.
+last committed state; `freshness.age_seconds` says how old it is. `myce host status HOST`
+exits 0 healthy, 3 degraded (fresh workers, faults named) or 1 for missing or
+stale worker evidence ([host status](references/wait-and-status.md#host-status)).
 
 ## Report a problem
 

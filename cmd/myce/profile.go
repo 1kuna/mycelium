@@ -364,7 +364,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			}
 		}
 		for dest, ref := range inputRefs {
-			commonRefs[dest] = ref
+			// Per-piece bytes differ by piece; keep learned-memory identity common.
+			if !strings.HasPrefix(dest, myce.PlainPiecePrefix) {
+				commonRefs[dest] = ref
+			}
 		}
 		if p.Inputs == nil {
 			p.Inputs = map[string]string{}

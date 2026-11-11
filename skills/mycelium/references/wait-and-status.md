@@ -63,6 +63,16 @@ measurement for attribution.
 wait totals and wasted attempts; see
 [queue efficiency](release-behavior.md#queue-efficiency-source-audited-verify-installed-support).
 
+## Host status
+
+`myce host status HOST` always prints its full JSON on stdout; parse that, not
+the stderr line. Exit 0 means healthy. Exit 3 means degraded: every worker is
+fresh and consistent, and the stderr line names each faulty device, root or
+host-hygiene reason and what clears it (for a quarantined accelerator, `myce
+device clear-quarantine` on that host after repair, or a reboot). A degraded
+host is valid evidence for that clear. Exit 1 means missing, stale or
+inconsistent worker evidence; do not act on device state from it.
+
 ## Recovery and trust
 
 Newer clients recover interrupted transfers and queue restarts within the

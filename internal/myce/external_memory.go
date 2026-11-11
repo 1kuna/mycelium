@@ -73,12 +73,6 @@ type ExternalMemoryHistory struct {
 	Week      ExternalMemoryWindow   `json:"7d"`
 }
 
-func externalBin(v float64) int {
-	if v <= 0 {
-		return 0
-	}
-	return min(63, max(1, int(math.Ceil(math.Log(v/.125)/math.Log(1.2)))+1))
-}
 func externalBinUpper(i int) float64 {
 	if i == 0 {
 		return 0

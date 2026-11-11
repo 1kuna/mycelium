@@ -36,10 +36,6 @@ func NewMemorySourceWithMode(platform string, budget, reserve float64, mode stri
 		})
 }
 
-func newMemorySourceWithCommand(platform string, budget, reserve float64, command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
-	return newMemorySource(platform, budget, reserve, "auto", runtime.GOOS, guardedHardwareReadFile, command)
-}
-
 func newMemorySource(platform string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
 	if !validMemoryValue(budget) || !validMemoryValue(reserve) {
 		return nil, fmt.Errorf("memory budget and reserve must be finite and nonnegative")
@@ -275,11 +271,6 @@ func newHostMemorySource(reserve float64, goos string, readFile func(string) ([]
 		}
 		return max(0, n-reserve), nil
 	}, nil
-}
-
-// DetectUnifiedMemory uses the same unsupported-CUDA marker as admission.
-func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bool, error) {
-	return LocalMachineProbe().DetectUnifiedMemory(ctx, platform, device, mode)
 }
 
 // DetectUnifiedMemory shares the injected setup command runner.
