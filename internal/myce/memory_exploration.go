@@ -277,3 +277,43 @@ func (q *Queue) claimMemoryExploration(j *Job, m *Machine) {
 	id := memoryExplorationKey(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), memoryLayout(j, m))
 	q.s.MemoryExplorations[id] = memoryExploration{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, PriorGB: hostMemoryPeakGB(estimate.host) * estimate.hostFactor}
 }
+
+// The claim spends the probe to prevent duplicate launches, not to forbid a
+// measurement that never happened. Once the claiming attempt has ended and
+// released custody without an OOM or any recorded memory peak (a launch
+// refused for free memory, or a loss before the first sample), nothing was
+// learned. Return the probe so the queue measures instead of parking the job
+// behind "bounded exploration already used". Sampled peaks and OOMs keep it.
+func (q *Queue) releaseUnusedMemoryExplorations() {
+	for id, claim := range q.s.MemoryExplorations {
+		if j := q.s.Jobs[claim.Execution.ID]; j != nil && explorationAttemptUnused(j, claim.Execution.Attempt) {
+			delete(q.s.MemoryExplorations, id)
+		}
+	}
+}
+
+func explorationAttemptUnused(j *Job, attempt int) bool {
+	if j.Attempt == attempt && (j.State == "running" || j.State == "stopping" || !j.ReleaseConfirmed) {
+		return false
+	}
+	for _, c := range j.Copies {
+		if c.Attempt == attempt && c.ReleasedAt == nil && c.ReleaseReason == "awaiting_release" {
+			return false
+		}
+	}
+	ended := false
+	for _, outcome := range j.AttemptHistory {
+		if outcome.Attempt == attempt {
+			if outcome.OutOfMemory {
+				return false
+			}
+			ended = true
+		}
+	}
+	for _, facts := range j.MemoryAttempts {
+		if facts.Attempt == attempt && (facts.MemoryPeak != nil || facts.LearningReason == "oom") {
+			return false
+		}
+	}
+	return ended
+}

@@ -74,6 +74,25 @@ func (q *Queue) appendJobLedger(j *Job, e JobLedgerEntry) {
 	j.Ledger = &JobLedgerInfo{Complete: j.Ledger.Complete, HighWater: e.Sequence}
 }
 
+// ledgerShowsLaunch reports any start, process or custody evidence for one
+// exact execution.
+func ledgerShowsLaunch(j *Job, r Result) bool {
+	for _, e := range j.LedgerEntries {
+		if e.Attempt == r.Attempt && e.Machine == r.Machine && e.Session == r.Session && (e.Kind == "started" || e.CustodyID != "" || e.ProcessID != "") {
+			return true
+		}
+	}
+	return false
+}
+
+// A keyed worker acknowledges an own-session key it does not hold with a bare
+// release-only result (no outcome). With no launch evidence that attempt had no
+// process generation to cover, so its late release must not make a closed
+// ledger incomplete (#1021). Any outcome payload keeps the ordinary coverage rule.
+func unheldNeverLaunched(j *Job, r Result) bool {
+	return r.ReleaseOnly && !r.ReleasePending && !r.Success && !r.Interrupted && r.Error == "" && r.ExecutionCause == nil && !ledgerShowsLaunch(j, r)
+}
+
 func ledgerAttempt(j *Job, kind, reason string) JobLedgerEntry {
 	return JobLedgerEntry{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, Kind: kind, Reason: reason, State: j.State}
 }

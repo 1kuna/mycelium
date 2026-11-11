@@ -275,7 +275,7 @@ func TestStatusCompactCallsAndFilteredCapacity(t *testing.T) {
 	q.s.Hosts = map[string]*HostState{"worker-00": {Active: true, Policy: HostPolicy{ProductionHold: true}}}
 	q.s.Machines["worker-00"].MaxJobs = 1
 	q.contacts = map[string]*workerContact{"worker-00": {allowance: time.Minute, arrivalAllowance: time.Minute, processed: q.clock.Now()}}
-	s := readStatusOptions(t, q, "?project=second")
+	s := readStatusOptions(t, q, "?project=second&view=snapshot")
 	if len(s.Jobs) != 1 || s.Jobs[0].ID != "model-queued" || s.Jobs[0].State != "queued" {
 		t.Fatal("filtered call identity/lifecycle lost", s.Jobs)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -223,7 +224,42 @@ func (q *Queue) retryOOM(j *Job) {
 	j.Spec.Needs.MemoryGB *= 2
 	j.Spec.Needs.HostMemoryGB *= 2
 	j.ProductionHost = ""
+	if why := q.oomCapacityDeadEnd(j); why != "" {
+		j.State, j.Reason = "failed", why
+		return
+	}
 	q.retry(j, "out of memory; waiting for one retry on a larger hypha")
+}
+
+// oomCapacityDeadEnd: the job waits for a strictly larger host than the one it
+// ran out of memory on, and no known host (online or not) is larger. Hosts
+// with an unknown capability profile could be larger, so they keep the wait.
+func (q *Queue) oomCapacityDeadEnd(j *Job) string {
+	if j.OOMCapacity == nil {
+		return ""
+	}
+	// retryOOM runs before requeue; judge the job as the next placement will.
+	probe := *j
+	probe.State, probe.MemoryEnvelope = "queued", nil
+	j = &probe
+	for _, owner := range q.s.Machines {
+		if owner.Replacement != nil || !q.jobAllowsMachine(j, owner.ID) {
+			continue
+		}
+		if owner.CapabilityProfile == nil {
+			return ""
+		}
+		for _, m := range q.placementTargets(owner) {
+			for _, candidate := range extensionJobs(j, m, false) {
+				required := candidate.Spec.Needs.Platform.Required
+				if (len(required) == 0 || slices.Contains(required, m.GPU)) && capabilityFits(candidate, m) {
+					return ""
+				}
+			}
+		}
+	}
+	old := j.OOMCapacity
+	return fmt.Sprintf("dead end: out of memory, and no known host is larger than the one it ran on (%.1f GiB accelerator-reachable, %.1f GiB system); action: reduce the workload's memory use and resubmit", old.MemoryGB, old.HostMemoryGB)
 }
 
 func capabilityWaitingReason(j *Job) string {

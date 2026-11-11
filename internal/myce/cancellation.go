@@ -307,7 +307,7 @@ func (q *Queue) confirmCopyRelease(r Result, exact bool) {
 				}
 			}
 			if !c.ReleaseConfirmed {
-				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) {
+				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) && !unheldNeverLaunched(j, r) {
 					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 				}
 				// Existing exact release authority settles every generation in this copy.
@@ -362,12 +362,7 @@ func provenPrelaunchRefusal(j *Job, r Result) bool {
 	if r.Success || !r.Interrupted || r.ReleasePending || cause == nil || !cause.PrelaunchRefused {
 		return false
 	}
-	for _, e := range j.LedgerEntries {
-		if e.Attempt == r.Attempt && e.Machine == r.Machine && e.Session == r.Session && (e.Kind == "started" || e.CustodyID != "" || e.ProcessID != "") {
-			return false
-		}
-	}
-	return true
+	return !ledgerShowsLaunch(j, r)
 }
 
 func (q *Queue) confirmPreviousCopies(c Checkin) {

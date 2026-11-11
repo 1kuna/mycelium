@@ -155,6 +155,13 @@ On the interactive host, owner pressure checkpoints or stops and requeues your
 job (same job and key, no retry charge); wait as normal. Mark long jobs
 resumable to keep progress.
 
+The queue never parks a job on something waiting can't fix. It reruns its own
+missing steps (an interrupted native check, a memory probe that never launched).
+Otherwise the job fails promptly with `diagnostic_code: dead_end_wait` and a
+reason `dead end: …; action: …`, for example a missing variant, a missing or
+failed native check, memory no host can size, or out of memory on the largest
+host. Do that one action, then submit again.
+
 Class sets urgency: `production` only for work your project's rulings call
 production, `deadline` only with a real owner-set date, `experiment` otherwise.
 Pause only your own queued job with `myce pause JOB_ID --reason TEXT`; `myce
