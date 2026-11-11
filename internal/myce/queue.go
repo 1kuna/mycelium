@@ -561,14 +561,14 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	err := q.closeCheckpointShards()
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	var err error
 	if q.usageReader != nil {
-		err = q.usageReader.Close()
+		err = errors.Join(err, q.usageReader.Close())
 	}
 	err = errors.Join(err, q.db.Close())
 	if q.uploadSpool.lock != nil {
