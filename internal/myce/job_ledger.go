@@ -244,7 +244,7 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 				return ErrStale
 			}
 			predicate := "host_launch"
-			if q.hostSessionLaunchAllowed(q.s.Machines[r.Machine], r.Session) {
+			if q.assignedLaunchAllowed(q.s.Machines[r.Machine], r.Session, j) {
 				predicate = q.startPlacementRejection(j)
 			}
 			if predicate != "" {
