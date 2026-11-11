@@ -10,7 +10,7 @@ func TestPlacementAdvisoriesPreserveIntentAndPrivacy(t *testing.T) {
 	s := Spec{AllowedMachines: []string{"private-host"}, Needs: ResourceNeeds{GPU: &GPUSelection{Devices: []string{"private-device"}}}}
 	before, _ := json.Marshal(s)
 	advice := PlacementAdvisories(s, nil)
-	if len(advice) != 2 || !strings.Contains(advice[0], "omit allowed_machines") || !strings.Contains(advice[1], "needs.gpu.count: 1") {
+	if len(advice) != 2 || !strings.Contains(advice[0], "omit allowed_machines") || !strings.Contains(advice[1], "omit needs.gpu.devices") || strings.Contains(advice[1], "needs.gpu.count") {
 		t.Fatal(advice)
 	}
 	after, _ := json.Marshal(s)

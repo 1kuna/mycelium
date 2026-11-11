@@ -18,7 +18,7 @@ func PlacementAdvisories(s Spec, reasons map[string]string, variants ...Extensio
 		devicePinned = devicePinned || v.Needs.GPU != nil && len(v.Needs.GPU.Devices) > 0
 	}
 	if devicePinned && strings.TrimSpace(reasons["device"]) == "" {
-		advice = append(advice, "Device pin has no declared device requirement. If any compatible accelerator suffices, omit needs.gpu.devices and use needs.gpu.count: 1 with the required backend and memory; consume MYCE_DEVICE and assigned visibility. Retain an exact selector only when the work requires that device.")
+		advice = append(advice, "Device pin has no declared device requirement. If compatible accelerators suffice, omit needs.gpu.devices and declare the required backend and memory; Mycelium chooses devices. Consume MYCE_DEVICE and assigned visibility. Retain an exact selector only when the work requires that physical device.")
 	}
 	return advice
 }
