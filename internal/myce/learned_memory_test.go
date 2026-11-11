@@ -186,7 +186,7 @@ func unifiedGPUFixture(t *testing.T, unified bool) (*Queue, *fakeClock, Machine)
 	q, clock := fixture(t)
 	m := unifiedCUDAAdmissionMachine()
 	m.ExtensionFingerprint = "cuda-v1"
-	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", BudgetGB: 96, FreeMemoryGB: 96, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "cuda-v1"}
+	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", BudgetGB: 96, FreeMemoryGB: 96, ReserveMemoryGB: 25, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "cuda-v1"}
 	if !unified {
 		m.UnifiedMemory, m.CapabilityProfile.MemoryLayout = false, "separate"
 		d.MemoryMode, d.UnifiedMemory = "separate", false

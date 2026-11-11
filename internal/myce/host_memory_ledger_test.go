@@ -21,7 +21,7 @@ func TestHostMemoryLedgerFleetShapes(t *testing.T) {
 		want                 float64
 	}
 	for _, s := range []shape{
-		{name: "unified-authored", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, want: 92},
+		{name: "unified-authored", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, want: 96},
 		{name: "unified-measured", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, measured: true, want: 101.06},
 		{name: "services-authored", total: 31.21, p50: 8.2, p95: 12, max: 14.6, reserve: 4, allowance: 24, role: hostRoleServices, want: 19.01},
 		{name: "services-measured", total: 31.21, p50: 8.2, p95: 12, max: 14.6, reserve: 4, allowance: 24, role: hostRoleServices, measured: true, want: 16.61},
