@@ -750,7 +750,13 @@ unchanged capacity evidence cannot cause repeated offers. This also applies to
 recovery after a prior attempt failed and to a typed refusal after Started
 authorization. Exact release custody still gates reuse.
 Explicit absolute `start_by`, `give_up_at`, `deadline` and cancellation keep their
-existing semantics. Missing, incompatible or unreachable workers and an assigned
+existing semantics, with one exception: when the queue's own start fence refuses
+an attempt before main runs (launch authorization, start placement or hand-off,
+with exact `main: not_started` evidence after Started), the time from that
+attempt's assignment to the refusal is returned to an explicit `start_by`. The
+remainder the caller had at assignment applies from the requeue, so repeated
+refusals never exhaust it; time spent queued afterwards still counts. Missing,
+incompatible or unreachable workers and an assigned
 start without an accepted startup acknowledgement still consume the window.
 This adds no timeout or retry-budget increase.
 
@@ -775,7 +781,7 @@ available before command startup, including while dependencies block.
 `start_by`. After a started attempt loses its machine (including worker restart),
 a relative recovery window renews from the queue's loss-detection time:
 loss time plus the original effective window. An explicit absolute `start_by`
-never moves. That original window length is durable and does not grow across
+never moves on a loss (a queue start-fence refusal is the one exception above). That original window length is durable and does not grow across
 repeated losses. Brief outages can
 resume; a recovery attempt that does not start within its window fails with
 `production start deadline exceeded: <blocker>` so the caller can run fallback.
