@@ -925,3 +925,7 @@ func (f guardedProbeFS) Open(name string) (fs.File, error) {
 	probeguard.Check()
 	return f.FS.Open(name)
 }
+
+// ProtectServiceCredentials keeps an installed service's initial environment,
+// which can carry the fleet token, from same-user jobs (#1309).
+func ProtectServiceCredentials() error { return protectServiceCredentials() }

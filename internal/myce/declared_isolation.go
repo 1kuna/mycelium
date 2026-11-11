@@ -123,8 +123,9 @@ func (s *workerStore) warnNativeIsolation(j *Job) error {
 	return nil
 }
 
-// Bypass only the kernel wrapper. Managed workdir containment remains a launch
-// invariant even when the payload has ordinary worker-user host permissions.
+// Bypass only the kernel sandbox. Managed workdir containment remains a launch
+// invariant, and the worker's credentials stay unreadable (#1309), even when
+// the payload otherwise has ordinary worker-user host permissions.
 func (w Worker) isolateNativeAttempt(j *Job, namespace *nativeNamespace, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, main bool) error {
 	if !nativeUnsandboxed(j) {
 		w.nativeCI = nativeCIRequired(j)
@@ -141,5 +142,5 @@ func (w Worker) isolateNativeAttempt(j *Job, namespace *nativeNamespace, cmd *ex
 	if rel, err := filepath.Rel(root, dir); err != nil || rel != "." && !filepath.IsLocal(rel) {
 		return reject("native_workdir_containment", nil)
 	}
-	return nil
+	return w.withholdNativeCredentials(cmd, spool, work, env)
 }

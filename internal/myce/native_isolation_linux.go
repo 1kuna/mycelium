@@ -25,6 +25,10 @@ type nativeLinuxPolicy struct {
 	Env                            []string
 	Ports                          []uint16
 	Namespace                      bool
+	// Plain withholds only Deny from an unsandboxed job; Read lists the
+	// allowed paths inside it (#1309).
+	Plain bool
+	Deny  []string
 }
 
 type nativeLinuxSupport struct{ mode, reason, bwrap, nsenter string }

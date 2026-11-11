@@ -15,3 +15,9 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 func (w Worker) nativeIsolationCapabilities() []string {
 	return []string{"native_isolation_unavailable"}
 }
+
+func (w Worker) withholdNativeCredentials(*exec.Cmd, string, string, map[string]string) error {
+	return nil
+}
+
+func protectServiceCredentials() error { return nil }
