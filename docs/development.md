@@ -281,6 +281,16 @@ evidence falls back to the full envelope. This optional quick envelope may be
 refreshed while runs are active: existing reservations keep their original
 charges and only new requests use the new measurement.
 
+Paired quicks use one frozen source for both platforms. If their combined
+memory envelope does not fit live available RAM, they automatically run native
+then Linux, reserving the larger individual envelope, one leg's CPU share and
+the later guest's VM capacity from admission through cleanup. Both individual
+legs must fit before either starts. The Linux leg begins only after native
+cleanup is confirmed; an ordinary test failure still collects both verdicts,
+while a guard refusal, signal or unconfirmed cleanup stops the next leg.
+Quicks retain concurrent execution when the combined envelope fits; fulls keep
+their existing concurrent-platform admission. Every existing guard remains active.
+
 All requests keep their FIFO tickets. When the head lacks live available memory,
 the first later request whose measured memory envelope fits may take one admission,
 subject to every existing CPU, RAM, VM, custody and disk guard. That one bypass is

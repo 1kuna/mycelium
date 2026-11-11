@@ -608,6 +608,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     peak = (measured['native_peak_bytes'] if platform == 'native' else
                             measured['linux_peak_bytes'] + measured['vm_peak_bytes'])
                     gate_memory = (peak * cores + qualified_cores - 1) // qualified_cores + measured['headroom_bytes']
+                sequential_platforms = mode == 'quick' and platform == 'both' and available < gate_memory
+                single_leg_memory = max(memory_requirement(config, leg, mode, cores, slot_profile)
+                                        for leg in ('native', 'linux')) if mode == 'quick' and platform == 'both' else gate_memory
+                if sequential_platforms:
+                    gate_memory = single_leg_memory
                 needed_memory = gate_memory
                 if needed_memory > host_memory:
                     raise RuntimeError(f'{needed_memory / GIB:.2f} GiB entry requirement exceeds '
@@ -617,7 +622,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 # slots; it cannot admit another lane into that reserved share.
                 cpu_share = (min(cores, resources['measured_cores'])
                              if mode == 'full' and slot_profile and cores == slot_profile['slots'] else cores)
-                host_cores = cpu_share * (2 if platform == 'both' else 1)
+                host_cores = cpu_share * (2 if platform == 'both' and not sequential_platforms else 1)
                 reserve = int(config.get('workstation_cpu_reserve_cores', 0))
                 if reserve < 0:
                     raise ValueError('workstation CPU reserve must not be negative')
@@ -634,8 +639,9 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 # eight-slot choice. Later requests recheck live memory and full
                 # reservations, so a released owner cannot leave a stale blocker.
                 ticket_row = json.loads(queue_ticket.read_text())
-                minimum = memory_requirement(config, platform, mode,
-                    4 if automatic else cores, slot_profile)
+                minimum = (single_leg_memory if mode == 'quick' and platform == 'both' else
+                           memory_requirement(config, platform, mode,
+                               4 if automatic else cores, slot_profile))
                 ticket_update = dict(minimum_memory_bytes=minimum,
                                      memory_config_sha256=config_digest)
                 if any(ticket_row.get(k) != v for k, v in ticket_update.items()):
@@ -694,6 +700,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                      mode=mode, priority=priority, exclusive=exclusive,
                                      cores=host_cores, per_leg_cores=cores,
                                      automatic_slots=automatic, cpu_share_per_leg=cpu_share,
+                                     sequential_platforms=sequential_platforms,
                                      local_worker_usage_at_entry=worker,
                                      fleet_worker_cpu_reserve_cores=worker_cores,
                                      workstation_cpu_reserve_cores=reserve,
@@ -729,6 +736,9 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         if backfill is not None:
                             print('gate: one fitting run admitted past memory-blocked FIFO head; '
                                   'head protected from further overtaking', flush=True)
+                        if sequential_platforms:
+                            print('gate: paired quick runs native then Linux; combined memory does not fit; '
+                                  f'{admission_memory / GIB:.2f} GiB maximum leg envelope reserved', flush=True)
                         if automatic:
                             print(f'gate: full selected {cores} slots per leg; CPU share {cpu_share} per leg; '
                                   f'{admission_memory / GIB:.2f} GiB measured memory required, '

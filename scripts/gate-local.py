@@ -57,7 +57,8 @@ def prepare(path):
         host_cores=owner.get('cores', manifest['cores']),
         cpu_share_per_leg=owner.get('cpu_share_per_leg'),
         automatic_slots=owner.get('automatic_slots', False),
-        concurrent_platforms=manifest['platform'] == 'both',
+        concurrent_platforms=manifest['platform'] == 'both' and not manifest.get('sequential_platforms', False),
+        sequential_platforms=manifest.get('sequential_platforms', False),
         configuration_sha256=owner.get('admission_config_sha256'),
         fleet_worker_cpu_reserve_cores=owner.get('fleet_worker_cpu_reserve_cores'),
         workstation_cpu_reserve_cores=owner.get('workstation_cpu_reserve_cores'))
@@ -138,6 +139,7 @@ def execute(path):
     try:
         mode = manifest['mode']
         status = 0
+        collected = 0
         if manifest['platform'] != 'linux':
             native_id = uuid.uuid4().hex
             native_receipt = folder / 'native-cleanup.json'
@@ -159,6 +161,13 @@ def execute(path):
                       sys.executable, 'scripts/gate-budget.py', 'scripts/gate-command.sh', *payload]
             if launch(native, native_receipt, native_id, cwd=source, env=native_env) is None:
                 return 125
+        if (mode == 'quick' and manifest['platform'] == 'both' and
+                manifest.get('sequential_platforms', False)):
+            child, result, receipt, nonce = completed.get()
+            collected += 1
+            if invalid_exit(result) or interrupted or not receipts.confirmed(receipt, nonce):
+                return 125
+            status = status or result
         if manifest['platform'] != 'native':
             linux_id = uuid.uuid4().hex
             linux_receipt = folder / 'linux-cleanup.json'
@@ -181,7 +190,7 @@ def execute(path):
                       '--mode', mode, '--phase', 'linux', '--', *linux_payload]
             if launch(linux, linux_receipt, linux_id, cwd=source, env=env) is None:
                 return 125
-        for _ in children:
+        for _ in children[collected:]:
             child, result, receipt, nonce = completed.get()
             if (invalid_exit(result) or interrupted or
                     not receipts.confirmed(receipt, nonce)):
@@ -271,6 +280,7 @@ def main():
                         selection=str(args.selection.resolve()) if args.selection else None,
                         command=args.command, cores=args.cores, identity=identity,
                         platform=args.platform or ('native' if args.command else 'both'),
+                        sequential_platforms=bool(slot.owner.get('sequential_platforms', False)),
                         cache=str(cache), report=str(report),
                         capacity_slot=str(slot.directory), capacity_owner=slot.owner,
                         local_worker_usage_at_entry=slot.owner.get('local_worker_usage_at_entry'))

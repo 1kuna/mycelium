@@ -513,6 +513,47 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                     capacity.acquire(root, mode='full', platform='both', cores=4)
 
+    def test_paired_quick_reserves_max_leg_only_when_combined_memory_does_not_fit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            pair = capacity.memory_requirement(config, 'both', 'quick')
+            largest = max(capacity.memory_requirement(config, leg, 'quick')
+                          for leg in ('native', 'linux'))
+            for available, sequential in ((pair, False), (pair - 1, True), (largest, True)):
+                with self.subTest(available=available), \
+                     patch.object(capacity, 'root', return_value=root), \
+                     patch.object(capacity, 'available_memory', return_value=available):
+                    slot = capacity.acquire(root, mode='quick', platform='both')
+                    try:
+                        self.assertEqual(slot.owner['sequential_platforms'], sequential)
+                        self.assertEqual(slot.owner['cores'], 4 if sequential else 8)
+                        self.assertEqual(slot.owner['memory_requirement_at_entry_bytes'],
+                                         largest if sequential else pair)
+                        self.assertEqual(slot.owner['vm_peak_bytes'],
+                            capacity.memory_requirement(config, 'linux', 'quick') - 5 * capacity.GIB)
+                    finally: slot.release()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=largest)):
+                pair_slot = capacity.acquire(root, mode='quick', platform='both')
+                guest = capacity.acquire(root, mode='quick', platform='linux')
+                try:
+                    # The native-first pair already reserves its later guest
+                    # share: a third guest must not overbook the VM meanwhile.
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode='quick', platform='linux', cores=1)
+                finally:
+                    guest.release()
+                    pair_slot.release()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=largest - 1)):
+                # Native alone fits here; a paired quick must not start it
+                # unless the later Linux leg also fits the reserved envelope.
+                for mode in ('quick', 'full'):
+                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                        capacity.acquire(root, mode=mode, platform='both')
+                self.assertFalse(capacity.execution_lanes(root))
+
     def test_memory_wait_allows_one_fitting_backfill_then_protects_head(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -672,6 +713,10 @@ finally: slot.release()
                             time.sleep(.01)
                         with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                             capacity.acquire(root)
+                        with patch.object(capacity, 'available_memory', return_value=20 * capacity.GIB):
+                            # Sequential fallback cannot bypass release custody.
+                            with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                                capacity.acquire(root, mode='quick', platform='both')
                         child.terminate()
                         out, err = child.communicate(timeout=5)
                         self.assertEqual(child.returncode, 143, err)
@@ -1211,20 +1256,27 @@ sys.exit(m.main())
                 self.assertFalse((root / 'native-cleanup.json').exists())
                 self.assertFalse((root / 'linux-cleanup.json').exists())
 
-    def test_both_legs_overlap_and_collect_test_failure_before_releasing(self):
-        # The native child cannot finish until the Linux child is launched.
-        # Real pipes prove overlap without a sleep or an elapsed-time threshold.
-        for result in (0, 1):
-            with self.subTest(result=result), tempfile.TemporaryDirectory() as folder:
+    def test_both_legs_overlap_or_run_sequentially_and_collect_test_failure(self):
+        # Pipes prove overlap; sequential mode must observe confirmed native
+        # cleanup before guest launch. Neither proof uses elapsed-time limits.
+        cases = [(mode, sequential, result) for mode, sequential in
+                 (('full', False), ('quick', False), ('quick', True)) for result in (0, 1)]
+        for mode, sequential, result in cases:
+            with self.subTest(mode=mode, sequential=sequential, result=result), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 path = root / 'manifest.json'
                 path.write_text(json.dumps(dict(repo=str(root), cache=str(root / 'cache'), cores=2,
-                    report=str(root / 'report'), mode='full', command=[], platform='both', identity='run')))
+                    report=str(root / 'report'), mode=mode, command=[], platform='both', identity='run',
+                    sequential_platforms=sequential)))
                 original = subprocess.Popen
                 children, writers = [], []
                 def launch(command, **kwargs):
                     if children:
-                        self.assertIsNone(children[0].poll(), 'native finished before guest launch')
+                        if sequential:
+                            self.assertIsNotNone(children[0].poll(), 'native still running at guest launch')
+                            self.assertTrue(json.loads((root / 'native-cleanup.json').read_text())['stopped'])
+                        else:
+                            self.assertIsNone(children[0].poll(), 'native finished before guest launch')
                         receipt = root / 'linux-cleanup.json'
                         nonce = command[command.index('--cleanup-id') + 1]
                         code = 0
@@ -1234,10 +1286,11 @@ sys.exit(m.main())
                         code = result
                     reader, writer = os.pipe()
                     writers.append(writer)
-                    worker = ('import json,os,pathlib,select,sys; '
-                        'fd=int(sys.argv[1]); '
+                    overlap = ('' if sequential else
                         'assert select.select([fd],[],[],5)[0], "peer was not launched"; '
-                        'assert os.read(fd,1)==b"x"; '
+                        'assert os.read(fd,1)==b"x"; ')
+                    worker = ('import json,os,pathlib,select,sys; '
+                        'fd=int(sys.argv[1]); ' + overlap +
                         'pathlib.Path(sys.argv[2]).write_text(json.dumps(dict(schema=1,'
                         'identity=sys.argv[3],stopped=True,status=int(sys.argv[4])))); '
                         'sys.exit(int(sys.argv[4]))')
@@ -1246,14 +1299,18 @@ sys.exit(m.main())
                                          pass_fds=(reader,))
                     finally: os.close(reader)
                     children.append(child)
-                    if len(children) == 2:
+                    if len(children) == 2 and not sequential:
                         for fd in writers: os.write(fd, b'x')
                     return child
+                def freeze(repo, archive, ref=None):
+                    archive.touch()
+                    return {'source_sha': 'test'}
                 try:
-                    with (patch.object(local.sources, 'freeze', return_value={'source_sha': 'test'}),
+                    with (patch.object(local.sources, 'freeze', side_effect=freeze),
                           patch.object(local.sources, 'extract', side_effect=lambda a, d: (d / 'scripts').mkdir()),
                           patch.object(local.sources, 'runtime_archive'),
                           patch.object(local.sources, 'predecessors', return_value=[]),
+                          patch.object(local.subprocess, 'run'),
                           patch.object(local.subprocess, 'Popen', side_effect=launch)):
                         self.assertEqual(local.execute(path), result)
                     self.assertEqual(len(children), 2)
@@ -1265,14 +1322,15 @@ sys.exit(m.main())
                         if child.poll() is None: child.kill(); child.wait()
 
     def test_unknown_native_exit_never_starts_linux_or_confirms_capacity(self):
-        for code in (-9, 255):
-            with self.subTest(code=code), tempfile.TemporaryDirectory() as folder:
+        for code, sequential in ((-9, False), (-9, True), (255, False), (255, True), (125, True), (0, True)):
+            with self.subTest(code=code, sequential=sequential), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 repo = root / 'repo'
                 (repo / 'scripts').mkdir(parents=True)
                 path = root / 'manifest.json'
                 path.write_text(json.dumps(dict(repo=str(repo), cache=str(root / 'cache'), cores=4,
-                    report=str(root / 'report'), mode='quick', command=['true'], platform='both', identity='run')))
+                    report=str(root / 'report'), mode='quick', command=['true'], platform='both', identity='run',
+                    sequential_platforms=sequential)))
                 child = Mock()
                 child.wait.return_value = code
                 child.poll.return_value = code
