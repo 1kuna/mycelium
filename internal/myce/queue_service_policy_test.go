@@ -43,52 +43,11 @@ func TestQueueControlPlaneServicePolicy(t *testing.T) {
 	}
 }
 
-func TestQueueUpgradeRetiresLegacyDefaultThrottle(t *testing.T) {
-	for _, target := range []Detection{{OS: "linux", Arch: "amd64"}, {OS: "linux", Arch: "arm64"}, {OS: "darwin", Arch: "arm64"}} {
-		for _, role := range []string{"queue", "worker"} {
-			t.Run(target.OS+"/"+target.Arch+"/"+role, func(t *testing.T) {
-				home := t.TempDir()
-				target.Platform, target.MemoryMode, target.MemoryGB = "fake", "fixed", 8
-				c, err := PlanInstall(role, home, "", home, "http://queue.invalid", "fixture", target)
-				if err != nil {
-					t.Fatal(err)
-				}
-				c.Nice, c.CPUQuota = 10, "25%" // Saved pre-fix defaults, including upgrades from another architecture.
-				if err = os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
-					t.Fatal(err)
-				}
-				raw, _ := json.Marshal(c)
-				if err = os.WriteFile(c.Config, raw, 0600); err != nil {
-					t.Fatal(err)
-				}
-				got, err := ReadServiceConfig(c.Config)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if role == "queue" {
-					if got.Nice != 0 || got.CPUQuota != "" {
-						t.Fatal("saved upgrade reapplies legacy queue throttle")
-					}
-				} else if got.Nice != 10 || got.CPUQuota != "25%" {
-					t.Fatal("worker configuration changed")
-				}
-				// A second read of the rewritten config is idempotent.
-				raw, _ = json.Marshal(got)
-				os.WriteFile(c.Config, raw, 0600)
-				again, err := ReadServiceConfig(c.Config)
-				if err != nil || again.Nice != got.Nice || again.CPUQuota != got.CPUQuota {
-					t.Fatal("non-idempotent migration", err)
-				}
-			})
-		}
-	}
-}
-
 func TestQueueUpgradePreservesExplicitCPUSettings(t *testing.T) {
 	for _, v := range []struct {
 		nice  int
 		quota string
-	}{{0, "45%"}, {5, "25%"}, {10, "150%"}} {
+	}{{0, "45%"}, {5, "25%"}, {10, "150%"}, {10, "25%"}} {
 		home := t.TempDir()
 		c, err := PlanInstall("queue", home, "", home, "http://queue.invalid", "queue", Detection{OS: "linux", Arch: "amd64"})
 		if err != nil {

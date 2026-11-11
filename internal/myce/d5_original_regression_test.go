@@ -165,6 +165,16 @@ func TestRQv2OperatorMarkerPreservesSavedStageFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.state.Session = m.Session
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	child, err := newAttemptStore(s, *old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child.lock, s.lock = s.lock, nil
+	s = child
 	s.state = workerState{Session: m.Session, Identity: "operator-stage-failure", Job: old, Log: "operator-stage-failure.log", CheckpointRoot: q.root}
 	if err := s.save(); err != nil {
 		t.Fatal(err)

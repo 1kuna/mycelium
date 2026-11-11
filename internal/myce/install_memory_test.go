@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestInstallQueueMemoryDefaultUpgrade(t *testing.T) {
+func TestInstallQueueMemoryDefaultAndExplicitCaps(t *testing.T) {
 	home := t.TempDir()
 	c, err := PlanInstall("queue", home, "", home, "http://queue.invalid", "queue", Detection{OS: "linux", Arch: "amd64"})
 	if err != nil {
@@ -39,8 +39,8 @@ func TestInstallQueueMemoryDefaultUpgrade(t *testing.T) {
 		return got
 	}
 	c.MemoryMax = "512M"
-	if got := save(); got.MemoryMax != "infinity" {
-		t.Fatal("upgrade retained exact obsolete default")
+	if got := save(); got.MemoryMax != "512M" {
+		t.Fatal("explicit memory cap changed")
 	}
 	c.MemoryMax = "2G"
 	if got := save(); got.MemoryMax != "2G" {

@@ -78,7 +78,7 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 			}
 			requireState(t, q, victim.ID, "stopping")
 			// No grace/expiry advance: an unheld key can be released immediately.
-			if reply, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil || reply.Stop {
+			if reply, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m}); err != nil || reply.Stop {
 				t.Fatalf("unheld stop affected worker: %+v %v", reply, err)
 			}
 			if len(acknowledgements) != 1 {
@@ -102,7 +102,7 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 				}})
 				requireState(t, q, victim.ID, want)
 			}
-			reply, err := w.checkin(context.Background(), Checkin{Machine: m})
+			reply, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m})
 			if err != nil || reply.Job == nil || reply.Job.ID != next.ID {
 				t.Fatalf("next job did not place promptly: %+v %v", reply, err)
 			}
@@ -130,7 +130,7 @@ func TestAttemptProtocolCheckinBadRequestPreserved(t *testing.T) {
 	defer server.Close()
 	m.Session = "other-session"
 	w := Worker{Clock: clock, Machine: m, Client: Client{URL: server.URL, Token: "test"}}
-	_, err := w.checkin(context.Background(), Checkin{Machine: m})
+	_, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m})
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusBadRequest || he.Code != "worker_checkin_invalid" {
 		t.Fatalf("duplicate worker check-in misreported as queue incompatibility: %v", err)
@@ -170,7 +170,7 @@ func TestAttemptProtocolUnheldStopFences(t *testing.T) {
 			}))
 			defer server.Close()
 			w := Worker{Machine: m, Client: Client{URL: server.URL, Token: "test"}}
-			reply, err := w.checkin(context.Background(), Checkin{Machine: m, Running: &owned.Execution})
+			reply, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m, Running: &owned.Execution})
 			if (err != nil) != tc.wantError || len(acks) != len(tc.wantAck) {
 				t.Fatalf("acknowledgements=%d want=%d error=%v", len(acks), len(tc.wantAck), err)
 			}

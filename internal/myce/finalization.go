@@ -166,38 +166,3 @@ func regularOutputError(info os.FileInfo, err error) error {
 	}
 	return err
 }
-
-// Strict older queues may reject the additive nested detail. Retain it locally
-// and retry only their pre-mutation request_invalid refusal with legacy causes.
-func finalizationWireInput(in any, strip bool) (any, bool) {
-	switch v := in.(type) {
-	case *Result:
-		if v != nil {
-			return finalizationWireInput(*v, strip)
-		}
-	case Result:
-		has := false
-		legacy := func(c *RuntimeCause) *RuntimeCause {
-			if c == nil || c.Finalization == nil {
-				return c
-			}
-			has = true
-			if !strip {
-				return c
-			}
-			copy := *c
-			copy.Finalization = nil
-			if safeRuntimeCause(&copy) == nil {
-				copy.Class = "io_error"
-			}
-			return &copy
-		}
-		v.ExecutionCause, v.CleanupCause = legacy(v.ExecutionCause), legacy(v.CleanupCause)
-		return v, has
-	case LogChunk:
-		result, has := finalizationWireInput(v.Result, strip)
-		v.Result = result.(Result)
-		return v, has
-	}
-	return in, false
-}

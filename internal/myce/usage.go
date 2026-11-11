@@ -142,22 +142,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	return rows
 }
 
-// Version 1 keys decayed usage by stable tier name/resource family/project.
-// Legacy history has no class dimension: preserve it in the current catchall
-// GPU tier once, rather than copying one aggregate into every tier.
-func (q *Queue) migrateFairUsage() {
-	if q.s.FairUsageVersion == 0 {
-		migrated := map[string]FairUsage{}
-		tiers := q.effectivePriorityPolicy().Tiers
-		for project, usage := range q.s.FairUsage {
-			migrated[fairUsageKey(tiers[len(tiers)-1].Name, "gpu", project)] = usage
-		}
-		q.s.FairUsage = migrated
-		q.s.FairUsageVersion = 1
-	}
-}
 func (q *Queue) accountUsage(now time.Time) {
-	q.migrateFairUsage()
 	from := q.s.UsageAt
 	if from.IsZero() || now.Before(from) {
 		q.s.UsageAt = now
@@ -261,7 +246,6 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e != nil {
 		return e
 	}
-	q.fragmented = true
 	q.machineRecords = true
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}

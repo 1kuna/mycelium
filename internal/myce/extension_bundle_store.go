@@ -31,8 +31,8 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	if *ref != nil && **ref != next {
 		return errors.New("bundle reference mismatch")
 	}
-	// Startup holds the publication fence for the whole pass. Verify every
-	// embedded copy's digest above, but repeat disk durability only once per blob.
+	// Submission holds the publication fence. Verify every authored copy's
+	// digest above, but repeat disk durability only once per blob.
 	if verified[next] {
 		*files, *ref = nil, &next
 		return nil
@@ -292,13 +292,9 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 			// custody until exact release acknowledgement, using ordinary stops.
 			q.stop(j, "assignment files unavailable")
 			a := AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}
-			if reply.AttemptProtocol == "" {
-				reply.Stop, reply.Kill, reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.Stop, a.Kill, a.GraceSeconds, a.PriorityStop, a.UserCancel
-			} else {
-				for i := range reply.Attempts {
-					if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
-						reply.Attempts[i] = a
-					}
+			for i := range reply.Attempts {
+				if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
+					reply.Attempts[i] = a
 				}
 			}
 		}
@@ -306,18 +302,11 @@ func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) e
 	}, nil)
 }
 
-// Startup only, before serving traffic: publish and verify every blob first,
-// then commit the small references together. A crash before the SQLite commit
-// leaves embedded state authoritative; re-opening safely repeats publication.
-func (q *Queue) migrateBundleFiles() error {
+// Verify current frozen references before serving traffic. Startup never imports
+// embedded bundles from retired persistence formats.
+func (q *Queue) verifyBundleFiles() error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	// Enroll all new bytes in one transaction before changing any embedded
-	// record. Per-blob commits here would repeatedly copy the old large state.
-	if err := q.prepareBundleUploads(); err != nil {
-		return err
-	}
-	changed := false
 	checked := map[FileRef]bool{}
 	verify := func(ref *FileRef) error {
 		if ref == nil || checked[*ref] {
@@ -331,19 +320,13 @@ func (q *Queue) migrateBundleFiles() error {
 	}
 	recipe := func(r *EnvironmentRecipe) error {
 		if len(r.Files) > 0 {
-			if err := q.files.freezeRecipe(r, checked); err != nil {
-				return err
-			}
-			changed = true
+			return errors.New("unsupported embedded environment bundle; frozen reference required")
 		}
 		return verify(r.FilesRef)
 	}
 	extension := func(e *Extension) error {
 		if len(e.Files) > 0 {
-			if err := q.files.freezeFiles(&e.Files, &e.FilesRef, e.Digest, checked); err != nil {
-				return err
-			}
-			changed = true
+			return errors.New("unsupported embedded extension bundle; frozen reference required")
 		}
 		if e.FilesRef != nil && e.FilesRef.SHA256 != e.Digest {
 			return errors.New("extension bundle digest mismatch")
@@ -389,18 +372,18 @@ func (q *Queue) migrateBundleFiles() error {
 	}
 	for name, e := range q.s.Extensions {
 		if err := extension(&e); err != nil {
-			return fmt.Errorf("migrate frozen bundle: %w", err)
+			return fmt.Errorf("verify frozen bundle: %w", err)
 		}
 		q.s.Extensions[name] = e
 	}
 	for _, j := range q.s.Jobs {
 		if err := job(j); err != nil {
-			return fmt.Errorf("migrate job bundle: %w", err)
+			return fmt.Errorf("verify job bundle: %w", err)
 		}
 	}
 	for _, r := range q.s.Submissions {
 		if err := job(r.Job); err != nil {
-			return fmt.Errorf("migrate keyed bundle: %w", err)
+			return fmt.Errorf("verify keyed bundle: %w", err)
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
@@ -410,113 +393,7 @@ func (q *Queue) migrateBundleFiles() error {
 			}
 		}
 	}
-	if !changed {
-		return nil
-	}
-	return q.update(func() error {
-		for id := range q.s.Extensions {
-			q.touchCatalog("extensions/" + id)
-		}
-		for id := range q.s.Jobs {
-			q.touchJob(id)
-		}
-		for id := range q.s.Submissions {
-			q.touchSubmission(id)
-		}
-		return nil
-	})
-}
-
-// Startup only. Hashing and disk checks run before the small eligibility commit.
-func (q *Queue) prepareBundleUploads() error {
-	created := map[string]bool{}
-	files := func(data map[string][]byte) error {
-		if len(data) == 0 {
-			return nil
-		}
-		encoded, err := json.Marshal(data)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(encoded)
-		hash := hex.EncodeToString(sum[:])
-		if _, marked := q.s.BundleUploads[hash]; marked {
-			return nil
-		}
-		if _, err := os.Lstat(q.files.blob(FileRef{SHA256: hash})); os.IsNotExist(err) {
-			created[hash] = true
-		} else if err != nil {
-			return err
-		}
-		return nil
-	}
-	extension := func(e Extension) error {
-		if err := files(e.Files); err != nil {
-			return err
-		}
-		for _, v := range e.Variants {
-			for _, r := range v.Environments {
-				if err := files(r.Files); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	job := func(j *Job) error {
-		if j == nil {
-			return nil
-		}
-		for _, e := range j.Extensions {
-			if err := extension(e); err != nil {
-				return err
-			}
-		}
-		for _, r := range j.EnvironmentRecipes {
-			if err := files(r.Files); err != nil {
-				return err
-			}
-		}
-		for _, recipes := range j.SidecarEnvironmentRecipes {
-			for _, r := range recipes {
-				if err := files(r.Files); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	for _, e := range q.s.Extensions {
-		if err := extension(e); err != nil {
-			return err
-		}
-	}
-	for _, j := range q.s.Jobs {
-		if err := job(j); err != nil {
-			return err
-		}
-	}
-	for _, record := range q.s.Submissions {
-		if err := job(record.Job); err != nil {
-			return err
-		}
-	}
-	for _, slot := range q.s.ModelSlots {
-		if r := slot.EnvironmentRecipe; r != nil {
-			if err := files(r.Files); err != nil {
-				return err
-			}
-		}
-	}
-	if len(created) == 0 {
-		return nil
-	}
-	return q.update(func() error {
-		for hash := range created {
-			q.markBundleUpload(hash)
-		}
-		return nil
-	})
+	return nil
 }
 
 // q.mu held. Retained history and keyed answers own bundles independently of

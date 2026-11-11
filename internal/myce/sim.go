@@ -597,7 +597,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				for _, slot := range q.modelPlan(worker.spec.Name) {
 					reports = append(reports, ModelReport{Device: slot.Device, Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 				}
-				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}); e != nil {
+				if _, e = q.CheckinKeyed(Checkin{AttemptProtocol: keyedAttemptProtocol, period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}); e != nil {
 					return r, e
 				}
 				worker.loads = map[string]*simLoad{}
@@ -611,11 +611,11 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		// Register every newly present worker before submissions/placement.
 		for _, worker := range workers {
 			if worker.online && q.s.Machines[worker.spec.Name] == nil {
-				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker)}); e != nil {
+				if _, e = q.CheckinKeyed(Checkin{AttemptProtocol: keyedAttemptProtocol, period: checkinPeriod(0), Machine: machineReport(worker)}); e != nil {
 					return r, e
 				}
 			} else if worker.online && (q.s.Machines[worker.spec.Name].Gone || q.s.Machines[worker.spec.Name].Session != fmt.Sprint(worker.session)) {
-				if _, e = q.Checkin(Checkin{period: checkinPeriod(0), Machine: machineReport(worker), Fresh: true, PreviousSession: q.s.Machines[worker.spec.Name].Session}); e != nil {
+				if _, e = q.CheckinKeyed(Checkin{AttemptProtocol: keyedAttemptProtocol, period: checkinPeriod(0), Machine: machineReport(worker), Fresh: true, PreviousSession: q.s.Machines[worker.spec.Name].Session}); e != nil {
 					return r, e
 				}
 			}
@@ -706,6 +706,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 						outcome := simResult(t, worker, success)
 						outcome.Interrupted = !success && j.State == "stopping"
+						outcome.ReleaseOnly = terminal(j.State)
 						if e = q.Complete(outcome); e != nil && !(errors.Is(e, ErrStale) && j.State == "queued") {
 							return r, e
 						}
@@ -748,28 +749,53 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 					}
 				}
-				c := Checkin{period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}
+				c := Checkin{AttemptProtocol: keyedAttemptProtocol, period: checkinPeriod(0), Machine: machineReport(worker), ModelReports: reports}
 				if t := worker.task; t != nil {
-					c.Running = &Execution{ID: t.id, Attempt: t.attempt}
-					c.Started = t.downstreamOf == nil || now >= t.loadUntil // Input preparation precedes command authorization.
+					c.Attempts = []AttemptReport{{Execution: Execution{ID: t.id, Attempt: t.attempt}, Session: c.Machine.Session, Started: t.downstreamOf == nil || now >= t.loadUntil}} // Input preparation precedes command authorization.
 				}
-				reply, err := q.Checkin(c)
+				reply, err := q.CheckinKeyed(c)
 				if err != nil {
 					return r, err
 				}
-				if worker.task == nil && reply.Job != nil {
+				// Match the real worker's keyed cleanup: stop held executions and
+				// explicitly release own-session copies with no local execution.
+				for _, control := range reply.Attempts {
+					if !control.Stop || control.Session != c.Machine.Session {
+						continue
+					}
+					if t := worker.task; t != nil && control.ID == t.id && control.Attempt == t.attempt {
+						if math.IsInf(t.stopAt, 1) {
+							t.stopAt = now + min(1, max(0, control.GraceSeconds))
+							changed = true
+						}
+						continue
+					}
+					ack := Result{Execution: control.Execution, Machine: c.Machine.ID, Session: control.Session, ReleaseOnly: true}
+					if e = q.Complete(ack); e != nil && !errors.Is(e, ErrStale) {
+						return r, e
+					}
+					changed = true
+				}
+				var directive AttemptDirective
+				for _, offered := range reply.Attempts {
+					if offered.Job != nil {
+						directive = offered
+						break
+					}
+				}
+				if worker.task == nil && directive.Job != nil {
 					var t *simTask
 					for _, candidate := range tasks {
-						if candidate.id == reply.Job.ID {
+						if candidate.id == directive.Job.ID {
 							t = candidate
 							break
 						}
 					}
 					if t == nil {
-						if reply.Job.Batch != nil {
+						if directive.Job.Batch != nil {
 							for _, parent := range tasks {
-								if parent.id == reply.Job.Batch.Parent {
-									t = &simTask{parent: parent, stream: parent.stream, at: parent.at, id: reply.Job.ID, stopAt: math.Inf(1)}
+								if parent.id == directive.Job.Batch.Parent {
+									t = &simTask{parent: parent, stream: parent.stream, at: parent.at, id: directive.Job.ID, stopAt: math.Inf(1)}
 									tasks = append(tasks, t)
 									break
 								}
@@ -780,14 +806,14 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 					}
 					if t.parent != nil {
-						if err = simWaveWork(t, reply.Job, worker.spec); err != nil {
+						if err = simWaveWork(t, directive.Job, worker.spec); err != nil {
 							return r, err
 						}
 					}
 					if t.parent != nil && o.Pipeline && t.stream.Downstream != nil {
-						t.work += t.stream.Downstream.PublicationSeconds * float64(len(reply.Job.Batch.Pieces)) * worker.spec.Speed
+						t.work += t.stream.Downstream.PublicationSeconds * float64(len(directive.Job.Batch.Pieces)) * worker.spec.Speed
 					}
-					t.attempt = reply.Job.Attempt
+					t.attempt = directive.Job.Attempt
 					load := 0.0
 					if t.stream.Model != "" {
 						load = models[t.stream.Model].LoadSeconds / worker.spec.Speed

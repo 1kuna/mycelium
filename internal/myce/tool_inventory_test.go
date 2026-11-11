@@ -50,7 +50,7 @@ func TestToolInventoryWorkerHandshake(t *testing.T) {
 	send := func() Reply {
 		t.Helper()
 		clock.Advance(time.Second)
-		reply, err := worker.checkin(context.Background(), Checkin{Machine: m})
+		reply, err := worker.fixtureCheckin(context.Background(), Checkin{Machine: m})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,50 +221,6 @@ func TestToolInventoryFencesAndRollback(t *testing.T) {
 	}
 	if _, err := q.Checkin(Checkin{Machine: m}); err == nil {
 		t.Fatal("superseded session accepted")
-	}
-}
-
-func TestToolInventoryOldStrictQueue(t *testing.T) {
-	// An old queue rejects either additive request field. Its reply advertises no
-	// inventory capability, so a new worker keeps reporting the old full shape.
-	calls, probes := 0, 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var raw map[string]json.RawMessage
-		_ = json.NewDecoder(r.Body).Decode(&raw)
-		if raw["tool_inventory_hash"] != nil || raw["tool_inventory_version"] != nil {
-			probes++
-			w.WriteHeader(400)
-			_ = json.NewEncoder(w).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-			return
-		}
-		var m Machine
-		_ = json.Unmarshal(raw["machine"], &m)
-		if m.ToolInventory == nil {
-			t.Error("old queue did not receive full inventory")
-		}
-		calls++
-		_ = json.NewEncoder(w).Encode(Reply{AttemptProtocol: keyedAttemptProtocol})
-	}))
-	defer server.Close()
-	m := machine("old-queue-worker", "fake")
-	m.ToolInventory = map[string][]string{"": {"git"}}
-	worker := Worker{Client: Client{URL: server.URL}, toolReport: &workerToolReport{}}
-	for range 3 {
-		if _, err := worker.checkin(context.Background(), Checkin{Machine: m}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 3 || probes != 0 {
-		t.Fatal(calls, probes)
-	}
-	// Retained capability knowledge cannot strand a worker if the queue is
-	// replaced by an older strict binary. Only decode refusal permits this retry.
-	worker.toolReport.supported = true
-	if _, err := worker.checkin(context.Background(), Checkin{Machine: m}); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 4 || probes != 1 {
-		t.Fatal("legacy full retry", calls, probes)
 	}
 }
 

@@ -303,7 +303,12 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.state.Session = "old-session"
+	if err = s.save(); err != nil {
+		t.Fatal(err)
+	}
+	s.stateName = "state-attempt-replay.json"
 	j := recoveryJob(t, []string{"sh", "-c", "echo recovered"})
+	j.Session, j.Machine = s.state.Session, w.Machine.ID
 	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
@@ -313,7 +318,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	if f.err != nil {
 		t.Fatal(f.err)
 	}
-	// Leave state.json in its pre-completion form, as if Run died during HTTP.
+	// Leave the current attempt child in its pre-completion form, as if Run died during HTTP.
 	s.close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

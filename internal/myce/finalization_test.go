@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,39 +168,11 @@ func TestFinalizationUploadRetry(t *testing.T) {
 	}
 }
 
-func TestFinalizationPrivacyAndOldQueue(t *testing.T) {
+func TestFinalizationPrivacy(t *testing.T) {
 	zero := 0
 	cause := &RuntimeCause{Operation: "outputs", Class: "not_found", Finalization: &FinalizationDetail{Step: "output_path", Output: "undeclared-secret", Destination: "private-destination", Error: "not_found", CommandExitCode: &zero}}
 	safe := safeJobRuntimeCause(Spec{Outputs: map[string]string{"output": "results"}}, cause)
 	if safe.Finalization.Output != "" || safe.Finalization.Destination != "" || cause.Finalization.Output != "undeclared-secret" {
 		t.Fatal("declaration binding mutated or leaked worker input")
-	}
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
-			http.Error(w, `{"code":"request_invalid","error":"unsupported nested field"}`, 400)
-			return
-		}
-		var legacy struct {
-			ExecutionCause struct {
-				Finalization json.RawMessage `json:"finalization"`
-			} `json:"execution_cause"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&legacy); err != nil {
-			t.Error(err)
-		}
-		if len(legacy.ExecutionCause.Finalization) != 0 {
-			t.Error("additive detail sent to strict old queue")
-		}
-		fmt.Fprint(w, `{"ok":true}`)
-	}))
-	defer server.Close()
-	original := Result{ExecutionCause: cause}
-	if err := (Client{URL: server.URL}).Call(context.Background(), "POST", "/api/workers/complete", original, nil); err != nil || calls != 2 {
-		t.Fatalf("legacy retry: calls=%d err=%v", calls, err)
-	}
-	if original.ExecutionCause.Finalization == nil {
-		t.Fatal("legacy retry erased durable evidence")
 	}
 }

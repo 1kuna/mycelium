@@ -209,6 +209,9 @@ available within its configured budget.
 
 ## Observe and recover
 
+The current/previous release pair uses batch-v1 waits. An older queue without
+that endpoint requires an upgrade; clients no longer fall back to per-job polling.
+
 From the worker/queue release containing #811, filesystem pressure reclaims
 inactive rebuildable caches automatically across cache classes. Keep the same
 job while pending demand triggers cleanup; active readers, queued references,

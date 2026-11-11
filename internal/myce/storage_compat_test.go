@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// Seed the database from historical wire bytes, not current Go structs. Opening
-// imports the old monolithic row; the second open reads normalized SQLite rows.
+// Seed retained custody bytes in the previous release's normalized layout.
+// Both opens must preserve its unknown parked fields without importing state.
 func TestStorageCompatRetainedDatabaseReopens(t *testing.T) {
 	wire, err := os.ReadFile("testdata/parked-storage-state.json")
 	if err != nil {
@@ -25,19 +25,7 @@ func TestStorageCompatRetainedDatabaseReopens(t *testing.T) {
 	if err := PrepareStateRoots(dir); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec("CREATE TABLE queue (id INTEGER PRIMARY KEY, data BLOB NOT NULL)"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec("INSERT INTO queue VALUES (1, ?)", wire); err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	seedParkedStorageState(t, database, wire)
 	var before state
 	if err = json.Unmarshal(wire, &before); err != nil {
 		t.Fatal(err)
@@ -129,4 +117,49 @@ func TestStorageCompatRejectsNewProtectedTasks(t *testing.T) {
 		t.Fatal("parked discovery record was ignored", err)
 	}
 
+}
+
+// Keep the historical custody document while using the supported r6.8 format.
+func seedParkedStorageState(t *testing.T, database string, wire []byte) {
+	t.Helper()
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(wire, &base); err != nil {
+		t.Fatal(err)
+	}
+	records := map[string]json.RawMessage{}
+	for _, group := range []string{"jobs", "submissions", "extensions", "work_observations", "storage_observations", "external_memory"} {
+		if data := base[group]; data != nil {
+			var members map[string]json.RawMessage
+			if err := json.Unmarshal(data, &members); err != nil {
+				t.Fatal(err)
+			}
+			for id, value := range members {
+				records[group+"/"+id] = value
+			}
+			delete(base, group)
+		}
+	}
+	data, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records["state"] = data
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{"CREATE TABLE queue (id INTEGER PRIMARY KEY, data BLOB NOT NULL)", "CREATE TABLE queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL)"} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO queue VALUES (1, ?)", fieldQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range records {
+		if _, err := db.Exec("INSERT INTO queue_state VALUES (?, ?)", key, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"io"
 	"log"
 	"maps"
@@ -12,8 +13,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Policies are keyed by physical host_id (worker name when host_id is unset).
@@ -212,10 +211,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 		}
 		old := q.s.Machines[c.Machine.ID]
 		fresh := c.Fresh && old != nil && c.PreviousSession == old.Session && c.Machine.Session != old.Session && r.Session == c.PreviousSession
-		stopped := c.AttemptProtocol == "" && r.Session == c.Machine.Session && c.Running == nil && !r.Until.IsZero() && !r.Preparation && !r.CleanupFailed
-		if r.Preparation {
-			stopped = r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
-		}
+		stopped := r.Preparation && r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
 		if fresh || stopped {
 			q.confirmCopyRelease(Result{Execution: Execution{ID: r.Job, Attempt: r.Attempt}, Machine: r.Machine, Session: r.Session}, fresh)
 			delete(q.s.HostReleases, key)

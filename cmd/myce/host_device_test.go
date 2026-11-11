@@ -16,7 +16,7 @@ func TestHostDeviceCLI(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
 	m.Devices = []myce.MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-stable", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
@@ -44,7 +44,7 @@ func TestHostDeviceCLI(t *testing.T) {
 	}
 
 	pending := waitSubmit(t, q)
-	reply, err := q.Checkin(myce.Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"})
+	reply, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"})
 	if err != nil || len(reply.Attempts) != 1 || reply.Attempts[0].ID != pending.ID {
 		t.Fatal("missing usage assignment", reply, err)
 	}

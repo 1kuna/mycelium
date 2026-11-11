@@ -80,70 +80,43 @@ func TestDeviceTelemetryAndHostProbeAdvertisement(t *testing.T) {
 	}
 }
 
-func TestDeviceTelemetryWireNegotiationAndAge(t *testing.T) {
+func TestDeviceTelemetryCurrentWireAndAge(t *testing.T) {
 	_, clock := fixture(t)
-	strict := false
-	var reports []Checkin
+	m := sharedDiscreteMachine("xpu")
+	free, active := 4.0, 0.0
+	sensor := &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}
+	m.Devices[0].Telemetry = sensor
+	m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: "synthetic"}
+	m.Devices[0].RecoveryBlocked = &DeviceHealthFailure{Code: "health_component_unknown", Component: "memory"}
+	m.Devices[0].UnsupportedOnDevice = []string{"memory"}
+	reports := []Checkin{}
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		var c Checkin
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 			t.Error(err)
-			return
 		}
 		reports = append(reports, c)
-		if strict && (hasDeviceTelemetry(c) || hasDeviceRecovery(c)) {
-			rw.WriteHeader(400)
-			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-			return
-		}
-		reply := Reply{AttemptProtocol: keyedAttemptProtocol}
-		if !strict {
-			reply.DeviceTelemetryProtocol = deviceTelemetryProtocol
-			reply.DeviceRecoveryProtocol = deviceRecoveryProtocol
-			reply.DeviceHealthProtocol = deviceHealthProtocol
-		}
-		_ = json.NewEncoder(rw).Encode(reply)
+		_ = json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol})
 	}))
 	defer server.Close()
-	m := sharedDiscreteMachine("xpu")
-	free, active := 4.0, 0.0
-	s := &DeviceTelemetry{At: clock.Now(), FreeGB: &free, ActivePercent: &active}
-	m.Devices[0].Telemetry = s
-	m.Devices[0].Recovery = &DeviceRecovery{FaultEvent: "synthetic"}
-	m.Devices[0].UnsupportedOnDevice = []string{"memory"}
-	m.Devices[0].RecoveryBlocked = &DeviceHealthFailure{Code: "health_component_unknown", Component: "memory"}
-	w := Worker{Clock: clock, Client: Client{URL: server.URL}, unifiedMemoryWire: &workerUnifiedMemoryWire{}}
-	send := func() {
-		t.Helper()
-		_, err := w.checkin(context.Background(), Checkin{Machine: m})
-		if err != nil {
+	w := Worker{Clock: clock, Client: Client{URL: server.URL}}
+	for range 2 {
+		if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
 			t.Fatal(err)
 		}
+		clock.Advance(deviceMemorySampleFreshFor)
 	}
-	send()
-	clock.Advance(deviceMemorySampleFreshFor)
-	send()
-	if reports[0].Machine.Devices[0].RecoveryBlocked != nil || reports[1].Machine.Devices[0].RecoveryBlocked == nil || len(reports[0].Machine.Devices[0].UnsupportedOnDevice) != 0 || len(reports[1].Machine.Devices[0].UnsupportedOnDevice) != 1 || hasDeviceTelemetry(reports[0]) || !hasDeviceTelemetry(reports[1]) || hasDeviceRecovery(reports[0]) || !hasDeviceRecovery(reports[1]) {
-		t.Fatal("telemetry did not negotiate independently")
+	for _, c := range reports {
+		d := c.Machine.Devices[0]
+		if d.Telemetry == nil || d.Recovery == nil || d.RecoveryBlocked == nil || len(d.UnsupportedOnDevice) != 1 {
+			t.Fatal("current device evidence omitted")
+		}
 	}
-	// Recovery v1 queues still receive clear receipts, without the newer
-	// health diagnostic field. Both adaptations leave local status intact.
-	w.unifiedMemoryWire.healthSupported = false
-	legacy := w.deviceRecoveryCheckin(Checkin{Machine: m})
-	if legacy.Machine.Devices[0].Recovery == nil || legacy.Machine.Devices[0].RecoveryBlocked != nil || len(legacy.Machine.Devices[0].UnsupportedOnDevice) != 0 || m.Devices[0].RecoveryBlocked == nil {
-		t.Fatal("health negotiation changed v1 recovery or local status")
-	}
-	w.unifiedMemoryWire.healthSupported = true
-	// A delayed inventory result carries its original sensor age. Rebase it
-	// onto a queue clock with a different epoch; it must remain stale.
 	c := receivedDeviceTelemetry(reports[1], clock.Now().Add(24*time.Hour))
 	if deviceTelemetryReady(c.Machine.Devices[0].Telemetry, clock.Now().Add(24*time.Hour)) {
 		t.Fatal("send or receipt renewed stale activity")
 	}
-	strict = true
-	send()
-	send()
-	if len(reports) != 5 || !hasDeviceTelemetry(reports[2]) || hasDeviceTelemetry(reports[3]) || hasDeviceTelemetry(reports[4]) || hasDeviceRecovery(reports[3]) || hasDeviceRecovery(reports[4]) || m.Devices[0].RecoveryBlocked == nil || m.Devices[0].Recovery == nil || s.AgeSeconds != 0 {
-		t.Fatal("downgrade failed or mutated the original sensor evidence")
+	if sensor.AgeSeconds != 0 {
+		t.Fatal("wire changed local sensor")
 	}
 }

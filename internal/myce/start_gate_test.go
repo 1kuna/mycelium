@@ -185,8 +185,10 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 		t.Fatal(e)
 	}
 	store.state.Session = a.Session
-	store.state.Job = a
 	if e = store.save(); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = newAttemptStore(store, *a); e != nil {
 		t.Fatal(e)
 	}
 	store.close()
@@ -275,6 +277,10 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 		t.Fatal(e)
 	}
 	store.state.Session = a.Session
+	if e = store.save(); e != nil {
+		t.Fatal(e)
+	}
+	store.stateName = "state-attempt-start-replay.json"
 	p, e := startAfterFixtureInputs(t, w, store, *a)
 	if e != nil {
 		t.Fatal(e)

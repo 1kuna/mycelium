@@ -7,17 +7,10 @@ import (
 
 const keyedAttemptProtocol = "keyed-attempt-v1"
 
-// Adapt only the wire representation. The existing one-attempt queue decisions
-// remain authoritative until concurrent admission is implemented separately.
+// Every supported release addresses reports and controls by exact attempt key.
 func normalizeAttemptCheckin(c Checkin) (Checkin, error) {
-	if c.AttemptProtocol == "" {
-		if len(c.Attempts) != 0 {
-			return c, currentProtocolError("keyed attempts require attempt_protocol keyed-attempt-v1")
-		}
-		return c, nil
-	}
 	if c.AttemptProtocol != keyedAttemptProtocol || c.Running != nil || c.Started {
-		return c, currentProtocolError("keyed-attempt-v1 forbids legacy running/started fields")
+		return c, currentProtocolError("keyed-attempt-v1 requires its revision and forbids unkeyed running/started fields")
 	}
 	seen := map[attemptKey]bool{}
 	for _, a := range c.Attempts {
@@ -34,9 +27,6 @@ func normalizeAttemptCheckin(c Checkin) (Checkin, error) {
 }
 
 func attemptReply(c Checkin, reply Reply) Reply {
-	if c.AttemptProtocol == "" {
-		return reply
-	}
 	reply.AttemptProtocol = keyedAttemptProtocol
 	if len(reply.Attempts) == 0 && reply.Job != nil {
 		reply.Attempts = []AttemptDirective{{Execution: Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}, Session: reply.Job.Session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop, UserCancel: reply.UserCancel}}
@@ -50,58 +40,18 @@ func attemptReply(c Checkin, reply Reply) Reply {
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	c.period = checkinPeriod(w.Interval)
 	c.AttemptProtocol = keyedAttemptProtocol
-	if c.Running != nil {
-		c.Attempts = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
-	}
-	c.Running, c.Started = nil, false
-	c = w.hygieneCheckin(c)
 	c = w.deviceTelemetryCheckin(c)
-	c = w.deviceRecoveryCheckin(c)
-	full := c
-	c = w.unifiedMemoryCheckin(c)
 	if w.toolReport != nil {
 		c = w.toolReport.checkin(c)
 	}
+	c = w.diskBudgetCheckin(c)
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
 	if hasDiskBudgetWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		c = legacyDiskBudgetCheckin(c)
-		if w.hygieneWire != nil {
-			w.hygieneWire.diskBudgetSupported = false
-		}
-		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
-	}
-	if hasMountProgressWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		// A queue downgraded to hygiene v1 can still consume health and
-		// collection. Retry without only the newly negotiated mount evidence;
-		// the existing full legacy fallback remains for older queues.
-		c = legacyMountProgressCheckin(c)
-		if w.hygieneWire != nil {
-			w.hygieneWire.mountProgressSupported = false
-		}
-		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
-	}
-	if (w.toolReport != nil && c.ToolInventoryHash != "" || hasHygieneWireFields(c) || hasUnifiedMemoryWireFields(c) || hasResourceFields(c) || hasDeviceTelemetry(c) || hasDeviceRecovery(c)) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
-		// Strict decoding rejected additive inventory/hygiene/resource fields before mutation
-		// (for example, a queue replaced with an older inventory-capable binary).
-		// Retry once with the full legacy inventory; attempt protocol is unchanged.
-		c = legacyDeviceRecoveryCheckin(legacyDeviceTelemetryCheckin(legacyUnifiedMemoryCheckin(w.legacyHygieneCheckin(full))))
-		if w.Client.resourceWire != nil {
-			w.Client.resourceWire.supported.Store(false)
-			w.Client.resourceWire.cpuPressure.Store(false)
-		}
-		if w.unifiedMemoryWire != nil {
-			w.unifiedMemoryWire.supported = false
-			w.unifiedMemoryWire.sampleSupported = false
-			w.unifiedMemoryWire.probeSupported = false
-			w.unifiedMemoryWire.telemetrySupported = false
-			w.unifiedMemoryWire.recoverySupported = false
-			w.unifiedMemoryWire.healthSupported = false
-		}
-		if w.toolReport != nil {
-			w.toolReport.supported = false
-			c = w.toolReport.checkin(c)
+		c = withoutDiskBudgetFields(c)
+		if w.diskBudgetWire != nil {
+			w.diskBudgetWire.supported = false
 		}
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
@@ -116,17 +66,11 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if err != nil {
 		return Reply{}, err
 	}
+	if w.diskBudgetWire != nil {
+		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
+	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)
-	}
-	w.acceptHygieneReply(reply)
-	if w.unifiedMemoryWire != nil {
-		w.unifiedMemoryWire.supported = reply.UnifiedMemoryProtocol == unifiedMemoryProtocol
-		w.unifiedMemoryWire.sampleSupported = reply.HostMemorySampleProtocol == hostMemorySampleProtocol
-		w.unifiedMemoryWire.probeSupported = reply.ProbeMemoryProtocol == probeMemoryProtocol
-		w.unifiedMemoryWire.telemetrySupported = reply.DeviceTelemetryProtocol == deviceTelemetryProtocol
-		w.unifiedMemoryWire.recoverySupported = reply.DeviceRecoveryProtocol == deviceRecoveryProtocol
-		w.unifiedMemoryWire.healthSupported = reply.DeviceHealthProtocol == deviceHealthProtocol
 	}
 	// A lost/discarded assignment leaves no local custody to stop. Validate
 	// the whole reply first, then explicitly release only unheld own-session
@@ -152,8 +96,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	return validated, nil
 }
 
-// Validate the whole collection before mutation. Singular projections below are
-// retained for benchmark/direct callers; the M2 supervisor consumes Attempts.
+// Validate the whole collection before mutation. The supervisor consumes Attempts.
 func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 	if reply.AttemptProtocol != keyedAttemptProtocol {
 		return Reply{}, currentProtocolError("queue lacks keyed-attempt-v1: upgrade the queue before this worker; saved attempt custody is retained")
@@ -161,7 +104,7 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 	if reply.Job != nil || reply.Stop || reply.Kill || reply.Hold || reply.PriorityStop != nil || reply.GraceSeconds != 0 || reply.UserCancel {
 		return Reply{}, currentProtocolError("keyed-attempt-v1 queue returned unkeyed attempt decisions")
 	}
-	// A cold legacy session can be idle while the queue learns its cadence.
+	// A cold session can be idle while the queue learns its cadence.
 	// Empty is a complete idle response, with no assignment to index or launch.
 	if len(reply.Attempts) == 0 {
 		return reply, nil
@@ -188,16 +131,9 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 			if a.Job.ID != a.ID || a.Job.Attempt != a.Attempt || a.Job.Session != a.Session || a.Session != c.Machine.Session || a.Job.Machine != c.Machine.ID || a.Stop || a.Kill || a.Hold {
 				return Reply{}, currentProtocolError("queue assignment does not match its attempt key or worker")
 			}
-			reply.Job = a.Job
 			continue
 		}
-		if len(c.Attempts) == 1 {
-			current := c.Attempts[0]
-			if current.ID == a.ID && current.Attempt == a.Attempt && current.Session == a.Session {
-				reply.Stop, reply.Kill, reply.Hold = a.Stop, a.Kill, a.Hold
-				reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
-			}
-		}
+
 	}
 	return reply, nil
 }

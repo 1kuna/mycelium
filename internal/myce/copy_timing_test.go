@@ -76,14 +76,14 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 		t.Fatal("existing ledger lost per-attempt assignment time", page, err)
 	}
 	for _, kind := range []string{"stop", "cancel", "held-cancel"} {
-		t.Run("legacy-idle-"+kind, func(t *testing.T) {
+		t.Run("keyed-idle-"+kind, func(t *testing.T) {
 			q, clock := fixture(t)
-			m := machine("legacy", "xpu")
+			m := machine("keyed", "xpu")
 			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
 			queued := submit(t, q, sharedSpec("experiment", 3))
 			run := check(t, q, m, nil).Job
 			if run == nil {
-				t.Fatal("no legacy attempt", job(t, q, queued.ID).Reason)
+				t.Fatal("no keyed attempt", job(t, q, queued.ID).Reason)
 			}
 			if kind != "stop" {
 				if err := q.Cancel(run.ID); err != nil {
@@ -91,7 +91,7 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 				}
 			} else if err := q.update(func() error {
 				live := q.touchJob(run.ID)
-				q.stop(live, "legacy test stop")
+				q.stop(live, "test stop")
 				q.retainRelease(live)
 				return nil
 			}); err != nil {
@@ -113,11 +113,11 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 			}
 			check(t, q, m, nil)
 			copy := job(t, q, run.ID).Copies[0]
-			if !copy.ReleaseConfirmed {
-				t.Fatal("legacy idle did not reconcile inferred release", copy)
+			if copy.ReleaseConfirmed {
+				t.Fatal("idle check-in discharged custody", copy)
 			}
 			if copy.ReleasedAt != nil {
-				t.Fatal("legacy idle inference invented an exact release time", copy)
+				t.Fatal("idle check-in invented an exact release time", copy)
 			}
 			ack := result(run, false)
 			ack.ReleaseOnly = true
@@ -125,7 +125,7 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			if copy := job(t, q, run.ID).Copies[0]; copy.ReleasedAt == nil || !copy.ReleasedAt.Equal(clock.Now()) {
-				t.Fatal("later exact receipt did not record its own time", copy)
+				t.Fatal("exact receipt did not record its own time", copy)
 			}
 		})
 	}

@@ -171,87 +171,36 @@ func TestQueuePersistenceLargeFieldsRollbackRestart(t *testing.T) {
 	}
 }
 
-func TestQueuePersistenceLegacyMigration(t *testing.T) {
-	q, clock := fixture(t)
-	s := spec("experiment")
-	s.SubmissionKey = "migration"
-	j := submit(t, q, s)
-	// Construct the exact previous normalized layout, including a cold record
-	// that an ordinary update would never touch. The upgrade must retain both.
-	if err := q.update(func() error {
-		cold := &Job{ID: "cold", State: "succeeded", Spec: s, Queued: clock.Now(), FinishedAt: &clock.now, ReleaseConfirmed: true}
-		q.putJob(cold.ID, cold)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// Genuine v1 keyed answers embed the complete last durable job.
-	legacy := make(map[string][]byte, len(q.persisted))
-	for key, data := range q.persisted {
-		legacy[key] = data
-	}
-	for key, record := range q.s.Submissions {
-		data, err := json.Marshal(record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		legacy["submissions/"+key] = data
-	}
-	tx, err := q.db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
-		t.Fatal(err)
-	}
-	for key, data := range legacy {
-		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", legacyNormalizedQueueMarker); err != nil {
-		t.Fatal(err)
-	}
-	if err = tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	// Resume the old layout in this fixture without a startup write, then
-	// force the marker's final write to fail after all field writes ran.
-	q.fragmented = false
-	q.persisted = legacy
-	if _, err := q.db.Exec(`CREATE TRIGGER reject_migration BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'migration interrupted'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.update(func() error { return nil }); err == nil {
-		t.Fatal("interrupted migration committed")
-	}
-	var retainedMarker []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&retainedMarker); err != nil || !bytes.Equal(retainedMarker, legacyNormalizedQueueMarker) {
-		t.Fatal("failed migration published format marker", err)
-	}
-	var fragmentCount int
-	if err := q.db.QueryRow("SELECT count(*) FROM queue_state WHERE key GLOB 'fields/*'").Scan(&fragmentCount); err != nil || fragmentCount != 0 {
-		t.Fatal("failed migration leaked fragments", fragmentCount, err)
-	}
-	if _, err := q.db.Exec("DROP TRIGGER reject_migration"); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenQueue(t, q, clock)
-	if q.s.Jobs[j.ID] == nil || q.s.Jobs["cold"] == nil {
-		t.Fatal("migration lost jobs")
-	}
-	replay := submit(t, q, s)
-	if replay.ID != j.ID {
-		t.Fatal("migration lost keyed binding")
-	}
-	var marker []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil || !bytes.Equal(marker, normalizedQueueMarker) {
-		t.Fatal("migration marker missing", err)
-	}
-	q = reopenQueue(t, q, clock)
-	if q.s.Jobs["cold"] == nil {
-		t.Fatal("cold migrated job lost on second restart")
+func TestQueuePersistenceRetiredFormatsRefused(t *testing.T) {
+	for _, marker := range []string{`"myce-normalized-state-v1"`, `{"schema":3,"jobs":{}}`} {
+		t.Run(marker, func(t *testing.T) {
+			q, clock := fixture(t)
+			submit(t, q, spec("experiment"))
+			if _, err := q.db.Exec("UPDATE queue SET data=? WHERE id=1", []byte(marker)); err != nil {
+				t.Fatal(err)
+			}
+			path, root := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path, root, clock)
+			if err == nil {
+				reopened.Close()
+				t.Fatal("retired format accepted")
+			}
+			if !strings.Contains(err.Error(), "unsupported queue persistence format") {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var got []byte
+			if err := db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&got); err != nil || string(got) != marker {
+				t.Fatal("refusal changed stored format", err)
+			}
+		})
 	}
 }
 

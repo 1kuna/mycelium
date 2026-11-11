@@ -101,6 +101,10 @@ func TestProfileObserverTimeoutAndTransport(t *testing.T) {
 					w.WriteHeader(401)
 					return
 				}
+				if r.URL.Path == "/api/wait" {
+					io.WriteString(w, `{"jobs":[{"id":"fixture","state":"queued","revision":1}]}`)
+					return
+				}
 				io.WriteString(w, `{"id":"fixture","state":"queued"}`)
 			}))
 			defer server.Close()

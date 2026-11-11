@@ -349,12 +349,12 @@ func TestInstallFileCacheOmittedAutomatic(t *testing.T) {
 	}
 }
 
-func TestInstallFileCacheDefaultMigrationAndExplicitIntent(t *testing.T) {
+func TestInstallFileCacheExplicitIntent(t *testing.T) {
 	for _, tc := range []struct {
 		body string
 		want int64
 	}{
-		{`{"role":"worker","file_cache_bytes":10737418240}`, 0},
+		{`{"role":"worker","file_cache_bytes":10737418240}`, 10 << 30},
 		{`{"role":"worker","file_cache_bytes":10737418240,"file_cache_bytes_explicit":true}`, 10 << 30},
 		{`{"role":"worker","file_cache_bytes":34359738368}`, 32 << 30},
 	} {
@@ -364,12 +364,12 @@ func TestInstallFileCacheDefaultMigrationAndExplicitIntent(t *testing.T) {
 		}
 		c, err := ReadServiceConfig(path)
 		if err != nil || c.FileCacheBytes != tc.want {
-			t.Fatalf("cache migration got %d want %d: %v", c.FileCacheBytes, tc.want, err)
+			t.Fatalf("saved cache got %d want %d: %v", c.FileCacheBytes, tc.want, err)
 		}
 	}
 }
 
-func TestInstallFileCacheAutomaticSavedConfigAllowsDowngrade(t *testing.T) {
+func TestInstallFileCacheAutomaticSavedConfigRoundtrip(t *testing.T) {
 	for _, limit := range []int64{0, 32 << 30} {
 		c := ServiceConfig{Role: "worker", FileCacheBytes: limit, FileCacheBytesExplicit: limit > 0}
 		data, err := json.Marshal(c)
@@ -379,17 +379,6 @@ func TestInstallFileCacheAutomaticSavedConfigAllowsDowngrade(t *testing.T) {
 		var saved map[string]json.RawMessage
 		if err = json.Unmarshal(data, &saved); err != nil {
 			t.Fatal(err)
-		}
-		// s071 defaults a missing field to its positive cache budget, but
-		// rejects an explicitly saved zero before a downgrade can proceed.
-		var legacyLimit int64 = 10 << 30
-		if value, present := saved["file_cache_bytes"]; present {
-			if err = json.Unmarshal(value, &legacyLimit); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if legacyLimit <= 0 || limit > 0 && legacyLimit != limit {
-			t.Fatalf("saved cache limit cannot be read by the older installer: %d", legacyLimit)
 		}
 		path := filepath.Join(t.TempDir(), "worker.json")
 		if err = os.WriteFile(path, data, 0600); err != nil {

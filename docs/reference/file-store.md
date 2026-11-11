@@ -13,13 +13,11 @@ the bundle bytes. Worker delivery and digest downloads verify and load the bytes
 outside the queue mutex. Keep the file store with the queue database when moving
 or backing up queue state.
 
-On startup, embedded bundles are migrated before serving traffic: verify their
-digests, durably publish the blobs, then atomically commit the references in
-SQLite. An interrupted migration repeats safely on the next startup. A digest
-mismatch or missing referenced blob stops startup rather than discarding data.
-Use the same `--file-store` root on restart (default `DATABASE.files`). Embedded
-Go callers select a custom root with `WithFileStore` in `Open`, before migration;
-changing roots after bundle references exist is refused.
+Startup verifies frozen bundle references before serving traffic. Missing or
+corrupt blobs and retired embedded bundle formats stop startup. Keep the same
+`--file-store` root on restart (default `DATABASE.files`). Go callers select a
+custom root with `WithFileStore` in `Open`; changing roots after bundle references
+exist is refused. Only current and previous release formats are supported.
 
 Queue maintenance reclaims stored job inputs and results after **7 days in a
 terminal state**. Set a positive `myce queue --file-retention DURATION`; installed

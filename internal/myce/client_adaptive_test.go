@@ -79,49 +79,41 @@ func TestClientAdaptiveReadRetryAfter(t *testing.T) {
 	}
 }
 
-func TestClientAdaptiveWaitLegacyAndBatch(t *testing.T) {
+func TestClientAdaptiveBatchWait(t *testing.T) {
 	for _, latency := range []time.Duration{2 * time.Millisecond, 2 * time.Second} {
-		for _, batch := range []bool{false, true} {
-			clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
-			calls := 0
-			var sleeps []time.Duration
-			var holds []int
-			c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error {
-				sleeps = append(sleeps, d)
-				clock.Advance(d)
-				return nil
-			}, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-				calls++
-				clock.Advance(latency)
-				state := "queued"
-				if calls >= 7 {
-					state = "succeeded"
-				}
-				headers := make(http.Header)
-				if batch {
-					headers.Set("X-Myce-Wait", "batch-v1")
-				}
-				body := `{"id":"job","state":"` + state + `"}`
-				if r.URL.Path == "/api/wait" {
-					var request WaitRequest
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-						t.Fatal(err)
-					}
-					holds = append(holds, request.Seconds)
-					body = `{"jobs":[{"id":"job","state":"` + state + `","revision":1}]}`
-				}
-				return &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(body))}, nil
-			})}}
-			j, err := c.Wait(context.Background(), "job")
-			if err != nil || j.State != "succeeded" {
-				t.Fatal(j, err)
+		clock := &fakeClock{now: time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)}
+		calls := 0
+		var sleeps []time.Duration
+		var holds []int
+		c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			clock.Advance(d)
+			return nil
+		}, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			clock.Advance(latency)
+			state := "queued"
+			if calls >= 7 {
+				state = "succeeded"
 			}
-			if !batch && (len(sleeps) < 4 || sleeps[3] <= sleeps[1]) {
-				t.Fatal("unchanged reads did not back off", latency, batch, sleeps)
+			headers := make(http.Header)
+			body := `{"id":"job","state":"` + state + `"}`
+			if r.URL.Path == "/api/wait" {
+				var request WaitRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				holds = append(holds, request.Seconds)
+				body = `{"jobs":[{"id":"job","state":"` + state + `","revision":1}]}`
 			}
-			if batch && (len(holds) == 0 || holds[len(holds)-1] < holds[0]) {
-				t.Fatal("batch hold did not adapt", holds)
-			}
+			return &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}}
+		j, err := c.Wait(context.Background(), "job")
+		if err != nil || j.State != "succeeded" {
+			t.Fatal(j, err)
+		}
+		if len(holds) == 0 || holds[len(holds)-1] < holds[0] {
+			t.Fatal("batch hold did not adapt", holds)
 		}
 	}
 }

@@ -533,8 +533,16 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	j.Spec.StartBy = &deadline
 	j.Machine, j.Session = w.Machine.ID, "old-session"
 	r := result(&j, true)
-	store.state.Session, store.state.Job, store.state.Result = j.Session, &j, &r
+	store.state.Session = j.Session
 	if err = store.save(); err != nil {
+		t.Fatal(err)
+	}
+	child, err := newAttemptStore(store, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child.state.Result = &r
+	if err = child.save(); err != nil {
 		t.Fatal(err)
 	}
 	store.close()
