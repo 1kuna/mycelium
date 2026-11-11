@@ -4,8 +4,6 @@ import (
 	"errors"
 	"os"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // Outer commands own an OS session. Nested workers/engines keep that session
@@ -31,9 +29,10 @@ func processSessionEnvironment(env []string) []string {
 	return append(env, processSessionVariable+"=1")
 }
 
-// Snapshot the whole session before group delivery can orphan its descendants.
-// Individual birth checks fence PID reuse, and the ordinary release inspector
-// verifies all remaining session members, including separate process groups.
+// Snapshot the whole session and every descendant (including setsid escapers,
+// #1322) before group delivery can orphan them, then signal each snapshot
+// member outside the group by exact PID. Birth checks fence PID reuse, and the
+// release inspector verifies the same set, so release waits for escapers too.
 // Failed inspection still signals the owned group, while retaining the error
 // so missing descendant custody can never be mistaken for confirmed release.
 func signalWorkerSession(group int, signal syscall.Signal, delivered ...func()) error {
@@ -62,15 +61,14 @@ func signalWorkerSession(group int, signal syscall.Signal, delivered ...func()) 
 			result = errors.Join(result, err)
 			continue
 		}
-		session, sessionErr := unix.Getsid(pid)
 		pgid, groupErr := syscall.Getpgid(pid)
-		if sessionErr != nil || groupErr != nil {
-			if !errors.Is(sessionErr, syscall.ESRCH) && !errors.Is(groupErr, syscall.ESRCH) {
-				result = errors.Join(result, sessionErr, groupErr)
+		if groupErr != nil {
+			if !errors.Is(groupErr, syscall.ESRCH) {
+				result = errors.Join(result, groupErr)
 			}
 			continue
 		}
-		if pgid == group || session != group {
+		if pgid == group {
 			continue
 		}
 		if err := syscall.Kill(pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
