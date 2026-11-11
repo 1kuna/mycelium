@@ -811,7 +811,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
-	sharedCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
+	jobCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
 	// TMPDIR is worker-owned, even when run.env or activation supplied one.
 	// Keep it with the managed attempt files so existing custody/retention owns it.
 	tmp := filepath.Join(executionWork, ".tmp")

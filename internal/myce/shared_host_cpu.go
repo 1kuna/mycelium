@@ -64,13 +64,15 @@ func sharedCPUEnforcementStatus(m *Machine) string {
 	return "CPU time unenforced: worker did not confirm policy"
 }
 
-// Cooperative runtime concurrency complements the aggregate declared-core
-// ledger on Darwin. Payloads can ignore these variables; never claim a hard cap.
+// On a shared interactive host a job's own thread setting may not exceed its
+// allotment: cooperative runtime concurrency complements the aggregate
+// declared-core ledger on Darwin, where CPU time is otherwise unenforced.
+// Payloads can ignore these variables; never claim a hard cap.
 func sharedCPUEnvironment(env map[string]string, p *SharedHostProfile, cores int) {
 	if p == nil {
 		return
 	}
-	for _, key := range []string{"GOMAXPROCS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "RAYON_NUM_THREADS"} {
+	for _, key := range jobThreadVariables {
 		n, err := strconv.Atoi(env[key])
 		if err != nil || n <= 0 || n > cores {
 			env[key] = strconv.Itoa(max(1, cores))
