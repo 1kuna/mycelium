@@ -84,6 +84,10 @@ The key makes submission safe to repeat. After a lost reply, `submission
 unconfirmed` or exit 69 `input storage unconfirmed`, rerun the same command with
 the same key and frozen inputs and you get the same job. Changed intent needs a
 new key. A one-off without inputs or outputs can use `myce run --cpu N -- CMD`.
+To run one command over many inputs, add `pieces:` to the entry, for example
+`- {key: a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}`. Then one
+`run` and one wait cover them all, and results come back as `KEY/OUTPUT`. Don't
+loop or keep one entry per input ([plain pieces](../../docs/jobs.md#plain-command-pieces)).
 Don't add your own short timeout. Calls wait while the queue makes progress and
 fail with `queue_stalled` if it stops; then check `myce status` and repeat the
 same command ([slow or stalled queue](references/wait-and-status.md#slow-or-stalled-queue)).
