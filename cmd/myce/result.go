@@ -57,8 +57,18 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 	if c.HTTP != nil {
 		defer c.HTTP.CloseIdleConnections()
 	}
+	return retryResult(ctx, c, f.Arg(0), *out, *attempt, *recovered, errOut)
+}
+
+// fetchAcceptedResult downloads a succeeded job's accepted outputs into out,
+// verified against their recorded digests; myce run --out shares this path.
+func fetchAcceptedResult(ctx context.Context, c myce.Client, id, out string, errOut io.Writer) error {
+	return retryResult(ctx, c, id, out, 0, "", errOut)
+}
+
+func retryResult(ctx context.Context, c myce.Client, id, out string, attempt int, recovered string, errOut io.Writer) error {
 	return c.RetryTransient(ctx, func(attemptCtx context.Context, one myce.Client) error {
-		return fetchResult(attemptCtx, one, f.Arg(0), *out, *attempt, *recovered, errOut)
+		return fetchResult(attemptCtx, one, id, out, attempt, recovered, errOut)
 	}, func(cause error, delay time.Duration) {
 		fmt.Fprintf(errOut, "result: retrying accepted retrieval %s; next attempt in %s\n", myce.ClientErrorCause(cause), delay)
 	})
