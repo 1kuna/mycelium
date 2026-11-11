@@ -27,7 +27,8 @@ func TestCommandStartedAndCancelConfirmation(t *testing.T) {
 	}
 	compactStarted := func(id string) bool {
 		t.Helper()
-		// A filtered read bypasses the shared default's short-lived cache.
+		// A filtered read bypasses the shared default's short-lived cache and
+		// projects through NewCompactStatus, the CLI's status --json view.
 		var s CompactStatus
 		if err := client.Call(ctx, "GET", "/api/status?project="+running.Spec.Project, nil, &s); err != nil {
 			t.Fatal(err)
