@@ -580,6 +580,9 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 // Cold probes still need complete fresh evidence before releasing their offered
 // envelope. Their adaptive execution ceiling is containment, not extra demand.
 func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
+	if c, g, ok := usedMemoryCharge(j, m, ceiling, sample, now); ok {
+		return c, g // Contained work is charged by use (memory_planning.go).
+	}
 	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
 		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
 		// The native attempt's parent cgroup contains main and all helpers at

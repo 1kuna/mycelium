@@ -1252,6 +1252,7 @@ func (q *Queue) maintain() {
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSharedHosts()
+	q.yieldMemoryOvercommit()
 	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	now := q.clock.Now()

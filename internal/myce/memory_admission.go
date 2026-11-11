@@ -249,3 +249,127 @@ func (q *Queue) retainMemoryAdmissions() {
 		q.touchJob(id).LastMemoryAdmission = &s
 	}
 }
+
+const memoryOvercommitCause = "memory_overcommit_yield"
+
+// yieldMemoryOvercommit is the backstop for charging by use. A job charged by
+// use may grow back toward its declared ceiling after others were admitted
+// into its unused share. The host is lending while live free memory is less
+// than what its by-use jobs could still grow to their ceilings (charging their
+// envelopes would put the ledger in debt). When live free memory can no longer
+// absorb the measured growth expected before a stop completes, capped by each
+// job's ceiling, one running job yields through the planned-stop path (#1276):
+// resumable work checkpoints within the preemption grace, other work stops at
+// once, and both requeue with no retry charge. This acts before the kernel OOM
+// killer, which would fail a production job outright. The ledger's
+// instantaneous debt uses one sample's growth, too late to cover a checkpoint
+// grace, so the trigger evaluates the same live arm over the stop horizon.
+//
+// Victim order is the existing tier order: lowest tier first, then work
+// charged by use, then the most recently started. Production yields only to
+// protect another running production job on the host, and only if it is
+// resumable. One yield per host is in flight at a time, so freed memory is
+// observed before more work is stopped. Unknown availability never stops work.
+func (q *Queue) yieldMemoryOvercommit() {
+	now := q.clock.Now()
+	type host struct {
+		jobs                  []*Job
+		byUse                 map[string]bool
+		growthGB, lentGB      float64
+		production            int
+		pending, used         bool
+		availableGB, driftGB  float64
+		availableKnown, alive bool
+	}
+	hosts := map[string]*host{}
+	get := func(id string) *host {
+		if hosts[id] == nil {
+			hosts[id] = &host{byUse: map[string]bool{}, availableKnown: true}
+		}
+		return hosts[id]
+	}
+	for _, m := range q.s.Machines {
+		if m.Gone || m.Replacement != nil {
+			continue
+		}
+		h := get(hostID(m))
+		if !m.HostMemoryMeasured || m.HostMemoryError != "" || q.unreported[m.ID] {
+			h.availableKnown = false
+			continue
+		}
+		if !h.alive {
+			h.availableGB = m.HostAvailableMemoryGB
+		}
+		h.alive = true
+		h.availableGB = min(h.availableGB, m.HostAvailableMemoryGB)
+		h.driftGB = max(h.driftGB, exploratoryDriftMarginGB(m))
+	}
+	horizon := q.preemptionGrace()
+	for _, j := range q.liveJobs() {
+		owner := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		if owner == nil || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") {
+			continue
+		}
+		h := get(hostID(owner))
+		if p := priorityStop(j); p != nil && p.Cause == memoryOvercommitCause {
+			h.pending = true
+		}
+		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
+		if usedMemoryChargeEligible(j, owner, sample, now) {
+			h.used, h.byUse[j.ID] = true, true
+			// Growth expected until a stop releases memory: the last measured
+			// increment plus the rate over the stop grace and one sample
+			// interval, but never past the job's own enforced ceiling.
+			room := max(0, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-max(sample.gb, sample.footprintGB))
+			h.lentGB += room
+			h.growthGB += min(room, sample.growthGB+sample.rateGB*(horizon+sample.freshFor()).Seconds())
+		}
+		if j.State == "running" && !cancelled(j) && !plannedStop(j) && batchReservesCapacity(j) {
+			h.jobs = append(h.jobs, j)
+			if q.priorityMatch(j.Spec).Tier == "production" {
+				h.production++
+			}
+		}
+	}
+	for id, h := range hosts {
+		if !h.used || h.pending || !h.alive || !h.availableKnown || h.availableGB >= h.lentGB || h.availableGB > h.growthGB+h.driftGB {
+			continue
+		}
+		var victim *Job
+		for _, j := range h.jobs {
+			if q.priorityMatch(j.Spec).Tier == "production" && (!j.Spec.Resumable || h.production < 2) {
+				continue
+			}
+			if victim == nil || memoryYieldBefore(q, j, victim, h.byUse) {
+				victim = j
+			}
+		}
+		if victim == nil {
+			continue
+		}
+		q.touchJob(victim.ID)
+		for i := range victim.Copies {
+			c := &victim.Copies[i]
+			if c.Attempt == victim.Attempt && c.Machine == victim.Machine && c.Session == victim.Session {
+				c.StopCause = memoryOvercommitCause
+				c.PriorityStop = &PriorityPreemption{Cause: memoryOvercommitCause, Demand: "host/" + id, Victim: victim.ID, Policy: q.priorityMatch(victim.Spec)}
+				c.Recoverable = false
+			}
+		}
+		q.stopFor(victim, "host", "memory")
+		victim.Reason = "yielded: running jobs on this host grew into memory lent to it"
+	}
+}
+
+func memoryYieldBefore(q *Queue, a, b *Job, byUse map[string]bool) bool {
+	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
+		return n > 0 // Lowest tier first.
+	}
+	if byUse[a.ID] != byUse[b.ID] {
+		return byUse[a.ID]
+	}
+	if a.StartedAt != nil && b.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt) {
+		return a.StartedAt.After(*b.StartedAt)
+	}
+	return a.ID > b.ID
+}
