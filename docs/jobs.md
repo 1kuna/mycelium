@@ -581,7 +581,8 @@ remain bounded diagnostics with their existing contracts.
 
 ## CLI control calls under load
 
-The installed CLI and the fleet helpers set no fixed request timeout. A call
+The installed CLI, the fleet helpers and the Python client set no fixed request
+timeout; Python raises `QueueStalledError` for `queue_stalled`. A call
 still waiting after one transport recovery period (1 s, RFC 6298) reads
 `GET /api/ping`, which takes no queue lock and reports `queue_progress`: lock
 `releases`, callers `waiting` on the lock, and the queue's own `p99_ms` request
@@ -598,7 +599,7 @@ after the server's `Retry-After`. Other POSTs are never replayed by the client.
 ## Python client defaults
 
 `mycelium-client` imports as `mycelium`. `Client(url=None, token=None,
-timeout=10, poll_interval=0.3)` reads `MYCE_QUEUE` (otherwise loopback:7331)
+timeout=None, poll_interval=None, transfer_timeout=None)` reads `MYCE_QUEUE` (otherwise loopback:7331)
 and requires `MYCE_TOKEN` unless passed explicitly. Time values are seconds.
 `submit` accepts a mapping or YAML/path with the optional YAML extra;
 `submit_yaml` explicitly parses YAML. `status`, `list`, `get`, and `cancel` use
