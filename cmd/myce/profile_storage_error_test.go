@@ -49,6 +49,7 @@ func TestProfileStorageFailureCause(t *testing.T) {
 					p.Adapter = adapter
 					const secret = "fixture-secret-never-print"
 					var reached, preflightDone atomic.Bool
+					var expirePreflight context.CancelCauseFunc
 					release := make(chan struct{})
 					var server *httptest.Server
 					server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +61,9 @@ func TestProfileStorageFailureCause(t *testing.T) {
 						reached.Store(true)
 						switch failure {
 						case "timeout":
+							if expirePreflight != nil {
+								expirePreflight(context.DeadlineExceeded)
+							}
 							select {
 							case <-r.Context().Done():
 							case <-release:
@@ -107,7 +111,10 @@ func TestProfileStorageFailureCause(t *testing.T) {
 					ctx, cancel := context.WithCancel(t.Context())
 					if failure == "timeout" && operation == "preflight" {
 						cancel()
-						ctx, cancel = context.WithTimeout(t.Context(), 150*time.Millisecond)
+						// Expire the synthetic deadline only after real preflight
+						// entry; local staging must not consume its failure budget.
+						ctx, expirePreflight = context.WithCancelCause(t.Context())
+						cancel = func() { expirePreflight(context.Canceled) }
 					}
 
 					if failure == "timeout" && operation == "upload" {
