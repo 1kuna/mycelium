@@ -318,3 +318,29 @@ func startTestDev(t *testing.T, c DevConfig, configure ...func(*Queue)) (*Dev, e
 		}
 	})
 }
+
+// Enrollment precedes the asynchronous GPU inventory scan. Qualification needs
+// the device fingerprints from that scan, not merely a registered worker.
+func awaitTestDevDeviceFingerprints(t *testing.T, d *Dev) {
+	t.Helper()
+	await(t, func() bool {
+		snap, err := d.Queue.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snap.Machines) != len(d.workers) {
+			return false
+		}
+		for _, m := range snap.Machines {
+			if _, ok := d.workers[m.ID]; !ok || m.Gone || len(m.Devices) == 0 {
+				return false
+			}
+			for _, device := range m.Devices {
+				if device.ExtensionFingerprint == "" || device.Reason != "" {
+					return false
+				}
+			}
+		}
+		return true
+	})
+}

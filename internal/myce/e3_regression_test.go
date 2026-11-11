@@ -44,7 +44,7 @@ func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer d.Close()
-				await(t, func() bool { s, _ := d.Queue.Snapshot(); return len(s.Machines) > 0 })
+				awaitTestDevDeviceFingerprints(t, d)
 				if _, err = d.Queue.ChangeHostMaintenance("local-host", HostMaintenanceRequest{Action: action}); err != nil {
 					t.Fatal(err)
 				}

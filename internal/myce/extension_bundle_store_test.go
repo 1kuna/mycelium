@@ -256,7 +256,7 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 		t.Fatal(err)
 	}
 	defer d.Close()
-	await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
+	awaitTestDevDeviceFingerprints(t, d)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	trafficCtx, stopTraffic := context.WithCancel(ctx)
