@@ -58,6 +58,7 @@ class LocalGateTests(unittest.TestCase):
             launcher = '''import importlib.util,json,pathlib,signal,sys
 s=importlib.util.spec_from_file_location('capacity',sys.argv[1]); c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[]
+c._memory.evidence_directory=lambda:r/'evidence'
 c.local_worker_usage=lambda:None;c.native_full_custody=lambda:False;c.check_pressure=lambda:None
 c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.os.cpu_count=lambda:18
 slot=c.acquire(r,mode='full',source_root=r/'dead'/'source')
@@ -731,7 +732,8 @@ finally: slot.release()
             root = Path(folder).resolve()
             launcher = """import importlib.util,pathlib,sys,time,types
 s=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
-r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[]
+c._memory.evidence_directory=lambda:r/'evidence';c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
 c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
 original_sleep=time.sleep
