@@ -603,6 +603,8 @@ func portabilityEnvironment(name string, r EnvironmentRecipe, files map[string][
 	names := []string{"uv.lock", "pyproject.toml"}
 	if backend == "pixi" {
 		names = []string{"pixi.lock", "pixi.toml"}
+	} else if backend == "npm" {
+		names = []string{"package-lock.json", "package.json"}
 	} else if path.Base(r.LockFile) == "requirements.txt" {
 		names = []string{"requirements.txt"}
 	}

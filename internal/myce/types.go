@@ -370,13 +370,13 @@ func (s Spec) Validate() error {
 	if s.Environment.Name != "" && s.Environment.LockFile != "" {
 		return reject("job_environment_invalid", errors.New("environment must name an environment or a lock_file, not both"))
 	}
-	if s.Environment.Backend != "" && s.Environment.Backend != "uv" && s.Environment.Backend != "pixi" {
+	if !knownEnvironmentBackend(s.Environment.Backend) {
 		return reject("job_environment_invalid", errors.New("unsupported environment backend"))
 	}
 	if s.Environment.LockFile == "" && (s.Environment.Backend != "" || s.Environment.Python != "" || len(s.Environment.Platforms) > 0) {
 		return reject("job_environment_invalid", errors.New("backend, python and platforms belong to a lock_file environment"))
 	}
-	if s.Environment.LockFile != "" && s.Environment.Backend != "pixi" && s.Environment.Python == "" {
+	if s.Environment.LockFile != "" && s.Environment.Backend != "pixi" && s.Environment.Backend != "npm" && s.Environment.Python == "" {
 		return reject("job_environment_invalid", errors.New("lock_file environment requires python version"))
 	}
 	if len(s.Environment.Files) > 0 && s.Environment.LockFile == "" {

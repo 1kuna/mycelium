@@ -181,7 +181,8 @@ func runPixiLockCheck(ctx context.Context, files map[string][]byte, manifest, en
 
 // checkInlinePixiLock checks an inline recipe's frozen pixi.lock/pixi.toml.
 func checkInlinePixiLock(ctx context.Context, r EnvironmentRecipe) error {
-	if r.Backend != "pixi" || len(r.Files["pixi.lock"]) == 0 {
+	// An npm recipe's optional Node layer is the same Pixi workspace.
+	if (r.Backend != "pixi" && r.Backend != "npm") || len(r.Files["pixi.lock"]) == 0 {
 		return nil
 	}
 	return checkPixiLock(ctx, map[string][]byte{"pixi.lock": r.Files["pixi.lock"], "pixi.toml": r.Files["pixi.toml"]}, "pixi.toml", r.Environment)

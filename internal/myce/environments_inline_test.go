@@ -12,7 +12,7 @@ import (
 )
 
 func TestEnvironmentInlineBackends(t *testing.T) {
-	for _, backend := range []string{"", "uv", "pixi", "unsupported"} {
+	for _, backend := range []string{"", "uv", "pixi", "npm", "unsupported"} {
 		t.Run("backend="+backend, func(t *testing.T) {
 			q, _ := fixture(t)
 			dir := t.TempDir()
@@ -21,6 +21,10 @@ func TestEnvironmentInlineBackends(t *testing.T) {
 			if backend == "pixi" {
 				lock, python = "pixi.lock", ""
 				files = map[string]string{"pixi.lock": "version: 6\nenvironments: {}\n", "pixi.toml": "[workspace]\nname='example'\n"}
+			}
+			if backend == "npm" {
+				lock, python = "package-lock.json", ""
+				files = map[string]string{"package-lock.json": `{"lockfileVersion":3,"packages":{"":{"dependencies":{"a":"^1.0.0"}}}}`, "package.json": `{"dependencies":{"a":"^1.0.0"}}`}
 			}
 			for name, data := range files {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {

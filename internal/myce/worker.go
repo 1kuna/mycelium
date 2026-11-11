@@ -696,6 +696,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	if environmentPath != "" {
 		bindEnvironment(env, environmentPath)
+		if j.Spec.Run.Workdir == executionWork {
+			if err := linkNodeModules(executionWork, environmentPath); err != nil {
+				return nil, s.startFailure(j, environmentFailed, err)
+			}
+		}
 	}
 	if missing := missingExecutableTools(j.Spec.Needs.Tools, env["PATH"]); len(missing) > 0 {
 		return nil, toolMissingError(w.Machine.ID, missing)

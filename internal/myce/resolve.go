@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -242,6 +243,10 @@ func (q *Queue) resolveRecipes(s Spec, r *ResolveReport) (map[string]Environment
 		} else {
 			f.Problem = err.Error()
 			f.Fix = "Correct the environment declaration to satisfy this validation error, then run `myce spec check --resolve` again."
+			var npmErr *NPMLockError
+			if errors.As(err, &npmErr) {
+				f.Fix = "Run `npm install` so package-lock.json matches package.json, commit both, then run `myce spec check --resolve` again."
+			}
 			if isPixiLockError(err) {
 				f.Fix = "Run `pixi lock` with Pixi >= " + workerPixiVersion() + " (the workers' version), then run `myce spec check --resolve` again."
 			}

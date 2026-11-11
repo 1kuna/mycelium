@@ -42,6 +42,11 @@ func (c *EnvironmentCache) pruneDownloads(ctx context.Context, dir string, env [
 		return nil
 	}
 	fmt.Fprintf(out, "download cache: %d bytes exceeds separate %d-byte limit; pruning\n", size, c.DownloadLimit)
+	// npm's content-addressed cache has no partial prune; clearing it under the
+	// exclusive downloads lock is `npm cache clean --force` without needing npm.
+	if err = os.RemoveAll(c.downloadCache("npm")); err != nil {
+		return fmt.Errorf("npm cache prune: %w", err)
+	}
 	for _, tool := range []string{"uv", "pixi"} {
 		n, err := environmentSize(c.downloadCache(tool))
 		if err != nil {
