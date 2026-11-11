@@ -85,11 +85,12 @@ func ledgerShowsLaunch(j *Job, r Result) bool {
 	return false
 }
 
-// A keyed worker sends a release-only ack only for an own-session key it does
-// not hold. With no launch evidence, that attempt had no process generation to
-// cover, so its late release must not make a closed ledger incomplete (#1021).
+// A keyed worker acknowledges an own-session key it does not hold with a bare
+// release-only result (no outcome). With no launch evidence that attempt had no
+// process generation to cover, so its late release must not make a closed
+// ledger incomplete (#1021). Any outcome payload keeps the ordinary coverage rule.
 func unheldNeverLaunched(j *Job, r Result) bool {
-	return r.ReleaseOnly && !r.ReleasePending && !r.Success && !ledgerShowsLaunch(j, r)
+	return r.ReleaseOnly && !r.ReleasePending && !r.Success && !r.Interrupted && r.Error == "" && r.ExecutionCause == nil && !ledgerShowsLaunch(j, r)
 }
 
 func ledgerAttempt(j *Job, kind, reason string) JobLedgerEntry {
