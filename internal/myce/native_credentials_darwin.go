@@ -20,7 +20,8 @@ var nativeCredentialSupport = sync.OnceValue(func() bool {
 
 // An allow-default Seatbelt profile that withholds only the worker's
 // credentials and SSH keys from an unsandboxed job (#1309). Everything else,
-// including nested sandbox-exec (SwiftPM manifests), behaves as before.
+// including nested sandbox-exec (SwiftPM manifests), behaves as before; a
+// program calling sandbox_init itself is refused.
 func (w Worker) withholdNativeCredentials(cmd *exec.Cmd, spool, work string, env map[string]string) error {
 	if !nativeCredentialSupport() {
 		return nil
@@ -47,10 +48,12 @@ func nativeCredentialProfileArgs(deny, allow []string, cmd *exec.Cmd) []string {
 			fmt.Fprintf(&profile, "(deny %s (require-all (subpath %s) %s))\n", operation, strconv.Quote(path), except.String())
 		}
 	}
-	// Seatbelt refuses to exec setuid programs. Read-only process and network
-	// diagnostics run outside the profile as before; crontab, at, authopen and
-	// the like stay refused, since they could read or replay withheld files.
-	profile.WriteString(`(allow process-exec (require-any (literal "/bin/ps") (literal "/usr/bin/top") (literal "/usr/sbin/traceroute") (literal "/usr/sbin/traceroute6")) (with no-sandbox))` + "\n")
+	// Seatbelt refuses to exec setuid programs, and any non-trivial profile
+	// refuses a nested sandbox_apply. Read-only process and network diagnostics
+	// and sandbox-exec (SwiftPM manifests and plugins) run outside the profile as
+	// before; crontab, at, authopen and the like stay refused, since they could
+	// read or replay withheld files.
+	profile.WriteString(`(allow process-exec (require-any (literal "/bin/ps") (literal "/usr/bin/top") (literal "/usr/sbin/traceroute") (literal "/usr/sbin/traceroute6") (literal "/usr/bin/sandbox-exec")) (with no-sandbox))` + "\n")
 	// sandbox-exec execs its target in place, so process custody is unchanged.
 	// The environment passes through: plain jobs keep their loader variables.
 	path := cmd.Path

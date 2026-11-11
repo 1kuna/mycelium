@@ -159,10 +159,11 @@ they keep this worker's state (their own attempt files), caches, `tools` and
 installed executables. Everything else is unchanged.
 
 - **macOS:** an allow-default Seatbelt profile denies reads and writes of those
-  paths. Nested `sandbox-exec` (SwiftPM manifests, for example) still works.
-  Seatbelt refuses setuid programs; `ps`, `top` and `traceroute` run outside
-  the profile as before, while `crontab`, `at`, `sudo`, `su`, `authopen` and the
-  other setuid tools are refused.
+  paths. Seatbelt refuses setuid programs and, under any non-trivial profile,
+  a nested sandbox. `ps`, `top`, `traceroute` and `/usr/bin/sandbox-exec`
+  (SwiftPM manifests and plugins) therefore run outside the profile as before.
+  `crontab`, `at`, `sudo`, `su`, `authopen` and the other setuid tools are
+  refused, as is a program that calls `sandbox_init` itself.
 - **Linux:** the `_native-exec` helper applies a Landlock ruleset handling only
   file reads and cross-directory renames (ABI 2+), granting both on every entry
   beside the path to each denied one. No seccomp or network rule applies.
@@ -178,8 +179,8 @@ installed executables. Everything else is unchanged.
   same-user process can't read their environment or attach to them.
 
 This removes direct reads only. An unsandboxed job can still start processes
-outside its restriction through the user's service manager, cron or login
-files; `isolation: sandboxed` or `ci` is the boundary for untrusted code.
+outside its restriction through the user's service manager, cron, login
+files or (on macOS) `sandbox-exec`; `isolation: sandboxed` or `ci` is the boundary for untrusted code.
 
 Choose an exception at the extension top level or adapter entry with
 `isolation: unsandboxed` plus a required nonempty `reason`. Main, its sidecars
