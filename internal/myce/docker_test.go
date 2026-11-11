@@ -1,10 +1,13 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -753,7 +756,32 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	s.close()
 	q, _ := fixture(t)
 	q.clock = c
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	completeEntered, completeRelease := make(chan struct{}), make(chan struct{})
+	var completeOnce, releaseOnce sync.Once
+	releaseComplete := func() { releaseOnce.Do(func() { close(completeRelease) }) }
+	defer releaseComplete()
+	handler := API{Queue: q, Token: "test"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/workers/complete" {
+			data, err := io.ReadAll(r.Body)
+			var result Result
+			if err != nil || json.Unmarshal(data, &result) != nil {
+				t.Error("invalid completion request")
+				rw.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			if !result.ReleasePending {
+				completeOnce.Do(func() { close(completeEntered) })
+				select {
+				case <-completeRelease:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		handler.ServeHTTP(rw, r)
+	}))
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Interval = time.Millisecond
@@ -763,9 +791,29 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	w.HostMemorySource = func(context.Context) (float64, error) { return 32, nil }
 	w.CheckpointRoot = q.root
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
+	workerStopped := false
+	stopped := func() bool {
+		if workerStopped {
+			return true
+		}
+		select {
+		case err := <-done:
+			workerStopped = true
+			if err != nil {
+				t.Error(err)
+			}
+			return true
+		default:
+			return false
+		}
+	}
 	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		releaseComplete()
+		cancel()
+		await(t, func() bool { c.advance(time.Millisecond); return stopped() })
+	}()
 	defer func() {
 		if !t.Failed() {
 			return
@@ -784,10 +832,8 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 		if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
 			return true
 		}
-		select {
-		case e := <-done:
-			t.Fatalf("worker ended before Docker start: %v", e)
-		default:
+		if stopped() {
+			t.Fatal("worker ended before Docker start")
 		}
 		return false
 	})
@@ -804,16 +850,34 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	// Independent control and heartbeats continue despite timed-out daemon requests.
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
 	c.advance(StopGrace)
-	cancel()
-	deadline := time.After(5 * time.Second)
-	// Worker completion happens after the final queue acknowledgement.
-	for {
+	await(t, func() bool {
 		c.advance(time.Millisecond)
 		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
-			}
+		case <-completeEntered:
+			return true
+		default:
+		}
+		if stopped() {
+			t.Fatal("worker stopped before final completion")
+		}
+		return false
+	})
+	if held := job(t, q, j.ID); held.State != "stopping" || held.ReleaseConfirmed {
+		t.Fatalf("released before final completion acknowledgement: %+v", held)
+	}
+	releaseComplete()
+	await(t, func() bool {
+		c.advance(time.Millisecond)
+		final := job(t, q, j.ID)
+		return final.State == "cancelled" && final.ReleaseConfirmed
+	})
+	cancel()
+	// Recovery, queue acknowledgement and controller shutdown are distinct
+	// fences. Real I/O is bounded by the shared fixture wait, not a deadline
+	// spanning all three phases.
+	await(t, func() bool {
+		c.advance(time.Millisecond)
+		if stopped() {
 			final := job(t, q, j.ID)
 			if final.State != "cancelled" || !final.ReleaseConfirmed || final.LastStopOutcome != "forced" || final.Losses != 0 {
 				t.Fatalf("worker exited without confirmed cancellation: %+v", final)
@@ -833,13 +897,10 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 			if !custody.Stopped || !custody.Forced || !custody.Released || custody.Pending {
 				t.Fatalf("unsettled Docker custody: %+v", custody)
 			}
-			return
-		case <-deadline:
-			data, _ := os.ReadFile(filepath.Join(w.StateDir, "state.json"))
-			t.Fatalf("cancellation stuck: job=%+v state=%s", job(t, q, j.ID), data)
-		case <-time.After(5 * time.Millisecond):
+			return true
 		}
-	}
+		return false
+	})
 }
 
 // Explicit opt-in precedes even daemon discovery: never runs Docker in the normal suite.

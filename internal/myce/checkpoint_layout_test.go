@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -125,6 +126,70 @@ func TestCheckpointShardPreparationRetriesWithoutCreatingRoot(t *testing.T) {
 	if !q.shards.ready.Load() {
 		t.Fatal("not ready after the root appeared")
 	}
+
+	t.Run("close drains preparation before releasing storage", func(t *testing.T) {
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		q, err := Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), c, WithCheckpointShards(), func(q *Queue) {
+			q.shards.prepare = func(root string) error {
+				close(entered)
+				<-release
+				return prepareCheckpointShards(root)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { unblock(); _ = q.Close() }()
+		await(t, func() bool {
+			select {
+			case <-entered:
+				return true
+			default:
+				return false
+			}
+		})
+		closed := make(chan error, 1)
+		go func() { closed <- q.Close() }()
+		await(t, func() bool {
+			select {
+			case err := <-closed:
+				t.Fatalf("close released storage while preparation was held: %v", err)
+			default:
+			}
+			q.shards.mu.Lock()
+			defer q.shards.mu.Unlock()
+			return q.shards.closed
+		})
+		select {
+		case err := <-closed:
+			t.Fatalf("close released storage while preparation was held: %v", err)
+		default:
+		}
+		// The drain must not own q.mu, which control shutdown also needs.
+		if !q.mu.TryLock() {
+			t.Fatal("preparation drain holds queue mutex")
+		}
+		q.mu.Unlock()
+		unblock()
+		await(t, func() bool {
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+				return true
+			default:
+				return false
+			}
+		})
+		q.shards.ready.Store(false)
+		if q.kickCheckpointShards() != nil {
+			t.Fatal("closed queue restarted shard preparation")
+		}
+	})
 }
 
 // jobCheckpointDir finds a dev job's folder whether it was submitted before or
