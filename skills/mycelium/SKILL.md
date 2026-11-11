@@ -13,17 +13,22 @@ installed command's help. Optional contracts name their required components in
 [release behavior](references/release-behavior.md#capability-evidence).
 A merged change or a “next release” note does not establish installed support.
 
-From the queue release enforcing explicit production parity lists, a configured
-project/work `production_parity_hosts` entry bounds all production placements,
-including fan-out and recovery. Native qualification, measured quality and old
-registrations cannot admit an unlisted host. The owner must add an approved host
-to widen the list; an explicitly empty list holds that production work. Checks
-and experiments remain available for collecting comparison evidence.
-The typed `production_parity_hosts` blocker identifies this hold even for
-extensions without variants. A removed host's queued binding is placed again;
-running execution and release custody remain with its current attempt.
-Parity-held production cannot withhold another project's environment preparation
-on an unapproved host. Eligible production retains its tier/preemption priority.
+**Default: declare needs, submit once, wait, verify the result.** Use the
+project's adapter entry with its supported implementation variants, environment,
+inputs and class. Leave machine and device selection to Mycelium. A backend
+requirement such as CUDA already selects compatible hardware; even if only one
+host can satisfy it, no host pin is needed. Worker-provided `MYCE_DEVICE` and
+assigned runtime visibility tell the command what it received.
+
+Resolve the entry, submit with a retained key, and wait on the returned job ID
+using the first-run commands below. Mycelium chooses a qualified variant that
+fits, preserves scarce capacity, and uses comparable measured completion data
+within that placement order. Unknown timing is not a reason to select a machine.
+For a genuine wait, read `myce status JOB_ID` once and follow its blocker's owner
+and action. Keep the job ID while capacity or preparation recovers.
+
+Exact hardware qualification and owner-imposed restrictions are exceptional;
+see [explicit restrictions](advanced.md#explicit-placement-restrictions).
 
 Use the installed CLI or Python `Client.from_installed()`, which resolve
 credentials internally. Never open, print, copy, pass or set fleet credentials.

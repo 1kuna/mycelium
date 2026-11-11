@@ -80,13 +80,33 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 		m   *Machine
 	}
 	var targets []observation
+	compatibleHosts := map[string]bool{}
+	freshTargets := false
 	q.evaluateTargets(j, func(f targetFit, candidate *Job, m *Machine) bool {
 		if j.Spec.Needs.cpuOnly() && m.Device != "" {
 			return true
 		}
 		targets = append(targets, observation{f, candidate, m})
+		fresh := !f.excluded && q.inventoryFresh(q.s.Machines[m.ID]) && m.Replacement == nil
+		freshTargets = freshTargets || fresh
+		if fresh && f.failures == 0 {
+			compatibleHosts[hostID(m)] = true
+		}
 		return true
 	})
+	defer func() {
+		if blocker == nil {
+			return
+		}
+		if (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil {
+			if hosts, configured := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]; configured {
+				blocker.Evidence += fmt.Sprintf("; owner production parity policy approves %d physical hosts for this work; Mycelium selects within that list without a job host pin; only the owner can widen production_parity_hosts after output comparison", len(placementStrings(hosts)))
+			}
+		}
+		if len(compatibleHosts) == 1 && len(j.Spec.AllowedMachines) == 0 && len(j.Spec.ExcludedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
+			blocker.Evidence += "; only one freshly observed physical host meets the declared software, resource, qualification and parity requirements; this is observed coverage, not a required host pin; keep the job unpinned unless an explicit restriction is intended"
+		}
+	}()
 	slices.SortFunc(targets, func(a, b observation) int {
 		if a.fit.better(b.fit) {
 			return -1
@@ -137,6 +157,50 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 	b := &Blocker{"resource_pressure", "eligible execution capacity", "queue", "wait for the named capacity or reservation to be released; keep other work moving", reason}
 	if strings.HasPrefix(reason, productionParityHostHold+":") {
 		b.Code, b.Dependency, b.Owner, b.Action = productionParityHostHold, "production parity host approval", "queue owner", "compare candidate outputs with the reference and explicitly approve the physical host in the exact work's production_parity_hosts list"
+	} else if j.Spec.extensionJob() && len(j.Extensions) == 0 {
+		b.Code, b.Dependency, b.Owner, b.Action = "missing_extension", "registered implementation", "consumer", "register an implementation for this work with its supported targets, environment and native check; keep the queued job identity"
+	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "extension" {
+		if !freshTargets {
+			b.Code, b.Dependency, b.Owner, b.Action = "unknown_observation", "worker inventory", "queue owner", "restore fresh worker observations before deciding implementation coverage or qualification"
+			return b
+		}
+		b.Code, b.Dependency, b.Owner, b.Action = "execution_coverage", "compatible implementation", "consumer", "run myce portability for the registered extension; add an implementation for a supported target with its own environment and native check, or retain a genuine backend requirement; naming a host cannot create a missing variant"
+		var declared []string
+		for _, e := range j.Extensions {
+			for _, v := range e.Variants {
+				declared = append(declared, targetLabel(portabilityTarget(v.Target)))
+			}
+		}
+		if len(declared) > 0 {
+			b.Evidence += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
+		}
+		staleCompatible := false
+		for _, t := range targets {
+			if t.fit.excluded || t.m.Replacement != nil {
+				continue
+			}
+			for _, candidate := range extensionJobs(j, t.m, false) {
+				if j.Spec.Resumable && !candidate.Extensions[0].Resumable {
+					continue
+				}
+				if !q.inventoryFresh(q.s.Machines[t.m.ID]) {
+					staleCompatible = true
+					continue
+				}
+				b.Code, b.Dependency, b.Action = "native_qualification", "qualified implementation", "prepare and run the registered extension's native check on compatible hardware; qualification selects exact hardware, ordinary submissions do not; keep the queued job identity"
+				return b
+			}
+		}
+		if staleCompatible {
+			b.Code, b.Dependency, b.Owner, b.Action = "unknown_observation", "compatible worker inventory", "queue owner", "restore fresh observations from compatible hardware before deciding native qualification"
+		}
+	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "production parity" {
+		b.Code, b.Dependency, b.Owner, b.Action = "production_parity", "reference-output parity", "consumer and queue owner", variantParityAction
+	} else if len(targets) > 0 && !targets[0].fit.excluded && (targets[0].fit.first == "target" || targets[0].fit.first == "platform") {
+		b.Code, b.Dependency, b.Owner, b.Action = "execution_coverage", "compatible execution target", "consumer and queue owner", "declare supported targets and environment coverage; if the backend is a genuine requirement, keep this job queued for compatible hardware or add and verify another implementation; a host pin cannot supply a missing backend"
+		if !freshTargets {
+			b.Code, b.Dependency, b.Owner, b.Action = "unknown_observation", "worker inventory", "queue owner", "restore fresh worker observations before deciding target coverage"
+		}
 	} else if deviceFaultRetryReason(reason) {
 		b.Code, b.Dependency, b.Owner, b.Action = deviceFaultRetryHold, "healthy accelerator capacity after a driver fault", "queue and worker", "wait for another healthy device or host, or a health-proven quarantine recovery"
 	} else if !dependencyReady(j) {

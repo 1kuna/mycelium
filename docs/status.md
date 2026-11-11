@@ -2414,6 +2414,24 @@ missing/stale observations; it never claims preparation is progressing.
 `resource_pressure` retains the existing RAM, card, reservation or policy reason.
 A ready alternative takes precedence over preparation on another target.
 
+Queue builds with placement coverage diagnostics distinguish `missing_extension`
+(register an implementation), `execution_coverage` (no compatible implementation
+on observed targets), `native_qualification` (a declared implementation needs its
+exact native check), and `production_parity` (reference-output parity required).
+An explicit owner host-list hold retains `production_parity_hosts`. Each names
+the next owner/action rather than presenting the missing software or approval as
+ordinary capacity pressure. Extension coverage advice includes declared targets,
+without recipes or private paths. Stale compatible inventory remains unknown.
+
+Detailed queued observations also explain when only one freshly observed
+physical host passes permanent requirements, deduplicating devices on a host.
+This is current coverage, not proof of a permanent hardware monopoly or a reason
+to pin a job. Authored host restrictions are not relabeled as observed uniqueness.
+Configured production parity lists report their distinct host count and owner
+authority even while an approved target waits for capacity or preparation.
+The existing small default status remains a lifecycle projection; use a job ID
+or explicit detailed sections for these diagnostics.
+
 CPU resolve omits accelerator and multi-card target views. Eligible means permanent
 placement compatibility, not immediate capacity. `needs-staging` for a local source
 placeholder is normal: the following run stages it automatically. A successful
