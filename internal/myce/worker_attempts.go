@@ -819,7 +819,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
-		charge, pending := jobHostMemoryCharge(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		charge, pending := memoryCharge(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		usedRAM += charge
 		growth += pending
 		sharedCard := !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) })

@@ -1064,7 +1064,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := jobHostMemoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
+		charge, pending := memoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
 		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
 			// This cold command has not executed yet. Its offered reservation
 			// must fit. Bounded estimates already use the offer plus retained

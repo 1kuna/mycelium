@@ -33,7 +33,7 @@ func TestHostForecastExpiredSampleCannotGrowCharge(t *testing.T) {
 			samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
 			q.hostMemorySamples[m.ID] = samples
 			q.retainHostMemoryCharges(m.ID, clock.Now())
-			charge, pending := jobHostMemoryCharge(q.s.Jobs[j.ID], &m, 2, samples[jobKey(j)], clock.Now())
+			charge, pending := memoryCharge(q.s.Jobs[j.ID], &m, 2, samples[jobKey(j)], clock.Now())
 			if charge != before || pending != charge || charge >= 3 {
 				t.Fatalf("expired rate grew permanent charge: before=%g charge=%g pending=%g allowance=96 observed=1.5", before, charge, pending)
 			}
@@ -118,7 +118,7 @@ func TestHostForecastOpaqueChargeStaysConservative(t *testing.T) {
 	j.ID, j.Session, j.Attempt, j.State = "holder", "session", 1, "running"
 	j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: 1}, Session: j.Session, GiB: 40}
 	sample := hostMemorySample{id: 2, at: clock.Now(), gb: 1, footprintGB: 1.5, growthObserved: true}
-	charge, _ := jobHostMemoryCharge(&j, &m, 3, sample, clock.Now())
+	charge, _ := memoryCharge(&j, &m, 3, sample, clock.Now())
 	if charge < 40 {
 		t.Fatalf("opaque pre-upgrade charge was assumed to be forecast-only: %g", charge)
 	}

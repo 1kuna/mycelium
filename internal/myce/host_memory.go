@@ -38,7 +38,7 @@ func hostFits(m *Machine, gpu, host float64) bool {
 
 func hostFitFailure(m *Machine, gpu, host float64) string {
 	if host == 0 {
-		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 || m.HostMemoryDerivation != nil || m.HostMemoryBudgetMeasured {
+		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.EffectiveHostMemoryBudgetGB != 0 || m.HostMemoryDerivation != nil || m.HostMemoryBudgetMeasured {
 			return "host memory declaration is 0 GiB; allowance or enforced ceilings require a positive declaration"
 		}
 		if !unifiedCUDA(m) || gpu == 0 {
@@ -80,10 +80,11 @@ func (q *Queue) refreshHostMemory() {
 		m.HostMemoryInUseGB = reserved
 		// Full charges consume the allowance; only unused growth consumes live RAM.
 		capacity, available, availableKnown, observedAt := q.hostLiveCapacity(m)
-		room := q.hostMemoryRoom(m, capacity, reserved, growth)
+		room, enforced := q.hostMemoryRoom(m, capacity, reserved, growth)
+		ledger.enforcedGB = enforced
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
-		ledger.AvailableGB, ledger.CapacityGB, ledger.AllowanceGB = available, capacity, m.hostBudgetGB
+		ledger.AvailableGB, ledger.CapacityGB, ledger.AllowanceGB = available, capacity, m.EffectiveHostMemoryBudgetGB
 		ledger.ObservedAt, ledger.AvailableKnown = observedAt, availableKnown
 		ledger.SignedRoomGB, ledger.DebtGB, ledger.FreeGB = room, m.hostReservationDebtGB, m.FreeHostMemoryGB
 		q.hostMemoryLedgers[m.ID] = ledger
@@ -94,17 +95,18 @@ func (q *Queue) refreshHostMemory() {
 // acknowledgement arrives. GPU releases are local; RAM releases may be on any
 // card on the same physical host. Pins and failed unloads remain protected.
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
-	return q.hostReleasesExcept(m, gpu, host, priorityDemand(priority, identity), nil, nil)
+	demand := priorityDemand(priority, identity)
+	return q.hostReleasesWithVictims(m, gpu, host, demand, nil, nil, false, func(j *Job) bool { return q.batchPreemptible(j, demand) })
 }
-func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparations ...bool) ([]*Job, []*ModelSlot, bool) {
-	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
-	return q.hostReleasesWithVictims(m, gpu, host, demand, releasedJobs, releasedSlots, releasePreparation, func(j *Job) bool { return q.batchPreemptible(j, demand) })
-}
+
+// hostReleasesWithVictims plans the releases that make room for a demand on
+// m's host: RAM through hostRoomAfter, cores through cpuAfterReleases. The
+// caller's already planned releases are credited the same way, once.
 func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool, canStop func(*Job) bool) ([]*Job, []*ModelSlot, bool) {
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
-	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
+	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.EffectiveHostMemoryBudgetGB > 0) {
 		return nil, nil, false
 	}
 	cores := demand.Needs.cores()
@@ -145,18 +147,35 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
 		return cores == 0 || cpuAllocationFits(&copy, cores)
 	}
-	if (host == 0 || hostFits(m, gpu, host)) && cpuOK(nil, nil) {
-		return nil, nil, true
+	// Room after the caller's releases; each candidate adds its own return.
+	base := q.hostRoomArms(m)
+	for j := range releasedJobs {
+		base = base.plus(q.jobRelease(m, j))
 	}
+	for s := range releasedSlots {
+		base = base.plus(q.slotRelease(m, s))
+	}
+	jobRAM, slotRAM := map[*Job]roomArms{}, map[*ModelSlot]roomArms{}
+	ramAfter := func(jobs []*Job, slots []*ModelSlot) float64 {
+		room := base
+		for _, j := range jobs {
+			room = room.plus(jobRAM[j])
+		}
+		for _, s := range slots {
+			room = room.plus(slotRAM[s])
+		}
+		return room.gb()
+	}
+	room := ramAfter(nil, nil)
 	if host > 0 && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
 		return nil, nil, false
 	}
-	// Free RAM is clamped in the live ledger. Repay any hidden reservation
-	// debt before crediting candidate releases (#104).
-	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
-	need := hostNeed(m, gpu, host)
-	if host == 0 {
-		need = 0
+	need := 0.0
+	if host > 0 {
+		need = hostNeed(m, gpu, host)
+	}
+	if (host == 0 || room >= need) && cpuOK(nil, nil) {
+		return nil, nil, true
 	}
 	var jobs []*Job
 	var slots []*ModelSlot
@@ -170,6 +189,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		}
 		if j.State == "running" || j.State == "stopping" {
 			jobs = append(jobs, j)
+			jobRAM[j] = q.jobRelease(m, j)
 		}
 	}
 	sort.Slice(jobs, func(i, j int) bool {
@@ -185,6 +205,7 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		}
 		if !releasedSlots[s] && slotReservesMemory(s) && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
+			slotRAM[s] = q.slotRelease(m, s)
 		}
 	}
 	sort.Slice(slots, func(i, j int) bool {
@@ -193,49 +214,33 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		}
 		return slotKey(slots[i].Machine, slots[i].Model, slots[i].Device) < slotKey(slots[j].Machine, slots[j].Model, slots[j].Device)
 	})
-	ramDeficit := max(0, need-room)
-	// Fresh unified over-use is freed too, up to the shortfall (#596).
-	freedRAM := func(j *Job) float64 {
-		return q.hostJobCharge(j) + min(q.unifiedOveruseGB(j), ramDeficit)
-	}
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
-	jobs = slices.DeleteFunc(jobs, func(j *Job) bool {
-		return freedRAM(j) == 0 && freedCPU([]*Job{j}, nil) == 0
-	})
-	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool {
-		model, _ := q.model(s.Model)
-		return hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB) == 0 && freedCPU(nil, []*ModelSlot{s}) == 0
-	})
+	jobs = slices.DeleteFunc(jobs, func(j *Job) bool { return jobRAM[j].live == 0 && freedCPU([]*Job{j}, nil) == 0 })
+	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool { return slotRAM[s].live == 0 && freedCPU(nil, []*ModelSlot{s}) == 0 })
 	// Reject impossible demands without constructing a partial release plan.
-	allRAM := room
-	for _, j := range jobs {
-		allRAM += freedRAM(j)
-	}
-	for _, s := range slots {
-		model, _ := q.model(s.Model)
-		allRAM += hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB)
-	}
-	if allRAM < need || !cpuOK(jobs, slots) {
+	fits := func(js []*Job, ss []*ModelSlot) bool { return ramAfter(js, ss) >= need && cpuOK(js, ss) }
+	if !fits(jobs, slots) {
 		return nil, nil, false
 	}
 	// This single-victim check plus greedy/reverse prune is a heuristic, not
 	// always optimal; #100 accepts this tradeoff to keep check-ins inexpensive.
 	ramCapacity := m.HostAvailableMemoryGB
-	if m.hostBudgetGB > 0 {
-		ramCapacity = min(ramCapacity, m.hostBudgetGB)
+	if m.EffectiveHostMemoryBudgetGB > 0 {
+		ramCapacity = min(ramCapacity, m.EffectiveHostMemoryBudgetGB)
 	}
 	coreDeficit := max(0, m.CPUInUseCores+cores-m.EffectiveCPUCores)
 	var bestJobs []*Job
 	var bestSlots []*ModelSlot
 	var bestTiers []int
 	bestStops, bestExcess, bestID := 0, 0.0, ""
-	consider := func(js []*Job, ss []*ModelSlot, spec Spec, stops int, ram float64, id string) {
-		if room+ram < need || !cpuOK(js, ss) {
+	consider := func(js []*Job, ss []*ModelSlot, spec Spec, stops int, id string) {
+		if !fits(js, ss) {
 			return
 		}
 		tiers := make([]int, len(q.effectivePriorityPolicy().Tiers))
 		tiers[q.priorityMatch(spec).Index] = stops
-		excess := max(0, ram-ramDeficit)/max(1, ramCapacity) + float64(max(0, freedCPU(js, ss)-coreDeficit))/float64(max(1, m.EffectiveCPUCores))
+		// RAM freed beyond the shortfall, over what the host can hold.
+		excess := max(0, ramAfter(js, ss)-max(room, need))/max(1, ramCapacity) + float64(max(0, freedCPU(js, ss)-coreDeficit))/float64(max(1, m.EffectiveCPUCores))
 		order := slices.Compare(tiers, bestTiers)
 		if bestTiers == nil || order < 0 || order == 0 && (stops < bestStops || stops == bestStops && (excess < bestExcess || excess == bestExcess && id < bestID)) {
 			bestJobs, bestSlots, bestTiers = js, ss, tiers
@@ -247,15 +252,14 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 		if j.State == "running" {
 			stops = 1
 		}
-		consider([]*Job{j}, nil, j.Spec, stops, freedRAM(j), "job/"+j.ID)
+		consider([]*Job{j}, nil, j.Spec, stops, "job/"+j.ID)
 	}
 	for _, s := range slots {
 		stops := 0
 		if s.State != "draining" && s.State != "unloading" {
 			stops = 1
 		}
-		model, _ := q.model(s.Model)
-		consider(nil, []*ModelSlot{s}, q.slotSpec(s), stops, hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB), "slot/"+slotKey(s.Machine, s.Model, s.Device))
+		consider(nil, []*ModelSlot{s}, q.slotSpec(s), stops, "slot/"+slotKey(s.Machine, s.Model, s.Device))
 	}
 	if bestTiers != nil {
 		return bestJobs, bestSlots, true
@@ -263,50 +267,37 @@ func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Sp
 	// Prefer releasing model residency before interrupting commands.
 	chosenSlots := []*ModelSlot{}
 	for _, s := range slots {
-		if room >= need && cpuOK(nil, chosenSlots) {
+		if fits(nil, chosenSlots) {
 			break
 		}
-		model, _ := q.model(s.Model)
-		n := hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB)
-		if room < need && n > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
-			room += n
+		if ramAfter(nil, chosenSlots) < need && slotRAM[s].live > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
 			chosenSlots = append(chosenSlots, s)
 		}
 	}
 	chosenJobs := []*Job{}
 	for _, j := range jobs {
-		if room >= need && cpuOK(chosenJobs, chosenSlots) {
+		if fits(chosenJobs, chosenSlots) {
 			break
 		}
-		n := freedRAM(j)
-		if room < need && n > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
-			room += n
+		if ramAfter(chosenJobs, chosenSlots) < need && jobRAM[j].live > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			chosenJobs = append(chosenJobs, j)
 		}
 	}
 	// A later RAM release can also cover cores freed by an earlier pick.
 	// Prune in reverse preference order, retaining the cheaper victims first.
 	for i := len(chosenJobs) - 1; i >= 0; i-- {
-		j := chosenJobs[i]
-		n := freedRAM(j)
-		remaining := slices.Delete(slices.Clone(chosenJobs), i, i+1)
-		if room-n >= need && cpuOK(remaining, chosenSlots) {
-			room -= n
+		if remaining := slices.Delete(slices.Clone(chosenJobs), i, i+1); fits(remaining, chosenSlots) {
 			chosenJobs = remaining
 		}
 	}
 	for i := len(chosenSlots) - 1; i >= 0; i-- {
-		s := chosenSlots[i]
-		model, _ := q.model(s.Model)
-		n := hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB)
-		remaining := slices.Delete(slices.Clone(chosenSlots), i, i+1)
-		if room-n >= need && cpuOK(chosenJobs, remaining) {
-			room -= n
+		if remaining := slices.Delete(slices.Clone(chosenSlots), i, i+1); fits(chosenJobs, remaining) {
 			chosenSlots = remaining
 		}
 	}
-	return chosenJobs, chosenSlots, room >= need && cpuOK(chosenJobs, chosenSlots)
+	return chosenJobs, chosenSlots, fits(chosenJobs, chosenSlots)
 }
+
 func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Spec) float64 {
 	demand := priorityDemand(priority, identity)
 	room := m.FreeMemoryGB
@@ -425,17 +416,6 @@ func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
 	return growth, validMemoryValue(growth)
 }
 
-func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
-	forecast, fresh := sample.hostGrowth(now)
-	if !fresh {
-		return reservation
-	}
-	// The envelope and the live forecast protect the same future bytes. Raw
-	// availability already excludes resident anon: spend that credit once,
-	// then protect whichever remaining bound is larger, including sample age.
-	return max(0, reservation-sample.gb, forecast)
-}
-
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
 	return updateHostMemorySamples(reports, now, nil)
 }
@@ -449,7 +429,8 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
-			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, devicePeakGB: old.devicePeakGB, retainedGB: old.retainedGB}
+			// A missing reading keeps the forecast the last one supported.
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, devicePeakGB: old.devicePeakGB, retainedGB: sampleForecast(old, now)}
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
@@ -513,105 +494,6 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 	return samples
 }
 
-// Bounded learned/exploratory estimates are admission reservations; their
-// wider execution ceiling contains unseen growth but is not measured demand.
-// Cold probes still need complete fresh evidence before releasing their offered
-// envelope. Their adaptive execution ceiling is containment, not extra demand.
-func jobHostMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
-	if c, g, ok := usedMemoryCharge(j, m, ceiling, sample, now); ok {
-		return c, g // Contained work is charged by use (memory_planning.go).
-	}
-	if m != nil && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" &&
-		!j.Spec.Run.Docker && j.Spec.Needs.cpuOnly() && j.Spec.Needs.Memory != "auto" && j.Spec.Needs.HostMemoryGB > 0 {
-		// The native attempt's parent cgroup contains main and all helpers at
-		// hostNeed (declaration plus slack). Its complete reservation already
-		// covers every possible growth forecast. Preserve contradictory actual
-		// observations, but do not invent use beyond kernel containment. This
-		// does not apply to RSS or accelerator memory outside the cgroup.
-		charge = max(ceiling, retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
-		if _, fresh := sample.hostGrowth(now); fresh {
-			return charge, max(0, charge-sample.gb)
-		}
-		return charge, charge // Missing/stale data grants no resident credit.
-	}
-	adaptiveCeiling := adaptiveMemoryCeilingGB(j, m)
-	hardCeiling := max(ceiling, adaptiveCeiling)
-	hardContained := j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)"
-	e := j.MemoryEnvelope
-	bounded := adaptiveCeiling > 0 && e.ProbeFloorGB <= 0
-	charge = max(ceiling, retainedHostCharge(j))
-	// A cold probe already reserves the full opportunity admitted beside its
-	// neighbors. Promoting it to wider execution containment here can exceed the
-	// host allowance and block startup before the first observation can arrive.
-	if bounded {
-		charge = boundedHostMemoryCharge(j, m, ceiling, adaptiveCeiling, sample, now)
-	}
-	coldObserved := 0.0
-	if adaptiveCeiling > 0 && !bounded {
-		// An unknown command can outgrow its original opportunity. Retain
-		// measured demand independently of its replaceable live forecast.
-		coldObserved = max(retainedHostCharge(j), sample.peakGB, sample.gb, sample.footprintGB)
-		charge = max(charge, coldObserved+exploratoryDriftMarginGB(m))
-	}
-	// Accelerator and unenforced attempts also use the generic forecast. A
-	// measured slope can predict impossible occupancy even while fresh. Bound
-	// only its prediction by inventoried physical RAM, never by an operator's
-	// smaller allowance, and never discard actual high water or known demand.
-	physical := 0.0
-	if m.CapabilityProfile != nil {
-		physical = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	}
-	if !bounded {
-		charge = max(charge, sample.peakGB, sample.gb, sample.footprintGB)
-	}
-	if !bounded && !sample.at.IsZero() && !now.Before(sample.at) && now.Sub(sample.at) < sample.freshFor() {
-		forecast := sample.hostForecast(now)
-		if physical > 0 {
-			forecast = min(forecast, physical)
-		}
-		charge = max(charge, forecast)
-	}
-	growth = remainingAllocationGrowth(m, j.Spec.Needs.MemoryGB, charge, sample, now)
-	if !bounded && physical > 0 {
-		// Apply the same physical bound to outstanding growth; capping only
-		// the static charge would still let the raw slope invent admission debt.
-		limit := max(charge, physical)
-		if _, fresh := sample.hostGrowth(now); fresh {
-			limit = max(0, limit-sample.gb)
-		}
-		if unifiedCUDA(m) {
-			limit = max(limit, j.Spec.Needs.MemoryGB) // No unproved device overlap.
-		}
-		growth = min(growth, limit)
-	}
-	if hardContained {
-		// Bound burst forecasts by the complete physical execution ceiling,
-		// without assuming sampled residency remains present at admission.
-		growth = min(growth, hardCeiling)
-	}
-	if e == nil || (e.ProbeFloorGB <= 0 && adaptiveCeiling <= 0) || j.Spec.Needs.Memory != "auto" || !j.Spec.Needs.cpuOnly() || j.State != "running" || !sample.growthObserved || sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= sample.freshFor() || !validMemoryValue(sample.gb) || !validMemoryValue(sample.growthGB) {
-		return
-	}
-	floor := e.ProbeFloorGB
-	if bounded {
-		floor = charge // Estimates can grow, never earn probe credit.
-	} else if adaptiveCeiling > 0 {
-		floor = max(floor, coldObserved+exploratoryDriftMarginGB(m))
-	}
-	charge = floor
-	if !bounded {
-		charge = max(floor, sample.hostForecast(now)+exploratoryDriftMarginGB(m))
-	}
-	if m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
-		// Adaptive guards use their physical execution ceiling, not the
-		// admission estimate. Retain measured footprint and known floors.
-		charge = max(floor, sample.gb, sample.footprintGB, min(charge, hardCeiling))
-	}
-	charge = boundedProcessMemoryCharge(m, floor, sample.footprintGB, charge)
-	growth = max(0, charge-sample.gb)
-	return
-}
-
 // Two observed delivery intervals allow one missed delivery. Until an interval
 // is measured, preserve the legacy credit window. Receipt of the same cached
 // sample cannot extend validity. Device attribution keeps its separate fence.
@@ -639,22 +521,6 @@ func (s hostMemorySample) identifiedHostForecast(now time.Time) (float64, bool) 
 	return s.hostForecast(now), true
 }
 
-func boundedHostMemoryCharge(j *Job, m *Machine, ceiling, containment float64, sample hostMemorySample, now time.Time) float64 {
-	retained := retainedHostCharge(j)
-	forecast, fresh := sample.identifiedHostForecast(now)
-	observed := max(sample.peakGB, sample.gb, sample.footprintGB)
-	if c := j.HostMemoryCharge; retained > 0 && c != nil && c.ObservedGB != nil {
-		observed = max(observed, *c.ObservedGB)
-		if fresh && sample.id > c.SampleID {
-			// A genuinely newer observation replaces forecast uncertainty. The
-			// durable observed peak cannot be released, even across restart.
-			retained = *c.ObservedGB
-		}
-	}
-	drift := exploratoryDriftMarginGB(m)
-	return max(ceiling, retained, observed+drift, min(containment, max(sample.retainedGB, forecast)+drift))
-}
-
 // Durable exact-attempt demand and replaceable forecast survive restart without
 // preserving resident credit. Nil ObservedGB means a pre-provenance opaque floor:
 // it cannot safely be attributed to forecast, so it remains conservative.
@@ -680,7 +546,7 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
-		charge, _ := jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now)
+		charge, _ := memoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now)
 		observed, id := 0.0, int64(0)
 		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {
 			observed, id = old.GiB, old.SampleID
@@ -715,5 +581,5 @@ func (q *Queue) hostJobCharge(j *Job) float64 {
 
 func (q *Queue) hostJobChargeGrowth(j *Job) (charge, growth float64) {
 	m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	return jobHostMemoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+	return memoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 }

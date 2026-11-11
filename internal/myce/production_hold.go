@@ -171,7 +171,7 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if j.Spec.Needs.CPUCores == 0 && (m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs == 0) && !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if j.Spec.Needs.CPUCores == 0 && (m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs == 0) && !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.EffectiveHostMemoryBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {

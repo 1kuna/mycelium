@@ -185,7 +185,7 @@ func TestHostReleaseConfirmedStoppingJobHasNoCredit(t *testing.T) {
 			}
 			demand := spec("production")
 			demand.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 8}
-			jobs, slots, ok := q.hostReleasesExcept(m, 0, 8, demand, nil, nil)
+			jobs, slots, ok := q.hostReleases(m, 0, 8, demand.Priority, demand)
 			if ok || len(jobs)+len(slots) != 0 {
 				t.Fatalf("already-refunded release supplied phantom RAM: feasible=%v victims=%v", ok, releaseTestIDs(jobs, slots))
 			}
@@ -207,7 +207,7 @@ func TestHostReleaseEnvironmentBuildKeepsCPUReservation(t *testing.T) {
 	q.refreshHostMemory()
 	demand := spec("production")
 	demand.Needs = ResourceNeeds{CPUCores: 2}
-	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	jobs, slots, ok := q.hostReleases(m, 0, 0, demand.Priority, demand)
 	if !ok || !slices.Equal(releaseTestIDs(jobs, slots), []string{"job/b"}) {
 		t.Fatalf("build takes a's released core: feasible=%v victims=%v; want [job/b]", ok, releaseTestIDs(jobs, slots))
 	}
@@ -233,7 +233,7 @@ func TestHostReleaseBuildSharesJobAndSlotReservation(t *testing.T) {
 	q.refreshHostMemory()
 	demand := spec("production")
 	demand.Needs = ResourceNeeds{CPUCores: 2}
-	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	jobs, slots, ok := q.hostReleases(m, 0, 0, demand.Priority, demand)
 	if !ok {
 		t.Fatal("shared reservation should have a feasible plan")
 	}

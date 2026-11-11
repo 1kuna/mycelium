@@ -170,7 +170,7 @@ func TestEnvironmentOwnedCoreSurvivesExecutionReleaseProjection(t *testing.T) {
 	q.refreshHostMemory()
 	demand := spec("production")
 	demand.Needs = ResourceNeeds{CPUCores: 2}
-	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	jobs, slots, ok := q.hostReleases(m, 0, 0, demand.Priority, demand)
 	if !ok || !slices.Equal(releaseTestIDs(jobs, slots), []string{"job/a", "job/b"}) {
 		t.Fatalf("owned builder core distorted release projection: feasible=%t victims=%v", ok, releaseTestIDs(jobs, slots))
 	}

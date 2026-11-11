@@ -61,17 +61,15 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			continue
 		}
 		jobs := []*Job{}
-		room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 		for _, running := range q.liveJobs() {
 			owner := q.s.Machines[running.Machine]
 			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) {
 				jobs = append(jobs, running)
-				room += q.hostJobCharge(running)
 			}
 		}
-		projected := q.cpuAfterReleases(m, jobs, nil, 0)
+		projected := q.afterReleases(m, jobs, nil)
 		capacity := q.qualificationCapacity(m)
-		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, max(0, room))
+		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, projected.FreeHostMemoryGB)
 		projections[targetKey(m)] = &projected
 	}
 	// Keep dispatch's target order and global wave planner. Passing the entire

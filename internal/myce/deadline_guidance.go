@@ -76,8 +76,7 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 			// this demand. Test fit after its exact release, as placement does,
 			// rather than hiding the blocker when current capacity is full.
 			if !fitsCurrent {
-				projected := q.cpuAfterReleases(m, []*Job{r}, nil, 0)
-				projected.FreeHostMemoryGB += q.hostJobCharge(r)
+				projected := q.afterReleases(m, []*Job{r}, nil)
 				if !fits(j, &projected, max(m.TotalMemoryGB, m.FreeMemoryGB+r.Spec.Needs.MemoryGB)) {
 					continue
 				}

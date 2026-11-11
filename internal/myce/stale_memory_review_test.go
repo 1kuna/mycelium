@@ -58,7 +58,7 @@ func TestHostMemoryDelayedLegacySampleRetainsExpiry(t *testing.T) {
 	c.Advance(20 * time.Second)
 	r.CurrentHostMemory.AgeSeconds = 10
 	samples = updateHostMemorySamples([]AttemptReport{r}, c.Now(), samples)
-	if got := remainingHostGrowth(3, samples[key], c.Now()); got != 3 {
+	if got := reservedGrowth(nil, 0, 3, samples[key], c.Now()); got != 3 {
 		t.Fatalf("delayed cached observation renewed resident credit: pending=%g period=%s age=%s", got, samples[key].period, c.Now().Sub(samples[key].at))
 	}
 }
@@ -78,13 +78,13 @@ func TestHostMemoryDelayedCachedSampleRetainsExpiry(t *testing.T) {
 			}
 			r.CurrentHostMemory.AgeSeconds = 10
 			samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
-			if got := remainingHostGrowth(3, samples[key], clock.Now()); got != 3 {
+			if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 3 {
 				t.Fatalf("cached sample renewed credit: %g", got)
 			}
 			// A genuinely new observation establishes cadence without renewing the old one.
 			r.CurrentHostMemory.SampleID, r.CurrentHostMemory.AgeSeconds = 2, 0
 			samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
-			if got := remainingHostGrowth(3, samples[key], clock.Now()); got != 1 {
+			if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 1 {
 				t.Fatalf("new observation lost credit: %g", got)
 			}
 		})
@@ -102,14 +102,14 @@ func TestHostMemoryIdentityRecoversAfterUnknownSample(t *testing.T) {
 	c.Attempts[0].CurrentHostMemory.SampleID = 1
 	c.Attempts[0].CurrentHostMemory.AgeSeconds = 10
 	samples = updateHostMemorySamples(c.Attempts, clock.Now(), samples)
-	if s := samples[key]; s.id != 1 || s.period != 0 || remainingHostGrowth(3, s, clock.Now()) != 3 {
+	if s := samples[key]; s.id != 1 || s.period != 0 || reservedGrowth(nil, 0, 3, s, clock.Now()) != 3 {
 		t.Fatalf("identity transition renewed expired credit or lost anchor: %+v", s)
 	}
 	for _, id := range []int64{2, 3} {
 		clock.Advance(6 * time.Second)
 		c.Attempts[0].CurrentHostMemory.SampleID, c.Attempts[0].CurrentHostMemory.AgeSeconds = id, 0
 		samples = updateHostMemorySamples(c.Attempts, clock.Now(), samples)
-		if s := samples[key]; s.id != id || s.period != 6*time.Second || remainingHostGrowth(3, s, clock.Now()) != 1 {
+		if s := samples[key]; s.id != id || s.period != 6*time.Second || reservedGrowth(nil, 0, 3, s, clock.Now()) != 1 {
 			t.Fatalf("fresh identified sample failed to recover cadence/credit: %+v", s)
 		}
 	}

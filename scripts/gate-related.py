@@ -31,6 +31,16 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
     'device_detection_test.go', 'device_inventory_family_test.go',
     'probe_consolidation_test.go', 'accelerator_backend_test.go')
 
+# Actual check-in admission decisions are exercised by the admission wait tests.
+SUPPLEMENTAL_CONSUMERS['internal/myce/admission_decision.go'] = ('admission_wait_test.go',)
+# Cold-load readiness alerts are reviewed through the readiness regressions.
+SUPPLEMENTAL_CONSUMERS['internal/myce/readiness_health.go'] = ('readiness_review_test.go',)
+# The one memory rule's charge, room and release regressions (#990).
+SUPPLEMENTAL_CONSUMERS['internal/myce/memory_room.go'] = (
+    'used_memory_charge_test.go', 'host_memory_growth_test.go', 'stale_memory_charge_test.go',
+    'declared_host_memory_test.go', 'learned_memory_guard_test.go', 'host_release_search_test.go',
+    'memory_admission_test.go', 'unified_launch_memory_test.go', 'metal_footprint_charge_test.go')
+
 # Backend accounting policy feeds these existing memory/placement regressions.
 SUPPLEMENTAL_CONSUMERS['internal/myce/memory_sizing_facts.go'] = (
     'attempt_memory_facts_test.go', 'process_memory_test.go',

@@ -250,25 +250,16 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 			return nil
 		}
 	}
-	// Mandatory/local releases already provide RAM as well as GPU memory.
-	// Project both once before asking for additional host-wide releases.
+	// Mandatory/local releases already provide RAM as well as GPU memory;
+	// the host-wide plan credits them once before asking for more.
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
-	projected.FreeHostMemoryGB -= m.hostReservationDebtGB - q.unifiedReleaseDebtCredit(m, p.jobs)
-	projected.hostReservationDebtGB = 0 // Carry signed room through local releases once.
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
-	overuse := 0.0
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
-		projected.FreeHostMemoryGB += q.hostJobCharge(r)
-		overuse += q.unifiedOveruseGB(r)
 	}
 	for _, s := range p.slots {
 		releasedSlots[s] = true
-		model, _ := q.model(s.Model)
-		projected.FreeHostMemoryGB += hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB)
 	}
-	// Measured over-use counts only up to the signed (debt-inclusive) shortfall.
-	projected.FreeHostMemoryGB += min(overuse, max(0, hostNeed(&projected, need, host)-projected.FreeHostMemoryGB))
 	hostJobs, hostSlots, ok := q.hostReleasesWithVictims(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0, func(v *Job) bool { return q.batchPreemptible(v, j.Spec) || p.yields[v.ID] != nil })
 	if !ok {
 		return nil
@@ -282,45 +273,6 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, 
 	return p
 }
 
-// A started unified-CUDA job's device allocation is invisible to its cgroup
-// sample, so live headroom already lacks it while growth still reserves the
-// full device vector (#424); that double count surfaces as reservation debt.
-// Releasing the job frees both, so credit its device vector against the debt,
-// never beyond it. Without this, production never planned to stop a deadline
-// holder of most of the host's allowance (#598). Planning only: admission
-// still waits for confirmed release and rechecks live memory.
-func (q *Queue) unifiedReleaseDebtCredit(m *Machine, jobs []*Job) float64 {
-	credit := 0.0
-	for _, j := range jobs {
-		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-		if owner != nil && unifiedCUDA(owner) && j.StartedAt != nil && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
-			credit += j.Spec.Needs.MemoryGB
-		}
-	}
-	return min(credit, m.hostReservationDebtGB)
-}
-
-// A started unified-CUDA job's device memory is invisible to its cgroup, so a
-// job reserving 2 GiB can hold 45 GiB that live headroom already lacks, and
-// production waited behind it with no stop (#596). Releasing it frees that use
-// too: credit its fresh measured device plus cgroup use above its reservation.
-// Stale or missing samples count as zero. Planning only: admission still waits
-// for exact release and the live recheck.
-func (q *Queue) unifiedOveruseGB(j *Job) float64 {
-	owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	if !unifiedCUDA(owner) || j.StartedAt == nil || j.ReleaseConfirmed || j.State != "running" && j.State != "stopping" {
-		return 0
-	}
-	s, now := q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()
-	if s.deviceAt.IsZero() || now.Before(s.deviceAt) || now.Sub(s.deviceAt) >= deviceMemorySampleFreshFor {
-		return 0
-	}
-	used := s.deviceGB
-	if !s.at.IsZero() && !now.Before(s.at) && now.Sub(s.at) < hostMemorySampleFreshFor {
-		used += s.gb
-	}
-	return max(0, used-hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
-}
 func (q *Queue) slotMemory(s *ModelSlot) float64 { model, _ := q.model(s.Model); return model.MemoryGB }
 
 // fewestBatchVictims plans the fewest preemptible co-tenants whose release

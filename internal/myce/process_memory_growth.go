@@ -32,18 +32,3 @@ func (g *processMemoryGrowth) observe(now time.Time, gb float64) float64 {
 	g.last, g.lastGB = now, gb
 	return margin
 }
-
-// A forecast cannot allocate more physical RAM than the measured host has.
-// Hitting this bound still reserves the whole host (RSS receives no resident
-// credit), preventing neighbors from spending a high-slope job's headroom.
-// Keep actual RSS even when shared-page double counting exceeds physical RAM,
-// and keep every known floor. Estimates are deliberately not hard ceilings.
-// Missing inventory leaves the existing conservative forecast unchanged;
-// Linux's hard-cgroup accounting and estimator are independent.
-func boundedProcessMemoryCharge(m *Machine, floor, footprint, forecastCharge float64) float64 {
-	if m == nil || m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" || m.CapabilityProfile == nil || m.CapabilityProfile.OS != "darwin" || m.CapabilityProfile.SystemMemoryBytes == 0 {
-		return forecastCharge
-	}
-	physical := float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	return max(floor, footprint, min(forecastCharge, physical))
-}

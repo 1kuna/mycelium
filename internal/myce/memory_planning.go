@@ -100,68 +100,6 @@ func constrainedMemoryIdentity(j *Job, estimate memoryEstimate) constrainedMemor
 // Darwin worker compute the same charge.
 const darwinGuardReaction = 4 * attemptMemorySamplePeriod
 
-// usedMemoryCharge charges a running job the memory it uses, not its whole
-// declared envelope, where a guard contains its growth or, for unified CUDA
-// device memory, where it is measured per process (#1044, audit item 3):
-//
-//   - native CPU-only work with a positive declaration on a guarded dedicated
-//     host: Linux cgroup v2 ceilings, or the Darwin RSS guard. Interactive
-//     hosts keep their envelope (MY-45: harsher limits);
-//   - native GPU work on a unified CUDA host with cgroup v2 ceilings (see
-//     unifiedUsedMemoryCharge);
-//   - native Metal work with a declared size on a Darwin worker whose guard
-//     samples phys_footprint (metal_footprint_guard_v1). Metal buffers are
-//     invisible to RSS but counted 1:1 in phys_footprint (#1044), so the
-//     sample is the job's whole unified-memory use. Discrete accelerators keep
-//     their envelope;
-//   - learned evidence for this work on this target (MY-34): a first run with no
-//     accepted history keeps its envelope, and later runs never drop below
-//     what history says the job reaches;
-//   - a fresh exact-attempt sample. Missing or stale data grants nothing.
-//
-// The charge is max(learned need, attempt high water, live forecast) plus the
-// measured overshoot before containment acts, bounded by the enforced ceiling.
-// Actual observation above that bound is kept: it is real occupancy.
-// Remaining growth credits current resident memory once, because live host
-// availability already excludes it. When lenders outgrow what they were
-// charged, yieldMemoryOvercommit stops the lowest-tier work before the kernel.
-func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64, ok bool) {
-	if !usedMemoryChargeEligible(j, m, sample, now) {
-		return 0, 0, false
-	}
-	if unifiedDeviceWork(j, m) {
-		charge, growth = unifiedUsedMemoryCharge(j, m, ceiling, sample, now)
-		return charge, growth, true
-	}
-	resident := max(sample.gb, sample.footprintGB)
-	observed := max(sample.peakGB, resident)
-	learned := hostNeed(m, 0, j.MemoryEnvelope.Learned.HostGB)
-	if metalFootprintWork(j, m) {
-		// As for unified CUDA, the floor is the accepted peaks (RSS plus the
-		// footprint beyond it) without the envelope's uncertainty; the yield
-		// backstop covers growth past them.
-		learned = j.MemoryEnvelope.Learned.PeakHostGB + j.MemoryEnvelope.Learned.PeakDeviceGB
-	}
-	// hostForecast already carries the last measured increment and the rate
-	// through the sample's age; the drift margin covers snapshot-to-launch.
-	margin := exploratoryDriftMarginGB(m)
-	bound := ceiling
-	if m.MemoryEnforcement == darwinRSSGuardStatus {
-		overshoot := sample.rateGB * darwinGuardReaction.Seconds()
-		margin += overshoot
-		bound += overshoot // RSS can pass the limit before the guard stops it.
-	}
-	charge = max(min(max(learned, observed, sample.hostForecast(now))+margin, bound), observed)
-	credit := sample.gb
-	if m.MemoryEnforcement == darwinRSSGuardStatus {
-		// Darwin availability excludes the job's resident pages, but RSS gets
-		// no resident field. The charge is built from the same RSS, so credit
-		// it once while always protecting the measured margin.
-		credit = sample.footprintGB
-	}
-	return charge, max(0, charge-credit, min(margin, charge)), true
-}
-
 func metalFootprintWork(j *Job, m *Machine) bool {
 	return m != nil && backendFor(m.GPU).processFootprint && !j.Spec.Needs.cpuOnly() && slices.Contains(m.Capabilities, metalFootprintGuardCapability)
 }
@@ -170,94 +108,16 @@ func unifiedDeviceWork(j *Job, m *Machine) bool {
 	return unifiedCUDA(m) && !j.Spec.Needs.cpuOnly()
 }
 
-// Measured on a GB10 unified host on 2026-11-11 (#1044): the attempt cgroup
+// Measured on a unified host on 2026-11-11 (#1044): the attempt cgroup
 // charges and contains host, managed (cudaMallocManaged) and pinned
 // (cudaMallocHost) allocations, but device allocations (cudaMalloc, which the
 // PyTorch caching allocator uses) escape both the cgroup and RSS. NVML still
 // reports them per process, the worker samples that every
 // deviceMemorySamplePeriod, and host availability falls by the same amount.
-// So the host share is contained and the device share is measured.
-//
-// Each share is charged max(accepted peak of this work on this target, attempt
-// high water, live forecast). The peaks drop the learned envelope's measured
-// uncertainty, which on this host was as large as the peaks themselves; growth
-// past them is what yieldMemoryOvercommit stops before the host runs out. The
-// sum, plus the launch drift margin, is bounded by the envelope; observed use
-// above it is kept. Per-process device counters can count one allocation more
-// than once and may overlap cgroup pages (#424), so the sum only overstates,
-// and only the host vector uniquely charged to the cgroup earns credit.
-func unifiedUsedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
-	l := j.MemoryEnvelope.Learned
-	host := max(l.PeakHostGB, sample.peakGB, sample.gb, sample.footprintGB, sample.hostForecast(now))
-	device := max(l.PeakDeviceGB, sample.devicePeakGB, sample.deviceGB, deviceForecast(sample, now))
-	observed := max(sample.peakGB, sample.gb, sample.footprintGB) + max(sample.devicePeakGB, sample.deviceGB)
-	margin := exploratoryDriftMarginGB(m)
-	charge = max(min(host+device+margin, ceiling), observed)
-	return charge, max(0, charge-sample.gb, min(margin, charge))
-}
-
+// So the host share is contained and the device share is measured: by-use
+// unified work is charged both (memoryCharge). Per-process device counters can
+// count one allocation more than once and may overlap cgroup pages (#424), so
+// the sum only overstates, and only the host vector earns resident credit.
 func deviceForecast(s hostMemorySample, now time.Time) float64 {
 	return s.deviceGB + s.deviceGrowthGB + s.deviceRateGB*now.Sub(s.deviceAt).Seconds()
-}
-
-func usedMemoryChargeEligible(j *Job, m *Machine, sample hostMemorySample, now time.Time) bool {
-	if j == nil || m == nil || j.StartedAt == nil || (j.State != "running" && j.State != "stopping") {
-		return false
-	}
-	n, e := j.Spec.Needs, j.MemoryEnvelope
-	if j.Spec.Run.Docker || m.SharedHost != nil || e == nil || e.Learned == nil || e.Learned.Evidence < 1 {
-		return false
-	}
-	if _, fresh := sample.hostGrowth(now); !fresh || !validMemoryValue(sample.footprintGB) || !validMemoryValue(sample.rateGB) {
-		return false
-	}
-	if unifiedDeviceWork(j, m) {
-		return unifiedUsedMemoryEligible(j, m, sample, now)
-	}
-	if metalFootprintWork(j, m) {
-		return metalUsedMemoryEligible(j, m, sample)
-	}
-	if !n.cpuOnly() || n.Memory == "auto" || n.HostMemoryGB <= 0 {
-		return false
-	}
-	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" && m.MemoryEnforcement != darwinRSSGuardStatus {
-		return false
-	}
-	if !validMemoryValue(e.Learned.HostGB) || e.Learned.HostGB <= 0 {
-		return false
-	}
-	return max(sample.gb, sample.footprintGB) > 0
-}
-
-// The envelope is fixed at assignment, learned or declared, and the worker
-// applies hostNeed (host plus device) as the attempt's memory.max. One card's
-// NVML sample describes the attempt; RSS and host-delta fallbacks, which
-// require exclusive execution, are estimates and grant nothing.
-func unifiedUsedMemoryEligible(j *Job, m *Machine, sample hostMemorySample, now time.Time) bool {
-	n, l := j.Spec.Needs, j.MemoryEnvelope.Learned
-	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" || !m.HostMemoryMeasured || n.MemoryGB <= 0 || n.HostMemoryGB <= 0 || len(j.AllocatedDevices) > 1 {
-		return false
-	}
-	if l.PeakDeviceGB <= 0 || !validMemoryValue(l.PeakDeviceGB) || !validMemoryValue(l.PeakHostGB) {
-		return false
-	}
-	if sample.source != "" || sample.exclusive || sample.deviceAt.IsZero() || now.Before(sample.deviceAt) || now.Sub(sample.deviceAt) >= deviceMemorySampleFreshFor {
-		return false
-	}
-	return validMemoryValue(sample.deviceGB) && validMemoryValue(sample.deviceGrowthGB) && validMemoryValue(sample.deviceRateGB)
-}
-
-// The worker guards the same envelope it reports: device plus host in unified
-// memory, so the queue must sum them too (a measured unified host). Peaks
-// come only from footprint samples: Metal attempts sampled by RSS alone never
-// carried a device share, so unified sizing never accepted them.
-func metalUsedMemoryEligible(j *Job, m *Machine, sample hostMemorySample) bool {
-	n, l := j.Spec.Needs, j.MemoryEnvelope.Learned
-	if m.MemoryEnforcement != darwinRSSGuardStatus || !m.UnifiedMemory || !m.HostMemoryMeasured || n.Memory == "auto" || n.HostMemoryGB <= 0 || len(j.AllocatedDevices) > 1 {
-		return false
-	}
-	if l.PeakDeviceGB <= 0 || !validMemoryValue(l.PeakDeviceGB) || !validMemoryValue(l.PeakHostGB) {
-		return false
-	}
-	return sample.footprintGB > 0
 }

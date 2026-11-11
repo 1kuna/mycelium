@@ -92,7 +92,7 @@ func TestHostGrowthResidentOvershootBindsAllowance(t *testing.T) {
 	j := Job{ID: "holder", State: "running", Attempt: 1, Session: m.Session, AllocatedDevices: []string{"0"}, Spec: spec("production")}
 	j.Spec.Needs.HostMemoryGB = 11
 	sample := hostMemorySample{gb: 12, at: clock.Now()}
-	charge, pending := jobHostMemoryCharge(&j, &m, 11, sample, clock.Now())
+	charge, pending := memoryCharge(&j, &m, 11, sample, clock.Now())
 	if charge < 12 || pending != 0 {
 		t.Fatalf("resident overshoot lost: charge=%g pending=%g", charge, pending)
 	}

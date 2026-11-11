@@ -45,8 +45,7 @@ func (q *Queue) coldLoadContender(s *ModelSlot) string {
 		if hostID(m) != hostID(owner) || !q.placementPolicyAllowed(j, m, true) || q.capReasonFor(j, m) != "" || !q.checkpointReady(j, m) || !environmentReady(j, m) {
 			return false
 		}
-		projected := q.cpuAfterReleases(m, nil, []*ModelSlot{s}, 0)
-		projected.FreeHostMemoryGB += hostNeed(slotMachine(owner, s), model.MemoryGB, model.HostMemoryGB)
+		projected := q.afterReleases(m, nil, []*ModelSlot{s})
 		if slotOnTarget(s, m) {
 			projected.FreeMemoryGB += model.MemoryGB
 		}

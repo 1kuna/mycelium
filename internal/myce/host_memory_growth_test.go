@@ -161,13 +161,13 @@ func TestHostMemoryCurrentCreditsOnlyAnonymousResident(t *testing.T) {
 		t.Fatal("unsupported telemetry fabricated")
 	}
 	for _, sample := range []hostMemorySample{{gb: math.NaN(), at: clock.Now()}, {gb: math.Inf(1), at: clock.Now()}, {gb: 2.75, at: clock.Now().Add(time.Second)}} {
-		if remainingHostGrowth(16.356, sample, clock.Now()) != 16.356 {
+		if reservedGrowth(nil, 0, 16.356, sample, clock.Now()) != 16.356 {
 			t.Fatal("invalid telemetry credited")
 		}
 	}
 	reports := []AttemptReport{{Execution: Execution{ID: "holder", Attempt: 1}, Session: "old", Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 2.75}}}
 	samples := currentHostMemorySamples(reports, clock.Now())
-	if remainingHostGrowth(16.356, samples[attemptKey{"holder", 1, "new"}], clock.Now()) != 16.356 {
+	if reservedGrowth(nil, 0, 16.356, samples[attemptKey{"holder", 1, "new"}], clock.Now()) != 16.356 {
 		t.Fatal("stale session credited")
 	}
 }
@@ -220,7 +220,7 @@ func TestHostMemoryProbeForecastAgesBeforeExpiry(t *testing.T) {
 	}
 	sample := hostMemorySample{gb: 1, footprintGB: 1, growthGB: .1, rateGB: 1, growthObserved: true, at: clock.Now()}
 	clock.Advance(4 * time.Second)
-	charge, _ := jobHostMemoryCharge(&j, &m, 16, sample, clock.Now())
+	charge, _ := memoryCharge(&j, &m, 16, sample, clock.Now())
 	if charge < 5.1 {
 		t.Fatalf("aged forecast charges %g GiB; measured rate predicts at least 5.1", charge)
 	}
@@ -269,7 +269,7 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 			q.s.Jobs[j.ID] = &j
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
 			q.refreshHostMemory()
-			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			charge, growth := memoryCharge(&j, &m, ceiling, sample, clock.Now())
 			if enforced && (charge != ceiling || math.Abs(growth-(ceiling-.3)) > 1e-10) {
 				t.Fatalf("contained probe charged forecast above ceiling: charge=%g growth=%g ceiling=%g", charge, growth, ceiling)
 			}
@@ -289,7 +289,7 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 			if enforced {
 				over := sample
 				over.footprintGB = ceiling + 1
-				actual, _ := jobHostMemoryCharge(&j, &m, ceiling, over, clock.Now())
+				actual, _ := memoryCharge(&j, &m, ceiling, over, clock.Now())
 				if actual < over.footprintGB {
 					t.Fatal("forecast bound hid measured overuse", actual)
 				}
@@ -299,25 +299,25 @@ func TestHostMemoryProbeForecastCannotExceedEnforcedCeiling(t *testing.T) {
 				envelope := *j.MemoryEnvelope
 				adaptive.MemoryEnvelope = &envelope
 				adaptive.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
-				grown, _ := jobHostMemoryCharge(&adaptive, &m, ceiling, sample, clock.Now())
+				grown, _ := memoryCharge(&adaptive, &m, ceiling, sample, clock.Now())
 				if grown <= ceiling || grown > m.HostMemoryBudgetGB {
 					t.Fatal("adaptive execution ceiling replaced by its estimate", grown)
 				}
 				burst := sample
 				burst.rateGB = 100
-				bounded, _ := jobHostMemoryCharge(&adaptive, &m, ceiling, burst, clock.Now())
+				bounded, _ := memoryCharge(&adaptive, &m, ceiling, burst, clock.Now())
 				if bounded != m.HostMemoryBudgetGB {
 					t.Fatal("adaptive forecast escaped physical containment", bounded)
 				}
 			}
 			// Cancellation cannot discard custody or acquire reduced probe credit.
 			j.State = "stopping"
-			stopped, pending := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			stopped, pending := memoryCharge(&j, &m, ceiling, sample, clock.Now())
 			if stopped < ceiling || enforced && pending > ceiling {
 				t.Fatal("stopping probe lost full charge", stopped)
 			}
 			clock.Advance(hostMemorySampleFreshFor)
-			stopped, pending = jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+			stopped, pending = memoryCharge(&j, &m, ceiling, sample, clock.Now())
 			if stopped < ceiling || pending < ceiling {
 				t.Fatal("stale stopping probe lost custody", stopped, pending)
 			}

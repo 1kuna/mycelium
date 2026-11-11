@@ -171,7 +171,7 @@ func TestLearnedMemoryGuardExploratoryIncident(t *testing.T) {
 				report := AttemptReport{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
 					CurrentHostMemory: &CurrentHostMemory{SampleID: 1, FootprintGB: &footprint, GrowthObserved: true, GrowthGB: observedGrowth, GrowthRateGB: observedGrowth}}
 				sample := currentHostMemorySamples([]AttemptReport{report}, clock.Now())[jobKey(*run)]
-				charge, pending := jobHostMemoryCharge(job(t, q, run.ID), &m, limit, sample, clock.Now())
+				charge, pending := memoryCharge(job(t, q, run.ID), &m, limit, sample, clock.Now())
 				if math.Abs(charge-5.669582535182689) > 1e-9 || pending != charge {
 					t.Fatalf("exploratory growth not re-reserved without RSS credit: charge=%g pending=%g", charge, pending)
 				}
@@ -338,13 +338,13 @@ func TestLearnedMemoryGuardChargeUsesProbeForecast(t *testing.T) {
 			s := &CurrentHostMemory{SampleID: 1, FootprintGB: &footprint, NonreclaimableGB: resident, GrowthObserved: true, GrowthGB: .1, GrowthRateGB: .05, AgeSeconds: .5}
 			r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: s}
 			sample := currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(j)]
-			charge, pending := jobHostMemoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			charge, pending := memoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
 			want := footprint + .1 + .025 + exploratoryDriftMarginGB(&m)
 			if math.Abs(charge-want) > 1e-9 || math.Abs(pending-(charge-resident)) > 1e-9 {
 				t.Fatalf("charge=%g pending=%g want=%g", charge, pending, want)
 			}
 			clock.Advance(hostMemorySampleFreshFor)
-			charge, _ = jobHostMemoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			charge, _ = memoryCharge(&j, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
 			if charge < want || charge >= 12 {
 				t.Fatalf("stale forecast lost growth or charged physical cap: %g", charge)
 			}
@@ -352,7 +352,7 @@ func TestLearnedMemoryGuardChargeUsesProbeForecast(t *testing.T) {
 			replacement := j
 			replacement.Attempt++
 			sample = currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(replacement)]
-			charge, _ = jobHostMemoryCharge(&replacement, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
+			charge, _ = memoryCharge(&replacement, &m, j.Spec.Needs.HostMemoryGB, sample, clock.Now())
 			if charge != j.Spec.Needs.HostMemoryGB {
 				t.Fatalf("replacement inherited old growth: %g", charge)
 			}

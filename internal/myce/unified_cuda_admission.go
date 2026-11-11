@@ -1,9 +1,6 @@
 package myce
 
-import (
-	"fmt"
-	"time"
-)
+import "fmt"
 
 func unifiedCUDA(m *Machine) bool {
 	return m != nil && backendFor(m.GPU).unifiedProcessAdmission && m.UnifiedMemory
@@ -35,8 +32,8 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 		}
 	}
 	budget := m.HostMemoryBudgetGB
-	if m.hostBudgetGB > 0 {
-		budget = m.hostBudgetGB
+	if m.EffectiveHostMemoryBudgetGB > 0 {
+		budget = m.EffectiveHostMemoryBudgetGB
 	}
 	// The floor is compared with live used RAM, which already contains the
 	// OS, driver and idle-service footprint. Any allowance, measured or
@@ -47,19 +44,6 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 		floor = max(floor, total-budget)
 	}
 	return floor, true
-}
-
-// Host anon/current cannot establish overlap with CUDA allocations (#424).
-// Per-process device counters can themselves count shared allocations more
-// than once, so neither their sum nor an RSS estimate proves unique physical
-// residency. Credit only the uniquely charged host vector; retain the full
-// device floor until device residency/overlap can be independently established.
-func remainingAllocationGrowth(m *Machine, device, reservation float64, sample hostMemorySample, now time.Time) float64 {
-	growth := remainingHostGrowth(reservation, sample, now)
-	if unifiedCUDA(m) {
-		growth = max(growth, device)
-	}
-	return growth
 }
 
 // Existing holds still own takeover/preemption. This additional admission-only
@@ -74,11 +58,8 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 	for _, candidate := range q.memoryCandidates(j, m) {
 		charge = max(charge, hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB))
 	}
-	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
-	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && hostID(owner) == host && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
-		// An unstarted offer already owns its reservation. Revalidate it once.
-		room += remainingAllocationGrowth(owner, j.Spec.Needs.MemoryGB, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
-	}
+	// An offer already owns its reservation: revalidate it once, not twice.
+	room := q.hostRoomAfter(m, []*Job{j}, nil)
 	for _, demand := range q.liveJobs() {
 		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 {
 			continue
