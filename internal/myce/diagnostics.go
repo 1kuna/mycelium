@@ -251,7 +251,7 @@ func runtimeErrorFor(operation string, err error) error {
 		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
 		c.Class = cpuIsolationUnavailable
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, errFileTransferStalled), errors.Is(err, errCheckpointIOTimeout):
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, exec.ErrWaitDelay), errors.Is(err, errFileTransferStalled), errors.Is(err, errCheckpointIOTimeout):
 		c.Class = "timeout"
 	case errors.Is(err, context.Canceled):
 		c.Class = "cancelled"

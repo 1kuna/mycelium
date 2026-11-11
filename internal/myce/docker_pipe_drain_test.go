@@ -20,7 +20,7 @@ func TestDockerRPCDrainsBufferedOutputWithinLatencyEnvelope(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "docker")
 	pidFile := binary + ".pid"
-	script := "#!/bin/sh\nprintf '[]\\n'\nprintf '%s' \"$$\" > \"$0.pid\"\n"
+	script := "#!/bin/sh\nprintf '[]\\n'\nprintf 'diagnostic\\n' >&2\nprintf '%s' \"$$\" > \"$0.pid\"\n"
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
