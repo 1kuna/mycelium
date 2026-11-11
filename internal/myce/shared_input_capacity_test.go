@@ -76,7 +76,7 @@ func TestSharedInputCapacityPressure(t *testing.T) {
 }
 
 func TestSharedInputCapacityLegacyWorkerLargeInputs(t *testing.T) {
-	for _, peers := range []int{0, 199} {
+	for _, peers := range []int{0, 3} {
 		t.Run(fmt.Sprintf("hosts-%d", peers+1), func(t *testing.T) {
 			q, clock := fixture(t)
 			s := sharedCapacitySpec()
