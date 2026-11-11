@@ -440,6 +440,14 @@ submitted IDs; unknown IDs and other HTTP client errors fail immediately.
 Exit codes: `0` all succeeded (also help), `1` any failed/cancelled, `2`
 usage/auth/API error, `3` timeout, `4` interrupted. `--timeout` must be positive;
 omit it to wait indefinitely. Timeout/interruption leaves the jobs running.
+`cancel JOB_ID` or `cancel --project PROJECT --key KEY` prints the
+[cancel acknowledgement](schemas/cancel-ack-v1.schema.json). It exits `0` only
+when the cancel is confirmed: `will_not_run` and `release` is `confirmed` or
+`not_applicable` (the job will not run and no attempt holds resources). It exits
+`75` when the cancel is acknowledged but release is still `pending` (or `null`
+for expired coverage). `--wait` rereads the stored acknowledgement every three
+seconds until confirmed and exits `0`; interruption, or a `null` release that
+can never confirm, exits `75`. Other errors exit `1`; usage errors exit `2`.
 Keep foreground waits owned by their agent session. Profile/adapter commands
 with a notifier use one managed completion observer per user; do not launch
 `wait --observer-dir ... --detached` yourself.

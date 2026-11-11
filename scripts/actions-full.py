@@ -55,7 +55,8 @@ def cleanup(sha, owner):
             reply = command('cancel', '--project', 'mycelium', '--key',
                             submission_key(sha, platform, owner), timeout=CANCEL_SECONDS)
             ack = json.loads(reply.stdout)
-            ok = (reply.returncode == 0 and ack.get('will_not_run') is True
+            # Cleanup needs the fence only; 75 means release is still pending.
+            ok = (reply.returncode in (0, 75) and ack.get('will_not_run') is True
                   and ack.get('state') != 'unknown')
         except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
             ok = False

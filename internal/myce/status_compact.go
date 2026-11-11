@@ -194,7 +194,8 @@ func (o *statusOptions) includes(section string) bool {
 // Whitelist current lifecycle facts before copying. Retained attempts, ledgers,
 // fan-out member manifests and evidence never enter the default capture.
 func compactStatusJob(j *Job) Job {
-	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
+	started := commandStarted(j)
+	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, CommandStarted: &started,
 		Copies: compactStatusCopies(j.Copies),
 		Spec: Spec{Workload: j.Spec.Workload, QualityTolerance: j.Spec.QualityTolerance, ExtensionCheck: compactStatusCheck(j.Spec.ExtensionCheck), Logs: j.Spec.Logs, AuthoringOrigin: j.Spec.Origin(), AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, Priority: j.Spec.Priority,
 			Deadline: j.Spec.Deadline, StartWindow: j.Spec.StartWindow, Resumable: j.Spec.Resumable, Preemptible: j.Spec.Preemptible, Needs: j.Spec.Needs, StartBy: j.Spec.StartBy,

@@ -509,7 +509,7 @@ myce wait JOB_ID
 myce logs JOB_ID
 myce logs JOB_ID --follow
 myce cancel JOB_ID
-myce cancel --project PROJECT --key KEY
+myce cancel --project PROJECT --key KEY --wait  # exit 0 only once release is confirmed
 myce result JOB_ID --out ./accepted-results
 # For an explicitly supplied file identity (not accepted-result resolution):
 myce file get --size-bytes BYTE_COUNT SHA256 ./new-destination

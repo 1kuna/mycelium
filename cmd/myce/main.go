@@ -242,9 +242,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	by := f.String("by", "project", "usage grouping: project or machine")
 	var clientConfig string
 	var cancelProject, cancelKey string
+	var cancelWait bool
 	if args[0] == "cancel" {
 		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
+		f.BoolVar(&cancelWait, "wait", false, "wait until release is confirmed (exit 0); otherwise exit 75 while unconfirmed")
 	}
 	// Consumer commands resolve the installed authority; the consumer skill forbids
 	// exporting MYCE_TOKEN, so no read may require it.
@@ -959,23 +961,23 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		printStatus(s, *full)
 		return nil
 	case "cancel":
-		var ack myce.Cancellation
-		var err error
+		const usage = "usage: myce cancel <id> | --project PROJECT --key KEY [--wait]"
+		var send func(context.Context) (myce.Cancellation, error)
 		if cancelProject != "" || cancelKey != "" {
 			if cancelProject == "" || cancelKey == "" || f.NArg() != 0 {
-				return errors.New("usage: myce cancel <id> | --project PROJECT --key KEY")
+				return &exitError{2, errors.New(usage)}
 			}
-			ack, err = client.CancelSubmission(ctx, cancelProject, cancelKey)
+			send = func(ctx context.Context) (myce.Cancellation, error) {
+				return client.CancelSubmission(ctx, cancelProject, cancelKey)
+			}
 		} else {
 			if f.NArg() != 1 {
-				return errors.New("usage: myce cancel <id> | --project PROJECT --key KEY")
+				return &exitError{2, errors.New(usage)}
 			}
-			ack, err = client.Cancel(ctx, f.Arg(0))
+			send = func(ctx context.Context) (myce.Cancellation, error) { return client.Cancel(ctx, f.Arg(0)) }
 		}
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(os.Stdout).Encode(ack)
+		ack, err := cancelAndConfirm(ctx, client, send, cancelWait, waitPause)
+		return printCancelAck(os.Stdout, ack, err)
 	case "leave":
 		s, err := status(ctx, client)
 		if err != nil {

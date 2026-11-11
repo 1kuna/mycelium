@@ -57,6 +57,8 @@ type CompactJob struct {
 	Since    *time.Time `json:"since,omitempty"`
 	Reason   string     `json:"reason,omitempty"`
 	Delivery string     `json:"delivery,omitempty"`
+	// CommandStarted is false only when no attempt's command began.
+	CommandStarted bool `json:"command_started"`
 	// Finding is the failed or requeued job's plain-language cause and action.
 	Finding *JobFinding `json:"finding,omitempty"`
 }
@@ -169,7 +171,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		if reason == "running now" {
 			reason = ""
 		}
-		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Finding: j.Finding}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Finding: j.Finding, CommandStarted: commandStarted(j)}
 		if j.State == "queued" {
 			since := j.WaitingSince
 			if since.IsZero() {
