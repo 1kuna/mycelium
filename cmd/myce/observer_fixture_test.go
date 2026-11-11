@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"testing"
 	"time"
 )
 
@@ -103,4 +105,52 @@ func stopCLIObserverFixtures(root string) error {
 		}
 	}
 	return nil
+}
+
+// Registration retirement and an unlocked observer.lock happen before the
+// final status/supervisor writes. Only process exit permits fixture removal.
+func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) {
+	t.Helper()
+	seen := map[int]bool{}
+	wait(t, ctx, func() bool {
+		entries, err := filepath.Glob(filepath.Join(registry, "*.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var owner observerDiagnostic
+		if err := readProfileJSON(filepath.Join(registry, "observer.status"), &owner); err == nil {
+			if owner.PID > 0 {
+				seen[owner.PID] = true
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		var supervisor observerSupervision
+		if err := readProfileJSON(filepath.Join(registry, "observer.supervision"), &supervisor); err == nil {
+			for _, pid := range []int{supervisor.PID, supervisor.ChildPID} {
+				if pid > 0 {
+					seen[pid] = true
+				}
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			return false
+		}
+		for pid := range seen {
+			state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+			if err != nil {
+				var exited *exec.ExitError
+				if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
+					continue
+				}
+				t.Fatal(err)
+			}
+			if status := strings.TrimSpace(string(state)); status != "" && !strings.HasPrefix(status, "Z") {
+				return false
+			}
+		}
+		return true
+	})
 }
