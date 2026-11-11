@@ -1,0 +1,10 @@
+name: dir-job
+project: example
+class: test
+source: {directory: work}
+run: {command: [sh, run.sh]}
+needs: {cpu_cores: 1, memory_gb: 0.25, platform: cpu}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+inputs: {item.json: data/item.json}
+outputs: {result: results}
+check: [test, -s, result]

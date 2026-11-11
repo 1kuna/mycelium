@@ -1,0 +1,23 @@
+entries:
+    dir-job:
+        checks:
+            result:
+                - test
+                - -s
+                - result
+        class: test
+        inputs:
+            item.json: data/item.json
+        needs:
+            cpu_cores: 1
+            memory_gb: 0.25
+            platform: cpu
+        outputs:
+            result: results
+        run:
+            command:
+                - sh
+                - run.sh
+        source:
+            directory: work
+project: example

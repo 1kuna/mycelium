@@ -1,0 +1,33 @@
+entries:
+    legacy-suite:
+        checks:
+            result:
+                - test
+                - -s
+                - report.xml
+        environment:
+            lock_file: requirements.txt
+            platforms:
+                - cpu
+            python: "3.13"
+        memory_class: per_item
+        needs:
+            cpu_cores: 2
+            memory_gb: 1
+            platform: cpu
+        priority: experiment
+        resumable: true
+        run:
+            command:
+                - python
+                - -m
+                - pytest
+                - literal $HOME
+            env:
+                THREADS: "2"
+        source:
+            allow_dirty: true
+            git: HEAD
+            paths:
+                - src/
+project: example
