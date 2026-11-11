@@ -38,7 +38,12 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 	if m.hostBudgetGB > 0 {
 		budget = m.hostBudgetGB
 	}
-	if budget > 0 {
+	// The floor is compared with live used RAM, which already contains the
+	// OS, driver and idle-service footprint. A measured allowance has already
+	// excluded that footprint, so physical-minus-allowance would subtract it a
+	// second time; the allowance still caps reservations on its own. Authored
+	// allowances and shared-interactive hosts keep the complement as a floor.
+	if budget > 0 && !(m.HostMemoryBudgetMeasured && m.SharedHost == nil) {
 		floor = max(floor, total-budget)
 	}
 	return floor, true
