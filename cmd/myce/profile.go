@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,6 +134,81 @@ func profileLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// submitLockWait bounds waiting for another local submission's preparation
+// when the caller set no deadline. The holder keeps the lock through source
+// freezing, input upload and submit, so the bound leaves room for large
+// uploads; it exists so a hung holder ends in a typed refusal, not a silent
+// indefinite wait.
+const submitLockWait = 30 * time.Minute
+
+// submitLockPoll is how often a waiter retries the non-blocking lock; flock
+// has no cancellable blocking form.
+const submitLockPoll = 50 * time.Millisecond
+
+func profileHolderLabel(p executionProfile, key string) string {
+	label := "myce run pid " + strconv.Itoa(os.Getpid())
+	if p.Name != "" {
+		label += " (" + p.Name
+		if key != "" {
+			label += ", key " + key
+		}
+		label += ")"
+	} else if key != "" {
+		label += " (key " + key + ")"
+	}
+	return label
+}
+
+// waitSubmitLock takes the checkout's submission lock, waiting while another
+// submission prepares. The wait ends at the earliest of the context deadline,
+// the job deadline and submitLockWait; only then is the caller refused with
+// submission_busy, naming the recorded holder.
+func waitSubmitLock(ctx context.Context, path string, jobDeadline *time.Time, holder string, errOut io.Writer) (*os.File, error) {
+	bound := time.Now().Add(submitLockWait)
+	if d, ok := ctx.Deadline(); ok && d.Before(bound) {
+		bound = d
+	}
+	if jobDeadline != nil && jobDeadline.Before(bound) {
+		bound = *jobDeadline
+	}
+	announced := false
+	for {
+		lock, err := profileLock(path)
+		if err == nil {
+			// Record the holder for waiters; the lock is the fd's flock, not the bytes.
+			if lock.Truncate(0) == nil {
+				_, _ = lock.WriteAt([]byte(holder+" since "+time.Now().UTC().Format(time.RFC3339)), 0)
+			}
+			return lock, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, err
+		}
+		current := "another local submission"
+		if b, e := os.ReadFile(path); e == nil && len(bytes.TrimSpace(b)) > 0 {
+			current = string(bytes.TrimSpace(b))
+		}
+		remaining := time.Until(bound)
+		if remaining <= 0 {
+			return nil, waitError(75, "submission_busy: this checkout's submission lock is still held by "+current+"; retry once it finishes")
+		}
+		if !announced {
+			fmt.Fprintf(errOut, "waiting for this checkout's submission lock, held by %s (up to %s)\n", current, remaining.Round(time.Second))
+			announced = true
+		}
+		t := time.NewTimer(min(submitLockPoll, remaining))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, waitError(75, "submission_busy: this checkout's submission lock is still held by "+current+"; retry once it finishes")
+			}
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+	}
 }
 
 // Typed failures always print the recoverable receipt. Only explicit safe
@@ -322,9 +398,10 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		return err
 	}
 	// Serializing local profile preparation also protects identical generated keys.
-	lock, err := profileLock(filepath.Join(receipts, "submit.lock"))
+	// Concurrent submissions from one checkout wait their turn (#1383).
+	lock, err := waitSubmitLock(ctx, filepath.Join(receipts, "submit.lock"), p.Deadline, profileHolderLabel(p, key), errOut)
 	if err != nil {
-		return waitError(75, "submission_busy: another local profile submission is preparing; retry")
+		return err
 	}
 	defer lock.Close()
 	stages, err := filepath.Glob(filepath.Join(receipts, ".prepare-*"))
