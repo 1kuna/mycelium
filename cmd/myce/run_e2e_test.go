@@ -227,6 +227,7 @@ case "$1" in
 ok) echo adapter-log; printf adapter-ok > result ;;
 fail) echo adapter-failing >&2; exit 9 ;;
 sleep) echo adapter-ready; sleep 60 ;;
+tree) mkdir -p tree/sub logs && printf a > tree/a && printf b > tree/sub/b && printf x > logs/x.log && printf y > logs/y.log && printf skip > logs/z.txt ;;
 esac
 `), 0600); err != nil {
 			t.Fatal(err)
@@ -242,6 +243,12 @@ entries:
     targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
     outputs: {result: results}
     checks: {result: [test, -s, result]}
+  tree:
+    source: {directory: source}
+    run: {command: [sh, entry.sh, tree]}
+    needs: {cpu_cores: 1, memory_gb: 0.25, platform: cpu}
+    targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
+    outputs: {"tree/": results, "logs/*.log": results}
 `
 		if err := os.WriteFile(filepath.Join(root, ".mycelium", "adapter.yaml"), []byte(adapter), 0600); err != nil {
 			t.Fatal(err)
@@ -260,6 +267,19 @@ entries:
 		stdout, stderr, code := entry("--wait", "--out", entryOut, "--", "ok")
 		if b, e := os.ReadFile(filepath.Join(entryOut, "result")); code != 0 || e != nil || string(b) != "adapter-ok" || stdout != "adapter-log\n" || !strings.Contains(stderr, "outputs verified") {
 			t.Fatalf("entry success: code=%d stdout=%q stderr=%s result=%q %v", code, stdout, stderr, b, e)
+		}
+		// Folder and glob outputs resolve on adapter entries and download every file (#1341).
+		treeOut := filepath.Join(root, "tree-out")
+		if output, err := command("--entry", "tree", "--wait", "--out", treeOut).CombinedOutput(); err != nil {
+			t.Fatalf("pattern entry: %v %s", err, output)
+		}
+		for name, want := range map[string]string{"tree/a": "a", "tree/sub/b": "b", "logs/x.log": "x", "logs/y.log": "y"} {
+			if b, e := os.ReadFile(filepath.Join(treeOut, filepath.FromSlash(name))); e != nil || string(b) != want {
+				t.Fatalf("pattern output %s: %q %v", name, b, e)
+			}
+		}
+		if _, e := os.Stat(filepath.Join(treeOut, "logs", "z.txt")); !errors.Is(e, os.ErrNotExist) {
+			t.Fatal("glob downloaded an unmatched file", e)
 		}
 		if stdout, stderr, code = entry("--wait", "--out", entryOut, "--", "fail"); code != 9 || !strings.Contains(stdout+stderr, "adapter-failing") {
 			t.Fatalf("entry command exit: code=%d %s %s", code, stdout, stderr)

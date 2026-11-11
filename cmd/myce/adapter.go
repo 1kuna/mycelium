@@ -205,7 +205,7 @@ func validateAdapterEntry(e adapterEntry) error {
 		}
 	}
 	for dest, prefix := range s.Outputs {
-		if !profileRelative(dest) || !profileRelative(prefix) {
+		if !myce.ValidOutputDeclaration(dest) || !profileRelative(prefix) {
 			return errors.New("outputs require clean relative names and prefixes")
 		}
 	}
