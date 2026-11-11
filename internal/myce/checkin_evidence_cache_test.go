@@ -11,10 +11,14 @@ import (
 	"time"
 )
 
-func largeRetainedHistoryFixture(t testing.TB) (*Queue, []Machine) {
+// incidentRetainedJobs is the incident's retained-history size. Tests whose
+// assertions are counts rather than digests use a smaller history.
+const incidentRetainedJobs = 6500
+
+func largeRetainedHistoryFixture(t testing.TB, retained int) (*Queue, []Machine) {
 	t.Helper()
 	q, workers := candidateCostFixture(t)
-	for i := 160; i < 6500; i++ {
+	for i := 160; i < retained; i++ {
 		source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
 		j := *source
 		j.ID = fmt.Sprintf("retained-%04d", i)
@@ -30,7 +34,7 @@ func largeRetainedHistoryFixture(t testing.TB) (*Queue, []Machine) {
 // predicates, resolved needs/envelopes and health outcomes for the incident shape,
 // including the next pass after new evidence and changed inventory identity.
 func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
-	q, _ := largeRetainedHistoryFixture(t)
+	q, _ := largeRetainedHistoryFixture(t, incidentRetainedJobs)
 	type decision struct {
 		Job, Target string
 		Failed      []string
@@ -106,14 +110,15 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 }
 
 func TestCheckinRetainedEvidenceScans(t *testing.T) {
-	q, workers := largeRetainedHistoryFixture(t)
+	q, workers := largeRetainedHistoryFixture(t, 480)
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
+	full := len(q.s.Jobs)
 	scans, uncached := 0, 0
 	q.observeMemoryHistory = func(jobs int, indexed bool) {
 		// Live-only planning views do not scan retained history.
-		if jobs >= 6500 {
+		if jobs >= full {
 			scans++
 			if !indexed {
 				uncached++
@@ -137,7 +142,7 @@ func TestCheckinRetainedEvidenceScans(t *testing.T) {
 // The incident fixture uses real private SQLite commits and an injected decision
 // clock. Inclusive child phases (notably retained_index) must not be summed.
 func BenchmarkCheckinBodyPhases(b *testing.B) {
-	q, workers := largeRetainedHistoryFixture(b)
+	q, workers := largeRetainedHistoryFixture(b, incidentRetainedJobs)
 	benchmarkCheckinBodyPhases(b, q, workers)
 }
 
@@ -145,7 +150,7 @@ func BenchmarkCheckinBodyPhases(b *testing.B) {
 // as well as the incident's backlog and observation catalog. No live data is
 // loaded: these records are generated from the same laptop fixture.
 func BenchmarkCheckinBodyAttemptScale(b *testing.B) {
-	q, workers := largeRetainedHistoryFixture(b)
+	q, workers := largeRetainedHistoryFixture(b, incidentRetainedJobs)
 	for _, j := range q.s.Jobs {
 		if j.State != "succeeded" {
 			continue

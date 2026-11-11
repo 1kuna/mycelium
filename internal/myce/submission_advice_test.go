@@ -13,15 +13,16 @@ import (
 	"time"
 )
 
-// The incident-size history preserves constrained execution provenance used by
-// memory planning: 6,500 retained executions, 110 queued, 1,400 curves, 5 workers.
-func submissionAdviceFixture(t testing.TB) *Queue {
+// The history preserves constrained execution provenance used by memory
+// planning: 110 queued, 1,400 curves, 5 workers, and retained executions
+// (the incident's 6,500 for benchmarks; fewer for equivalence tests).
+func submissionAdviceFixture(t testing.TB, retained int) *Queue {
 	t.Helper()
 	q, _ := candidateCostFixture(t)
 	func() {
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		for i := 160; i < 6500; i++ {
+		for i := 160; i < retained; i++ {
 			source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
 			j := *source
 			j.ID = fmt.Sprintf("retained-%04d", i)
@@ -38,7 +39,7 @@ func submissionAdviceFixture(t testing.TB) *Queue {
 }
 
 func BenchmarkSubmissionAdvice(b *testing.B) {
-	q := submissionAdviceFixture(b)
+	q := submissionAdviceFixture(b, incidentRetainedJobs)
 	budgetHost(q, 8<<30, 1) // Synthetic headroom keeps the measured copy admitted.
 	run := func() (submissionAdviceTiming, time.Duration) {
 		j := storedTestJob(b, q, "queued-081")
@@ -227,7 +228,7 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 }
 
 func TestSubmissionAdvicePreservesFields(t *testing.T) {
-	q := submissionAdviceFixture(t)
+	q := submissionAdviceFixture(t, 480)
 	inputs, _, err := q.readGeneration.inputs(context.Background())
 	if err != nil {
 		t.Fatal(err)

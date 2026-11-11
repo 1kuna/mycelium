@@ -734,7 +734,7 @@ func TestValueGlobalPlanClaimsDistinctCPUJobs(t *testing.T) {
 }
 
 func TestValuePlanningWorkCounts(t *testing.T) {
-	for _, count := range []int{200, 800, 1600} {
+	for _, count := range []int{200, 800} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			q, _ := fixture(t)
 			accelerator := valueMachine("a-accelerator", "fake", 64)

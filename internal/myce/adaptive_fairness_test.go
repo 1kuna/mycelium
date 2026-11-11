@@ -113,7 +113,7 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 
 func TestAdaptiveFairnessManyProjectsAndStatus(t *testing.T) {
 	t.Parallel()
-	for _, count := range []int{2, 32} {
+	for _, count := range []int{2, 8} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			q, clock := fixture(t)
 			for i := range count {

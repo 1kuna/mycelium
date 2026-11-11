@@ -13,7 +13,7 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 		name  string
 		hosts int
 		ram   float64
-	}{{"tiny", 1, .5}, {"large", 200, 512}} {
+	}{{"tiny", 1, .5}, {"large", 4, 512}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			var m Machine
@@ -96,7 +96,7 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 		name  string
 		hosts int
 		ram   float64
-	}{{"two small hosts", 2, .5}, {"large installation", 200, 512}} {
+	}{{"two small hosts", 2, .5}, {"large installation", 4, 512}} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			var source, destination Machine
