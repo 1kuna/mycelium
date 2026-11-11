@@ -10,7 +10,8 @@ import (
 // on subsequent process scheduling. Reuse the healthy-helper latency from
 // TestDockerHealthyHelperStartupBudget, but introduce it after the first create
 // has taught the adapter its local initialization envelope.
-func TestDockerRestartFixtureSurvivesCLIStartupVariation(t *testing.T) {
+func varyDockerCLIStartup(t *testing.T) {
+	t.Helper()
 	binary := dockerCLITestBinary(t)
 	wrapper := filepath.Join(t.TempDir(), "docker-cli")
 	script := "#!/bin/sh\nfor arg do\n" +
@@ -20,6 +21,10 @@ func TestDockerRestartFixtureSurvivesCLIStartupVariation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GATE_TEST_DOCKER_BINARY", wrapper)
+}
+
+func TestDockerRestartFixtureSurvivesCLIStartupVariation(t *testing.T) {
+	varyDockerCLIStartup(t)
 	w, store, d, clock, root := restartResultFixture(t)
 	if d.state.Container == "" || !d.state.Containers[d.state.Container].Started || d.state.Pending {
 		t.Fatalf("fixture did not freeze a durably started main: %+v", d.state)
@@ -29,4 +34,9 @@ func TestDockerRestartFixtureSurvivesCLIStartupVariation(t *testing.T) {
 	if r := restartSavedResult(t, w, store); !r.Success || r.Interrupted {
 		t.Fatalf("CLI startup variation changed recovered completion: %+v", r)
 	}
+}
+
+func TestDockerNetworkFixtureSurvivesCLIStartupVariation(t *testing.T) {
+	varyDockerCLIStartup(t)
+	testDockerNetworkViolationsAndRemovalHold(t)
 }

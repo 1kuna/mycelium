@@ -509,16 +509,37 @@ func TestDockerSidecarCrashFailsJob(t *testing.T) {
 }
 
 func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
+	testDockerNetworkViolationsAndRemovalHold(t)
+}
+
+func testDockerNetworkViolationsAndRemovalHold(t *testing.T) {
+	t.Helper()
 	for _, mode := range []string{"published-port", "refuse-network-rm"} {
 		t.Run(mode, func(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
+			// These cases test daemon state and custody, not CLI scheduling.
+			w.dockerDaemon = fakeDockerGroupCommand(root)
 			j := dockerGroupJob(t)
 			p, e := startDockerFixture(w, s, j)
 			if e != nil {
 				t.Fatal(e)
 			}
-			t.Cleanup(p.docker.close)
+			t.Cleanup(func() {
+				if t.Failed() {
+					p.docker.mu.Lock()
+					state, _ := json.Marshal(p.docker.state)
+					p.docker.mu.Unlock()
+					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+					t.Logf("network fixture state: %s; calls:\n%s", state, calls)
+				}
+				p.docker.close()
+			})
 			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+			await(t, func() bool {
+				p.docker.mu.Lock()
+				defer p.docker.mu.Unlock()
+				return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+			})
 			_ = os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600)
 			_ = os.WriteFile(filepath.Join(root, "unlabeled-network"), nil, 0600)
 			if mode == "refuse-network-rm" || mode == "late-network-container" {
