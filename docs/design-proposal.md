@@ -2518,8 +2518,9 @@ Advice neither changes accepted jobs nor authorizes relocation.
 New multi-variant registrations carry server-owned registration metadata requiring
 measured MY-19 parity or explicit approval before production placement. Native
 checks and experiments remain admissible to obtain evidence. After comparing outputs to the reference
-within the owner's accuracy criteria, the owner uses the existing project/work
-`production_parity_hosts` policy to approve candidate physical hosts. A native
+within the project's accuracy criteria, the project adds the candidate physical
+host to its own project/work `production_parity_hosts` list with that comparison
+as evidence (#1341). A native
 baseline proves execution, not cross-variant parity. Historical registrations,
 identical replays and their frozen accepted jobs retain their admission contract.
 Each variant may publish `quality[WORK][METRIC]` with a frozen `reference`
@@ -2537,10 +2538,11 @@ and restart, so one measured digest cannot authorize an unmeasured alternative.
 Evidence is
 immutable recipe metadata, not an evaluation runner or native qualification.
 The hold and owner action appear in eligibility/status. Approval is eligibility,
-not a job host pin. When owner policy contains an exact work entry, its
+not a job host pin. When the project's list contains an exact work entry, its
 `production_parity_hosts` list constrains every production assignment and
 retarget, including historical registrations and measured variants. Measurements
-cannot authorize an unlisted host; the owner must explicitly add it. An empty
+cannot authorize an unlisted host; the project must explicitly add it with
+passing comparison evidence. An empty
 list admits no host for that production work. Checks and experiments remain
 available for gathering evidence.
 

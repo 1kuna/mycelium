@@ -60,11 +60,7 @@ func TestQualityVariantEligibility(t *testing.T) {
 			check(t, q, a, nil)
 			check(t, q, b, nil)
 			if tc.approved {
-				policy := q.PriorityPolicy()
-				policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"extension:" + e.Name: {hostID(&b)}}}
-				if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-					t.Fatal(err)
-				}
+				setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&b))
 			}
 			spec := variantSpec(e, tc.class)
 			spec.QualityTolerance = tc.tolerance

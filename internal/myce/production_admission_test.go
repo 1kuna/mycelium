@@ -272,13 +272,11 @@ func TestProductionAdmissionParityDoesNotBlockOtherProjectPreparation(t *testing
 			if approved {
 				hosts = []string{hostID(&target)}
 			}
-			project := policy.Policy.Projects[production.Project]
-			project.ProductionParityHosts = map[string][]string{production.workType(): hosts}
-			policy.Policy.Projects[production.Project] = project
 			policy.Policy.Projects[experiment.Project] = ProjectPolicy{Weight: 1}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
+			setParityHosts(t, q, production.Project, production.workType(), hosts...)
 			demand := submit(t, q, production)
 			job := submit(t, q, experiment)
 			reason := runtimeJob(t, q, job.ID).Reason

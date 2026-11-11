@@ -98,11 +98,7 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			}
 			if restriction == "parity" {
 				s.Class = "production"
-				policy := q.PriorityPolicy()
-				policy.Policy.Projects[s.Project] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{s.workType(): {hostID(&a)}}}
-				if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-					t.Fatal(err)
-				}
+				setParityHosts(t, q, s.Project, s.workType(), hostID(&a))
 			}
 			j := submit(t, q, s)
 			before := storedTestJob(t, q, j.ID)

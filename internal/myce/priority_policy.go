@@ -306,8 +306,9 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		if expected != q.policyRevision() {
 			return ErrPolicyRevision
 		}
+		q.migrateProjectParity()
 		for name, v := range projects {
-			if err := q.validateProductionParityHosts(v.ProductionParityHosts); err != nil {
+			if err := q.checkPolicyParityUnchanged(name, v.ProductionParityHosts); err != nil {
 				return err
 			}
 			if keepFileLimits {
@@ -328,6 +329,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p}
 		if projects != nil {
 			q.s.Policies = projects
+			q.mirrorProjectParity()
 		}
 		if hosts != nil {
 			q.replaceHostPolicies(hosts)

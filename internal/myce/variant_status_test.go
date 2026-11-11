@@ -157,19 +157,12 @@ func TestVariantStatusParityApproval(t *testing.T) {
 	}
 	// An approval for unrelated work grants no placement. Checks/experiments
 	// remain usable for evidence; only this exact work gets production approval.
-	policy := q.PriorityPolicy()
-	policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {hostID(&b)}}}
-	if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-		t.Fatal(err)
-	}
+	setParityHosts(t, q, "test", "kind:sample", hostID(&b))
 	if got := check(t, q, b, nil).Job; got != nil {
 		t.Fatal("unrelated work approved production")
 	}
-	policy = q.PriorityPolicy()
-	policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"extension:" + e.Name: {hostID(&b)}}}
-	if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-		t.Fatal(err)
-	}
+	clearParityHosts(t, q, "test")
+	setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&b))
 	clock.Advance(time.Second)
 	assigned := check(t, q, b, nil).Job
 	if assigned == nil || assigned.ID != j.ID {

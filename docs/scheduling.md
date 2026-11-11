@@ -143,39 +143,64 @@ Each entry has `production_hold` and an optional `production_hold_scope`
 `queue --host-config` seeds host policy once; see
 [changing a host's scope](operations.md#change-live-project-policy).
 
-`production_parity_hosts` is an optional per-project mapping from exact work
-identifiers to physical host IDs whose outputs the consumer has approved as
-matching its reference for that work (MY-19).
-It defaults to empty. When an exact work key is present, its host list is a hard
-boundary for production placement: initial assignments, fan-out children and
-retargeting must stay within it. This applies to historical registrations and
-measured variants too. An explicitly empty host list admits no production host
-for that work. To widen placement, the owner explicitly adds the approved host.
-Native checks and experiments remain available to gather comparison evidence.
-Execution qualification alone does not grant parity.
-For example, after the consumer approves `worker-b` for ASR, add this to the
-project's existing settings in the exported policy, preserving its other settings:
+**Production parity hosts (project-owned).** Each project keeps its own `production_parity_hosts` list: for an exact work
+identity, the physical host IDs whose outputs the project has shown match its
+reference for that work (MY-19). The project edits the list with the same
+authority it uses to submit (the fleet token and its project name). No queue
+policy edit is needed (MY-44, #1341), and a project's write never changes
+another project's list or the policy revision.
 
-```yaml
-projects:
-  transcribe:
-    weight: 1
-    production_parity_hosts:
-      kind:asr: [worker-b]
+Lists default to empty. When an exact work key is present, its host list is a
+hard boundary for production placement: initial assignments, fan-out children
+and retargeting must stay within it. This applies to historical registrations and
+measured variants too. An explicitly empty host list admits no production host
+for that work. Execution qualification alone does not grant parity.
+
+To widen placement, first run a check or experiment of that work on the new host
+(for example pinned with `allowed_machines`) that compares outputs with your
+reference under your own criteria and succeeds only when they match. Then name
+that job as evidence:
+
+```sh
+myce parity add --project transcribe --work kind:asr --host worker-b --evidence JOB_ID
+myce parity list --project transcribe
+myce parity remove --project transcribe --work kind:asr --host worker-b
 ```
 
-Export with `myce policy get --yaml > policy.yaml`, edit the mapping, then run
-`myce policy set policy.yaml --if-revision N`, replacing `N` with the revision
-printed by the export. The same field is supported by `PUT /api/policy`.
+The queue accepts the addition only when the evidence job belongs to the same
+project, ran the same exact work identity as a check or experiment (not
+production), succeeded, and its accepted attempt ran on that physical host. The
+entry records the job, its attempt and the queue time it was added. Any other
+evidence is refused with `parity_evidence_required` and one next action. Removing
+a host needs no evidence; removing the last one leaves an empty list that admits
+no host. The HTTP routes are `GET /api/parity-hosts?project=P`,
+`POST /api/parity-hosts` and `POST /api/parity-hosts/remove`, with the body
+`{project, work, host, evidence}`.
+
 Keys match the job's work identity: `kind:<kind>` for kind jobs,
 `program:<type>` for programs, or `extension:<name>` for extension-only jobs.
 Approval for `kind:asr` never approves separation or another work identity.
 Use exact physical host IDs from status or the configured host policy, rather
 than device worker IDs or globs; unknown hosts are rejected.
-Consumers own the parity criteria and must revisit approval when their work or
-platform changes; this setting does not infer parity from timing or native checks.
+Projects own the parity criteria and must revisit approval when their work or
+platform changes (remove the host, compare again, add it back). Mycelium does
+not infer parity from timing, measured quality or native checks.
+With one fleet token, the project name is the authority, as for submit and
+cancel: the queue refuses another project's evidence, which guards against
+mistakes, not against a hostile token holder.
 
-This mapping also permits **new occupancy spillover**: a queued production job
+**Migration (MY-42).** On first open, a queue copies each project's old
+`projects.P.production_parity_hosts` policy field into the project list, marked
+`evidence.migrated`. A `--project-config` or dev config with that field seeds the
+project list the same way. In queue policy the field is now a read-only mirror:
+`myce policy get` shows it, and `myce policy set` accepts it unchanged or
+omitted but refuses a change with `parity_hosts_project_owned` and the
+`myce parity` command to use instead. The mirror keeps a rollback to the previous
+release enforcing the same lists for projects that have a policy entry.
+Replacing or clearing `projects` in queue policy leaves project lists in place.
+The next release removes the policy field.
+
+The project list also permits **new occupancy spillover**: a queued production job
 bound by a production hold can move when equal-or-higher production work blocks
 its RAM or device admission and an approved alternative can admit it immediately.
 The alternative must still pass placement, maintenance, freshness, memory,

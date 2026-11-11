@@ -427,7 +427,7 @@ func (q *Queue) holdWait(j *Job) *Hold {
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		if reason := q.productionOccupancyReason(j); reason != "" {
-			return newHold("production_hold", reason+"; production hold bound to "+j.ProductionHost+"; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host")
+			return newHold("production_hold", reason+"; production hold bound to "+j.ProductionHost+"; spillover requires measured quality parity or the project's production_parity_hosts approval and an immediately admissible qualified host")
 		}
 		h := q.productionHold(j.ProductionHost)
 		return newHold(h.Kind, h.Detail)

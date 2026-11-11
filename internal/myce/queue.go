@@ -109,10 +109,12 @@ type state struct {
 	UsageMaintenance time.Time                    `json:"usage_maintenance,omitempty"`
 	ProductionStarts []ProductionStart            `json:"production_starts,omitempty"`
 	Policies         map[string]ProjectPolicy     `json:"project_policies,omitempty"`
-	FairUsageVersion int                          `json:"fair_usage_version,omitempty"`
-	FairUsage        map[string]FairUsage         `json:"fair_usage,omitempty"`
-	UsageAt          time.Time                    `json:"usage_at,omitempty"`
-	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
+	// Project-owned production parity hosts (#1341); nil until copied from Policies.
+	ProjectParity    *projectParityStore  `json:"project_parity,omitempty"`
+	FairUsageVersion int                  `json:"fair_usage_version,omitempty"`
+	FairUsage        map[string]FairUsage `json:"fair_usage,omitempty"`
+	UsageAt          time.Time            `json:"usage_at,omitempty"`
+	Preemptions      []Preemption         `json:"preemptions,omitempty"`
 
 	// Per adapter/profile entry without targets (#853): recipe, proven and skipped types.
 	EntryCoverage map[string]entryCoverageRecord `json:"entry_coverage,omitempty"`
@@ -416,6 +418,8 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}
 	}
 	if err = q.update(func() error {
+		q.migrateProjectParity()
+		q.mirrorProjectParity()
 		for _, j := range q.liveJobs() {
 			if j.Timing != nil && !terminal(j.State) && j.Timing.Reason != "queue restarted; occupancy unknown" {
 				q.touchJob(j.ID)

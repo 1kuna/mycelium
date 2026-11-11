@@ -95,8 +95,8 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 			return
 		}
 		if (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil {
-			if hosts, configured := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]; configured {
-				blocker.Detail += fmt.Sprintf("; owner production parity policy approves %d physical hosts for this work; Mycelium selects within that list without a job host pin; only the owner can widen production_parity_hosts after output comparison", len(placementStrings(hosts)))
+			if hosts, configured := q.parityHostList(j.Spec.Project, j.Spec.workType()); configured {
+				blocker.Detail += fmt.Sprintf("; the project's production_parity_hosts list approves %d physical hosts for this work; Mycelium selects within that list without a job host pin; the project widens it with myce parity add after a passing output comparison", len(placementStrings(hosts)))
 			}
 		}
 		if len(compatibleHosts) == 1 && len(j.Spec.AllowedMachines) == 0 && len(j.Spec.ExcludedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
