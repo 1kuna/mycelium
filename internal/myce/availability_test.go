@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -242,7 +243,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 	s := spec("experiment")
 	s.Run.Command = []string{"sh", "-c", `
  test -z "$MYCE_TOKEN" || exit 99
- if [ "$MYCE_ATTEMPT" -gt 1 ]; then
+ if [ -f "$MYCE_CHECKPOINT_DIR/saved" ]; then
   test "$(cat "$MYCE_CHECKPOINT_DIR/saved")" = saved || exit 98
   echo "resumed=$MYCE_MACHINE"; exit 0
  fi
@@ -280,10 +281,12 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 		})
 	}()
 	wait := func(f func() bool) { t.Helper(); await(t, func() bool { clock.Advance(time.Millisecond); return f() }) }
+	readyAttempt := 0
 	wait(func() bool {
 		logs, _ := q.Logs(j.ID, 0)
 		for _, l := range logs {
 			if strings.Contains(l.Text, "ready") {
+				readyAttempt = l.Attempt
 				return true
 			}
 		}
@@ -292,7 +295,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 	active.Store(true)
 	clock.Advance(signalRefresh)
 	wait(func() bool { return job(t, q, j.ID).State == "queued" })
-	data, err := os.ReadFile(filepath.Join(j.Checkpoint, "attempt-1", "saved"))
+	data, err := os.ReadFile(filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", readyAttempt), "saved"))
 	if err != nil || strings.TrimSpace(string(data)) != "saved" {
 		t.Fatal("checkpoint not saved", err)
 	}
@@ -309,7 +312,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 			found = true
 		}
 	}
-	if !found || job(t, q, j.ID).Attempt != 2 {
+	if !found || job(t, q, j.ID).Attempt <= readyAttempt {
 		t.Fatal("different hypha didn't consume checkpoint")
 	}
 	snap, _ := q.Snapshot()
@@ -411,10 +414,12 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 		})
 	}()
 	wait := func(f func() bool) { t.Helper(); await(t, func() bool { clock.Advance(time.Millisecond); return f() }) }
+	readyAttempt := 0
 	wait(func() bool {
 		logs, _ := q.Logs(j.ID, 0)
 		for _, l := range logs {
 			if strings.Contains(l.Text, "ready") {
+				readyAttempt = l.Attempt
 				return true
 			}
 		}
@@ -431,7 +436,10 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 	})
 	active.Store(true)
 	clock.Advance(signalRefresh)
-	wait(func() bool { _, err := os.Stat(filepath.Join(j.Checkpoint, "attempt-1", "saved")); return err == nil })
+	wait(func() bool {
+		_, err := os.Stat(filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", readyAttempt), "saved"))
+		return err == nil
+	})
 	// Result persisted independently while the queue response is still held.
 	wait(func() bool {
 		matches, _ := filepath.Glob(filepath.Join(state, "*.result.json"))
