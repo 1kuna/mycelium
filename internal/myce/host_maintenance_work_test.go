@@ -188,6 +188,20 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					if !reply.AdmissionBlocked || slot.State != "failed" || slot.Attempt != attempt {
 						t.Fatal("pin restarted during maintenance", reply)
 					}
+					// Ticks and repeated failed reports cannot restart it or revive custody.
+					for range 3 {
+						clock.Advance(time.Second)
+						if err := q.Tick(); err != nil {
+							t.Fatal(err)
+						}
+						if slot.State != "failed" || slot.Attempt != attempt {
+							t.Fatal("tick restarted pin during maintenance", slot)
+						}
+						pulse()
+					}
+					if status, err := q.HostMaintenanceStatus("host"); err != nil || !status.Quiescent || !status.Healthy || status.Sidecars != 0 || obligationCount() != 0 {
+						t.Fatal("cleaned engine retained custody", status, err)
+					}
 					if len(q.s.Pins) != 1 || q.s.Pins[0].Assigned != m.ID {
 						t.Fatal("maintenance removed pin intent", q.s.Pins)
 					}
