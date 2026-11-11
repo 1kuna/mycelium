@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -329,5 +328,3 @@ MYCE_ENROLLMENT_TICKET
 	// A single physical command; base64 is available on both supported OSes.
 	return "printf %s " + quoteShell(base64.StdEncoding.EncodeToString([]byte(script))) + " | base64 -d | sh -s --", nil
 }
-
-func ReleaseArtifactPath(dir string, a ReleaseArtifact) string { return filepath.Join(dir, a.File) }

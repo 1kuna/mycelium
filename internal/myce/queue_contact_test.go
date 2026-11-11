@@ -78,7 +78,7 @@ func TestCheckinAbandonedContactExpires(t *testing.T) {
 	}
 	c.Advance(4 * time.Second)
 	check(t, q, peer, nil)
-	q.beginCheckin(worker.ID, worker.Session) // Abandoned: never calls settle.
+	q.beginWorkerCheckin(worker.ID, worker.Session, 0, false) // Abandoned: never calls settle.
 	allowance := q.machineLossTimeout(worker.ID)
 	c.Advance(allowance - time.Nanosecond)
 	check(t, q, peer, nil)
@@ -153,7 +153,7 @@ func TestCheckinRejectedReportDoesNotRefreshContact(t *testing.T) {
 	check(t, q, worker, nil)
 	last := q.s.Machines[worker.ID].LastSeen
 	c.Advance(time.Second)
-	stale := q.beginCheckin(worker.ID, "stale-session")
+	stale := q.beginWorkerCheckin(worker.ID, "stale-session", 0, false)
 	if got := q.lastContact(q.s.Machines[worker.ID], c.Now()); !got.Equal(last) {
 		t.Fatal("stale session received pending contact")
 	}

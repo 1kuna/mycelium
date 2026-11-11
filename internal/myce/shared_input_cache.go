@@ -627,14 +627,6 @@ func writeSharedReady(ctx context.Context, stage string, b []byte) error {
 
 func inputRef(s SharedInput) *FileRef { ref := s.ref(); return &ref }
 
-func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
-	return copyNASInput(ctx, Client{}, source, target, &ref, nil)
-
-}
-
-func makeSharedReadOnly(root string) error {
-	return makeSharedReadOnlyContext(context.Background(), root)
-}
 func makeSharedReadOnlyContext(ctx context.Context, root string) error {
 	return filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if err := sharedInputProgress(ctx); err != nil {

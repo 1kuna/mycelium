@@ -1501,19 +1501,6 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (sta
 	return verifyFile(ctx, dest, ref)
 }
 
-func copyFileDownload(dst interface {
-	io.Writer
-	Sync() error
-}, src io.Reader) (int64, error) {
-	n, err := io.Copy(fileDownloadWriter{dst}, src)
-	// An interrupted remote read does not excuse a failed local durability
-	// boundary. Return the sync failure alone so its terminal cause wins.
-	if syncErr := dst.Sync(); syncErr != nil {
-		return n, fmt.Errorf("%w: %w", errFileTransferLocal, syncErr)
-	}
-	return n, err
-}
-
 type fileDownloadWriter struct{ io.Writer }
 
 func (w fileDownloadWriter) Write(p []byte) (int, error) {
