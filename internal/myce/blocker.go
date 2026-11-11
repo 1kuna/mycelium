@@ -157,6 +157,8 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 	b := &Blocker{"resource_pressure", "eligible execution capacity", "queue", "wait for the named capacity or reservation to be released; keep other work moving", reason}
 	if strings.HasPrefix(reason, productionParityHostHold+":") {
 		b.Code, b.Dependency, b.Owner, b.Action = productionParityHostHold, "production parity host approval", "queue owner", "compare candidate outputs with the reference and explicitly approve the physical host in the exact work's production_parity_hosts list"
+	} else if deviceFaultRetryReason(reason) {
+		b.Code, b.Dependency, b.Owner, b.Action = deviceFaultRetryHold, "healthy accelerator capacity after a driver fault", "queue and worker", "wait for another healthy device or host, or a health-proven quarantine recovery"
 	} else if j.Spec.extensionJob() && len(j.Extensions) == 0 {
 		b.Code, b.Dependency, b.Owner, b.Action = "missing_extension", "registered implementation", "consumer", "register an implementation for this work with its supported targets, environment and native check; keep the queued job identity"
 	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "extension" {
@@ -201,8 +203,6 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 		if !freshTargets {
 			b.Code, b.Dependency, b.Owner, b.Action = "unknown_observation", "worker inventory", "queue owner", "restore fresh worker observations before deciding target coverage"
 		}
-	} else if deviceFaultRetryReason(reason) {
-		b.Code, b.Dependency, b.Owner, b.Action = deviceFaultRetryHold, "healthy accelerator capacity after a driver fault", "queue and worker", "wait for another healthy device or host, or a health-proven quarantine recovery"
 	} else if !dependencyReady(j) {
 		b.Code, b.Dependency, b.Owner, b.Action = "unprepared", "accepted upstream result", "producer", "complete and publish the required upstream result"
 	} else if strings.Contains(reason, "waiting for software preparation for job ") {
