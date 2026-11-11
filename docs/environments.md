@@ -289,7 +289,8 @@ needs:
 ```
 
 The lock file's basename must be exactly `uv.lock`, `pyproject.toml`, or
-`requirements.txt` (or `pixi.lock` with `backend: pixi`); names such as
+`requirements.txt` (or `pixi.lock` with `backend: pixi`, or `package-lock.json`
+with `backend: npm`); names such as
 `download-requirements.txt` are rejected.
 
 For `requirements.txt`, only that file is frozen; for `uv.lock` or
@@ -341,6 +342,70 @@ the managed tool the installer places in its user's tool tree, or a `pixi` on
 PATH reporting exactly 0.81.0; it never downloads one at submission. Without
 it, or on a timeout (30 s) or any other tool failure, the check is skipped and
 workers refuse at preparation as before. Results are cached by input digest.
+
+### npm package locks
+
+`environment: {backend: npm, lock_file: package-lock.json}` prepares
+`node_modules` once per lock digest on each worker and reuses it across jobs,
+like a Pixi environment. The queue freezes `package-lock.json` and the adjacent
+`package.json`; both are required and `python` is not used. When `pixi.toml` and
+`pixi.lock` sit beside the lock, they are frozen too and form the Node layer:
+the worker installs that Pixi workspace's default environment first and runs
+npm from it, so the worker needs no Node of its own. Pin `nodejs` there for
+portable jobs. One Pixi file without its partner is refused. Without the layer,
+the worker's own `node` and `npm` are used.
+
+```yaml
+environment: {backend: npm, lock_file: app/package-lock.json, platforms: [cpu]}
+```
+
+Resolve and submission refuse what `npm ci` would refuse, with
+`job_environment_invalid`:
+
+- a lock that is not valid JSON;
+- a `lockfileVersion` outside 1–3;
+- for version 2 and 3 locks, a root `packages[""]` entry whose dependency maps
+  differ from `package.json`. The fix is `npm install` and committing both files.
+
+A Pixi Node layer gets the same up-to-date check as `backend: pixi`.
+
+- **Cache key.** The key is the frozen inputs, the backend and the platform. It
+  is local to each worker, so the worker's OS and architecture are implicit.
+  A Pixi layer pins Node through `pixi.lock`. For host Node, the worker records
+  `node --version` and its OS/architecture with the tree. When they change, the
+  tree is retired and prepared again; while another attempt is using it, the
+  start fails and can be retried.
+- **Preparation.** The worker runs
+  `npm ci --cache CACHE/.downloads/npm --prefer-offline --no-audit --no-fund` in
+  `CACHE/KEY`. npm's own cache is shared across lock digests and counts toward
+  the separate download limit. When the downloads exceed that limit, the npm
+  cache is cleared, which is what `npm cache clean --force` does. Package and
+  root lifecycle scripts run, including the root `prepare`, so `package.json`
+  must not need project sources to install.
+- **Tool downloads.** These standard cache variables point into the prepared
+  tree, both while installing and in the job:
+  - `PUPPETEER_CACHE_DIR` (`CACHE/KEY/tool-cache/puppeteer`)
+  - `PLAYWRIGHT_BROWSERS_PATH` (`…/ms-playwright`)
+  - `CYPRESS_CACHE_FOLDER` (`…/Cypress`)
+
+  So a headless browser that a `postinstall` downloads (for example
+  `"postinstall": "playwright install chromium"`) is fetched once per lock and
+  found by later jobs. A tool with another cache variable can be pointed at
+  `node_modules/.cache` from its `postinstall`.
+- **Job view.** The job gets:
+  - `node_modules/.bin` first on `PATH`;
+  - `NODE_PATH`, which CommonJS `require` uses;
+  - the tool-cache variables;
+  - `MYCE_ENVIRONMENT_DIR`.
+
+  ESM imports ignore `NODE_PATH`. So when `run.workdir` is the attempt's own
+  folder and has no `node_modules`, the worker links `node_modules` there to
+  the prepared tree. The link is not an output.
+- **Isolation.** `node_modules` and `tool-cache` are made read-only before the
+  tree is published. Point any tool that writes a runtime cache at the job's
+  workdir.
+- **Budget.** The tree counts toward the environment-cache limit, with the
+  usual admission, oldest-first eviction and 24-hour minimum.
 
 A single-job reply (`myce status JOB --json`, `GET /api/jobs/ID`) carries
 `environment_lock`: the backend and the sha256 of each frozen lock input, by

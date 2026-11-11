@@ -108,6 +108,10 @@ func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (E
 	return snapshotEnvironmentFiles(r, platform, base, label, nil)
 }
 
+func knownEnvironmentBackend(b string) bool {
+	return b == "" || b == "uv" || b == "pixi" || b == "npm"
+}
+
 // EnvironmentLockInputs validates an inline lock basename and returns every
 // file its backend freezes, in the lock's directory.
 func EnvironmentLockInputs(backend, lockFile string) (string, []string, error) {
@@ -117,6 +121,10 @@ func EnvironmentLockInputs(backend, lockFile string) (string, []string, error) {
 		return name, nil, errors.New("pixi requires pixi.lock")
 	case backend == "pixi":
 		return name, []string{"pixi.lock", "pixi.toml"}, nil
+	case backend == "npm" && name != "package-lock.json":
+		return name, nil, errors.New("npm requires package-lock.json")
+	case backend == "npm":
+		return name, []string{"package-lock.json", "package.json"}, nil
 	case name == "requirements.txt":
 		return name, []string{"requirements.txt"}, nil
 	case name == "uv.lock" || name == "pyproject.toml":
@@ -150,6 +158,11 @@ func ReadEnvironmentLock(backend, lockFile, resolved, authored, side, base strin
 		}
 		files[n] = b
 	}
+	if backend == "npm" {
+		if err := readNPMNodeLayer(files, resolved, authored, side, base); err != nil {
+			return nil, err
+		}
+	}
 	return files, nil
 }
 
@@ -160,10 +173,16 @@ func uploadedEnvironmentLock(backend, lockFile string, uploaded map[string][]byt
 	if err != nil {
 		return nil, err
 	}
-	if len(uploaded) != len(names) {
+	files := map[string][]byte{}
+	optional := 0
+	if backend == "npm" {
+		if optional, err = uploadedNPMNodeLayer(files, uploaded); err != nil {
+			return nil, err
+		}
+	}
+	if len(uploaded) != len(names)+optional {
 		return nil, fmt.Errorf("uploaded environment files must be exactly %s", strings.Join(names, " and "))
 	}
-	files := map[string][]byte{}
 	for _, n := range names {
 		b, ok := uploaded[n]
 		if !ok {
@@ -178,7 +197,7 @@ func uploadedEnvironmentLock(backend, lockFile string, uploaded map[string][]byt
 }
 
 func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string, uploaded map[string][]byte) (EnvironmentRecipe, error) {
-	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
+	if !knownEnvironmentBackend(r.Backend) {
 		return r, errors.New("unsupported environment backend")
 	}
 	r.Platform = platform
@@ -188,7 +207,7 @@ func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string,
 	}
 	r.Files = map[string][]byte{}
 	if r.LockFile != "" {
-		if r.Backend != "pixi" && r.Python == "" {
+		if r.Backend != "pixi" && r.Backend != "npm" && r.Python == "" {
 			return r, errors.New("Python lock file requires python version")
 		}
 		if r.Backend == "pixi" && r.Manifest != "" && filepath.Clean(r.Manifest) != filepath.Join(filepath.Dir(r.LockFile), "pixi.toml") {
@@ -206,6 +225,11 @@ func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string,
 		}
 		if e != nil {
 			return r, e
+		}
+		if r.Backend == "npm" {
+			if e = checkNPMLock(r.Files); e != nil {
+				return r, e
+			}
 		}
 	} else if r.Binary != "" {
 		// Binaries stay on NAS; include verified content identity, not its mount path.
@@ -304,6 +328,10 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 			continue
 		}
 		r, err := snapshotEnvironmentFiles(EnvironmentRecipe{Backend: e.Backend, LockFile: e.LockFile, Python: e.Python}, p, "queue-working-directory", "", e.Files)
+		var npmErr *NPMLockError
+		if errors.As(err, &npmErr) {
+			return nil, rejectFieldRule("job_environment_invalid", err)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -739,7 +767,7 @@ func (c *EnvironmentCache) purgeRetiredKey(onlyKey string) (int64, error) {
 			// Old interrupted builds may still have a recorded child to reap.
 			if !c.recent(path) {
 				if err = c.cleanupBuild(path); err == nil {
-					err = os.RemoveAll(path)
+					err = removeEnvironmentTree(path)
 				}
 			}
 		}
@@ -932,7 +960,7 @@ func (c *EnvironmentCache) admit(key string, size int64, contexts ...context.Con
 	return nil
 }
 func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (string, func(), error) {
-	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
+	if !knownEnvironmentBackend(r.Backend) {
 		return "", nil, errors.New("unsupported environment backend")
 	}
 	if r.Target != nil && (r.Target.OS != runtime.GOOS || r.Target.Arch != runtime.GOARCH) {
@@ -942,6 +970,9 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 		return "", nil, errors.New("invalid environment hash")
 	}
 	if e := c.init(); e != nil {
+		return "", nil, e
+	}
+	if e := c.retireStaleNPM(ctx, r); e != nil {
 		return "", nil, e
 	}
 	// Shared use lock spans build and execution, preventing eviction races.
@@ -1028,7 +1059,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 				// Only this just-created, never-published build is disposable.
 				// Its recorded process has been reaped and .build is still held;
 				// retain download objects, not a duplicate prefix charged to retry.
-				_ = os.RemoveAll(partial)
+				_ = removeEnvironmentTree(partial)
 			} else {
 				_ = c.trash(partial)
 			}
@@ -1172,7 +1203,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			if r.Binary != "" {
 				continue
 			}
-			if !safeRelative(n) || (n != "uv.lock" && n != "pyproject.toml" && n != "requirements.txt" && n != "pixi.toml" && n != "pixi.lock" && !strings.HasPrefix(n, "extension/")) {
+			if !safeRelative(n) || (n != "uv.lock" && n != "pyproject.toml" && n != "requirements.txt" && n != "pixi.toml" && n != "pixi.lock" && n != "package-lock.json" && n != "package.json" && !strings.HasPrefix(n, "extension/")) {
 				return errors.New("invalid environment input name")
 			}
 			if e = os.MkdirAll(filepath.Dir(filepath.Join(partial, n)), 0700); e != nil {
@@ -1186,6 +1217,8 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			// Binary/build-only and asset recipes have no package installer.
 		} else if r.Backend == "pixi" {
 			e = c.installPixi(buildCtx, r, partial, env, output, run)
+		} else if r.Backend == "npm" {
+			e = c.installNPM(buildCtx, r, partial, env, output, run)
 		} else if _, ok := r.Files["uv.lock"]; ok {
 			e = run(buildCtx, []string{"uv", "sync", "--verbose", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output, output)
 		} else {

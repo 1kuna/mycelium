@@ -147,6 +147,11 @@ myce spec check --resolve --entry pixi-task .mycelium/adapter.yaml
 myce run --entry pixi-task --key "pixi-task-$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
+npm projects use `environment: {backend: npm, lock_file: package-lock.json}`.
+`node_modules` and post-install tool downloads such as headless browsers are
+prepared once per lock on each worker and reused read-only; see
+[npm package locks](../../../docs/environments.md#npm-package-locks).
+
 An absolute `lock_file` is still read by the queue at its own path. Each
 input is limited to 1 MiB; oversized or missing inputs report a
 `path_diagnostic` (`side: submitter` for a relative lock, `side: queue` for
