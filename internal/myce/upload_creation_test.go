@@ -38,20 +38,29 @@ func creationStore(t *testing.T, limit int64) (*Queue, *FileStore) {
 func TestUploadCreationBurst(t *testing.T) {
 	_, s := creationStore(t, 1<<20)
 	record := s.recordUpload
-	// Model a one-second queue-lock wait at each purpose lookup. Readers can
-	// proceed together once a check-in releases q.mu; a global store lock cannot.
+	// Model a queue-lock wait at each purpose lookup that ends only once all 30
+	// creations are waiting together. Concurrent readers reach that point; a
+	// global store lock serializes them and never does, which the backstop
+	// below reports. No wall-clock budget is involved.
+	const creations = 30
+	var waiting atomic.Int32
+	together := make(chan struct{})
+	release := sync.OnceFunc(func() { close(together) })
 	s.recordUpload = func(hash, purpose string, created bool, contexts ...context.Context) error {
 		ctx := requestContext(contexts)
+		if waiting.Add(1) == creations {
+			release()
+		}
 		select {
-		case <-time.After(time.Second):
+		case <-together:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		return record(hash, purpose, created, contexts...)
 	}
-	start := time.Now()
 	var wg sync.WaitGroup
-	for i := 0; i < 30; i++ {
+	defer release() // Free a serialized holder so a failed run can clean up.
+	for i := 0; i < creations; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -62,12 +71,7 @@ func TestUploadCreationBurst(t *testing.T) {
 			}
 		}(i)
 	}
-	wg.Wait()
-	elapsed := time.Since(start)
-	t.Logf("30 creations with one-second queue waits: %s", elapsed)
-	if elapsed >= 10*time.Second {
-		t.Fatalf("creations serialized: %s", elapsed)
-	}
+	returnsWhileBlocked(t, "upload creations (serialized)", wg.Wait)
 }
 
 func TestUploadCreationCancelledQueueWait(t *testing.T) {
@@ -88,7 +92,7 @@ func TestUploadCreationCancelledQueueWait(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(testWaitTimeout):
 		q.mu.Unlock()
 		<-done
 		t.Fatal("cancelled creation waited for q.mu")
@@ -193,7 +197,7 @@ func TestUploadCreationMixedAdmission(t *testing.T) {
 				if code != 201 {
 					t.Errorf("unrelated upload: %d", code)
 				}
-			case <-time.After(300 * time.Millisecond):
+			case <-time.After(testWaitTimeout):
 				t.Error("unrelated upload blocked behind queue persistence")
 			}
 			close(release)
@@ -224,7 +228,7 @@ func TestUploadCreationCancelledFinish(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(testWaitTimeout):
 		q.mu.Unlock()
 		<-done
 		t.Fatal("POST finish ignored cancellation")
@@ -428,7 +432,7 @@ func TestUploadCreationDuringClaimSweep(t *testing.T) {
 		if code != 201 {
 			t.Errorf("unrelated upload: %d", code)
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(testWaitTimeout):
 		t.Error("upload blocked behind claim sweep queue wait")
 	}
 	close(release)
@@ -486,14 +490,14 @@ func TestUploadCreationCancelledPressureClear(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("pressure transaction not reached")
 	}
 	cancel()
 	select {
 	case <-done:
 		q.mu.Unlock()
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(testWaitTimeout):
 		s.mu.Lock()
 		held := s.creations[ref.SHA256].length
 		s.mu.Unlock()

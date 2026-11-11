@@ -51,7 +51,7 @@ func TestProcessMemoryPressureEligibility(t *testing.T) {
 			defer finish()
 			select {
 			case <-sampled:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("process sampler did not run")
 			}
 			p := finish()

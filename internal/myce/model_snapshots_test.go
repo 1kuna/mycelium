@@ -404,7 +404,7 @@ func TestModelSnapshotsDockerMountMatchesNativePath(t *testing.T) {
 	}
 	select {
 	case <-p.done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("refused create did not finish")
 	}
 	calls, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -746,7 +746,7 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	}
 	select {
 	case <-a.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("unpin did not retry")
 	}
 	data, err = os.ReadFile(filepath.Join(s.dir, s.stateName))

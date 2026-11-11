@@ -193,7 +193,7 @@ func TestOperatorStopMarkerReconcilesWorkerWithQueue(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-			case <-time.After(8 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("worker did not finish")
 			}
 		})

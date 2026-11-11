@@ -458,7 +458,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("hypha a did not leave")
 	}
 	await(t, func() bool {
@@ -500,7 +500,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("hypha b did not leave")
 	}
 }
@@ -681,7 +681,7 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("extension worker stuck")
 	}
 }

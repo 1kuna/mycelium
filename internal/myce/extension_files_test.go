@@ -96,7 +96,7 @@ func TestExtensionFilesOverlapNASInputsAndJoinBeforeReturn(t *testing.T) {
 			for range 2 {
 				select {
 				case <-entered:
-				case <-time.After(2 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatal("independent NAS input copies did not overlap")
 				}
 			}
@@ -121,7 +121,7 @@ func TestExtensionFilesOverlapNASInputsAndJoinBeforeReturn(t *testing.T) {
 			var err error
 			select {
 			case err = <-done:
-			case <-time.After(2 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("staging did not finish after all reads were released")
 			}
 			if peak.Load() != 2 || active.Load() != 0 || count.Load() != int32(len(inputs)) {

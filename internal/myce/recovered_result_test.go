@@ -176,7 +176,7 @@ func TestRecoveredResultVerificationFence(t *testing.T) {
 	go func() { _, err := c.RecoverResult(context.Background(), p); done <- err }()
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("verification did not start")
 	}
 	progress := make(chan error, 1)
@@ -189,7 +189,7 @@ func TestRecoveredResultVerificationFence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("verification held q.mu")
 	}
 	unblock()
@@ -198,7 +198,7 @@ func TestRecoveredResultVerificationFence(t *testing.T) {
 		if recoveryCode(err) != "recovery_stale" {
 			t.Fatalf("stale acceptance: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("recovery did not finish")
 	}
 	if len(q.s.Jobs[p.ID].RecoveredResults) != 0 {

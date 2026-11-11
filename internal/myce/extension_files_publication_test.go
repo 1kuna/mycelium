@@ -62,7 +62,7 @@ func TestExtensionFilesPublicationOverlapsCopiesAndJoins(t *testing.T) {
 					if filepath.Base(dst) == "one" {
 						staged = filepath.Dir(dst)
 					}
-				case <-time.After(2 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatal("independent output copies did not overlap")
 				}
 			}
@@ -84,7 +84,7 @@ func TestExtensionFilesPublicationOverlapsCopiesAndJoins(t *testing.T) {
 			var err error
 			select {
 			case err = <-done:
-			case <-time.After(2 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("publication did not finish after copies joined")
 			}
 			if fail {

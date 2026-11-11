@@ -78,7 +78,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			armed.Store(true)
 			select {
 			case <-timedOut:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("observation did not time out")
 			}
 			retryStatus := func() string {
@@ -104,7 +104,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			releaseSecond()
 			select {
 			case <-timedOut:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("observation was not retried")
 			}
 			await(t, func() bool { return strings.Contains(retryStatus(), "unavailable 3m") })
@@ -129,7 +129,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				if f.err != nil || !f.result.Success || f.result.Interrupted || f.result.ReleasePending {
 					t.Fatalf("recovered observation lost completion: %+v", f)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("healthy attempt did not complete")
 			}
 			calls, err := os.ReadFile(filepath.Join(root, "calls"))

@@ -108,7 +108,7 @@ while :; do read line <&5; done
 		if main.err != nil {
 			t.Fatal(main.err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("waiter did not report checkpoint completion")
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "saved")); err != nil || string(data) != "saved" {
@@ -149,7 +149,7 @@ func TestNativeNamespaceCanceledChildHandshakeCannotExecLate(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("handshake ignored cancellation: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("canceled handshake did not return")
 	}
 	gate.Close() // The ordinary launch abort closes its deferred gate writer.
@@ -163,7 +163,7 @@ func TestNativeNamespaceCanceledChildHandshakeCannotExecLate(t *testing.T) {
 	}
 	select {
 	case <-main.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("late child did not reject the closed exec gate")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "main-ready")); !os.IsNotExist(err) {

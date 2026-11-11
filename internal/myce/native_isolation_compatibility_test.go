@@ -527,7 +527,7 @@ func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, bu
 				if f.err != nil || f.result.ReleasePending {
 					t.Errorf("failure cleanup unconfirmed: %+v", f)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Error("failure cleanup timed out")
 			}
 		}

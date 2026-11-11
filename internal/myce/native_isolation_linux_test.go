@@ -249,7 +249,7 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 			if finish.err != nil || finish.result.ReleasePending {
 				t.Errorf("sibling cleanup: %+v", finish)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("sibling cleanup timed out")
 		}
 	}()
@@ -277,7 +277,7 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 		if finish.err != nil || !finish.result.Success || finish.result.ReleasePending || !strings.Contains(string(out), "isolated") {
 			t.Fatalf("worker attack: %+v\n%s", finish, out)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker attack timed out")
 	}
 	for _, path := range []string{"own-output", ".tmp/own-temp"} {
@@ -355,7 +355,7 @@ __attribute__((constructor)) static void attack(void) {
 					out, _ := os.ReadFile(filepath.Join(store.dir, store.state.Log))
 					t.Fatalf("preload payload: %+v\n%s", finish, out)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				p.stop(w.Clock.Now(), 0, true)
 				t.Fatal("preload payload timed out")
 			}

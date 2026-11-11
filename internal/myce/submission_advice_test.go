@@ -115,7 +115,7 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 	go func() { defer close(done); handler.ServeHTTP(w, r) }()
 	select {
 	case <-committed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("submission never committed")
 	}
 	control := make(chan error, 1)
@@ -128,14 +128,14 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("advice blocked a later control commit")
 	}
 	q.mu.Lock()
 	release.Do(func() { close(resume) })
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		q.mu.Unlock()
 		t.Fatal("submission response reacquired q.mu after commit")
 	}
@@ -199,7 +199,7 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 		go func() { handler.ServeHTTP(w, r); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(3 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("production receipt waited for optional retained diagnostics")
 		}
 		var got Job

@@ -256,7 +256,7 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 	}
 	mode.Store(7)
 	{
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 		defer cancel()
 		out := t.TempDir()
 		var diagnostics strings.Builder
@@ -295,7 +295,7 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 				if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat > "+shellArg(payload)+"\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 				defer cancel()
 				r := profileReceipt{Key: "key", Project: "test", JobID: "fixture", Status: "queued", Observation: "armed", Delivery: "armed"}
 				if err := observeProfile(ctx, client, dir, r, profileObserver{Notify: hook}); err == nil || ctx.Err() != nil {

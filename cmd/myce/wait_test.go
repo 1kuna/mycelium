@@ -122,7 +122,7 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 	// Observe assignment before completing it, just as a real worker does.
 	// Advance only the old worker's first measured send interval; later
 	// assignment retries keep the scheduling clock fixed.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
 	var reply myce.Reply
 	wait(t, ctx, func() bool {

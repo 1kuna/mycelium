@@ -143,7 +143,7 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 			p.stopDirective(w.Clock.Now(), 0, true, true)
 			select {
 			case <-p.done:
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Error("exception fixture cleanup stalled")
 			}
 		}
@@ -178,7 +178,7 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 		if err := q.Complete(f.result); err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("tiny exception fixture stalled")
 	}
 	// Reload the persisted warning receipt, as on recovery, and attempt it again.

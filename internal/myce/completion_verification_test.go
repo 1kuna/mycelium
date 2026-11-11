@@ -76,7 +76,7 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 			}()
 			select {
 			case <-entered:
-			case <-time.After(3 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("verification did not reach durability barrier")
 			}
 			progress := func(name string, fn func() error) {
@@ -88,7 +88,7 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 					if err != nil {
 						t.Fatalf("%s: %v", name, err)
 					}
-				case <-time.After(3 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatalf("%s blocked behind output verification", name)
 				}
 			}
@@ -122,7 +122,7 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 			unblock()
 			select {
 			case <-done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("completion did not return")
 			}
 			if fence != "request-cancel" && fence != "accept" && response.Code != http.StatusConflict {

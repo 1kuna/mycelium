@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestDiscoveryUsesResidentDaemon(t *testing.T) {
@@ -145,7 +144,7 @@ func TestDiscoveryCommandCancellationAndCredentialIsolation(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ -z \"$MYCE_TOKEN\" ] || exit 9\n[ \"$LC_ALL\" = C ] || exit 8\nprintf 'ready\\n'\nexec sleep 30\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	ready := false
 	err := runDiscoveryCommand(ctx, script, nil, func(line string) {

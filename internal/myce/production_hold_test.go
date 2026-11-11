@@ -819,7 +819,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 		if err := q.Complete(receipt.result); err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("force-stop waits for NAS save")
 	}
 	run := check(t, q, a, nil).Job

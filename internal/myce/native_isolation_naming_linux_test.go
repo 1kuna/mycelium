@@ -219,7 +219,7 @@ func TestNativeIsolationCUDANaming(t *testing.T) {
 				if f.err != nil || f.result.ReleasePending {
 					t.Error("failed qualification child cleanup unconfirmed")
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Error("failed qualification child cleanup timed out")
 			}
 		}

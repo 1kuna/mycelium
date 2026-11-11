@@ -82,7 +82,7 @@ while read request <&5; do printf 'ready\n' >&6; done
 					p.enforceGrace(w.Clock.Now().Add(3 * time.Second))
 					select {
 					case <-p.done:
-					case <-time.After(10 * time.Second):
+					case <-time.After(testWaitTimeout):
 						t.Error("namespace fixture cleanup timed out")
 					}
 				}
@@ -151,7 +151,7 @@ while read request <&5; do printf 'ready\n' >&6; done
 				if finish.err != nil || finish.result.ReleasePending {
 					t.Errorf("namespace cleanup unconfirmed: %+v", finish)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("namespace did not finish cleanup")
 			}
 			if data, err := os.ReadFile(saved); err != nil || string(data) != "checkpoint-complete" {

@@ -97,7 +97,7 @@ func submitVerificationWait[T any](t *testing.T, name string, done <-chan T) T {
 	select {
 	case result := <-done:
 		return result
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatalf("%s blocked behind input verification", name)
 		var zero T
 		return zero

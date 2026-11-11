@@ -50,7 +50,7 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 			r.Header.Set("X-Myce-Request-Budgets", requestBudgetProtocol)
 			r.Header.Set("X-Myce-Max-Response-Bytes", "67108864")
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), testWaitTimeout)
 		defer cancel()
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r.WithContext(ctx))
@@ -114,7 +114,7 @@ func cheapReadLoad(t *testing.T, requireProgress bool) {
 	if requireProgress {
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(testWaitTimeout):
 			releaseControl()
 			<-done
 			t.Error("completed responses waited behind the live queue transaction")

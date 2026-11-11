@@ -380,7 +380,7 @@ func TestStatusReadTerminalCommitDuringProjection(t *testing.T) {
 			if err := q.Started(result(a, true)); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			reader, err := q.usageReader.Conn(ctx)
 			if err != nil {
@@ -450,7 +450,7 @@ func TestJobReadAvoidsUsage(t *testing.T) {
 	s.SubmissionKey = "poll-key"
 	s.Run.Command = []string{"echo", "private-poll-payload"}
 	j := submit(t, q, s)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	writer, err := q.db.Conn(ctx)
 	if err != nil {
@@ -584,7 +584,7 @@ func TestStatusInspectionRemainsFresh(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	client := Client{URL: server.URL, Token: "test"}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	var cached Snapshot
 	if err := client.Call(ctx, "GET", "/api/status", nil, &cached); err != nil {
@@ -612,7 +612,7 @@ func TestStatusReadCoalescesAndDoesNotAuthorize(t *testing.T) {
 	if a == nil || a.ID != j.ID {
 		t.Fatal("no assignment")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	captured, release := make(chan struct{}), make(chan struct{})
 	defer func() {

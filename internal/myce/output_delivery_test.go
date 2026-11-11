@@ -114,7 +114,7 @@ func TestOutputDeliveryCompletesBeforeNASAndRetriesStall(t *testing.T) {
 	var progress func()
 	select {
 	case progress = <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("publisher did not start")
 	}
 	clock.Advance(2 * checkpointAvailabilityStallBudget)

@@ -174,7 +174,7 @@ func TestSharedInputBlockedColdMissDoesNotBlockOtherInputs(t *testing.T) {
 			t.Fatal(r.err)
 		}
 		r.done()
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		close(unblock)
 		<-pending
 		r := <-finished

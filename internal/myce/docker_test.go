@@ -489,7 +489,7 @@ func TestDockerWorkerGraceAndIdentity(t *testing.T) {
 		if !f.result.Forced || !f.result.Interrupted || f.result.ReleasePending {
 			t.Fatalf("bad result: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup did not finish")
 	}
 	if _, e = os.Stat(filepath.Join(root, "running")); !errors.Is(e, os.ErrNotExist) {
@@ -583,7 +583,7 @@ func TestDockerDaemonRefusalRetriesWithoutRelease(t *testing.T) {
 		if !f.result.Forced {
 			t.Fatal("forced custody lost")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("retry did not recover")
 	}
 }
@@ -621,7 +621,7 @@ func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
 		if !f.result.Forced {
 			t.Fatal("delayed start force classification lost")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("accepted start not reconciled")
 	}
 }
@@ -643,9 +643,10 @@ func TestDockerHangingCallDoesNotBlockStopOrHeartbeat(t *testing.T) {
 	})
 	stopped := make(chan struct{})
 	go func() { p.stop(c.Now(), 0, true); close(stopped) }()
+	// Stop must return before the hanging call's own timeout could release it.
 	select {
 	case <-stopped:
-	case <-time.After(time.Second):
+	case <-time.After(w.dockerCallTimeout):
 		t.Fatal("stop blocked behind dockerd")
 	}
 	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
@@ -681,7 +682,7 @@ func TestDockerRestartReconcilesContainers(t *testing.T) {
 		if !f.result.Interrupted || !f.result.Forced {
 			t.Fatalf("bad restart result: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("restart did not release containers")
 	}
 }
@@ -742,7 +743,7 @@ func TestDockerDefiniteRefusalReleasesWithoutStarting(t *testing.T) {
 		if f.result.Success || f.result.ReleasePending {
 			t.Fatalf("invalid refusal result: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("definite refusal stayed reserved")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -997,7 +998,7 @@ func TestDockerAcceptedStartObservationSettlesLostResponse(t *testing.T) {
 		if !f.result.Forced || !f.result.Interrupted {
 			t.Fatal("forced disposition not retained")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		data, _ := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
 		calls, _ := os.ReadFile(filepath.Join(root, "calls"))
 		t.Fatalf("positively witnessed and killed start stayed unresolved: custody=%s calls=%s", data, calls)
@@ -1016,7 +1017,7 @@ func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	select {
 	case <-p.done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("never-started stop did not settle")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -1124,7 +1125,7 @@ func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
 			}
 			select {
 			case <-p.done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("definite refusal did not recover automatically")
 			}
 

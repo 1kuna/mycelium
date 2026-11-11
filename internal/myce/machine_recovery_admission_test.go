@@ -270,7 +270,7 @@ func TestMachineWorkerReportsRecoveryUntilBufferedResultDrains(t *testing.T) {
 			if !c.Recovering || c.Machine.Session != j.Session || c.Fresh || len(c.Attempts) != 1 || c.Attempts[0].ID != j.ID {
 				t.Fatalf("startup custody not marked recovering: recovering=%t session=%s fresh=%t attempts=%d", c.Recovering, c.Machine.Session, c.Fresh, len(c.Attempts))
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("recovery blocked heartbeat")
 		}
 	}
@@ -285,7 +285,7 @@ func TestMachineWorkerReportsRecoveryUntilBufferedResultDrains(t *testing.T) {
 				}
 				return
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("result drain did not restore admission")
 		}
 	}

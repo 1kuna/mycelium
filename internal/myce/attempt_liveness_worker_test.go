@@ -78,7 +78,7 @@ func TestAttemptLivenessSamplerDoesNotBlockHeartbeat(t *testing.T) {
 	defer func() { sampler.cancel(); <-sampler.done }()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("collector did not start")
 	}
 	// Snapshot remains available while the sole collector is in OS I/O.
@@ -89,7 +89,7 @@ func TestAttemptLivenessSamplerDoesNotBlockHeartbeat(t *testing.T) {
 		if r.CPU.Value != nil {
 			t.Fatal("invented a sample")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("heartbeat blocked on collector")
 	}
 }

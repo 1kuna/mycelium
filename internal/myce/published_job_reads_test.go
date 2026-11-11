@@ -35,7 +35,7 @@ func TestPublishedJobReadsDuringControlTransaction(t *testing.T) {
 	read := func(id string) (int, Job) {
 		r := httptest.NewRequest("GET", "/api/jobs/"+id, nil)
 		r.Header.Set("Authorization", "Bearer test")
-		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), testWaitTimeout)
 		defer cancel()
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r.WithContext(ctx))

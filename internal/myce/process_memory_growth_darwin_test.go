@@ -67,7 +67,7 @@ func TestDarwinRSSGuardGrowthOvershoot(t *testing.T) {
 					t.Fatal(f.err)
 				}
 				r = f.result
-			case <-time.After(40 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("attempt did not finish")
 			}
 			finished := time.Now()

@@ -123,7 +123,7 @@ func restartSavedResult(t *testing.T, w Worker, s *workerStore) Result {
 			if f.err != nil {
 				t.Fatal(f.err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("recovery did not finish")
 		}
 	}
@@ -165,7 +165,7 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 			if f.err != nil || !f.result.Success || f.result.Interrupted {
 				t.Fatalf("resumed result: %+v", f)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("cleanup did not complete")
 		}
 	}

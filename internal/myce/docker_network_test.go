@@ -254,7 +254,7 @@ func TestDockerPrivateNetworkLifecycle(t *testing.T) {
 		if !f.result.Forced {
 			t.Fatal("not forced")
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup stuck")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -488,7 +488,7 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 		if !f.result.Success || f.result.Interrupted {
 			t.Fatalf("main success became interruption: %+v", f.result)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("main exit did not end job")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -524,7 +524,7 @@ func TestDockerSidecarCrashFailsJob(t *testing.T) {
 		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "sidecar naming exited") {
 			t.Fatalf("crash: %+v", f.result)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("sidecar crash did not stop job")
 	}
 }
@@ -577,7 +577,7 @@ func testDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 						t.Fatalf("violation: %+v", f.result)
 					}
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("cleanup stuck")
 			}
 			if _, e := os.Stat(filepath.Join(root, "unlabeled-network")); e != nil {
@@ -624,7 +624,7 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 				if !stop && !strings.Contains(f.result.Error, "readiness timeout") {
 					t.Fatalf("wrong reason: %+v", f.result)
 				}
-			case <-time.After(4 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("readiness cleanup stuck")
 			}
 			if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
@@ -661,7 +661,7 @@ func TestDockerExplicitSwapAndHiddenNetworkCustody(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
 	select {
 	case <-p.done:
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup did not recover")
 	}
 }
@@ -755,7 +755,7 @@ func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
 		if f.result.Interrupted || f.result.Success {
 			t.Fatalf("readiness failure became loss: %+v", f.result)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup stuck")
 	}
 	if _, e := os.Stat(filepath.Join(root, "running")); e == nil {
@@ -783,7 +783,7 @@ func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
 		if !f.result.Interrupted || !f.result.Forced {
 			t.Fatalf("restart: %+v", f.result)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("restart cleanup stuck")
 	}
 	for _, name := range []string{"sortformer", "naming"} {

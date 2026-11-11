@@ -258,7 +258,7 @@ func TestWorkerDiskBudgetDetachedBuilderKeepsReservation(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("builder did not start")
 	}
 	c.mu.Lock()
@@ -273,7 +273,7 @@ func TestWorkerDiskBudgetDetachedBuilderKeepsReservation(t *testing.T) {
 		if err == nil {
 			t.Fatal("cancelled builder succeeded")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("caller did not withdraw")
 	}
 	if release, err := b.reserve(context.Background(), c.cache.Root, uint64(ref.SizeBytes), 0); err == nil {
@@ -283,7 +283,7 @@ func TestWorkerDiskBudgetDetachedBuilderKeepsReservation(t *testing.T) {
 	once.Do(func() { close(unblock) })
 	select {
 	case <-joined:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("detached writer did not join")
 	}
 	if release, err := b.reserve(context.Background(), c.cache.Root, uint64(ref.SizeBytes), 0); err != nil {

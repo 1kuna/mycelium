@@ -160,7 +160,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		if string(early) == oldURL || string(early) != main["MYCE_SIDECAR_HELPER_URL"] {
 			t.Fatalf("retry left earlier consumer on stolen endpoint; healthy helper and main use replacement endpoint")
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(testWaitTimeout):
 		p.stop(worker.Clock.Now(), 0, true)
 		<-p.done
 		t.Fatal("timeout")
