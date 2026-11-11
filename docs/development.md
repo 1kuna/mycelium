@@ -42,6 +42,19 @@ After affirmative cleanup, successful and failed runs both remove their frozen
 source tree and source/runtime archives. Unconfirmed cleanup retains the tree
 for diagnosis without retaining admission; verdicts and receipts remain available in either case.
 
+At the same points it also trims the default Go build cache (`go env GOCACHE`),
+which workers' direct `go test` runs fill and nothing else trims (#1224). On
+2026-11-11 that cache reached 51 GB, at about 10 GB/h, and held the disk under
+the 45 GiB entry floor, which blocked every local gate. The budget is derived:
+free disk must cover the entry floor plus the bytes written to that cache in the
+last hour. Only the shortfall is evicted, oldest first, so with ample free disk
+nothing is removed. Go refreshes an entry's mtime at most once an hour, so the
+trim never removes an entry younger than an hour plus five minutes. Anything a
+concurrent build used in the last five minutes therefore survives. It skips a
+cache on another filesystem and never fails a gate.
+`python3 scripts/gate-default-cache.py --dry-run` prints what it would remove;
+the regression is `python3 scripts/test-gate-default-cache.py`.
+
 ## Laptop test gates
 
 On the 64 GB development host, install Lima and prepare the local Linux VM once

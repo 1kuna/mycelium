@@ -26,6 +26,8 @@ def module(name):
 
 capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', 'receipt', 'source'))
 trim_cache = module('gate-cache').trim_cache
+# Workers' direct go test runs fill the default cache, which nothing else trims (#1224).
+trim_default_cache = module('gate-default-cache').trim_default_cache
 HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-capacity.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
@@ -256,6 +258,7 @@ def main():
         cache.mkdir(parents=True, exist_ok=True)
         # Reclaim rebuildable objects before admission checks disk headroom.
         trim_cache(cache)
+        trim_default_cache(capacity.ENTRY_FLOOR, repo, skip=(cache,))
         slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
                                 wait=True, after_pid=args.after_pid,
                                 exclusive=args.exclusive, source_root=planned_folder / 'source',
@@ -303,6 +306,7 @@ def main():
             capacity._cache.trim_backups(slot.directory.parent / 'selfheal-backups')
         if cache is not None:
             trim_cache(cache)
+            trim_default_cache(capacity.ENTRY_FLOOR, repo, skip=(cache,))
         if folder:
             print('local gate receipts:', folder, flush=True)
         for sig, handler in handlers.items():
