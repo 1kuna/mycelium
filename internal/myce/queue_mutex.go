@@ -22,6 +22,24 @@ type queueMutex struct {
 	observation sync.Mutex
 	occupants   int
 	occupiedAt  time.Time
+
+	// Liveness evidence for waiting clients: releases only advance, and waiting
+	// counts callers blocked in Lock/RLock. Two atomics; no lock, no history.
+	releases atomic.Uint64
+	waiting  atomic.Int64
+}
+
+// QueueProgress lets a client tell a slow queue from a stalled one. Releases
+// that advance, or nobody waiting, is progress; a constant count while callers
+// wait means one holder has kept the queue for the whole interval.
+type QueueProgress struct {
+	Releases uint64  `json:"releases"`
+	Waiting  int64   `json:"waiting"`
+	P99MS    float64 `json:"p99_ms"` // completed requests, excluding ping
+}
+
+func (m *queueMutex) progress() QueueProgress {
+	return QueueProgress{Releases: m.releases.Load(), Waiting: max(0, m.waiting.Load())}
 }
 
 func (m *queueMutex) Lock() {
@@ -29,9 +47,11 @@ func (m *queueMutex) Lock() {
 }
 
 func (m *queueMutex) lock(submission bool) {
+	m.waiting.Add(1)
 	p, w := m.waitPressure()
 	m.writers.acquire(submission)
 	m.mu.Lock()
+	m.waiting.Add(-1)
 	if m.control != nil {
 		m.control.begin()
 	}
@@ -40,6 +60,7 @@ func (m *queueMutex) lock(submission bool) {
 }
 
 func (m *queueMutex) Unlock() {
+	m.releases.Add(1)
 	m.leave()
 	if p := m.pressure.Load(); p != nil {
 		p.release()
@@ -53,8 +74,10 @@ func (m *queueMutex) Unlock() {
 }
 
 func (m *queueMutex) RLock() {
+	m.waiting.Add(1)
 	p, w := m.waitPressure()
 	m.mu.RLock()
+	m.waiting.Add(-1)
 	if m.control != nil {
 		m.control.begin()
 	}
@@ -63,6 +86,7 @@ func (m *queueMutex) RLock() {
 }
 
 func (m *queueMutex) RUnlock() {
+	m.releases.Add(1)
 	m.leave()
 	if p := m.pressure.Load(); p != nil {
 		p.release()

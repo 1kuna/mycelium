@@ -44,8 +44,11 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	nas := a.Queue.resolveNASInspections()
 	// Joining needs authenticated identity/version only, never the growing status
 	// snapshot. Transport pinning authenticates this identity to joining clients.
+	// Clients waiting on a slow call read queue progress here. No queue mutex.
 	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, map[string]any{"version": 1, "fingerprint": joiningPin}, nil)
+		progress := a.Queue.mu.progress()
+		progress.P99MS = float64(a.Queue.requestLatencies.p99("GET /api/ping")) / float64(time.Millisecond)
+		respond(w, map[string]any{"version": 1, "fingerprint": joiningPin, "queue_progress": progress}, nil)
 	})
 	mux.HandleFunc("GET /api/environments", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, a.Queue.EnvironmentEntries(), nil)
@@ -677,6 +680,7 @@ type Client struct {
 	Pause         func(context.Context, time.Duration) error
 	Jitter        func() float64
 	singleAttempt bool
+	watch         bool // see WithProgressWatch
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
@@ -688,17 +692,17 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	for {
 		started := clock.Now()
 		wireIn, faultFields := faultWireInput(in, c.faultWire != nil && c.faultWire.Load())
-		err := c.callOnce(ctx, method, path, wireIn, out)
+		err := c.callWatched(ctx, method, path, wireIn, out)
 		var rejected *HTTPError
 		if faultFields && errors.As(err, &rejected) && rejected.Status == 400 && rejected.Code == "request_invalid" {
 			if c.faultWire != nil {
 				c.faultWire.Store(false)
 			}
 			legacy, _ := faultWireInput(in, false)
-			err = c.callOnce(ctx, method, path, legacy, out)
+			err = c.callWatched(ctx, method, path, legacy, out)
 		}
 		var api *HTTPError
-		safe := method == "GET" || method == "HEAD"
+		safe := method == "GET" || method == "HEAD" || method == "POST" && replaySafePost[path]
 		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
 			if last != nil && ctx.Err() != nil {
 				return &clientRetryStopped{last, ctx.Err()}
@@ -712,6 +716,10 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		}
 	}
 }
+
+// These POSTs change nothing, or replay identically (an extension registration
+// is keyed by its digest), so overload refusals retry under Retry-After.
+var replaySafePost = map[string]bool{"/api/resolve": true, "/api/files/preflight": true, "/api/extensions": true}
 
 func (c Client) callOnce(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader

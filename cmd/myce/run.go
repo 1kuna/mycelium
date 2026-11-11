@@ -298,7 +298,8 @@ func (authority *runAuthority) client(address, token string) (myce.Client, error
 		if address == "" {
 			address = invitation.Address
 		}
-		return invitation.Client(address)
+		client, err := invitation.Client(address)
+		return client.WithProgressWatch(), err
 	}
 	if address == "" {
 		address = "http://127.0.0.1:7331"
@@ -310,7 +311,8 @@ func (authority *runAuthority) client(address, token string) (myce.Client, error
 	if token == "" {
 		return myce.Client{}, errors.New("queue credential is missing")
 	}
-	return myce.Client{URL: address, Token: token}, nil
+	// Queue progress, not a fixed timeout, bounds each control call (#1016).
+	return myce.Client{URL: address, Token: token}.WithProgressWatch(), nil
 }
 
 // Drain every available page, advancing only after a successful write. The same

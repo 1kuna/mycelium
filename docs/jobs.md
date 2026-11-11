@@ -579,6 +579,22 @@ digests do not retain ledger rows. Expired history is never returned as an empty
 complete page. The four-entry `attempt_history` and 32-entry `memory_attempts`
 remain bounded diagnostics with their existing contracts.
 
+## CLI control calls under load
+
+The installed CLI and the fleet helpers set no fixed request timeout. A call
+still waiting after one transport recovery period (1 s, RFC 6298) reads
+`GET /api/ping`, which takes no queue lock and reports `queue_progress`: lock
+`releases`, callers `waiting` on the lock, and the queue's own `p99_ms` request
+latency. The call keeps waiting while releases advance or nobody waits. It
+fails with `queue_stalled` once the release count has not moved, with callers
+waiting, for four measured p99 periods (at least four recovery periods), or when
+ping gives no answer for that long. The queue may still finish that request;
+resolve, file preflight, identical extension registration and keyed
+submissions are safe to repeat. A queue whose ping lacks `queue_progress` (an
+older release) leaves the call to the caller's own deadline. Resolve, file
+preflight and extension registration also retry overload refusals (429/503)
+after the server's `Retry-After`. Other POSTs are never replayed by the client.
+
 ## Python client defaults
 
 `mycelium-client` imports as `mycelium`. `Client(url=None, token=None,

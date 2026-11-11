@@ -110,6 +110,35 @@ func (l *requestLatencies) record(route string, duration time.Duration) bool {
 	return v.telemetry.admit(duration)
 }
 
+// p99 aggregates every completed route except one (the liveness probe itself),
+// using the same exact per-bin maxima as snapshot.
+func (l *requestLatencies) p99(exclude string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var counts [64]uint64
+	var maxima [64]time.Duration
+	var total uint64
+	for route, v := range l.routes {
+		if route == exclude {
+			continue
+		}
+		for i := range counts {
+			counts[i] += v.counts[i]
+			maxima[i] = max(maxima[i], v.maxima[i])
+		}
+		total += v.count
+	}
+	target := uint64(math.Ceil(.99 * float64(total)))
+	var count uint64
+	for i, n := range counts {
+		count += n
+		if total > 0 && count >= target {
+			return maxima[i]
+		}
+	}
+	return 0
+}
+
 func (l *requestLatencies) snapshot() []RequestLatency {
 	l.mu.Lock()
 	copies := make(map[string]requestLatencySamples, len(l.routes))
