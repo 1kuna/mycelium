@@ -709,6 +709,9 @@ func (q *Queue) publishEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	defer q.mu.Unlock()
 	if q.efficiencyView == nil || !d.report.At.Before(q.efficiencyView.At) {
 		q.efficiencyView = d.report
+		// The commit captured the prior report; expose this accepted immutable
+		// generation to status and inspection without waiting for another commit.
+		q.republishReads()
 	}
 }
 

@@ -27,7 +27,9 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		HealthAlertDelivery: &myce.HealthAlertDelivery{Pending: 22415},
 		FleetUpgrade:        &myce.FleetUpgradeStatus{Operation: "done-upgrade", State: "complete"},
 		HostStates:          map[string]string{"gpu-a": "healthy", "gpu-b": "degraded"},
-		ComponentExclusions: []myce.ComponentExclusion{{Selector: "host=mac-c", Active: true, SetBy: "operator", Reason: "storage faults"}},
+		Holds: []myce.Hold{{Kind: "component_exclusion", Scope: "host=mac-c", Owner: "operator",
+			Reason: "components are excluded from placement", Clears: "an operator removes the exclusion",
+			Detail: `set by operator; reason="storage faults"`, Next: "myce exclude remove host=mac-c when the components should run work"}},
 	}
 	for i, id := range []string{"gpu-a", "gpu-b", "mac-a", "mac-b", "mac-c"} {
 		m := &myce.Machine{ID: id, GPU: "cuda", FreeMemoryGB: 30, Release: &release, HostMemoryMeasured: true, FreeHostMemoryGB: 8}
@@ -62,14 +64,14 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		"recipe ×17 (gpu-a 8, gpu-b 5, mac-a 3, mac-b) since",
 		"22415 retained alerts",
 		"host gpu-b: degraded",
-		`exclusion host=mac-c: set by operator`,
+		`hold host=mac-c: components are excluded from placement (set by operator; reason="storage faults"); next: myce exclude remove host=mac-c when the components should run work`,
 		"hypha gpu-a: cuda, 30.0 GiB free, hardware capability profile unavailable; host RAM 8.0 GiB for admission; running 3",
 		"hypha mac-c: cuda, 30.0 GiB free, disabled by operator; host RAM 8.0 GiB for admission; release v3.1.0-test.1",
 		"run00000 train [a/experiment] running · attempt 1 on gpu-a running for 29m0s\n",
 		"wait0000 viewer [b/experiment] queued waited 64h0m0s; memory_capacity: free memory insufficient for declared needs",
 		"wait0001 naming [c/experiment] queued waited 77h0m0s; waiting for a hypha to take this job",
-		"paused 55 b: latest tail-first priority\n",
-		"paused 7 a: superseded diagnostic head xxx",
+		"paused 55 b: paused: latest tail-first priority\n  next: myce resume JOB_ID when it should run\n",
+		"paused 7 a: paused: superseded diagnostic head xxx",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
@@ -98,7 +100,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	}
 	if len(data) > 10<<10 || len(view.Jobs) != 5 || len(view.Hyphas) != 5 || len(view.Alerts) != 3 || view.Counts["paused"] != 62 ||
 		len(view.Paused) != 2 || len(view.Paused[0].IDs) != 55 || view.Paused[0].IDs[0] != "pause000-full-id" || view.Jobs[3].ID != "wait0000-full-id" || view.Jobs[3].Since == nil ||
-		!strings.Contains(view.Paused[1].Reason, strings.Repeat("x", 300)) || strings.Contains(string(data), `"spec"`) || strings.Contains(string(data), "capability_profile") {
+		!strings.Contains(view.Paused[1].Reason, strings.Repeat("x", 300)) || view.Paused[0].Next != "myce resume JOB_ID when it should run" || view.Paused[1].Next != view.Paused[0].Next || strings.Contains(string(data), `"spec"`) || strings.Contains(string(data), "capability_profile") {
 		t.Fatalf("compact JSON (%d bytes): %s", len(data), data)
 	}
 	out.Reset()
