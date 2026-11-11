@@ -17,7 +17,9 @@ func TestTopLevelUsage(t *testing.T) {
 	runCLI := func(arg string) (string, int) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestTopLevelUsage$", "--", arg)
-		cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "MYCE_USAGE_CHILD=1"}
+		// The scrubbed environment would drop the gate's GORACE; without it each
+		// race-built child sleeps a full second at exit (#1086).
+		cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "MYCE_USAGE_CHILD=1", "GORACE=atexit_sleep_ms=0"}
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			return string(out), 0
