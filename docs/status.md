@@ -249,7 +249,7 @@ availability (including the latest health sample and active preparation identiti
 fleet upgrade, and `summary.alert_groups`.
 `summary.retained_jobs` counts all retained jobs, including calls.
 
-From the release containing the Package E status change, the default is a few
+From the release containing #1267, the default is a few
 KB. Replaying the 2026-11-11 live fleet snapshot (five hosts, 67 current jobs,
 49 active alert conditions) through it took plain `myce status` from 33,924
 bytes / 267 lines to 3,668 bytes / 31 lines. Default JSON fell only from 154,583
@@ -2053,7 +2053,7 @@ not hidden for fifteen minutes. Delivery retries keep the same `delivery_id`.
 Clearing retains the diagnostic event; it sends no second notification and
 changes no admission, retry or release-custody decision.
 
-From the release containing the Package E status change, identical pending
+From the release containing #1267, identical pending
 alerts deliver once. Pending events whose fields other than time, delivery ID
 and recovery receipt match (kind, reason, host, machine, device, project, client
 kind, store, reservation, job, attempt and recipients) form one notification:
