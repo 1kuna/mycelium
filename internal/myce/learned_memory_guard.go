@@ -34,6 +34,41 @@ func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
 	return cap
 }
 
+// Metal buffers are invisible to RSS but charged to phys_footprint (#1044), so
+// Metal work gets the same sampled guard over the owned tree's footprint. The
+// limit is the whole declared envelope in unified memory: device plus host plus
+// slack. Auto-sized Metal envelopes were learned from RSS, which never saw
+// the buffers, so only declared sizes are enforced.
+const footprintGuardQuality = "owned_session_footprint"
+const metalFootprintGuardCapability = "metal_footprint_guard_v1"
+
+func (w Worker) footprintGuarded(j Job) bool {
+	n := j.Spec.Needs
+	return w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint &&
+		!n.cpuOnly() && !j.Spec.Run.Docker && n.Memory != "auto" && n.HostMemoryGB > 0
+}
+
+func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
+	m := w.Machine
+	m.UnifiedMemory, m.HostMemoryMeasured = true, true
+	limit, err := memoryBytes(hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
+	if err != nil {
+		limit = 0
+	}
+	return learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, reserve: w.HostMemoryReserveGB}
+}
+
+// Without a cgroup, the sampled guard's own measurement is the attempt's
+// current memory. Report it wherever the queue can charge the job by use:
+// auto CPU work, declared CPU work under the Darwin RSS guard (#1296) and
+// guarded Metal work. Other jobs keep sending none, so unguarded RSS never
+// earns resident credit.
+func (w Worker) reportsProcessSample(j Job) bool {
+	n := j.Spec.Needs
+	return adaptiveMemoryCeilingGB(&j, &w.Machine) > 0 || w.footprintGuarded(j) ||
+		w.Machine.MemoryEnforcement == darwinRSSGuardStatus && n.cpuOnly() && !j.Spec.Run.Docker && n.Memory != "auto" && n.HostMemoryGB > 0
+}
+
 func (w Worker) jobCeilingBytes(j Job) (int64, error) {
 	bytes, err := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if err != nil {
