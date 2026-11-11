@@ -613,6 +613,8 @@ func TestMachineWorkerRestartCleansTwoRunningAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = child.Wait()
+	store := awaitCrashedWorkerStore(t, w)
+	store.close()
 	startHarness(t, w, h)
 	await(t, func() bool { return h.completed("running-0") && h.completed("running-1") })
 	for _, st := range before {

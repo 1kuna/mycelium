@@ -90,6 +90,8 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = child.Wait()
+			store := awaitCrashedWorkerStore(t, Worker{StateDir: stateDir})
+			store.close()
 			await(t, func() bool {
 				p, _ := workerGroupMembers(before.PID)
 				for _, pid := range p {

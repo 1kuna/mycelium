@@ -67,6 +67,25 @@ func recoveryJob(t *testing.T, command []string) Job {
 	s.Run.Command = command
 	return Job{ID: ID(), Spec: s, Attempt: 1, Checkpoint: filepath.Join(t.TempDir(), "job")}
 }
+
+// Only for fixtures that have killed and reaped their controller. Reaping is
+// not the spool-ownership fence: the spool has been observed briefly busy
+// after Wait returns. Synchronize on the actual lock before a replacement;
+// preserve every other store error and the product's live-owner refusal.
+func awaitCrashedWorkerStore(t *testing.T, w Worker) *workerStore {
+	t.Helper()
+	var store *workerStore
+	await(t, func() bool {
+		var err error
+		store, err = w.openStore()
+		if err != nil && !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			t.Fatal("crashed worker store:", err)
+		}
+		return err == nil
+	})
+	return store
+}
+
 func TestWorkerStateLockAndCorruption(t *testing.T) {
 	w := recoveryWorker(t)
 	s, err := w.openStore()
@@ -558,11 +577,7 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 		_ = helper.Wait()
 		// A readiness assertion can fail after the helper has spawned its
 		// command. Clean only its recorded, identity-verified owned group.
-		store, err := (Worker{StateDir: stateDir}).openStore()
-		if err != nil {
-			t.Error("open crash-helper cleanup state:", err)
-			return
-		}
+		store := awaitCrashedWorkerStore(t, Worker{StateDir: stateDir})
 		defer store.close()
 		if err := store.cleanupOrphan(RealClock{}); err != nil {
 			t.Error("crash-helper orphan cleanup:", err)
@@ -587,6 +602,8 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper.Wait()
+	store := awaitCrashedWorkerStore(t, Worker{StateDir: stateDir})
+	store.close()
 	members, err := workerGroupMembers(before.PID)
 	if err != nil || len(members) == 0 {
 		t.Fatalf("test did not leave orphan group: %v %v", members, err)
