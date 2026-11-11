@@ -374,7 +374,7 @@ var dockerCLIExecutable struct {
 }
 
 // The simulated Docker CLI is an external program, like Docker itself. Build it
-// once without race instrumentation; the worker, adapter and assertions stay in
+// once per source state without race instrumentation (fake_docker_cache_test.go); the worker, adapter and assertions stay in
 // the race-instrumented parent. Do not use this binary to run product tests.
 func dockerCLITestBinary(t *testing.T) string {
 	t.Helper()
@@ -383,7 +383,7 @@ func dockerCLITestBinary(t *testing.T) string {
 	}
 	dockerCLIExecutable.Do(func() {
 		dockerCLIExecutable.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "fake-docker.test")
-		dockerCLIExecutable.out, dockerCLIExecutable.err = exec.Command("go", "test", "-c", "-vet=off", "-race=false", "-o", dockerCLIExecutable.path, ".").CombinedOutput()
+		dockerCLIExecutable.out, dockerCLIExecutable.err = buildFakeDockerCLI(dockerCLIExecutable.path)
 	})
 	if dockerCLIExecutable.err != nil {
 		t.Fatalf("build fake Docker CLI: %v\n%s", dockerCLIExecutable.err, dockerCLIExecutable.out)
