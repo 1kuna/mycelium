@@ -82,10 +82,18 @@ func decodeAdapter(data []byte) (projectAdapter, error) {
 	if d.Decode(&extra) != io.EOF {
 		return a, errors.New("expected one YAML adapter")
 	}
-	if a.Schema != 1 || a.Project == "" || len(a.Entries) == 0 {
-		return a, errors.New("declare schema: 1, project, entries and default")
+	if a.Schema == 0 {
+		a.Schema = 1 // schema defaults to the only version.
 	}
-	if _, ok := a.Entries[a.Default]; !ok {
+	if a.Schema != 1 || a.Project == "" || len(a.Entries) == 0 {
+		return a, errors.New("declare project and entries (schema defaults to 1)")
+	}
+	if a.Default == "" && len(a.Entries) == 1 {
+		for name := range a.Entries {
+			a.Default = name // A single entry is the default.
+		}
+	}
+	if _, ok := a.Entries[a.Default]; a.Default != "" && !ok {
 		return a, errors.New("default must name an entry")
 	}
 	var document yaml.Node
@@ -165,8 +173,8 @@ func validateAdapterEntry(e adapterEntry) error {
 		if len(command) == 0 || command[0] == "" {
 			return errors.New("declare application argv before result checks or appended arguments")
 		}
-		if len(s.Targets) == 0 && !myce.WantsCommandDiscovery(s) || reflect.ValueOf(s.Needs).IsZero() {
-			return errors.New("declare resource needs and targets, or portable: true for managed CPU discovery")
+		if len(s.Targets) == 0 && !myce.WantsCommandDiscovery(s) && entryProduction(s) {
+			return errors.New(productionTargetsRequired)
 		}
 	}
 	if !reflect.ValueOf(s.Environment).IsZero() && len(e.Environments) > 0 {
@@ -207,9 +215,15 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if name == "" {
 		name = a.Default
 	}
+	if name == "" {
+		return executionProfile{}, nil, errors.New("this adapter has several entries and no default; name one with --entry")
+	}
 	e, ok := a.Entries[name]
 	if !ok {
 		return executionProfile{}, nil, errors.New("entry does not exist")
+	}
+	if len(e.Variants) == 0 && reflect.ValueOf(e.Needs).IsZero() {
+		e.Needs = defaultEntryNeeds()
 	}
 	p := executionProfile{Spec: e.Spec, Source: e.Source, Check: e.Checks.Result, MemoryClass: e.MemoryClass, Adapter: true}
 	p.Project = a.Project
@@ -243,6 +257,9 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 			}
 			if e.Environment.Key() != "" {
 				return p, nil, errors.New("native recipes use existing named environments, not a flat catalog override")
+			}
+			if len(e.Targets) == 0 {
+				return p, nil, errors.New("native recipes declare targets or complete variants")
 			}
 			for _, target := range e.Targets {
 				needs := e.Needs
@@ -294,6 +311,15 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 		Value   adapterEntry `yaml:"value"`
 	}{a.Project, name, e})
 	return p, b, err
+}
+
+const productionTargetsRequired = "production entries declare explicit targets (MY-19 parity); only non-production entries may omit them"
+
+func entryProduction(s myce.Spec) bool { return s.Class == "production" || s.Priority == "production" }
+
+// An entry without needs is a one-core CPU command whose memory the queue learns.
+func defaultEntryNeeds() myce.ResourceNeeds {
+	return myce.ResourceNeeds{CPUCores: 1, Memory: "auto", Platform: myce.Platform{Required: []string{"cpu"}}}
 }
 
 // Check argv occupies fixed positional parameters; the main argv and later CLI

@@ -773,7 +773,7 @@ func (q *Queue) validateJobExclusions(s Spec) error {
 }
 
 func (q *Queue) jobAllowsMachine(j *Job, machine string) bool {
-	return j.Spec.allowsMachine(machine) && q.projectAllows(j.Spec.Project, machine)
+	return j.Spec.allowsMachine(machine) && q.projectAllows(j.Spec.Project, machine) && q.entryCoverageAllows(j, machine)
 }
 
 func (q *Queue) projectAllows(project, machine string) bool {
