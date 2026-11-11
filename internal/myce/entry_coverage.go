@@ -41,9 +41,11 @@ type entryCoverageRecord struct {
 
 // deriveEntryCoverage runs outside q.mu, before frozen lock bytes move to the
 // file store. Only entries that omit targets and are not portable discovery
-// qualify; production is refused separately under the lock.
+// qualify; production is refused separately under the lock. Fan-out entries
+// still run without targets but do not learn coverage: a requeue there would
+// restart the whole parent rather than one attempt.
 func deriveEntryCoverage(s Spec, recipes map[string]EnvironmentRecipe, discovery *CommandDiscovery) *EntryCoverage {
-	if s.extensionJob() || !s.RequireTarget || len(s.Targets) > 0 || discovery != nil || s.ProfileMemory == "" || s.Name == "" ||
+	if s.extensionJob() || !s.RequireTarget || len(s.Targets) > 0 || discovery != nil || s.ProfileMemory == "" || s.Name == "" || s.FanOut != nil ||
 		s.AuthoringOrigin != OriginAdapter && s.AuthoringOrigin != OriginProfile {
 		return nil
 	}

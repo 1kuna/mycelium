@@ -140,7 +140,9 @@ platform. Source commits and per-run arguments are not part of it, except that
 
 Placement explanations and `no_qualified_target` refusals name a skipped type
 as `entry coverage`; the read-only `--resolve` preview does not yet include
-coverage records. A coverage skip is not a hold. Explicit targets always bind and never get a coverage record.
+coverage records. Fan-out entries may omit targets too, but do not yet record
+coverage findings; their failures stay ordinary piece failures. A coverage skip
+is not a hold. Explicit targets always bind and never get a coverage record.
 
 Production entries keep explicit targets. A production entry, or a `--class
 production` override, without targets is refused before submission. The queue
