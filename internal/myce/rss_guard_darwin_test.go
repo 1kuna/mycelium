@@ -89,26 +89,43 @@ func TestDarwinRSSGuardChild(t *testing.T) {
 func TestDarwinRSSGuardMemberBirthAndControlExclusion(t *testing.T) {
 	// The control anchor alone is far above the payload threshold; payload and
 	// a separate-PGID helper remain below it. Unrelated process 99 is excluded.
+	// A member that exits, is replaced or leaves the session mid-sample is
+	// dropped rather than voiding the sample (churn must not reset the guard);
+	// a replaced root still makes the sample unknown.
 	const data = "7 1 1048576\n8 7 1024\n9 1 2048\n99 1 1048576\n"
-	for _, mode := range []string{"complete", "reused member", "changed session"} {
+	for _, mode := range []string{"complete", "reused member", "changed session", "exited before inventory", "exited after inventory", "reused root"} {
 		t.Run(mode, func(t *testing.T) {
 			collected := false
 			birth := func(pid int) (string, error) {
-				if collected && pid == 9 && mode == "reused member" {
+				switch {
+				case collected && pid == 9 && mode == "reused member":
+					return "replacement", nil
+				case pid == 9 && mode == "exited before inventory", collected && pid == 9 && mode == "exited after inventory":
+					return "", os.ErrNotExist
+				case collected && pid == 7 && mode == "reused root":
 					return "replacement", nil
 				}
 				return fmt.Sprint(pid), nil
 			}
 			belongs := func(pid, root int) bool { return !(collected && pid == 9 && mode == "changed session") }
-			bytes, members, err := sampleOwnedResident(map[int]string{7: "7"}, birth, func(int) ([]int, error) { return []int{7, 8, 9}, nil }, belongs, func() ([]byte, error) { collected = true; return []byte(data), nil })
-			if mode != "complete" {
+			inventory := data
+			if mode == "exited before inventory" {
+				inventory = "7 1 1048576\n8 7 1024\n99 1 1048576\n"
+			}
+			bytes, members, err := sampleOwnedResident(map[int]string{7: "7"}, birth, func(int) ([]int, error) { return []int{7, 8, 9}, nil }, belongs, func() ([]byte, error) { collected = true; return []byte(inventory), nil })
+			want := uint64(3 << 20)
+			wantMembers := 2
+			switch mode {
+			case "reused root":
 				if err == nil {
-					t.Fatal("changed member became valid RSS")
+					t.Fatal("replaced root became valid RSS")
 				}
 				return
+			case "reused member", "changed session", "exited before inventory", "exited after inventory":
+				want, wantMembers = 1<<20, 1
 			}
-			if err != nil || bytes != 3<<20 || members != 2 {
-				t.Fatalf("control/sibling charged or helper missing: %d %d %v", bytes, members, err)
+			if err != nil || bytes != want || members != wantMembers {
+				t.Fatalf("%s: got %d bytes %d members %v, want %d %d", mode, bytes, members, err, want, wantMembers)
 			}
 			g := rssGuard{limit: 4 << 20}
 			for i := 0; i < 3; i++ {
