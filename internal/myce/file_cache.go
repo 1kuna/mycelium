@@ -120,7 +120,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if c.automatic {
 		explicit = 0
 	}
-	limit, free, err := inputCacheBudget(root, used, explicit, c.diskProbe)
+	limit, free, err := inputCacheBudget(root, used, explicit, c.diskProbe, c.budget.foreignHeadroom(root))
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 			return err
 		}
 		used -= v.size
-		limit, free, err = inputCacheBudget(root, used, explicit, c.diskProbe)
+		limit, free, err = inputCacheBudget(root, used, explicit, c.diskProbe, c.budget.foreignHeadroom(root))
 		if err != nil {
 			return err
 		}

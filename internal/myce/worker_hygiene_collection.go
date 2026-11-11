@@ -214,7 +214,7 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 	if c.automatic {
 		explicit = 0
 	}
-	r.Limit, _, err = inputCacheBudget(c.Root, r.Bytes, explicit, c.diskProbe)
+	r.Limit, _, err = inputCacheBudget(c.Root, r.Bytes, explicit, c.diskProbe, c.budget.foreignHeadroom(c.Root))
 	if err != nil {
 		r.Error = "file_cache_collect_failed"
 		return r

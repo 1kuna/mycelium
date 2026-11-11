@@ -80,7 +80,7 @@ func TestFileCacheCurrentHeadroomAndExplicitLimit(t *testing.T) {
 	if err := cache.copyTo(context.Background(), FileRef{SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}, filepath.Join(t.TempDir(), "warm")); err != nil {
 		t.Fatal("warm retained copy refused", err)
 	}
-	limit, _, err := inputCacheBudget(cache.Root, ref.SizeBytes, 1, cache.diskProbe)
+	limit, _, err := inputCacheBudget(cache.Root, ref.SizeBytes, 1, cache.diskProbe, 0)
 	if err != nil || limit != 1 {
 		t.Fatal("explicit ceiling changed", limit, err)
 	}

@@ -15,7 +15,8 @@ size refusal.
 
 Admission measures available blocks and reserves pending writes above the
 existing disk floor (1% of the volume, at least 256 MiB), plus measured growth
-of the worker's small control files. A model-copy policy can require a larger
+of the worker's small control files, plus the volume's measured
+[foreign headroom](#foreign-disk-headroom-1104). A model-copy policy can require a larger
 floor; other concurrent writers honor that floor until its transfer joins.
 Reservations remain charged through detached cancellation tails. To avoid
 overcommit during concurrent writes, a transfer's full remaining reservation
@@ -67,6 +68,34 @@ maps the role names to local paths for its owner; public diagnostics contain
 only roles and opaque volume IDs. `compiler_warning` and
 `unmanaged_compiler_bytes` expose known external compiler storage without paths.
 Scratch bytes/reasons come from the exact-attempt collector below.
+
+### Foreign disk headroom (#1104)
+
+On a volume other users also write to (builds, test caches, tool updates, the
+queue's own file store), the worker keeps free space for them on top of the disk
+floor. Each collection measures their use as volume size minus free space minus
+Mycelium's allocated bytes there. The headroom is the larger of:
+
+- the room for them to return to their highest use observed since the worker
+  started (`foreign_peak_bytes - foreign_bytes`); and
+- their fastest growth between two collections (`foreign_peak_growth_bytes`),
+  which is how far they can grow before this worker's next chance to evict.
+
+Collection evicts reproducible cache copies (oldest use first, with the existing
+protections) so that free space stays at or above `floor_bytes`, which now
+includes `foreign_headroom_bytes`. Automatic `--file-cache-bytes` and
+shared-input allowances shrink by the same amount, and new reservations cannot
+take it. On a host nobody else writes to, the headroom stays zero. It is not a
+fixed size and resets when the worker restarts. A large permanent deletion by
+another user reserves at most the space it freed. An explicit `--file-cache-bytes`
+still overrides the automatic allowance, but not the headroom kept by eviction
+and reservations.
+
+`hygiene_collection.disk_budget[]` reports `foreign_bytes`, `foreign_peak_bytes`,
+`foreign_peak_growth_bytes` and `foreign_headroom_bytes` to queues that
+advertise `worker-disk-headroom-v1`; older queues receive the budget without
+these fields. This only keeps what it measures: a writer that outgrows anything
+seen so far can still find less space than it needs until the next collection.
 
 These are admission and sampled-pressure protections, not a filesystem quota
 on arbitrary payload/foreign writes. Active or unique data can exhaust a volume
@@ -168,8 +197,10 @@ and the existing worker retention sweep refresh it without restarting the worker
 The effective allowance adds occupied cache blocks to measured usable free
 space, so eviction exchanges occupied and free bytes without shrinking the
 allowance. The existing floor leaves 1% of the filesystem, at least 256 MiB,
-for filesystem metadata, logs and control state. Other caches, active work and
-external writers already reduce measured free space; concurrent shared stages
+for filesystem metadata, logs and control state, and the measured
+[foreign headroom](#foreign-disk-headroom-1104) leaves room for the volume's
+other users to swing and grow. Other caches, active work and
+external writers' current use already reduce measured free space; concurrent shared stages
 reserve their unwritten bytes. Cache allocation is not a reservation against
 unmanaged external writers or the native disk-isolation guarantee parked under
 #504/#506. Staging rechecks current headroom and reports required/available bytes.
