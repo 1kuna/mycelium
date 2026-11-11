@@ -67,7 +67,7 @@ func TestHostInventoryObserverSlowPartialAndStale(t *testing.T) {
 		if calls.Add(1) > 1 {
 			<-release
 		}
-		return []MachineDevice{{ID: "0", Platform: "cuda", Identity: "gpu-a", Selector: "0"}}, &acceleratorProbeError{xpu: true}
+		return []MachineDevice{{ID: "0", Platform: "cuda", Identity: "gpu-a", Selector: "0"}}, &acceleratorProbeError{families: map[string]bool{"xpu": true}}
 	}
 	sampleHostInventory(ctx, &lane, source)
 	await(t, func() bool { return len(lane.pending) == 1 })

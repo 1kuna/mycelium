@@ -104,8 +104,8 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 	}
 	binding := o.Device
 	if o.ReadMemory == nil {
-		if o.Platform == "cuda" {
-			binding, err = ResolveCUDADevice(ctx, o.Device)
+		if resolve := backendFor(o.Platform).resolveDevice; resolve != nil {
+			binding, err = resolve(ctx, o.Device)
 			if err != nil {
 				return report, err
 			}
@@ -201,8 +201,8 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 			return report, e
 		}
 		m, err = WithModelDevice(m, o.Platform, o.Device)
-		if err == nil && o.Platform == "cuda" {
-			m.DeviceEnv["CUDA_VISIBLE_DEVICES"] = binding
+		if backend := backendFor(o.Platform); err == nil && backend.resolveDevice != nil {
+			m.DeviceEnv[backend.visibleDevicesVariable] = binding
 		}
 		if err != nil {
 			return report, err
@@ -408,7 +408,7 @@ func newMeasurementSource(platform, device, goos string, readFile func(string) (
 	if goos != "linux" {
 		return nil, errors.New("native measurement currently requires Linux /proc and CUDA or XPU counters")
 	}
-	if platform != "cuda" && platform != "xpu" {
+	if backendFor(platform).measureMemory == nil {
 		return nil, errors.New("measurement requires native CUDA or XPU counters")
 	}
 	if device == "" || strings.ContainsAny(device, "\n\r,") {
@@ -428,42 +428,7 @@ func newMeasurementSource(platform, device, goos string, readFile func(string) (
 		if e != nil {
 			return MemoryReading{}, e
 		}
-		var d float64
-		basis := "dedicated/host"
-		if platform == "cuda" {
-			out, e := command(c, "nvidia-smi", "--id="+device, "--query-gpu=memory.used", "--format=csv,noheader,nounits")
-			if e != nil {
-				return MemoryReading{}, fmt.Errorf("CUDA used memory: %w", e)
-			}
-			d, e = parseCUDAFreeMemory(out)
-			if errors.Is(e, errUnifiedMemory) {
-				unified, detectErr := (MachineProbe{Command: command}).DetectUnifiedMemory(c, platform, device, "auto")
-				if detectErr != nil {
-					return MemoryReading{}, detectErr
-				}
-				if !unified {
-					return MemoryReading{}, errors.New("CUDA used memory unavailable on a dedicated-memory device")
-				}
-				d, e, basis = h, nil, "unified/host"
-			}
-			if e != nil {
-				return MemoryReading{}, e
-			}
-		} else {
-			if _, e := strconv.ParseUint(device, 10, 32); e != nil {
-				return MemoryReading{}, errors.New("XPU device must be a numeric native device index")
-			}
-			out, e := command(c, "xpu-smi", "stats", "-d", device, "--json")
-			if e != nil {
-				return MemoryReading{}, fmt.Errorf("native XPU used memory unavailable: %w", e)
-			}
-			d, e = parseMeasureXPU(out, device)
-			if e != nil {
-				return MemoryReading{}, e
-			}
-
-		}
-		return MemoryReading{DeviceGB: d, HostGB: h, Basis: basis}, nil
+		return backendFor(platform).measureMemory(c, device, h, command)
 	}, nil
 }
 func parseMeasureHost(data []byte) (float64, error) {
@@ -527,4 +492,48 @@ func parseMeasureXPU(data []byte, device string) (float64, error) {
 		return 0, errors.New("XPU statistics lack current device-level memory used")
 	}
 	return *used / 1024, nil
+}
+
+func measureCUDADeviceMemory(ctx context.Context, device string, h float64, command func(context.Context, string, ...string) ([]byte, error)) (MemoryReading, error) {
+	var d float64
+	var e error
+	basis := "dedicated/host"
+
+	out, e := command(ctx, "nvidia-smi", "--id="+device, "--query-gpu=memory.used", "--format=csv,noheader,nounits")
+	if e != nil {
+		return MemoryReading{}, fmt.Errorf("CUDA used memory: %w", e)
+	}
+	d, e = parseCUDAFreeMemory(out)
+	if errors.Is(e, errUnifiedMemory) {
+		unified, detectErr := (MachineProbe{Command: command}).DetectUnifiedMemory(ctx, "cuda", device, "auto")
+		if detectErr != nil {
+			return MemoryReading{}, detectErr
+		}
+		if !unified {
+			return MemoryReading{}, errors.New("CUDA used memory unavailable on a dedicated-memory device")
+		}
+		d, e, basis = h, nil, "unified/host"
+	}
+	if e != nil {
+		return MemoryReading{}, e
+	}
+	return MemoryReading{DeviceGB: d, HostGB: h, Basis: basis}, nil
+}
+func measureXPUDeviceMemory(ctx context.Context, device string, h float64, command func(context.Context, string, ...string) ([]byte, error)) (MemoryReading, error) {
+	var d float64
+	var e error
+
+	if _, e := strconv.ParseUint(device, 10, 32); e != nil {
+		return MemoryReading{}, errors.New("XPU device must be a numeric native device index")
+	}
+	out, e := command(ctx, "xpu-smi", "stats", "-d", device, "--json")
+	if e != nil {
+		return MemoryReading{}, fmt.Errorf("native XPU used memory unavailable: %w", e)
+	}
+	d, e = parseMeasureXPU(out, device)
+	if e != nil {
+		return MemoryReading{}, e
+	}
+
+	return MemoryReading{DeviceGB: d, HostGB: h, Basis: "dedicated/host"}, nil
 }

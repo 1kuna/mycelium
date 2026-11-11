@@ -155,3 +155,11 @@ func (w Worker) sampleXPUTelemetry(ctx context.Context, p MachineProbe, devices 
 		d.Telemetry = s
 	}
 }
+
+func (w Worker) sampleDeviceTelemetry(ctx context.Context, p MachineProbe, devices []MachineDevice) {
+	for _, backend := range acceleratorBackends {
+		if backend.telemetry != nil {
+			backend.telemetry(w, ctx, p, devices)
+		}
+	}
+}

@@ -307,7 +307,7 @@ func (w *Worker) quarantineHealth(ctx context.Context, root *workerStore) map[st
 			h := deviceHealthObservation{event: f.Event, started: clock.Now()}
 			var normal bool
 			var err error
-			if reportProbe != nil && d.Platform == "xpu" {
+			if reportProbe != nil && backendFor(d.Platform).healthReport != nil {
 				target := readReport(d)
 				r, errRead := target.report, target.err
 				h.started, h.at = target.started, target.at
@@ -491,14 +491,10 @@ func (w *Worker) autoClearDeviceFaults(next *deviceQuarantine, health map[string
 }
 
 func deviceHealthProbeName(platform string) string {
-	switch platform {
-	case "xpu":
-		return "xpu-smi health"
-	case "cuda":
-		return "nvidia-smi recovery action"
-	default:
-		return "vendor health"
+	if name := backendFor(platform).healthName; name != "" {
+		return name
 	}
+	return "vendor health"
 }
 
 // DeviceHealth is read-only and targets the physical vendor identity. Unsupported
@@ -507,36 +503,10 @@ func (p MachineProbe) DeviceHealth(ctx context.Context, d MachineDevice) (bool, 
 	if p.Command == nil {
 		return false, exec.ErrNotFound
 	}
-	switch d.Platform {
-	case "xpu":
-		r, err := p.XPUHealthReport(ctx, d)
-		if err != nil {
-			return false, err
-		}
-		_, err = r.proof(nil)
-		return err == nil, err
-
-	case "cuda":
-		data, err := p.Command(ctx, "nvidia-smi", "-q", "-x", "-i", d.Identity)
-		if err != nil {
-			return false, deviceHealthFailure(false, err)
-		}
-		var report struct {
-			GPUs []struct {
-				UUID     string `xml:"uuid"`
-				Recovery string `xml:"gpu_recovery_action"`
-			} `xml:"gpu"`
-		}
-		if err := xml.Unmarshal(data, &report); err != nil {
-			return false, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
-		}
-		if len(report.GPUs) != 1 || report.GPUs[0].UUID != d.Identity {
-			return false, &DeviceHealthFailure{Code: "health_probe_identity_mismatch"}
-		}
-		return strings.TrimSpace(report.GPUs[0].Recovery) == "None", nil
-	default:
-		return false, &DeviceHealthFailure{Code: "health_probe_unsupported"}
+	if probe := backendFor(d.Platform).health; probe != nil {
+		return probe(p, ctx, d)
 	}
+	return false, &DeviceHealthFailure{Code: "health_probe_unsupported"}
 }
 
 // XPUHealthReport keeps Unknown separate from malformed/missing evidence.
@@ -605,4 +575,33 @@ func (p MachineProbe) XPUHealthReport(ctx context.Context, d MachineDevice) (Dev
 		}
 	}
 	return report, nil
+}
+
+func cudaDeviceHealth(p MachineProbe, ctx context.Context, d MachineDevice) (bool, error) {
+	data, err := p.Command(ctx, "nvidia-smi", "-q", "-x", "-i", d.Identity)
+	if err != nil {
+		return false, deviceHealthFailure(false, err)
+	}
+	var report struct {
+		GPUs []struct {
+			UUID     string `xml:"uuid"`
+			Recovery string `xml:"gpu_recovery_action"`
+		} `xml:"gpu"`
+	}
+	if err := xml.Unmarshal(data, &report); err != nil {
+		return false, &DeviceHealthFailure{Code: "health_probe_invalid_output"}
+	}
+	if len(report.GPUs) != 1 || report.GPUs[0].UUID != d.Identity {
+		return false, &DeviceHealthFailure{Code: "health_probe_identity_mismatch"}
+	}
+	return strings.TrimSpace(report.GPUs[0].Recovery) == "None", nil
+}
+
+func xpuDeviceHealth(p MachineProbe, ctx context.Context, d MachineDevice) (bool, error) {
+	r, err := p.XPUHealthReport(ctx, d)
+	if err != nil {
+		return false, err
+	}
+	_, err = r.proof(nil)
+	return err == nil, err
 }

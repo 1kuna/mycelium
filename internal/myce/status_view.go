@@ -96,20 +96,10 @@ func admissionWords(reason string) string {
 }
 
 func resourceWords(platform string) string {
-	switch platform {
-	case "cuda":
-		return "NVIDIA (CUDA)"
-	case "metal":
-		return "Apple Metal"
-	case "xpu":
-		return "Intel (XPU)"
-	case "cpu":
-		return "CPU"
-	case "fake":
-		return "test resource (fake)"
-	default:
-		return "unknown resource"
+	if name := backendFor(platform).resourceName; name != "" {
+		return name
 	}
+	return "unknown resource"
 }
 func profileSize(n uint64) string {
 	if n == 0 {

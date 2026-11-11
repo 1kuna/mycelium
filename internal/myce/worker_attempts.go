@@ -846,7 +846,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		if sharedCard && (fanOutDeviceSharing(&next) || fanOutDeviceSharing(&j)) {
 			card := allocationMachine(&w.Machine, j.AllocatedDevices)
 			sample, telemetry := w.hostMemorySamples[jobKey(j)], cardTelemetry(card)
-			if card.GPU != "xpu" || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
+			if !backendFor(card.GPU).deviceHostMemory || card.UnifiedMemory || !deviceTelemetryReady(telemetry, w.Clock.Now()) || *telemetry.ActivePercent >= 100 ||
 				!fanOutDeviceSampleReady(sample, w.Clock.Now()) {
 				return errors.New("fan-out sharing requires fresh discrete XPU headroom evidence")
 			}
@@ -984,7 +984,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	telemetryProbe := extensionIdentityProbe()
 	telemetryWorker := Worker{Clock: w.Clock, GPUTelemetryHelper: w.GPUTelemetryHelper}
 	inventory.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
-		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)
+		telemetryWorker.sampleDeviceTelemetry(ctx, telemetryProbe, devices)
 		return devices, nil
 	}
 	inventoryDone := make(chan struct{})

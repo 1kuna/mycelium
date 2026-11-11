@@ -385,7 +385,7 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		if err != nil {
 			return w, err
 		}
-		if d.Platform != "fake" || len(w.Machine.Devices) != 1 || w.MemorySource == nil {
+		if !backendFor(d.Platform).simulated || len(w.Machine.Devices) != 1 || w.MemorySource == nil {
 			w.MemorySource, w.MemoryMeasured = source, d.MemoryMeasured
 		}
 		return w, nil
@@ -459,7 +459,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		if d.Reason != "" {
 			continue
 		}
-		if (d.Platform == "cuda" || d.Platform == "xpu") && (d.pciFact == nil || !d.pciFact.topologyKnown) {
+		if backendFor(d.Platform).pciVendor != "" && (d.pciFact == nil || !d.pciFact.topologyKnown) {
 			d.Reason = "device_memory_unavailable"
 			continue
 		}
@@ -491,7 +491,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.TotalMemoryGB = configured.Machine.FreeMemoryGB
 			d.ReserveMemoryGB = configured.Machine.ReservedMemoryGB
 			d.BudgetGB = max(0, d.TotalMemoryGB-d.ReserveMemoryGB)
-		} else if d.Platform == "xpu" && configured.FixedAcceleratorMemory {
+		} else if backendFor(d.Platform).fixedMemoryDefault && configured.FixedAcceleratorMemory {
 			d.MemoryMode, d.BudgetGB = "fixed", configured.Machine.FreeMemoryGB
 			d.TotalMemoryGB, d.ReserveMemoryGB = configured.Machine.FreeMemoryGB+configured.Machine.ReservedMemoryGB, configured.Machine.ReservedMemoryGB
 		} else {
@@ -550,17 +550,17 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.Reason = "device_memory_unavailable"
 			d.FreeMemoryGB = 0
 		}
-		d.MemoryMeasured = d.MemoryMode != "fixed" && d.Platform != "fake"
+		d.MemoryMeasured = d.MemoryMode != "fixed" && !backendFor(d.Platform).simulated
 		if d.UnifiedMemory && configured.Machine.FreeMemoryGB == 0 {
 			d.BudgetGB = d.FreeMemoryGB
 		}
-		if d.Platform == "xpu" && !d.UnifiedMemory {
+		if backendFor(d.Platform).telemetry != nil && !d.UnifiedMemory {
 			// Live telemetry is sampled separately from hardware discovery.
 			clock := w.Clock
 			if clock == nil {
 				clock = RealClock{}
 			}
-			d.Telemetry = &DeviceTelemetry{At: clock.Now(), Source: "XPU telemetry not yet sampled"}
+			d.Telemetry = &DeviceTelemetry{At: clock.Now(), Source: backendFor(d.Platform).telemetryPendingSource}
 		}
 	}
 	return physical, err

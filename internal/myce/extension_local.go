@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -161,7 +160,7 @@ func extensionFingerprintFrom(ctx context.Context, platform, device string, iden
 }
 
 func extensionFingerprintWithInventory(ctx context.Context, platform, device string, identity func() MachineProbe, inventory func(context.Context) ([]MachineDevice, error)) (string, error) {
-	if platform == "cpu" {
+	if backendFor(platform).cpu {
 		device = ""
 	}
 	if !validGPU(platform) {
@@ -169,58 +168,18 @@ func extensionFingerprintWithInventory(ctx context.Context, platform, device str
 	}
 	// The default fake runtime has always meant its single device. Canonical
 	// machine inventory calls that same simulated component "0".
-	if platform == "fake" && device == "" {
+	if backendFor(platform).simulated && device == "" {
 		device = "0"
 	}
 	probe := identity()
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
-	commands := [][]string{}
-	switch platform {
-	case "cpu":
-		if runtime.GOOS == "darwin" {
-			commands = [][]string{{"/usr/bin/sw_vers", "-productVersion"}, {"/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"}}
-		} else if runtime.GOOS == "linux" {
-			commands = [][]string{{"uname", "-r"}}
-			facts, err := fs.ReadFile(probe.Files, "proc/cpuinfo")
-			if err != nil {
-				return "", errors.New("CPU identity unavailable")
-			}
-			data = append(data, []byte(cpuIdentity(facts))...)
-		} else {
-			return "", errors.New("CPU qualification requires Linux or macOS")
-		}
-	case "fake":
-		data = append(data, []byte("/fake-v1")...)
-	case "metal":
-		commands = [][]string{{"sw_vers", "-productVersion"}, {"system_profiler", "-json", "SPHardwareDataType", "SPDisplaysDataType"}}
-	case "cuda":
-		commands = [][]string{{"nvidia-smi", "--query-gpu=uuid,name,driver_version", "--format=csv,noheader"}, {"uname", "-r"}}
-	case "xpu":
-		// Runtime ordinals select a component; they are not its identity. Reuse
-		// the shared PCI/Level Zero probe instead of hashing incidental OpenCL
-		// enumeration (which can differ between a shell and the worker).
-		if inventory == nil {
-			inventory = probe.Accelerators
-		}
-		devices, err := inventory(ctx)
-		var selected *MachineDevice
-		for i := range devices {
-			d := &devices[i]
-			if d.Platform == "xpu" && d.ID == device && d.Reason == "" && d.Fingerprint != "" {
-				selected = d
-				break
-			}
-		}
-		if selected == nil {
-			return "", errors.New("hardware/driver identity unavailable")
-		}
-		var partial *acceleratorProbeError
-		if err != nil && (!errors.As(err, &partial) || partial.failed("xpu")) {
-			return "", errors.New("hardware/driver identity unavailable")
-		}
-		identity, _ := json.Marshal(struct{ UUID, Driver string }{selected.Identity, selected.Fingerprint})
-		data = append([]byte(runtime.GOOS+"/"+runtime.GOARCH+"/xpu/"), identity...)
-		commands = [][]string{{"uname", "-r"}}
+	operation := backendFor(platform).fingerprint
+	if operation == nil {
+		return "", errors.New("hardware/driver identity unavailable")
+	}
+	data, commands, err := operation(ctx, probe, device, data, inventory)
+	if err != nil {
+		return "", err
 	}
 	for _, args := range commands {
 		b, err := probe.Command(ctx, args[0], args[1:]...)
@@ -247,17 +206,7 @@ func cleanExtensionEnv(extra map[string]string) []string {
 	return out
 }
 func ExtensionDevice(platform string) string {
-	switch platform {
-	case "metal":
-		return "mps"
-	case "xpu":
-		return "xpu:0"
-	case "cuda":
-		return "cuda:0"
-	case "fake", "cpu":
-		return "cpu"
-	}
-	return ""
+	return backendFor(platform).extensionDevice
 }
 func extensionEnvironment(root string, e Extension, platform, device string) (map[string]string, error) {
 	folder, err := filepath.Abs(extensionFolder(root, e))

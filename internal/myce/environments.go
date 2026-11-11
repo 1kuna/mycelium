@@ -225,7 +225,8 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 		return out, nil
 	}
 	out := map[string]EnvironmentRecipe{}
-	for _, p := range []string{"cuda", "xpu", "metal", "fake", "cpu"} {
+	for _, backend := range acceleratorBackends {
+		p := backend.platform
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}

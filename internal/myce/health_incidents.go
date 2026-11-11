@@ -105,7 +105,7 @@ func (q *Queue) detectIncidentHealth() {
 		for _, d := range m.Devices {
 			key := "teardown-faults/" + m.ID + "/" + deviceFaultKey(d)
 			seen[key] = true
-			q.observeHealth(key, !intentional && d.Platform == "xpu" && d.RepeatedTeardownFault && deviceFaultReason(d.Reason), 0,
+			q.observeHealth(key, !intentional && backendFor(d.Platform).repeatedTeardownAttention && d.RepeatedTeardownFault && deviceFaultReason(d.Reason), 0,
 				HealthAlert{Kind: "xpu_repeated_teardown_faults", Host: host, Device: d.ID})
 		}
 	}

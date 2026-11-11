@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -72,7 +73,7 @@ func sameInventoryObservation(a []MachineDevice, aerr error, b []MachineDevice, 
 	}
 	var ap, bp *acceleratorProbeError
 	aPartial, bPartial := errors.As(aerr, &ap), errors.As(berr, &bp)
-	return aPartial == bPartial && (!aPartial || ap.cuda == bp.cuda && ap.xpu == bp.xpu)
+	return aPartial == bPartial && (!aPartial || maps.Equal(ap.families, bp.families))
 }
 
 // Inventory is an observation lane, not an attempt sampler. No per-host driver
