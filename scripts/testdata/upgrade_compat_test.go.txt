@@ -65,7 +65,7 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		if mode == "queue-rollback-seed" {
 			now := q.clock.Now()
 			m := Machine{ID: "rollback-device", HostID: "rollback-host", Session: "rollback-session", GPU: "cpu", FreeMemoryGB: 64, HostMemoryMeasured: true, CapabilityProfile: &CapabilityProfile{Version: 0, OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 16, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30}}
-			if _, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"}); err != nil {
+			if _, err = q.CheckinKeyed(Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"}); err != nil {
 				t.Fatal(err)
 			}
 			err = q.update(func() error {
