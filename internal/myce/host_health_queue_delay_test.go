@@ -645,3 +645,39 @@ func TestHostHealthQueueDelayLegacyPSIRecovery(t *testing.T) {
 		})
 	}
 }
+
+// A queue restart must not alert every host for its own outage (live: a
+// host_probe_unknown burst on all five hosts at each restart). Admission stays
+// conservative; a worker that stays silent past restart grace still alerts.
+func TestHostHealthQueueRestartDoesNotAlertEveryHost(t *testing.T) {
+	for _, reports := range []bool{true, false} {
+		t.Run(map[bool]string{true: "reports", false: "silent"}[reports], func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("restart-health", "fake")
+			m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .001, ValidSeconds: 2.1}, AgeSeconds: .01, History: []HostHealthSample{{At: clock.Now()}}}
+			check(t, q, m, nil)
+			clock.Advance(time.Minute) // queue down for an upgrade
+			q = reopenQueue(t, q, clock)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if len(alertsOf(q, "host_degraded")) != 0 {
+				t.Fatal("restart alerted a host for the queue's outage")
+			}
+			if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
+				t.Fatal("restart admitted unverified host evidence", reason)
+			}
+			clock.Advance(RestartGrace + time.Second)
+			if reports {
+				m.HostHealth.History[0].At = clock.Now()
+				check(t, q, m, nil)
+			}
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(alertsOf(q, "host_degraded")); got != map[bool]int{true: 0, false: 1}[reports] {
+				t.Fatalf("host_degraded alerts after grace: %d", got)
+			}
+		})
+	}
+}

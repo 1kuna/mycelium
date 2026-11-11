@@ -1729,6 +1729,11 @@ Matching-session contact cannot renew a negotiated observation. `availability.pr
 `availability.age_seconds` similarly preserve owner observation age across clock
 skew. `host_health.probe` applies the same frozen validity to health evidence;
 `host_probe_unknown` withholds admission when it expires or the source fails.
+After a queue restart, persisted health evidence falls back to wall age, so each
+host stays `host_probe_unknown` for admission until its first report. From the
+release containing the restart fix, that state raises no `host_degraded` alert
+while the worker is unreported and restart grace lasts. Earlier releases alerted
+every host at each restart. A worker still silent when grace ends alerts as usual.
 Older workers retain legacy age rules until upgraded. See
 [adaptive host observations](host-probes.md).
 
@@ -2086,8 +2091,10 @@ the latest event, with `repeats` (how many more it covers) and `first_at`. One
 acknowledgement marks every member delivered. Every member stays in retained
 history. This matters when a hook is configured after a long unconfigured
 period: on 2026-11-11 the live queue held 22,416 pending events, 12,453 of them
-one flapping `host_degraded`/`host_probe_unknown` kind, which would otherwise
-deliver one per second for hours. A condition that recovers and fails again
+`host_degraded`/`host_probe_unknown` across all five hosts, which would otherwise
+deliver one per second for hours. 99% were recorded 2026-11-07/08, before #1036
+stopped counting queue delivery delay as report age (#1025); the rest were
+restart bursts and a loaded agents' host. A condition that recovers and fails again
 after its alert was delivered still alerts again.
 
 - `queue_overload`: sustained response-cost or mutex-wait regression against
