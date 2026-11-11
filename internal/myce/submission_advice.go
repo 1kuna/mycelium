@@ -176,6 +176,17 @@ func (q *Queue) captureResolveView(ctx context.Context) (*Queue, error) {
 	}
 	snapshot := q.captureSubmissionAdvice()
 	snapshot.view.evidenceRetention = q.evidenceRetention
+	if !q.simulation {
+		// Configuration setters do not commit, so the published copies can lag
+		// a registered environment or model. Small; charged before copying.
+		config := observationState{Models: q.models, Environments: q.environments}
+		if err := chargeProjectionValue(ctx, config); err != nil {
+			unlock()
+			return nil, err
+		}
+		owned := copyObservation(config)
+		snapshot.view.models, snapshot.view.environments = owned.Models, owned.Environments
+	}
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
