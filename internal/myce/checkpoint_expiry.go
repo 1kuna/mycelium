@@ -13,10 +13,31 @@ import (
 
 // Settled checkpoint expiry (#894). The queue decides from its own terminal,
 // delivery and release records which NAS checkpoint folders nothing can resume
-// or still write; age alone never qualifies a folder. Workers do the deletion
+// or still write; age alone never qualifies a folder. Consumers may still read
+// a finished job's checkpoint for a while, so a settled folder also waits out
+// the grace period after the job's recorded terminal time. Workers do the deletion
 // off the queue lock and report each removal, which the queue records durably
 // on the job. The queue performs no directory scan or NAS I/O for this.
 const checkpointExpiryProtocol = "checkpoint-expiry-v1"
+
+// DefaultCheckpointExpiryGrace keeps a settled job's checkpoint readable after
+// it ends (maintainer-directed, #894). `myce queue --checkpoint-expiry-grace`.
+const DefaultCheckpointExpiryGrace = 72 * time.Hour
+
+// WithCheckpointExpiryGrace sets how long after a job's terminal time its
+// settled checkpoint folder is kept. Zero keeps the default.
+func WithCheckpointExpiryGrace(grace time.Duration) QueueOption {
+	return func(q *Queue) {
+		if grace > 0 {
+			q.checkpointGrace = grace
+		}
+	}
+}
+
+type checkpointExpiryEntry struct {
+	path string
+	due  time.Time
+}
 
 // One worker holds at most this many folders, so a lost or wedged worker
 // strands only these until its claim lapses or its session changes.
@@ -61,13 +82,15 @@ func validCheckpointExpiryPath(id, path string) bool {
 }
 
 // checkpointExpirable reports the root-relative folder of a settled job.
+// Terminal records without a recorded terminal time never expire: there is no
+// basis for the grace period.
 // Terminal alone is not enough: undelivered outputs, unreleased attempts and
 // parked storage custody keep the job mutable, and an unreleased attempt could
 // still write its folder. Terminal jobs never resume (reconcileAttemptReport
 // only recovers queued, running or stopping jobs), and retries, fan-out waves
 // and resubmissions use new job IDs and folders.
 func checkpointExpirable(root string, j *Job) (string, bool) {
-	if j == nil || j.FileTransport || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || mutableJob(j) {
+	if j == nil || j.FileTransport || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || j.FinishedAt == nil || mutableJob(j) {
 		return "", false
 	}
 	rel, err := filepath.Rel(root, j.Checkpoint)
@@ -81,13 +104,20 @@ func checkpointExpirable(root string, j *Job) (string, bool) {
 // indexCheckpointExpiry runs with the other record indexes at commit.
 func (q *Queue) indexCheckpointExpiry(id string, j *Job) {
 	if q.records.checkpointExpiry == nil {
-		q.records.checkpointExpiry = map[string]string{}
+		q.records.checkpointExpiry = map[string]checkpointExpiryEntry{}
 	}
 	if rel, ok := checkpointExpirable(q.root, j); ok {
-		q.records.checkpointExpiry[id] = rel
+		q.records.checkpointExpiry[id] = checkpointExpiryEntry{path: rel, due: j.FinishedAt.Add(q.expiryGrace())}
 	} else {
 		delete(q.records.checkpointExpiry, id)
 	}
+}
+
+func (q *Queue) expiryGrace() time.Duration {
+	if q.checkpointGrace > 0 {
+		return q.checkpointGrace
+	}
+	return DefaultCheckpointExpiryGrace
 }
 
 // checkinCheckpointExpiry runs inside the check-in transaction under q.mu.
@@ -122,7 +152,7 @@ func (q *Queue) checkinCheckpointExpiry(c Checkin, m *Machine, reply *Reply) {
 	}
 	busy := false
 	for id, claim := range q.checkpointClaims {
-		if !now.Before(claim.until) || q.records.checkpointExpiry[id] == "" {
+		if _, pending := q.records.checkpointExpiry[id]; !now.Before(claim.until) || !pending {
 			delete(q.checkpointClaims, id)
 		} else if claim.machine == m.ID && claim.session == m.Session && !claim.failed {
 			busy = true // Its current batch is still running.
@@ -131,15 +161,18 @@ func (q *Queue) checkinCheckpointExpiry(c Checkin, m *Machine, reply *Reply) {
 	if busy {
 		return
 	}
-	for id, rel := range q.records.checkpointExpiry {
+	for id, entry := range q.records.checkpointExpiry {
 		if len(reply.CheckpointExpiries) == checkpointExpiryBatch {
 			break
+		}
+		if now.Before(entry.due) {
+			continue
 		}
 		if claim, ok := q.checkpointClaims[id]; ok && (claim.failed || q.claimLive(claim)) {
 			continue
 		}
 		q.checkpointClaims[id] = checkpointExpiryClaim{machine: m.ID, session: m.Session, until: now.Add(checkpointExpiryAllowance)}
-		reply.CheckpointExpiries = append(reply.CheckpointExpiries, CheckpointExpiry{ID: id, Path: rel})
+		reply.CheckpointExpiries = append(reply.CheckpointExpiries, CheckpointExpiry{ID: id, Path: entry.path})
 	}
 }
 

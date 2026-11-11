@@ -887,12 +887,16 @@ The previous release's workers need only an existing parent folder, which the
 queue already created; current workers recreate a missing shard beneath an
 existing root.
 
-**Settled expiry (#894).** Checkpoints are not results. Once a job is terminal,
-any `async_nas` delivery is verified, every attempt's release is confirmed and
-no storage custody is parked, nothing can resume or still write its folder:
-terminal jobs never resume, and retries, fan-out waves and resubmissions use new
-job IDs. The queue picks such jobs from its in-memory records, never from
-directory scans or folder age, and gives a worker that advertises
+**Settled expiry (#894).** Checkpoints are not results: a NAS checkpoint is kept
+for 72 h after the job ends; declare outputs for anything needed longer. The
+queue setting `myce queue --checkpoint-expiry-grace` (default `72h`) is measured
+from the job's recorded terminal time (`finished_at`). A folder also expires only
+once nothing can resume or still write it: the job is terminal, any `async_nas`
+delivery is verified, every attempt's release is confirmed and no storage custody
+is parked. Terminal jobs never resume, and retries, fan-out waves and
+resubmissions use new job IDs. Elapsed time alone never qualifies a folder, and
+historical terminal records without `finished_at` are kept. The queue picks
+due jobs from its in-memory records, never from directory scans, and gives a worker that advertises
 `checkpoint-expiry-v1` up to 8 job folders at a time. The worker removes them in
 the background, off the queue lock, and reports each removal. The queue records
 `checkpoint_expired` on the job, which survives restart. A worker removes nothing
@@ -901,8 +905,7 @@ counts as the share. It refuses any path other than the job's own flat or
 sharded folder and never follows a symlinked shard. A failed or unfinished
 removal is reissued after 30 minutes, or sooner if that worker restarts or
 leaves. Jobs that never started, and file-store checkpoints, which file retention
-already governs, are not touched. Declare `outputs` for anything needed after
-the job ends.
+already governs, are not touched.
 
 **Every save must be atomic:** write to a temporary file in the same directory,
 flush and fsync it, rename it into place, then fsync the directory (except the

@@ -39,7 +39,7 @@ type queueRecords struct {
 	keys                      recordDeadlines
 	jobCount, submissionCount int
 	updating                  bool
-	checkpointExpiry          map[string]string // Settled job ID -> root-relative checkpoint folder (#894).
+	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
 }
 
 type recordDeadline struct {

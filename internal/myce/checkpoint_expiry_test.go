@@ -65,6 +65,10 @@ func TestCheckpointExpiryUsesSettledRecordsAndClaims(t *testing.T) {
 	}
 	one, two := machine("one", "fake"), machine("two", "fake")
 
+	if got := expiryCheckin(t, q, one); len(got) != 0 {
+		t.Fatal("settled checkpoint expired before the grace period")
+	}
+	c.Advance(DefaultCheckpointExpiryGrace)
 	if v := check(t, q, one, nil); len(v.CheckpointExpiries) != 0 {
 		t.Fatal("expiry sent to a worker that did not advertise the protocol")
 	}
@@ -93,7 +97,7 @@ func TestCheckpointExpiryUsesSettledRecordsAndClaims(t *testing.T) {
 	q.mu.Lock()
 	expired := q.s.Jobs[jobs["succeeded"].ID].CheckpointExpired
 	q.mu.Unlock()
-	if expired == nil || !expired.Equal(now) {
+	if expired == nil || !expired.Equal(now.Add(DefaultCheckpointExpiryGrace)) {
 		t.Fatal("removal not recorded")
 	}
 	if got := expiryCheckin(t, q, two); len(got) != 0 {

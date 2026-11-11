@@ -198,6 +198,7 @@ type Queue struct {
 	nasProgress                checkpointIO[int64]
 	shards                     checkpointShards
 	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
+	checkpointGrace            time.Duration
 	nasAvailable               bool
 
 	nextApprovalWarning time.Time
