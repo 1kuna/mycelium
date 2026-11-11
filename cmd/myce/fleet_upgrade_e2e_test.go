@@ -388,7 +388,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	// custody and may omit either command after it finishes.
 	status := func() bool {
 		snapshot = myce.Snapshot{}
-		lastErr = client.Call(ctx, "GET", "/api/status?limit=1", nil, &snapshot)
+		lastErr = client.Call(ctx, "GET", "/api/status?jobs=all&limit=1", nil, &snapshot)
 		return lastErr == nil
 	}
 	poll("queue startup", func() bool {

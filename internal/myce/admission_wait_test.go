@@ -84,20 +84,25 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 				Targets: []ExecutionTarget{v.Target}, Workload: &Workload{InputShape: "small-v1", Units: 10},
 				FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "piece"}}}}
 			parent := submit(t, q, s)
-			target := m.Devices[1].machine(*q.s.Machines[m.ID])
-			ordinary := extensionJobs(q.fanOutTemplate(q.s.Jobs[parent.ID]), &target, true)[0]
-			probe := *ordinary
-			probe.Machine, probe.Session, probe.AllocatedDevices = m.ID, target.Session, []string{"1"}
-			key, why := q.workObservationKey(&probe)
-			if key == nil {
-				t.Fatal(why)
+			if err := q.update(func() error {
+				target := m.Devices[1].machine(*q.s.Machines[m.ID])
+				ordinary := extensionJobs(q.fanOutTemplate(q.s.Jobs[parent.ID]), &target, true)[0]
+				probe := *ordinary
+				probe.Machine, probe.Session, probe.AllocatedDevices = m.ID, target.Session, []string{"1"}
+				key, why := q.workObservationKey(&probe)
+				if key == nil {
+					return errors.New(why)
+				}
+				host, device := 11.5-minimumHostMemoryGB, 4.5-minimumHostMemoryGB
+				q.putWorkObservation(identityHash(key), WorkObservation{Key: *key, Source: "accepted work", Samples: 19,
+					RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: "separate",
+					MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program),
+					MemoryPeak:          &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}},
+					MemoryRange:         &MemoryPeakRange{Samples: 19, MinGB: host, MaxGB: host}})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
 			}
-			host, device := 11.5-minimumHostMemoryGB, 4.5-minimumHostMemoryGB
-			q.s.WorkObservations = map[string]WorkObservation{identityHash(key): {Key: *key, Source: "accepted work", Samples: 19,
-				RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: "separate",
-				MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program),
-				MemoryPeak:          &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}},
-				MemoryRange:         &MemoryPeakRange{Samples: 19, MinGB: host, MaxGB: host}}}
 			if healthy {
 				for i := range m.Devices {
 					m.Devices[i].Reason = ""
@@ -106,7 +111,9 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			}
 			clock.Advance(time.Second)
 			reply := machineCheck(t, q, m, runs...)
-			owner := q.s.Machines[m.ID]
+			q.mu.Lock()
+			owner := cloneMachine(q.s.Machines[m.ID])
+			q.mu.Unlock()
 			if math.Abs(owner.HostMemoryInUseGB-17.2) > 1e-6 || math.Abs(owner.hostReservationDebtGB-.8) > 1e-6 {
 				t.Fatalf("wrong replay ledger: charged=%g debt=%g", owner.HostMemoryInUseGB, owner.hostReservationDebtGB)
 			}

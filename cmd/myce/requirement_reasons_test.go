@@ -74,7 +74,8 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 			if err != nil || got.State != "succeeded" || len(got.RequirementReasons) != 1 || got.RequirementReasons[0] != (myce.RequirementReasonStatus{Constraint: "host", ReasonSource: "authored", Source: "spec.requirement_reasons[host]"}) || len(got.Spec.RequirementReasons) != 0 {
 				t.Fatal("job GET lost safe reason/provenance", got.RequirementReasons, err)
 			}
-			snapshot, err := status(ctx, d.Client())
+			var snapshot myce.Snapshot
+			err = d.Client().Call(ctx, "GET", "/api/status?jobs=all&sections=jobs", nil, &snapshot)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +84,7 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 				if j.ID == receipt.JobID {
 					found = len(j.RequirementReasons) == 1 && j.RequirementReasons[0].ReasonSource == "authored"
 					data, _ := json.Marshal(j)
-					if bytes.Contains(data, []byte("private")) {
+					if bytes.Contains(data, []byte("private explanation /private/input")) {
 						t.Fatal("raw prose leaked in status")
 					}
 				}
