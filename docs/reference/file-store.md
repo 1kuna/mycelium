@@ -19,11 +19,32 @@ corrupt blobs and retired embedded bundle formats stop startup. Keep the same
 custom root with `WithFileStore` in `Open`; changing roots after bundle references
 exist is refused. Only current and previous release formats are supported.
 
-Queue maintenance reclaims stored job inputs and results after **7 days in a
-terminal state**. Set a positive `myce queue --file-retention DURATION`; installed
-queues accept `myce install queue --config QUEUE_CONFIG --file-retention DURATION`
-and preserve the setting across upgrades. The default is `168h`. This is separate
-from log retention, and applies in NAS and file-store checkpoint modes.
+Stored job inputs and results stay until they are released or a retention
+window expires them. Omitted or zero `myce queue --file-retention` keeps unique
+bytes until [explicit release](#project-owner-early-file-release-465); a positive
+duration expires terminal jobs' files after that long. Installed queues accept
+`myce install queue --config QUEUE_CONFIG --file-retention DURATION` and preserve
+the setting across upgrades; older installations keep their saved window. This is
+separate from log retention, and applies in NAS and file-store checkpoint modes.
+
+### Per-project file retention (#1214)
+
+A project policy can set its own window with `file_retention` (a Go duration,
+for example `72h`), through `myce policy set` like other project settings:
+
+```yaml
+projects:
+  example:
+    weight: 1
+    file_retention: 72h   # this project's finished jobs release files after 3 days
+```
+
+It applies to the project's terminal jobs, including jobs that finished before
+the policy was set, and to their [worker scratch](worker-caches.md#worker-scratch-retention).
+It can only shorten the queue-wide window: with `--file-retention 168h`, a project
+`file_retention: 24h` expires after 24 hours, and `1000h` still expires after 168
+hours. Empty keeps the queue-wide policy. As with the limits below, a policy PUT
+from an older CLI keeps the stored value; a current CLI's file can clear it.
 
 Job records and keyed answers stay, including their file identities and
 `files_expired: true`. A keyed retry returns the original answer and never reruns
@@ -36,9 +57,10 @@ recorded finish time receive a full window from first observation.
 Reclamation preserves blobs needed by non-terminal or unexpired jobs, any
 checkpoint generation, catalog models, extensions and environments. It runs from
 `Queue.Tick`, with filesystem work outside the queue lock. There is no job-record
-pruning, result acknowledgment or early release command. Each pass checks at most
-64 unprotected candidate blobs and records completed reclamation on the existing
-job, so later passes do not revisit those hashes. Publication and successful blob
+pruning or result acknowledgment; owners release early with `myce file release`
+(below). Collection takes one record at a time, yields to waiting control work,
+and records completed reclamation on the existing job, so later passes do not
+revisit those hashes. Publication and successful blob
 HEAD verification refresh a durable mtime; collection waits six hours after that
 refresh. This covers the gap from the first file through later multi-GB uploads,
 slow NAS, or a queue outage/deploy before submit/complete. Only refreshed blobs
@@ -75,13 +97,27 @@ for `/api/files/preflight`, causing every profile submission to exit 69.
 
 Profiles preflight the complete input manifest through `POST /api/files/preflight`
 before the first upload. Preflight runs ordinary retention maintenance; upload creation repeats capacity
-admission. Capacity refusals use HTTP 507 with code `file_store_capacity`, the
+admission. **Before refusing for space, preflight reclaims what is already
+authorized:** it expires jobs whose retention deadline has passed and collects
+expired or owner-released files until the manifest's bytes are covered, without
+waiting for a maintenance pass. It never deletes anything retention or a release
+has not already authorized, and it stops once the request fits. Collection skips
+files inside their publication grace and yields if an upload holds the store's
+publication fence; maintenance collects those later.
+
+Capacity refusals use HTTP 507 with code `file_store_capacity`, the
 public store name, needed/free/shortfall byte counts and recovery instructions;
-profile receipts preserve the reason and exit 75 for retry. A failed capacity
+profile receipts preserve the reason and exit 75 for retry. The reason names the
+bound that set free space: `bound=store_allowance` (the `--file-store-bytes`
+limit) or `bound=volume` with the bytes other data uses on the queue volume. It
+then gives the bytes finished jobs hold until release, the queue and project
+retention in force, the requesting project's share, and the next step: release
+finished work with `myce file release plan`/`apply`, set the project's
+`file_retention`, or (operator) free volume space or raise `--file-store-bytes`. A failed capacity
 reading returns HTTP 503 `file_store_unavailable`. Preflight makes no reservation:
 other writers can consume space afterward, and unknown output sizes cannot be
 predicted. Protected data is never evicted to admit work; increase the configured
-store allowance or free disk space when retention cannot help. Worker file caches
+store allowance or free disk space when retention and release cannot help. Worker file caches
 already evict reproducible copies under pressure. See [files](../files.md).
 
 ## Production file-store reserve
@@ -143,7 +179,8 @@ A full `ExecStart` override hides new arguments in the generated base unit;
 future capacity/reserve changes should use install flags instead.
 
 New identified non-production allocations that would consume the reserve receive
-HTTP 507 `file_store_capacity`, naming the reserve. Preflight, upload creation,
+HTTP 507 `file_store_capacity`, naming the reserve, total free space and the bound
+that set it. Preflight first reclaims already-authorized files as described above. Preflight, upload creation,
 internal registry bundles and declared async output reservations use this check.
 Production output commitments back the reserve rather than being charged twice.
 Production still needs actual store/disk space above the physical floor and

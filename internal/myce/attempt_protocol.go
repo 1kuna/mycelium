@@ -68,6 +68,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	}
 	if w.diskBudgetWire != nil {
 		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
+		w.diskBudgetWire.headroom = reply.WorkerDiskHeadroomProtocol == workerDiskHeadroomProtocol
 	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)

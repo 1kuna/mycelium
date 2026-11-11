@@ -237,7 +237,7 @@ func fakeDockerGroupInspect(root string, ids []string, mode string, out io.Write
 }
 
 func TestDockerPrivateNetworkLifecycle(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerJob()
 	j.Checkpoint = t.TempDir()
 	j.Spec.Run.DockerNetwork = "private"
@@ -246,7 +246,7 @@ func TestDockerPrivateNetworkLifecycle(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	p.stop(c.Now(), 0, true)
 	expireDockerStop(t, p)
 	select {
@@ -278,6 +278,27 @@ func dockerGroupJob(t *testing.T) Job {
 	j.Spec.Needs.HostMemoryGB = 6
 	j.Spec.Run.DockerSidecars = []DockerSidecar{{Name: "sortformer", MemoryGB: 2, Command: append([]string(nil), j.Spec.Run.Command...)}, {Name: "naming", MemoryGB: 2, Command: append([]string(nil), j.Spec.Run.Command...)}}
 	return j
+}
+
+// Group lifecycle fixtures exercise daemon state and durable receipts, rather
+// than teaching initialization budgets from subprocess scheduling under load.
+// Logs still use the external CLI; transport/startup timing has separate tests.
+func dockerGroupFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string) {
+	t.Helper()
+	w, store, clock, root := dockerFixture(t)
+	w.dockerDaemon = fakeDockerGroupCommand(root)
+	return w, store, clock, root
+}
+
+// A daemon's running marker precedes the adapter's durable start receipt. Fault
+// injection and restart must observe the latter before interrupting startup.
+func awaitDockerMainStarted(t *testing.T, p *process) {
+	t.Helper()
+	await(t, func() bool {
+		p.docker.mu.Lock()
+		defer p.docker.mu.Unlock()
+		return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+	})
 }
 
 // Run the shared fake daemon effects in process. Memory rejection is independent
@@ -353,7 +374,7 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	}{{"", false}, {"id1", false}, {"sidecar-sortformer", true}} {
 		id, afterStart := tc.id, tc.afterStart
 		t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
-			w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
+			w, s, c, root := dockerGroupFixture(t)
 			j := dockerGroupJob(t)
 			j.Spec.Logs = "none"
 			j.Spec.Run.DockerSidecars[0].MemoryGB = 3
@@ -428,7 +449,7 @@ func TestDockerRequiresHostMemoryDeclaration(t *testing.T) {
 	}
 }
 func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	var ready atomic.Bool
 	var probes atomic.Int32
@@ -455,7 +476,7 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	// Fast inspect/503 replies cannot bound unknown silent initialization.
 	c.advance(2 * time.Minute)
 	ready.Store(true)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "main-exited"))
 	await(t, func() bool {
 		data, _ := os.ReadFile(filepath.Join(root, "calls"))
@@ -488,14 +509,14 @@ func TestDockerSidecarsMainExitAndReadiness(t *testing.T) {
 	}
 }
 func TestDockerSidecarCrashFailsJob(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
+	w, s, _, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	p, e := startDockerFixture(w, s, j)
 	if e != nil {
 		t.Fatal(e)
 	}
 	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	_ = os.Rename(filepath.Join(root, "running-sidecar-naming"), filepath.Join(root, "crashed"))
 	expireDockerStop(t, p)
 	select {
@@ -516,9 +537,7 @@ func testDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 	t.Helper()
 	for _, mode := range []string{"published-port", "refuse-network-rm"} {
 		t.Run(mode, func(t *testing.T) {
-			w, s, c, root := dockerFixture(t)
-			// These cases test daemon state and custody, not CLI scheduling.
-			w.dockerDaemon = fakeDockerGroupCommand(root)
+			w, s, c, root := dockerGroupFixture(t)
 			j := dockerGroupJob(t)
 			p, e := startDockerFixture(w, s, j)
 			if e != nil {
@@ -534,12 +553,7 @@ func testDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 				}
 				p.docker.close()
 			})
-			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-			await(t, func() bool {
-				p.docker.mu.Lock()
-				defer p.docker.mu.Unlock()
-				return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
-			})
+			awaitDockerMainStarted(t, p)
 			_ = os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600)
 			_ = os.WriteFile(filepath.Join(root, "unlabeled-network"), nil, 0600)
 			if mode == "refuse-network-rm" || mode == "late-network-container" {
@@ -580,7 +594,7 @@ func testDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 	for _, stop := range []bool{false, true} {
 		t.Run(fmt.Sprint(stop), func(t *testing.T) {
-			w, s, c, root := dockerFixture(t)
+			w, s, c, root := dockerGroupFixture(t)
 			j := dockerGroupJob(t)
 			var checked atomic.Bool
 			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
@@ -621,7 +635,7 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 }
 
 func TestDockerExplicitSwapAndHiddenNetworkCustody(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	swap := 3.0
 	j.Spec.Run.DockerMemorySwap = &swap
@@ -631,7 +645,7 @@ func TestDockerExplicitSwapAndHiddenNetworkCustody(t *testing.T) {
 		t.Fatal(e)
 	}
 	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
 	if strings.Count(string(data), "--memory-swap 3221225472") != 2 {
 		t.Fatalf("explicit swap missing: %s", data)
@@ -683,7 +697,7 @@ func TestDockerGroupAdmissionUsesSimultaneousJobMemory(t *testing.T) {
 }
 
 func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	var checked atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -720,7 +734,7 @@ func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 }
 
 func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	var checked atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { checked.Store(true); rw.WriteHeader(503) }))
@@ -750,13 +764,13 @@ func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
 }
 
 func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
+	w, s, _, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	p, e := startDockerFixture(w, s, j)
 	if e != nil {
 		t.Fatal(e)
 	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	p.docker.close()
 	restarted, e := w.restoreDocker(s)
 	if e != nil || restarted == nil {
@@ -785,7 +799,7 @@ func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
 func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	// Exercise queue escalation with serialized daemon effects. External CLI
 	// startup/timeout behavior has its own lifecycle and helper-budget tests.
-	w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
+	w, s, c, root := dockerGroupFixture(t)
 	s.close()
 	q, _ := fixture(t)
 	q.clock = c

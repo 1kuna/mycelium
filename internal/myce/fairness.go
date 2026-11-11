@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,10 @@ type ProjectPolicy struct {
 	MaxRetainedFileBytes uint64 `json:"max_retained_file_bytes,omitempty" yaml:"max_retained_file_bytes,omitempty"`
 	MaxAddedFileBytes24h uint64 `json:"max_added_file_bytes_24h,omitempty" yaml:"max_added_file_bytes_24h,omitempty"`
 	ReservedFileBytes    uint64 `json:"reserved_file_bytes,omitempty" yaml:"reserved_file_bytes,omitempty"`
+	// Optional Go duration after which this project's terminal job inputs and
+	// results expire. It can only shorten the queue-wide --file-retention; empty
+	// keeps the queue-wide policy (zero there retains until explicit release).
+	FileRetention string `json:"file_retention,omitempty" yaml:"file_retention,omitempty"`
 }
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`
@@ -117,6 +122,9 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 				}
 			}
 		}
+		if _, err := parseProjectFileRetention(v.FileRetention); err != nil {
+			return err
+		}
 		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrent < 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative concurrency caps, and memory share in [0,1]")
 		}
@@ -165,7 +173,9 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 	if err := validateProjectPolicies(p); err != nil {
 		return err
 	}
-	return q.update(func() error {
+	var previous map[string]ProjectPolicy
+	return q.updateTransaction(context.Background(), func() error {
+		previous = q.s.Policies
 		if seedOnly && (q.s.PriorityPolicy != nil || len(q.s.Policies) > 0) {
 			return nil
 		}
@@ -188,7 +198,7 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: q.policyRevision() + 1, Policy: policy}
 		q.s.Policies = copy
 		return nil
-	})
+	}, nil, false, func() { q.reindexProjectFileDeadlines(previous) })
 }
 func (q *Queue) capReason(j *Job) string { return q.capReasonFor(j, nil) }
 func (q *Queue) capReasonFor(j *Job, target *Machine) string {

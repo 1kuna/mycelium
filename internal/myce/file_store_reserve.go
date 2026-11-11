@@ -121,7 +121,7 @@ func (q *Queue) fileStoreReserveRefusal(status FileStoreStatus, need, growth, pr
 	}
 	available := q.nonProductionFileStoreFree(status, productionReserved)
 	if need > available {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes; production reserve=%d bytes (--file-store-production-reserve); production and unidentified legacy writes may use the reserve", need, available, q.fileStoreProductionReserve)}
+		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes free=%d bytes; production reserve=%d bytes (--file-store-production-reserve) withholds the rest; production and unidentified legacy writes may use the reserve%s", need, available, status.FreeBytes, q.fileStoreProductionReserve, status.capacityBound())}
 	}
 	return nil
 }

@@ -32,6 +32,8 @@ type FileStoreStatus struct {
 	DiskFreeBytes                    uint64                  `json:"disk_free_bytes"`
 	FloorBytes                       uint64                  `json:"floor_bytes"`
 	Error                            string                  `json:"error,omitempty"`
+	// Which bound set FreeBytes, for refusal explanations; not public status.
+	allowanceFree, volumeFree, diskTotal uint64
 }
 
 type storedPayload struct {
@@ -165,7 +167,8 @@ func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[stri
 	status.DiskFreeBytes, status.FloorBytes = disk.FreeBytes, diskFreeFloor(disk.TotalBytes)
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
-	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
+	status.allowanceFree, status.volumeFree, status.diskTotal = storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable), disk.TotalBytes
+	status.FreeBytes = min(status.allowanceFree, status.volumeFree)
 	return status, payloads, nil
 }
 
@@ -186,7 +189,7 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 		return &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue-file-store capacity unavailable; retry when storage is healthy"}
 	}
 	if need > status.FreeBytes {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes free=%d bytes shortfall=%d bytes used=%d bytes disk_free=%d bytes floor=%d bytes; wait for retention or increase --file-store-bytes / free space on the queue file-store volume", need, status.FreeBytes, max(need-min(need, status.FreeBytes), status.FloorBytes-min(status.FloorBytes, status.DiskFreeBytes)), status.UsedBytes, status.DiskFreeBytes, status.FloorBytes)}
+		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes free=%d bytes shortfall=%d bytes used=%d bytes disk_free=%d bytes floor=%d bytes%s; release retained files, increase --file-store-bytes or free space on the queue file-store volume", need, status.FreeBytes, max(need-min(need, status.FreeBytes), status.FloorBytes-min(status.FloorBytes, status.DiskFreeBytes)), status.UsedBytes, status.DiskFreeBytes, status.FloorBytes, status.capacityBound())}
 	}
 	return nil
 }
@@ -298,6 +301,23 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	if store == nil {
 		return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 	}
+	growth, err := q.preflightAdmission(ctx, store, files)
+	if !fileStoreSpaceRefusal(err) {
+		return err
+	}
+	// Reclaim what retention or an owner release already authorized before
+	// refusing. The admission fence is released so collection can take it.
+	if q.reclaimForAdmission(ctx, growth) {
+		if _, err = q.preflightAdmission(ctx, store, files); !fileStoreSpaceRefusal(err) {
+			return err
+		}
+	}
+	return q.explainFileStoreRefusal(ctx, err)
+}
+
+// Holds the store lifecycle fence only for one capacity reading and admission.
+// Returns the manifest's new bytes.
+func (q *Queue) preflightAdmission(ctx context.Context, store *FileStore, files FileManifest) (uint64, error) {
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
@@ -330,7 +350,7 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	// Admission also refuses an over-quota project before it uploads inputs
 	// submit would refuse.
 	_, err = store.admit(ctx, status, payloads, files, need, growth)
-	return err
+	return growth, err
 }
 
 func (c Client) PreflightFileStore(ctx context.Context, files FileManifest) error {

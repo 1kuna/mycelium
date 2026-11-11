@@ -142,6 +142,7 @@ type FileStore struct {
 	completedAllocations        map[string]completedAllocation
 	capacitySnapshots           map[*fileCapacitySnapshot]bool
 	admitCreation               func(context.Context, *fileCapacitySnapshot, FileRef) (uint64, error)
+	explainRefusal              func(context.Context, error) error
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
@@ -202,7 +203,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{inputClaim: q.inputClaimContext, checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, explainRefusal: q.explainFileStoreRefusal, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
@@ -480,6 +481,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	defer view.release()
 	unidentified, err := s.admitCreation(r.Context(), view, ref)
 	if err != nil {
+		if s.explainRefusal != nil {
+			err = s.explainRefusal(r.Context(), err)
+		}
 		respond(w, nil, err)
 		return
 	}

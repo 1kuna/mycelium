@@ -12,7 +12,7 @@ import (
 
 // A worker restart is not proof a daemon-owned running command was lost.
 func TestRQv2WorkerRecoversRunningContainer(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
+	w, store, clock, root := dockerGroupFixture(t)
 	q, _ := fixture(t)
 	q.clock = clock
 	w.CheckpointRoot = q.root
@@ -33,7 +33,7 @@ func TestRQv2WorkerRecoversRunningContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	p.docker.close()
 	if _, err := os.Stat(filepath.Join(root, "running")); err != nil {
 		t.Fatal("container did not survive worker", err)
@@ -81,7 +81,7 @@ func TestRQv2IndependentExitBeforeStopObservation(t *testing.T) {
 		code int
 	}{{"main-nonzero", 7}, {"main-killed", 137}} {
 		t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
-			w, store, clock, root := dockerFixture(t)
+			w, store, clock, root := dockerGroupFixture(t)
 			q, _ := fixture(t)
 			q.clock = clock
 			w.CheckpointRoot = q.root
@@ -102,7 +102,7 @@ func TestRQv2IndependentExitBeforeStopObservation(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(p.docker.close)
-			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+			awaitDockerMainStarted(t, p)
 			p.docker.close()
 			if err := os.WriteFile(filepath.Join(root, "mode"), []byte(tc.mode), 0600); err != nil {
 				t.Fatal(err)

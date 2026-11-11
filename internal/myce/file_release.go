@@ -165,7 +165,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 			Copies           []Copy
 		}{j.Attempt, j.Machine, j.Session, j.ReleaseConfirmed, j.Copies})
 		if j.FinishedAt != nil {
-			at := j.FinishedAt.Add(q.fileRetention)
+			at := j.FinishedAt.Add(q.jobFileRetention(j))
 			item.ExpiresAt = &at
 		}
 		if parkedStorageCustody(j) {

@@ -177,7 +177,7 @@ func (q *Queue) retainRelease(j *Job) {
 	if q.s.HostReleases == nil {
 		q.s.HostReleases = map[string]HostRelease{}
 	}
-	r := HostRelease{CPUOnly: j.Spec.Needs.cpuOnly(), CPUCores: j.Spec.Needs.cores(), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: deviceShareGB(j), HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
+	r := HostRelease{CPUOnly: j.Spec.Needs.cpuOnly(), CPUCores: jobCPUCharge(j, m), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: deviceShareGB(j), HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
 	if len(j.AllocatedDevices) > 1 {
 		r.Device, r.Devices = j.AllocatedDevices[0], slices.Clone(j.AllocatedDevices)
 	}

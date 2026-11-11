@@ -435,6 +435,7 @@ type Job struct {
 	ExecutionEvidence  *ExecutionEvidence            `json:"execution_evidence,omitempty"`
 	HealthRecovery     *AlertRecovery                `json:"health_recovery,omitempty"`
 
+	CPUObservation          *SharedCPUObservation  `json:"cpu_observation,omitempty"`
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
@@ -725,6 +726,7 @@ type Reply struct {
 	ProbeMemoryProtocol        string                       `json:"probe_memory_protocol,omitempty"`
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
 	WorkerDiskBudgetProtocol   string                       `json:"worker_disk_budget_protocol,omitempty"`
+	WorkerDiskHeadroomProtocol string                       `json:"worker_disk_headroom_protocol,omitempty"`
 	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	HostMountProgressProtocol  string                       `json:"host_mount_progress_protocol,omitempty"`

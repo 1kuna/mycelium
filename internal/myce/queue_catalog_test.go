@@ -2,7 +2,6 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"syscall"
@@ -31,7 +30,7 @@ func TestQueueCatalogRollbackAndRestart(t *testing.T) {
 	}
 	wire := func() string {
 		t.Helper()
-		data, err := json.Marshal(q.s)
+		data, err := marshalQueueState(t, q)
 		if err != nil {
 			t.Fatal(err)
 		}

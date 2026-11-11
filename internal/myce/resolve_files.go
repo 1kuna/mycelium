@@ -37,11 +37,6 @@ func (q *Queue) resolveFileInputs(parent context.Context, req ResolveRequest, re
 	if len(verify) == 0 {
 		return
 	}
-	// Reuse submission's one charged I/O slot. Resolve is an observation: its
-	// wait uses the existing local observation budget, then reports unknown.
-	// Cancellation bounds hash reads; a stuck syscall keeps its slot until return.
-	ctx, cancel := context.WithTimeout(parent, localObservationBudget)
-	defer cancel()
 	q.mu.Lock()
 	store := q.files
 	if q.submitVerificationSlot == nil {
@@ -49,41 +44,11 @@ func (q *Queue) resolveFileInputs(parent context.Context, req ResolveRequest, re
 	}
 	slot := q.submitVerificationSlot
 	q.mu.Unlock()
-	select {
-	case slot <- struct{}{}:
-	case <-ctx.Done():
-		return
+	var check func(context.Context, FileRef) error
+	if store != nil {
+		check = store.verify // read-only; never the manifest publication fsync
 	}
-	inputs := slices.Clone(report.FileInputs)
-	done := make(chan []ResolveFileInput, 1)
-	go func() {
-		defer func() { <-slot }()
-		for _, index := range verify {
-			if ctx.Err() != nil {
-				break
-			}
-			input := &inputs[index]
-			if store == nil {
-				input.State = "needs-staging"
-				continue
-			}
-			err := store.verify(ctx, input.Ref) // read-only; never the manifest publication fsync
-			if ctx.Err() != nil {
-				break
-			}
-			if err == nil {
-				input.State = "ready"
-			} else {
-				input.State = "needs-staging"
-			}
-		}
-		done <- inputs
-	}()
-	select {
-	case report.FileInputs = <-done:
-	case <-ctx.Done():
-		return
-	}
+	resolveFileChecks(parent, report.FileInputs, verify, check, slot)
 	for _, input := range report.FileInputs {
 		if input.State == "needs-staging" && !slices.Contains(req.UnstagedInputs, resolveFileName(input.Field)) {
 			report.Findings = append(report.Findings, ResolveFinding{Field: input.Field, Side: "queue", Problem: "declared file-store bytes are unavailable or do not match their SHA-256 and size", Fix: "Upload the exact bytes with myce file put, or correct the immutable hash and size; submit revalidates."})
@@ -95,4 +60,45 @@ func resolveFileName(field string) string {
 		return "shared/" + name
 	}
 	return "files/" + strings.TrimPrefix(field, "files.")
+}
+
+// Resolve follows its caller's lifetime instead of a hash-size-blind deadline:
+// under submission contention a fixed budget expired before any input was
+// checked (#963). Each input takes submission's one charged I/O slot on its own,
+// so a waiting submission interleaves after at most one resolve hash. Hashing
+// stays outside q.mu. Completed checks survive caller cancellation; unfinished
+// ones stay unknown. A syscall that ignores cancellation keeps its slot until
+// it actually returns, and only this caller writes inputs.
+func resolveFileChecks(ctx context.Context, inputs []ResolveFileInput, indexes []int, check func(context.Context, FileRef) error, slot chan struct{}) {
+	if check == nil {
+		for _, index := range indexes {
+			inputs[index].State = "needs-staging"
+		}
+		return
+	}
+	for _, index := range indexes {
+		select {
+		case slot <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		ref := inputs[index].Ref
+		done := make(chan error, 1)
+		go func() {
+			defer func() { <-slot }()
+			done <- check(ctx, ref)
+		}()
+		select {
+		case err := <-done:
+			if ctx.Err() != nil {
+				return // A cancelled read is not evidence about the bytes.
+			}
+			inputs[index].State = "ready"
+			if err != nil {
+				inputs[index].State = "needs-staging"
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }

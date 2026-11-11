@@ -199,9 +199,7 @@ func livenessProcessCPU(ctx context.Context, p *process, source func(context.Con
 	docker := p.docker
 	p.mu.Unlock()
 	if docker != nil {
-		docker.mu.Lock()
 		memory = docker.envelope()
-		docker.mu.Unlock()
 	}
 	if memory != nil {
 		if value, err := livenessCgroupCPU(memory); err == nil {

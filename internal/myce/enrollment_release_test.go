@@ -274,7 +274,7 @@ func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
 	if err := q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := json.Marshal(q.s)
+	before, _ := marshalQueueState(t, q)
 	var logs bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
@@ -298,7 +298,7 @@ func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
 	if strings.Contains(logs.String(), "fixture-authority") || strings.Contains(logs.String(), q.root) {
 		t.Fatal("storage diagnostics exposed private input")
 	}
-	after, _ := json.Marshal(q.s)
+	after, _ := marshalQueueState(t, q)
 	if !bytes.Equal(before, after) {
 		t.Fatal("failed commit changed default approval or trust")
 	}

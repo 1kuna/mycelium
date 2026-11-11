@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// FleetSupersession is the durable audit record of an operator retiring a
-// stopped fleet operation (#588). Drains that operation owned stay in place.
+// FleetSupersession is the durable audit record of a retired fleet operation.
+// It also retains critical stop evidence when explicit fix-forward replaces it.
 type FleetSupersession struct {
+	Urgency            string            `json:"urgency"`
 	Operation          string            `json:"operation"`
 	Release            string            `json:"release"`
 	State              string            `json:"state"`
@@ -29,6 +30,17 @@ type FleetSupersedeRequest struct {
 	Reason    string `json:"reason"`
 }
 
+func (q *Queue) fleetSupersession(u *fleetUpgrade, reason string) FleetSupersession {
+	record := FleetSupersession{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Reason: reason, SupersededAt: q.clock.Now(), Hosts: []FleetHostStatus{}}
+	for _, h := range u.Hosts {
+		record.Hosts = append(record.Hosts, h.FleetHostStatus)
+		if p := q.s.HostMaintenance[h.Host]; p.Mode == "drained" && p.DrainOwner == u.Operation {
+			record.RetainedDrains = append(record.RetainedDrains, h.Host)
+		}
+	}
+	return record
+}
+
 func fleetAge(d time.Duration) string {
 	d = d.Round(time.Minute)
 	if d < time.Minute {
@@ -40,8 +52,11 @@ func fleetAge(d time.Duration) string {
 	return strings.TrimSuffix(d.String(), "0s")
 }
 
-func fleetFlags(queueOnly, waitIdle bool) string {
+func fleetFlags(queueOnly, waitIdle bool, urgency string) string {
 	var flags []string
+	if fleetUrgency(urgency) == "critical" {
+		flags = append(flags, "--urgency critical")
+	}
 	if queueOnly {
 		flags = append(flags, "--queue-only")
 	}
@@ -75,9 +90,9 @@ func (q *Queue) fleetOperationRefusal(code string, request FleetUpgradeRequest) 
 	if !at.IsZero() {
 		age = label + " " + fleetAge(q.clock.Now().Sub(at)) + " ago"
 	}
-	msg := fmt.Sprintf("fleet operation %s is %s (release %s, %s, %s%s)", u.Operation, u.State, u.Release.Manifest.Version, fleetFlags(u.QueueOnly, u.WaitProductionIdle), age, failure)
+	msg := fmt.Sprintf("fleet operation %s is %s (release %s, %s, %s%s)", u.Operation, u.State, u.Release.Manifest.Version, fleetFlags(u.QueueOnly, u.WaitProductionIdle, u.Urgency), age, failure)
 	if u.State == "stopped" {
-		msg += fmt.Sprintf("; to resume or fix forward rerun myce fleet upgrade with %s (and --release NEWER to fix forward); to retire it run myce fleet supersede --operation %s --reason TEXT", fleetFlags(u.QueueOnly, u.WaitProductionIdle), u.Operation)
+		msg += fmt.Sprintf("; to resume or fix forward rerun myce fleet upgrade with %s (and --release NEWER to fix forward); to retire it run myce fleet supersede --operation %s --reason TEXT", fleetFlags(u.QueueOnly, u.WaitProductionIdle, u.Urgency), u.Operation)
 	} else {
 		msg += "; wait for it to finish (myce status), then rerun"
 	}
@@ -158,13 +173,7 @@ func (q *Queue) SupersedeFleetUpgrade(request FleetSupersedeRequest, requestCont
 		if u.State != "stopped" {
 			return &HTTPError{Status: 409, Code: "fleet_operation_not_stopped", Message: fmt.Sprintf("operation %s is %s; only a stopped operation can be superseded", u.Operation, u.State)}
 		}
-		record := FleetSupersession{Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Reason: reason, SupersededAt: q.clock.Now(), Hosts: []FleetHostStatus{}}
-		for _, h := range u.Hosts {
-			record.Hosts = append(record.Hosts, h.FleetHostStatus)
-			if p := q.s.HostMaintenance[h.Host]; p.Mode == "drained" && p.DrainOwner == u.Operation {
-				record.RetainedDrains = append(record.RetainedDrains, h.Host)
-			}
-		}
+		record := q.fleetSupersession(u, reason)
 		record.Next = "run myce fleet upgrade to start a new operation"
 		if len(record.RetainedDrains) > 0 {
 			record.Next += "; retained drains stay in place: resume each host with myce host resume HOST once it is healthy"

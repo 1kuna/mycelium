@@ -327,7 +327,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	}
 	address := listener.Addr().String()
 	_ = listener.Close()
-	client := myce.Client{URL: "http://" + address, Token: token, HTTP: &http.Client{Timeout: 2 * time.Second}}
+	// Every request uses the acceptance journey's existing context. A separate
+	// two-second HTTP deadline made normal loaded commits fail submission before
+	// the fixture could exercise any rollout behavior.
+	client := myce.Client{URL: "http://" + address, Token: token, HTTP: &http.Client{}}
 	var managers []*fleetE2EManager
 	install := func(role, host string) *fleetE2EManager {
 		t.Helper()
@@ -594,12 +597,42 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			t.Errorf("queue-only restarted worker: %s", m.config.Name)
 		}
 	}
+	// A project declares its next pipeline stage, which only worker-1 can
+	// start. The rollout upgrades the other worker and leaves worker-1 enabled
+	// until the lease closes; no one has to ask the project first (#1009).
+	stage := myce.ProductionStage{AllowedMachines: []string{"worker-1"}}
+	stage.Needs.MemoryGB, stage.Needs.Platform.Any = 1, true
+	if err = client.Call(ctx, "POST", "/api/production-leases", myce.ProductionLeaseRequest{Project: "fleet-test", Key: "rollout-pipeline", TTL: "1h", Stages: []myce.ProductionStage{stage}}, nil); err != nil {
+		t.Fatal(err)
+	}
 	queueOnly = false
 	full := upgrade()
 	if full.Operation == operation.Operation || full.QueueOnly {
 		t.Fatalf("full operation reused queue-only scope: %+v", full)
 	}
 	operation = full
+	poll("leased worker held enabled while the other worker upgraded", func() bool {
+		if !status() || snapshot.FleetUpgrade == nil {
+			return false
+		}
+		if snapshot.FleetUpgrade.State == "stopped" {
+			t.Fatalf("upgrade stopped: %+v", snapshot.FleetUpgrade)
+		}
+		held, upgraded := false, false
+		for _, host := range snapshot.FleetUpgrade.Hosts {
+			held = held || host.Phase == "pending" && strings.Contains(host.Wait, "production lease rollout-pipeline")
+			upgraded = upgraded || host.Host != "queue" && host.Phase == "complete"
+		}
+		return held && upgraded
+	})
+	for _, m := range managers[1:] {
+		if pid, starts := m.process(); m.config.Name == "worker-1" && (pid != before[m.config.Name].Fleet.PID || starts != 1) {
+			t.Fatal("leased worker restarted while its lease was open")
+		}
+	}
+	if err = client.Call(ctx, "DELETE", "/api/production-leases/fleet-test/rollout-pipeline", nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	poll("all commands succeeded and signed rollout completed", func() bool {
 		if !status() {
 			return false

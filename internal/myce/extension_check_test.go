@@ -494,7 +494,7 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 				t.Fatalf("learned sizing rejected a check: err=%v", err)
 			}
 			if peak+minimumHostMemoryGB > 24 {
-				if why := q.memoryEvidenceWaitingReason(j); !strings.HasPrefix(why, memoryEvidenceRecovering+":") || !strings.Contains(why, "exceeds allowance 24 GiB") {
+				if why := memoryEvidenceReason(t, q, j); !strings.HasPrefix(why, memoryEvidenceRecovering+":") || !strings.Contains(why, "exceeds allowance 24 GiB") {
 					t.Fatalf("oversized sibling estimate lost its typed wait: %q", why)
 				}
 			}

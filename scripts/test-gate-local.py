@@ -69,7 +69,11 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
             try:
                 dead = json.loads(child.stdout.readline())
                 with (patch.object(capacity, 'root', return_value=root),
-                      patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                      patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                      # Admission/recovery bookkeeping is independent of a
+                      # host-wide handle scan, which may correctly defer scratch
+                      # collection (e.g. a same-second non-dumpable PAM helper).
+                      patch.object(capacity._cache, 'scratch_idle', return_value=True)):
                     peer = capacity.acquire(root, mode='full')
                     waiter = root / 'local-go-release-wait-peer'
                     waiter.write_text(json.dumps(dict(pid=os.getpid(),
@@ -97,6 +101,32 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     child.kill()
                 child.wait(timeout=5)
                 child.stdout.close()
+
+    def test_failed_scratch_inventory_defers_collection_without_holding_admission(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                slot = capacity.acquire(root, source_root=root / 'source')
+                scratch = Path(slot.owner['scratch'])
+                scratch.mkdir(parents=True)
+                (scratch / 'fixture').write_text('rebuildable')
+                with patch.object(capacity._cache, 'scratch_idle', side_effect=PermissionError('fixture inventory denied')):
+                    slot.release(stopped=False)
+                    next_gate = capacity.acquire(root)
+                    next_gate.release()
+                self.assertFalse(slot.directory.exists())
+                self.assertTrue(scratch.exists())
+                archives = list((root / 'selfheal-backups').iterdir())
+                self.assertEqual(len(archives), 1)
+                self.assertTrue((archives[0] / 'scratch-pending.json').exists())
+                self.assertIn('fixture inventory denied', (archives[0] / 'scratch-retained.txt').read_text())
+                with patch.object(capacity._cache, 'scratch_idle', return_value=True):
+                    next_gate = capacity.acquire(root)
+                    next_gate.release()
+                self.assertFalse(scratch.exists())
+                moved = Path(json.loads((archives[0] / 'scratch.json').read_text())['backup'])
+                self.assertEqual((moved / 'fixture').read_text(), 'rebuildable')
 
     def test_reused_pid_reclaims_but_unknown_or_live_identity_does_not(self):
         with tempfile.TemporaryDirectory() as folder:
