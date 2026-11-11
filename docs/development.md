@@ -553,6 +553,14 @@ python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/
   myce run --profile gate-quick --input gate-selection.tsv=.reports/gate-selection.tsv
 ```
 
+That submits one Linux leg. When the development host can't run gates
+(MY-37), use `scripts/gate-fleet-quick.sh [BASE]` instead: it computes the same
+selection and submits it to `gate-quick` (Linux) and `gate-quick-darwin`
+(darwin/arm64, placed by Mycelium on any Mac worker), then `myce wait`s both and
+exits 0 only when both legs succeed. The Darwin leg runs the same
+`GATE_TARGET=native` quick gate as the local native leg, including the native
+CGO darwin/arm64 build, so a fleet quick is two-platform proof.
+
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
 files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
 the `&&` keeps a failed selection's empty file from submitting a test-free run.

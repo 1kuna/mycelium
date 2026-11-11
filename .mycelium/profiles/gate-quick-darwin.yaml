@@ -1,0 +1,27 @@
+# Darwin leg of the fleet quick gate: same selection input, native CGO build.
+# Comparable accepted observations supply memory; cold configurations explore.
+name: mycelium-gate-quick-darwin
+project: mycelium
+class: test
+memory_class: per_item
+source:
+  git: HEAD
+# Adapter source excludes its instruction file; dogfood tests need it explicitly.
+inputs:
+  .mycelium/adapter.yaml: .mycelium/adapter.yaml
+run:
+  command: [bash, scripts/gate-profile.sh, quick]
+  env:
+    GOMAXPROCS: '2'
+needs:
+  cpu_cores: 2
+  memory: auto
+  platform: cpu
+targets:
+  - {os: darwin, arch: arm64, platform: cpu}
+# Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
+environment: mycelium-gate
+outputs:
+  gate-result.txt: results
+  gate-timings.jsonl: results
+check: [grep, -qx, 'gate quick: exit=0', gate-result.txt]
