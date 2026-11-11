@@ -20,7 +20,7 @@ func TestAuthoringOriginRetentionReplayAndPrivacy(t *testing.T) {
 	}
 	defer func() { q.Close() }()
 	ids := map[string]string{}
-	for _, origin := range []string{OriginProfile, OriginAdapter, OriginJobSpec, OriginAPI, OriginCommand, OriginExtension} {
+	for _, origin := range []string{OriginProfile, OriginAdapter, OriginJobSpec, OriginAPI, OriginPython, OriginCommand, OriginExtension} {
 		s := spec("experiment")
 		s.SubmissionKey, s.AuthoringOrigin = origin, origin
 		s.Run.Command = []string{"echo", "private-payload-sentinel"}

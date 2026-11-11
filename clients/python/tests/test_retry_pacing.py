@@ -71,7 +71,7 @@ class RetryPacingTests(unittest.TestCase):
                             if not target:
                                 return Reply({"jobs": [{**job, "revision": 1}]} if request.selector == "/api/wait" else job)
                             if operation == "keyed":
-                                self.assertEqual(json.loads(request.data), {"submission_key": "same-key"})
+                                self.assertEqual(json.loads(request.data), {"submission_key": "same-key", "authoring_origin": "python"})
                             self.assertGreaterEqual(clock.now + 1e-9, not_before)
                             attempts.append(clock.now)
                             clock.now += .008

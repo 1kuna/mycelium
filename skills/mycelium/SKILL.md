@@ -153,6 +153,8 @@ result = client.download_result(job["id"], "result.txt", Path("accepted/result.t
 assert result.read_bytes() == b"mycelium-ease-audit-ok\n"
 ```
 
+For an adapter entry, `client.run_entry(NAME, out=DIR, key=KEY)` does the
+whole trip (submit like `myce run --entry`, wait, fetch, verify) in one call.
 Keep the key and spec unchanged when retrying an uncertain reply. Batch waits
 use `client.wait_many([JOB_A, JOB_B])`. The client retries overload and
 transient TLS failures within your deadline; unkeyed writes and model calls are

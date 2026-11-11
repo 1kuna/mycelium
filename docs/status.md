@@ -446,8 +446,9 @@ Python `Client.get()` and `Client.list()`.
 
 On releases with #775, `spec.authoring_origin` records the reader used at first
 acceptance: `profile`, `adapter`, `job_spec` (explicit YAML/JSON or Python YAML),
-`command` (one-off CLI), `extension` (Go/Python extension run helper), or `api`
-(otherwise unmarked new API/SDK submissions). Generated qualification jobs are
+`command` (one-off CLI), `extension` (Go/Python extension run helper), `python`
+(mappings built with the Python client), or `api` (otherwise unmarked new
+API/SDK submissions). Generated qualification jobs are
 `extension_check`; generated fan-out execution records are `fan_out_child`,
 while their parent retains its reader label. Count those separately from
 independent submissions. CLI status and the status page show the same label.
