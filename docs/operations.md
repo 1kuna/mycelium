@@ -714,11 +714,11 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
-A rollout needs no consumer confirmation. Projects with open production work,
-including stages they have not submitted yet, declare it with a
-[production lease](#production-leases); the rollout keeps an enabled host for
-each lease and for each queued production job, and upgrades those hosts after
-the lease closes or expires. The earlier manual zero-open check before each
+A rollout needs no consumer confirmation. The rollout keeps an enabled host for
+each queued production job, including a stage still waiting on `after:`, and
+for each open [production lease](#production-leases), which projects open only
+for stages they cannot submit ahead. It upgrades those hosts once the job
+starts, is cancelled or fails, or the lease closes or expires. The earlier manual zero-open check before each
 restart is retired once a queue with #1009 is deployed. Rollback to the previous
 release stays as described in
 [queue-only rollback](#queue-only-rollback-to-the-previous-release); a newer queue's
@@ -752,8 +752,11 @@ rollout remain separate from the laptop acceptance tests.
 
 ## Production leases
 
-A project declares open production work so maintenance never breaks an
-in-flight pipeline, including the stages it has not submitted yet (#1009):
+Queued production jobs are protected without a lease, including stages
+submitted with `after:` that still wait on their upstream (#1374); that
+protection ends when the stage runs, is cancelled or its upstream fails. A
+project opens a lease only for production stages it cannot submit ahead, so
+maintenance never breaks an in-flight pipeline (#1009):
 
 ```sh
 myce fleet lease open --project P --key RUN --for 4h --platform cuda --memory-gb 24
@@ -774,7 +777,8 @@ no capacity. While it is open:
 
 - `myce host drain` of an enabled host refuses with HTTP 409
   `production_work_open` when that host is the last enabled one able to start a
-  declared stage or a queued production job. `myce host status HOST` shows the
+  lease stage or a queued production job (a stage waiting on `after:`
+  included). `myce host status HOST` shows the
   same reason as `production_blocker`. `myce host disable` remains the explicit
   out-of-service action and is not refused.
 - `myce fleet upgrade` leaves that host pending with admission open, as above.

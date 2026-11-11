@@ -999,7 +999,10 @@ class Client:
 
     def open_production_lease(self, project: str, key: str, ttl: str,
                               stages: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-        """Declare open production work, including stages not yet submitted.
+        """Declare production stages not yet submitted.
+
+        Submitted production jobs, including stages waiting on ``after:``,
+        are already protected; a lease covers only stages you can't submit ahead.
 
         Planned host drains and fleet upgrades keep at least one enabled host
         that can start each stage (``{"needs": {...}, "allowed_machines": [...]}``,
