@@ -913,6 +913,11 @@ func TestFleetUpgradeDisabledPreflightFailureLastAndVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	root, queueRuntime := q.root, q.fleetQueue
+	// Workers re-send their full reports; stored records keep only the durable half (#1399).
+	var workers []Machine
+	for _, m := range q.s.Machines {
+		workers = append(workers, cloneMachine(m))
+	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -923,8 +928,8 @@ func TestFleetUpgradeDisabledPreflightFailureLastAndVisible(t *testing.T) {
 	defer q.Close()
 	fakeCheckpointAvailability(t, q, true)
 	q.fleetQueue = queueRuntime
-	for _, m := range q.s.Machines {
-		check(t, q, cloneMachine(m), nil) // Re-establish fresh custody after queue restart.
+	for _, m := range workers {
+		check(t, q, m, nil) // Re-establish fresh custody after queue restart.
 	}
 	if status := q.fleetUpgradeStatus(); status.State != "complete" || status.Hosts[2].Failure != "storage_preflight_failed" {
 		t.Fatal("persisted failure lost", status)

@@ -68,9 +68,16 @@ func (q *Queue) recordLaunchCapacityWait(j *Job, r Result) {
 		j.LaunchCapacityWait = map[string]LaunchCapacityWait{}
 	}
 	if m != nil {
+		// A restored machine holds no capacity telemetry until its first
+		// check-in (#1399). Leave the evidence empty; that report becomes the
+		// baseline, so an unchanged reading is still not new capacity.
+		evidence := ""
+		if !q.unreported[m.ID] {
+			evidence = q.launchCapacityEvidence(j, m)
+		}
 		j.LaunchCapacityWait[targetKey(m)] = LaunchCapacityWait{Machine: j.Machine, Session: j.Session,
 			Attempt: j.Attempt, Admission: safeAdmissionDetail(r.ExecutionCause.Admission),
-			Evidence: q.launchCapacityEvidence(j, m)}
+			Evidence: evidence}
 	}
 }
 
@@ -102,7 +109,20 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 		}
 	}
 	h, ok := j.LaunchCapacityWait[targetKey(m)]
-	return ok && h.Evidence == q.launchCapacityEvidence(j, m)
+	if !ok {
+		return false
+	}
+	if h.Evidence == "" {
+		// Refused before the first post-restart report. Only a committed
+		// pass after that report records the baseline; views stay blocked.
+		if !q.unreported[m.ID] && q.records != nil && q.records.updating {
+			q.touchJob(j.ID)
+			h.Evidence = q.launchCapacityEvidence(j, m)
+			j.LaunchCapacityWait[targetKey(m)] = h
+		}
+		return true
+	}
+	return h.Evidence == q.launchCapacityEvidence(j, m)
 }
 
 // The pending launch-capacity wait. A refusal whose launching attempt carried
