@@ -18,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.9 must interoperate with the live r6.8 release.
+# MY-42: candidate r6.11 must interoperate with the live r6.10 release.
 # Advance this pair together at each release.
-PREVIOUS = "0ca83b30f0b21997574a48cb4d7923093a131001"
-OLD_VERSION = "v3.1.0-rc.20261110.s076r6.8"
-VERSION = "v3.1.0-rc.20261110.s076r6.9"
+PREVIOUS = "302620cacaace8a16e7ed424e1183dbb10f46414"
+OLD_VERSION = "v3.1.0-rc.20261110.s076r6.10"
+VERSION = "v3.1.0-rc.20261111.s076r6.11"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 
 
@@ -333,17 +333,15 @@ def inventory_restarts(candidate, previous, scratch, tools):
 
             # Reopen the same persisted state with the previous release while
             # the current worker keeps its session and keyed attempt protocol.
+            # Both releases share the v3 layout, so rollback needs no conversion.
             queues.close()
             database = queue_root / "state/queue.db"
-            # Read the stopped candidate through production code before/after
-            # conversion, and through the exact previous binary before startup.
             before = inspect_queue(candidate[0], queue_root)
             with sqlite3.connect(database) as db:
                 marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
                 assert json.loads(marker) == "myce-normalized-state-v3", "candidate did not write v3"
-            command([str(candidate[1]), "queue", "downgrade", "--db", str(database), "--to", "v2"])
             after = inspect_queue(previous[0], queue_root)
-            assert before == after, "downgrade changed durable jobs, custody or decisions"
+            assert before == after, "previous release read different durable jobs, custody or decisions"
             assert len(after["jobs"]) >= 6286 and after["machines"], "rollback fixture lost IDs"
             allow_additive_retry = True
             queue = queues.enter_context(process(previous[0], "queue", queue_root, listen=address))
@@ -351,16 +349,16 @@ def inventory_restarts(candidate, previous, scratch, tools):
             rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
             assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1"
                        for row in rows), "previous queue changed session or attempt protocol"
-    print("upgrade-compat: PASS v3 -> verified v2 downgrade -> exact previous queue reopen; all IDs/state intact; inventory refresh", flush=True)
+    print("upgrade-compat: PASS candidate v3 -> exact previous queue reopen; all IDs/state intact; inventory refresh", flush=True)
 
 
 def validate_inventory_receipts(rows, allow_additive_retry=False):
     refused = [i for i, row in enumerate(rows) if row["status"] != 200]
     if not refused:
         return
-    # The worker keeps its r6.9 negotiation across queue replacement. r6.8
-    # strictly rejects post-r6.8 disk-budget/checkpoint-expiry fields; the
-    # narrow compatibility path retries once without either addition. All other
+    # The worker keeps its candidate negotiation across queue replacement. The
+    # previous queue strictly rejects newer additive disk-budget/checkpoint-expiry
+    # fields; the narrow compatibility path retries once without them. All other
     # refusals, repeated refusals and changed attempt/session/inventory fences fail.
     if allow_additive_retry and refused == [0] and rows[0]["status"] == 400:
         error = json.loads(rows[0].get("error", "{}"))
@@ -387,7 +385,6 @@ def queue_rollback(candidate, previous, scratch):
     with sqlite3.connect(database) as db:
         marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
         assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
-    command([str(candidate[1]), "queue", "downgrade", "--db", str(database), "--to", "v2"])
     with process(previous[0], "queue-rollback-open", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("previous release did not preserve IDs, decisions and custody")
@@ -395,7 +392,7 @@ def queue_rollback(candidate, previous, scratch):
     with process(candidate[0], "queue-rollback-open", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("re-upgrade did not preserve IDs, decisions and custody")
-    print("upgrade-compat: PASS v3 -> v2 -> exact r6.8 Open -> current Open; queued/paused/running/terminal IDs and pending custody intact", flush=True)
+    print("upgrade-compat: PASS candidate v3 -> exact previous Open -> current Open; queued/paused/running/terminal IDs and pending custody intact", flush=True)
 
 
 def inspect_queue(binary, root):

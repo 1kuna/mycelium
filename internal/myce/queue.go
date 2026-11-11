@@ -259,7 +259,6 @@ type Queue struct {
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
-	machineRecords          bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
 	maintenance             *queueMaintenance
