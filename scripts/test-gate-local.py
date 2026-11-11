@@ -633,52 +633,54 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     self.assertEqual(capacity.full_waiters(root), [])
 
     def test_exclusive_waiter_drains_local_work_and_blocks_new_quick_runs(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            qualified_config(root)
-            script = '''import importlib.util,pathlib,signal,sys,time
-p,folder=sys.argv[1:];s=importlib.util.spec_from_file_location('c',p);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+        for declaration in ('exclusive', 'release'):
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                qualified_config(root)
+                script = '''import importlib.util,pathlib,signal,sys,time
+p,folder,declaration=sys.argv[1:];s=importlib.util.spec_from_file_location('c',p);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 r=pathlib.Path(folder);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.check_pressure=lambda:None;c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
 def stop(*_): raise SystemExit(143)
 signal.signal(signal.SIGTERM,stop)
-slot=c.acquire(r,mode='full',exclusive=True,wait=True)
+slot=c.acquire(r,mode='full',exclusive=declaration=='exclusive',
+ priority='release' if declaration=='release' else 'normal',wait=True)
 try:
  (r/'exclusive-ready').write_text('ready');time.sleep(30)
 finally: slot.release()
 '''
-            with (patch.object(capacity, 'root', return_value=root),
-                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
-                held = capacity.acquire(root, mode='full')
-                child = subprocess.Popen([sys.executable, '-c', script, capacity.__file__, str(root)],
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                try:
-                    deadline = time.monotonic() + 5
-                    while not list(root.glob('local-go-wait-*.json')):
-                        if time.monotonic() > deadline: self.fail('exclusive did not queue')
-                        time.sleep(.01)
-                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                        capacity.acquire(root)
-                    self.assertFalse((root / 'exclusive-ready').exists())
-                    # Release labels cannot jump an earlier exclusive waiter.
-                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                        capacity.acquire(root, priority='release')
-                    held.release()
-                    deadline = time.monotonic() + 5
-                    while not (root / 'exclusive-ready').exists():
-                        if time.monotonic() > deadline: self.fail('exclusive did not acquire')
-                        time.sleep(.01)
-                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                        capacity.acquire(root)
-                    child.terminate()
-                    out, err = child.communicate(timeout=5)
-                    self.assertEqual(child.returncode, 143, err)
-                    self.assertIn(b'queue position', out)
-                    self.assertFalse(capacity.occupied_lanes(root))
-                finally:
-                    if held.directory.exists(): held.release()
-                    if child.poll() is None: child.kill(); child.wait()
-                    child.stdout.close(); child.stderr.close()
+                with (patch.object(capacity, 'root', return_value=root),
+                      patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                    held = capacity.acquire(root, mode='full')
+                    child = subprocess.Popen([sys.executable, '-c', script, capacity.__file__, str(root), declaration],
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not list(root.glob('local-go-wait-*.json')):
+                            if time.monotonic() > deadline: self.fail('exclusive did not queue')
+                            time.sleep(.01)
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root)
+                        self.assertFalse((root / 'exclusive-ready').exists())
+                        # Release labels cannot jump an earlier exclusive waiter.
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, priority='release')
+                        held.release()
+                        deadline = time.monotonic() + 5
+                        while not (root / 'exclusive-ready').exists():
+                            if time.monotonic() > deadline: self.fail('exclusive did not acquire')
+                            time.sleep(.01)
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root)
+                        child.terminate()
+                        out, err = child.communicate(timeout=5)
+                        self.assertEqual(child.returncode, 143, err)
+                        self.assertIn(b'queue position', out)
+                        self.assertFalse(capacity.occupied_lanes(root))
+                    finally:
+                        if held.directory.exists(): held.release()
+                        if child.poll() is None: child.kill(); child.wait()
+                        child.stdout.close(); child.stderr.close()
 
     def test_concurrent_capacity_requires_digest_bound_complete_measurements(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -857,7 +859,13 @@ slot.release()
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
                 full = capacity.acquire(root, mode='full', priority='release')
-                full.release()
+                try:
+                    self.assertEqual(full.owner['priority'], 'release')
+                    self.assertTrue(full.owner['exclusive'])
+                    for mode in ('quick', 'full'):
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode=mode)
+                finally: full.release()
                 build = capacity.acquire(root, priority='release')
                 self.assertEqual(build.owner['priority'], 'normal')
                 build.release()
@@ -1524,7 +1532,7 @@ sys.exit(m.main())
                 child = Mock()
                 child.wait.return_value = 0
                 return child
-            with (patch.object(sys, 'argv', ['gate-local.py', '--repo', str(root), '--priority',
+            with (patch.object(sys, 'argv', ['gate-local.py', 'full', '--repo', str(root), '--priority',
                     'release', '--command', 'go', 'build', '-o', str(output)]),
                   patch.dict(os.environ, MYCE_TOKEN='nonsecret-fixture'),
                   patch.object(local.capacity, 'acquire', side_effect=lambda *a, **kw:
