@@ -35,12 +35,19 @@ func modelReadinessFile(dir string, model Model) string {
 }
 
 func superviseModelLoad(parent context.Context, model Model, dir string, clock Clock) (context.Context, *readinessProgress, func(bool)) {
+	return superviseModelLoadPhase(parent, model, dir, clock, false)
+}
+
+// Admission and environment preparation have their own cancellation protocols.
+// Runtime loads start paused until actual model/cache work begins.
+func superviseModelLoadPhase(parent context.Context, model Model, dir string, clock Clock, suspended bool) (context.Context, *readinessProgress, func(bool)) {
 	path := modelReadinessFile(dir, model)
 	history := readinessHistory{}
 	if dir != "" {
 		history = readReadinessHistory(path)
 	}
 	p := newReadinessProgress(clock, history)
+	p.suspended = suspended
 	ctx, cancel := context.WithCancelCause(parent)
 	ctx = context.WithValue(ctx, readinessProgressKey{}, p)
 	previous, _ := parent.Value(ioProgressKey{}).(func())

@@ -15,7 +15,11 @@ import (
 var fieldQueueMarker = []byte(`"myce-normalized-state-v2"`)
 var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
-func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
+type queueRecordReader interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, fieldQueueMarker) {
 		return nil, fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v2 or normalized-state-v3")
 	}
@@ -398,7 +402,7 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 }
 
 // Reassemble logical records for startup/recovery, outside ordinary writes.
-func readQueueRecords(db *sql.DB, only ...string) (map[string][]byte, error) {
+func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, error) {
 	query := "SELECT key,data FROM queue_state"
 	var args []any
 	if len(only) > 0 {

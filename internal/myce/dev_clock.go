@@ -20,6 +20,7 @@ const devClockMaxAdvance = 90 * 24 * time.Hour
 // Only StartDev installs it; ordinary Open callers never get the dev route.
 type devClock struct {
 	mu      sync.Mutex
+	base    Clock // nil uses real elapsed time; fixtures may inject a fixed source.
 	offset  time.Duration
 	targets []ExtensionCheckTarget
 }
@@ -27,7 +28,15 @@ type devClock struct {
 func (c *devClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return RealClock{}.Now().Add(c.offset)
+	return c.nowLocked()
+}
+
+func (c *devClock) nowLocked() time.Time {
+	base := c.base
+	if base == nil {
+		base = RealClock{}
+	}
+	return base.Now().Add(c.offset)
 }
 
 func (c *devClock) advance(seconds float64) (time.Time, error) {
@@ -41,7 +50,7 @@ func (c *devClock) advance(seconds float64) (time.Time, error) {
 		return time.Time{}, errors.New("dev clock offset would overflow")
 	}
 	c.offset += delta
-	return RealClock{}.Now().Add(c.offset), nil
+	return c.nowLocked(), nil
 }
 
 func (a API) registerDevClock(mux *requestMux) {
