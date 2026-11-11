@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -37,10 +38,21 @@ func restartRead(t *testing.T, s *workerStore) dockerExecution {
 }
 func restartTick(t *testing.T, d *dockerAttempt) bool {
 	t.Helper()
-	done, e := d.reconcile()
-	if e != nil {
-		t.Fatal(e)
-	}
+	var done bool
+	// The live adapter retries an uncertain daemon mutation on its next
+	// reconciliation. A synchronous fixture must drive the same recovery rather
+	// than treating a load-sensitive CLI reply timeout as a terminal result.
+	await(t, func() bool {
+		var err error
+		done, err = d.reconcile()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return true
+	})
 	return done
 }
 func restartMainExit(t *testing.T, d *dockerAttempt, root string) {

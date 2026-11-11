@@ -65,8 +65,11 @@ func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 		if err := q.Started(result(running, false)); err != nil {
 			t.Fatal(err)
 		}
+		q.mu.Lock()
 		q.refreshHostMemory()
-		if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 2 {
+		charged := q.s.Machines[m.ID].HostMemoryInUseGB
+		q.mu.Unlock()
+		if got := charged; got != 2 {
 			t.Fatal("member caps double charged", got)
 		}
 		if attempt > 1 {
@@ -90,8 +93,11 @@ func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 		if got.State != want || got.InfrastructureRetries != min(attempt, 2) {
 			t.Fatal("retry budget charged twice", got)
 		}
+		q.mu.Lock()
 		q.refreshHostMemory()
-		if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 0 {
+		charged = q.s.Machines[m.ID].HostMemoryInUseGB
+		q.mu.Unlock()
+		if got := charged; got != 0 {
 			t.Fatal("settled attempt retained charge", got)
 		}
 		previous = r

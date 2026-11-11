@@ -210,10 +210,31 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, conf
                     raise RuntimeError(f"check-in refused: {rows}")
                 return len(rows) >= 2
             rows = json.loads(await_file(root / "queue/receipts.json", worker, ready))
-            request = urllib.request.Request(url + "/api/status?detail=full", headers={"Authorization": "Bearer upgrade-fixture"})
-            with urllib.request.urlopen(request, timeout=10) as response:
-                status = json.load(response)
-            assert len(status["jobs"]) == 6286, "retained history missing"
+            # Exercise the bounded history API supported by every predecessor.
+            # A full-detail projection of all 6,286 jobs competed with large
+            # check-ins and exceeded the request deadline under parallel gates.
+            # Traverse every page, preserving the retained-history assertion
+            # without requiring one unbounded response to finish in ten seconds.
+            seen, before = set(), ""
+            while True:
+                query = urllib.parse.urlencode(dict(jobs="all", limit=1000, before=before))
+                request = urllib.request.Request(url + "/api/status?" + query,
+                                                 headers={"Authorization": "Bearer upgrade-fixture"})
+                try:
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        status = json.load(response)
+                except TimeoutError as error:
+                    raise RuntimeError(f"history page timed out after {len(seen)} jobs") from error
+                page = status["jobs_page"]
+                assert page["total"] == 6286, "retained history total changed"
+                ids = {job["id"] for job in status["jobs"]}
+                assert ids and not seen.intersection(ids), "history page did not advance"
+                assert len(ids) == len(status["jobs"]) == page["returned"], "duplicate history jobs"
+                seen.update(ids)
+                before = page.get("next_before", "")
+                if not before:
+                    break
+            assert len(seen) == 6286, "retained history missing"
             assert len(status["work_curves"]) == 1655, "curves missing"
             machines = status["machines"]
             assert len(machines) == 1 and machines[0]["session"], "worker did not join"

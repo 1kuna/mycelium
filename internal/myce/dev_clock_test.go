@@ -36,7 +36,8 @@ func TestDevClockProductionRouteAbsent(t *testing.T) {
 
 func TestDevClockValidationAndAuthentication(t *testing.T) {
 	q, _ := fixture(t)
-	clock := &devClock{}
+	// Keep the dev routes and admission semantics when fixtures freeze time.
+	clock := &devClock{base: q.clock}
 	q.clock = clock
 	handler := API{Queue: q, Token: "test"}.Handler()
 	for _, body := range []string{`{}`, `null`, `{"seconds":null}`, `{"seconds":0}`, `{"seconds":-1}`, `{"seconds":7776001}`, `{"seconds":1e100}`, `{"seconds":1e-10}`, `{"seconds":"1"}`, `{"seconds":1,"extra":true}`, `{"seconds":1} {}`} {
@@ -54,7 +55,7 @@ func TestDevClockValidationAndAuthentication(t *testing.T) {
 	if response := clockRequest(handler, `{"seconds":0.001}`, "test"); response.Code != 200 {
 		t.Fatal(response.Code, response.Body.String())
 	}
-	if clock.Now().Before(before.Add(time.Millisecond)) {
+	if !clock.Now().Equal(before.Add(time.Millisecond)) {
 		t.Fatal("clock did not advance")
 	}
 	minimumClock := &devClock{}

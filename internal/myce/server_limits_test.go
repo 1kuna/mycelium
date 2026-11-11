@@ -176,7 +176,10 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 			t.Fatal("request did not reach upstream")
 		}
 	}
-	stop, first := start("active", "experiment")
+	// Keep the active call at production priority: a later production call is
+	// allowed to preempt an experiment, which would race the three-call barrier.
+	// Both waiting tiers still compete for the explicitly cancelled slot below.
+	stop, first := start("active", "production")
 	receive("active")
 	_, experiment := start("experiment", "experiment")
 	_, production := start("production", "production")
@@ -189,6 +192,10 @@ func testModelLimitHTTP(t *testing.T, generic bool) {
 			break
 		}
 		select {
+		case code := <-experiment:
+			t.Fatalf("experiment returned before cancellation: HTTP %d (calls=%d)", code, n)
+		case code := <-production:
+			t.Fatalf("production returned before cancellation: HTTP %d (calls=%d)", code, n)
 		case <-ctx.Done():
 			t.Fatal("calls did not queue")
 		case <-time.After(time.Millisecond):
