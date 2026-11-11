@@ -3,6 +3,7 @@
 # gate-quick passes `quick`; its job input gate-selection.tsv replaces Git history.
 set -euo pipefail
 export GATE_TARGET=native
+export GATE_FLEET_PROFILE=1  # gate.sh skips local-host admission regressions
 mode=${1:-full}
 case "$mode" in full) gate=(full);; quick) gate=(quick --selection gate-selection.tsv);; *) echo "gate profile: unknown mode: $mode" >&2; exit 2;; esac
 for tool in go git python3 uv; do

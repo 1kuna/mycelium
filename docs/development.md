@@ -559,7 +559,11 @@ selection and submits it to `gate-quick` (Linux) and `gate-quick-darwin`
 (darwin/arm64, placed by Mycelium on any Mac worker), then `myce wait`s both and
 exits 0 only when both legs succeed. The Darwin leg runs the same
 `GATE_TARGET=native` quick gate as the local native leg, including the native
-CGO darwin/arm64 build, so a fleet quick is two-platform proof.
+CGO darwin/arm64 build, so a fleet quick is two-platform proof. Fleet legs
+(`GATE_FLEET_PROFILE=1`, set by `scripts/gate-profile.sh`) skip
+`scripts/test-gate-local.py`: they never run `gate-local.py` or its host FIFO
+admission, and those tests probe the executing host's `ps`/`sysctl` latency
+(a busy fleet Mac timed out child registration). Every local gate still runs them.
 
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
 files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
