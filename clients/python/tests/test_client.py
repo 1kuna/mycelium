@@ -413,6 +413,19 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
 
 
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # A zombie has exited; Linux reports it in /proc until it is reaped.
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
 class DevTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -456,6 +469,23 @@ class DevTests(unittest.TestCase):
         while list(observers.glob("*.json")) and time.monotonic() < end:
             time.sleep(0.1)
         self.assertEqual(list(observers.glob("*.json")), [], "receipt observers did not finish")
+        # The registry empties before the processes exit: the child observer then
+        # records its final status through a temporary file and the supervisor
+        # its supervision state, which raced HOME's removal ("Directory not
+        # empty: 'observers'", #1401). Wait for every recorded process to exit.
+        seen, live = set(), []
+        while time.monotonic() < end:
+            for name, keys in (("observer.status", ("pid",)), ("observer.supervision", ("pid", "child_pid"))):
+                try:
+                    state = json.loads((observers / name).read_text())
+                except (OSError, ValueError):
+                    continue
+                seen.update(state[key] for key in keys if state.get(key))
+            live = [pid for pid in seen if process_alive(pid)]
+            if not live:
+                break
+            time.sleep(0.05)
+        self.assertEqual(live, [], "receipt observer processes did not exit")
 
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
