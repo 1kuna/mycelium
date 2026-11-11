@@ -3041,6 +3041,11 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "checkpoint_expired": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause",
           "x-contract": "diagnostic"

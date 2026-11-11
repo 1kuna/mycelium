@@ -189,10 +189,22 @@ func TestFilesNASInputs(t *testing.T) {
 	if finished.FileTransport || len(finished.FileCheckpoints) != 0 || finished.ResumeFiles != nil {
 		t.Fatal("stored inputs changed NAS checkpoint transport", finished)
 	}
-	save := filepath.Join(checkpoints, accepted.ID, "attempt-1", "save.json")
-	if data, err := os.ReadFile(save); err != nil || !bytes.Contains(data, []byte(`"value":42`)) {
-		t.Fatalf("NAS checkpoint missing: %s %v", data, err)
-	}
+	// The NAS save is visible until settled expiry removes the folder (#894);
+	// only a NAS-transport job can record that removal.
+	await(t, func() bool {
+		save := filepath.Join(jobCheckpointDir(checkpoints, accepted.ID), "attempt-1", "save.json")
+		if data, err := os.ReadFile(save); err == nil {
+			if !bytes.Contains(data, []byte(`"value":42`)) {
+				t.Fatalf("NAS checkpoint content: %s", data)
+			}
+			return true
+		}
+		var current Job
+		if err := c.Call(ctx, "GET", "/api/jobs/"+accepted.ID, nil, &current); err != nil {
+			t.Fatal(err)
+		}
+		return current.CheckpointExpired != nil
+	})
 	dest := filepath.Join(root, "downloaded")
 	if err := c.DownloadResult(ctx, accepted.ID, "output", dest); err != nil {
 		t.Fatal(err)
