@@ -230,7 +230,7 @@ func sharesDevice(j *Job) bool {
 // reservations without fresh per-process evidence (#687). Both require every
 // lower-tier holder to release before higher-tier admission.
 func isolatesDeviceTiers(m *Machine) bool {
-	return m.GPU == "xpu" || m.GPU == "cuda"
+	return backendFor(m.GPU).isolateTiers
 }
 
 // deviceCoTenants counts the batch attempts on card m that demand may share it

@@ -28,7 +28,7 @@ func sampledDeviceCharge(j *Job, m *Machine, s hostMemorySample, now time.Time) 
 	if sharedDeviceSampleReady(s, now) {
 		if unifiedCUDA(m) {
 			charge = max(charge, s.deviceGB+s.deviceGrowthGB)
-		} else if fanOutDeviceSharing(j) && m.GPU == "xpu" && !m.UnifiedMemory {
+		} else if fanOutDeviceSharing(j) && backendFor(m.GPU).deviceHostMemory && !m.UnifiedMemory {
 			charge = max(charge, s.deviceGB+s.deviceGrowthGB+s.deviceRateGB*now.Sub(s.deviceAt).Seconds())
 		}
 	}
@@ -41,7 +41,7 @@ func sampledDeviceCharge(j *Job, m *Machine, s hostMemorySample, now time.Time) 
 // opportunity to measure packing, not a prediction of its throughput benefit.
 func (q *Queue) fanOutDeviceHeadroom(m *Machine, demand *Job, holders []*Job) bool {
 	now, telemetry := q.clock.Now(), cardTelemetry(m)
-	if m.GPU != "xpu" || m.UnifiedMemory || !deviceTelemetryReady(telemetry, now) || *telemetry.ActivePercent >= 100 ||
+	if !backendFor(m.GPU).deviceHostMemory || m.UnifiedMemory || !deviceTelemetryReady(telemetry, now) || *telemetry.ActivePercent >= 100 ||
 		!m.HostMemoryMeasured || m.HostMemoryError != "" || demand.Spec.Needs.HostMemoryGB <= 0 || !hostFits(m, demand.Spec.Needs.MemoryGB, demand.Spec.Needs.HostMemoryGB) {
 		return false
 	}

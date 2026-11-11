@@ -71,7 +71,7 @@ func TestInventorySemanticChangesAndBackoff(t *testing.T) {
 func TestInventoryStablePartialFailureBackoff(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1000, 0)}
 	lane := hostProbeLane[[]MachineDevice]{clock: clock, equal: sameInventoryObservation, timing: probeTiming{base: time.Second, cores: 2}}
-	partial := &acceleratorProbeError{cuda: true}
+	partial := &acceleratorProbeError{families: map[string]bool{"cuda": true}}
 	var failure error = partial
 	source := func(context.Context) ([]MachineDevice, error) {
 		clock.Advance(250 * time.Millisecond)

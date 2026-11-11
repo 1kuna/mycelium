@@ -110,8 +110,8 @@ func LocalGPUAccessProbe() GPUAccessProbe {
 }
 func (p GPUAccessProbe) Check(platform string) error {
 	pattern := "/dev/dri/renderD*"
-	if platform == "cuda" {
-		pattern = "/dev/nvidia[0-9]*"
+	if nodes := backendFor(platform).accessNodes; nodes != "" {
+		pattern = nodes
 	}
 	nodes, err := p.Glob(pattern)
 	if err != nil {
@@ -160,15 +160,11 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 		return Detection{OS: p.OS, Arch: p.Arch, Platform: "cpu", MemoryMode: "fixed"}, nil
 	}
 	selector := strings.TrimSpace(strings.Split(c.Device, ",")[0])
-	if selector != "" && c.Detection.Platform == "xpu" {
-		bound, err := WithModelDevice(Model{}, "xpu", selector)
+	if prepare := backendFor(c.Detection.Platform).prepareServiceProbe; prepare != nil {
+		var err error
+		p, err = prepare(p, selector)
 		if err != nil {
 			return Detection{}, err
-		}
-		for key, value := range bound.DeviceEnv {
-			if err = os.Setenv(key, value); err != nil {
-				return Detection{}, err
-			}
 		}
 	}
 	if c.Detection.OS == "linux" {
@@ -176,19 +172,11 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 			return Detection{}, preflightError("gpu_permission_denied", "gpu", "service cannot access configured GPU nodes; repair driver permissions")
 		}
 	}
-	if c.Detection.Platform == "xpu" {
-		command := p.Command
-		p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			if name == "nvidia-smi" {
-				return nil, exec.ErrNotFound
-			}
-			return command(ctx, name, args...)
-		}
-	}
+
 	d, err := p.DetectDevice(ctx, selector)
 	// Explicit budgets must not require telemetry unavailable on discrete XPUs.
 	var failure *PreflightError
-	if err != nil && c.Detection.Platform == "xpu" && c.Detection.MemoryMode == "fixed" && c.Detection.MemoryGB > c.Detection.ReserveGB && errors.As(err, &failure) && failure.Code == "gpu_memory_unavailable" {
+	if err != nil && backendFor(c.Detection.Platform).fixedMemoryDefault && c.Detection.MemoryMode == "fixed" && c.Detection.MemoryGB > c.Detection.ReserveGB && errors.As(err, &failure) && failure.Code == "gpu_memory_unavailable" {
 		return c.Detection, nil
 	}
 	return d, err
@@ -217,4 +205,28 @@ func DetectServiceHardware(ctx context.Context, c ServiceConfig, p MachineProbe,
 		}
 	}
 	return PreflightHardware(ctx, c, p)
+}
+
+// A scalar Intel service selects its private affinity before probing and never
+// lets an unrelated NVIDIA tool replace that selected runtime's diagnosis.
+func xpuServiceProbe(p MachineProbe, selector string) (MachineProbe, error) {
+	if selector != "" {
+		bound, err := WithModelDevice(Model{}, "xpu", selector)
+		if err != nil {
+			return p, err
+		}
+		for key, value := range bound.DeviceEnv {
+			if err := os.Setenv(key, value); err != nil {
+				return p, err
+			}
+		}
+	}
+	command := p.Command
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "nvidia-smi" {
+			return nil, exec.ErrNotFound
+		}
+		return command(ctx, name, args...)
+	}
+	return p, nil
 }

@@ -111,7 +111,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	}
 	platform := "cpu"
 	if *gpu != "" {
-		if *gpu != "cuda" && *gpu != "xpu" && *gpu != "metal" {
+		if !myce.PhysicalAcceleratorPlatform(*gpu) {
 			return errors.New("gpu must be cuda, xpu or metal")
 		}
 		platform = *gpu

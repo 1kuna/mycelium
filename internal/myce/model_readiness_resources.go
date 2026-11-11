@@ -24,7 +24,7 @@ func (l *LlamaEngine) observeReadinessActivity(ctx context.Context, p *readiness
 	resources := w.observeResources(owned, memory)
 	deviceCtx, cancelDevice := context.WithCancel(ctx)
 	var deviceDone <-chan deviceMemoryResult
-	if memory != nil && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
+	if memory != nil && backendFor(w.Machine.GPU).attemptMemory != nil {
 		a := memory
 		deviceDone = w.observeDeviceMemory(deviceCtx, func() (map[int]bool, map[int]bool, error) {
 			ids := map[int]bool{}

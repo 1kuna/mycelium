@@ -40,7 +40,7 @@ func (q *Queue) memorySizingFacts(j *Job, m *Machine, key *ObservationKey, confi
 	var hostRange *MemoryPeakRange
 	var hostAcceptedAt time.Time
 	completeHostRange := true
-	gpuHost := !cpu && key.Target.Platform == "xpu" && !m.UnifiedMemory
+	gpuHost := !cpu && backendFor(key.Target.Platform).deviceHostMemory && !m.UnifiedMemory
 	invalidated := false
 	// Once corrected evidence exists, legacy XPU attribution on another
 	// comparable key (including a sibling card) must not restore the old peak.
@@ -67,7 +67,7 @@ func (q *Queue) memorySizingFacts(j *Job, m *Machine, key *ObservationKey, confi
 	}
 	for _, point := range points {
 		k, p := point.Key, point.MemoryPeak
-		if correctedXPU && k.Target.Platform == "xpu" && p != nil && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted && !p.constrained() {
+		if correctedXPU && backendFor(k.Target.Platform).deviceHostMemory && p != nil && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted && !p.constrained() {
 			continue
 		}
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)

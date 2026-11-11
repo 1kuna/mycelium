@@ -28,7 +28,7 @@ func TestInventoryPendingPreservesCompletedObservation(t *testing.T) {
 				t.Fatal(err)
 			}
 			if initiallyFailed {
-				if err := w.refreshInventory(context.Background(), devices[:1], &acceleratorProbeError{xpu: true}, s); err != nil {
+				if err := w.refreshInventory(context.Background(), devices[:1], &acceleratorProbeError{families: map[string]bool{"xpu": true}}, s); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -47,7 +47,7 @@ func TestInventoryPendingPreservesCompletedObservation(t *testing.T) {
 				probe := func() ([]MachineDevice, error) {
 					calls.Add(1)
 					<-release
-					return devices[:1], &acceleratorProbeError{xpu: true}
+					return devices[:1], &acceleratorProbeError{families: map[string]bool{"xpu": true}}
 				}
 				// Repeated heartbeat waits must neither change health nor launch
 				// duplicate probes while the same observation is outstanding.

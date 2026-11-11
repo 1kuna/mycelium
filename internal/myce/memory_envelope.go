@@ -710,7 +710,7 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 	hostRange, hostAcceptedAt, completeHostRange := facts.hostRange, facts.hostAcceptedAt, facts.completeHostRange
 	points := facts.points
 	layout := memoryLayout(j, m)
-	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
+	gpuHost := !j.Spec.Needs.cpuOnly() && backendFor(key.Target.Platform).deviceHostMemory && !m.UnifiedMemory
 	estimate := memoryEstimate{key: key, constrainedGB: constrainedGB}
 	switch {
 	case exact != nil:

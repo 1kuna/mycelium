@@ -62,7 +62,12 @@ type deviceFaultClear struct {
 
 func deviceFaultKey(d MachineDevice) string { return d.Platform + ":" + d.Identity }
 func deviceFaultReason(s string) bool {
-	return s == "device_fault_xe" || s == "device_fault_i915" || s == "device_fault_nvidia_xid"
+	for _, backend := range acceleratorBackends {
+		if slices.Contains(backend.faultReasons, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error {
@@ -84,7 +89,12 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 		return err
 	}
 	if w.DeviceFaultMatchers == nil {
-		w.DeviceFaultMatchers = map[string]DeviceFaultMatcher{"xpu": intelKernelFault, "cuda": cudaKernelFault}
+		w.DeviceFaultMatchers = map[string]DeviceFaultMatcher{}
+		for _, backend := range acceleratorBackends {
+			if backend.faultMatcher != nil {
+				w.DeviceFaultMatchers[backend.platform] = backend.faultMatcher
+			}
+		}
 	}
 	if w.DeviceFaultSource == nil {
 		w.DeviceFaultSource = workerDeviceFaultSource()
@@ -92,7 +102,10 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	if w.DeviceHealthProbe == nil {
 		if w.DeviceHealthReportProbe == nil {
 			w.DeviceHealthReportProbe = func(ctx context.Context, d MachineDevice) (DeviceHealthReport, error) {
-				return workerMachineProbe().XPUHealthReport(ctx, d)
+				if probe := backendFor(d.Platform).healthReport; probe != nil {
+					return probe(workerMachineProbe(), ctx, d)
+				}
+				return DeviceHealthReport{}, &DeviceHealthFailure{Code: "health_probe_unsupported"}
 			}
 		}
 		// Resolve host discovery only when a health check runs (#1152): a
