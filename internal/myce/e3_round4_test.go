@@ -31,7 +31,7 @@ func TestExtensionSmokeSuccessRemainsUnqualified(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer d.Close()
-			await(t, func() bool { s, _ := d.Queue.Snapshot(); return len(s.Machines) > 0 })
+			awaitTestDevDeviceFingerprints(t, d)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			reports, err := CheckExtension(ctx, ext, e, "fake", "0", "dev-host", io.Discard, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())

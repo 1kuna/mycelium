@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -480,20 +481,33 @@ func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
 		return math.Float64frombits(free.Load()), nil
 	}
 	checkpoint := t.TempDir()
+	staged := make(chan struct{})
+	resume := make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	defer release()
 	w.checkpointPrepare = func(Job) (string, error) {
 		// Admission succeeded; RAM changed while inputs/checkpoints were staged.
 		free.Store(math.Float64bits(21.9))
+		close(staged)
+		<-resume
 		return checkpoint, nil
 	}
 	startHarness(t, w, h)
-	deadline := time.After(3 * time.Second)
-	for !h.completed("ram-drop") {
-		select {
-		case <-deadline:
-			t.Fatal("RAM refusal retained assigned custody without starting or releasing")
-		case <-time.After(5 * time.Millisecond):
-		}
+	// Synchronize at the RAM-drop boundary; worker initialization is not a
+	// release deadline. The ordinary I/O bound still catches retained custody.
+	select {
+	case <-staged:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("attempt never reached checkpoint staging")
 	}
+	if h.completed("ram-drop") {
+		t.Fatal("attempt released before checkpoint staging finished")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("entrypoint ran during checkpoint staging", err)
+	}
+	release()
+	await(t, func() bool { return h.completed("ram-drop") })
 	r := h.result("ram-drop")
 	if r.Success || r.ReleasePending || r.ExecutionCause == nil || r.ExecutionCause.Operation != "launch" || r.ExecutionCause.Class != "resource_limit" || !strings.Contains(r.Error, "host RAM need 22 GiB, available 21.9 GiB") {
 		t.Fatalf("RAM refusal must release with its admission diagnostic: %+v", r)

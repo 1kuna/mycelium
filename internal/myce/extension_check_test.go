@@ -379,7 +379,7 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	if err = d.Client().UploadFile(context.Background(), assetFile, e.Assets["model"]); err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
+	awaitTestDevDeviceFingerprints(t, d)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cwd, err := os.Getwd()

@@ -115,15 +115,7 @@ func TestExtensionBaselineFailureIsFailedAttempt(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer d.Close()
-			// Registration can precede the asynchronous device identity probe.
-			// CheckExtension selects the enrolled device's completed fingerprint.
-			await(t, func() bool {
-				snap, err := d.Queue.Snapshot()
-				if err != nil {
-					t.Fatal(err)
-				}
-				return len(snap.Machines) == 1 && len(snap.Machines[0].Devices) == 1 && snap.Machines[0].Devices[0].ExtensionFingerprint != ""
-			})
+			awaitTestDevDeviceFingerprints(t, d)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			reports, err := CheckExtension(ctx, ext, e, "fake", "0", "dev-host", os.Stderr, &EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 4 << 20}, d.Client())
