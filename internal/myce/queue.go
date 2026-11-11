@@ -262,6 +262,9 @@ type Queue struct {
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
+	histories               *historySnapshot // Measurement histories as SQLite holds them (history_persistence.go).
+	historiesPending        *historySnapshot
+	flushHistoriesNow       bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
 	maintenance             *queueMaintenance
@@ -575,6 +578,9 @@ func (q *Queue) Close() error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if flushErr := q.flushHistories(); flushErr != nil {
+		err = errors.Join(err, fmt.Errorf("write measurement histories at close: %w", flushErr))
+	}
 	if q.usageReader != nil {
 		err = errors.Join(err, q.usageReader.Close())
 	}

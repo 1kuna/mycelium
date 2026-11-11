@@ -157,7 +157,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	base := queueBase(q.s, false)
+	base := q.persistentBase()
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
@@ -308,6 +308,7 @@ func (q *Queue) loadPersistedState() error {
 	}
 	q.restoreLastSeen()
 	q.rebuildRecords()
+	q.histories = cloneHistories(q.s.EfficiencyHosts, q.s.HostLaunchMemory)
 	return nil
 }
 
