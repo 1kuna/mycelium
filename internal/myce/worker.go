@@ -814,6 +814,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, err
 		}
 		env["HOME"] = home
+		// Git discovery must not climb into a hidden parent repository (a
+		// dotfiles home, say), where a denied read is fatal rather than skipped.
+		if env["GIT_CEILING_DIRECTORIES"] == "" {
+			env["GIT_CEILING_DIRECTORIES"] = filepath.Dir(executionWork)
+		}
 	}
 	w.storageObserver = w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
 	s.storageObserver = w.storageObserver

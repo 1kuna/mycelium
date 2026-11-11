@@ -170,7 +170,9 @@ The job still sees its declared inputs and model snapshots, its own checkpoint
 directory, prepared environments and extension caches, and system toolchains
 (`/usr`, `/opt`, `/Library`, `/Applications` on macOS). Tools that keep config or
 caches under HOME (git, Go, npm, pip, cargo) write to `{work}/.home`, which
-follows the attempt's retention and cleanup. Toolchains installed under the
+follows the attempt's retention and cleanup. Unless the job sets its own,
+`GIT_CEILING_DIRECTORIES` stops git's repository discovery at the attempt
+directory, so a hidden parent repository can't cause a fatal read. Toolchains installed under the
 worker user's home aren't visible: declare them through a prepared environment,
 or install them system-wide. Linux reads only granted files, so `/etc/gitconfig`
 and similar system files can be unreadable; set `GIT_CONFIG_NOSYSTEM=1` if git
