@@ -787,7 +787,10 @@ func TestLaunchCapacityBoundedExploration(t *testing.T) {
 				s.StartWindow = "1s"
 			}
 			j := submit(t, q, s)
+			// Inspect planner state under the same lock as evidence publication.
+			q.mu.Lock()
 			candidate := q.memoryCandidate(q.s.Jobs[j.ID], q.s.Machines[target.ID])
+			q.mu.Unlock()
 			if candidate.MemoryEnvelope == nil || candidate.MemoryEnvelope.Refusal != boundedMemoryCapacityWait {
 				t.Fatal("fixture did not establish bounded capacity refusal", candidate.MemoryEnvelope)
 			}

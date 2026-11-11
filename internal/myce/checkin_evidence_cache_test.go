@@ -238,7 +238,11 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "7b41b03ef3b1540261f76675346d941484131e96bcdcc3631e8f64de83bc8726"}[occupied]
+			// Holds now persist the status sentence in all 80 production reasons:
+			// "waiting for a hypha to take this job". Replacing only that phrase
+			// with "waiting for a worker to pull this job" reproduces 7b41b03e;
+			// job IDs, states, resources and all six picks are unchanged.
+			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "58da4d26d2d553ece59b04f41d8640bf201597527b1f497b965af5e97e73fbaf"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
 				t.Fatalf("planning outcomes %s, want %s", got, want)
