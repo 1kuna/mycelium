@@ -526,6 +526,8 @@ type Job struct {
 	CleanupCause   *RuntimeCause   `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
+	// Reply-only projection of launch and Started evidence; never stored.
+	CommandStarted *bool `json:"command_started,omitempty"`
 
 	// Derived status-only policy projection; a pointer preserves an empty host list.
 	EligibleHosts           *[]string `json:"eligible_hosts,omitempty"`

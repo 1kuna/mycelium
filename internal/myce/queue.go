@@ -2729,6 +2729,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	projectCommandStarted(j)
 	q.projectEfficiency(j)
 	j.YieldPlan = q.yieldProjection(j)
 	if j.State == "queued" && strings.HasPrefix(j.Reason, memoryEvidenceRecovering+":") {

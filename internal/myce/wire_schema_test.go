@@ -71,7 +71,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "command_started", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -107,6 +107,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	delete(defs, "JobLedgerEntry")
 	job["ledger"].(map[string]any)["description"] = "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies."
 	job["isolation"].(map[string]any)["description"] = "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction."
+	job["command_started"].(map[string]any)["description"] = "Reply-only answer to whether any attempt's command may have begun, derived from the queue's start acknowledgement on the job or a retained copy and from main execution evidence (may_have_run or unknown). Present on job GET and status job replies; false means no attempt's command began, so resubmission cannot duplicate this job's work."
 	job["cancellation"].(map[string]any)["description"] = "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence."
 	job["cancellation_scope"].(map[string]any)["description"] = "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads."
 	for _, definition := range []string{"CancellationMember", "CancellationPiece"} {

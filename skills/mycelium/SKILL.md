@@ -125,6 +125,7 @@ SHA-256. Success takes all three: the job `succeeded`, `result` verified the
 files, and your own application check passed (here 23 bytes, newline included).
 A wake, notification, terminal receipt or exit code alone is not success; an
 exit-zero command can still fail its output contract. See [results](references/results.md).
+Before resubmitting, read the job's `command_started` (false: no attempt's command began) and cancel with `myce cancel --wait`, which exits 0 only once the job will not run and its resources are released (75 while release is pending).
 
 ## Python
 

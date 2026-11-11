@@ -3061,6 +3061,11 @@
           "$ref": "#/$defs/CommandDiscovery",
           "x-contract": "diagnostic"
         },
+        "command_started": {
+          "description": "Reply-only answer to whether any attempt's command may have begun, derived from the queue's start acknowledgement on the job or a retained copy and from main execution evidence (may_have_run or unknown). Present on job GET and status job replies; false means no attempt's command began, so resubmission cannot duplicate this job's work.",
+          "type": "boolean",
+          "x-contract": "stable"
+        },
         "copies": {
           "items": {
             "$ref": "#/$defs/Copy"

@@ -16,6 +16,11 @@ and `myce logs JOB_ID` prints its output.
   state and the machine that ran it (`hypha=`). The main states are `queued`,
   `running`, `stopping`, `succeeded`, `failed`, `cancelled` and `paused`. A
   queued job carries a reason naming what it is waiting for and who needs to act.
+- **Started:** every job GET reply and `myce status --json` job row carries
+  `command_started: true|false`. It is true once any attempt's command may have
+  begun (the queue's start acknowledgement on the job or a retained copy, or
+  main `execution_evidence` of `may_have_run` or `unknown`). False means no
+  attempt's command began, so a resubmission cannot repeat this job's work.
 
 The rest of this page is a field-by-field reference, including
 [live view](#live-view-myce-view).
