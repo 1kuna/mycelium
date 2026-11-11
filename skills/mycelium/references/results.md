@@ -41,8 +41,13 @@ myce file release apply --accept-expiry release-plan.json
 custody cannot be forced. Collection is asynchronous and released references
 return `result_expired`. Project attribution is not an authorization check. Keep
 plan/apply receipts and verified copies. Omitted retention protects until
-explicit release; saved positive windows still bind. See
-[result retention and release](../../../docs/files.md) and [operations](../../../docs/operations.md).
+explicit release; saved positive windows still bind. On a supporting queue, a
+project policy `file_retention` (for example `72h`) expires its own finished jobs'
+files sooner, and a `file_store_capacity` refusal names the limiting bound, bytes
+held by finished jobs and the release or retention step to take. See
+[result retention and release](../../../docs/files.md),
+[per-project retention](../../../docs/reference/file-store.md#per-project-file-retention-1214)
+and [operations](../../../docs/operations.md).
 
 ## Worker scratch
 
