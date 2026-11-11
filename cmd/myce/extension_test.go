@@ -70,7 +70,7 @@ variants:
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var snapshot myce.Snapshot
-		if err = client.Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+		if err = client.Call(context.Background(), "GET", "/api/status?view=snapshot", nil, &snapshot); err != nil {
 			t.Fatal(err)
 		}
 		if len(snapshot.Machines) > 0 {

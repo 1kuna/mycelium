@@ -199,7 +199,7 @@ func deferredObservationProjection(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	if r.URL.Path == "/api/status" && len(r.URL.Query()) == 0 {
+	if query := r.URL.Query(); r.URL.Path == "/api/status" && (len(query) == 0 || len(query) == 1 && query.Get("view") == "snapshot") {
 		return true
 	}
 	id, ok := strings.CutPrefix(r.URL.Path, "/api/jobs/")

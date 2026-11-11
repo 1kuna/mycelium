@@ -113,8 +113,8 @@ func TestUpstreamNeverFollowsRedirects(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 1 || seen[0] != "/api/status" {
-		t.Fatalf("upstream requests %v, want only /api/status", seen)
+	if len(seen) != 1 || seen[0] != StatusPath {
+		t.Fatalf("upstream requests %v, want only %s", seen, StatusPath)
 	}
 }
 
@@ -213,8 +213,8 @@ func waitFrame(t *testing.T, ch <-chan []byte) Frame {
 	}
 }
 
-// End to end against a fake queue: the view only ever sends GET /api/status
-// with no query (never detail=full or history), the browser cannot mutate
+// End to end against a fake queue: the view only ever sends the summary
+// snapshot read, StatusPath (never detail=full or history), the browser cannot mutate
 // anything, and other origins are refused.
 func TestViewIsReadOnlyEndToEnd(t *testing.T) {
 	var mu sync.Mutex
@@ -300,7 +300,7 @@ func TestViewIsReadOnlyEndToEnd(t *testing.T) {
 		t.Fatal("queue saw no reads")
 	}
 	for _, s := range seen {
-		if s != "GET /api/status auth=true body=0" {
+		if s != "GET "+StatusPath+" auth=true body=0" {
 			t.Errorf("unexpected upstream request %q", s)
 		}
 	}

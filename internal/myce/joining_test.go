@@ -234,7 +234,7 @@ func TestProfileCheckinAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snapshot Snapshot
-	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "GET", "/api/status?view=snapshot", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot.Machines) != 1 || snapshot.Machines[0].CapabilityProfile == nil || !strings.Contains(snapshot.Machines[0].CapabilityProfile.Summary(), "unified") {

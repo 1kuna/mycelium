@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// CompactStatus is the default `myce status` projection, shared by the text
-// view and `--json`: what runs, what waits and why, what is held, one row per
+// CompactStatus is the default GET /api/status document, also rendered by
+// `myce status` text and encoded by `--json`: what runs, what waits and why, what is held, one row per
 // hypha and alerts grouped by kind. Full job and machine objects stay behind
-// `--sections jobs,machines`, `--history` and `status JOB_ID`.
+// view=snapshot, sections, job pages, detail=full and per-job reads.
 type CompactStatus struct {
 	Now           time.Time            `json:"now"`
 	QueueRelease  RunningRelease       `json:"queue_release"`
@@ -28,6 +28,7 @@ type CompactStatus struct {
 	Jobs          []CompactJob         `json:"jobs,omitempty"`
 	Paused        []CompactPaused      `json:"paused,omitempty"`
 	Detail        string               `json:"detail"`
+	Freshness     *SnapshotFreshness   `json:"freshness,omitempty"`
 }
 type CompactHypha struct {
 	ID           string   `json:"id"`
@@ -54,8 +55,6 @@ type CompactJob struct {
 	Since    *time.Time `json:"since,omitempty"`
 	Reason   string     `json:"reason,omitempty"`
 	Delivery string     `json:"delivery,omitempty"`
-	display  string
-	age      string
 }
 type CompactPaused struct {
 	Project string   `json:"project"`
@@ -81,7 +80,7 @@ func compactJobGroup(j *Job) string {
 // NewCompactStatus projects a default (summary) snapshot. Reasons are whole;
 // the text view bounds them to one line.
 func NewCompactStatus(s Snapshot) CompactStatus {
-	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail}
+	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail, Freshness: s.Freshness}
 	if s.Summary != nil {
 		c.RetainedJobs, c.Alerts = s.Summary.RetainedJobs, s.Summary.Alerts
 	}
@@ -166,7 +165,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		if reason == "running now" {
 			reason = ""
 		}
-		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, display: JobState(j), age: JobAge(j, s.Now)}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason}
 		if j.State == "queued" {
 			since := j.WaitingSince
 			if since.IsZero() {
@@ -266,12 +265,19 @@ func (c CompactStatus) Lines(full bool) []string {
 		if full {
 			id = j.ID
 		}
-		line := fmt.Sprintf("%s %s [%s/%s] %s", id, j.Name, j.Project, j.Class, j.display)
+		// Derived from the encoded fields, so a decoded server view renders alike.
+		display := displayState(j.State)
+		if j.Attempt > 0 {
+			display += fmt.Sprintf(" · attempt %d", j.Attempt)
+		}
+		line := fmt.Sprintf("%s %s [%s/%s] %s", id, j.Name, j.Project, j.Class, display)
 		if j.Machine != "" {
 			line += " on " + j.Machine
 		}
-		if j.age != "" {
-			line += " " + j.age
+		if j.Since != nil && j.State == "queued" {
+			line += " waited " + elapsed(*j.Since, c.Now)
+		} else if j.Since != nil && (j.State == "running" || j.State == "stopping") {
+			line += " running for " + elapsed(*j.Since, c.Now)
 		}
 		if j.Reason != "" {
 			line += "; " + compactLine(j.Reason)

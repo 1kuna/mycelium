@@ -227,7 +227,7 @@ func TestDiskHeadroomUnavailableAndStaleReadings(t *testing.T) {
 	}
 	held := job(t, q, j.ID)
 	var status Snapshot
-	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status")), &status); err != nil {
+	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status?view=snapshot")), &status); err != nil {
 		t.Fatal(err)
 	}
 	if len(status.Machines) != 1 || status.Machines[0].DiskVolumes[0].AgeSeconds < 31 || status.Machines[0].DiskVolumes[0].Error != "disk reading unavailable" {

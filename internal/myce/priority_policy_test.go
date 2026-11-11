@@ -252,7 +252,7 @@ func TestPriorityPolicyStatus(t *testing.T) {
 	s.Project = "verso"
 	j := submit(t, q, s)
 	handler := API{Queue: q, Token: "owner-test"}.Handler()
-	for _, url := range []string{"/api/status", "/"} {
+	for _, url := range []string{"/api/status?view=snapshot", "/"} {
 		r := httptest.NewRequest("GET", url, nil)
 		r.Header.Set("Authorization", "Bearer owner-test")
 		w := httptest.NewRecorder()
@@ -260,7 +260,7 @@ func TestPriorityPolicyStatus(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("status %s: %d", url, w.Code)
 		}
-		if url == "/api/status" {
+		if url != "/" {
 			var snapshot Snapshot
 			if err := json.Unmarshal(w.Body.Bytes(), &snapshot); err != nil {
 				t.Fatal(err)

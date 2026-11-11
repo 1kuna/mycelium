@@ -74,6 +74,7 @@ type statusCache struct {
 	mu               sync.Mutex
 	refresh          sync.Mutex
 	data             string
+	compact          string // the default CompactStatus encoding of the same capture
 	expires          time.Time
 	capturedAt       time.Time
 	generation       uint64
@@ -116,6 +117,16 @@ func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, err
 }
 
 func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
+	return q.cachedStatus(false, contexts...)
+}
+
+// cachedCompactStatusJSON serves the default GET /api/status: the CompactStatus
+// projection of the same cached capture as view=snapshot.
+func (q *Queue) cachedCompactStatusJSON(contexts ...context.Context) (string, error) {
+	return q.cachedStatus(true, contexts...)
+}
+
+func (q *Queue) cachedStatus(compact bool, contexts ...context.Context) (string, error) {
 	ctx, finishBudget, budgetErr := q.requestBudgets.projectionContext(requestContext(contexts))
 	if budgetErr != nil {
 		return "", budgetErr
@@ -129,6 +140,9 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		c.mu.Lock()
 		revision := c.terminalRevision.Load()
 		data, captured := c.data, c.capturedAt
+		if compact {
+			data = c.compact
+		}
 		hit := data != "" && c.generation == revision && q.clock.Now().Before(c.expires)
 		c.mu.Unlock()
 		if !hit {
@@ -177,6 +191,10 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		view, err := json.Marshal(NewCompactStatus(s))
+		if err != nil {
+			return "", err
+		}
 		if c.terminalRevision.Load() != revision {
 			allocation.rewindProjection(mark)
 			if err := ctx.Err(); err != nil {
@@ -185,9 +203,12 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 			continue
 		}
 		c.mu.Lock()
-		c.data, c.expires, c.generation = string(data), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
+		c.data, c.compact, c.expires, c.generation = string(data), string(view), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
 		c.capturedAt = s.Now
 		c.mu.Unlock()
+		if compact {
+			return q.statusJSONFreshness(string(view), s.Now, false)
+		}
 		return q.statusJSONFreshness(string(data), s.Now, false)
 	}
 }

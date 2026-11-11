@@ -199,7 +199,7 @@ func TestInventoryRereviewUnmatchedSelectors(t *testing.T) {
 						MemoryError     string `json:"memory_error"`
 					} `json:"machines"`
 				}
-				if err := client.Call(context.Background(), "GET", "/api/status", nil, &wire); err != nil {
+				if err := client.Call(context.Background(), "GET", "/api/status?view=snapshot", nil, &wire); err != nil {
 					return false
 				}
 				for _, m := range wire.Machines {

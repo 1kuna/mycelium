@@ -95,10 +95,10 @@ func retryAfter(v string, now time.Time) time.Duration {
 	return 0
 }
 
-// StatusPath is the only request the view ever makes: the default status read,
-// with no query, so it shares the queue's one-second snapshot with every other
-// reader and never asks for history (detail=full) or uncached filters.
-const StatusPath = "/api/status"
+// StatusPath is the only request the view ever makes: the summary snapshot
+// (view=snapshot), which shares the queue's one-second cached capture with the
+// default compact read and never asks for history (detail=full) or filters.
+const StatusPath = "/api/status?view=snapshot"
 
 // Upstream reads queue status. It only ever issues GET StatusPath.
 type UpstreamReader struct {
