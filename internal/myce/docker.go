@@ -155,6 +155,7 @@ type dockerAttempt struct {
 	initializations   map[string]string
 	latency           map[string]readinessLatency
 	observationBudget map[string]time.Duration
+	pipeBudget        map[string]time.Duration
 	hostMemoryProbe   checkpointIO[*CurrentHostMemory]
 	memory            *memoryAttempt
 	storageObserver   *storageObserver
@@ -331,6 +332,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		clock = RealClock{}
 	}
 	var since time.Time
+	var retryCause *RuntimeCause
 	halt := d.rpcHalt()
 	backoff := d.rpcBudget(args[0])
 	warned := false
@@ -338,10 +340,13 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		started := RealClock{}.Now()
 		out, err := d.callWithTimeout(d.timeout, args...)
 		backoff = max(time.Nanosecond, RealClock{}.Now().Sub(started))
-		if !errors.Is(err, context.DeadlineExceeded) || d.ctx != nil && d.ctx.Err() != nil {
+		if !dockerObservationTimeout(err) || d.ctx != nil && d.ctx.Err() != nil {
 			if failures > 0 {
 				d.mu.Lock()
 				d.state.ObservationRetry = ""
+				if err == nil && !d.state.Stopped && d.state.CleanupCause == retryCause {
+					d.state.CleanupCause = nil
+				}
 				_ = d.saveLocked()
 				d.mu.Unlock()
 			}
@@ -354,6 +359,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		elapsed := clock.Now().Sub(since).Round(time.Second)
 		d.mu.Lock()
 		d.state.CleanupCause = runtimeDiagnostic(err)
+		retryCause = d.state.CleanupCause
 		d.state.ObservationRetry = fmt.Sprintf("Docker observation retry; custody retained; unavailable %s; %d timed-out reads; %s", elapsed, failures, d.state.CleanupCause.String())
 		// Heartbeats must keep their recognized launch/running transition. A
 		// read timeout is a diagnostic, not a cleanup/admission refusal (#149).
@@ -479,7 +485,17 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 		}
 		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
 			err = context.DeadlineExceeded
-			d.backoffRPC(operation, timeout)
+		}
+		if dockerObservationTimeout(err) {
+			d.backoffRPC(operation, max(timeout, RealClock{}.Now().Sub(realStarted)))
+			if errors.Is(err, exec.ErrWaitDelay) {
+				d.latencyMu.Lock()
+				if d.pipeBudget == nil {
+					d.pipeBudget = map[string]time.Duration{}
+				}
+				d.pipeBudget[operation] = d.observationBudget[operation]
+				d.latencyMu.Unlock()
+			}
 		}
 	}()
 	if d.command != nil {
@@ -503,6 +519,13 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	defer stderrProgress.close()
 	cmd.Stdout = stdoutProgress
 	cmd.Stderr = stderrProgress
+	if dockerObservation(args) {
+		// Inventory JSON is not a pull progress stream. Parsing every line
+		// reserves diagnostic capacity (including host probes), delaying pipe
+		// consumption until a fast daemon response can time out locally.
+		cmd.Stdout = &dockerObservationOutput{output: &stdout, progress: progress}
+		cmd.Stderr = &dockerObservationOutput{output: &stderr, progress: progress}
+	}
 	err = cmd.Run()
 	out = stdout.Bytes()
 	if exit := new(exec.ExitError); errors.As(err, &exit) {

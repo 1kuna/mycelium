@@ -1,8 +1,11 @@
 package myce
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -25,11 +28,12 @@ func (d *dockerAttempt) rpcCadence(operation string) time.Duration {
 
 // Draining a completed CLI's buffered output needs the same local variability
 // allowance as its response, rather than just the mean between observations.
-// Only completed samples count here: outage backoff must not delay pipe cleanup.
+// Only completed samples and actual drain timeouts count here: a daemon outage
+// must not delay pipe cleanup, while a slow local consumer must be recoverable.
 func (d *dockerAttempt) rpcDrainBudget(operation string) time.Duration {
 	d.latencyMu.Lock()
 	defer d.latencyMu.Unlock()
-	return d.latency[operation].budget()
+	return max(d.latency[operation].budget(), d.pipeBudget[operation])
 }
 func (d *dockerAttempt) noteRPCLatency(operation string, elapsed time.Duration) {
 	d.latencyMu.Lock()
@@ -40,7 +44,21 @@ func (d *dockerAttempt) noteRPCLatency(operation string, elapsed time.Duration) 
 	v := d.latency[operation]
 	v.observe(elapsed)
 	d.latency[operation] = v
-	delete(d.observationBudget, operation)
+	for _, budgets := range []map[string]time.Duration{d.observationBudget, d.pipeBudget} {
+		allowance := budgets[operation]
+		if allowance <= 0 {
+			continue
+		}
+		// One fast response does not disprove a slower response just observed.
+		// Retire outage uncertainty at the same smoothing rate as local RTT;
+		// repeated healthy samples eventually restore the normal envelope.
+		allowance = allowance/8*7 + elapsed/8
+		if allowance > v.budget() {
+			budgets[operation] = allowance
+		} else {
+			delete(budgets, operation)
+		}
+	}
 }
 func (d *dockerAttempt) backoffRPC(operation string, budget time.Duration) {
 	d.latencyMu.Lock()
@@ -48,7 +66,26 @@ func (d *dockerAttempt) backoffRPC(operation string, budget time.Duration) {
 	if d.observationBudget == nil {
 		d.observationBudget = map[string]time.Duration{}
 	}
-	d.observationBudget[operation] = scaleReadinessDuration(budget, 2)
+	d.observationBudget[operation] = scaleReadinessDuration(max(budget, d.observationBudget[operation]), 2)
+}
+
+// A completed CLI with an unfinished pipe read is still an unavailable
+// observation. It says nothing about whether the owned container is healthy.
+func dockerObservationTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay)
+}
+
+type dockerObservationOutput struct {
+	output   io.Writer
+	progress *readinessProgress
+}
+
+func (w *dockerObservationOutput) Write(b []byte) (int, error) {
+	n, err := w.output.Write(b)
+	if n > 0 {
+		w.progress.advance()
+	}
+	return n, err
 }
 
 // Docker's JSON pull stream identifies each layer and separates downloading

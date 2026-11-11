@@ -80,6 +80,14 @@ or lost malformed evidence, and none supplies release proof. Shutdown cancels
 active Docker observations even when an outage enlarged their allowance, without
 recording deliberate observer shutdown as execution loss. A mutation reply can
 still settle its dispatch custody; explicit parent/user cancellation binds.
+
+Docker inventory reads count arriving bytes as transport progress and skip the
+pull-stream parser: container metadata must not cause a host-capacity probe for
+every JSON line. A CLI pipe-drain timeout retries the observation just like a
+response timeout, preserving the running container and exact custody. Retry
+allowances include the measured failed read's full cost; one fast response
+cannot erase that evidence. Successful samples gradually retire the allowance
+using the RTT estimator's smoothing rate, and recovery clears the retry cause.
 Daemon RPCs measure real transport elapsed time, independently of lifecycle clock
 advances. Their observers join when the response returns, before local history
 publication; slow durable metadata cannot turn a completed response into a

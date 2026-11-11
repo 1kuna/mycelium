@@ -31,10 +31,15 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				if armed.Load() && args[0] == operation {
 					n := failures.Add(1)
 					if n <= 2 {
-						<-ctx.Done()
 						if n == 2 {
+							// The daemon has answered but the CLI pipe consumer
+							// cannot drain in time. This used to escape the read
+							// retry and turn a healthy container into cleanup.
 							<-second
+							timedOut <- struct{}{}
+							return nil, exec.ErrWaitDelay
 						}
+						<-ctx.Done()
 						timedOut <- struct{}{}
 						return nil, ctx.Err()
 					}

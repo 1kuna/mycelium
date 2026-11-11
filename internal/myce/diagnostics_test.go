@@ -119,6 +119,7 @@ func TestRuntimeCauseClassificationAndPrivacy(t *testing.T) {
 		class string
 	}{
 		{fmt.Errorf("private-secret: %w", context.DeadlineExceeded), "timeout"},
+		{fmt.Errorf("private-secret: %w", exec.ErrWaitDelay), "timeout"},
 		{fmt.Errorf("private-secret: %w", os.ErrPermission), "permission_denied"},
 		{fmt.Errorf("private-secret: %w", syscall.ECONNREFUSED), "connection_refused"},
 		{errors.New("private-secret"), "io_error"},
