@@ -474,17 +474,28 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
             check_pressure()
             if shutil.disk_usage(repo).free < ENTRY_FLOOR:
                 raise RuntimeError('local disk below 45 GiB entry floor')
+            config_path = directory / 'gate-capacity.json'
+            raw_config = json.loads(config_path.read_text()) if config_path.exists() else {}
+            if raw_config != checked_config:
+                config = _memory.retained_calibration(raw_config)
+                resources = resource_qualification(config)
+                slot_profile = full_slot_profile(config) if resources else None
+                checked_config = raw_config
+            if config != raw_config and (directory / 'local-go-resource-group.custody').exists():
+                # Existing owners keep their original envelope until cleanup.
+                # Retain this request's FIFO ticket while fallback becomes safe.
+                if not wait:
+                    raise RuntimeError('local capacity busy: waiting for calibrated owners to finish')
+                if announced != 'calibration cleanup':
+                    print('gate: waiting for active calibration custody cleanup before default admission', flush=True)
+                    announced = 'calibration cleanup'
+                time.sleep(.5)
+                continue
             with admission_lock(directory):
                 legacy_roots = legacy_directories(repo)
                 for folder in [directory, *legacy_roots]:
                     reclaim_dead(folder)
                 legacy = [p for folder in legacy_roots for p in occupied_lanes(folder)]
-                config_path = directory / 'gate-capacity.json'
-                config = json.loads(config_path.read_text()) if config_path.exists() else {}
-                if config != checked_config:
-                    resources = resource_qualification(config)
-                    slot_profile = full_slot_profile(config) if resources else None
-                    checked_config = config
                 if not resources and (directory / 'local-go-resource-group.custody').exists():
                     raise RuntimeError('resource qualification removed during active custody; retained')
                 worker = local_worker_usage()

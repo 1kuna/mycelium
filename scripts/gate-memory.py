@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host memory observations, without treating compressed pages as free bytes."""
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -10,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 from typing import Optional
 
 
@@ -85,7 +87,12 @@ def idle_baseline() -> Optional[dict]:
         return None
     baseline = json.loads(path.read_text()).get('swap_baseline')
     if baseline is not None:
-        verify_baseline(baseline)
+        try:
+            verify_baseline(baseline)
+        except FileNotFoundError:
+            print('WARNING gate: swap calibration evidence is missing; using the uncalibrated swap guard',
+                  file=sys.stderr, flush=True)
+            return None
     return baseline
 
 
@@ -119,13 +126,62 @@ def measured_rates(rows: list) -> dict:
                     for a, b in zip(rows, rows[1:])) / sum(periods))
 
 
+def evidence_directory() -> Path:
+    return Path.home() / '.cache/mycelium-gates/control/evidence'
+
+
 def evidence_bytes(evidence: dict) -> bytes:
     if not isinstance(evidence, dict) or not evidence.get('sha256') or not evidence.get('path'):
         raise ValueError('swap qualification lacks digest-bound measurement evidence')
-    data = Path(evidence['path']).read_bytes()
+    digest = evidence['sha256']
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('invalid calibration evidence digest')
+    # Pin immutable bytes in gate-owned state before admitting work. The source
+    # worktree and its reports can then be removed without losing qualification.
+    retained = evidence_directory() / digest
+    data = retained.read_bytes() if retained.exists() else Path(evidence['path']).read_bytes()
     if hashlib.sha256(data).hexdigest() != evidence['sha256']:
         raise ValueError('swap qualification evidence digest changed')
+    if not retained.exists():
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=retained.parent, delete=False) as pending:
+            pending.write(data)
+        try:
+            os.replace(pending.name, retained)
+        finally:
+            Path(pending.name).unlink(missing_ok=True)
     return data
+
+
+def retained_calibration(config: dict) -> dict:
+    """Retain every pinned input; a lost qualification uses default admission."""
+    result = copy.deepcopy(config)
+
+    def retain(value):
+        if isinstance(value, dict):
+            if 'path' in value and 'sha256' in value:
+                evidence_bytes(value)
+            else:
+                for item in value.values():
+                    retain(item)
+        elif isinstance(value, list):
+            for item in value:
+                retain(item)
+
+    for section in ('memory_measurement', 'quick_memory_measurement', 'full_slot_measurement', 'swap_baseline'):
+        if section not in result:
+            continue
+        try:
+            retain(result[section])
+        except FileNotFoundError:
+            print(f'WARNING gate: {section} evidence is missing; dropping that calibration and using defaults',
+                  file=sys.stderr, flush=True)
+            del result[section]
+            if section == 'memory_measurement':
+                # Resource/slot qualifications and quick headroom depend on it.
+                for dependent in ('resource_admission', 'full_slot_measurement', 'quick_memory_measurement'):
+                    result.pop(dependent, None)
+    return result
 
 
 def verify_baseline(baseline: dict) -> None:
