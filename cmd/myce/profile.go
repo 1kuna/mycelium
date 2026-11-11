@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -193,8 +194,14 @@ func readProfile(name string) (executionProfile, string, []byte, error) {
 	if d.Decode(&extra) != io.EOF {
 		return p, "", nil, waitError(64, "profile_invalid: expected one YAML profile")
 	}
-	if len(p.Check) == 0 || p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" || p.Class == "" || len(p.Targets) == 0 && !myce.WantsCommandDiscovery(p.Spec) {
-		return p, "", nil, waitError(64, "profile_invalid: declare run.command, project, class, check and targets (or portable: true for managed CPU discovery)")
+	if len(p.Check) > 0 && p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" {
+		return p, "", nil, waitError(64, "profile_invalid: declare run.command and project; check, class, needs and targets are optional")
+	}
+	if p.Class == "" && p.Priority == "" {
+		p.Class = "experiment"
+	}
+	if reflect.ValueOf(p.Needs).IsZero() {
+		p.Needs = defaultEntryNeeds()
 	}
 	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || p.Run.Docker || len(p.Run.Sidecars) > 0 || len(p.Run.DockerSidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
 		return p, "", nil, waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")
@@ -255,6 +262,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return waitError(64, "deadline must be RFC3339")
 		}
 		p.Deadline = &d
+	}
+	if p.Native == nil && len(p.Targets) == 0 && !myce.WantsCommandDiscovery(p.Spec) && entryProduction(p.Spec) {
+		return waitError(64, "profile_invalid: "+productionTargetsRequired)
 	}
 	for _, advice := range p.placementAdvisories() {
 		fmt.Fprintln(errOut, "placement advisory: "+advice)

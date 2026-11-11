@@ -114,6 +114,9 @@ type state struct {
 	UsageAt          time.Time                    `json:"usage_at,omitempty"`
 	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
 
+	// Per adapter/profile entry without targets (#853): recipe, proven and skipped types.
+	EntryCoverage map[string]entryCoverageRecord `json:"entry_coverage,omitempty"`
+
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
 	Pins         []ModelPin            `json:"pins,omitempty"`
@@ -872,6 +875,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
 	var discovery *CommandDiscovery
+	var entryCoverage *EntryCoverage
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		// Digest before freezeRecipes moves the bytes to the file store.
@@ -884,6 +888,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if recipeErr != nil {
 				recipeErr = rejectFieldRule("job_environment_invalid", recipeErr)
 			}
+		}
+		if recipeErr == nil {
+			entryCoverage = deriveEntryCoverage(prepared, recipes, discovery)
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -1036,7 +1043,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		} else {
 			id = ID()
 		}
-		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
+		j := &Job{EntryCoverage: entryCoverage, CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -1070,6 +1077,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
+		}
+		if j.EntryCoverage != nil && q.entryCoverageProduction(j) {
+			return rejectFieldRule("job_placement_invalid", errors.New("production entries declare explicit targets (MY-19 parity); only non-production entries may omit them"))
 		}
 		if s.RequireTarget || nativeNetworkRequired(j) {
 			if ok, reason := q.qualifiedTarget(j); !ok {
@@ -2357,7 +2367,11 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 		q.recordAttemptLearning(j, r)
 		q.recordModelUse(j.Spec.Needs.Model)
+		q.recordEntryCoverageSuccess(j, r.Machine)
 		j.State = "succeeded"
+	} else if q.entryCoverageFailure(j, r.Machine) {
+		// A coverage finding requeued the job onto another machine type, or
+		// failed it with the finding when no proven type remains.
 	} else {
 		j.State = "failed"
 		j.Reason = "command failed: " + r.Error

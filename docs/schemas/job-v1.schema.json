@@ -1355,6 +1355,34 @@
       ],
       "type": "object"
     },
+    "CoverageFinding": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "job": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "job",
+        "attempt",
+        "at",
+        "action"
+      ],
+      "type": "object"
+    },
     "DeadlineGuidance": {
       "properties": {
         "blockers": {
@@ -1676,6 +1704,39 @@
         "io_observed_attempts",
         "io_lower_bound",
         "seconds"
+      ],
+      "type": "object"
+    },
+    "EntryCoverage": {
+      "properties": {
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/CoverageFinding"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "lock_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "recipe": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "recipe"
       ],
       "type": "object"
     },
@@ -3130,6 +3191,10 @@
         },
         "eligible_unrestricted": {
           "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "entry_coverage": {
+          "$ref": "#/$defs/EntryCoverage",
           "x-contract": "diagnostic"
         },
         "environment_failure_log": {
