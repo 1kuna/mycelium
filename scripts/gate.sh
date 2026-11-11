@@ -102,7 +102,11 @@ step() {
   return "$result"
 }
 step gate-progress-regressions python3 scripts/test-gate-progress.py
-if [[ -f scripts/test-gate-local.py ]]; then
+if [[ -f scripts/test-gate-local.py && ${GATE_FLEET_PROFILE:-} == 1 ]]; then
+  # Fleet legs never run gate-local.py or its host FIFO admission; those tests
+  # probe the executing host (ps, sysctl) and stay covered by every local gate.
+  echo 'gate-local-regressions: skipped (fleet profile; covered by local gates)'
+elif [[ -f scripts/test-gate-local.py ]]; then
   step gate-local-regressions python3 scripts/test-gate-local.py
 fi
 if [[ -f scripts/test-gate-runtime.py ]]; then
