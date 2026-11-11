@@ -42,7 +42,7 @@ After affirmative cleanup, successful and failed runs both remove their frozen
 source tree and source/runtime archives. Unconfirmed cleanup retains the tree
 for diagnosis without retaining admission; verdicts and receipts remain available in either case.
 
-At the same points it also trims the default Go build cache (`go env GOCACHE`),
+At every entry and exit it also trims the default Go build cache (`go env GOCACHE`),
 which workers' direct `go test` runs fill and nothing else trims (#1224). On
 2026-11-11 that cache reached 51 GB, at about 10 GB/h, and held the disk under
 the 45 GiB entry floor, which blocked every local gate. The budget is derived:
