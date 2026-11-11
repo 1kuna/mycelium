@@ -59,13 +59,19 @@ func TestDarwinMetalFootprintGuardOvershoot(t *testing.T) {
 	before := probeguard.Before
 	probeguard.Before = nil
 	defer func() { probeguard.Before = before }()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "grow.swift"), []byte(metalGrowthSource), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	child := filepath.Join(dir, "metal-grow")
-	if out, err := exec.Command("swiftc", "-O", "-framework", "Metal", filepath.Join(dir, "grow.swift"), "-o", child).CombinedOutput(); err != nil {
-		t.Fatalf("swiftc: %v\n%s", err, out)
+	// MYCE_METAL_GROW_BIN names a prebuilt child for hosts without swiftc.
+	child := os.Getenv("MYCE_METAL_GROW_BIN")
+	if child == "" {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "grow.swift"), []byte(metalGrowthSource), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		child = filepath.Join(dir, "metal-grow")
+		if out, err := exec.Command("swiftc", "-O", "-framework", "Metal", filepath.Join(dir, "grow.swift"), "-o", child).CombinedOutput(); err != nil {
+			t.Fatalf("swiftc: %v\n%s", err, out)
+		}
+	} else if abs, err := filepath.Abs(child); err == nil {
+		child = abs
 	}
 	const deviceMiB, hostMiB, growthCapMiB = 384, 128, 3072
 	limit := int64(deviceMiB+hostMiB) << 20
