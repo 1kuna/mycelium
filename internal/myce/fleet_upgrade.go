@@ -414,7 +414,20 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 	if h.Machine != "" && q.fleetWorkerFailure(q.s.Machines[h.Machine], &q.s.FleetUpgrade.Release) != "" {
 		return "waiting for compatible worker runtime proof before idle cutover"
 	}
+	// Open production work, declared or queued, keeps an enabled host able to
+	// start its next stage. Expiry or closure releases the wait; no deadline here.
+	if reason := q.productionDrainBlocker(h.Host); reason != "" {
+		return "waiting for open production work: " + reason + "; host admission remains enabled"
+	}
 	return ""
+}
+
+// fleetDrainTemporary reports a drain the running upgrade owns. It ends when
+// that host's step verifies; a stopped operation's retained drain does not.
+func (q *Queue) fleetDrainTemporary(host string) bool {
+	u := q.s.FleetUpgrade
+	policy := q.s.HostMaintenance[host]
+	return u != nil && u.State == "running" && policy.Mode == "drained" && policy.DrainOwner != "" && policy.DrainOwner == u.Operation
 }
 func (q *Queue) fleetPausesCalls() bool {
 	h := q.fleetActiveHost()
@@ -461,6 +474,7 @@ func (q *Queue) fleetProductionIdle() bool {
 // Called from the normal queue transaction; only in-memory fences and custody
 // are inspected here. Hashing, signature checks and manager probes stay outside.
 func (q *Queue) maintainFleetUpgrade() {
+	q.pruneProductionLeases()
 	u := q.s.FleetUpgrade
 	if u == nil || u.State != "running" {
 		return

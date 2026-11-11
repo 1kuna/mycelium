@@ -709,6 +709,29 @@ class Client:
             "project": project, "submission_key": submission_key,
         })
 
+    def open_production_lease(self, project: str, key: str, ttl: str,
+                              stages: list[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+        """Declare open production work, including stages not yet submitted.
+
+        Planned host drains and fleet upgrades keep at least one enabled host
+        that can start each stage (``{"needs": {...}, "allowed_machines": [...]}``,
+        the same fields a job uses) until you close the lease or ``ttl`` (a
+        duration such as ``"2h"``) passes. Reopen the same key to renew.
+        Without stages it protects any host the project may use.
+        """
+        body: dict[str, Any] = {"project": project, "key": key, "ttl": ttl}
+        if stages:
+            body["stages"] = list(stages)
+        return self._call("POST", "/api/production-leases", body)
+
+    def close_production_lease(self, project: str, key: str) -> dict[str, Any]:
+        """Close a production lease; closing an absent or expired lease succeeds."""
+        return self._call("DELETE", f"/api/production-leases/{quote(project, safe='')}/{quote(key, safe='')}")
+
+    def production_leases(self) -> list[dict[str, Any]]:
+        """Open production leases across all projects."""
+        return self._call("GET", "/api/production-leases").get("leases", [])
+
     def _wait_batch(self, job_ids, after, seconds, timeout):
         try:
             reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,

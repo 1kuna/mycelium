@@ -43,6 +43,12 @@ remain explicit. Constrained first-run observations persist even when rejected
 by learning. See [memory facts](../../docs/status.md) for scope and
 platform limits.
 
+Before a multi-stage production pipeline, declare it so maintenance keeps a host
+able to start each stage: `client.open_production_lease(project, run_key, "4h",
+[{"needs": {...}}])`, renew by reopening the same key, and
+`client.close_production_lease(project, run_key)` when done. It expires on its own
+([production leases](../../docs/operations.md#production-leases)).
+
 For a fan-out abort, cancel the parent by ID or `cancel_submission(project, key)`.
 Read `client.get(parent_id)["cancellation"]["release"]` until it is `confirmed`
 or `not_applicable`; `wait()` returning a terminal state does not prove release.

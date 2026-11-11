@@ -67,6 +67,7 @@ type state struct {
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	FleetSuperseded        []FleetSupersession            `json:"fleet_superseded,omitempty"`
+	ProductionLeases       map[string]ProductionLease     `json:"production_leases,omitempty"`
 
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
