@@ -181,9 +181,10 @@ outputs: {combined.json: results}
 its `job_id`; outputs of a pieces producer are named `KEY/OUTPUT`. Submit the
 stage with `myce submit FILE` or Python `client.submit(spec)`
 ([stages](../../docs/jobs.md#start-a-consumer-after-every-producer-piece-succeeds)).
-Maintenance doesn't yet count a stage still waiting on `after:`, so a production
-pipeline also opens a [production lease](references/waiting.md#production-leases)
-for its run.
+A submitted production stage counts as open production work while it waits on
+`after:`, so drains and fleet upgrades keep a host able to start it; open a
+[production lease](references/waiting.md#production-leases) only for stages you
+can't submit ahead.
 
 ## When a job fails or waits
 

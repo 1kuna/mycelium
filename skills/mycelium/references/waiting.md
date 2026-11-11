@@ -208,11 +208,12 @@ their place. Shared policy belongs to the queue owner.
 ## Production leases
 
 Submit later stages with `after:` first: the queue then sees them, starts each
-when its inputs are accepted and cancels them with their producer. Maintenance
-protection is narrower. A planned drain or fleet upgrade keeps at least one
-enabled host able to start each queued production job, but a stage still
-blocked on `after:` doesn't count until it is ready (#1374). Open a lease for a
-production pipeline whose later stages are blocked or not yet submitted, so a
+when its inputs are accepted and cancels them with their producer. A planned
+drain or fleet upgrade keeps at least one enabled host able to start each queued
+production job, including a stage still waiting on `after:`; that protection
+ends when the stage runs, is cancelled or its upstream fails. You don't need a
+lease for those stages. Open a lease only for production stages you can't
+submit ahead (for example, ones whose spec depends on earlier results), so a
 drain can't strand them:
 
 ```sh
@@ -225,7 +226,7 @@ and `client.close_production_lease(project, run_key)`. Each stage takes a job's
 placement fields (`needs`, `allowed_machines`, `excluded_machines`); without
 stages the lease covers any host your project may use. Pick a duration that
 covers the pipeline, reopen the same key to renew, and close it when the last
-stage is submitted. It expires on its own, grants no priority and reserves no
+undeclared stage is submitted. It expires on its own, grants no priority and reserves no
 capacity. A critical Mycelium update may still checkpoint and requeue production
 work (MY-39); requeued or newly submitted stages wait for the host to return.
 See [production leases](../../../docs/operations.md#production-leases).

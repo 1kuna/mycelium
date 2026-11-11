@@ -370,3 +370,95 @@ func TestProductionLeaseInCompactStatus(t *testing.T) {
 		t.Fatalf("closed or expired lease still shown: %+v", view.Leases)
 	}
 }
+
+// #1374: a production stage declared with after: is open production work
+// before its upstream succeeds, so a drain of its last eligible host refuses
+// without a lease, between producer waves too. Upstream failure fails the stage
+// and releases the host.
+func TestBlockedAfterProductionStageRefusesDrainUntilUpstreamFails(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 3)
+	s.Outputs = map[string]string{"out": "results"}
+	spare := machine("worker-spare", "fake", "spare-host")
+	check(t, q, spare, nil)
+	parent := submit(t, q, s)
+	c := wholeParentConsumer(s, parent.ID, false)
+	c.Priority = "production"
+	consumer := submit(t, q, c)
+	if consumer.Spec.StartBy != nil || len(q.ProductionLeases()) != 0 {
+		t.Fatal("fixture should have no start deadline and no lease", consumer.Spec.StartBy)
+	}
+	host := hostID(&m)
+	wave := check(t, q, m, nil).Job
+	if wave == nil || wave.Batch == nil {
+		t.Fatal("producer wave not running")
+	}
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); !productionWorkOpen(err) || !strings.Contains(err.Error(), consumer.ID) || !strings.Contains(err.Error(), "waiting on after: "+parent.ID) {
+		t.Fatal("drain stranded the declared stage", err)
+	}
+	if status, _ := q.HostMaintenanceStatus(host); !strings.Contains(status.ProductionBlocker, consumer.ID) {
+		t.Fatal("host status (and fleet upgrade wait) hides the stage", status.ProductionBlocker)
+	}
+	// Eligibility comes from the stage's needs: a host that cannot start it drains.
+	if _, err := q.ChangeHostMaintenance(hostID(&spare), HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	finish(t, q, wave, true)
+	clock.Advance(time.Second)
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); !productionWorkOpen(err) {
+		t.Fatal("drain between producer waves stranded the stage", err)
+	}
+	tail := check(t, q, m, nil).Job
+	finish(t, q, tail, false)
+	if got := job(t, q, consumer.ID); got.State != "failed" || got.DiagnosticCode != "upstream_failed" {
+		t.Fatal("upstream failure did not settle the stage", got.State, got.DiagnosticCode)
+	}
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal("failed upstream still protects the host", err)
+	}
+}
+
+// Only production stages are protected, and the protection ends when the stage
+// is cancelled or starts running.
+func TestBlockedAfterStageProtectionScope(t *testing.T) {
+	q, _, m, s := fanOutFixture(t, 3)
+	s.Outputs = map[string]string{"out": "results"}
+	host := hostID(&m)
+	parent := submit(t, q, s)
+	experiment := submit(t, q, pieceConsumer(s, parent.ID, "item-1"))
+	if reason := q.productionDrainBlockerForTest(host); reason != "" {
+		t.Fatal("non-production after: stage blocks maintenance", experiment.ID, reason)
+	}
+	c := pieceConsumer(s, parent.ID, "item-2")
+	c.Priority = "production"
+	cancelledStage := submit(t, q, c)
+	if reason := q.productionDrainBlockerForTest(host); !strings.Contains(reason, cancelledStage.ID) {
+		t.Fatal("production stage not counted", reason)
+	}
+	if _, err := q.CancelJob(cancelledStage.ID); err != nil {
+		t.Fatal(err)
+	}
+	if reason := q.productionDrainBlockerForTest(host); reason != "" {
+		t.Fatal("cancelled stage still blocks maintenance", reason)
+	}
+	c = pieceConsumer(s, parent.ID, "item-0")
+	c.Priority = "production"
+	running := submit(t, q, c)
+	wave := check(t, q, m, nil).Job
+	finish(t, q, wave, true)
+	if got := job(t, q, running.ID); !dependencyReady(got) {
+		t.Fatal("stage not released by its accepted piece", got.Reason)
+	}
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != running.ID {
+		t.Fatal("ready production stage not assigned", assigned)
+	}
+	if reason := q.productionDrainBlockerForTest(host); reason != "" {
+		t.Fatal("running stage still blocks maintenance", reason)
+	}
+}
+
+func (q *Queue) productionDrainBlockerForTest(host string) string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.productionDrainBlocker(host)
+}

@@ -127,8 +127,10 @@ func (q *Queue) pruneProductionLeases() {
 }
 
 // productionDemand is one thing that would fail if every host able to start it
-// were drained: an open lease's stage, or a queued production job whose start
-// deadline makes an all-drained host set a failure ("no eligible host is enabled").
+// were drained: an open lease's stage, a queued production job whose start
+// deadline makes an all-drained host set a failure ("no eligible host is
+// enabled"), or a production stage declared with after: that will get that
+// deadline when its upstream releases it (#1374).
 type productionDemand struct {
 	job   *Job
 	label string
@@ -144,9 +146,17 @@ func (q *Queue) productionDemands() []productionDemand {
 	}
 	for _, j := range q.liveJobs() {
 		// Dependency readiness is not required: a pipeline submitted ahead of
-		// time fails at its first ready stage if its hosts were drained meanwhile.
-		if j.State == "queued" && j.Attempt == 0 && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) {
-			out = append(out, productionDemand{job: j, label: fmt.Sprintf("queued production job %s (project %s)", j.ID, j.Spec.Project)})
+		// time fails at its first ready stage if its hosts were drained
+		// meanwhile. A blocked stage has no start deadline yet, but its
+		// placement fields are known, so it counts like a lease stage. Upstream
+		// failure or cancellation settles it to failed or cancelled in the same
+		// transaction, which ends the protection.
+		if j.State == "queued" && j.Attempt == 0 && j.Spec.Priority == "production" && (j.Spec.StartBy != nil || j.Spec.After != nil) && !cancelled(j) {
+			label := fmt.Sprintf("queued production job %s (project %s)", j.ID, j.Spec.Project)
+			if j.Spec.After != nil && !dependencyReady(j) {
+				label = fmt.Sprintf("production stage %s (project %s, waiting on after: %s)", j.ID, j.Spec.Project, j.Spec.After.Job)
+			}
+			out = append(out, productionDemand{job: j, label: label})
 		}
 	}
 	return out

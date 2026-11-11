@@ -43,8 +43,9 @@ remain explicit. Constrained first-run observations persist even when rejected
 by learning. See [memory facts](../../docs/status.md) for scope and
 platform limits.
 
-Before a multi-stage production pipeline, declare it so maintenance keeps a host
-able to start each stage: `client.open_production_lease(project, run_key, "4h",
+Submitted production stages, including ones waiting on `after:`, already keep a
+host able to start them through maintenance. For production stages you can't
+submit ahead, declare them: `client.open_production_lease(project, run_key, "4h",
 [{"needs": {...}}])`, renew by reopening the same key, and
 `client.close_production_lease(project, run_key)` when done. It expires on its own
 ([production leases](../../docs/operations.md#production-leases)).
