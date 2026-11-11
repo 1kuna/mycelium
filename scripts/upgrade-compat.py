@@ -293,11 +293,11 @@ def run(args):
 def inventory_restarts(candidate, previous, scratch, tools):
     root = scratch / "inventory-restarts"
     queue_root = root / "queue"
-    allow_disk_budget_retry = False
+    allow_additive_retry = False
 
     def accepted_hash_only(value):
         rows = json.loads(value)
-        validate_inventory_receipts(rows, allow_disk_budget_retry)
+        validate_inventory_receipts(rows, allow_additive_retry)
         return len(rows) >= 3 and rows[-1]["hash"] and rows[-1]["inventory_keys"] == 0
 
     with contextlib.ExitStack() as queues:
@@ -345,7 +345,7 @@ def inventory_restarts(candidate, previous, scratch, tools):
             after = inspect_queue(previous[0], queue_root)
             assert before == after, "downgrade changed durable jobs, custody or decisions"
             assert len(after["jobs"]) >= 6286 and after["machines"], "rollback fixture lost IDs"
-            allow_disk_budget_retry = True
+            allow_additive_retry = True
             queue = queues.enter_context(process(previous[0], "queue", queue_root, listen=address))
             assert await_file(queue_root / "url", queue) == url
             rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
@@ -354,25 +354,26 @@ def inventory_restarts(candidate, previous, scratch, tools):
     print("upgrade-compat: PASS v3 -> verified v2 downgrade -> exact previous queue reopen; all IDs/state intact; inventory refresh", flush=True)
 
 
-def validate_inventory_receipts(rows, allow_disk_budget_retry=False):
+def validate_inventory_receipts(rows, allow_additive_retry=False):
     refused = [i for i, row in enumerate(rows) if row["status"] != 200]
     if not refused:
         return
     # The worker keeps its r6.9 negotiation across queue replacement. r6.8
-    # strictly rejects the post-r6.8 disk-budget fields, then the worker's
-    # narrow compatibility path retries once without them. All other refusals,
-    # repeated refusals and changes to the attempt/session/inventory fence fail.
-    if allow_disk_budget_retry and refused == [0] and rows[0]["status"] == 400:
+    # strictly rejects post-r6.8 disk-budget/checkpoint-expiry fields; the
+    # narrow compatibility path retries once without either addition. All other
+    # refusals, repeated refusals and changed attempt/session/inventory fences fail.
+    if allow_additive_retry and refused == [0] and rows[0]["status"] == 400:
         error = json.loads(rows[0].get("error", "{}"))
-        fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes")
+        fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes",
+                  "checkpoint_expiry_protocol", "checkpoint_expiry_reports")
         message = error.get("error", "")
         unknown_fields = (message == "body must be one JSON object with known fields and valid field types"
                           or any('unknown field "' + f + '"' in message for f in fields))
-        if error.get("code") == "request_invalid" and unknown_fields and rows[0].get("disk_budget_fields"):
+        if error.get("code") == "request_invalid" and unknown_fields and (rows[0].get("disk_budget_fields") or rows[0].get("checkpoint_expiry_fields")):
             if len(rows) > 1:
-                assert not rows[1]["disk_budget_fields"], "disk-budget retry retained rejected fields"
-                for key in ("session", "attempt_protocol", "hash", "disk_budget_baseline_sha256"):
-                    assert rows[1][key] == rows[0][key], "disk-budget retry changed " + key
+                assert not rows[1]["disk_budget_fields"] and not rows[1].get("checkpoint_expiry_fields"), "additive retry retained rejected fields"
+                for key in ("session", "attempt_protocol", "hash", "rollback_baseline_sha256"):
+                    assert rows[1][key] == rows[0][key], "additive retry changed " + key
             return
     raise RuntimeError(f"inventory check-in refused: {rows}")
 

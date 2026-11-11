@@ -18,11 +18,20 @@ spec.loader.exec_module(compat)
 
 
 class SupervisorTests(unittest.TestCase):
-    def test_inventory_restart_only_accepts_one_exact_disk_budget_retry(self):
-        fence = dict(session="same-session", attempt_protocol="keyed-attempt-v1", hash="same-inventory", disk_budget_baseline_sha256="same-request")
+    def test_inventory_restart_only_accepts_one_exact_additive_retry(self):
+        fence = dict(session="same-session", attempt_protocol="keyed-attempt-v1", hash="same-inventory", rollback_baseline_sha256="same-request")
         refused = dict(fence, status=400, disk_budget_fields=True, error=json.dumps(dict(code="request_invalid", error='json: unknown field "disk_budget"')))
-        accepted = dict(fence, status=200, disk_budget_fields=False)
+        accepted = dict(fence, status=200, disk_budget_fields=False, checkpoint_expiry_fields=False)
         compat.validate_inventory_receipts([refused, accepted], True)
+        expiry_refused = dict(refused, disk_budget_fields=False, checkpoint_expiry_fields=True,
+                              error=json.dumps(dict(code="request_invalid", error='json: unknown field "checkpoint_expiry_protocol"')))
+        compat.validate_inventory_receipts([expiry_refused, accepted], True)
+        compat.validate_inventory_receipts([dict(expiry_refused, disk_budget_fields=True), accepted], True)
+        for key in ("disk_budget_fields", "checkpoint_expiry_fields"):
+            with self.assertRaises(AssertionError):
+                compat.validate_inventory_receipts([expiry_refused, dict(accepted, **{key: True})], True)
+        with self.assertRaises(RuntimeError):
+            compat.validate_inventory_receipts([dict(refused, disk_budget_fields=False), accepted], True)
         compat.validate_inventory_receipts([dict(refused, error=json.dumps(dict(code="request_invalid", error="body must be one JSON object with known fields and valid field types"))), accepted], True)
         for rows, allow in [([refused, accepted], False), ([accepted, refused], True), ([refused, refused], True),
                             ([dict(refused, error=json.dumps(dict(code="request_invalid", error='unknown field "attempts"')))], True)]:
@@ -31,7 +40,7 @@ class SupervisorTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             compat.validate_inventory_receipts([refused, dict(accepted, session="different")], True)
         with self.assertRaises(AssertionError):
-            compat.validate_inventory_receipts([refused, dict(accepted, disk_budget_baseline_sha256="changed-request")], True)
+            compat.validate_inventory_receipts([refused, dict(accepted, rollback_baseline_sha256="changed-request")], True)
 
     def test_sigterm_reaps_detached_command_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
