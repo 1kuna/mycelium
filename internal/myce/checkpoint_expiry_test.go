@@ -250,7 +250,7 @@ func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	q.mu.Lock()
-	status := *q.checkpointExpiryStatus
+	status := *q.checkpointExpiryCounts()
 	var due, stamped int
 	for _, entry := range q.records.checkpointExpiry {
 		if !now.Before(entry.due) {

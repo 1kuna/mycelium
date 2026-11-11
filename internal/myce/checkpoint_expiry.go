@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -161,11 +162,22 @@ func (q *Queue) indexCheckpointExpiry(id string, j *Job) {
 			q.records.checkpointUndated[id] = true
 		}
 	}
-	// Replaced, never mutated: detached status reads share the pointer.
-	next := CheckpointExpiryStatus{Waiting: len(q.records.checkpointExpiry), Undated: len(q.records.checkpointUndated)}
-	if q.checkpointExpiryStatus == nil || *q.checkpointExpiryStatus != next {
-		q.checkpointExpiryStatus = &next
+	// Replaced, never mutated. Read captures freeze before commit indexes jobs,
+	// so views share this atomic rather than copying a stale value.
+	if q.checkpointExpiryStatus == nil {
+		q.checkpointExpiryStatus = &atomic.Pointer[CheckpointExpiryStatus]{}
 	}
+	next := CheckpointExpiryStatus{Waiting: len(q.records.checkpointExpiry), Undated: len(q.records.checkpointUndated)}
+	if old := q.checkpointExpiryStatus.Load(); old == nil || *old != next {
+		q.checkpointExpiryStatus.Store(&next)
+	}
+}
+
+func (q *Queue) checkpointExpiryCounts() *CheckpointExpiryStatus {
+	if q.checkpointExpiryStatus == nil {
+		return nil
+	}
+	return q.checkpointExpiryStatus.Load()
 }
 
 func (q *Queue) expiryGrace() time.Duration {
