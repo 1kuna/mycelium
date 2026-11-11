@@ -284,7 +284,7 @@ func TestConsolidatedSparkAbsentXPUHealthy(t *testing.T) {
 		t.Fatal("absent XPU informational note missing", notes)
 	}
 	runInventoryReviewWorker(t, q, w)
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
+	awaitInventoryReviewMachine(t, q, w.Machine.ID, func(m *Machine) bool { return m.MemoryError == "" && m.InventoryReason == "" })
 	status, err := q.HostMaintenanceStatus("spark-fixture-host")
 	if err != nil || !status.Healthy || len(status.Workers) != 1 || len(status.Workers[0].Machine.Devices) != 1 || status.Workers[0].Machine.InventoryReason != "" {
 		t.Fatalf("CUDA-only host unhealthy: %+v %v", status, err)

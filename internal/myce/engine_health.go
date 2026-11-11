@@ -67,15 +67,7 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 			}
 			started := clock.Now()
 			realStarted := RealClock{}.Now()
-			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, health, nil)
-			res, err := client.Do(req)
-			healthy := err == nil && res.StatusCode >= 200 && res.StatusCode < 300
-			if res != nil {
-				// Finish the response within the existing request deadline so fast
-				// health probes reuse TCP rather than exhausting ephemeral ports.
-				_, _ = io.Copy(io.Discard, res.Body)
-				res.Body.Close()
-			}
+			healthy, err := probeServerHealth(ctx, client, health)
 			if ctx.Err() != nil {
 				return
 			}
@@ -104,6 +96,19 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 			}
 		}
 	}()
+}
+
+// probeServerHealth finishes the body before returning so successive probes can
+// reuse the connection. Request cancellation still owns the transport deadline.
+func probeServerHealth(ctx context.Context, client *http.Client, health string) (bool, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, health, nil)
+	res, err := client.Do(req)
+	healthy := err == nil && res.StatusCode >= 200 && res.StatusCode < 300
+	if res != nil {
+		_, _ = io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}
+	return healthy, err
 }
 
 func (l *LlamaEngine) runtimeHealth() (error, uint64, bool) {
