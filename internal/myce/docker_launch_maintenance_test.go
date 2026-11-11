@@ -56,7 +56,7 @@ func TestMaintenanceDelayedDockerGroupLaunch(t *testing.T) {
 			defer p.docker.close()
 			select {
 			case <-entered:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("missing per-operation queue authorization")
 			}
 			name := action
@@ -71,7 +71,7 @@ func TestMaintenanceDelayedDockerGroupLaunch(t *testing.T) {
 				if f.result.Success || f.result.ReleasePending {
 					t.Fatal("denied launch did not clean up", f.result)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("denied group did not settle")
 			}
 			data, _ := os.ReadFile(filepath.Join(root, "calls"))

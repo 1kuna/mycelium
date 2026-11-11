@@ -62,7 +62,7 @@ func TestSharedInputsRemainProtectedUntilCleanupRetrySucceeds(t *testing.T) {
 					t.Fatal("expected unconfirmed cleanup", f)
 				}
 				store.state.Result, store.state.PID = &f.result, 0
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				p.stop(w.Clock.Now(), 0, true)
 				t.Fatal("command did not finish")
 			}

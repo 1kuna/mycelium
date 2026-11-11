@@ -254,7 +254,7 @@ func TestNativeIsolationSiblingAndControl(t *testing.T) {
 			if f.err != nil || f.result.ReleasePending {
 				t.Errorf("sibling cleanup: %+v", f)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("sibling cleanup timed out")
 		}
 	}()
@@ -289,7 +289,7 @@ test "$failures" = 0 && echo isolation-passed
 		if finish.err != nil || !finish.result.Success || finish.result.ReleasePending || !strings.Contains(string(out), "isolation-passed") {
 			t.Fatalf("attack result: %+v\n%s", finish, out)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("attack job timed out")
 	}
 	if _, err := os.Stat(filepath.Join(attack.job.Spec.Run.Workdir, "own")); err != nil {

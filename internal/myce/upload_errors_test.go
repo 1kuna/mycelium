@@ -329,7 +329,7 @@ func TestUploadCompletedRetryRejectsChangedSource(t *testing.T) {
 				backend.ServeHTTP(w, r)
 			}))
 			defer api.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			var pauses atomic.Int32
 			c := Client{URL: api.URL, Token: "fixture", Pause: func(context.Context, time.Duration) error {

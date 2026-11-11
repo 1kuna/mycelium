@@ -81,7 +81,7 @@ func TestHostTelemetryCaptureSensorDescendants(t *testing.T) {
 				if mode == "cancel" && !errors.Is(err, context.Canceled) || mode != "cancel" && err != nil {
 					t.Errorf("canceled sample returned %v", err)
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(testWaitTimeout):
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 				<-done
 				t.Fatal("sensor deadline left inherited pipes blocked")

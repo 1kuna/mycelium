@@ -42,7 +42,7 @@ func testWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 		if f.err != nil || f.result.Error != "" {
 			t.Fatalf("command failed after preparation: %+v", f)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("command did not finish")
 	}
 }
@@ -141,7 +141,7 @@ func testWorkerNASProbeBlockedAndRecovery(t *testing.T) {
 			if err == nil {
 				t.Fatal("blocked NAS reported available")
 			}
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("blocked NAS hangs heartbeat")
 		}
 	}

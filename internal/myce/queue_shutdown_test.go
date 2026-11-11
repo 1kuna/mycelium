@@ -137,12 +137,14 @@ func TestQueueShutdownShedsBlockedObservations(t *testing.T) {
 	start(client, "/api/status?sections=usage")
 	start(Client{URL: joining.URL, Token: "test", HTTP: joining.Client()}, "/api/inspection")
 
+	// q.mu stays held until after the fence, so BeginShutdown can only finish
+	// without the mutex; the long deadline is a deadlock backstop, not a bound.
 	q.mu.Lock()
 	fenced := make(chan struct{})
 	go func() { q.BeginShutdown(); close(fenced) }()
 	select {
 	case <-fenced:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		q.mu.Unlock()
 		<-fenced
 		t.Fatal("shutdown waited for the queue mutex before cancelling requests")
@@ -154,7 +156,10 @@ func TestQueueShutdownShedsBlockedObservations(t *testing.T) {
 		t.Fatal("shutdown admitted a maintenance transaction")
 	}
 	q.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// The held SQL connection never frees the handlers, so only cancellation
+	// can drain them; http.Server.Shutdown polls idle connections at up to
+	// 500 ms, so a one-second deadline failed under host load (#1224).
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := q.ShutdownServers(ctx, server.Config, joining.Config); err != nil {
 		t.Fatal(err)
@@ -209,7 +214,7 @@ func TestQueueShutdownCancelsPortability(t *testing.T) {
 			select {
 			case <-done:
 				q.mu.Unlock()
-			case <-time.After(time.Second):
+			case <-time.After(testWaitTimeout):
 				q.mu.Unlock()
 				<-done
 				t.Fatal("portability retained its queue lock wait after shutdown")
@@ -249,7 +254,7 @@ func TestQueueShutdownCancelsFileStatus(t *testing.T) {
 			select {
 			case <-done:
 				unlock()
-			case <-time.After(time.Second):
+			case <-time.After(testWaitTimeout):
 				unlock()
 				<-done
 				t.Fatal("file status retained its " + phase + " lock wait after cancellation")

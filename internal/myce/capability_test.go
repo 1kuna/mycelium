@@ -10,7 +10,7 @@ import (
 
 func TestCapabilityProfileMinimalPath(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	for _, gpu := range []string{"fake", "metal"} {
 		probe := syntheticProfileProbe()

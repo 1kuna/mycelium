@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // The directory appears when the simulated external automount becomes usable.
@@ -78,7 +77,7 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 	}))
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)

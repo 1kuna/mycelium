@@ -64,7 +64,7 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 					if err != nil {
 						t.Error(err)
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Error("worker did not stop after native cleanup recovered")
 				}
 			}()
@@ -91,7 +91,7 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 			if err := os.Remove(blocked); err != nil {
 				t.Fatal(err)
 			}
-			waitCtx, stopWait := context.WithTimeout(context.Background(), 5*time.Second)
+			waitCtx, stopWait := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer stopWait()
 			probeWait(t, waitCtx, func() bool {
 				h.mu.Lock()
@@ -440,7 +440,7 @@ func TestAttemptReportsAndReleasesDuringAdmissionDrain(t *testing.T) {
 	if _, err := command.WriteString("log\n"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	probeWait(t, ctx, func() bool {
 		clock.Advance(time.Millisecond)

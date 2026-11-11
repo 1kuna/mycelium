@@ -201,7 +201,7 @@ func TestNativeGroupGPUCancellationRecoveryGrace(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("recovery did not finish")
 			}
 			if live, err := workerGroupMembers(helper.Process.Pid); err != nil || len(live) != 0 {

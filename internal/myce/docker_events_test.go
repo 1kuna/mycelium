@@ -53,7 +53,7 @@ func TestDockerRetainsEventsWhenKillReplyTimesOut(t *testing.T) {
 		if f.err != nil || f.result.CleanupCause == nil || f.result.CleanupCause.Operation != "kill" || f.result.CleanupCause.Class != "timeout" || f.result.Interrupted {
 			t.Fatalf("event observation must not invent successful Mycelium delivery: %+v", f)
 		}
-	case <-time.After(8 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("attempt did not finish")
 	}
 	path := filepath.Join(store.dir, store.state.Identity+".docker-events.json")

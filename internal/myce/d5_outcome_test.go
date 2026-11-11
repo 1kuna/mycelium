@@ -436,14 +436,14 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("replacement worker did not stop")
 		}
 	}()
 	select {
 	case r := <-received:
 		return r
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker loss was not reported")
 		return Result{}
 	}

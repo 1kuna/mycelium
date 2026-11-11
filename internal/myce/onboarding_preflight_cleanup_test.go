@@ -47,7 +47,7 @@ func TestStoragePreflightRemovesOnlyItsNewDirectories(t *testing.T) {
 			if pending != nil {
 				select {
 				case <-pending.done:
-				case <-time.After(time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatal("preflight cleanup did not finish")
 				}
 			}

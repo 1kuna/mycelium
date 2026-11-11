@@ -46,7 +46,7 @@ func TestGPUTelemetryBrokerClient(t *testing.T) {
 					return
 				}
 				defer c.Close()
-				_ = c.SetDeadline(time.Now().Add(time.Second))
+				_ = c.SetDeadline(time.Now().Add(testWaitTimeout))
 				request, err := io.ReadAll(io.LimitReader(c, 1))
 				if err != nil || len(request) != 0 {
 					done <- io.ErrUnexpectedEOF
@@ -64,8 +64,9 @@ func TestGPUTelemetryBrokerClient(t *testing.T) {
 					<-release
 				}
 			}()
-			start := time.Now()
-			err = GPUTelemetryBrokerClient(context.Background(), socket, &out)
+			// "partial timeout" holds the connection until the test returns, so
+			// returning proves the client's bounded collection window.
+			returnsWhileBlocked(t, "broker client", func() { err = GPUTelemetryBrokerClient(context.Background(), socket, &out) })
 			if mode == "snapshot" {
 				if err != nil || out.String() != snapshot {
 					t.Fatalf("broker snapshot changed: %q %v", out.String(), err)
@@ -73,15 +74,12 @@ func TestGPUTelemetryBrokerClient(t *testing.T) {
 			} else if err == nil || out.Len() != 0 {
 				t.Fatalf("incomplete broker response escaped: %d bytes, %v", out.Len(), err)
 			}
-			if time.Since(start) > time.Second {
-				t.Fatal("broker stalled beyond the bounded collection window")
-			}
 			select {
 			case err := <-done:
 				if err != nil && mode == "snapshot" {
 					t.Fatal(err)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("broker did not receive the no-payload request")
 			}
 		})

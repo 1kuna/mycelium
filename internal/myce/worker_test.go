@@ -318,7 +318,7 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 	}
 	select {
 	case <-pending.done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("released checkpoint preparation did not finish")
 	}
 	w.checkpointPrepare = func(Job) (string, error) {

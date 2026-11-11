@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
@@ -65,7 +64,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 	w.EnvironmentRoot, w.EnvironmentLimit = config.EnvironmentCache, config.EnvironmentCacheBytes
 	w.environmentSizeLimit = lowHeadroom
 	w.Client = Client{URL: server.URL, Token: "test"}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)

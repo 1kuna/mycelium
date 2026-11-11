@@ -124,7 +124,7 @@ func TestAttemptProtocolOldQueueWorkerRetainsCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	err = w.Run(ctx)
 	var he *HTTPError

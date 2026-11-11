@@ -405,7 +405,7 @@ func TestInventoryReviewSplitWorkerDiagnostic(t *testing.T) {
 	if !errors.As(err, &httpErr) || httpErr.Status != 409 || httpErr.Code != "machine_worker_conflict" || !strings.Contains(httpErr.Message, "run one machine worker per host") {
 		t.Fatalf("split worker diagnostic: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	w := Worker{EnvironmentLimit: 1 << 20, Machine: m, Clock: RealClock{}, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return inventoryReviewDevices(), nil }}
 	err = w.Run(ctx)

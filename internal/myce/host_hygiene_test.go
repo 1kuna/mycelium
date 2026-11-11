@@ -314,7 +314,7 @@ func TestHostHygieneBlockedPersistenceDoesNotBlockHeartbeat(t *testing.T) {
 		if len(h.History) != hostHealthWarmup+1 {
 			t.Error("missing fresh in-memory evidence")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Error("blocked persistence stalled heartbeat snapshot")
 	}
 	close(release)

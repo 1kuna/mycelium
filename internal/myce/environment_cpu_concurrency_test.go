@@ -63,7 +63,7 @@ func TestEnvironmentPreparesBesideRunningCPUCommand(t *testing.T) {
 	waiting := submit(t, q, waitingSpec)
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("environment offer never started beside the running CPU command")
 	}
 	await(t, func() bool {

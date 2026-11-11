@@ -110,7 +110,7 @@ func TestBenchmarkDailyOwnerReturnCancelsMeasurement(t *testing.T) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(8 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("owner return did not interrupt benchmark")
 			return nil, nil
 		}

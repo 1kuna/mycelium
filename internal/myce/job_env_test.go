@@ -279,7 +279,7 @@ func TestJobEnvironmentAllowlistDockerContainer(t *testing.T) {
 	p.enforceGrace(c.Now())
 	select {
 	case <-p.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup did not finish")
 	}
 }

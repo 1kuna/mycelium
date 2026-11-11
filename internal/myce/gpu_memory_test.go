@@ -165,8 +165,12 @@ func TestMemorySourceCanceledContext(t *testing.T) {
 // A wedged driver command must not indefinitely stop worker heartbeats or leave.
 func TestMemorySourceCUDABoundsHungProbe(t *testing.T) {
 	source, err := newMemorySource("cuda", 0, 0, "auto", runtime.GOOS, guardedHardwareReadFile, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
-		if _, ok := ctx.Deadline(); !ok {
-			t.Fatal("GPU probe has no deadline")
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("GPU probe has no deadline")
+		} else if remaining := time.Until(deadline); remaining > 4*time.Second {
+			// Load only shrinks the remaining budget, so this cannot flake.
+			t.Errorf("GPU probe budget %s exceeds 4s", remaining)
 		}
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -174,11 +178,8 @@ func TestMemorySourceCUDABoundsHungProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	if _, err := source(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+	returnsWhileBlocked(t, "hung CUDA probe", func() { _, err = source(context.Background()) })
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("hung probe: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 4*time.Second {
-		t.Fatalf("probe blocked for %s", elapsed)
 	}
 }

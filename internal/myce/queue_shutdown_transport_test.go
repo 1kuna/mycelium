@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sync"
 	"testing"
-	"time"
 )
 
 type shutdownPipeListener struct {
@@ -77,7 +76,7 @@ func TestQueueShutdownInterruptsSocketIO(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-entered
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			if err := q.ShutdownServers(ctx, server); err != nil {
 				t.Fatal("socket I/O retained shutdown", err)

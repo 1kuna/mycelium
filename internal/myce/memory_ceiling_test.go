@@ -199,7 +199,7 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 				t.Fatal(got.Reason)
 			}
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker did not finish")
 	}
 }
@@ -267,7 +267,7 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 						t.Fatalf("Docker OOM: %+v", f)
 					}
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("Docker did not finish")
 			}
 		})
@@ -576,7 +576,7 @@ func TestMemoryCeilingDockerUndeclaredOOM(t *testing.T) {
 		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "OOM-killed without a declared memory ceiling") {
 			t.Fatalf("undeclared OOM claimed a ceiling: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("Docker did not finish")
 	}
 }

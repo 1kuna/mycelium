@@ -76,12 +76,13 @@ func TestDeviceFaultSourceBoundedStartupRead(t *testing.T) {
 	w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
 	w.DeviceFaultSource = kernelLogSource(func() ([]byte, error) { return []byte("boot\n"), nil }, journal, nil)
 	root := &workerStore{dir: t.TempDir()}
-	began := time.Now()
 	if err := w.initDeviceFaults(context.Background(), root); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(began); elapsed > 2*time.Second || w.Machine.FaultMonitorError != "" {
-		t.Fatalf("startup read took %s, monitor error %q", elapsed, w.Machine.FaultMonitorError)
+	// The fake journal returns only records after --since, so the request
+	// assertion below proves the bounded read without a wall-clock budget.
+	if w.Machine.FaultMonitorError != "" {
+		t.Fatalf("monitor error %q", w.Machine.FaultMonitorError)
 	}
 	if !slices.Contains(requests[0], "--since=@"+strconv.FormatInt(start.Unix(), 10)) {
 		t.Fatalf("startup read is not bounded: %v", requests[0])

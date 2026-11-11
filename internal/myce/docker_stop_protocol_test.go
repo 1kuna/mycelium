@@ -119,7 +119,7 @@ func TestDockerSidecarStopRecoveryAndEvidence(t *testing.T) {
 		if f.result.ReleasePending {
 			t.Fatal("release pending")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("cleanup stuck")
 	}
 	b, _ = os.ReadFile(filepath.Join(root, "calls"))

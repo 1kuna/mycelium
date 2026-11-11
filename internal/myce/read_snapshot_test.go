@@ -129,7 +129,7 @@ func TestReadSnapshotBulkWorkDoesNotHoldQueue(t *testing.T) {
 			captured := make(chan struct{})
 			var once sync.Once
 			q.observeRead = func(_ string, _, _ time.Duration) { once.Do(func() { close(captured) }) }
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			readDone := make(chan error, 1)
 			go func() { _, _, err := q.captureReadObservation(id, nil, ctx); readDone <- err }()

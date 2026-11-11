@@ -197,7 +197,7 @@ func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 	if err := q.update(func() error { q.touchJob(j.ID).Checkpoint = "private-checkpoint"; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	req := httptest.NewRequest("POST", "/models/test/ocr", strings.NewReader(`{"model":"test","input":"private-body"}`)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer fixture-secret")
