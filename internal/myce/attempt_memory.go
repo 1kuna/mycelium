@@ -379,9 +379,11 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 }
 
 // Raise a process-group peak to the root's exit max RSS, which catches a
-// spike between samples in the main process.
+// spike between samples in the main process. A Metal footprint peak is left
+// alone: its RSS and beyond-RSS shares sum to the sampled footprint, and
+// raising one share alone would count the same pages twice.
 func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMemoryPeak {
-	if peak == nil || peak.Source != processGroupMemorySource || state == nil {
+	if peak == nil || peak.Source != processGroupMemorySource || peak.DeviceSource == deviceFootprintSource || state == nil {
 		return peak
 	}
 	ru, ok := state.SysUsage().(*syscall.Rusage)
