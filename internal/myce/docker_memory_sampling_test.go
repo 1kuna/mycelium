@@ -52,7 +52,7 @@ func TestDockerSharedDeviceSamplesContainerDescendants(t *testing.T) {
 	if err != nil || !ids[42] || !ids[43] || ids[99] {
 		t.Fatal("incorrect host PIDs", ids, err)
 	}
-	gb, foreign, err := cudaAttemptMemory([]byte("GPU-one, 42, 1024\nGPU-one, 99, 8192"), "GPU-one", ids, map[int]bool{99: true})
+	gb, foreign, err := cudaAttemptMemoryReading([]byte("GPU-one, 42, 1024\nGPU-one, 99, 8192"), "GPU-one", ids, nil, map[int]bool{99: true})
 	if err != nil || foreign || gb != 1 {
 		t.Fatal("known co-tenant counted as foreign", gb, foreign, err)
 	}

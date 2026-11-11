@@ -88,9 +88,6 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 	}
 	return index
 }
-func (q *Queue) memoryObservations(k ObservationKey, configuration string) []*WorkObservation {
-	return q.memoryObservationCatalog().work[memoryWorkIdentity(k, configuration)]
-}
 func (q *Queue) putWorkObservation(id string, point WorkObservation) {
 	q.touchCatalog("work_observations/" + id)
 	q.evidenceGeneration++
