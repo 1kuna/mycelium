@@ -97,7 +97,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			if _, err := q.Checkin(heartbeat); err != nil {
 				t.Fatal(err)
 			}
-			if len(alertsOf(q, "production_attempt_lost")) != 1 {
+			if firings(q, "production_attempt_lost") != 1 {
 				t.Fatal("running observation timeout did not alert")
 			}
 			clock.advance(3 * time.Minute)

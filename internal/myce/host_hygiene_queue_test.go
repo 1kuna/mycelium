@@ -35,7 +35,7 @@ func TestHostHygieneQueueDrainPreservesRunningAndOperatorPolicy(t *testing.T) {
 			if q.machineLimitReason(q.s.Machines[m.ID]) != "host_memory_pressure" {
 				t.Fatal("missing typed reason")
 			}
-			if len(alertsOf(q, "host_degraded")) != 1 || alertsOf(q, "host_degraded")[0].Reason != "host_memory_pressure" {
+			if firings(q, "host_degraded") != 1 || alertsOf(q, "host_degraded")[0].Reason != "host_memory_pressure" {
 				t.Fatal("missing causal alert")
 			}
 			finish(t, q, run, true)
@@ -85,7 +85,7 @@ func TestHostHygieneDiskExhaustionForecastAlert(t *testing.T) {
 	}
 	report(volume(3600, 7200, "foreign_disk_growth"))
 	report(volume(7200, 3600, "owned_disk_growth"))
-	if n := len(alertsOf(q, "host_disk_exhaustion_forecast")); n != 0 {
+	if n := firings(q, "host_disk_exhaustion_forecast"); n != 0 {
 		t.Fatal("early or owned decline alerted", n)
 	}
 	report(volume(7200, 3600, "foreign_disk_growth"))
@@ -96,7 +96,7 @@ func TestHostHygieneDiskExhaustionForecastAlert(t *testing.T) {
 	}
 	report(&WorkerHygieneCollection{})
 	report(volume(7200, 3600, "foreign_disk_growth"))
-	if len(alertsOf(q, "host_disk_exhaustion_forecast")) != 2 {
+	if firings(q, "host_disk_exhaustion_forecast") != 2 {
 		t.Fatal("a vanished volume did not clear, or a new episode did not wake")
 	}
 }

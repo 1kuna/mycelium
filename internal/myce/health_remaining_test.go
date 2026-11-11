@@ -107,7 +107,7 @@ func TestRemainingHealthPinsTargetsAndHealthyOccupancy(t *testing.T) {
 			// permanent incompatibility. All capacity predicates use resolve's view.
 			s.RequirementReasons = map[string]string{"host": "hardware validation"}
 			healthy := submit(t, q, s)
-			if len(alertsOf(q, "pin_reason_missing")) != 1 || len(alertsOf(q, "job_target_unsatisfied")) != 0 {
+			if firings(q, "pin_reason_missing") != 1 || firings(q, "job_target_unsatisfied") != 0 {
 				t.Fatal("healthy intent alerted")
 			}
 			if err := q.Cancel(healthy.ID); err != nil {
@@ -158,13 +158,13 @@ func TestRemainingHealthAttemptStreak(t *testing.T) {
 			for i := 1; i <= 4; i++ {
 				record(i, false, false, false)
 			}
-			if len(alertsOf(q, "infrastructure_loss_streak")) != 0 {
+			if firings(q, "infrastructure_loss_streak") != 0 {
 				t.Fatal("healthy endings alerted")
 			}
 			record(5, true, false, true)
 			record(5, true, false, true)
 			requireIncident(t, q, "staging_cache_refused", "attempt-staging/worker", 1, true)
-			if len(alertsOf(q, "infrastructure_loss_streak")) != 0 {
+			if firings(q, "infrastructure_loss_streak") != 0 {
 				t.Fatal("same attempt counted twice")
 			}
 			record(6, true, true, false)

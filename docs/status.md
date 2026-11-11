@@ -353,7 +353,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 | `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
 | `storage` | `storage_observations`, `file_store` (including retained-file accounting) and `checkpoint_expiry` (settled NAS checkpoint folders `waiting` for their grace period or a worker, and `undated` ones kept for lack of any timestamp; see [files](files.md#resumable-jobs)) |
 | `work` | `work_curves` |
-| `health` | Retained `health_alerts` event history (large on a busy queue), independently of current `summary.alert_groups` |
+| `health` | `health_alerts`: one record per open or recently closed problem (kind and subject), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
 | `usage` | Complete `usage`, including daily rows, preemptions and production starts |
 | `diagnostics` | `request_latencies`, `fleet_superseded`, `evidence_retention`, and retained `admissions` |
@@ -2126,44 +2126,51 @@ remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 
-From the next release, `health_alert_delivery` reports `configured` and `pending`
-in status/inspection JSON; CLI and page status explain the same state. No hook
-is a supported diagnostic-only mode: retained alerts stay `delivered: false`.
-`pending` counts retained events without a durable hook acknowledgement, including
-events recorded before a hook was configured. It does not prove an attempt or
-distinguish hook failures from queue acknowledgement failures. Older releases
-omit configuration and attempt evidence, so `delivered: false` alone cannot
-establish why delivery has not been acknowledged. The queue owner must verify
-the running hook configuration and sanitized delivery/commit evidence.
-Successful hook exit does not itself prove downstream thread execution.
-Restarting without a hook clears its historical configuration flag. On releases
-containing #811, all unique alert and delivery history remains protected, including
-events recorded without a hook; disabling delivery never reinstates a count cap.
-Job completion observers
-and their thread-bound notifiers are independent of this queue-level channel.
+`health_alerts` holds one record per problem: a `kind` and its subject (host,
+machine, device, project, client kind, store, reservation, job, reason and
+recipients). A firing of an existing record updates it instead of adding a row:
+`first_at` and `last_at` bound every firing, `count` totals them, `state` is
+`open` or `closed`, and `closed_at` records the latest closing. `at` and
+`delivery_id` identify the current episode; `attempt`, `recovery` and `mount`
+are the latest firing's detail. On 2026-11-11 the live queue had saved 25,818
+per-firing rows in four days (12,531 `host_degraded`), none delivered because
+no notifier was configured; a replay of that mix now keeps 16 records (#1395).
 
-`health_alerts` retains diagnostic events delivered by the existing optional
-queue `--health-notify` executable. Detectors run on queue mutations and ticks,
-using the queue clock; no polling service or automatic issue filing is added.
-Each condition has a stable subject key and emits once per episode. Positive
-recovery rearms it without a wall-time cooldown, so a second real incident is
-not hidden for fifteen minutes. Delivery retries keep the same `delivery_id`.
-Clearing retains the diagnostic event; it sends no second notification and
-changes no admission, retry or release-custody decision.
+Detectors run on queue mutations and ticks, using the queue clock; no polling
+service or automatic issue filing is added. Each condition has a stable subject
+key and fires once per episode; positive recovery rearms it without a wall-time
+cooldown. A record stays open while any active condition keeps it open, and
+closes when none does. Point events with no clearing condition
+(`production_attempt_lost`) are recorded closed. Closed records expire
+`HealthAlertRetention` (3 days, matching finished-job file retention, MY-47)
+after closing, except that with a notifier configured an unacknowledged
+closing is kept until delivered. Clearing changes no admission, retry or
+release-custody decision.
 
-From the release containing #1267, identical pending
-alerts deliver once. Pending events whose fields other than time, delivery ID
-and recovery receipt match (kind, reason, host, machine, device, project, client
-kind, store, reservation, job, attempt and recipients) form one notification:
-the latest event, with `repeats` (how many more it covers) and `first_at`. One
-acknowledgement marks every member delivered. Every member stays in retained
-history. This matters when a hook is configured after a long unconfigured
-period: on 2026-11-11 the live queue held 22,416 pending events, 12,453 of them
-`host_degraded`/`host_probe_unknown` across all five hosts, which would otherwise
-deliver one per second for hours. 99% were recorded 2026-11-07/08, before #1036
-stopped counting queue delivery delay as report age (#1025); the rest were
-restart bursts and a loaded agents' host. A condition that recovers and fails again
-after its alert was delivered still alerts again.
+The optional queue `--health-notify` executable receives openings and closings
+only. An opening uses the record's `delivery_id`; a closing uses
+`delivery_id + "/closed"` with `state: closed`. A record that closed before its
+opening was delivered sends one closing notification carrying its count. A
+record that reopens before its closing was delivered continues the episode the
+receiver already sees open and sends nothing; a reopen after a delivered
+closing is a new episode with a new `delivery_id`. Delivery retries keep the
+same identity. `delivered` acknowledges the opening and `closed_delivered` the
+closing.
+
+`health_alert_delivery` reports `configured` and `pending` in status/inspection
+JSON; CLI and page status explain the same state. `pending` counts openings and
+closings without a durable hook acknowledgement. No hook is a supported
+diagnostic-only mode. It does not prove an attempt or distinguish hook failures
+from queue acknowledgement failures. Restarting without a hook clears its
+historical configuration flag. Successful hook exit does not itself prove
+downstream thread execution. Job completion observers and their thread-bound
+notifiers are independent of this queue-level channel.
+
+Upgrade from the previous release folds its per-firing rows into records on
+the first queue transaction, closed at their last firing, and rearms active
+conditions so current problems reopen a record at once. Records stay dense
+`health_events/N` rows whose JSON the previous release reads as events, so a
+rollback keeps working; rows it appends fold in again on the next upgrade.
 
 - `queue_overload`: sustained response-cost or mutex-wait regression against
   this installation's healthy history, separately for each normalized API route.

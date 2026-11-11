@@ -9,15 +9,17 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
 
 const DefaultHealthStorageDelay = 5 * time.Minute
 
-// HealthAlert contains identities and fixed diagnostic codes, never worker text.
-// Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
+// HealthAlert is one record per open or recently closed problem: a kind and its
+// subject (host, job, project, store...). Repeated firings update the record's
+// last_at and count instead of adding rows. It contains identities and fixed
+// diagnostic codes, never worker text. Receivers deduplicate DeliveryID, including
+// after an ambiguous hook exit; a closing notification uses DeliveryID+"/closed".
 type HealthAlert struct {
 	Recovery    *AlertRecovery   `json:"recovery,omitempty"`
 	Machine     string           `json:"machine,omitempty"`
@@ -33,46 +35,53 @@ type HealthAlert struct {
 	Reservation string           `json:"reservation,omitempty"`
 	JobID       string           `json:"job_id,omitempty"`
 	Attempt     int              `json:"attempt,omitempty"`
-	At          time.Time        `json:"at"`
+	At          time.Time        `json:"at"` // current episode's opening
 	Delivered   bool             `json:"delivered"`
 	Mount       *HostMountHealth `json:"mount,omitempty"`
-	// Delivery payload only: identical pending alerts this notification covers
-	// beyond itself, and the first one's time. Every member stays retained.
-	Repeats int        `json:"repeats,omitempty"`
-	FirstAt *time.Time `json:"first_at,omitempty"`
+	// Record fields. An empty State is a previous-release per-firing row; the
+	// next transaction folds those into records (migrateHealthEvents).
+	State           string     `json:"state,omitempty"` // "open" or "closed"
+	FirstAt         *time.Time `json:"first_at,omitempty"`
+	LastAt          *time.Time `json:"last_at,omitempty"`
+	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	Count           int        `json:"count,omitempty"`
+	ClosedDelivered bool       `json:"closed_delivered,omitempty"`
 }
 
-// healthAlertIdentity is everything a receiver can tell apart. Two pending
-// alerts with one identity differ only in time, so they deliver once.
-func healthAlertIdentity(e HealthAlert) string {
-	return strings.Join([]string{e.Kind, e.Reason, e.Host, e.Machine, e.Device, e.Project, e.ClientKind, e.Store, e.Reservation, e.JobID, strconv.Itoa(e.Attempt), strings.Join(e.Recipients, ",")}, "\x00")
+// HealthAlertRetention bounds closed records, matching finished-job file
+// retention (MY-47). Open records and unacknowledged configured notifications
+// stay; the record count is bounded by distinct kinds and subjects.
+const HealthAlertRetention = 72 * time.Hour
+
+// healthAlertKey is the record identity: kind and subject. Attempt is the latest
+// firing's detail, not a separate problem.
+func healthAlertKey(e HealthAlert) string {
+	return strings.Join([]string{e.Kind, e.Reason, e.Host, e.Machine, e.Device, e.Project, e.ClientKind, e.Store, e.Reservation, e.JobID, strings.Join(e.Recipients, ",")}, "\x00")
 }
 
 type healthDelivery struct {
-	alert HealthAlert
-	ids   []string
+	alert   HealthAlert
+	key     string
+	episode string
+	closing bool
 }
 
-// groupHealthDeliveries keeps first-seen order and sends each identity's latest
-// event (its recovery receipt is the current one) with the repeat count.
-func groupHealthDeliveries(pending []HealthAlert) []healthDelivery {
-	index := map[string]int{}
+// pendingHealthDeliveries sends openings and closings only. A record that closed
+// before its opening was delivered sends one closing notification.
+func pendingHealthDeliveries(events []HealthAlert) []healthDelivery {
 	var out []healthDelivery
-	for _, e := range pending {
-		key := healthAlertIdentity(e)
-		i, ok := index[key]
-		if !ok {
-			index[key] = len(out)
-			out = append(out, healthDelivery{alert: e, ids: []string{e.DeliveryID}})
+	for _, r := range events {
+		d := healthDelivery{alert: r, episode: r.DeliveryID}
+		switch {
+		case r.State == "open" && !r.Delivered:
+		case r.State == "closed" && !(r.Delivered && r.ClosedDelivered):
+			d.closing = true
+			d.alert.DeliveryID += "/closed"
+		default:
 			continue
 		}
-		d := &out[i]
-		first := d.alert.At
-		if d.alert.FirstAt != nil {
-			first = *d.alert.FirstAt
-		}
-		d.alert, d.ids = e, append(d.ids, e.DeliveryID)
-		d.alert.FirstAt, d.alert.Repeats = &first, len(d.ids)-1
+		d.key = healthAlertKey(r)
+		out = append(out, d)
 	}
 	return out
 }
@@ -88,6 +97,8 @@ type healthCondition struct {
 	// Only rejected, oversized auto-memory demand needs a retained probe.
 	// Accepted jobs already live in the queue. Drop the probe on recovery.
 	Envelope *Job `json:"envelope,omitempty"`
+	// Record is the healthAlertKey this active condition keeps open.
+	Record string `json:"record,omitempty"`
 }
 type healthAlerts struct {
 	DeliveryConfigured bool                       `json:"delivery_configured,omitempty"`
@@ -95,7 +106,7 @@ type healthAlerts struct {
 	Events             []HealthAlert              `json:"events,omitempty"`
 }
 
-// HealthAlertDelivery explains unacknowledged diagnostic history without
+// HealthAlertDelivery explains unacknowledged notifications without
 // exposing the executable or claiming that pending events were attempted.
 type HealthAlertDelivery struct {
 	Configured bool `json:"configured"`
@@ -107,13 +118,13 @@ func (d HealthAlertDelivery) Summary() string {
 	if d.Configured {
 		configuration = "health notifier is configured"
 	}
-	return fmt.Sprintf("Health notifications: %s; %d retained alerts have no delivery acknowledgement.", configuration, d.Pending)
+	return fmt.Sprintf("Health notifications: %s; %d alert openings or closings have no delivery acknowledgement.", configuration, d.Pending)
 }
 
 func (q *Queue) healthAlertDelivery() *HealthAlertDelivery {
-	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured}
+	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured, Pending: len(pendingHealthDeliveries(q.s.Health.Events))}
 	for _, e := range q.s.Health.Events {
-		if !e.Delivered {
+		if e.State == "" && !e.Delivered {
 			d.Pending++
 		}
 	}
@@ -142,26 +153,182 @@ func (q *Queue) observeHealth(key string, bad bool, delay time.Duration, e Healt
 		}
 		if !c.Active && now.Sub(c.Since) >= delay {
 			c.Active, c.LastAlert = true, now
-			q.appendHealthAlert(e)
+			c.Record = q.recordHealthAlert(e, false)
 		}
 	}
 	q.s.Health.Conditions[key] = c
 }
-func (q *Queue) appendHealthAlert(e HealthAlert) {
-	e.DeliveryID, e.At = ID(), q.clock.Now()
-	e.Recovery = q.recoverHealthAlert(e)
-	q.s.Health.Events = append(q.s.Health.Events, e)
-	// Delivery identities are unique custody evidence, stored as separate immutable
-	// rows so history never enlarges ordinary queue transactions.
-	q.pruneHealthEvents()
+
+// appendHealthAlert records a point event (no condition clears it): the record
+// closes at once and delivers one notification per episode.
+func (q *Queue) appendHealthAlert(e HealthAlert) { q.recordHealthAlert(e, true) }
+
+// Records are a handful of rows; copy before editing because rollback and read
+// snapshots may still own the previous slice. Every edited index is persisted.
+func (q *Queue) editHealthEvents() []HealthAlert { return slices.Clone(q.s.Health.Events) }
+func (q *Queue) healthEventChanged(i int) {
+	if q.records == nil {
+		return
+	}
+	if q.records.healthChanged == nil {
+		q.records.healthChanged = map[int]bool{}
+	}
+	q.records.healthChanged[i] = true
 }
-func (q *Queue) pruneHealthEvents() {
-	// Pending events and active incident evidence have readers. Capacity-aware
-	// maintenance runs separately from the control transaction.
+
+// recordHealthAlert opens, reopens or updates the one record for e's kind and
+// subject and returns its key. A reopen whose closing was never delivered
+// continues the receiver's open episode instead of notifying again.
+func (q *Queue) recordHealthAlert(e HealthAlert, point bool) string {
+	now := q.clock.Now()
+	key := healthAlertKey(e)
+	events := q.editHealthEvents()
+	i := slices.IndexFunc(events, func(r HealthAlert) bool { return r.State != "" && healthAlertKey(r) == key })
+	n := e
+	n.LastAt, n.State, n.ClosedAt, n.Delivered, n.ClosedDelivered = &now, "open", nil, false, false
+	if point {
+		n.State, n.ClosedAt = "closed", &now
+	}
+	if i < 0 {
+		n.DeliveryID, n.At, n.FirstAt, n.Count = ID(), now, &now, 1
+		n.Recovery = q.recoverHealthAlert(n)
+		events = append(events, n)
+		i = len(events) - 1
+	} else {
+		r := events[i]
+		n.FirstAt, n.Count = r.FirstAt, r.Count+1
+		if r.Delivered && r.State == "closed" && r.ClosedDelivered {
+			n.DeliveryID, n.At = ID(), now
+			n.Recovery = q.recoverHealthAlert(n)
+		} else {
+			n.DeliveryID, n.At, n.Delivered = r.DeliveryID, r.At, r.Delivered
+			if point {
+				n.ClosedDelivered = r.ClosedDelivered
+			}
+			if r.Delivered {
+				n.Recovery = r.Recovery // published receipts are immutable
+			} else {
+				n.Recovery = q.recoverHealthAlert(n)
+			}
+		}
+		events[i] = n
+	}
+	q.s.Health.Events = events
+	q.healthEventChanged(i)
+	return key
+}
+
+// reconcileHealthRecords closes open records no active condition keeps open
+// (conditions are also deleted directly by detectors), then expires closed
+// records after HealthAlertRetention. Removal swaps the last record into the
+// gap so only two rows change.
+func (q *Queue) reconcileHealthRecords() {
+	open := map[string]bool{}
+	for _, c := range q.s.Health.Conditions {
+		if c.Active && c.Record != "" {
+			open[c.Record] = true
+		}
+	}
+	now := q.clock.Now()
+	var events []HealthAlert
+	edit := func() {
+		if events == nil {
+			events = q.editHealthEvents()
+		}
+	}
+	for i, r := range q.s.Health.Events {
+		if r.State == "open" && !open[healthAlertKey(r)] {
+			edit()
+			events[i].State, events[i].ClosedAt = "closed", &now
+			q.healthEventChanged(i)
+		}
+	}
+	current := q.s.Health.Events
+	if events != nil {
+		current = events
+	}
+	for i := len(current) - 1; i >= 0; i-- {
+		r := current[i]
+		if r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && !(r.Delivered && r.ClosedDelivered) {
+			continue
+		}
+		edit()
+		last := len(events) - 1
+		events[i] = events[last]
+		events = events[:last]
+		current = events
+		if i < last {
+			q.healthEventChanged(i)
+		}
+	}
+	if events != nil {
+		q.s.Health.Events = events
+	}
+}
+
+// migrateHealthEvents folds previous-release per-firing rows (empty State) into
+// records, and rearms active conditions without a record so they reopen one in
+// this pass. Migrated history is closed at its last firing; undelivered history
+// sends one closing notification per record if a notifier is configured.
+func (q *Queue) migrateHealthEvents() {
+	for key, c := range q.s.Health.Conditions {
+		if c.Active && c.Record == "" {
+			c.Active = false
+			q.s.Health.Conditions[key] = c
+		}
+	}
+	if !slices.ContainsFunc(q.s.Health.Events, func(e HealthAlert) bool { return e.State == "" }) {
+		return
+	}
+	var out []HealthAlert
+	index := map[string]int{}
+	for _, e := range q.s.Health.Events {
+		if e.State != "" {
+			index[healthAlertKey(e)] = len(out)
+			out = append(out, e)
+		}
+	}
+	created := map[string]bool{}
+	for _, e := range q.s.Health.Events {
+		if e.State != "" {
+			continue
+		}
+		key, at := healthAlertKey(e), e.At
+		i, ok := index[key]
+		if !ok {
+			n := e
+			n.State, n.Count, n.FirstAt, n.LastAt, n.ClosedAt, n.Delivered = "closed", 0, &at, &at, &at, true
+			i, index[key], created[key] = len(out), len(out), true
+			out = append(out, n)
+		}
+		r := &out[i]
+		r.Count++
+		if r.FirstAt == nil || at.Before(*r.FirstAt) {
+			r.FirstAt = &at
+		}
+		later := r.LastAt == nil || !at.Before(*r.LastAt)
+		if later {
+			r.LastAt = &at
+		}
+		if !created[key] {
+			continue // a previous-release firing on an existing record: count only
+		}
+		if later {
+			r.DeliveryID, r.At, r.Attempt, r.Recovery, r.Mount, r.ClosedAt = e.DeliveryID, e.At, e.Attempt, e.Recovery, e.Mount, &at
+		}
+		r.Delivered = r.Delivered && e.Delivered
+		r.ClosedDelivered = r.Delivered
+	}
+	q.s.Health.Events = out
+	for i := range out {
+		q.healthEventChanged(i)
+	}
 }
 
 func (q *Queue) detectHealth() {
 	defer q.bodyPhaseFinish("health", q.bodyPhaseStart())
+	q.migrateHealthEvents()
+	defer q.reconcileHealthRecords()
 	q.detectHostHygiene()
 	q.detectReadinessHealth()
 	// Job-specific pressure conditions follow live demand, rather than growing
@@ -244,7 +411,6 @@ func (q *Queue) ConfigureHealthNotifier(ctx context.Context, hook string) error 
 		q.mu.Unlock()
 		return q.update(func() error {
 			q.s.Health.DeliveryConfigured = false
-			q.pruneHealthEvents()
 			return nil
 		})
 	}
@@ -271,20 +437,16 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 	for {
 		q.mu.RLock()
 		hook, wake := q.healthNotifier, q.wake
-		var pending []HealthAlert
+		var pending []healthDelivery
 		if hook != "" {
-			for _, e := range q.s.Health.Events {
-				if !e.Delivered {
-					pending = append(pending, e)
-				}
-			}
+			pending = pendingHealthDeliveries(q.s.Health.Events)
 		}
 		q.mu.RUnlock()
 		if hook == "" {
 			return
 		}
 		failed := false
-		for _, delivery := range groupHealthDeliveries(pending) {
+		for _, delivery := range pending {
 			e := delivery.alert
 			data, _ := json.Marshal(e)
 			// Bound a wedged local hook so health delivery cannot strand shutdown.
@@ -301,7 +463,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 				failed = true
 				break
 			}
-			err = q.ackHealthEvents(ctx, delivery.ids)
+			err = q.ackHealthDelivery(ctx, delivery)
 			if err != nil {
 				failed = true
 				break
@@ -335,48 +497,29 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 	}
 }
 
-// Clone a delivered generation outside control. Concurrent append/delivery
-// invalidates the plan; retry against the current immutable slice.
-func (q *Queue) ackHealthEvents(ctx context.Context, ids []string) error {
-	want := map[string]bool{}
-	for _, id := range ids {
-		want[id] = true
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		q.mu.RLock()
-		events := q.s.Health.Events
-		q.mu.RUnlock()
-		var changed []int
-		for i, e := range events {
-			if want[e.DeliveryID] && !e.Delivered {
-				changed = append(changed, i)
-			}
-		}
-		if len(changed) == 0 {
+// ackHealthDelivery marks one opening or closing delivered on the current record.
+// A closing acknowledged after the record silently reopened starts a new
+// episode, because the receiver now believes the problem closed.
+func (q *Queue) ackHealthDelivery(ctx context.Context, d healthDelivery) error {
+	return q.updateRequest(ctx, func() error {
+		i := slices.IndexFunc(q.s.Health.Events, func(r HealthAlert) bool {
+			return r.State != "" && r.DeliveryID == d.episode && healthAlertKey(r) == d.key
+		})
+		if i < 0 {
 			return nil
 		}
-		copy := slices.Clone(events)
-		for _, i := range changed {
-			copy[i].Delivered = true
+		events := q.editHealthEvents()
+		r := &events[i]
+		switch {
+		case !d.closing:
+			r.Delivered = true
+		case r.State == "closed":
+			r.Delivered, r.ClosedDelivered = true, true
+		default:
+			r.DeliveryID, r.At, r.Delivered, r.ClosedDelivered = ID(), q.clock.Now(), false, false
 		}
-		applied := false
-		err := q.updateRequest(ctx, func() error {
-			current := q.s.Health.Events
-			if len(current) != len(events) || len(current) > 0 && &current[0] != &events[0] {
-				return nil
-			}
-			q.s.Health.Events = copy
-			for _, i := range changed {
-				q.records.healthChanged[i] = true
-			}
-			applied = true
-			return nil
-		}, nil)
-		if err != nil || applied {
-			return err
-		}
-	}
+		q.s.Health.Events = events
+		q.healthEventChanged(i)
+		return nil
+	}, nil)
 }

@@ -188,20 +188,20 @@ func TestEfficiencyLearnedAlerts(t *testing.T) {
 	for range alertWarmup {
 		step()
 	}
-	if len(alertsOf(q, "efficiency_regression")) != 0 {
+	if firings(q, "efficiency_regression") != 0 {
 		t.Fatal("healthy fleet alerted")
 	}
 	r.Hosts[0].Rate.ReservedMemoryGB = 84
 	for range alertConfirmation {
 		step()
 	}
-	if len(alertsOf(q, "efficiency_regression")) != 1 {
+	if firings(q, "efficiency_regression") != 1 {
 		t.Fatal("reservation regression not alerted")
 	}
 	for range alertHistorySize {
 		step()
 	}
-	if len(alertsOf(q, "efficiency_regression")) != 1 {
+	if firings(q, "efficiency_regression") != 1 {
 		t.Fatal("episode flooded delivery")
 	}
 	r.Hosts[0].Rate.ReservedMemoryGB = 12

@@ -81,8 +81,8 @@ func TestHealthAlertDeliveryConfigurationClearsAfterRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.s.Health.Events) != 257 {
-		t.Fatal("configured pending events were pruned")
+	if len(q.s.Health.Events) != 1 || q.s.Health.Events[0].Count != 257 {
+		t.Fatal("configured pending record lost firings", q.s.Health.Events)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
@@ -97,14 +97,14 @@ func TestHealthAlertDeliveryConfigurationClearsAfterRestart(t *testing.T) {
 	if q.s.Health.DeliveryConfigured {
 		t.Fatal("historical hook configuration survived startup without a notifier")
 	}
-	if len(q.s.Health.Events) != 257 {
-		t.Fatal("clearing notifier configuration discarded unique alert history")
+	if len(q.s.Health.Events) != 1 || q.s.Health.Events[0].Count != 257 {
+		t.Fatal("clearing notifier configuration discarded alert history")
 	}
 	snapshot, err := q.publicSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.HealthAlertDelivery == nil || snapshot.HealthAlertDelivery.Configured || snapshot.HealthAlertDelivery.Pending != 257 {
+	if snapshot.HealthAlertDelivery == nil || snapshot.HealthAlertDelivery.Configured || snapshot.HealthAlertDelivery.Pending != 1 {
 		t.Fatalf("restarted status: %+v", snapshot.HealthAlertDelivery)
 	}
 }
@@ -140,10 +140,9 @@ func TestHealthAlertDeliveryFailedHookRemainsUnacknowledged(t *testing.T) {
 	}
 }
 
-// A condition that flapped while no receiver listened delivers once with its
-// repeat count (live: 12,453 identical host_probe_unknown events), and every
-// retained member is acknowledged; nothing is dropped from history.
-func TestHealthAlertDeliveryGroupsIdenticalPendingAlerts(t *testing.T) {
+// A problem that fired while no receiver listened is one record and one
+// notification carrying its count (live: 12,531 host_degraded rows in four days).
+func TestHealthAlertDeliverySendsOneNotificationPerRecord(t *testing.T) {
 	q, clock := fixture(t)
 	dir := t.TempDir()
 	hook, out := filepath.Join(dir, "notify"), filepath.Join(dir, "payloads")
@@ -172,12 +171,7 @@ func TestHealthAlertDeliveryGroupsIdenticalPendingAlerts(t *testing.T) {
 	await(t, func() bool {
 		q.mu.RLock()
 		defer q.mu.RUnlock()
-		for _, e := range q.s.Health.Events {
-			if !e.Delivered {
-				return false
-			}
-		}
-		return true
+		return len(pendingHealthDeliveries(q.s.Health.Events)) == 0
 	})
 	data, err := os.ReadFile(out)
 	if err != nil {
@@ -191,10 +185,10 @@ func TestHealthAlertDeliveryGroupsIdenticalPendingAlerts(t *testing.T) {
 		}
 		got = append(got, e)
 	}
-	if len(got) != 2 || got[0].Host != "a" || got[0].Repeats != 2 || got[0].FirstAt == nil || !got[0].FirstAt.Equal(first) || got[1].Host != "b" || got[1].Repeats != 0 || got[1].FirstAt != nil {
-		t.Fatalf("grouped deliveries: %s", data)
+	if len(got) != 2 || got[0].Host != "a" || got[0].Count != 3 || got[0].FirstAt == nil || !got[0].FirstAt.Equal(first) || !strings.HasSuffix(got[0].DeliveryID, "/closed") || got[1].Host != "b" || got[1].Count != 1 {
+		t.Fatalf("record deliveries: %s", data)
 	}
-	if len(q.s.Health.Events) != 4 {
-		t.Fatal("grouped delivery changed retained history")
+	if len(q.s.Health.Events) != 2 {
+		t.Fatal("records", len(q.s.Health.Events))
 	}
 }

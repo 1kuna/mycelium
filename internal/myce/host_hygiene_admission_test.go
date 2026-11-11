@@ -78,7 +78,7 @@ func TestHostHygieneMountCompletedOutliersKeepProductionHealth(t *testing.T) {
 			t.Fatal("three completed outliers lost their advisory", got)
 		}
 	}
-	if len(alertsOf(q, "host_mount_degraded")) != 1 || len(alertsOf(q, "host_mount_unavailable")) != 0 {
+	if firings(q, "host_mount_degraded") != 1 || firings(q, "host_mount_unavailable") != 0 {
 		t.Fatal("advisory alert was lost or became an availability failure")
 	}
 }
@@ -149,7 +149,7 @@ func TestHostHygieneMountProgressingOutlierIsAdvisory(t *testing.T) {
 				t.Fatal("slow completed success was not advisory", got)
 			}
 			alerts := alertsOf(q, "host_mount_degraded")
-			if len(alerts) != 1 || alerts[0].Reason != "mount_probe_slow" || alerts[0].Mount == nil || alerts[0].Mount.SlowThresholdSeconds != .001 || alerts[0].Mount.OperationAgeSeconds <= 0 || len(alertsOf(q, "host_mount_unavailable")) != 0 {
+			if len(alerts) != 1 || alerts[0].Reason != "mount_probe_slow" || alerts[0].Mount == nil || alerts[0].Mount.SlowThresholdSeconds != .001 || alerts[0].Mount.OperationAgeSeconds <= 0 || firings(q, "host_mount_unavailable") != 0 {
 				t.Fatal("advisory lost measured evidence or duplicated its wake", alerts)
 			}
 		})

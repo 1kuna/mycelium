@@ -21,12 +21,21 @@ func alertsOf(q *Queue, kind string) []HealthAlert {
 	}
 	return events
 }
+
+// firings counts alert episodes: each kind-and-subject record carries its count.
+func firings(q *Queue, kind string) int {
+	n := 0
+	for _, e := range alertsOf(q, kind) {
+		n += e.Count
+	}
+	return n
+}
 func TestHealthAlertDiskGuard(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("disk-host", "cuda")
 	m.DiskVolumes = []DiskVolume{{ID: "volume", Roots: []string{"data"}, TotalBytes: 100 << 30, FreeBytes: 2 << 30, SampledAt: c.Now()}}
 	check(t, q, m, nil)
-	if len(alertsOf(q, "disk_below_guard")) != 0 {
+	if firings(q, "disk_below_guard") != 0 {
 		t.Fatal("healthy disk alerted")
 	}
 	c.Advance(time.Second)
@@ -34,7 +43,7 @@ func TestHealthAlertDiskGuard(t *testing.T) {
 	m.DiskVolumes[0].FreeBytes = 100 << 20
 	check(t, q, m, nil)
 	check(t, q, m, nil)
-	if len(alertsOf(q, "disk_below_guard")) != 1 {
+	if firings(q, "disk_below_guard") != 1 {
 		t.Fatal("disk guard did not deduplicate")
 	}
 	snapshot, err := q.publicSnapshot()
@@ -44,14 +53,14 @@ func TestHealthAlertDiskGuard(t *testing.T) {
 	c.Advance(healthAlertCooldown)
 	m.DiskVolumes[0].SampledAt = c.Now()
 	check(t, q, m, nil)
-	if len(alertsOf(q, "disk_below_guard")) != 1 {
+	if firings(q, "disk_below_guard") != 1 {
 		t.Fatal("continuous incident repeated")
 	}
 	m.DiskVolumes[0].FreeBytes = 2 << 30
 	check(t, q, m, nil)
 	m.DiskVolumes[0].FreeBytes = 100 << 20
 	check(t, q, m, nil)
-	if len(alertsOf(q, "disk_below_guard")) != 2 {
+	if firings(q, "disk_below_guard") != 2 {
 		t.Fatal("recovered disk did not rearm")
 	}
 }
@@ -59,21 +68,21 @@ func TestHealthAlertHostStaleAndUnhealthy(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("host", "cuda")
 	check(t, q, m, nil)
-	if len(alertsOf(q, "host_unhealthy_or_stale")) != 0 {
+	if firings(q, "host_unhealthy_or_stale") != 0 {
 		t.Fatal("healthy host alerted")
 	}
 	c.Advance(q.machineLossTimeout(m.ID))
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if len(alertsOf(q, "host_unhealthy_or_stale")) != 1 {
+	if firings(q, "host_unhealthy_or_stale") != 1 {
 		t.Fatal("entire quiet fleet must alert even when loss decisions are paused")
 	}
 	check(t, q, m, nil)
 	c.Advance(healthAlertCooldown)
 	m.InventoryReason = "private worker error"
 	check(t, q, m, nil)
-	if len(alertsOf(q, "host_unhealthy_or_stale")) != 2 {
+	if firings(q, "host_unhealthy_or_stale") != 2 {
 		t.Fatal("unhealthy report did not alert")
 	}
 }
@@ -83,7 +92,7 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("host", "cuda")
 			check(t, q, m, nil)
-			if len(alertsOf(q, "checkpoint_store_unavailable")) != 0 {
+			if firings(q, "checkpoint_store_unavailable") != 0 {
 				t.Fatal("healthy storage alerted")
 			}
 			if scope == "queue" {
@@ -100,7 +109,7 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 			check(t, q, m, nil)
 			c.Advance(DefaultHealthStorageDelay - time.Second)
 			check(t, q, m, nil)
-			if len(alertsOf(q, "checkpoint_store_unavailable")) != 0 {
+			if firings(q, "checkpoint_store_unavailable") != 0 {
 				t.Fatal("short outage alerted")
 			}
 			c.Advance(time.Second)
@@ -109,7 +118,7 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 			}
 			check(t, q, m, nil)
 			check(t, q, m, nil)
-			if len(alertsOf(q, "checkpoint_store_unavailable")) != 1 {
+			if firings(q, "checkpoint_store_unavailable") != 1 {
 				t.Fatal("sustained outage missing or duplicated")
 			}
 		})
@@ -223,7 +232,7 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
-		if len(alertsOf(q, "production_attempt_lost")) != 1 {
+		if firings(q, "production_attempt_lost") != 1 {
 			t.Fatal("missing initial alert")
 		}
 		// A burst preserves exact incident custody and must not duplicate an old
@@ -236,14 +245,14 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if len(alertsOf(q, "production_attempt_lost")) != 1 {
+		if firings(q, "production_attempt_lost") != 1 {
 			t.Fatal("burst evicted unique incident history")
 		}
 		c.Advance(time.Second)
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
-		if len(alertsOf(q, "production_attempt_lost")) != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
+		if firings(q, "production_attempt_lost") != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
 			t.Fatal("same retained attempt alerted after event pruning")
 		}
 		data, err := json.Marshal(q.s.Jobs[assigned.ID])
@@ -274,7 +283,7 @@ func TestHealthAlertHealthyAndPlannedProduction(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if len(alertsOf(q, "production_attempt_lost")) != 0 {
+			if firings(q, "production_attempt_lost") != 0 {
 				t.Fatal("healthy/planned production alerted")
 			}
 		})

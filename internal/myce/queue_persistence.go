@@ -258,7 +258,21 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 		}
 	}
 	for index := range q.records.healthChanged {
+		if index >= len(q.s.Health.Events) {
+			continue
+		}
 		if err := put("health_events/"+strconv.Itoa(index), q.s.Health.Events[index]); err != nil {
+			return nil, err
+		}
+	}
+	// One record per open problem: migration and retention shrink the dense rows.
+	for index := len(q.s.Health.Events); ; index++ {
+		key := "health_events/" + strconv.Itoa(index)
+		if _, saved := q.persisted[key]; !saved && index >= q.records.healthCount {
+			break
+		}
+		next[key] = nil
+		if _, err := exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
 			return nil, err
 		}
 	}

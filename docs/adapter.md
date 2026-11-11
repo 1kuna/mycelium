@@ -836,8 +836,9 @@ alert (positive duration). Other kinds are `disk_below_guard`,
 `checkpoint_store_unavailable`. A JSON event includes `delivery_id`, `kind`, `at`,
 `delivered: false`, the optional fixed `store` label, and the relevant `host`,
 `job_id`, `attempt` identities. Read
-`health_alerts` in authenticated status for the durable event window and delivery
-acknowledgements. Keep host names non-sensitive. Events omit raw errors and paths,
+`health_alerts` in authenticated status for one record per open or recently
+closed problem and its delivery acknowledgements; the hook receives openings and
+closings only (see [status](status.md#incident-health-alerts)). Keep host names non-sensitive. Events omit raw errors and paths,
 and the hook environment excludes `MYCE_TOKEN`. Hook output is not logged.
 
 Condition alerts deduplicate continuously unhealthy episodes and rate-limit flaps
