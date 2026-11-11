@@ -23,7 +23,7 @@ type DevConfig struct {
 	FileStore                       string
 	FileStoreLimit                  int64
 	FileStoreProductionReserve      int64
-	FileRetention                   time.Duration
+	FileRetention                   time.Duration // Zero retains until release; the CLI passes its flag.
 	NASCheckpoints                  bool
 	ExtensionRoot, JobFileRoot      string
 	ModelRoot                       string // Optional shared model root; its hub/ folder serves model_snapshots.
@@ -115,11 +115,9 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 			return nil, err
 		}
 	}
-	if c.FileRetention != 0 {
-		if err = q.ConfigureFileRetention(c.FileRetention); err != nil {
-			q.Close()
-			return nil, err
-		}
+	if err = q.ConfigureFileRetention(c.FileRetention); err != nil {
+		q.Close()
+		return nil, err
 	}
 	if len(c.ModelConfig.Models) == 0 {
 		c.ModelConfig.Models = []Model{{Name: "dev-model", Engine: "fake", Path: "fake", MemoryGB: 1, Platforms: []string{c.GPU}}}

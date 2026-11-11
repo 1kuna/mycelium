@@ -127,6 +127,9 @@ printf 'mycelium-ease-audit-ok\n' > expected.txt
 cmp expected.txt accepted/result.txt
 ```
 
+Finished jobs' files are kept for 3 days by default, then expire (`result_expired`);
+download results within that window.
+
 `myce result` downloads accepted outputs and verifies each file's size and
 SHA-256. Success takes all three: the job `succeeded`, `result` verified the
 files, and your own application check passed (here 23 bytes, newline included).

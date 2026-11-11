@@ -20,12 +20,14 @@ custom root with `WithFileStore` in `Open`; changing roots after bundle referenc
 exist is refused. Only current and previous release formats are supported.
 
 Stored job inputs and results stay until they are released or a retention
-window expires them. Omitted or zero `myce queue --file-retention` keeps unique
-bytes until [explicit release](#project-owner-early-file-release-465); a positive
-duration expires terminal jobs' files after that long. Installed queues accept
-`myce install queue --config QUEUE_CONFIG --file-retention DURATION` and preserve
-the setting across upgrades; older installations keep their saved window. This is
-separate from log retention, and applies in NAS and file-store checkpoint modes.
+window expires them. By default `myce queue --file-retention` is `72h`: a
+finished job's files are kept for 3 days, then reclaimed ([MY-47](../DECISIONS.md#my-47)).
+Pass another duration to change the window, or an explicit `0` to keep unique
+bytes until [explicit release](#project-owner-early-file-release-465). Installed
+queues accept `myce install queue --config QUEUE_CONFIG --file-retention DURATION`
+and preserve the setting across upgrades; an installation keeps its saved window,
+including a saved `0`, until its owner changes it. This is separate from log
+retention, and applies in NAS and file-store checkpoint modes.
 
 ### Per-project file retention (#1214)
 
@@ -41,9 +43,9 @@ projects:
 
 It applies to the project's terminal jobs, including jobs that finished before
 the policy was set, and to their [worker scratch](worker-caches.md#worker-scratch-retention).
-It can only shorten the queue-wide window: with `--file-retention 168h`, a project
-`file_retention: 24h` expires after 24 hours, and `1000h` still expires after 168
-hours. Empty keeps the queue-wide policy. As with the limits below, a policy PUT
+It can only shorten the queue-wide window: with the default `--file-retention 72h`,
+a project `file_retention: 24h` expires after 24 hours, and `1000h` still expires
+after 72 hours. Empty keeps the queue-wide policy. As with the limits below, a policy PUT
 from an older CLI keeps the stored value; a current CLI's file can clear it.
 
 Job records and keyed answers stay, including their file identities and

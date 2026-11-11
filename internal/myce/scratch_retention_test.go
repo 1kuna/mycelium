@@ -29,6 +29,7 @@ func TestScratchRetentionQueueAuthority(t *testing.T) {
 		{name: "accepted legacy success", state: "succeeded", wantRemoved: true},
 		{name: "failed explicit policy", state: "failed", policy: 3 * time.Hour, wantRemoved: true},
 		{name: "cancelled day policy", state: "cancelled", policy: 24 * time.Hour, wantRemoved: true},
+		{name: "default policy", state: "failed", policy: DefaultFileRetention, wantRemoved: true},
 		{name: "collected result", state: "succeeded", oldAttempt: true, expired: true, wantRemoved: true},
 		{name: "released failed result", state: "failed", expired: true, wantRemoved: true},
 		{name: "reviewed owner release", state: "failed", ownerRelease: true, wantRemoved: true},

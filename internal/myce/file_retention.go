@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// Zero selects automatic retention. Unique file bytes require explicit release;
-// a positive configured duration remains an operator-authored policy.
-const DefaultFileRetention time.Duration = 0
+// Finished jobs' files are kept for 3 days, then reclaimed (MY-47). An explicit
+// zero retains unique file bytes until explicit release.
+const DefaultFileRetention = 72 * time.Hour
 
 // Publication/reference lifecycle locks and revision fences, rather than an
 // elapsed grace, protect concurrent writes. Unclaimed unique bytes stay pinned

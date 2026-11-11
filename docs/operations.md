@@ -1217,8 +1217,9 @@ Worker scratch, failed-attempt folders and installer `.Trash` copies follow
 [worker scratch retention](reference/worker-caches.md#worker-scratch-retention):
 superseded released attempts are collected on the next sweep; recover a failed
 or cancelled job's partial outputs from its current attempt's
-`job-files/JOB/ATTEMPT` before the configured file-retention deadline or explicit
-release. The former fixed 24-hour scratch promise is retired; unknown/unreleased
+`job-files/JOB/ATTEMPT` before the configured file-retention deadline (default
+`72h` after the job finishes; set `--file-retention`, `0` keeps files until
+release) or explicit release. The former fixed 24-hour scratch promise is retired; unknown/unreleased
 data stays protected. For a slow queue, capture
 [live queue profiles](reference/queue-maintenance.md#opt-in-live-queue-profiling)
 and read the [queue timing log lines](reference/queue-maintenance.md#benchmarks-outages-and-control-timing).
