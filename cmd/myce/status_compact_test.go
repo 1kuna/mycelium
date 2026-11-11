@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -78,6 +79,27 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("default printed %q:\n%s", unwanted, text)
 		}
+	}
+	// Default --json is the same projection: full IDs for every job, no full
+	// job or machine objects.
+	data, err := json.Marshal(myce.NewCompactStatus(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Counts map[string]int          `json:"counts"`
+		Jobs   []myce.CompactJob       `json:"jobs"`
+		Paused []myce.CompactPaused    `json:"paused"`
+		Hyphas []myce.CompactHypha     `json:"hyphas"`
+		Alerts []myce.StatusAlertGroup `json:"alert_groups"`
+	}
+	if err := json.Unmarshal(data, &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > 10<<10 || len(view.Jobs) != 5 || len(view.Hyphas) != 5 || len(view.Alerts) != 3 || view.Counts["paused"] != 62 ||
+		len(view.Paused) != 2 || len(view.Paused[0].IDs) != 55 || view.Paused[0].IDs[0] != "pause000-full-id" || view.Jobs[3].ID != "wait0000-full-id" || view.Jobs[3].Since == nil ||
+		!strings.Contains(view.Paused[1].Reason, strings.Repeat("x", 300)) || strings.Contains(string(data), `"spec"`) || strings.Contains(string(data), "capability_profile") {
+		t.Fatalf("compact JSON (%d bytes): %s", len(data), data)
 	}
 	out.Reset()
 	printCompactStatus(&out, s, true)
