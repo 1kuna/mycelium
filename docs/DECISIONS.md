@@ -113,7 +113,7 @@ MY-28, 2026-11-01, relayed by the guidance-review orchestrator; it replaced MY-2
 
 - Maintain one v3 runtime. Earlier versions live only in tagged source history: no compatibility layers, old-version fallback or automatic rollback machinery. Fix forward. The approved design's checkpoint/retry contracts stay. (MY-03)
 - The one exception is the adjacent release pair: the current release interoperates with the previous one during rolling upgrades (MY-35). Older protocols, importers, converters and persistence formats belong in tagged history. Before deleting their runtime paths, verify every active installation and the production database meet the floor. (MY-42)
-- Release-specific: on 2026-11-10 Zach required candidate r6.9 to support queue rollback to the live r6.8, preferably by converting the v3 database to v2 without losing jobs, custody or decisions; see [the rollback procedure as shipped](https://github.com/1kuna/mycelium/blob/302620cacaace8a16e7ed424e1183dbb10f46414/docs/operations.md#queue-only-rollback-from-r69-to-r68). Agent note (2026-11-11, not a ruling): this applied to the r6.8/r6.9 pair; with r6.10 live everywhere the converter left main under MY-42 and lives in source history at that commit (no r6.x tags exist yet).
+- Release-specific: on 2026-11-10 Zach required candidate r6.9 to support queue rollback to the live r6.8, preferably by converting the v3 database to v2 without losing jobs, custody or decisions; see [the rollback procedure](operations.md#queue-only-rollback-from-r69-to-r68).
 
 <details><summary>Sources</summary>
 

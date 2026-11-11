@@ -246,6 +246,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e != nil {
 		return e
 	}
+	q.machineRecords = true
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}
 	}

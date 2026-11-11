@@ -2,7 +2,6 @@ package myce
 
 import (
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -210,8 +209,4 @@ func (q *Queue) deviceFaultRetryWaitingReason(j *Job, scans ...*placementScan) s
 		return deviceFaultRetryHold + ": preserving the host's last healthy accelerator after this job's driver fault; waiting for another healthy device or host, or a health-proven recovery"
 	}
 	return ""
-}
-
-func deviceFaultRetryReason(reason string) bool {
-	return strings.HasPrefix(reason, deviceFaultRetryHold+":")
 }

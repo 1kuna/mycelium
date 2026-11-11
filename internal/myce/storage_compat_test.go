@@ -119,7 +119,7 @@ func TestStorageCompatRejectsNewProtectedTasks(t *testing.T) {
 
 }
 
-// Keep the historical custody document in the supported r6.10 v3 layout.
+// Keep the historical custody document while using the supported r6.8 format.
 func seedParkedStorageState(t *testing.T, database string, wire []byte) {
 	t.Helper()
 	var base map[string]json.RawMessage
@@ -127,7 +127,7 @@ func seedParkedStorageState(t *testing.T, database string, wire []byte) {
 		t.Fatal(err)
 	}
 	records := map[string]json.RawMessage{}
-	for _, group := range []string{"jobs", "submissions", "extensions", "work_observations", "storage_observations", "external_memory", "machines"} {
+	for _, group := range []string{"jobs", "submissions", "extensions", "work_observations", "storage_observations", "external_memory"} {
 		if data := base[group]; data != nil {
 			var members map[string]json.RawMessage
 			if err := json.Unmarshal(data, &members); err != nil {
@@ -154,7 +154,7 @@ func seedParkedStorageState(t *testing.T, database string, wire []byte) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec("INSERT INTO queue VALUES (1, ?)", normalizedQueueMarker); err != nil {
+	if _, err := db.Exec("INSERT INTO queue VALUES (1, ?)", fieldQueueMarker); err != nil {
 		t.Fatal(err)
 	}
 	for key, value := range records {

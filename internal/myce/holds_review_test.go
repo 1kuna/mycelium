@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,16 +15,16 @@ func TestHoldsReviewHostDisableScope(t *testing.T) {
 			t.Fatal(err)
 		}
 		found := false
-		for _, d := range s.HoldsDetail {
-			if d.Host == "b70" && d.Kind == "host_disabled" {
+		for _, d := range s.Holds {
+			if d.Scope == "b70" && d.Kind == "host_disabled" {
 				found = true
-				if d.OperatorActionRequired || d.ClearsAt != nil {
-					t.Fatalf("disable is not a fault: %+v", d)
+				if !d.operatorAction() || d.Expires != nil || !strings.Contains(d.Next, "myce host resume b70") {
+					t.Fatalf("disable is the operator's to resume, with no expiry: %+v", d)
 				}
 			}
 		}
 		if found != want {
-			t.Fatalf("host disable=%v want=%v: %+v", found, want, s.HoldsDetail)
+			t.Fatalf("host disable=%v want=%v: %+v", found, want, s.Holds)
 		}
 	}
 	assert(false)
@@ -60,8 +61,8 @@ func TestHoldsReviewProductionReleaseAttention(t *testing.T) {
 				want = true
 			}
 			q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-			d := q.productionHoldDetail("b70")
-			if d.Kind != "production_release_unknown" || d.OperatorActionRequired != want || d.ClearsAt != nil {
+			d := q.productionHold("b70")
+			if d.Kind != "production_release_unknown" || d.operatorAction() != want || d.Expires != nil {
 				t.Fatalf("%s: %+v", mode, d)
 			}
 		})
@@ -98,8 +99,8 @@ func TestHoldsReviewModelReleaseAttention(t *testing.T) {
 				want = true
 			}
 			q.s.ModelSlots[slotKey(a.ID, slot.Model)] = slot
-			d := q.productionHoldDetail("b70")
-			if d.Kind != "production_release_unknown" || d.OperatorActionRequired != want || d.ClearsAt != nil {
+			d := q.productionHold("b70")
+			if d.Kind != "production_release_unknown" || d.operatorAction() != want || d.Expires != nil {
 				t.Fatalf("%s: %+v", mode, d)
 			}
 		})
@@ -115,8 +116,8 @@ func TestHoldsReviewDockerSeverityDeterministic(t *testing.T) {
 	assert := func(kind, text string) {
 		t.Helper()
 		for i := 0; i < 100; i++ {
-			d := q.dockerHoldDetail("b70")
-			if d.Kind != kind || d.Text != text {
+			d := q.dockerHold("b70")
+			if d.Kind != kind || d.Detail != text {
 				t.Fatalf("iteration %d: %+v", i, d)
 			}
 		}
@@ -151,10 +152,10 @@ func TestHoldsReviewStartupGone(t *testing.T) {
 			t.Fatal(err)
 		}
 		found := false
-		for _, d := range s.HoldsDetail {
+		for _, d := range s.Holds {
 			if d.Kind == "startup_release" {
 				found = true
-				if d.OperatorActionRequired != gone || d.ClearsAt != nil {
+				if d.operatorAction() != gone || d.Expires != nil {
 					t.Fatalf("gone=%v: %+v", gone, d)
 				}
 			}
@@ -167,8 +168,8 @@ func TestHoldsReviewStartupGone(t *testing.T) {
 
 func TestHoldsReviewUnclassifiedFailsClosed(t *testing.T) {
 	for _, kind := range []string{"", "new-kind"} {
-		d := productionBlockerDetail("host", "future blocker", hostBlockerClass{Kind: kind})
-		if d.Kind != "unclassified" || !d.OperatorActionRequired || d.ClearsAt != nil || d.Text != "host: production hold; future blocker" {
+		d := productionBlockerHold("host", "future blocker", hostBlockerClass{Kind: kind})
+		if d.Kind != "unclassified" || !d.operatorAction() || d.Expires != nil || d.Detail != "host: production hold; future blocker" {
 			t.Fatalf("unclassified blocker: %+v", d)
 		}
 	}
@@ -179,13 +180,13 @@ func TestHoldsReviewCallAttention(t *testing.T) {
 	q.s.Hosts["b70"].Active = true
 	deadline := c.Now().Add(-time.Second)
 	q.calls["call"] = &ModelCall{ID: "call", Machine: a.ID, Priority: "experiment", StopAt: &deadline}
-	d := q.productionHoldDetail("b70")
-	if d.Kind != "production_release_unknown" || d.OperatorActionRequired {
+	d := q.productionHold("b70")
+	if d.Kind != "production_release_unknown" || d.operatorAction() {
 		t.Fatalf("kill result pending: %+v", d)
 	}
 	c.Advance(releaseAttentionDelay - time.Second)
-	d = q.productionHoldDetail("b70")
-	if !d.OperatorActionRequired {
+	d = q.productionHold("b70")
+	if !d.operatorAction() {
 		t.Fatalf("late release: %+v", d)
 	}
 }
@@ -194,15 +195,15 @@ func TestHoldsReviewUnknownDockerStatusFailsClosed(t *testing.T) {
 	q, _, a, b, _ := holdFleet(t, false)
 	q.s.Machines[a.ID].DockerCleanup = "pull pending"
 	q.s.Machines[b.ID].DockerCleanup = "cleanup unconfirmed: inspect"
-	d := q.dockerHoldDetail("b70")
-	if d.Kind != "unclassified" || !d.OperatorActionRequired || d.ClearsAt != nil || d.Text != "b70: Docker cleanup unconfirmed; pull pending" {
+	d := q.dockerHold("b70")
+	if d.Kind != "unclassified" || !d.operatorAction() || d.Expires != nil || d.Detail != "b70: Docker cleanup unconfirmed; pull pending" {
 		t.Fatalf("unknown Docker status must fail closed: %+v", d)
 	}
 	now := q.clock.Now()
 	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: "old", Attempt: 1, Docker: true, EscalatedAt: &now}
 	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	d = q.dockerHoldDetail("b70")
-	if d.Kind != "docker_cleanup_operator_action" || !d.OperatorActionRequired {
+	d = q.dockerHold("b70")
+	if d.Kind != "docker_cleanup_operator_action" || !d.operatorAction() {
 		t.Fatalf("unknown status hid escalation: %+v", d)
 	}
 }

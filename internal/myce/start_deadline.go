@@ -111,16 +111,16 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 			continue
 		}
 		host := hostID(m)
-		if b := q.startupReleaseBlocker(host); b != "" {
-			return b
+		if h := q.startupReleaseHold(host); h.Kind != "" {
+			return h.Detail
 		}
 		if q.maintenanceBlocked(host) {
 			return "host " + host + " in planned maintenance"
 		}
-		if b := q.dockerBlocker(host); b != "" {
-			return "waiting for Docker cleanup to be confirmed on " + host + "; " + b
+		if h := q.dockerHold(host); h.Kind != "" {
+			return "waiting for Docker cleanup to be confirmed on " + host + "; " + h.Detail
 		}
-		if b := q.hostBlockers(host); b != "" && q.held(host) {
+		if b, _ := q.hostBlockerState(host); b != "" && q.held(host) {
 			return "waiting for lower-priority work to stop on " + host + "; " + b
 		}
 		if j.State == "queued" {
@@ -248,20 +248,18 @@ func (q *Queue) maintainStartDeadlines() {
 }
 
 // Keep a failed startup's resources fenced until its exact execution is released.
-func (q *Queue) startupReleaseBlocker(host string) string { return q.startupReleaseDetail(host).Text }
-
-func (q *Queue) startupReleaseDetail(host string) HoldDetail {
-	detail := HoldDetail{}
+// The zero Hold means no fence.
+func (q *Queue) startupReleaseHold(host string) Hold {
+	h, operator := Hold{}, false
 	for _, r := range q.s.HostReleases {
 		j := q.s.Jobs[r.Job]
 		if r.Host == host && j != nil && terminal(j.State) && j.Spec.StartBy != nil {
-			detail.Host, detail.Kind = host, "startup_release"
-			detail.Text = fmt.Sprintf("host %s: production startup release pending", host)
 			m := q.s.Machines[r.Machine]
-			detail.OperatorActionRequired = detail.OperatorActionRequired || m == nil || m.Gone
+			operator = operator || m == nil || m.Gone
+			h = scopedHold("startup_release", host, fmt.Sprintf("host %s: production startup release pending", host), operator)
 		}
 	}
-	return detail
+	return h
 }
 
 func pausedStartBudget(j *Job) string {

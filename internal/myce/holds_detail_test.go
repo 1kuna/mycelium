@@ -31,14 +31,14 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"b70: Docker cleanup unconfirmed; cleanup unconfirmed: inspect"}
-	if !reflect.DeepEqual(snap.HostHolds, want) {
-		t.Fatalf("legacy strings changed: %v", snap.HostHolds)
+	if !reflect.DeepEqual(hostHoldTexts(snap.Holds), want) {
+		t.Fatalf("legacy strings changed: %v", hostHoldTexts(snap.Holds))
 	}
-	if len(snap.HoldsDetail) != 1 {
-		t.Fatalf("retired idle hold remains: %+v", snap.HoldsDetail)
+	if len(snap.Holds) != 1 {
+		t.Fatalf("retired idle hold remains: %+v", snap.Holds)
 	}
-	cleanup := snap.HoldsDetail[0]
-	if cleanup.Kind != "docker_cleanup_waiting" || cleanup.Host != "b70" || cleanup.OperatorActionRequired || cleanup.ClearsAt != nil || cleanup.Text != want[0] {
+	cleanup := snap.Holds[0]
+	if cleanup.Kind != "docker_cleanup_waiting" || cleanup.Scope != "b70" || cleanup.operatorAction() || cleanup.Expires != nil || cleanup.Detail != want[0] {
 		t.Fatalf("Docker blocker: %+v", cleanup)
 	}
 	// An attempt-specific custody record drives the existing escalation timer.
@@ -62,16 +62,16 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	found := false
-	for _, d := range snap.HoldsDetail {
-		if d.Host == "b70" && d.Kind == "docker_cleanup_operator_action" {
+	for _, d := range snap.Holds {
+		if d.Scope == "b70" && d.Kind == "docker_cleanup_operator_action" {
 			found = true
-			if !d.OperatorActionRequired || d.ClearsAt != nil || d.Text != "b70: Docker cleanup unconfirmed; waiting for attempt old-job/1; operator action required (myce resolve-docker)" {
+			if !d.operatorAction() || d.Expires != nil || d.Detail != "b70: Docker cleanup unconfirmed; waiting for attempt old-job/1; operator action required (myce resolve-docker)" {
 				t.Fatalf("escalation: %+v", d)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("not escalated: %+v", snap.HoldsDetail)
+		t.Fatalf("not escalated: %+v", snap.Holds)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 		if strings.HasPrefix(status, "cleanup unconfirmed") {
 			kind = "docker_cleanup_waiting"
 		}
-		if len(s.HoldsDetail) != 1 || s.HoldsDetail[0].Kind != kind || s.HoldsDetail[0].Text != want || s.HoldsDetail[0].OperatorActionRequired || !reflect.DeepEqual(s.HostHolds, []string{want}) {
-			t.Fatalf("%s: %+v %v", status, s.HoldsDetail, s.HostHolds)
+		if len(s.Holds) != 1 || s.Holds[0].Kind != kind || s.Holds[0].Detail != want || s.Holds[0].operatorAction() || !reflect.DeepEqual(hostHoldTexts(s.Holds), []string{want}) {
+			t.Fatalf("%s: %+v %v", status, s.Holds, hostHoldTexts(s.Holds))
 		}
 	}
 	q.s.Machines[m.ID].DockerCleanup = ""
@@ -106,23 +106,25 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	kinds := map[string]bool{}
-	for _, d := range s.HoldsDetail {
+	for _, d := range s.Holds {
 		kinds[d.Kind] = true
-		if d.OperatorActionRequired {
+		// Only a deliberate disable waits on the operator; a live startup
+		// release clears itself.
+		if d.operatorAction() != (d.Kind == "host_disabled") {
 			t.Fatalf("operator fence: %+v", d)
 		}
-		if strings.Contains(d.Text, "private reason") {
+		if strings.Contains(d.Detail, "private reason") {
 			t.Fatal("private reason exposed")
 		}
 	}
-	if !kinds["host_disabled"] || !kinds["startup_release"] || len(s.HostHolds) != 0 {
+	if !kinds["host_disabled"] || !kinds["startup_release"] || len(hostHoldTexts(s.Holds)) != 0 {
 		t.Fatalf("fences: %+v", s)
 	}
 	data, _ := json.Marshal(s)
 	if strings.Contains(string(data), `"host_holds"`) {
 		t.Fatal("empty legacy list must be omitted")
 	}
-	if !strings.Contains(string(data), `"holds_detail":[`) {
+	if !strings.Contains(string(data), `"holds":[`) {
 		t.Fatal("missing details array")
 	}
 }
@@ -133,19 +135,19 @@ func TestHoldsDetailProductionKinds(t *testing.T) {
 	// exercise the public status path after explicit maintenance.
 	h := q.s.Hosts["b70"]
 	h.Active = true
-	d := q.productionHoldDetail("b70")
-	if d.Kind != "production_hold" || d.OperatorActionRequired || d.Text != "b70: production hold" {
+	d := q.productionHold("b70")
+	if d.Kind != "production_hold" || d.operatorAction() || d.Detail != "b70: production hold" {
 		t.Fatalf("active: %+v", d)
 	}
 	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: a.Session, Attempt: 1, Until: c.Now().Add(10 * time.Second)}
 	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	d = q.productionHoldDetail("b70")
-	if d.Kind != "production_stopping" || d.OperatorActionRequired || d.Text != "b70: production hold; stopping 1 attempts; grace remaining 10s" {
+	d = q.productionHold("b70")
+	if d.Kind != "production_stopping" || d.operatorAction() || d.Detail != "b70: production hold; stopping 1 attempts; grace remaining 10s" {
 		t.Fatalf("grace: %+v", d)
 	}
 	c.Advance(10 * time.Second)
-	d = q.productionHoldDetail("b70")
-	if d.Kind != "production_release_unknown" || d.OperatorActionRequired || d.Text != "b70: production hold; release unknown: worker b70-0" {
+	d = q.productionHold("b70")
+	if d.Kind != "production_release_unknown" || d.operatorAction() || d.Detail != "b70: production hold; release unknown: worker b70-0" {
 		t.Fatalf("unknown: %+v", d)
 	}
 }
@@ -160,7 +162,18 @@ func TestHoldsDetailEmptyIsArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"holds_detail":[]`) || strings.Contains(string(data), `"host_holds"`) {
+	if !strings.Contains(string(data), `"holds":[]`) || strings.Contains(string(data), `"host_holds"`) {
 		t.Fatalf("empty holds fields: %s", data)
 	}
+}
+
+// The production and Docker fence evidence status used to list as host holds.
+func hostHoldTexts(holds []Hold) []string {
+	var out []string
+	for _, h := range holds {
+		if strings.HasPrefix(h.Kind, "production") || strings.HasPrefix(h.Kind, "docker") || h.Kind == "unclassified" {
+			out = append(out, h.Detail)
+		}
+	}
+	return out
 }

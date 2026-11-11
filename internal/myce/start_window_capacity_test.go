@@ -182,8 +182,8 @@ func TestStartWindowCapacityPreparationDisplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Blocker == nil || got.Blocker.Code != want || !strings.Contains(JobReason(got), "600s left to start (paused for capacity)") {
-				t.Fatalf("preparation observation hid paused budget: blocker=%+v display=%s", got.Blocker, JobReason(got))
+			if got.Hold == nil || got.Hold.Kind != want || !strings.Contains(JobReason(got), "600s left to start (paused for capacity)") {
+				t.Fatalf("preparation observation hid paused budget: blocker=%+v display=%s", got.Hold, JobReason(got))
 			}
 		})
 	}

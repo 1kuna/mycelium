@@ -84,8 +84,8 @@ func TestDeviceFaultStartBudgetRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if status.Blocker == nil || status.Blocker.Code != deviceFaultRetryHold || !strings.Contains(status.Blocker.Evidence, "paused for device recovery") {
-				t.Fatal("held recovery hid its blocker or paused budget", status.Reason, status.Blocker)
+			if status.Hold == nil || status.Hold.Kind != deviceFaultRetryHold || !strings.Contains(status.Hold.Detail, "paused for device recovery") {
+				t.Fatal("held recovery hid its blocker or paused budget", status.Reason, status.Hold)
 			}
 			m.Devices[0].Reason, m.Devices[0].FreeMemoryGB = "", 8
 			wantDevice := "0"
@@ -187,8 +187,8 @@ func TestDeviceFaultStartBudgetRecoveryBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Blocker == nil || status.Blocker.Code != deviceFaultRetryHold {
-		t.Fatal("recovery wait hid its blocker before its bound", status.Reason, status.Blocker)
+	if status.Hold == nil || status.Hold.Kind != deviceFaultRetryHold {
+		t.Fatal("recovery wait hid its blocker before its bound", status.Reason, status.Hold)
 	}
 	q = reopenCancellationQueue(t, q, clock)
 	machineCheck(t, q, m)

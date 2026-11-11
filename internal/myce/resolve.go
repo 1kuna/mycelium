@@ -24,7 +24,7 @@ type ResolveRequest struct {
 
 type ResolveReport struct {
 	Linkage     []MachOLinkage     `json:"linkage,omitempty"`
-	Blocker     *Blocker           `json:"blocker,omitempty"`
+	Hold        *Hold              `json:"hold,omitempty"`
 	FileInputs  []ResolveFileInput `json:"file_inputs,omitempty"`
 	ObservedAt  time.Time          `json:"observed_at"`
 	Resolved    []string           `json:"resolved"`
@@ -137,7 +137,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		r.Notes = append(r.Notes, "Model snapshots are verified by the worker before launch; a missing or changed snapshot fails the attempt with a named model_snapshot reason.")
 	}
 	if !ok || err != nil {
-		r.Blocker = ResolveFindingBlocker(r.Findings)
+		r.Hold = ResolveFindingHold(r.Findings)
 		r.Notes = append(r.Notes, "Targets are evaluated once the environment and extension resolve.")
 		return r, nil
 	}
@@ -182,9 +182,9 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		p := view.portabilityWithRecipes(PortabilityRequest{Spec: &s, RequirementReasons: req.RequirementReasons}, sets)
 		r.Portability = &p
 	}
-	r.Blocker = view.actionableBlocker(j)
-	if r.Blocker != nil && r.Blocker.Code == "waiting_for_worker" {
-		r.Blocker = nil
+	r.Hold = view.jobHold(j)
+	if r.Hold != nil && r.Hold.Kind == "waiting_for_worker" {
+		r.Hold = nil
 	}
 
 	eligible := 0
@@ -209,8 +209,8 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if eligible == 0 && len(r.Targets) > 0 {
 		r.Notes = append(r.Notes, "No eligible target: fix the first blocker on the closest target; submission with require_target would refuse.")
 	}
-	if finding := ResolveFindingBlocker(r.Findings); finding != nil {
-		r.Blocker = finding
+	if finding := ResolveFindingHold(r.Findings); finding != nil {
+		r.Hold = finding
 	}
 	return r, nil
 }
@@ -401,8 +401,8 @@ func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
 			fmt.Fprintln(&out, "Warning: "+d.String())
 		}
 	}
-	if r.Blocker != nil {
-		fmt.Fprintln(&out, r.Blocker.Text())
+	if r.Hold != nil {
+		fmt.Fprintln(&out, r.Hold.FullText())
 	}
 	fmt.Fprintf(&out, "Resolution observed %s\n", r.ObservedAt.Format(time.RFC3339))
 	for _, line := range r.Resolved {

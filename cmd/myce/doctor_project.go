@@ -58,7 +58,7 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	}
 	addFinding := func(prefix string, finding myce.ResolveFinding) {
 		state, owner := "advice", "consumer"
-		if b := myce.ResolveFindingBlocker([]myce.ResolveFinding{finding}); b != nil {
+		if b := myce.ResolveFindingHold([]myce.ResolveFinding{finding}); b != nil {
 			state, owner = "blocked", b.Owner
 		}
 		add(prefix+finding.Field, state, owner, finding.Fix)
@@ -248,13 +248,13 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 	for _, finding := range report.Findings {
 		addFinding("resolve: ", finding)
 	}
-	if b := report.Blocker; b != nil {
+	if b := report.Hold; b != nil {
 		state := "blocked"
-		if b.Code == "unprepared" && b.Owner == "queue" || b.Code == "building" || b.Code == "waiting_for_worker" {
+		if b.Kind == "unprepared" && b.Owner == "queue" || b.Kind == "building" || b.Kind == "waiting_for_worker" {
 			state = "advice"
 		}
-		add("resolve: "+b.Dependency, state, b.Owner, b.Action)
-		checks[len(checks)-1].Evidence = b.Evidence
+		add("resolve: "+b.Reason, state, b.Owner, b.Next)
+		checks[len(checks)-1].Evidence = b.Detail
 	}
 	for _, name := range slices.Sorted(maps.Keys(request.Spec.SharedInputs)) {
 		input := request.Spec.SharedInputs[name]
@@ -268,9 +268,9 @@ func projectDoctorWithAuthority(ctx context.Context, args []string, out, errOut 
 		}
 	}
 	if !slices.ContainsFunc(report.Targets, func(t myce.ResolveTarget) bool { return t.Eligible }) {
-		if b := report.Blocker; b != nil {
-			add("target coverage", "blocked", b.Owner, b.Action)
-			checks[len(checks)-1].Evidence = b.Evidence
+		if b := report.Hold; b != nil {
+			add("target coverage", "blocked", b.Owner, b.Next)
+			checks[len(checks)-1].Evidence = b.Detail
 		} else {
 			add("target coverage", "blocked", "queue owner", "restore a compatible qualified target or correct the declared needs")
 			for _, target := range report.Targets {

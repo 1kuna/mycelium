@@ -9,11 +9,13 @@ import (
 // Explain admission on the job's own targets, using the same target checks and
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
-func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
+func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) (string, string) {
 	if why := q.memoryEvidenceWaitingReason(j); why != "" {
-		return why
+		return "memory", why
 	}
 	var reasons []string
+	// One kind when every blocked target agrees; mixed causes are capacity.
+	kinds := map[string]bool{}
 	specific := false
 	for _, m := range q.planningMachines(scans...) {
 		if !q.jobAllowsMachine(j, m.ID) {
@@ -44,30 +46,34 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
 				continue
 			}
 			var blocked []string
+			block := func(kind, why string) {
+				blocked = append(blocked, why)
+				kinds[kind] = true
+			}
 			if !toolsFit(candidate, m) {
-				blocked = append(blocked, targetFitReason("tools", candidate, m))
+				block("capability", targetFitReason("tools", candidate, m))
 			}
 			if !nativeNetworkFits(candidate, m) {
-				blocked = append(blocked, targetFitReason("native network isolation", candidate, m))
+				block("capability", targetFitReason("native network isolation", candidate, m))
 			}
 			if why := sharedHostRefusal(candidate, m); why != "" {
-				blocked = append(blocked, why)
+				block("capability", why)
 			} else if !environmentCanRun(candidate, m) {
-				blocked = append(blocked, targetFitReason("environment", candidate, m))
+				block("capability", targetFitReason("environment", candidate, m))
 			}
 			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
-				blocked = append(blocked, targetFitReason("memory envelope", candidate, m))
+				block("memory", targetFitReason("memory envelope", candidate, m))
 			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.
 			if len(blocked) == 0 {
 				if why := q.reservationReasonOnTarget(j, m); why != "" {
-					blocked = append(blocked, why)
+					block("reservation", why)
 				}
 			}
 			if len(blocked) == 0 {
 				if why := q.cardWaitingReason(candidate, m); why != "" {
-					blocked = append(blocked, why)
+					block("capacity", why)
 				}
 			}
 			// Permanent capacity above deliberately ignores current occupancy.
@@ -81,12 +87,12 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
 				if why == "" {
 					why = fmt.Sprintf("%d cores needed; %d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", candidate.Spec.Needs.cores(), m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
 				}
-				blocked = append(blocked, "CPU capacity: "+why)
+				block("capacity", "CPU capacity: "+why)
 			}
 			// Permanent qualification also clears temporary availability. Such
 			// a host cannot serve this job just because its cores and RAM fit.
 			if m.Disabled != "" || m.Gone || m.Leaving || m.Recovering || availabilityBlocked(m) {
-				blocked = append(blocked, HyphaAvailability(m))
+				block("host_unavailable", HyphaAvailability(m))
 			}
 			specific = specific || len(blocked) > 0
 			if why := hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB); why != "" {
@@ -98,16 +104,16 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
 				if why != "host memory" {
 					detail += "; " + why
 				}
-				blocked = append(blocked, detail)
+				block("memory", detail)
 			}
 			if len(blocked) == 0 {
-				return "" // Another target can serve it; retain ordinary queue ordering.
+				return "", "" // Another target can serve it; retain ordinary queue ordering.
 			}
 			reasons = append(reasons, m.ID+": "+strings.Join(blocked, "; "))
 		}
 	}
 	if !specific {
-		return ""
+		return "", ""
 	}
 	slices.Sort(reasons)
 	reason := strings.Join(slices.Compact(reasons), "; ")
@@ -116,7 +122,13 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) string {
 		// blocker is more specific than the ordinary allowed-machine wait.
 		reason = "waiting for allowed machines: " + strings.Join(j.Spec.AllowedMachines, ", ") + "; " + reason
 	}
-	return reason
+	kind := "capacity"
+	if len(kinds) == 1 {
+		for k := range kinds {
+			kind = k
+		}
+	}
+	return kind, reason
 }
 
 // Occupancy is not RAM pressure. Explain the same sharing/release gate used by

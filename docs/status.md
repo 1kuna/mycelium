@@ -120,7 +120,7 @@ Workers send the additive health fields only after the queue advertises
 requires `host_mount_progress_protocol: mount-progress-v1`; v1-only queues still
 receive the original health and collection payloads. A strict older queue receives the
 legacy shape; local evidence still persists and unknown health or a confirmed
-local drain uses reversible availability withholding. After a queue rollback the worker retries the legacy shape once
+local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing
@@ -804,7 +804,7 @@ With `device-recovery-v1` support (#1142), `devices[].quarantine_recovery`
 records an automatic clear's fault hash, healthy interval, observation window,
 vendor probe and queue-owned transition receipt (`observed_at`). Older queues
 receive inventory without this optional field. `attempt_history[].device_fault`
-is queue-owned host/backend loss evidence, and `blocker.code:
+is queue-owned host/backend loss evidence, and `hold.kind:
 device_fault_last_healthy` explains a held retry. See
 [device quarantine](reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine) for
 recovery conditions and mixed-version behavior.
@@ -1392,26 +1392,32 @@ reflects both managed and unmanaged usage. Discrete CUDA and other platforms
 retain their existing memory admission rules. Production priority and takeover
 rules are unchanged.
 
-Host gates should read `holds_detail`, an array (empty when there are no holds)
-whose entries have `host`, `kind`, `operator_action_required`, `text` and an
-optional `clears_at` timestamp. Entries are sorted by host and kind; a host can
-have several holds at once. Do not match English text to choose an action.
+Host gates should read `holds`, an array (empty when there are no holds) of
+the same hold record jobs use: `kind`, `scope` (the host, device or selector),
+`owner`, `reason`, `clears`, optional `expires`, `next` and `detail`. Entries are
+sorted by scope and kind; a host can have several holds at once. Choose an
+action from `kind` and `owner`, never from English text. `owner: operator` means
+no automatic path clears it. Reservations, component exclusions and disabled
+devices also appear here, beside their own records.
 
-| `kind` | `operator_action_required` | `clears_at` | When emitted |
-| --- | --- | --- | --- |
-| `production_hold` | false | omitted | Active production demand on a host-scope hold, including work between stages. Device-scope holds emit none. |
-| `production_stopping` | false | omitted | Lower-priority work is within its stop grace. |
-| `production_release_unknown` | conditional | omitted | Production reservation has an unconfirmed release. True only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based flag. Draining calls, recovery and the short wait for a kill result are false. |
-| `docker_transition` | false | omitted | Recognized Docker startup/stop operation or final release report in progress. |
-| `docker_cleanup_waiting` | false | omitted | Retained Docker custody or a `cleanup unconfirmed:`-prefixed status awaits confirmation, before escalation. |
-| `docker_cleanup_operator_action` | true | omitted | Docker custody reached the cleanup escalation bound (`myce resolve-docker`). |
-| `startup_release` | conditional | omitted | Failed startup awaits exact execution release; true when any corresponding worker is gone/missing. |
-| `host_disabled` | false | omitted | Queue host maintenance is drained/disabled. Does not clear by itself; not a fault. A machine's `disabled` field is a status projection of this queue policy. |
-| `unclassified` | true | omitted | A production host blocker has no recognized explicit classification, or a worker reports an unrecognized Docker status (for example, `pull pending`). Never treated as self-clearing. |
+| `kind` | owner | When emitted |
+| --- | --- | --- |
+| `production_hold` | queue | Active production demand on a host-scope hold, including work between stages. Device-scope holds emit none. |
+| `production_stopping` | queue | Lower-priority work is within its stop grace. |
+| `production_release_unknown` | queue or operator | Production reservation has an unconfirmed release. Operator only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based case. Draining calls, recovery and the short wait for a kill result stay with the queue. |
+| `docker_transition` | queue | Recognized Docker startup/stop operation or final release report in progress. |
+| `docker_cleanup_waiting` | queue | Retained Docker custody or a `cleanup unconfirmed:`-prefixed status awaits confirmation, before escalation. |
+| `docker_cleanup_operator_action` | operator | Docker custody reached the cleanup escalation bound (`myce resolve-docker`). |
+| `startup_release` | queue or operator | Failed startup awaits exact execution release; operator when any corresponding worker is gone/missing. |
+| `host_disabled` | operator | Queue host maintenance is drained/disabled. Does not clear by itself; resume with `myce host resume HOST`. A machine's `disabled` field is a status projection of this queue policy. |
+| `reservation_active` | reservation owner | A reservation holds components for one job until release or `expires`. |
+| `component_exclusion` | operator | An active exclusion removes components from placement. |
+| `device_maintenance` | operator | An operator disabled a device. |
+| `unclassified` | operator | A production host blocker has no recognized explicit classification, or a worker reports an unrecognized Docker status (for example, `pull pending`). Never treated as self-clearing. |
 
-There is no idle production cooldown. `clears_at` is optional; refresh before acting. A false
-operator flag means no fault currently demands operator attention, not that
-release is proven or that recovery has a deadline. In particular, deliberate
+There is no idle production cooldown. `expires` is optional; refresh before acting. A queue
+owner means no fault currently demands operator attention, not that release is
+proven or that recovery has a deadline. In particular, deliberate
 Queue admission stays drained/disabled until explicit resume. Cleanup acknowledgements may clear an
 escalated hold without an operator override; custody remains fenced until proven.
 
@@ -1427,8 +1433,7 @@ and does not emit a second escalation event.
 
 Known limits: a recovering model slot without `StopAt` has no time-based
 escalation deadline while its worker remains present. A deliberate disabled-host
-hold stays non-fault (`operator_action_required: false`) even if its disabled
-worker later dies. Check worker liveness and model release evidence separately;
+hold stays `host_disabled` even if its disabled worker later dies. Check worker liveness and model release evidence separately;
 these holds alone do not prove release or eventual recovery.
 
 For run monitoring, distinguish routine reservations and transitions from
@@ -1437,11 +1442,6 @@ a hold's automatic recovery does not make the host safe: wait for relevant holds
 to clear and verify assignments, loaded models and attempt release evidence.
 Treat unreadable status, missing/invalid details, or unknown kinds as unresolved.
 An empty hold list alone does not prove a specific attempt has released custody.
-
-The compatibility field `host_holds` remains a list of the existing strings and
-is **omitted when empty**. `text` equals the corresponding existing string; the
-additional startup-release and disabled-host entries use the queue's existing
-fence messages and appear only in `holds_detail`.
 
 The CLI and page label the effective host allowance **last reported**, including
 stopped workers, with `memory_allowance_bytes` and UNQUALIFIED qualification.
@@ -2443,7 +2443,7 @@ From the next release, nonterminal native variant jobs expose
 An explicit work parity list also constrains historical extensions without
 variants. When that list excludes every qualified candidate, status reports
 `production_parity_hosts: held: host not in production parity list` and the
-typed `blocker.code` is `production_parity_hosts`, owned by the queue owner.
+typed `hold.kind` is `production_parity_hosts`, owned by the queue owner.
 The action is reference-output comparison and explicit physical-host approval
 for that exact work. A queued binding to a removed host is cleared and placed
 again; running attempts retain their execution and release custody.
@@ -2502,14 +2502,27 @@ as `other` with a redacted-key locator. Free-form explanations stay in authored
 source, private receipts and frozen intent, under the existing privacy default.
 There is no raw-text exception or full-spec status mode.
 
-## Primary consumer blocker
+## One hold record
 
-Resolve and queued job observations expose an additive `blocker` with `code`,
-`dependency`, `owner`, `action` and `evidence`. CLI resolve, status, the web page
-and the initial wait observation lead with this same projection. Aggregate order
-is additional context; it does not choose a different primary dependency than
-job GET. The projection reads the existing qualification, waiting-reason and
-preparation facts on a detached snapshot; it changes no admission decision.
+Every reason Mycelium keeps runnable work waiting is one record: a queued or
+paused job's `hold`, resolve's `hold`, and each entry of snapshot `holds`. It has
+`kind` (the mechanism, a stable code), `owner` (who clears it), `reason` (one
+plain sentence), `clears` (the condition), optional `expires`, `next` (one
+action) and `detail` (the producing mechanism's evidence). Default and compact
+status show `reason` and a `next:` line; `myce status JOB_ID`, `--full`, resolve
+and JSON add `detail`. The scheduler tags the kind where it decides the wait, so
+no view infers the mechanism from reason text. The record changes no admission
+decision.
+
+Job kinds: `upstream`, `paused`, `device_fault_last_healthy`, `launch_capacity`,
+`scarce_host_yield`, `shared_host_backoff`, `storage_root`,
+`production_parity_hosts`, `production_parity`, `no_matching_device`,
+`log_policy`, `project_cap`, `production_admission`, `production_hold`,
+`production_reserved`, `pinned_model`, `disk_headroom`, Docker cleanup kinds,
+`reservation`, `capacity` (mixed or card/CPU causes), `memory`, `host_backfill`,
+`host_unavailable`, `capability`, `shared_input`, `docker_runtime`, `extension`,
+`no_eligible_host`, `waiting_for_worker` and the preparation and coverage kinds
+below. An unknown kind is unresolved; read its `owner` and `next`.
 
 `unprepared` means no builder has started; `waiting_for_builder` distinguishes
 an unstarted offer or unavailable preparation core; `building` requires a fresh
@@ -2517,7 +2530,6 @@ builder report. `deterministically_failed` retains the failed immutable recipe's
 cause and log excerpt: the consumer must fix its inputs. Transient failures retain
 the existing retry evidence. `unknown_observation` asks the queue owner to restore
 missing/stale observations; it never claims preparation is progressing.
-`resource_pressure` retains the existing RAM, card, reservation or policy reason.
 A ready alternative takes precedence over preparation on another target.
 
 Queue builds with placement coverage diagnostics distinguish `missing_extension`
@@ -2567,7 +2579,7 @@ command started (`queue_admission`, owner `mycelium`), launch failures (`library
 `tools_missing`, `input_unavailable`, `launch_*`), upstream dependencies,
 nonzero exits and payload signals. A failure with no typed cause reports
 `cause_unknown` rather than a guess. Succeeded and cancelled jobs carry none;
-waiting explanations remain in `blocker`.
+waiting explanations remain in `hold`.
 
 ## Read-only consumer project doctor
 
@@ -2583,7 +2595,7 @@ configuration. It leads with ready/blocked, the next owner and one action;
 blocking checks exit 1, invalid options exit 2. Findings retain their evidence
 and fixes. Queue-side unreadable locks remain queue-owner holds. Current resource
 pressure, failed preparation, missing builders and unknown observations reuse
-resolve's blocker. Cold environments with an available builder can be submitted
+resolve's hold. Cold environments with an available builder can be submitted
 normally; target eligibility still does not promise immediate capacity.
 
 No notifier is a valid foreground `myce wait` workflow, explicitly distinguished

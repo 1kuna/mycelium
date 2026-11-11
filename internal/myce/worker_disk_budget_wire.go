@@ -5,9 +5,8 @@ const workerDiskBudgetProtocol = "worker-disk-budget-v1"
 // Queues advertising this accept the foreign-headroom fields on disk budgets.
 const workerDiskHeadroomProtocol = "worker-disk-headroom-v1"
 
-// The previous release strictly decodes check-ins and predates disk headroom
-// telemetry. Only additive fields wait for an advertisement on the serialized
-// check-in lane; a strict refusal retries once without them.
+// r6.8 strictly decodes check-ins and predates disk-budget telemetry. Only
+// these new fields wait for an advertisement on the serialized check-in lane.
 type workerDiskBudgetWire struct {
 	machine, session    string
 	supported, headroom bool

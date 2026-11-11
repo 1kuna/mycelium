@@ -29,9 +29,9 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		CopyReports:        []CopyReport{{Model: "embed", State: "copying", Bytes: 50, Total: 100}},
 	}
 	snapshot := Snapshot{
-		HostHolds: []string{"b70: Docker cleanup unconfirmed; operator action required (myce resolve-docker)"},
-		Jobs:      []*Job{job},
-		Machines:  []*Machine{machine},
+		Holds:    []Hold{scopedHold("docker_cleanup_operator_action", "b70", "b70: Docker cleanup unconfirmed; operator action required (myce resolve-docker)", true)},
+		Jobs:     []*Job{job},
+		Machines: []*Machine{machine},
 		LoadedModels: []ModelSlot{
 			{Machine: "spark", Model: "qwen", State: "ready", InFlight: 2, Error: "load warning"},
 		},

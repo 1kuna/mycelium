@@ -16,12 +16,12 @@ import (
 
 func TestWaitActionableBlockerThenQuietSuccess(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	b := &myce.Blocker{Code: "waiting_for_builder", Dependency: "environment tools", Owner: "queue", Action: "wait for the offered builder", Evidence: "no builder report"}
+	b := &myce.Hold{Kind: "waiting_for_builder", Reason: "environment tools", Owner: "queue", Next: "wait for the offered builder", Detail: "no builder report"}
 	var done atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		j := myce.Job{ID: "cpu-job", State: "queued", Blocker: b}
+		j := myce.Job{ID: "cpu-job", State: "queued", Hold: b}
 		if done.Load() {
-			j.State, j.Blocker = "succeeded", nil
+			j.State, j.Hold = "succeeded", nil
 			j.DeadlineGuidance = &myce.DeadlineGuidance{Example: "deadline tutorial"}
 		}
 		if r.URL.Path == "/api/wait" {

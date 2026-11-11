@@ -114,9 +114,6 @@ type state struct {
 	UsageAt          time.Time                    `json:"usage_at,omitempty"`
 	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
 
-	// Per adapter/profile entry without targets (#853): recipe, proven and skipped types.
-	EntryCoverage map[string]entryCoverageRecord `json:"entry_coverage,omitempty"`
-
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
 	Pins         []ModelPin            `json:"pins,omitempty"`
@@ -259,6 +256,7 @@ type Queue struct {
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
 
 	persistencePageBytes    int
+	machineRecords          bool
 	observePersistence      func(queuePersistenceTiming)
 	observePersistenceHold  func(queueHoldPhases)
 	maintenance             *queueMaintenance
@@ -874,7 +872,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
 	var discovery *CommandDiscovery
-	var entryCoverage *EntryCoverage
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		// Digest before freezeRecipes moves the bytes to the file store.
@@ -887,9 +884,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if recipeErr != nil {
 				recipeErr = rejectFieldRule("job_environment_invalid", recipeErr)
 			}
-		}
-		if recipeErr == nil {
-			entryCoverage = deriveEntryCoverage(prepared, recipes, discovery)
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -1042,7 +1036,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		} else {
 			id = ID()
 		}
-		j := &Job{EntryCoverage: entryCoverage, CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
+		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -1076,9 +1070,6 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
-		}
-		if j.EntryCoverage != nil && q.entryCoverageProduction(j) {
-			return rejectFieldRule("job_placement_invalid", errors.New("production entries declare explicit targets (MY-19 parity); only non-production entries may omit them"))
 		}
 		if s.RequireTarget || nativeNetworkRequired(j) {
 			if ok, reason := q.qualifiedTarget(j); !ok {
@@ -2366,11 +2357,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 		q.recordAttemptLearning(j, r)
 		q.recordModelUse(j.Spec.Needs.Model)
-		q.recordEntryCoverageSuccess(j, r.Machine)
 		j.State = "succeeded"
-	} else if q.entryCoverageFailure(j, r.Machine) {
-		// A coverage finding requeued the job onto another machine type, or
-		// failed it with the finding when no proven type remains.
 	} else {
 		j.State = "failed"
 		j.Reason = "command failed: " + r.Error
@@ -2422,7 +2409,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	compact := q.observationSelection != nil && q.observationSelection.compact
-	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade
@@ -2463,22 +2450,12 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.Warning = strings.Join(warnings, "; ")
 	for host := range q.s.Hosts {
 		if q.held(host) {
-			detail := q.productionHoldDetail(host)
-			out.HostHolds = append(out.HostHolds, detail.Text)
-			out.HoldsDetail = append(out.HoldsDetail, detail)
+			out.Holds = append(out.Holds, q.productionHold(host))
 		}
 	}
 	hosts := map[string]bool{}
 	for _, m := range q.s.Machines {
 		hosts[hostID(m)] = true
-	}
-	for host := range hosts {
-		if detail := q.dockerHoldDetail(host); detail.Text != "" {
-			if !slices.Contains(out.HostHolds, detail.Text) {
-				out.HostHolds = append(out.HostHolds, detail.Text)
-			}
-			out.HoldsDetail = append(out.HoldsDetail, detail)
-		}
 	}
 	// Also report fences without a configured production policy or live worker.
 	for _, r := range q.s.HostReleases {
@@ -2494,31 +2471,23 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	}
 
 	out.HostStates = make(map[string]string, len(hosts))
-	for host, hasMachine := range hosts {
+	for host := range hosts {
 		out.HostStates[host] = q.hostMaintenanceStatus(host).State
 		out.DeviceMaintenance = append(out.DeviceMaintenance, q.deviceMaintenanceStatus(host)...)
-		if !hasMachine {
-			if detail := q.dockerHoldDetail(host); detail.Text != "" {
-				out.HoldsDetail = append(out.HoldsDetail, detail)
-			}
+		if h := q.dockerHold(host); h.Kind != "" {
+			out.Holds = append(out.Holds, h)
 		}
-		if detail := q.startupReleaseDetail(host); detail.Text != "" {
-			out.HoldsDetail = append(out.HoldsDetail, detail)
+		if h := q.startupReleaseHold(host); h.Kind != "" {
+			out.Holds = append(out.Holds, h)
 		}
 		if q.maintenanceBlocked(host) {
-			out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
+			h := scopedHold("host_disabled", host, "host "+host+" disabled by operator", true)
+			h.Next = strings.ReplaceAll(h.Next, "HOST", host)
+			out.Holds = append(out.Holds, h)
 		}
 	}
 	slices.SortFunc(out.DeviceMaintenance, func(a, b DeviceMaintenance) int {
 		return strings.Compare(a.Host+"/"+deviceMaintenanceKey(a.Platform, a.Identity), b.Host+"/"+deviceMaintenanceKey(b.Platform, b.Identity))
-	})
-	sort.Strings(out.HostHolds)
-	sort.Slice(out.HoldsDetail, func(i, j int) bool {
-		a, b := out.HoldsDetail[i], out.HoldsDetail[j]
-		if a.Host != b.Host {
-			return a.Host < b.Host
-		}
-		return a.Kind < b.Kind
 	})
 	// Retained diagnostics are absent from compact captures; explicit section/full
 	// reads preserve every existing evidence field.
@@ -2539,6 +2508,8 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	}
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
+	out.Holds = append(out.Holds, operatorHolds(out.Reservations, out.ComponentExclusions, out.DeviceMaintenance)...)
+	sortHolds(out.Holds)
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := map[string]int{}, map[string]string{}
@@ -2703,7 +2674,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 	if reason := q.capReason(call); reason != "" {
 		call.Reason = reason
 	}
-	if reason := q.holdWaitReason(call); reason != "" {
+	if _, reason := q.holdWaitReason(call); reason != "" {
 		call.Reason = reason
 	}
 	if c.Machine == "" && model.HostMemoryGB > 0 {
@@ -2780,6 +2751,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 			if strings.HasPrefix(j.Reason, "no_matching_device:") {
 				j.DiagnosticCode = "no_matching_device"
 			}
+		}
+		if j.State == "paused" {
+			j.Hold = pauseHold(j)
 		}
 		key := j.Spec.SubmissionKey
 		lock := j.EnvironmentLock

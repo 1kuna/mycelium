@@ -289,8 +289,8 @@ func TestStatusCompactCallsAndFilteredCapacity(t *testing.T) {
 	if len(s.Jobs) != 1 || s.Jobs[0].ID != "model-queued" || s.Jobs[0].State != "queued" {
 		t.Fatal("filtered call identity/lifecycle lost", s.Jobs)
 	}
-	if len(s.HoldsDetail) == 0 || !strings.Contains(s.HoldsDetail[0].Text, "stopping") {
-		t.Fatal("call hold lost", s.HoldsDetail)
+	if len(s.Holds) == 0 || !strings.Contains(s.Holds[0].Detail, "stopping") {
+		t.Fatal("call hold lost", s.Holds)
 	}
 	if s.Machines[0].AdmissionReason != "maximum simultaneous jobs reached" {
 		t.Fatal("filter changed fleet capacity", s.Machines[0].AdmissionReason)
