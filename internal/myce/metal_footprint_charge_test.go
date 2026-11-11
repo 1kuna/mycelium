@@ -48,7 +48,7 @@ func TestMetalUsedMemoryCharge(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := metalFootprintJob(at)
-			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, tc.sample, at)
+			charge, growth := memoryCharge(&j, &m, ceiling, tc.sample, at)
 			if !near(charge, tc.charge) || !near(growth, tc.growth) {
 				t.Fatalf("charge=%g growth=%g, want %g/%g", charge, growth, tc.charge, tc.growth)
 			}
@@ -74,7 +74,7 @@ func TestMetalUsedMemoryCharge(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			j, mm, s := metalFootprintJob(at), metalFootprintMachine(), sample
 			tc.edit(&j, &mm, &s)
-			if _, _, ok := usedMemoryCharge(&j, &mm, hostNeed(&mm, 8, 2), s, at); ok {
+			if _, lend := lendingFloor(&j, &mm, s, at); lend != lendNone {
 				t.Fatal("charged by use without footprint containment")
 			}
 		})

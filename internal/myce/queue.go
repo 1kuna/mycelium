@@ -1635,7 +1635,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		reply.HostMaintenance = q.s.HostMaintenance[hostID(&m)].Mode
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
-			if h := q.s.Hosts[hostID(old)]; q.maintenanceKnown(hostID(old)) || old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
+			if h := q.s.Hosts[hostID(old)]; q.maintenanceKnown(hostID(old)) || old.HostMemoryBudgetGB > 0 || old.EffectiveHostMemoryBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {
 					if slot.Machine == m.ID && slot.Session == old.Session {
 						return errors.New("previous model execution release unknown; prior-session cleanup required")

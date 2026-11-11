@@ -403,7 +403,7 @@ func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retaine
 	v.s, v.models, v.calls, v.unreported = detached.State, detached.Models, detached.Calls, detached.Unreported
 	for id, m := range v.s.Machines {
 		original := s.Machines[id]
-		m.cpuLedger, m.hostBudgetGB = original.cpuLedger, original.hostBudgetGB
+		m.cpuLedger = original.cpuLedger
 		m.modelReservationDebtGB, m.hostReservationDebtGB = original.modelReservationDebtGB, original.hostReservationDebtGB
 	}
 	v.observationSelection = selection

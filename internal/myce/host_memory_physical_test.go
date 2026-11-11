@@ -34,7 +34,7 @@ func TestHostMemoryAcceleratorForecastPhysicalBound(t *testing.T) {
 		t.Fatal("fixture no longer reproduces the reported forecast")
 	}
 	q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
-	charge, pending := jobHostMemoryCharge(&j, &m, envelope, sample, clock.Now())
+	charge, pending := memoryCharge(&j, &m, envelope, sample, clock.Now())
 	if math.Abs(charge-physical) > 1e-9 || math.Abs(pending-(physical-resident)) > 1e-9 {
 		t.Errorf("forecast invented physical RAM: charge=%g pending=%g physical=%g resident=%g", charge, pending, physical, resident)
 	}
@@ -78,25 +78,25 @@ func TestHostMemoryPhysicalBoundPreservesEvidence(t *testing.T) {
 	m.CapabilityProfile.SystemMemoryBytes = 32 << 30
 	j := Job{ID: "holder", Attempt: 1, Session: m.Session, State: "running", Spec: spec("production")}
 	sample := hostMemorySample{gb: 7, footprintGB: 8, peakGB: 40, growthGB: 100, at: clock.Now()}
-	charge, pending := jobHostMemoryCharge(&j, &m, 13, sample, clock.Now())
+	charge, pending := memoryCharge(&j, &m, 13, sample, clock.Now())
 	if charge != 40 || pending != 33 {
 		t.Fatal("physical forecast cap discarded actual high water", charge, pending)
 	}
 	// Neither a declaration nor an opaque exact-attempt floor is a forecast.
 	j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: 1}, Session: m.Session, GiB: 48}
-	charge, _ = jobHostMemoryCharge(&j, &m, 50, sample, clock.Now())
+	charge, _ = memoryCharge(&j, &m, 50, sample, clock.Now())
 	if charge != 50 {
 		t.Fatal("physical bound weakened a known reservation", charge)
 	}
 	clock.Advance(sample.freshFor())
-	charge, pending = jobHostMemoryCharge(&j, &m, 13, sample, clock.Now())
+	charge, pending = memoryCharge(&j, &m, 13, sample, clock.Now())
 	if charge != 48 || pending != charge {
 		t.Fatal("stale evidence granted resident credit or lost a floor", charge, pending)
 	}
 	j.HostMemoryCharge = nil
 	sample.peakGB, sample.at = 8, clock.Now()
 	m.CapabilityProfile.SystemMemoryBytes = 0
-	charge, pending = jobHostMemoryCharge(&j, &m, 13, sample, clock.Now())
+	charge, pending = memoryCharge(&j, &m, 13, sample, clock.Now())
 	if charge != 108 || pending != 101 {
 		t.Fatal("unknown physical inventory invented a cap", charge, pending)
 	}

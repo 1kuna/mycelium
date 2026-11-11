@@ -74,7 +74,7 @@ func TestHostReleaseReviewerHandBack(t *testing.T) {
 		m := q.s.Machines["target"]
 		d := spec("production")
 		d.Needs = ResourceNeeds{CPUCores: cores}
-		jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, d, nil, nil)
+		jobs, slots, ok := q.hostReleases(m, 0, 0, d.Priority, d)
 		fits, used := releaseHandBackLedger(t, q, m, jobs, slots, false, cores)
 		return result{ok, releaseTestIDs(jobs, slots)}, fits, used
 	}

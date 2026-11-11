@@ -664,7 +664,6 @@ type Machine struct {
 	HostMemoryDerivation        *HostMemoryDerivation `json:"host_memory_derivation,omitempty"`
 	EffectiveHostMemoryBudgetGB float64               `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64               `json:"host_memory_in_use_gb,omitempty"`
-	hostBudgetGB                float64               // Effective shared-host queue allowance; compared against every device report.
 	modelReservationDebtGB      float64               // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
 	hostReservationDebtGB       float64               // Same deficit for the shared host allowance.
 	MemoryEnforcement           string                `json:"memory_enforcement,omitempty"`

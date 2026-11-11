@@ -223,7 +223,8 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		// The pin alone can spend its planning reservation. It is never
 		// returned to the batch scheduler during crash backoff.
 		room.FreeMemoryGB = max(0, room.FreeMemoryGB+model.MemoryGB-m.modelReservationDebtGB)
-		room.FreeHostMemoryGB = max(0, room.FreeHostMemoryGB+hostNeed(m, model.MemoryGB, model.HostMemoryGB)-m.hostReservationDebtGB)
+		after := q.hostRoomAfter(m, nil, []*ModelSlot{s})
+		room.FreeHostMemoryGB, room.hostReservationDebtGB = max(0, after), max(0, -after)
 	}
 	plan := q.roomPlan(job, &room, false)
 	if plan == nil {

@@ -174,20 +174,33 @@ Linux uses `MemAvailable`; macOS uses free plus inactive pages from `vm_stat`.
 `--reserve-host-memory-gb` (default 0) withholds extra OS/other-workload headroom;
 on unified memory the larger of it and `--reserve-memory-gb` applies once.
 The queue uses its durable host memory policy, within every worker's acknowledged
-allowance, and subtracts all outstanding declared allocations, including loading models
-and stopping/draining work. This is intentionally conservative: resident memory
-already reduces the live OS allowance, and its declared reservation is retained
-to cover growth rather than guessing process usage. A slower/stale sibling
+allowance, and subtracts every outstanding charge (below), including loading models
+and stopping/draining work. A slower/stale sibling
 report can temporarily reduce admission until its next check-in. This is
 aggregate admission; external allocations can still race it. Workers repeat
 live refusal after preparation and before batch/model starts.
 
-Each host keeps one memory ledger. Capacity is the smallest live worker reading
-less one margin: the largest of the explicit host reserve, the measured idle
-burst, the unified CUDA physical floor and the interactive owner reserve,
-applied once, never stacked. Room is that capacity less the outstanding growth
-of every charge, within the host's one allowance less the charges, which workers
-enforce at launch.
+Each host keeps one memory ledger and one rule: room = capacity − Σ charge.
+
+- Capacity is the smallest live worker reading less one margin: the largest of
+  the explicit host reserve, the measured idle burst, the unified CUDA physical
+  floor and the interactive owner reserve, applied once, never stacked. It is
+  lowered to the host's one allowance, which workers enforce at launch.
+- A running attempt is charged its measured use plus forecast growth, bounded by
+  the ceiling that contains it (its cgroup, Docker limit or sampled guard, else
+  physical RAM). Measured high water is always kept. Live availability already
+  excludes resident memory, so that is credited once.
+- An attempt keeps its declared or learned envelope as the least it is charged,
+  unless it may lend the unused part: it is started, contained by a guard,
+  freshly sampled and has accepted history for this work and target (or is a
+  cold probe with complete evidence), and it is not on the shared interactive
+  host. A lender that grows back is stopped before the kernel would.
+
+Placement, release planning, exploratory sizing, fairness and backfill all read
+room after the releases they plan: each released owner returns its charge. A
+started unified CUDA attempt also returns its device memory to the live side,
+since no cgroup sample proves it. Admission still waits for the confirmed
+release and the worker's live recheck.
 
 On dedicated GPUs the host pool charges only `host_memory_gb`. On unified-memory
 machines, GPU and CPU allocations share one host pool:

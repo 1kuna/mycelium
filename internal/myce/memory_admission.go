@@ -48,6 +48,7 @@ type HostMemoryLedger struct {
 	DebtGB         float64           `json:"debt_gb"`
 	FreeGB         float64           `json:"free_gb"`
 	Owners         []HostMemoryOwner `json:"owners"`
+	enforcedGB     float64           // The enforced arm of SignedRoomGB (memory_room.go).
 }
 
 type HostMemoryOwner struct {
@@ -316,7 +317,7 @@ func (q *Queue) yieldMemoryOvercommit() {
 			h.pending = true
 		}
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
-		if usedMemoryChargeEligible(j, owner, sample, now) {
+		if _, lend := lendingFloor(j, owner, sample, now); lend == lendByUse {
 			h.used, h.byUse[j.ID] = true, true
 			// Growth expected until a stop releases memory: the last measured
 			// increment plus the rate over the stop grace and one sample

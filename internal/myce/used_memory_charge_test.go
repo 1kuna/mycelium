@@ -99,7 +99,7 @@ func TestUsedMemoryChargeGrowthContainedNotDoubleCharged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := at.Add(tc.age)
-			charge, growth := jobHostMemoryCharge(&j, &linux, ceiling, tc.sample, now)
+			charge, growth := memoryCharge(&j, &linux, ceiling, tc.sample, now)
 			if !near(charge, tc.charge) || !near(growth, tc.growth) {
 				t.Fatalf("charge=%g growth=%g, want %g/%g", charge, growth, tc.charge, tc.growth)
 			}
@@ -116,13 +116,13 @@ func TestUsedMemoryChargeGrowthContainedNotDoubleCharged(t *testing.T) {
 	dceiling := hostNeed(&darwin, 0, 16)
 	overshoot := 2 * darwinGuardReaction.Seconds() // 2 GiB/s
 	sample := hostMemorySample{footprintGB: 6, peakGB: 6, rateGB: 2, at: at}
-	charge, growth := jobHostMemoryCharge(&j, &darwin, dceiling, sample, at)
+	charge, growth := memoryCharge(&j, &darwin, dceiling, sample, at)
 	margin := exploratoryDriftMarginGB(&darwin) + overshoot
 	if !near(charge, 6+margin) || !near(growth, margin) {
 		t.Fatalf("darwin charge=%g growth=%g, want %g/%g", charge, growth, 6+margin, margin)
 	}
 	sample = hostMemorySample{footprintGB: 16.2, peakGB: 16.2, rateGB: 2, at: at}
-	if charge, _ := jobHostMemoryCharge(&j, &darwin, dceiling, sample, at); !near(charge, dceiling+overshoot) {
+	if charge, _ := memoryCharge(&j, &darwin, dceiling, sample, at); !near(charge, dceiling+overshoot) {
 		t.Fatal("darwin charge not bounded by ceiling plus guard overshoot", charge, dceiling+overshoot)
 	}
 }
@@ -154,7 +154,7 @@ func TestUsedMemoryChargeKeepsEnvelopeWithoutContainment(t *testing.T) {
 			m.MemoryEnforcement, m.MemoryCeilingSlackGB = cgroupEnforced, .125
 			j, s := usedChargeRunning(16, 4), sample
 			tc.edit(&j, &m, &s)
-			if _, _, ok := usedMemoryCharge(&j, &m, hostNeed(&m, j.Spec.Needs.MemoryGB, 16), s, at); ok {
+			if _, lend := lendingFloor(&j, &m, s, at); lend != lendNone {
 				t.Fatal("charged by use without containment")
 			}
 		})
@@ -408,7 +408,7 @@ func TestUnifiedUsedMemoryChargeGrowth(t *testing.T) {
 		{"observed above envelope", hostMemorySample{gb: 3, footprintGB: 3, peakGB: 3, deviceGB: 70, at: at, deviceAt: at}, 0, 73, 70},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			charge, growth := jobHostMemoryCharge(&j, &m, ceiling, tc.sample, at.Add(tc.age))
+			charge, growth := memoryCharge(&j, &m, ceiling, tc.sample, at.Add(tc.age))
 			if !near(charge, tc.charge) || !near(growth, tc.growth) {
 				t.Fatalf("charge=%g growth=%g, want %g/%g", charge, growth, tc.charge, tc.growth)
 			}
@@ -445,7 +445,7 @@ func TestUnifiedUsedMemoryChargeGrowth(t *testing.T) {
 			cp := *m.CapabilityProfile
 			mm.CapabilityProfile = &cp
 			tc.edit(&jj, &mm, &s)
-			if _, _, ok := usedMemoryCharge(&jj, &mm, ceiling, s, at); ok {
+			if _, lend := lendingFloor(&jj, &mm, s, at); lend != lendNone {
 				t.Fatal("GPU work charged by use without measured device memory")
 			}
 		})

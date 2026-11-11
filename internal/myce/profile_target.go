@@ -353,7 +353,7 @@ func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	// All other referenced inventory remains read-only for this planning pass.
 	copy := *target
 	copy.sharedInputClaims = nil
-	copy.hostBudgetGB, copy.modelReservationDebtGB, copy.hostReservationDebtGB = 0, 0, 0
+	copy.modelReservationDebtGB, copy.hostReservationDebtGB = 0, 0
 	copy.batchTenants = 0
 	if target.CapabilityProfile != nil {
 		profile := *target.CapabilityProfile

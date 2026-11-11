@@ -180,10 +180,18 @@ func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {
 	if q.s.ProgramNeeds == nil {
 		q.s.ProgramNeeds = map[string]SizeHint{}
 	}
-	old, floor, usage := q.s.ProgramNeeds[sample.programKey], sample.programFloor, sample.result.Usage
-	// Explicit floors and prior requirements never shrink. New headroom comes
-	// from the attempt sensors, rather than a universal percentage.
-	q.s.ProgramNeeds[sample.programKey] = SizeHint{MemoryGB: max(old.MemoryGB, floor.MemoryGB, usage.MemoryGB+deviceMemoryGrowthGB(sample.result.MemoryPeak)), HostMemoryGB: max(old.HostMemoryGB, floor.HostMemoryGB, usage.HostMemoryGB+memoryGrowthGB(sample.result.MemoryPeak))}
+	old, floor, usage, peak := q.s.ProgramNeeds[sample.programKey], sample.programFloor, sample.result.Usage, sample.result.MemoryPeak
+	// As for charges (memory_room.go), the need is the latest accepted use plus
+	// its measured growth, so a past forecast can come back down (#987).
+	// Unknown growth keeps the prior need; authored floors never shrink.
+	need := SizeHint{MemoryGB: max(floor.MemoryGB, usage.MemoryGB+deviceMemoryGrowthGB(peak)), HostMemoryGB: max(floor.HostMemoryGB, usage.HostMemoryGB+memoryGrowthGB(peak))}
+	if peak == nil || peak.DeviceGrowthGB == nil {
+		need.MemoryGB = max(need.MemoryGB, old.MemoryGB)
+	}
+	if peak == nil || peak.GrowthGB == nil {
+		need.HostMemoryGB = max(need.HostMemoryGB, old.HostMemoryGB)
+	}
+	q.s.ProgramNeeds[sample.programKey] = need
 	observation := *usage
 	sample.job.MeasuredNeeds = &observation
 }

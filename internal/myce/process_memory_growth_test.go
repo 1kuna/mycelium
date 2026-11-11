@@ -57,7 +57,7 @@ func TestProcessMemoryGrowthSustainedAdmissionAndPhysicalBound(t *testing.T) {
 	r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: s}
 	sample := currentHostMemorySamples([]AttemptReport{r}, clock.Now())[jobKey(j)]
 	clock.Advance(4 * time.Second)
-	charge, growth := jobHostMemoryCharge(&j, &m, 2, sample, clock.Now())
+	charge, growth := memoryCharge(&j, &m, 2, sample, clock.Now())
 	if math.Abs(charge-(5.1+exploratoryDriftMarginGB(&m))) > 1e-8 || growth != charge || charge <= 2 {
 		t.Fatalf("lost sustained growth or clipped at estimate: charge=%g growth=%g", charge, growth)
 	}
@@ -78,7 +78,7 @@ func TestProcessMemoryGrowthSustainedAdmissionAndPhysicalBound(t *testing.T) {
 	// A still-positive extreme slope may consume all physical room, but cannot
 	// invent hundreds of GiB of physical growth on this 16 GiB host.
 	sample.rateGB = 100
-	charge, growth = jobHostMemoryCharge(&j, &m, 2, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 2, sample, clock.Now())
 	if charge != 16 || growth != 16 {
 		t.Fatalf("physical bound credited room: charge=%g growth=%g", charge, growth)
 	}
@@ -88,38 +88,19 @@ func TestProcessMemoryGrowthSustainedAdmissionAndPhysicalBound(t *testing.T) {
 	if !sample.growthObserved || sample.gb != 0 {
 		t.Fatal("flat sample invalidated or RSS credited", sample)
 	}
-	charge, growth = jobHostMemoryCharge(&j, &m, 2, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 2, sample, clock.Now())
 	if charge != 2 || growth != 2 {
 		t.Fatal("flat sample did not preserve known floor", charge, growth)
 	}
 	clock.Advance(hostMemorySampleFreshFor)
-	charge, growth = jobHostMemoryCharge(&j, &m, 16, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 16, sample, clock.Now())
 	if charge != 16 || growth != 16 {
 		t.Fatal("stale sample released conservative charge", charge, growth)
 	}
 }
 
-func TestProcessMemoryGrowthPhysicalBoundPreservesEvidenceAndLinux(t *testing.T) {
+func TestProcessMemoryGrowthLinuxEstimatorUnchanged(t *testing.T) {
 	_, clock := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 16, 16)
-	m.CapabilityProfile.OS = "darwin"
-	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
-	if n := boundedProcessMemoryCharge(&m, 2, 20, 120); n != 20 {
-		t.Fatal("lost actual over-physical RSS", n)
-	}
-	if n := boundedProcessMemoryCharge(&m, 24, 4, 120); n != 24 {
-		t.Fatal("lost known floor", n)
-	}
-	m.CapabilityProfile.SystemMemoryBytes = 0
-	if n := boundedProcessMemoryCharge(&m, 2, 4, 120); n != 120 {
-		t.Fatal("fabricated physical bound", n)
-	}
-	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
-	m.CapabilityProfile.OS = "linux"
-	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
-	if n := boundedProcessMemoryCharge(&m, 2, 4, 120); n != 120 {
-		t.Fatal("changed hard-cgroup forecast", n)
-	}
 	// The existing Linux estimator deliberately keeps its original semantics.
 	var linux memoryGrowth
 	linux.observe(clock.Now(), 1)

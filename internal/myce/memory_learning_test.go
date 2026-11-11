@@ -93,3 +93,53 @@ func TestMemoryLearningRejectedProgramUsage(t *testing.T) {
 		})
 	}
 }
+
+// #987: an accepted forecast used to become a permanent program need. The need
+// follows the latest accepted use plus its measured growth, so it comes back
+// down; unknown growth keeps the prior need.
+func TestMemoryLearningProgramNeedsFollowAcceptedForecast(t *testing.T) {
+	q, clock := fixture(t)
+	e := fakeExtension(t)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := placementMachine("synthetic", "separate", 128, 128, e)
+	check(t, q, m, nil)
+	spec := placementSpec(true)
+	complete := func(growth *float64) string {
+		t.Helper()
+		queued := submit(t, q, spec)
+		run := check(t, q, m, nil).Job
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("not assigned")
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		r := result(run, true)
+		host := 4.0
+		r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: host}
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, GrowthGB: growth, DeviceGrowthGB: growth}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		return programNeedsKey(run, e, "fake")
+	}
+	forecast, corrected := 10.0, .25
+	key := complete(&forecast)
+	if got := q.s.ProgramNeeds[key]; got.MemoryGB != 12 || got.HostMemoryGB != 14 {
+		t.Fatal("accepted forecast not learned", got)
+	}
+	complete(&corrected)
+	if got := q.s.ProgramNeeds[key]; got.MemoryGB != 2.25 || got.HostMemoryGB != 4.25 {
+		t.Fatal("past forecast kept as a permanent need", got)
+	}
+	complete(nil)
+	if got := q.s.ProgramNeeds[key]; got.MemoryGB != 2.25 || got.HostMemoryGB != 4.25 {
+		t.Fatal("unknown growth lowered the need", got)
+	}
+	if next := submit(t, q, spec); next.Spec.Needs.MemoryGB != 2.25 || next.Spec.Needs.HostMemoryGB != 4.25 {
+		t.Fatal("next reservation kept the past forecast", next.Spec.Needs)
+	}
+}

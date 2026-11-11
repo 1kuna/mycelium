@@ -806,7 +806,7 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 	fresh := make(map[string]readFreshness, len(q.s.Machines))
 	for key, m := range q.s.Machines {
 		ledgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
-			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB}
 		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
 	}
@@ -974,7 +974,6 @@ func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt t
 		}
 		copy.toolInventory = l.toolInventory
 		copy.cpuLedger = l.cpuLedger
-		copy.hostBudgetGB = l.hostBudgetGB
 		copy.modelReservationDebtGB = l.modelReservationDebtGB
 		copy.hostReservationDebtGB = l.hostReservationDebtGB
 		source.s.Machines[key] = &copy

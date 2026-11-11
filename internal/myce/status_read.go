@@ -260,7 +260,6 @@ type observationMachineLedger struct {
 	healthDelivery         *hostHealthDelivery
 	toolInventory          *toolInventory
 	cpuLedger              bool
-	hostBudgetGB           float64
 	modelReservationDebtGB float64
 	hostReservationDebtGB  float64
 }
@@ -462,7 +461,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	machineLedgers := make(map[string]observationMachineLedger, len(s.Machines))
 	for key, m := range s.Machines {
 		machineLedgers[key] = observationMachineLedger{healthDelivery: q.freezeHostHealthDelivery(m),
-			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			toolInventory: m.toolInventory, cpuLedger: m.cpuLedger,
 			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB,
 		}
 	}
@@ -549,7 +548,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		if m.HostHealth != nil {
 			m.HostHealth.delivery = ledger.healthDelivery
 		}
-		m.cpuLedger, m.hostBudgetGB = ledger.cpuLedger, ledger.hostBudgetGB
+		m.cpuLedger = ledger.cpuLedger
 		m.modelReservationDebtGB, m.hostReservationDebtGB = ledger.modelReservationDebtGB, ledger.hostReservationDebtGB
 	}
 	for key := range gatherWait {

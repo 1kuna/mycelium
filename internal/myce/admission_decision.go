@@ -252,7 +252,6 @@ const (
 	predicateExistingAssignment   AdmissionPredicate = "existing_assignment"
 	predicateGroupDemand          AdmissionPredicate = "group_demand"
 	predicateHostBackfill         AdmissionPredicate = "host_backfill"
-	predicateHostMemoryPolicy     AdmissionPredicate = "host_memory_policy"
 	predicateHostRelease          AdmissionPredicate = "host_release"
 	predicateInventory            AdmissionPredicate = "inventory"
 	predicateLaunchCapacity       AdmissionPredicate = "launch_capacity"

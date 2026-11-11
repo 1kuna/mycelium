@@ -841,7 +841,6 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
-	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 	for _, release := range q.s.HostReleases {
 		if release.Host != hostID(m) || release.HostChargeGB <= 0 {
 			continue
@@ -851,13 +850,15 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release", true
 		}
 	}
+	var jobs []*Job
+	var slots []*ModelSlot
 	for _, running := range q.liveJobs() {
 		owner := q.planningAllocationMachine(q.s.Machines[running.Machine], running.AllocatedDevices)
 		if owner == nil || hostID(owner) != hostID(m) || running.ReleaseConfirmed || (running.State != "running" && running.State != "stopping") {
 			continue
 		}
 		if q.batchPreemptible(running, j.Spec) {
-			room += q.hostJobCharge(running)
+			jobs = append(jobs, running)
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
@@ -865,13 +866,11 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 		if owner == nil || hostID(owner) != hostID(m) || !slotReservesMemory(slot) {
 			continue
 		}
-		model, _ := q.model(slot.Model)
-		charge := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
 		if q.slotReclaimableFor(slot, j.Spec) {
-			room += charge
+			slots = append(slots, slot)
 		}
 	}
-	room = min(room, allowance)
+	room := min(q.hostRoomAfter(m, jobs, slots), allowance)
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + drift

@@ -52,7 +52,7 @@ func TestColdProbePrestartKeepsOfferedCharge(t *testing.T) {
 			t.Fatal(err)
 		}
 		holder := q.s.Jobs[probe.ID]
-		charge, growth := jobHostMemoryCharge(holder, &m, offered, hostMemorySample{}, clock.Now())
+		charge, growth := memoryCharge(holder, &m, offered, hostMemorySample{}, clock.Now())
 		if charge != offered || growth != offered || reply.AdmissionBlocked || holder.StartedAt != nil {
 			t.Fatalf("unstarted probe promoted to containment: charge=%g growth=%g offered=%g blocked=%t", charge, growth, offered, reply.AdmissionBlocked)
 		}
@@ -128,7 +128,7 @@ func TestColdProbeObservedGrowthSurvivesMissingTelemetry(t *testing.T) {
 		t.Helper()
 		holder := q.s.Jobs[j.ID]
 		s := q.hostMemorySamples[m.ID]
-		charge, pending := jobHostMemoryCharge(holder, &m, 8, s[jobKey(j)], clock.Now())
+		charge, pending := memoryCharge(holder, &m, 8, s[jobKey(j)], clock.Now())
 		if charge < 16 || pending != charge {
 			t.Fatalf("%s lost cold measured floor or granted stale credit: charge=%g pending=%g observed=16", label, charge, pending)
 		}

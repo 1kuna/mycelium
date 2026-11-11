@@ -47,7 +47,7 @@ func TestDeclaredHostMemoryForecastContainment(t *testing.T) {
 			if err != nil || ceiling != int64(6.125*(1<<30)) {
 				t.Fatal("worker containment differs from declaration plus slack", ceiling, err)
 			}
-			charge, pending := jobHostMemoryCharge(a, &m, hostNeed(&m, 0, 6), samples[jobKey(*a)], clock.Now())
+			charge, pending := memoryCharge(a, &m, hostNeed(&m, 0, 6), samples[jobKey(*a)], clock.Now())
 			if charge != tc.charge || pending != tc.pending {
 				t.Errorf("charge=%g pending=%g, want %g/%g", charge, pending, tc.charge, tc.pending)
 			}
@@ -91,16 +91,16 @@ func TestDeclaredHostMemoryCeilingAndFreshness(t *testing.T) {
 	ceiling := hostNeed(&m, 0, 2)
 	sample := hostMemorySample{gb: 2.1, footprintGB: 2.12, growthGB: 2, rateGB: 20, at: clock.Now()}
 	clock.Advance(3 * time.Second)
-	charge, growth := jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+	charge, growth := memoryCharge(&j, &m, ceiling, sample, clock.Now())
 	if charge != ceiling || math.Abs(growth-.025) > 1e-9 {
 		t.Fatal("near-ceiling use lost containment headroom", charge, growth)
 	}
 	clock.Advance(hostMemorySampleFreshFor)
-	charge, growth = jobHostMemoryCharge(&j, &m, ceiling, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, ceiling, sample, clock.Now())
 	if charge != ceiling || growth != ceiling {
 		t.Fatal("expired sample granted resident credit", charge, growth)
 	}
-	charge, growth = jobHostMemoryCharge(&j, &m, ceiling, hostMemorySample{}, clock.Now())
+	charge, growth = memoryCharge(&j, &m, ceiling, hostMemorySample{}, clock.Now())
 	if charge != ceiling || growth != ceiling {
 		t.Fatal("missing sample granted resident credit", charge, growth)
 	}
@@ -132,14 +132,14 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 			case "GPU":
 				job.Spec.Needs.Platform = Platform{Required: []string{"cuda"}}
 			}
-			charge, pending := jobHostMemoryCharge(&job, &machine, 6.125, sample, clock.Now())
-			wantPending := 62.0
+			charge, pending := memoryCharge(&job, &machine, 6.125, sample, clock.Now())
+			wantCharge, wantPending := 64.0, 62.0
 			if kind == "Docker" || kind == "auto" {
-				// These CPU attempts retain their forecast reservation, but
-				// future growth cannot exceed the complete hard cgroup ceiling.
-				wantPending = 6.125
+				// A cgroup or Docker limit contains these CPU attempts, so the
+				// forecast is bounded by that ceiling: charge and growth alike.
+				wantCharge, wantPending = 6.125, 4.125
 			}
-			if charge != 64 || pending != wantPending {
+			if charge != wantCharge || pending != wantPending {
 				t.Fatal("lost forecast charge or physical growth bound", charge, pending)
 			}
 		})
@@ -156,21 +156,21 @@ func TestDeclaredHostMemoryRetainsActualPeakAndAttemptFloor(t *testing.T) {
 	// Retained forecast-only evidence cannot invent use above containment;
 	// actual peaks and exact-attempt reservation floors must survive it.
 	sample := hostMemorySample{gb: 2, footprintGB: 2, peakGB: 7, retainedGB: 100, at: clock.Now()}
-	charge, growth := jobHostMemoryCharge(&j, &m, 6.125, sample, clock.Now())
+	charge, growth := memoryCharge(&j, &m, 6.125, sample, clock.Now())
 	if charge != 8 || growth != 6 {
 		t.Fatal("lost retained attempt floor or charged unbounded forecast", charge, growth)
 	}
 	clock.Advance(hostMemorySampleFreshFor)
-	charge, growth = jobHostMemoryCharge(&j, &m, 6.125, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 6.125, sample, clock.Now())
 	if charge != 8 || growth != 8 {
 		t.Fatal("stale sample released floor or granted resident credit", charge, growth)
 	}
 	j.HostMemoryCharge.Session = "previous"
-	charge, growth = jobHostMemoryCharge(&j, &m, 6.125, sample, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 6.125, sample, clock.Now())
 	if charge != 7 || growth != 7 {
 		t.Fatal("lost actual peak or inherited another session's floor", charge, growth)
 	}
-	charge, growth = jobHostMemoryCharge(&j, &m, 10, hostMemorySample{}, clock.Now())
+	charge, growth = memoryCharge(&j, &m, 10, hostMemorySample{}, clock.Now())
 	if charge != 10 || growth != 10 {
 		t.Fatal("lost larger known reservation floor", charge, growth)
 	}

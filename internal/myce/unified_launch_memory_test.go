@@ -55,11 +55,11 @@ func TestUnifiedLaunchMemoryQueueAndWorker(t *testing.T) {
 	// No multiplication of resident credit: device counters do not prove unique
 	// physical allocations. Keep future growth even with a fresh direct counter.
 	s := hostMemorySample{gb: 30, at: clock.Now(), deviceGB: 22, deviceAt: clock.Now()}
-	if got := remainingAllocationGrowth(&m, 22, 61, s, clock.Now()); got != 31 {
+	if got := reservedGrowth(&m, 22, 61, s, clock.Now()); got != 31 {
 		t.Fatalf("overlapping occupancy credited twice: growth=%g, want 31", got)
 	}
 	s.gb, s.source = 1, deviceUnifiedResidentSource
-	if got := remainingAllocationGrowth(&m, 22, 61, s, clock.Now()); got != 60 {
+	if got := reservedGrowth(&m, 22, 61, s, clock.Now()); got != 60 {
 		t.Fatalf("RSS estimate earned device credit: growth=%g", got)
 	}
 	// The same reservations must wait when raw availability actually falls.
@@ -168,7 +168,7 @@ func TestHelperMemoryHeartbeatKeepsMainUnstarted(t *testing.T) {
 	// of a cold probe. Keep its full reservation, while crediting the 2 GiB
 	// already absent from physical availability exactly once.
 	machine := cpuMachine("cpu", "host", "cpu", 4, 24)
-	charge, growth := jobHostMemoryCharge(&j, &machine, 16, currentHostMemorySamples(reports, clock.Now())[jobKey(j)], clock.Now())
+	charge, growth := memoryCharge(&j, &machine, 16, currentHostMemorySamples(reports, clock.Now())[jobKey(j)], clock.Now())
 	if charge != 16 || growth != 14 {
 		t.Fatalf("helper released future main demand: charge=%g growth=%g", charge, growth)
 	}
@@ -210,7 +210,7 @@ func TestUnifiedLaunchMemoryDoesNotCreditSummedDeviceCounters(t *testing.T) {
 	// Two process rows may map the same 11 GiB allocation. A sum of 22 GiB
 	// cannot prove 22 GiB uniquely resident and spend 11 GiB of phantom room.
 	s := hostMemorySample{at: clock.Now(), deviceAt: clock.Now(), deviceGB: 22}
-	if growth := remainingAllocationGrowth(&m, 22, 61, s, clock.Now()); growth != 61 {
+	if growth := reservedGrowth(&m, 22, 61, s, clock.Now()); growth != 61 {
 		t.Fatalf("unqualified device sum earned physical residency credit: %g", growth)
 	}
 }

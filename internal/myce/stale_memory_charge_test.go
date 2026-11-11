@@ -33,7 +33,7 @@ func TestStaleLearnedHostMemoryCharge(t *testing.T) {
 			samples := currentHostMemorySamples([]AttemptReport{report}, clock.Now())
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: samples}
 			q.retainHostMemoryCharges(m.ID, clock.Now())
-			fresh, _ := jobHostMemoryCharge(&j, &m, 3, samples[jobKey(j)], clock.Now())
+			fresh, _ := memoryCharge(&j, &m, 3, samples[jobKey(j)], clock.Now())
 			if mode != "fresh" {
 				clock.Advance(30 * time.Second)
 			}
@@ -44,7 +44,7 @@ func TestStaleLearnedHostMemoryCharge(t *testing.T) {
 				q.hostMemorySamples[m.ID] = samples
 				q.retainHostMemoryCharges(m.ID, clock.Now())
 			}
-			charge, pending := jobHostMemoryCharge(&j, &m, 3, samples[jobKey(j)], clock.Now())
+			charge, pending := memoryCharge(&j, &m, 3, samples[jobKey(j)], clock.Now())
 			if charge < fresh || charge >= m.HostMemoryBudgetGB {
 				t.Fatalf("charge=%g fresh=%g pending=%g", charge, fresh, pending)
 			}
@@ -82,7 +82,7 @@ func TestStaleLearnedHostMemoryCharge(t *testing.T) {
 			}
 			// Queue restart loses resident credit, but retains exact-attempt high water.
 			restored := cloneJob(&j)
-			restoredCharge, _ := jobHostMemoryCharge(&restored, &m, 3, hostMemorySample{}, clock.Now())
+			restoredCharge, _ := memoryCharge(&restored, &m, 3, hostMemorySample{}, clock.Now())
 			if restoredCharge < fresh {
 				t.Fatalf("restart released growth: %g < %g", restoredCharge, fresh)
 			}
@@ -104,14 +104,14 @@ func TestHostMemorySampleCadence(t *testing.T) {
 	r.CurrentHostMemory.SampleID = 2
 	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
 	clock.Advance(30 * time.Second)
-	if got := remainingHostGrowth(3, samples[key], clock.Now()); got != 2 {
+	if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 2 {
 		t.Fatalf("cadence credit=%g", got)
 	}
 	// A repeated cached observation cannot renew its original validity.
 	r.CurrentHostMemory.AgeSeconds = 30
 	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
 	clock.Advance(10 * time.Second)
-	if got := remainingHostGrowth(3, samples[key], clock.Now()); got != 3 {
+	if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 3 {
 		t.Fatalf("cached sample renewed credit=%g", got)
 	}
 }
@@ -126,17 +126,17 @@ func TestGrownHostMemoryChargeSurvivesMissingTelemetry(t *testing.T) {
 	key := jobKey(j)
 	samples := currentHostMemorySamples([]AttemptReport{r}, clock.Now())
 	clock.Advance(3 * time.Second)
-	grown, _ := jobHostMemoryCharge(&j, &m, 4, samples[key], clock.Now())
+	grown, _ := memoryCharge(&j, &m, 4, samples[key], clock.Now())
 	r.CurrentHostMemory = nil
 	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
-	charge, pending := jobHostMemoryCharge(&j, &m, 4, samples[key], clock.Now())
+	charge, pending := memoryCharge(&j, &m, 4, samples[key], clock.Now())
 	if charge < grown || pending != charge {
 		t.Fatalf("lost grown charge or granted resident credit: %g/%g, previous %g", charge, pending, grown)
 	}
 	j.HostMemoryCharge = &AttemptHostMemoryCharge{Execution: Execution{ID: j.ID, Attempt: 1}, Session: j.Session, GiB: charge}
 	// Losing guard inventory must not release the accepted charge.
 	m.HostMemoryBudgetGB, m.CapabilityProfile = 0, nil
-	charge, _ = jobHostMemoryCharge(&j, &m, 4, hostMemorySample{}, clock.Now())
+	charge, _ = memoryCharge(&j, &m, 4, hostMemorySample{}, clock.Now())
 	if charge < grown {
 		t.Fatalf("inventory loss released charge: %g", charge)
 	}
@@ -175,4 +175,19 @@ func TestHostMemoryChargeCheckinPersistsAcrossRestart(t *testing.T) {
 	if got := q.hostJobCharge(job(t, q, assigned.ID)); got < grown {
 		t.Fatalf("restart released charge: %g < %g", got, grown)
 	}
+}
+
+// reservedGrowth is the growth memoryCharge leaves a declared attempt
+// reserving gb, device GiB of it on a unified host: the resident credit a
+// sample earns is the only difference.
+func reservedGrowth(m *Machine, device, gb float64, s hostMemorySample, now time.Time) float64 {
+	j := Job{State: "running", Spec: cpuSpec(1, gb)}
+	if device > 0 {
+		j.Spec.Needs.MemoryGB, j.Spec.Needs.Platform = device, Platform{Any: true}
+	}
+	if m == nil {
+		m = &Machine{}
+	}
+	_, growth := memoryCharge(&j, m, gb, s, now)
+	return growth
 }

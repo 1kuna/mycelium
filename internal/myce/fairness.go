@@ -413,9 +413,9 @@ func (q *Queue) batchResourceProjectionWithPlan(j *Job, m *Machine, plan *placem
 				memory += q.slotMemory(slot)
 			}
 		}
-		for _, v := range plan.jobs {
-			projected.FreeHostMemoryGB += hostNeed(q.planningAllocationMachine(q.s.Machines[v.Machine], v.AllocatedDevices), v.Spec.Needs.MemoryGB, v.Spec.Needs.HostMemoryGB)
-		}
+		// Each victim returns its ledger charge, as in every release plan.
+		room := q.hostRoomAfter(m, plan.jobs, nil)
+		projected.FreeHostMemoryGB, projected.hostReservationDebtGB = max(0, room), max(0, -room)
 	}
 	return batchResourceRoom{machine: projected, memory: memory, ok: true, plan: plan}
 }

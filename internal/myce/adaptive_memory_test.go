@@ -178,11 +178,11 @@ func TestAdaptiveMemoryGrowthUsesClockAndLiveCredit(t *testing.T) {
 	}
 	sample := hostMemorySample{gb: .25, growthGB: .125, at: clock.Now()}
 	// The .125 forecast is already covered by the .25 unreached envelope.
-	if remainingHostGrowth(.5, sample, clock.Now()) != .25 {
+	if reservedGrowth(nil, 0, .5, sample, clock.Now()) != .25 {
 		t.Fatal("growth counted again inside the unreached envelope")
 	}
 	clock.Advance(hostMemorySampleFreshFor)
-	if remainingHostGrowth(.5, sample, clock.Now()) != .5 {
+	if reservedGrowth(nil, 0, .5, sample, clock.Now()) != .5 {
 		t.Fatal("unknown sample earned credit")
 	}
 }
