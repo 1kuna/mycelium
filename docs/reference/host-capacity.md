@@ -182,6 +182,13 @@ report can temporarily reduce admission until its next check-in. This is
 aggregate admission; external allocations can still race it. Workers repeat
 live refusal after preparation and before batch/model starts.
 
+Each host keeps one memory ledger. Capacity is the smallest live worker reading
+less one margin: the largest of the explicit host reserve, the measured idle
+burst, the unified CUDA physical floor and the interactive owner reserve,
+applied once, never stacked. Room is that capacity less the outstanding growth
+of every charge, within the host's one allowance less the charges, which workers
+enforce at launch.
+
 On dedicated GPUs the host pool charges only `host_memory_gb`. On unified-memory
 machines, GPU and CPU allocations share one host pool:
 charge `memory_gb + host_memory_gb` once per allocation, not two independent
