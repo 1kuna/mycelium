@@ -272,7 +272,7 @@ func compactStatusMachine(m *Machine) Machine {
 	}
 	if c.HostHealth != nil {
 		h := *c.HostHealth
-		h.Baseline, h.Foreign = nil, nil
+		h.Baseline, h.Foreign, h.ForeignServices = nil, nil, nil
 		if len(h.History) > 0 {
 			h.History = h.History[len(h.History)-1:]
 		}

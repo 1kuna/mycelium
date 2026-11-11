@@ -49,13 +49,13 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
-	if (hasDiskBudgetWireFields(c) || c.CheckpointExpiryProtocol != "") && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+	if (hasDiskBudgetWireFields(c) || hasForeignDetailFields(c) || c.CheckpointExpiryProtocol != "") && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// A strict predecessor queue (for example after a queue rollback)
-		// refuses both additive field sets; retry once with neither.
-		c = withoutCheckpointExpiryFields(withoutDiskBudgetFields(c))
+		// refuses the additive field sets; retry once with none.
+		c = withoutCheckpointExpiryFields(withoutForeignDetailFields(withoutDiskBudgetFields(c)))
 		expirySent = 0
 		if w.diskBudgetWire != nil {
-			w.diskBudgetWire.supported = false
+			w.diskBudgetWire.supported, w.diskBudgetWire.foreign = false, false
 		}
 		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	}
@@ -73,6 +73,7 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if w.diskBudgetWire != nil {
 		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
 		w.diskBudgetWire.headroom = reply.WorkerDiskHeadroomProtocol == workerDiskHeadroomProtocol
+		w.diskBudgetWire.foreign = reply.HostForeignProtocol == hostForeignProtocol
 	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)

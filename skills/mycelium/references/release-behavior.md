@@ -154,7 +154,10 @@ or run privileged mount commands. `host_degraded` and
 `host_mount_degraded` use existing health notifications; silent-worker alerts
 carry `host_silent`. Read the job's waiting reason or one needed status snapshot;
 no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
-context for the host owner: never stop their processes or services. See
+context for the host owner: never stop their processes or services. Newer
+queues add each process's `user`, `age_seconds` and `gpu_bytes`, plus
+`host_health.foreign_services` totals per service or container, so `myce host
+status HOST` shows what outside Mycelium holds a host's memory. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
 reversible availability withholding for unknown health or a confirmed local drain
