@@ -37,7 +37,7 @@ func compactStatusJob(j *Job) Job {
 			Program: compactStatusProgram(j.Spec.Program), Kind: j.Spec.Kind, WallTime: j.Spec.WallTime},
 		Queued: j.Queued, AssignedAt: j.AssignedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 		WaitingSince: j.WaitingSince, Starts: j.Starts, Losses: j.Losses, PreemptionCount: j.PreemptionCount,
-		AllocatedDevices: j.AllocatedDevices, Blocker: j.Blocker, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
+		AllocatedDevices: j.AllocatedDevices, Blocker: j.Blocker, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
 		ReleaseConfirmed: j.ReleaseConfirmed, LastStopOutcome: j.LastStopOutcome, StopAt: j.StopAt,
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
 		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause, ProductionHost: j.ProductionHost,

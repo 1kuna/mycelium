@@ -2438,6 +2438,30 @@ placeholder is normal: the following run stages it automatically. A successful
 wait/status omits deadline-policy tutorials and empty blockers. These changes
 require the matching client and queue release; they are not rollout evidence.
 
+## Job findings
+
+Failed jobs, and queued or running jobs that Mycelium requeued after an
+infrastructure loss, carry one additive `finding` with `code`, `owner`, `what`
+and `action`. `owner` is `job` (the command or its declaration), `mycelium`
+(host or queue infrastructure, not the job's fault) or `unknown` (no typed
+cause was recorded). `what` is one sentence of measured evidence and what
+Mycelium did; `action` is the single change to make. The finding appears in job
+GET, compact and detailed status, batched wait replies for failed jobs, and the
+`myce status`/`myce run` reason text. `myce wait` prints it on stderr after the
+terminal `ID state` line, and `myce result` includes it when it refuses a job
+with no accepted result.
+
+Findings are derived on each read from sanitized runtime causes and fixed
+queue-owned reasons; they are never persisted and never copy worker text.
+Covered classes include output-contract failures after exit 0 (`output_*`),
+publication failures (`output_publication`), resource stops (`memory_limit`,
+`out_of_memory`, `memory_exceeds_hosts`, `wall_time_limit`, `disk_limit`),
+infrastructure requeues and exhaustion, launch failures (`library_missing`,
+`tools_missing`, `input_unavailable`, `launch_*`), upstream dependencies,
+nonzero exits and payload signals. A failure with no typed cause reports
+`cause_unknown` rather than a guess. Succeeded and cancelled jobs carry none;
+waiting explanations remain in `blocker`.
+
 ## Read-only consumer project doctor
 
 On a matching client/queue release, `myce doctor --project` diagnoses the selected

@@ -439,11 +439,13 @@ type Job struct {
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
 	Blocker                 *Blocker               `json:"blocker,omitempty"`
-	WallTime                *WallTimeStatus        `json:"wall_time,omitempty"`
-	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
-	ScarceHostYield         *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
-	YieldGeneration         int64                  `json:"yield_generation,omitempty"`
-	FaultEvidence           []*FaultEvidence       `json:"fault_evidence,omitempty"`
+	// Finding is derived on each read and never persisted; see JobFinding.
+	Finding         *JobFinding            `json:"finding,omitempty"`
+	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
+	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
+	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
+	YieldGeneration int64                  `json:"yield_generation,omitempty"`
+	FaultEvidence   []*FaultEvidence       `json:"fault_evidence,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string

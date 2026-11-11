@@ -337,6 +337,11 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				if _, err := fmt.Fprintf(destination, "%s %s\n", j.ID, j.State); err != nil {
 					return &exitError{2, err}
 				}
+				if terminal {
+					if err := printJobFinding(errOut, j); err != nil {
+						return &exitError{2, err}
+					}
+				}
 				lastState[j.ID] = j.State
 			}
 			delete(pending, id)

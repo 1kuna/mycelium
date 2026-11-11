@@ -13,12 +13,13 @@ import (
 
 // WaitState is a scalar public observation, never an execution/diagnostic payload.
 type WaitState struct {
-	ID        string     `json:"id"`
-	State     string     `json:"state"`
-	Reason    string     `json:"reason,omitempty"`
-	Revision  uint64     `json:"revision"`
-	Spec      *WaitSpec  `json:"spec,omitempty"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
+	ID        string      `json:"id"`
+	State     string      `json:"state"`
+	Reason    string      `json:"reason,omitempty"`
+	Revision  uint64      `json:"revision"`
+	Spec      *WaitSpec   `json:"spec,omitempty"`
+	StartedAt *time.Time  `json:"started_at,omitempty"`
+	Finding   *JobFinding `json:"finding,omitempty"`
 }
 
 // WaitSpec contains only scalar observation metadata, never execution inputs.
@@ -39,7 +40,7 @@ func waitTimestamp(value *time.Time) *time.Time {
 
 // Job projects bounded batch metadata for consumer observation.
 func (state WaitState) Job() *Job {
-	job := &Job{ID: state.ID, State: state.State, Reason: state.Reason, StartedAt: waitTimestamp(state.StartedAt)}
+	job := &Job{ID: state.ID, State: state.State, Reason: state.Reason, StartedAt: waitTimestamp(state.StartedAt), Finding: state.Finding}
 	if state.Spec != nil {
 		job.Spec.Deadline = waitTimestamp(state.Spec.Deadline)
 		job.Spec.StartBy = waitTimestamp(state.Spec.StartBy)
@@ -118,6 +119,11 @@ func (s *waitStateIndex) set(id string, j *Job) {
 	} else {
 		s.setIntent(id, j)
 		next := WaitState{ID: id, State: j.State, Reason: j.Reason, StartedAt: waitTimestamp(j.StartedAt)}
+		if j.State == "failed" && (!exists || old.State != "failed") {
+			next.Finding = terminalJobFinding(j)
+		} else if exists && old.State == "failed" {
+			next.Finding = old.Finding
+		}
 		next.Spec = &WaitSpec{Deadline: waitTimestamp(j.Spec.Deadline), StartBy: waitTimestamp(j.Spec.StartBy), ExpectedMinutes: j.Spec.ExpectedMinutes}
 		if exists && old.State == next.State && old.Reason == next.Reason && reflect.DeepEqual(old.Spec, next.Spec) && reflect.DeepEqual(old.StartedAt, next.StartedAt) {
 			return
