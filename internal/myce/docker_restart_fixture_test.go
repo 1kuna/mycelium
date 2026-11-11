@@ -38,5 +38,7 @@ func TestDockerRestartFixtureSurvivesCLIStartupVariation(t *testing.T) {
 
 func TestDockerNetworkFixtureSurvivesCLIStartupVariation(t *testing.T) {
 	varyDockerCLIStartup(t)
-	testDockerNetworkViolationsAndRemovalHold(t)
+	t.Run("network", testDockerNetworkViolationsAndRemovalHold)
+	t.Run("logs-none", TestDockerLogsNoneRecovery)
+	t.Run("sidecar-recovery", TestDockerSidecarStopRecoveryAndEvidence)
 }
