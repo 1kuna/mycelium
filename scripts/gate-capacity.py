@@ -469,6 +469,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
         raise ValueError('calibration priority reserves a full lane only')
     if mode == 'quick':
         priority = 'normal'  # A flag or inherited environment is no release authority.
+    release_full = mode == 'full' and priority == 'release'
+    exclusive = exclusive or release_full
     queue_ticket = None
     checked_config, resources, slot_profile = None, None, None
     host_memory = total_memory()
@@ -544,7 +546,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 if (resources and cores > qualified_cores and not calibration and not automatic
                         and not (mode == 'full' and slot_profile and cores == slot_profile['slots'])):
                     raise RuntimeError('requested cores exceed the measured local gate budget')
-                if exclusive and not resources:
+                if exclusive and not resources and not release_full:
                     raise RuntimeError('exclusive timing requires qualified resource admission')
                 # Unqualified hosts preserve the previous two-heavy/one-full rule.
                 slots = ((os.cpu_count() or 1) + 2 if resources else
@@ -620,7 +622,10 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 if reserve < 0:
                     raise ValueError('workstation CPU reserve must not be negative')
                 cpu_ok = reserved_cores + worker_cores + host_cores + reserve <= (os.cpu_count() or 1)
-                group, resource_ok = None, True
+                # A declared release full drains existing gates and retains
+                # admission through cleanup, including on unqualified hosts.
+                group, resource_ok = None, (not any(row.get('exclusive') for row in owners)
+                                           and (not exclusive or not owners))
                 # Available RAM already reflects active RSS. Quick's measured peak plus
                 # shared host headroom covers its growth without recharging other runs.
                 admission_memory = needed_memory + (reserved_memory if resources and mode == 'full' else 0)
@@ -649,13 +654,11 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                                       and row.get('mode') == 'full'}
                     full_custody_ok = (set(directory.glob('local-go-full-*.custody')) == set(expected_fulls)
                         and all(json.loads(p.read_text()) == row for p, row in expected_fulls.items()))
-                    resource_ok = (not legacy and not native_full_custody() and
+                    resource_ok = (resource_ok and not legacy and not native_full_custody() and
                         full_custody_ok and
                         all(row.get('admission_protocol') == 2 and
                             row.get('resource_group') == existing_group.get('resource_group')
-                            for row in owners) and
-                        not any(row.get('exclusive') for row in owners) and
-                        (not exclusive or not owners))
+                            for row in owners))
                     vm_peak = (memory_requirement(config, 'linux', mode, cores, slot_profile) - headroom
                                if platform != 'native' else 0)
                     if calibration and platform == 'linux':
@@ -688,7 +691,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                             continue
                         owner = dict(pid=os.getpid(), run_id=uuid.uuid4().hex,
                                      process_identity=process_identity(os.getpid()),
-                                     mode=mode, priority=priority, cores=host_cores, per_leg_cores=cores,
+                                     mode=mode, priority=priority, exclusive=exclusive,
+                                     cores=host_cores, per_leg_cores=cores,
                                      automatic_slots=automatic, cpu_share_per_leg=cpu_share,
                                      local_worker_usage_at_entry=worker,
                                      fleet_worker_cpu_reserve_cores=worker_cores,
