@@ -49,5 +49,9 @@ const hostMemorySampleProtocol = "host-memory-sample-v1"
 const probeMemoryProtocol = "cpu-probe-memory-v1"
 
 const hostHygieneProtocol = "host-hygiene-v1"
+
+// Queues advertising this accept foreign-consumer owner, age, GPU memory and
+// per-service totals; strict older queues receive the original foreign shape.
+const hostForeignProtocol = "host-foreign-v2"
 const hostCollectionProtocol = "worker-collection-v1"
 const hostMountProgressProtocol = "mount-progress-v1"

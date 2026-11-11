@@ -171,6 +171,20 @@ service identities are reported, without argv or environment values. The worker
 tree and birth-verified recorded surviving attempt members are excluded. This
 is owner context only; it causes no signals, service changes or cleanup.
 
+With `host_foreign_protocol: host-foreign-v2` (#834), each foreign process also
+carries `user` (account name), `age_seconds` (elapsed since start) and, on hosts
+whose GPU driver attributes per-process memory, `gpu_bytes`. Memory leaders rank
+by RSS plus `gpu_bytes`; unified-memory device allocations need not appear in
+RSS, so the two are reported separately. `foreign_services` totals every
+foreign process per service or container identity (systemd unit or scope,
+Docker container, or the nearest launchd-labelled ancestor on macOS): process
+count, CPU, RSS, GPU bytes, and the oldest member's user and age, up to five CPU
+and five memory leaders. Read these in `myce host status HOST` to see why work
+waits on a host whose memory is held outside Mycelium; the owner decides what to
+do. The GPU query runs off the sampler lane, one at a time, and a failed query
+reports no GPU bytes rather than a stale value. Older queues receive the
+original foreign shape.
+
 Run `myce status` using your usual queue address and private token. `--full`
 shows full job IDs. Open the queue address in a browser for the same information;
 sign in as `myce`, using the token as the password. The page is read-only and

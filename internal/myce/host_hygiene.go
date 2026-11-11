@@ -50,12 +50,33 @@ type HostMountHealth struct {
 }
 
 // Executable and Service are basenames/identities only; never argv or env.
+// User, AgeSeconds and GPUBytes are sent only to queues advertising
+// hostForeignProtocol; strict older queues receive the original shape.
 type ForeignConsumer struct {
 	PID        int     `json:"pid"`
 	Executable string  `json:"executable"`
 	Service    string  `json:"service,omitempty"`
 	CPUPercent float64 `json:"cpu_percent"`
 	RSSBytes   uint64  `json:"rss_bytes"`
+	User       string  `json:"user,omitempty"`
+	AgeSeconds float64 `json:"age_seconds,omitempty"`
+	// Device memory the GPU driver attributes to this process, where the
+	// driver reports per-process use. Unified-memory allocations need not
+	// appear in RSS, so this is reported separately and never summed.
+	GPUBytes uint64 `json:"gpu_bytes,omitempty"`
+}
+
+// ForeignService totals every non-Mycelium process sharing one service or
+// container identity, so a multi-process container is one row. AgeSeconds is
+// the oldest member's age. Context only: nothing acts on it.
+type ForeignService struct {
+	Service    string  `json:"service"`
+	User       string  `json:"user,omitempty"`
+	Processes  int     `json:"processes"`
+	CPUPercent float64 `json:"cpu_percent"`
+	RSSBytes   uint64  `json:"rss_bytes"`
+	GPUBytes   uint64  `json:"gpu_bytes,omitempty"`
+	AgeSeconds float64 `json:"age_seconds,omitempty"`
 }
 
 type HostHealth struct {
@@ -71,6 +92,7 @@ type HostHealth struct {
 	Candidate          string                  `json:"candidate,omitempty"`
 	Consecutive        int                     `json:"consecutive,omitempty"`
 	Foreign            []ForeignConsumer       `json:"foreign,omitempty"`
+	ForeignServices    []ForeignService        `json:"foreign_services,omitempty"`
 	ForeignError       string                  `json:"foreign_error,omitempty"`
 	ForeignAt          time.Time               `json:"foreign_at,omitempty"`
 	AgeSeconds         float64                 `json:"age_seconds"`
@@ -230,7 +252,7 @@ type hostHealthMonitor struct {
 	health           HostHealth
 	heartbeat        float64
 	source           func(context.Context) (HostHealthReading, error)
-	foreign          func(context.Context) ([]ForeignConsumer, error)
+	foreign          func(context.Context) (foreignInventory, error)
 	mounts           map[string]*hostMountProbe
 	disks            map[string]float64
 	done             chan struct{}
@@ -299,7 +321,7 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 	if err != nil {
 		s.Error = "host_sensor_unavailable"
 	}
-	var foreign []ForeignConsumer
+	var foreign foreignInventory
 	var foreignErr error
 	m.mu.Lock()
 	foreignDue := m.health.ForeignAt.IsZero() || !at.Before(m.foreignTiming.next)
@@ -308,7 +330,7 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 		started := m.clock.Now()
 		foreign, foreignErr = m.foreign(ctx)
 		m.foreignTiming.base, m.foreignTiming.cores = m.timing.base, m.timing.cores
-		m.foreignTiming.observe(started, m.clock.Now(), foreignErr != nil || !slices.Equal(foreign, m.health.Foreign))
+		m.foreignTiming.observe(started, m.clock.Now(), foreignErr != nil || !slices.Equal(foreign.processes, m.health.Foreign))
 	}
 	var storageRoots map[string]storageRoot
 	if m.readStorageRoots != nil {
@@ -342,7 +364,7 @@ func (m *hostHealthMonitor) record(ctx context.Context, at time.Time, r HostHeal
 	m.health.Probe = observation
 	m.health.observe(s)
 	if foreignDue && m.foreign != nil {
-		m.health.Foreign, m.health.ForeignAt, m.health.ForeignError = foreign, at, ""
+		m.health.Foreign, m.health.ForeignServices, m.health.ForeignAt, m.health.ForeignError = foreign.processes, foreign.services, at, ""
 		if foreignErr != nil {
 			m.health.ForeignError = "foreign_inventory_unavailable"
 		}
@@ -421,7 +443,7 @@ func (m *hostHealthMonitor) currentSnapshotLocked() *HostHealth {
 }
 
 func cloneHostHealth(h HostHealth) HostHealth {
-	h.History, h.Baseline, h.Foreign = slices.Clone(h.History), slices.Clone(h.Baseline), slices.Clone(h.Foreign)
+	h.History, h.Baseline, h.Foreign, h.ForeignServices = slices.Clone(h.History), slices.Clone(h.Baseline), slices.Clone(h.Foreign), slices.Clone(h.ForeignServices)
 	if h.DiskRecovery != nil {
 		copy := map[string]float64{}
 		for key, value := range h.DiskRecovery {
@@ -450,7 +472,7 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 	// A cold or restarted source must positively establish its first observation.
 	m.health.Probe = &ProbeObservation{}
 	if workerForeignConsumers != nil {
-		m.foreign = func(ctx context.Context) ([]ForeignConsumer, error) { return workerForeignConsumers(ctx, dir) }
+		m.foreign = func(ctx context.Context) (foreignInventory, error) { return workerForeignConsumers(ctx, dir) }
 	}
 	m.done = make(chan struct{})
 	m.readStorageRoots = w.storageRoots
