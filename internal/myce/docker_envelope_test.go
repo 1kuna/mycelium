@@ -22,7 +22,7 @@ func TestDockerEnvelopeSharedParent(t *testing.T) {
 	}
 	objects := map[string]map[string]any{}
 	d := &dockerAttempt{clock: clock, dir: t.TempDir(), memory: parent, state: dockerExecution{Identity: "test", CgroupParent: "/synthetic", MemoryLimitBytes: 4 << 30, Containers: map[string]dockerMember{}}}
-	d.command = func(_ context.Context, args ...string) ([]byte, error) {
+	d.daemon = func(_ context.Context, args ...string) ([]byte, error) {
 		switch args[0] {
 		case "create":
 			fields := map[string]string{}

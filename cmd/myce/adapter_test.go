@@ -329,6 +329,9 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Building the shared race CLI is fixture setup, outside the journey and
+	// observer-cleanup liveness budget (a cold build can consume most of it).
+	binary := devTestBinary(t)
 	state := t.TempDir()
 	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ExtensionRoot: filepath.Join(state, "extensions"), Token: "native-adapter-token", GPU: "fake", MemoryGB: 2, Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
@@ -337,13 +340,16 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 	defer d.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
+	// This registry belongs only to this journey. A free lock or retired
+	// registration precedes the observer's final status and supervisor writes.
+	observerSession := filepath.Join(root, "observer-session")
+	defer waitCLIObserverFixture(t, ctx, filepath.Join(observerSession, "observers"))
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
-	binary := devTestBinary(t)
 	invoke := func(key string) profileReceipt {
 		t.Helper()
 		command := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", d.URL, "--key", key, "--", "native literal; $()")
 		command.Dir = root
-		command.Env = append(os.Environ(), "MYCE_TOKEN=native-adapter-token", "MYCE_NOTIFY=")
+		command.Env = append(os.Environ(), "MYCE_TOKEN=native-adapter-token", "MYCE_NOTIFY=", "MYCE_DEV_SESSION_ROOT="+observerSession)
 		var diagnostics bytes.Buffer
 		command.Stderr = &diagnostics
 		b, err := command.Output()
