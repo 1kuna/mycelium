@@ -151,12 +151,14 @@ func TestResolveOldInterpreterBuilderJourney(t *testing.T) {
 							t.Error(err)
 						}
 					}()
-					wait, stop := context.WithTimeout(ctx, 10*time.Second)
+					// This checks builder correctness, not latency. The gate watchdog
+					// owns the bound while concurrent fixtures share the host.
+					wait, stop := context.WithCancel(ctx)
 					defer stop()
 					for run := range 2 {
 						got, err := client.Wait(wait, submitted.ID)
 						if err != nil || got.State != "succeeded" || !got.ReleaseConfirmed {
-							t.Fatalf("builder job: %+v %v", got, err)
+							t.Fatalf("builder job: state=%s release=%t reason=%q err=%v", got.State, got.ReleaseConfirmed, got.Reason, err)
 						}
 						logs, err := q.Logs(got.ID, 0)
 						if err != nil {

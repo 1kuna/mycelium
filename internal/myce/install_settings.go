@@ -312,7 +312,7 @@ func InstallSettings() []InstallSetting {
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
 		{Field: "FileCacheBytesExplicit"},
-		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }}, {Field: "FromWorkerConfigs"},
+		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }},
 		{Field: "Version", validate: func(c ServiceConfig) error {
 			if c.Version < 0 || c.Version > 1 {
 				return errors.New("unsupported installed config version")

@@ -58,7 +58,6 @@ type HostMaintenanceStatus struct {
 	DeviceUse         []DeviceUse         `json:"device_use"`
 	DeviceMaintenance []DeviceMaintenance `json:"device_maintenance"`
 
-	MigrationReady bool                   `json:"migration_ready,omitempty"`
 	ExternalMemory *ExternalMemoryHistory `json:"external_memory,omitempty"`
 	Host           string                 `json:"host"`
 	Policy         HostMaintenance        `json:"policy"`
@@ -183,7 +182,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	freshEvidence := true
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
-		if hostID(m) != host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if hostID(m) != host || m.Replacement != nil {
 			continue
 		}
 		fresh := !q.unreported[m.ID] && q.workerFresh(m, now)
@@ -254,7 +253,6 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 			out.State = "healthy"
 		}
 	}
-	out.MigrationReady = q.machineMigrationReady(host)
 	// Fresh custody evidence is required; inventory and memory health are separate.
 	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out

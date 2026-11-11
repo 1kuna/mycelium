@@ -187,13 +187,17 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	demand.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
 	winner := submit(t, q, demand)
 	drainAdmissionWait(t, q)
-	q.mu.Lock()
-	q.stopBatchFor(q.s.Jobs[a.ID], winner)
-	q.mu.Unlock()
+	if err := q.update(func() error {
+		q.stopBatchFor(q.touchJob(a.ID), q.s.Jobs[winner.ID])
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Interrupted: true}); err != nil {
 		t.Fatal(err)
 	}
 	drainAdmissionWait(t, q)
+
 	func() {
 		q.mu.Lock()
 		defer q.mu.Unlock()

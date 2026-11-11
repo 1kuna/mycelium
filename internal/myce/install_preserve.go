@@ -76,8 +76,7 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 
 // installFiles is a per-invocation fault seam, never a global filesystem hook.
 type installFiles struct {
-	retain            func(*installTransaction)
-	machineConversion bool
+	retain func(*installTransaction)
 	// Persist ownership before publication, including across a process crash.
 	publication func(path string, data []byte, mode os.FileMode, removed bool) error
 

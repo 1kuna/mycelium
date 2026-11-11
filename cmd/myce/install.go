@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -97,20 +96,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	}
 	instance := f.String("instance", "", "Linux worker instance")
 	root := f.String("root", "", "installation root")
-	var sources []string
-	f.Func("from-worker-config", "source per-device worker config; repeat for every worker", func(v string) error {
-		p, e := filepath.Abs(v)
-		if e == nil {
-			sources = append(sources, p)
-		}
-		return e
-	})
-	machineMap := f.String("machine-map", "", "explicit queue conversion mapping JSON file")
-	drainEvidence := f.String("drain-evidence", "", "explicit stopped-source proof: verified-empty (offline queue conversion with every --from-worker-config)")
-	rollbackQueue := f.Bool("rollback-machines", false, "restore queue-side fences and legacy identities; retain upgraded queue")
-	rollback := f.Bool("rollback-machine", false, "restore the saved per-GPU installation; keep the compatible queue")
 	dry := f.Bool("dry-run", false, "print plan without installing")
-	machineCacheRoot := f.Bool("machine-cache-root", false, "move generated per-device cache settings to the machine spool; retain old directories and custom paths")
 	redetect := f.Bool("redetect", false, "re-detect hardware without changing saved selectors or per-device budgets")
 	f.Bool("force", false, "deprecated compatibility option; explicit flags authorize changes")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
@@ -133,12 +119,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected setup arguments")
-	}
-	if *machineCacheRoot && (action != "install" || role != "worker" || *rollback || *rollbackQueue || *machineMap != "") {
-		return errors.New("--machine-cache-root requires forward install worker")
-	}
-	if *drainEvidence != "" && (*drainEvidence != "verified-empty" || action != "install" || role != "queue" || *machineMap == "" || *rollbackQueue) {
-		return errors.New("machine_drain_evidence_invalid: --drain-evidence=verified-empty requires forward install queue --machine-map")
 	}
 	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -184,28 +164,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		return nil
 	}
-	if *machineMap != "" || *rollbackQueue {
-		if role != "queue" || *config == "" {
-			return errors.New("queue conversion requires install queue --config QUEUE_CONFIG")
-		}
-		c, err := myce.ReadServiceConfig(*config)
-		if err != nil {
-			return err
-		}
-		var mapping []myce.MachineRename
-		if *machineMap != "" {
-			data, err := os.ReadFile(*machineMap)
-			if err != nil {
-				return err
-			}
-			if err = json.Unmarshal(data, &mapping); err != nil {
-				return err
-			}
-		}
-		fmt.Println(myce.MachineConversionDiff(mapping))
-		fmt.Println("Queue must be stopped; preview/write queue-side policies, pins, servers and retired identities. Keep the upgraded queue on rollback.")
-		return myce.ConvertQueueInstall(ctx, c, mapping, *dry, *rollbackQueue, myce.RealClock{}, probe.Command, myce.MachineDrainOptions{Mode: *drainEvidence, WorkerConfigs: sources})
-	}
 	// Locate the saved configuration before detection or applying fresh-install
 	// defaults. Flag presence, rather than its value, defines the upgrade overlay.
 	explicit := map[string]bool{}
@@ -231,46 +189,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	configPath, e = filepath.Abs(configPath)
 	if e != nil {
 		return e
-	}
-	if *rollback {
-		fmt.Println("Restore saved worker files, enablement and prior activity; queue stays upgraded.")
-		return myce.RollbackMachineInstall(ctx, configPath, *dry, probe.Command)
-	}
-	if len(sources) > 0 {
-		if role != "worker" || !explicit["config"] {
-			return errors.New("conversion requires install worker --config MACHINE_CONFIG")
-		}
-		c, err := myce.PlanMachineInstallWithProbe(ctx, configPath, sources, explicit, probe)
-		if err != nil {
-			return err
-		}
-		c, err = myce.OverlayInstallFlags(f, c, values)
-		if err != nil {
-			return err
-		}
-		if *machineCacheRoot {
-			var preview string
-			c, preview, err = myce.PlanMachineCacheMigration(c, explicit)
-			if err != nil {
-				return err
-			}
-			fmt.Print(preview)
-			if !*dry {
-				if err = myce.CheckMachineCacheMigration(ctx, c); err != nil {
-					return err
-				}
-			}
-		}
-		fmt.Println("Convert split workers: stop/disable and retire source units/configs; retain source spools, all roots and gpu0 cache artifacts; install one machine worker with fresh spool. Rollback: " + c.Config + ".m4-rollback.json")
-		for _, path := range sources {
-			fmt.Println("Source:", path)
-		}
-		fmt.Println("Destination:", c.Config, "Unit:", c.Service, "Command:", strings.Join(c.Args(), " "))
-		executable, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		return myce.ConvertWorkerInstall(ctx, c, executable, *dry, probe.Command)
 	}
 	var installed *myce.ServiceConfig
 	if old, err := myce.ReadServiceConfig(configPath); err == nil {
@@ -366,18 +284,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	if e != nil {
 		return e
 	}
-	if *machineCacheRoot {
-		if installed == nil {
-			return errors.New("--machine-cache-root requires a saved machine config or --from-worker-config")
-		}
-		var preview string
-		c, preview, e = myce.PlanMachineCacheMigration(c, explicit)
-		if e != nil {
-			return e
-		}
-		fmt.Print(preview)
-	}
-	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"] || *machineCacheRoot); err != nil {
+	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"]); err != nil {
 		return err
 	}
 	if role == "worker" && *redetect {
@@ -481,11 +388,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")
 		fmt.Print(c.ServiceText())
 		return nil
-	}
-	if *machineCacheRoot {
-		if e = myce.CheckMachineCacheMigration(ctx, c); e != nil {
-			return e
-		}
 	}
 	executable, e := os.Executable()
 	if e != nil {

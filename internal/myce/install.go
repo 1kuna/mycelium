@@ -112,12 +112,11 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 }
 
 type ServiceConfig struct {
-	DailyUse          bool            `json:"daily_use"`
-	Laptop            bool            `json:"laptop"`
-	Desktop           bool            `json:"desktop"`
-	Enrollment        bool            `json:"enrollment,omitempty"`
-	MachineDevices    []DeviceInstall `json:"machine_devices,omitempty"`
-	FromWorkerConfigs []string        `json:"-"`
+	DailyUse       bool            `json:"daily_use"`
+	Laptop         bool            `json:"laptop"`
+	Desktop        bool            `json:"desktop"`
+	Enrollment     bool            `json:"enrollment,omitempty"`
+	MachineDevices []DeviceInstall `json:"machine_devices,omitempty"`
 
 	ProductionInfrastructureRetries int `json:"production_infrastructure_retries"`
 
@@ -368,10 +367,8 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return errors.New("refusing non-Mycelium service unit")
 	}
 
-	if !files.machineConversion {
-		if err := CheckMachineInstallGate(c); err != nil {
-			return err
-		}
+	if err := CheckMachineInstallGate(c); err != nil {
+		return err
 	}
 	if err := c.ValidateInstallPolicies(); err != nil {
 		return err
@@ -450,7 +447,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	for _, path := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
 		st, err := os.Lstat(path)
 		if err == nil {
-			if (!existing && !(files.machineConversion && (path == c.Credentials))) || !st.Mode().IsRegular() {
+			if !existing || !st.Mode().IsRegular() {
 				return fmt.Errorf("refusing unexpected installed path %s", path)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -458,7 +455,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		}
 	}
 	var reconciliation *slotReconciliation
-	if existing && !files.machineConversion {
+	if existing {
 		reconciliationConfig := installed
 		reconciliationConfig.Queue = c.Queue // Address repair already verified the saved certificate pin.
 		reconciliation, err = preflightInstallSlot(ctx, reconciliationConfig, command)
@@ -542,7 +539,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err = tx.put(c.Config, configData, 0600); err != nil {
 		return err
 	}
-	if c.EnvironmentFile == "" && !existing && invitation == nil && !files.machineConversion {
+	if c.EnvironmentFile == "" && !existing && invitation == nil {
 		if token == "" {
 			return errors.New("set MYCE_TOKEN before installing")
 		}

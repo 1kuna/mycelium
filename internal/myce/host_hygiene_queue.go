@@ -29,7 +29,7 @@ func acceptHostHygiene(m *Machine) {
 
 func (q *Queue) detectHostHygiene() {
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		reason := q.hostHygieneReasonAt(m, q.clock.Now())

@@ -448,8 +448,11 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			drainAdmissionWait(t, q)
-			if q.roomPlan(job(t, q, prod.ID), q.s.Machines[a.ID], true) != nil {
+			production := job(t, q, prod.ID)
+			q.mu.Lock()
+			plan := q.roomPlan(production, q.s.Machines[a.ID], true)
+			q.mu.Unlock()
+			if plan != nil {
 				t.Fatal("expired release credit still supplies a placement plan")
 			}
 			// #662 retains the selected host even when planning credit expires.

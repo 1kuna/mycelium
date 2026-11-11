@@ -138,6 +138,8 @@ func TestTierFairnessFitBackfillAndHistoryIsolation(t *testing.T) {
 	urgent.Project = "verso"
 	urgent.Needs.Platform = Platform{Required: []string{"cuda"}}
 	submit(t, q, urgent)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	m := machine("one", "fake")
 	q.s.Machines[m.ID] = &m
 	// Neither a higher incompatible tier nor an under-served oversized job idles

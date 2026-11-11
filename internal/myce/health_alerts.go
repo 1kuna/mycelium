@@ -144,7 +144,7 @@ func (q *Queue) detectHealth() {
 	q.observeHealth("queue-storage", !q.fileCheckpoints && !q.nasAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "nas"})
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+		if m.Replacement != nil {
 			continue
 		}
 		host := hostID(m)

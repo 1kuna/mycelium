@@ -21,4 +21,4 @@ its procedure.
 | [Windows host bridge](windows-host-bridge.md) | WSL2 owner signals from Windows: build, install, connect, undo |
 | [Queue disk I/O](queue-io.md) | Disk contention evidence, SQLite limits, systemd I/O weights |
 | [Completion observer](completion-observer.md) | Observer supervision, upgrade, legacy recovery, delivery acceptance |
-| [Migration archive](migrations.md) | Finished one-time migrations (split-worker M4 conversion, parked storage guards) |
+| [Migration archive](migrations.md) | Retired migration policy and parked storage guards |
