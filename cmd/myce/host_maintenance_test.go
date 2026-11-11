@@ -55,6 +55,20 @@ func TestHostMaintenancePlacementCLI(t *testing.T) {
 			t.Fatal("accepted invalid placement arguments", args)
 		}
 	}
+	// MY-45: the role is an explicit host property, editable while enabled.
+	var out bytes.Buffer
+	if err := hostMaintenanceCommand(context.Background(), []string{"role", "host", "--role", "services", "--queue", server.URL}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var status myce.HostMaintenanceStatus
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.Role != "services" || status.Policy.Mode != "enabled" {
+		t.Fatal("role did not edit enabled host", out.String(), err)
+	}
+	for _, args := range [][]string{{"role", "host"}, {"role", "host", "--role", "gpu", "--queue", server.URL}, {"placement", "host", "--last-resort", "--role", "node"}} {
+		if err := hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
+			t.Fatal("accepted invalid role arguments", args)
+		}
+	}
 }
 func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)

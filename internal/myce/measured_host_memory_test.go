@@ -43,7 +43,8 @@ func TestMeasuredHostMemoryLearnsPhysicalIdleOnly(t *testing.T) {
 	m.MemoryObservation.Quiescent, m.MemoryObservation.UsedGB = true, 8
 	q.recordExternalMemory(&m)
 	budget, d = q.measuredHostMemoryBudget(&m, policy)
-	if budget.GiB != 20 || d.ReserveGB != 4 || d.History.Windows != 2 {
+	// Default node role: 32 - p50 4 - max(reserve 2, burst 4) = 32 - max 8.
+	if budget.GiB != 24 || d.ReserveGB != 4 || d.History.Windows != 2 {
 		t.Fatal(budget, d)
 	}
 	// Expired observations return to the authored bound, never to uncapped.
@@ -182,9 +183,66 @@ func TestMeasuredHostMemorySameBinVariationSurvivesCompaction(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		budget, d := q.measuredHostMemoryBudget(&m, HostMemoryBudget{GiB: 20, Measured: true})
-		if budget.GiB != 20.75 || d.History.P50GB != 4.25 || d.ReserveGB != 3.5 {
+		if budget.GiB != 24.25 || d.History.P50GB != 4.25 || d.ReserveGB != 3.5 {
 			t.Fatal("histogram erased observed variation", budget, d)
 		}
 		compactExternalEvidence(q.s.ExternalMemory[m.HostID], clock.Now(), 1)
+	}
+}
+
+func dedicatedProfile(m *Machine, mode string, laptop bool) {
+	m.CapabilityProfile.Availability = &Availability{Mode: mode, Available: true, Signals: OwnerSignals{Laptop: laptop}}
+}
+
+// MY-45: capacity is live availability minus one measured margin. A node keeps
+// idle p50 plus the larger of reserve and burst; the services host keeps its
+// persistent p95 instead. Never the burst twice, never below the idle maximum.
+// Owner-used, laptop and interactive hosts keep the conservative rule.
+func TestMeasuredHostMemoryRoleSingleMargin(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		role      string
+		mode      string
+		laptop    bool
+		shared    bool
+		reserve   float64
+		allowance float64
+		source    string
+	}{
+		// Idle history: p50 2.25, p95 5, max 7.75 GiB on 32 GiB.
+		{"node-default-burst", "", "dedicated", false, false, 1, 24.25, "idle_burst"}, // 32-2.25-5.5 = 32-max
+		{"node-reserve", "node", "dedicated", false, false, 6, 23.75, "explicit_reserve"},
+		{"services-reserve", "services", "dedicated", false, false, 4, 23, "explicit_reserve"}, // 32-5-4
+		{"services-burst", "services", "dedicated", false, false, 1, 24.25, "idle_burst"},
+		{"daily", "", "daily", false, false, 1, 18.75, ""}, // 32-7.75-max(1,7.75-2.25)
+		{"laptop", "", "dedicated", true, false, 1, 18.75, ""},
+		{"interactive", "interactive", "dedicated", false, true, 1, 18.75, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := measuredMemoryMachine()
+			dedicatedProfile(&m, tc.mode, tc.laptop)
+			policy := HostMaintenance{Role: tc.role}
+			if tc.shared {
+				policy.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
+			}
+			q.s.HostMaintenance = map[string]HostMaintenance{m.HostID: policy}
+			m.MemoryObservation.Quiescent, m.MemoryObservation.ReserveGB = true, tc.reserve
+			for i := 0; i < 100; i++ {
+				m.MemoryObservation.UsedGB = 2.25
+				if i >= 88 {
+					m.MemoryObservation.UsedGB = 5
+				}
+				if i == 99 {
+					m.MemoryObservation.UsedGB = 7.75
+				}
+				q.recordExternalMemory(&m)
+				clock.Advance(time.Minute)
+			}
+			budget, d := q.measuredHostMemoryBudget(&m, HostMemoryBudget{GiB: 20, Measured: true})
+			if budget.GiB != tc.allowance || d.Dedicated != (tc.source != "") || d.ReserveSource != tc.source {
+				t.Fatal(budget, d)
+			}
+		})
 	}
 }

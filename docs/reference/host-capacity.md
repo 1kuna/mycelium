@@ -171,7 +171,8 @@ valid live RAM telemetry.
 All per-card workers on one physical machine must share a stable `join
 --host-id` (default hostname); use unique host IDs across different machines.
 Linux uses `MemAvailable`; macOS uses free plus inactive pages from `vm_stat`.
-`--reserve-host-memory-gb` (default 4 GiB) withholds OS/other-workload headroom.
+`--reserve-host-memory-gb` (default 0) withholds extra OS/other-workload headroom;
+on unified memory the larger of it and `--reserve-memory-gb` applies once.
 The queue uses its durable host memory policy, refuses inconsistent device reports,
 and subtracts all outstanding declared allocations, including loading models
 and stopping/draining work. This is intentionally conservative: resident memory
@@ -233,6 +234,33 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   The measured allowance is detected physical RAM minus the seven-day maximum
   qualified idle physical usage minus a reserve. The reserve is the larger of
   the worker's existing host reserve and observed idle peak-to-typical variation.
+
+  Each host has a role (MY-45), set with `myce host role HOST --role ROLE`
+  while enabled; it is kept with the queue's host policy and defaults to `node`:
+
+  - `node`: a managed on-demand machine with nothing persistent on it.
+    Capacity is live availability minus one margin. The allowance is physical
+    RAM minus the idle p50 minus that margin, the larger of the worker's host
+    reserve and the observed idle burst above p50. That never leaves less than
+    the observed idle maximum and counts neither the burst nor the reserve
+    twice; the live bound subtracts the same margin from current availability.
+  - `services`: the host running every project's always-on services, with its
+    accelerators still schedulable. Those services are persistent measured
+    external demand, so the baseline is their idle p95 instead of p50, with the
+    same single margin.
+  - `interactive`: the agents' host. It requires the shared-interactive profile
+    (`profile --shared=true` sets this role; `--shared=false` returns the host
+    to `node`) and keeps the rule above plus the profile's limits.
+
+  A worker that runs with `--daily-use` or is a laptop keeps the rule above
+  whatever its role. The idle baseline already contains the OS, drivers, other
+  resident services and the idle worker, so their measured use is kept back
+  without a separate estimate. The explicit reserve stays an operator override
+  for overshoot that is not yet measured, such as GPU allocations on unified
+  memory or the Darwin sampling interval; lower it in the worker's saved
+  configuration once that overshoot is measured. `host_memory_derivation`
+  reports `role`, `dedicated`, `baseline_quantile_gb` and `reserve_source`
+  (`explicit_reserve` or `idle_burst`).
   Raw availability already excludes unavailable OS pages: Linux `MemAvailable`
   preserves kernel low watermarks; Darwin excludes active, wired and compressed
   pages. Idle usage includes Mycelium control overhead, so RSS subtraction cannot

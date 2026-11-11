@@ -23,6 +23,7 @@ type HostMaintenance struct {
 	StopAt         *time.Time         `json:"stop_at,omitempty"`
 	Mode           string             `json:"mode"`
 	MemoryBudget   *HostMemoryBudget  `json:"memory_budget,omitempty"`
+	Role           string             `json:"role,omitempty"`
 	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
@@ -38,6 +39,7 @@ type HostMaintenanceRequest struct {
 	Stop                 bool               `json:"stop,omitempty"`
 	MemoryBudgetGB       *float64           `json:"memory_budget_gb,omitempty"`
 	MemoryBudgetMeasured *bool              `json:"memory_budget_measured,omitempty"`
+	Role                 *string            `json:"role,omitempty"`
 }
 
 type MaintenanceWorker struct {
@@ -382,9 +384,11 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	if policy.Mode == "" {
 		policy.Mode = "enabled"
 	}
-	// Placement changes do not transfer drain authority. Other maintenance
+	// Placement and allowance edits do not transfer drain authority, so an
+	// owner's conditional resume still works after them. Other maintenance
 	// edits, including a re-drain at the same timestamp, revoke it.
-	if request.Action != "placement" {
+	preservesDrain := request.Action == "placement" || request.Action == "budget" || request.Action == "role"
+	if !preservesDrain {
 		policy.DrainOwner = ""
 	}
 	switch request.Action {
@@ -426,12 +430,37 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 			policy.SharedHost = &profile
 			policy.LastResort = true
 		}
+		// The profile implies the interactive role; clearing it returns the
+		// host to the default on-demand node role.
+		policy.Role = ""
+		if policy.SharedHost != nil {
+			policy.Role = hostRoleInteractive
+		}
 	case "placement":
 		if request.LastResort == nil {
 			return errors.New("placement requires last_resort")
 		}
+	case "role":
+		// Capacity re-derives from the role on the next refresh; workers
+		// acknowledge the resulting allowance before new starts, so no drain.
+		if request.Role == nil || request.SharedHost != nil || request.LastResort != nil || request.MemoryBudgetGB != nil || request.MemoryBudgetMeasured != nil || request.CPUBudgetCores != nil {
+			return errors.New("role requires role and no other policy edits")
+		}
+		if err := validHostRole(*request.Role); err != nil {
+			return err
+		}
+		// The interactive role is exactly the hosts carrying the measured
+		// shared-interactive profile (#389), whose owner-yield logic keys off
+		// that profile; on-demand and services hosts never carry it.
+		if (*request.Role == hostRoleInteractive) != (policy.SharedHost != nil) {
+			return errors.New("the interactive role requires the shared host profile, and node or services require none; set or clear it with profile first")
+		}
+		policy.Role = *request.Role
 	default:
-		return errors.New("expected drain, disable, resume, budget, placement or profile")
+		return errors.New("expected drain, disable, resume, budget, placement, profile or role")
+	}
+	if request.Role != nil && request.Action != "role" {
+		return errors.New("role requires the role action")
 	}
 	if request.SharedHost != nil && request.Action != "profile" {
 		return errors.New("shared_host requires profile")
@@ -493,8 +522,8 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		policy.StopAt = &deadline
 	}
 	// Preserve the drain receipt's timestamp as well as its owner so its
-	// conditional resume remains valid after a placement-only edit.
-	if request.Action != "placement" {
+	// conditional resume remains valid after a placement or allowance edit.
+	if !preservesDrain {
 		policy.UpdatedAt = q.clock.Now()
 	}
 	q.s.HostMaintenance[host] = policy

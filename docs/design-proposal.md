@@ -2735,3 +2735,17 @@ reserve alone, and the allowance still caps reservations. Authored allowances
 and shared-interactive hosts keep the larger of the reserve and physical RAM
 minus the allowance.
 
+## Amendment: host roles and measured capacity (2026-11-11)
+
+MY-45 and MY-34. Each host carries an explicit queue-owned role, set through
+the host command and defaulting to `node`. On a node with a measured allowance,
+capacity is live availability minus one margin: the larger of the explicit host
+reserve and the observed idle burst above the idle p50. The allowance is
+physical RAM minus the idle p50 minus that margin, never less than the observed
+idle maximum. The `services` role (the host running every project's always-on
+services, accelerators still schedulable) keeps the idle p95 as persistent
+external demand, with the same single margin. The `interactive` role is exactly
+the hosts with the shared-interactive profile and keeps the existing rule and
+limits, as do workers declaring owner use or running on a laptop. The explicit
+reserve remains the operator's named override for overshoot not yet measured;
+no new fixed reserve is introduced.
