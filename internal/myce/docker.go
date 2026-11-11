@@ -160,6 +160,7 @@ type dockerAttempt struct {
 	storageObserver   *storageObserver
 	memoryWorker      *Worker
 	command           func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	daemon            func(context.Context, ...string) ([]byte, error) // Deterministic daemon effects, without CLI supervision.
 	persist           func(dockerExecution) error                      // Optional custody store for fault injection.
 	admit             func() error
 	dirty             bool
@@ -396,6 +397,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	parent := d.ctx
 	if parent == nil {
 		parent = context.Background()
+	}
+	if d.daemon != nil {
+		return d.daemon(parent, args...)
 	}
 	historyPath := d.initializationFile(operation, args)
 	history := readinessHistory{}
@@ -1202,6 +1206,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	d.command = w.dockerCommand
+	d.daemon = w.dockerDaemon
 	d.state.LogsNone = j.Spec.Logs == "none"
 	if dockerFileJob(j.Spec) {
 		d.state.FileMounts, err = dockerFileMounts(j, s.dir, checkpoint)
@@ -1671,7 +1676,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	} // Retry a missing CLI without declaring release.
 	state.Accelerator = !s.state.Job.Spec.Needs.cpuOnly()
 	state.LogsNone = state.LogsNone || s.state.Job.Spec.Logs == "none"
-	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
+	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, command: w.dockerCommand, daemon: w.dockerDaemon}
 
 	for _, v := range os.Environ() {
 		k, _, _ := strings.Cut(v, "=")

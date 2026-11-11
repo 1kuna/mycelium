@@ -106,6 +106,7 @@ type Worker struct {
 	LogRetention       time.Duration
 	dockerCallTimeout  time.Duration
 	dockerCommand      func(context.Context, ...string) ([]byte, error)
+	dockerDaemon       func(context.Context, ...string) ([]byte, error) // In-process daemon; no CLI transport timing.
 	Unit               string
 
 	SuperviseProcess bool

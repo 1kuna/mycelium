@@ -20,15 +20,7 @@ import (
 
 func TestObserverFixtureLifecycle(t *testing.T) {
 	if mode := os.Getenv("MYCE_OBSERVER_LIFECYCLE_HELPER"); mode != "" {
-		root := os.Getenv("MYCE_TEST_DOCKER_BIN")
-		data, err := os.ReadFile(os.Getenv("MYCE_OBSERVER_TEST_BINARY"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		binary := filepath.Join(root, "myce-dev-test")
-		if err = os.WriteFile(binary, data, 0700); err != nil {
-			t.Fatal(err)
-		}
+		binary := devTestBinary(t)
 		registry, err := sharedProfileRoot()
 		if err != nil {
 			t.Fatal(err)
@@ -80,7 +72,9 @@ func TestObserverFixtureLifecycle(t *testing.T) {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
-			cmd.Env = append(cmd.Env, "TMPDIR="+tmp, "MYCE_OBSERVER_LIFECYCLE_HELPER="+mode, "MYCE_OBSERVER_TEST_BINARY="+binary, "MYCE_OBSERVER_TEST_QUEUE="+server.URL, "MYCE_OBSERVER_TEST_REPORT="+report)
+			// Exercise the same prebuilt-image seam as the sharded gate. The
+			// borrowing child's suite still owns its detached observer teardown.
+			cmd.Env = append(cmd.Env, "TMPDIR="+tmp, "MYCE_OBSERVER_LIFECYCLE_HELPER="+mode, "GATE_TEST_CLI_BINARY="+binary, "MYCE_OBSERVER_TEST_QUEUE="+server.URL, "MYCE_OBSERVER_TEST_REPORT="+report)
 			// Receipts can outlive the executable fixture (ordinary consumers keep
 			// them in a checkout). Deleting the fixture is not observer teardown.
 			if mode == "fixture" {

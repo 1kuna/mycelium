@@ -82,6 +82,7 @@ func cliTestMain(m *testing.M) int {
 		return 1
 	}
 	if err := testenv.Cleanup(dir); err != nil { // All tests and observers have joined.
+		fmt.Fprintln(os.Stderr, "clean CLI fixture:", err)
 		code = 1
 	}
 	return code
