@@ -142,7 +142,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		return r, nil
 	}
 	if len(s.Files) > 0 {
-		r.Notes = append(r.Notes, "file_inputs reports ready only after a bounded read-only SHA-256/size verification of file-store bytes; local placeholders need staging, and incomplete observations stay unknown. Submit verifies all bytes again before admission.")
+		r.Notes = append(r.Notes, "file_inputs reports ready only after a read-only SHA-256/size verification of file-store bytes, which waits for the shared verification slot for as long as the caller waits; local placeholders need staging, and a check the caller abandoned stays unknown. Submit verifies all bytes again before admission.")
 	}
 	var discovery *CommandDiscovery
 	if WantsCommandDiscovery(s) {
