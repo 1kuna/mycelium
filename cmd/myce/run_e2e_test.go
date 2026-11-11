@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -204,5 +205,98 @@ check: [test, -s, result]
 		}
 		return false
 	})
-	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release; owned dev joined and listener closed")
+	t.Run("wait-out", func(t *testing.T) {
+		exitOf := func(err error) int {
+			var exit *exec.ExitError
+			if err == nil {
+				return 0
+			}
+			if !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			return exit.ExitCode()
+		}
+		// Inline --out returns declared files, verified against output_refs.
+		inlineOut := filepath.Join(root, "inline-out")
+		output, err := command("--out", inlineOut, "--output", "nested/inline.txt", "--", "sh", "-c", "mkdir -p nested && printf inline-ok > nested/inline.txt").CombinedOutput()
+		if b, e := os.ReadFile(filepath.Join(inlineOut, "nested", "inline.txt")); err != nil || e != nil || string(b) != "inline-ok" {
+			t.Fatalf("inline --out: %v %s %q %v", err, output, b, e)
+		}
+		if err := os.WriteFile(filepath.Join(root, "source", "entry.sh"), []byte(`test -z "${MYCE_TOKEN:-}"
+case "$1" in
+ok) echo adapter-log; printf adapter-ok > result ;;
+fail) echo adapter-failing >&2; exit 9 ;;
+sleep) echo adapter-ready; sleep 60 ;;
+esac
+`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		adapter := `schema: 1
+project: demo
+default: work
+entries:
+  work:
+    source: {directory: source}
+    run: {command: [sh, entry.sh]}
+    needs: {cpu_cores: 1, memory_gb: 0.25, platform: cpu}
+    targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
+    outputs: {result: results}
+    checks: {result: [test, -s, result]}
+`
+		if err := os.WriteFile(filepath.Join(root, ".mycelium", "adapter.yaml"), []byte(adapter), 0600); err != nil {
+			t.Fatal(err)
+		}
+		entry := func(args ...string) (string, string, int) {
+			c := command(append([]string{"--entry", "work"}, args...)...)
+			var stdout, stderr enrollmentLogBuffer
+			c.Stdout, c.Stderr = &stdout, &stderr
+			code := exitOf(c.Run())
+			if strings.Contains(stdout.String()+stderr.String(), token) {
+				t.Fatal("credential exposed")
+			}
+			return stdout.String(), stderr.String(), code
+		}
+		entryOut := filepath.Join(root, "entry-out")
+		stdout, stderr, code := entry("--wait", "--out", entryOut, "--", "ok")
+		if b, e := os.ReadFile(filepath.Join(entryOut, "result")); code != 0 || e != nil || string(b) != "adapter-ok" || stdout != "adapter-log\n" || !strings.Contains(stderr, "outputs verified") {
+			t.Fatalf("entry success: code=%d stdout=%q stderr=%s result=%q %v", code, stdout, stderr, b, e)
+		}
+		if stdout, stderr, code = entry("--wait", "--out", entryOut, "--", "fail"); code != 9 || !strings.Contains(stdout+stderr, "adapter-failing") {
+			t.Fatalf("entry command exit: code=%d %s %s", code, stdout, stderr)
+		}
+		if output, err := command("--entry", "absent", "--wait").CombinedOutput(); exitOf(err) != runInfraExit || !strings.Contains(string(output), "adapter_invalid") {
+			t.Fatalf("infrastructure exit: %v %s", err, output)
+		}
+		// SIGTERM cancels the entry's job and waits for confirmed release.
+		running := command("--entry", "work", "--wait", "--", "sleep")
+		var logs enrollmentLogBuffer
+		running.Stdout, running.Stderr = &logs, &logs
+		if err := running.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- running.Wait() }()
+		wait(t, ctx, func() bool { return strings.Contains(logs.String(), "adapter-ready") })
+		_ = running.Process.Signal(syscall.SIGTERM)
+		select {
+		case err := <-done:
+			if exitOf(err) != 130 || !strings.Contains(logs.String(), "cancellation confirmed (release confirmed)") {
+				t.Fatalf("entry interrupt: %v %s", err, logs.String())
+			}
+		case <-ctx.Done():
+			_ = running.Process.Kill()
+			<-done
+			t.Fatal("entry cancellation deadline")
+		}
+		var s myce.Snapshot
+		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &s); err != nil {
+			t.Fatal(err)
+		}
+		for _, j := range s.Jobs {
+			if j.Spec.Project == "demo" && strings.Contains(strings.Join(j.Spec.Run.Command, " "), "sleep") && j.State != "cancelled" {
+				t.Fatalf("entry job not cancelled: %s %s", j.ID, j.State)
+			}
+		}
+	})
+	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release, --wait/--out entry and inline outputs, exit 9 and 125, SIGTERM confirmed cancel; owned dev joined and listener closed")
 }

@@ -185,9 +185,15 @@ func TestRunInstalledPinnedAuthority(t *testing.T) {
 }
 
 func TestRunRequirementsAndUsage(t *testing.T) {
-	for _, args := range [][]string{{"--gpu", "bogus", "--", "echo"}, {"--cpu", "0", "--", "echo"}, {"--mem", "NaN", "--", "echo"}, {"--mem", "-2G", "--", "echo"}, {"--priority", "deadline", "--", "echo"}, {"--"}} {
+	for _, args := range [][]string{{"--gpu", "bogus", "--", "echo"}, {"--cpu", "0", "--", "echo"}, {"--mem", "NaN", "--", "echo"}, {"--mem", "-2G", "--", "echo"}, {"--priority", "deadline", "--", "echo"}, {"--output", "x", "--", "echo"}, {"--"}} {
 		if err := runCommand(context.Background(), args, io.Discard, io.Discard); err == nil {
 			t.Fatalf("accepted %v", args)
+		}
+	}
+	// --wait/--out usage errors are Mycelium failures, never a command's code.
+	for _, args := range [][]string{{"--wait", "--detach", "--", "echo"}, {"--out", "dir", "--", "echo"}, {"--out", "dir", "--output", "../x", "--", "echo"}, {"--entry", "e", "--output", "x", "--wait"}} {
+		if code := exitCode(runCommand(context.Background(), args, io.Discard, io.Discard)); code != runInfraExit {
+			t.Fatalf("%v exit %d", args, code)
 		}
 	}
 	t.Setenv("MYCE_TOKEN", "private-help-token")

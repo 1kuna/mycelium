@@ -8,9 +8,9 @@ CPU commands are supported alongside GPU work.
 
 | Need | Choose | Completion behavior |
 | --- | --- | --- |
-| One installed command | `myce run -- CMD` | Waits and streams logs; `--detach` returns the ID |
+| One installed command | `myce run -- CMD` | Waits and streams logs; `--out DIR --output NAME` returns files; `--detach` returns the ID |
 | Explicit job YAML/JSON or durable caller lifecycle | `myce submit job.yaml` | Returns a job ID; caller waits/cancels |
-| New reusable project integration | [`myce init`](#initialize-an-adapter), then `myce run --entry NAME` | Returns a receipt; wait/retrieve separately |
+| New reusable project integration | [`myce init`](#initialize-an-adapter), then `myce run --entry NAME` | Returns a receipt; `--wait --out DIR` does the whole trip |
 | Existing project profile | `myce run --profile NAME` | Same receipt/recovery path; conversion is explicit |
 | Shared kind/program with frozen native recipes | Registered extension | Native baseline qualification before useful work |
 
@@ -241,6 +241,48 @@ host/device pins from future authored submissions and resolve again. Genuine
 hardware/validation restrictions keep their `requirement_reasons`. Existing
 accepted work is not cancelled or rewritten to move it.
 
+### Run, wait and fetch in one command
+
+```sh
+myce run --entry analyze --wait --out accepted-results
+myce run --out accepted-results --output report.json -- python report.py
+```
+
+`--wait` submits through the same receipt path, then waits, prints state
+changes to stderr and streams command logs to stdout, downloads the accepted
+outputs into `--out DIR` and verifies each file's SHA-256 and size against the
+recorded `output_refs`. `--out` implies `--wait`; without `--out` nothing is
+downloaded. The entry's `checks` still run inside the job. `--wait`/`--out` also
+accept `--profile NAME`, `--key`, `--input`, `--class` and `--deadline`, and
+refuse `--detach`. Rerunning the same command with the same intent adopts the
+existing job (and fetches its outputs again) rather than submitting twice.
+
+For a one-off command, `--out DIR` needs one or more `--output NAME`: the
+relative files the command writes in its working folder. Mycelium attaches a
+small stored `.myce-outputs` manifest listing them, so the outputs return
+through the verified file store.
+
+Exit codes with `--wait` or `--out`:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The command succeeded and every output was verified into `DIR` |
+| `1`–`255` | The command's own exit code |
+| `130` | Interrupted (Ctrl-C or SIGTERM); cancellation confirmed, job will not run |
+| `125` | Mycelium or `myce run` failed, not the command: usage, submission refusal, queue or transport failure, a job lost, killed by a signal or cancelled elsewhere, output download/verification failure, or an unconfirmed cancellation |
+
+The stderr reason names the cause; a command that itself exits `125` is told
+apart only by that line. On Ctrl-C or SIGTERM the run cancels by project and
+submission key, then repeats the idempotent cancel for up to 10 seconds until
+a running process's release is confirmed and says so (`release confirmed`, or
+`release still pending`). An unconfirmed cancellation exits `125` and prints the
+project and key to cancel through the cancellation API. Submission refusals
+print the retained receipt to stderr; stdout carries only command logs. If the
+parent process exits, the job continues and the run exits `125`. Without these
+flags, the receipt output and exit codes below are unchanged.
+
+### Separate steps
+
 Adapter submission retains the existing profile receipt/observer recovery contract:
 
 ```sh
@@ -253,8 +295,7 @@ Submission returns a receipt; foreground `myce wait JOB_ID` is sufficient for
 adapter and profile completion, with no notifier or harness binding required.
 Use [completion notification](#completion-notification) only when detached delivery
 is needed. `myce result` verifies accepted artifact SHA-256 and size; then apply
-the project's own acceptance check. Integrated foreground completion/retrieval UX
-remains #156's separate slice. Queue outages never execute locally. Keep private receipts while recovery
+the project's own acceptance check. Queue outages never execute locally. Keep private receipts while recovery
 matters, and use a new explicit `--key` for an intentional repeat.
 
 ## Initialize an adapter

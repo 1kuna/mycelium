@@ -87,6 +87,9 @@ The key makes submission safe to repeat. After a lost reply, `submission
 unconfirmed` or exit 69 `input storage unconfirmed`, rerun the same command with
 the same key and frozen inputs and you get the same job. Changed intent needs a
 new key. A one-off without inputs or outputs can use `myce run --cpu N -- CMD`.
+`myce run --entry NAME --wait --out DIR` submits, waits, fetches verified outputs
+and returns the command's exit code (`125` Mycelium failure, `130` cancelled);
+see [run, wait and fetch](../../docs/adapter.md#run-wait-and-fetch-in-one-command).
 To run one command over many inputs, add `pieces:` to the entry, for example
 `- {key: a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}`. Then one
 `run` and one wait cover them all, and results come back as `KEY/OUTPUT`. Don't

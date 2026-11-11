@@ -36,6 +36,13 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	deadline := f.String("deadline", "", "RFC3339 deadline (required for deadline priority/class)")
 	name := f.String("name", "", "job name (default: command basename)")
 	detach := f.Bool("detach", false, "print job ID and return without waiting")
+	wait := f.Bool("wait", false, "with an adapter entry or profile: wait, stream logs and return the command's exit code (125: Mycelium/run failure)")
+	outDir := f.String("out", "", "download verified outputs into DIR after success; implies --wait")
+	var outputs []string
+	f.Func("output", "inline command output NAME to return with --out (repeatable)", func(value string) error {
+		outputs = append(outputs, value)
+		return nil
+	})
 	adapter := f.String("adapter", "", "project adapter YAML (default: .mycelium/adapter.yaml)")
 	entry := f.String("entry", "", "named adapter entry (default: adapter default)")
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
@@ -48,6 +55,15 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	notify := f.String("notify", os.Getenv("MYCE_NOTIFY"), "local notifier executable; must support --check and JSON on stdin")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+	// --wait and --out opt into one exit contract: the command's own code,
+	// 130 for a confirmed interrupt, runInfraExit for everything else.
+	waitMode := *wait || *outDir != ""
+	if waitMode {
+		defer func() { resultErr = runWaitContract(resultErr) }()
+		if *detach {
+			return errors.New("--detach cannot be combined with --wait or --out")
+		}
 	}
 	itemInputs := map[string]string{}
 	for _, value := range inputFlags {
@@ -73,17 +89,23 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 				overrides.Class = class
 			case "deadline":
 				overrides.Deadline = deadline
-			case "gpu", "cpu", "mem", "host-mem", "project", "priority", "name", "detach":
+			case "gpu", "cpu", "mem", "host-mem", "project", "priority", "name", "detach", "output":
 				unsupported = v.Name
 			}
 		})
 		if unsupported != "" {
 			return fmt.Errorf("--%s is not supported with a profile or adapter", unsupported)
 		}
-		if *profile == "" {
-			return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut, overrides)
+		submit := func(receipt io.Writer) error {
+			if *profile == "" {
+				return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, receipt, errOut, overrides)
+			}
+			return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, receipt, errOut, overrides)
 		}
-		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut, overrides)
+		if waitMode {
+			return runReceiptWait(ctx, submit, parentPID, *outDir, *config, *joining, *address, *token, out, errOut)
+		}
+		return submit(out)
 	}
 	explicitNotify, explicitHostMem := false, false
 	f.Visit(func(v *flag.Flag) {
@@ -95,6 +117,9 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	}
 	if f.NArg() == 0 {
 		return errors.New("usage: myce run [flags] -- <command> [args]")
+	}
+	if (*outDir == "") != (len(outputs) == 0) {
+		return errors.New("--out and --output go together: myce run --out DIR --output NAME -- <command>")
 	}
 	if *cpu <= 0 {
 		return errors.New("cpu must be positive")
@@ -122,6 +147,14 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	s := myce.Spec{AuthoringOrigin: myce.OriginCommand, Name: *name, Project: *project, Class: *class, Priority: *priority,
 		SubmissionKey: "run-" + rand.Text(), Run: myce.RunSpec{Command: f.Args()},
 		Needs: myce.ResourceNeeds{CPUCores: *cpu, MemoryGB: memory, Platform: myce.Platform{Required: []string{platform}}}}
+	var manifest string
+	if len(outputs) > 0 {
+		var cleanup func()
+		if manifest, cleanup, err = attachRunOutputs(&s, outputs); err != nil {
+			return err
+		}
+		defer cleanup()
+	}
 	if *gpu != "" && (*mem != "" || explicitHostMem) {
 		s.Needs.HostMemoryGB = hostMemory
 	}
@@ -145,25 +178,19 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if client.HTTP != nil {
 		defer client.HTTP.CloseIdleConnections()
 	}
-	// Never repeat credentials from transport/remote diagnostic text.
-	defer func() {
-		if resultErr != nil {
-			resultErr = &exitError{exitCode(resultErr), errors.New(strings.ReplaceAll(resultErr.Error(), client.Token, "[redacted]"))}
+	defer func() { resultErr = redactRunError(resultErr, client.Token) }()
+	if manifest != "" {
+		if err = client.UploadJobInput(myce.WithFileStoreSubmission(ctx, s), manifest, s.Files[runOutputManifest]); err != nil {
+			if ctx.Err() != nil {
+				return errors.New("run interrupted before submission; nothing submitted")
+			}
+			return fmt.Errorf("output manifest upload failed: %w", err)
 		}
-	}()
-	cancelJob := func() error {
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stop()
-		ack, e := client.CancelSubmission(cleanup, s.Project, s.SubmissionKey)
-		if e != nil || !ack.WillNotRun {
-			return waitError(130, "run interrupted; cancellation unconfirmed; cancel via /api/jobs/cancel with project "+s.Project+" and submission_key "+s.SubmissionKey)
-		}
-		return waitError(130, "run interrupted; cancellation acknowledged (running cleanup may still be pending)")
 	}
 	j, err := client.Submit(ctx, s)
 	if err != nil {
 		if ctx.Err() != nil {
-			return cancelJob()
+			return cancelRunJob(client, s.Project, s.SubmissionKey, waitMode)
 		}
 		return fmt.Errorf("submit failed (project %s, submission key %s): %w", s.Project, s.SubmissionKey, err)
 	}
@@ -171,37 +198,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		_, err = fmt.Fprintln(out, j.ID)
 		return err
 	}
-	observerCtx, stopObserver := waitParentContext(ctx, parentPID, time.Second, os.Getppid)
-	defer stopObserver()
-	var after int64
-	lastStatus := ""
-	j, err = client.WaitSubmitted(observerCtx, j, func(j *myce.Job) error {
-		line := j.ID + " " + j.State + " " + myce.JobReason(j)
-		if line != lastStatus {
-			if _, e := fmt.Fprintln(errOut, strings.ReplaceAll(line, client.Token, "[redacted]")); e != nil {
-				return e
-			}
-			lastStatus = line
-		}
-		return drainJobLogs(observerCtx, client, j.ID, &after, out)
-	})
-	if ctx.Err() != nil {
-		return cancelJob()
-	}
-	if observerCtx.Err() != nil {
-		return waitError(4, "run observer parent exited; job continues")
-	}
-	if err != nil {
-		return err
-	}
-	if j.State == "succeeded" {
-		return nil
-	}
-	code := 1
-	if cause := j.ExecutionCause; j.State == "failed" && cause != nil && cause.Class == "command_exit" && cause.ExitCode != nil && *cause.ExitCode > 0 && *cause.ExitCode <= 255 {
-		code = *cause.ExitCode
-	}
-	return waitError(code, fmt.Sprintf("job %s %s: %s", j.ID, j.State, myce.JobReason(j)))
+	return followRunJob(ctx, client, j, s.Project, s.SubmissionKey, parentPID, waitMode, *outDir, out, errOut)
 }
 
 func runMemory(value string) (float64, error) {
