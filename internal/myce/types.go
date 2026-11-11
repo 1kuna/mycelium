@@ -539,6 +539,7 @@ type Job struct {
 	ModelEnvironmentNeedsSource bool   `json:"model_environment_needs_source,omitempty"`
 
 	CommandDiscovery          *CommandDiscovery                       `json:"command_discovery,omitempty"`
+	EntryCoverage             *EntryCoverage                          `json:"entry_coverage,omitempty"`
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
 	HostMemoryCharge *AttemptHostMemoryCharge `json:"host_memory_charge,omitempty"`
