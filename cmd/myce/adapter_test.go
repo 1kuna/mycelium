@@ -337,13 +337,17 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 	defer d.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
+	// This registry belongs only to this journey. A free lock or retired
+	// registration precedes the observer's final status and supervisor writes.
+	observerSession := filepath.Join(root, "observer-session")
+	defer waitCLIObserverFixture(t, ctx, filepath.Join(observerSession, "observers"))
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
 	binary := devTestBinary(t)
 	invoke := func(key string) profileReceipt {
 		t.Helper()
 		command := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", d.URL, "--key", key, "--", "native literal; $()")
 		command.Dir = root
-		command.Env = append(os.Environ(), "MYCE_TOKEN=native-adapter-token", "MYCE_NOTIFY=")
+		command.Env = append(os.Environ(), "MYCE_TOKEN=native-adapter-token", "MYCE_NOTIFY=", "MYCE_DEV_SESSION_ROOT="+observerSession)
 		var diagnostics bytes.Buffer
 		command.Stderr = &diagnostics
 		b, err := command.Output()
