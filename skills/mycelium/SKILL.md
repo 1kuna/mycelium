@@ -214,6 +214,10 @@ in the foreground until stopped.
 
 ## References
 
+For releases containing #1356, `myce init` writes a minimal adapter entry;
+non-production entries may omit targets and learn machine-type coverage.
+Production still requires explicit targets. See [adapter defaults](../../docs/adapter.md).
+
 Load the page for your branch:
 
 - [Submit](references/submit.md): one-offs, GPU and memory, variants and

@@ -10,7 +10,7 @@ CPU commands are supported alongside GPU work.
 | --- | --- | --- |
 | One installed command | `myce run -- CMD` | Waits and streams logs; `--detach` returns the ID |
 | Explicit job YAML/JSON or durable caller lifecycle | `myce submit job.yaml` | Returns a job ID; caller waits/cancels |
-| New reusable project integration | Adapter, `myce run --entry NAME` | Returns a receipt; wait/retrieve separately |
+| New reusable project integration | [`myce init`](#initialize-an-adapter), then `myce run --entry NAME` | Returns a receipt; wait/retrieve separately |
 | Existing project profile | `myce run --profile NAME` | Same receipt/recovery path; conversion is explicit |
 | Shared kind/program with frozen native recipes | Registered extension | Native baseline qualification before useful work |
 
@@ -22,8 +22,14 @@ never switches callers or removes old readers. See [jobs](jobs.md) for keyed
 intent/cancellation, [files](files.md) for custody, and
 [scheduling](scheduling.md) for live portability advice.
 
-From the next release, a flat non-production native CPU entry or compatibility
-profile may set `portable: true` and omit targets when all member environments
+From the next release, a non-production entry or profile may omit `targets`
+entirely: it runs on any machine type its platform, Pixi lock and declared
+tools fit, and Mycelium learns its coverage
+([entries without targets](#entries-without-targets)). Production entries keep
+explicit targets (MY-19).
+
+A flat non-production native CPU entry or compatibility
+profile may instead set `portable: true` and omit targets when all member environments
 have selected immutable managed Pixi lock coverage. Mycelium derives candidates
 from those locks, supported runtimes and fresh inventory; see
 [managed CPU discovery](environments.md#cpu-tools-with-pixi). `portable: true`
@@ -67,24 +73,82 @@ selects its `default`; `myce run --entry NAME` selects another entry.
 when `--entry` or `--adapter` selects the entry. Plain `myce run -- CMD` retains
 its installed-command behavior, including in a project containing an adapter.
 
+The smallest file is a project and one command:
+
 ```yaml
-schema: 1
+project: example
+entries:
+  test:
+    run: {command: [python3, -m, pytest]}
+```
+
+Every other field is optional. From the next release the defaults are:
+
+| Field | Default |
+| --- | --- |
+| `schema` | `1` |
+| `default` | the only entry; with several entries and no default, `myce run` needs `--entry NAME` |
+| `source` | committed Git `HEAD` |
+| `class` | `experiment` |
+| `needs` | `{cpu_cores: 1, memory: auto, platform: cpu}` |
+| `environment` | installed tools on the worker (the same as `environment: {}`) |
+| `checks` | none: the command's exit status and required outputs decide success |
+| `targets` | any machine type that fits (non-production only; see below) |
+
+A fuller entry adds what it needs:
+
+```yaml
 project: example
 default: analyze
 entries:
   analyze:
     source: {git: HEAD, paths: [scripts/]}
     run: {command: [python3, scripts/analyze.py]}
-    needs: {platform: cpu, cpu_cores: 1, memory: auto}
-    targets: [{os: darwin, arch: arm64, platform: cpu}]
-    environment: {}
+    environment: {backend: pixi, lock_file: pixi.lock}
     outputs: {result.json: results}
     checks:
       result: [python3, scripts/analyze.py, --check]
 ```
 
-Declare the exact targets your software supports and let Mycelium choose the
-host. Add variants and lock coverage for other feasible platforms as the live
+### Entries without targets
+
+A non-production entry or profile that omits `targets` runs on any machine type
+(OS, architecture and platform) where its `needs.platform`, its Pixi lock and its
+`needs.tools` fit. A Pixi lock that declares its platforms limits the entry to
+those OS/architectures; a uv lock or installed tools do not limit it.
+
+The queue keeps a small coverage record per project entry and recipe. The recipe
+is the entry's command, checks, common inputs, environment, lock bytes, tools and
+platform. Source commits and per-run arguments are not part of it, except that
+`memory_class: per_item` makes arguments and per-item inputs part of it.
+
+- The first run on a machine type the recipe has never succeeded on is an
+  ordinary attempt.
+- If it fails there, the failure is a **coverage finding**, not the job's
+  failure. The queue records the finding, skips that machine type for this entry,
+  and requeues the job on another type. The job's `entry_coverage.findings` and
+  attempt history name the type and its one action: make the command, tools or
+  lock file work there. Otherwise it stays skipped.
+- Any change to the recipe clears its skips, so the next run may try those types
+  again. Waste is bounded to one attempt per machine type per recipe.
+- A failure on a type the recipe already succeeded on is the job's own failure.
+- If the job fails on every type it can use and the recipe has never succeeded
+  anywhere, the failure is not type-specific. The job fails with the command's
+  error and the skips are cleared.
+- If no type remains where the recipe has succeeded (for example, that machine
+  left), the job fails with the coverage finding as its reason.
+
+Placement explanations and `no_qualified_target` refusals name a skipped type
+as `entry coverage`; the read-only `--resolve` preview does not yet include
+coverage records. A coverage skip is not a hold. Explicit targets always bind and never get a coverage record.
+
+Production entries keep explicit targets. A production entry, or a `--class
+production` override, without targets is refused before submission. The queue
+refuses it too when a priority policy promotes the job to the production tier.
+This keeps MY-19 output parity in force before production use.
+
+Declare targets only when your software has a hard requirement, or for
+production. Otherwise let Mycelium choose the host. Add variants and lock coverage for other feasible platforms as the live
 portability report directs. Host/device selectors require a specific hardware,
 approved production parity or qualification exception; document it with
 `requirement_reasons`. See the [placement contract](scheduling.md#declare-requirements-let-mycelium-place).
@@ -191,6 +255,35 @@ the project's own acceptance check. Integrated foreground completion/retrieval U
 remains #156's separate slice. Queue outages never execute locally. Keep private receipts while recovery
 matters, and use a new explicit `--key` for an intentional repeat.
 
+## Initialize an adapter
+
+From the project's root, from the next release:
+
+```sh
+myce init
+myce init -- python scripts/analyze.py
+myce run --entry test
+```
+
+`myce init` writes `.mycelium/adapter.yaml` with one entry named `test`
+(`--entry NAME` picks another name). It finds the project's lock file and uses it
+as the entry's environment:
+
+- `pixi.lock` with `pixi.toml` becomes `environment: {backend: pixi, lock_file: pixi.lock}`.
+- `uv.lock` with `pyproject.toml` becomes `environment: {lock_file: uv.lock, python: "3.X"}`.
+  The Python version comes from `.python-version`, then from the `requires-python`
+  lower bound; `--python 3.X` sets it explicitly.
+- With both locks present, choose one with `--lock pixi.lock` or `--lock uv.lock`.
+- Without a lock, pass the command after `--`; it runs with the worker's installed tools.
+
+The default command is `python -m pytest`; arguments after `--` replace it. The
+entry has no wrapper, no result marker, no target list and no needs; the defaults
+above apply. An existing adapter is never overwritten. Initialization validates
+the entry and never submits it. Commit the source the entry should run, and
+ignore `.mycelium/receipts/`.
+
+`myce profile init` still writes the older profile starter for existing callers.
+
 ## Initialize a profile
 
 From the project's root:
@@ -235,7 +328,9 @@ command; broaden the suite and its output checks for the project's needs.
 ## Project profiles
 
 `myce run --profile gate-full` reads `.mycelium/profiles/gate-full.yaml`, submits
-and prints a JSON receipt. Use `--profile path.yaml` for an explicit file.
+and prints a JSON receipt. From the next release a profile needs only `project` and
+`run.command`; `check`, `class`, `needs` and (outside production) `targets` take
+the [adapter defaults](#project-instruction-file). Use `--profile path.yaml` for an explicit file.
 Use `myce run --profile go-test -- -race -run '^TestX$' ./internal/myce` for ad-hoc Go tests with the catalog-backed Go/Python/uv/git environment.
 Arguments after `--` append literally to `run.command`. The new flag belongs on
 `run`: `submit job.yaml` keeps its existing job-ID output and wire contract.
