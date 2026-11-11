@@ -1,8 +1,12 @@
 package myce
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -260,8 +264,16 @@ func TestResolveFitsRequestLaneWithLargeRetainedHistory(t *testing.T) {
 	// 16 MiB across two lanes: the history's projection (~512 x 28 KiB of
 	// command strings at the charged representation) exceeds the 8 MiB lane.
 	budgetHost(q, 16<<20, 1)
-	if _, err := q.cachedStatusJSON(context.Background()); !hasCode(err, "projection_capacity_exceeded") {
-		t.Fatal("fixture no longer exceeds the full-status lane", err)
+	// The previous resolve path: the full status capture in the same lane.
+	ctx, finish, err := q.requestBudgets.projectionContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = q.captureObservation("", ctx)
+	finish()
+	var refusal *HTTPError
+	if !errors.As(err, &refusal) || refusal.Code != "projection_capacity_exceeded" {
+		t.Fatal("fixture no longer exceeds the full-capture lane", err)
 	}
 	data, err := json.Marshal(ResolveRequest{Spec: cpuResolveSpec()})
 	if err != nil {
