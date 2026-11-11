@@ -31,10 +31,10 @@ var errLivenessUnavailable = errors.New("liveness observation unavailable")
 func livenessWorkBytes(ctx context.Context, root string) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, livenessScanBudget)
 	defer cancel()
-	return scanLivenessWork(ctx, root)
+	return scanLivenessWork(ctx, root, livenessScanEntries)
 }
 
-func scanLivenessWork(ctx context.Context, root string) (float64, error) {
+func scanLivenessWork(ctx context.Context, root string, limit int) (float64, error) {
 	entries := 0
 	var total float64
 	var walk func(int, string) error
@@ -43,7 +43,7 @@ func scanLivenessWork(ctx context.Context, root string) (float64, error) {
 			return err
 		}
 		entries++
-		if entries > livenessScanEntries {
+		if entries > limit {
 			return errLivenessUnavailable
 		}
 		var st unix.Stat_t

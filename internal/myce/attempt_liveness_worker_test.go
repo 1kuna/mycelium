@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// A small entry cap exercises the same partial-scan refusal as the production
+// cap without creating thousands of files.
+const livenessTestEntries = 8
+
 func TestAttemptLivenessWorkDirBoundAndSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "out"), []byte("hello"), 0600); err != nil {
@@ -19,23 +23,23 @@ func TestAttemptLivenessWorkDirBoundAndSymlinks(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	n, err := scanLivenessWork(context.Background(), dir)
+	n, err := scanLivenessWork(context.Background(), dir, livenessTestEntries)
 	if err != nil || n != 5 {
 		t.Fatal(n, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "out"), []byte("hello world"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	n, err = scanLivenessWork(context.Background(), dir)
+	n, err = scanLivenessWork(context.Background(), dir, livenessTestEntries)
 	if err != nil || n != 11 {
 		t.Fatal(n, err)
 	}
-	for i := 0; i < livenessScanEntries; i++ {
+	for i := 0; i < livenessTestEntries; i++ {
 		if err := os.WriteFile(filepath.Join(dir, fmt.Sprint(i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err = scanLivenessWork(context.Background(), dir); err == nil {
+	if _, err = scanLivenessWork(context.Background(), dir, livenessTestEntries); err == nil {
 		t.Fatal("partial directory total treated as known")
 	}
 	ctx, cancel := context.WithCancel(context.Background())

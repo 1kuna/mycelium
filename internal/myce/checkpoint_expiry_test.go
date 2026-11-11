@@ -210,8 +210,8 @@ func TestWorkerCheckpointExpiryRemovesOnlyVerifiedJobFolders(t *testing.T) {
 
 // Legacy terminal records that never stamped finished_at derive a conservative
 // end time from their own record; records with no timestamp are kept and
-// counted. The fixture models the reported root: 9,322 flat entries growing by
-// about 490 a day (6,857 on Nov 6 to 9,322 on Nov 11).
+// counted. The reported root (#1314) held 9,322 flat entries growing by about
+// 490 a day; the fixture keeps that age distribution at a tenth of the size.
 func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 	c := &fakeClock{now: time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)}
 	root := t.TempDir()
@@ -219,7 +219,7 @@ func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 	defer q.Close()
 	now := c.Now()
 	ptr := func(v time.Time) *time.Time { return &v }
-	const total, perDay = 9322, 490
+	const total, perDay = 933, 49
 	ids := make([]string, total)
 	ago := func(i int) time.Duration { return time.Duration(float64(i) / perDay * float64(24*time.Hour)) }
 	if err := q.update(func() error {
@@ -285,7 +285,7 @@ func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 		t.Fatalf("status %+v, want undated %d waiting %d", status, undated, total-undated-active)
 	}
 	// Within the grace period nothing derived is due; well beyond it, most are.
-	if due-stamped < 4000 || stamped > due/2 {
+	if due-stamped < 400 || stamped > due/2 {
 		t.Fatalf("legacy dating made too few entries due: due=%d stamped=%d", due, stamped)
 	}
 	snap, err := q.Snapshot()
