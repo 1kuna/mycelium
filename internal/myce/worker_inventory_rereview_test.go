@@ -16,126 +16,128 @@ import (
 // Exercise the real runner and queue retry policy with exact probe ordering,
 // independently of heartbeat probes. The queue and worker share fake time.
 func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
-	for _, resumable := range []bool{false, true} {
-		for _, probe := range []int{2, 3} {
-			for _, mismatch := range []bool{false, true} {
-				t.Run(fmt.Sprintf("resumable=%t/probe=%d/mismatch=%t", resumable, probe, mismatch), func(t *testing.T) {
-					q, clock := fixture(t)
-					server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-					defer server.Close()
-					w := recoveryWorker(t)
-					w.Clock = clock
-					w.Client = Client{URL: server.URL, Token: "test"}
-					w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
-					root, err := w.openStore()
+	// Pairwise cases: each probe site meets both fault kinds and both retry
+	// modes; the full 2x2x2 product covered no additional block (#1086).
+	for _, c := range []struct {
+		resumable, mismatch bool
+		probe               int
+	}{{false, false, 2}, {false, true, 3}, {true, true, 2}, {true, false, 3}} {
+		resumable, probe, mismatch := c.resumable, c.probe, c.mismatch
+		t.Run(fmt.Sprintf("resumable=%t/probe=%d/mismatch=%t", resumable, probe, mismatch), func(t *testing.T) {
+			q, clock := fixture(t)
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			w := recoveryWorker(t)
+			w.Clock = clock
+			w.Client = Client{URL: server.URL, Token: "test"}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			root, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.close()
+			root.state.Session = w.Machine.Session
+			spec := spec("production")
+			spec.Resumable = resumable
+			spec.Run.Command = []string{"sh", "-c", "exit 0"}
+			submitted := submit(t, q, spec)
+			devices := inventoryReviewDevices()[:1]
+			for attempt := 1; attempt <= 2; attempt++ {
+				reply := check(t, q, w.Machine, nil)
+				if reply.Job == nil {
+					t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
+				}
+				j := *reply.Job
+				store, err := newAttemptStore(root, j)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runner := workerWithPreparedCheckpoint(t, w, store, j)
+				runner.Machine.Device = "0"
+				runner.Machine.Devices = devices
+				calls := 0
+				runner.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
+					calls++
+					if attempt == 1 && calls == probe {
+						if !mismatch {
+							return nil, errors.New("transient probe failure")
+						}
+						changed := append([]MachineDevice(nil), devices...)
+						changed[0].Identity = "swapped-card"
+						return changed, nil
+					}
+					return devices, nil
+				}
+				bound, err := runner.forAttempt(j)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var p *process
+				// Force an input deferral before the launch fault when it is
+				// reachable, then join completion without shifting probe order.
+				budget := store.extensionFiles.timeout
+				store.extensionFiles.timeout = time.Nanosecond
+				for {
+					before := calls
+					p, err = bound.start(store, j)
+					store.extensionFiles.timeout = budget
+					if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending") {
+						break
+					}
+					if p != nil {
+						t.Fatal("input preparation returned a process before joining")
+					}
+					// A deferred start repeats only the entry probe, not a
+					// launch probe. Keep the injected launch fault at its site.
+					calls = before
+					store.extensionFiles.mu.Lock()
+					pending := store.extensionFiles.pending
+					store.extensionFiles.mu.Unlock()
+					if pending != nil {
+						select {
+						case <-pending.done:
+						case <-time.After(testWaitTimeout):
+							t.Fatal("fixture input preparation did not finish")
+						}
+					}
+					t.Log("joined input preparation before counted launch probes")
+				}
+				var r Result
+				if attempt == 1 {
+					if p != nil || err == nil {
+						t.Fatalf("launch probe did not refuse execution: process=%v error=%v probes=%d", p, err, calls)
+					}
+					if calls != probe {
+						t.Fatalf("refused at probe %d; want %d: %v", calls, probe, err)
+					}
+					r = startFailureOutcome(result(&j, false), err)
+					data, e := os.ReadFile(filepath.Join(store.dir, fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)))
+					var facts memberOutcome
+					if e == nil {
+						e = decodeWorkerJSON(data, &facts)
+					}
+					if e != nil || !facts.recordedInfrastructure() || len(facts.Infrastructure) != 1 || facts.Infrastructure[0].Kind != launchRefused {
+						t.Errorf("missing launch-refused fact: %+v %v", facts, e)
+					}
+				} else {
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer root.close()
-					root.state.Session = w.Machine.Session
-					spec := spec("production")
-					spec.Resumable = resumable
-					spec.Run.Command = []string{"sh", "-c", "exit 0"}
-					submitted := submit(t, q, spec)
-					devices := inventoryReviewDevices()[:1]
-					for attempt := 1; attempt <= 2; attempt++ {
-						reply := check(t, q, w.Machine, nil)
-						if reply.Job == nil {
-							t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
-						}
-						j := *reply.Job
-						store, err := newAttemptStore(root, j)
-						if err != nil {
-							t.Fatal(err)
-						}
-						runner := workerWithPreparedCheckpoint(t, w, store, j)
-						runner.Machine.Device = "0"
-						runner.Machine.Devices = devices
-						calls := 0
-						runner.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
-							calls++
-							if attempt == 1 && calls == probe {
-								if !mismatch {
-									return nil, errors.New("transient probe failure")
-								}
-								changed := append([]MachineDevice(nil), devices...)
-								changed[0].Identity = "swapped-card"
-								return changed, nil
-							}
-							return devices, nil
-						}
-						bound, err := runner.forAttempt(j)
-						if err != nil {
-							t.Fatal(err)
-						}
-						var p *process
-						// Force an input deferral before the launch fault when it is
-						// reachable, then join completion without shifting probe order.
-						budget := store.extensionFiles.timeout
-						store.extensionFiles.timeout = time.Nanosecond
-						for {
-							before := calls
-							p, err = bound.start(store, j)
-							store.extensionFiles.timeout = budget
-							if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending") {
-								break
-							}
-							if p != nil {
-								t.Fatal("input preparation returned a process before joining")
-							}
-							// A deferred start repeats only the entry probe, not a
-							// launch probe. Keep the injected launch fault at its site.
-							calls = before
-							store.extensionFiles.mu.Lock()
-							pending := store.extensionFiles.pending
-							store.extensionFiles.mu.Unlock()
-							if pending != nil {
-								select {
-								case <-pending.done:
-								case <-time.After(testWaitTimeout):
-									t.Fatal("fixture input preparation did not finish")
-								}
-							}
-							t.Log("joined input preparation before counted launch probes")
-						}
-						var r Result
-						if attempt == 1 {
-							if p != nil || err == nil {
-								t.Fatalf("launch probe did not refuse execution: process=%v error=%v probes=%d", p, err, calls)
-							}
-							if calls != probe {
-								t.Fatalf("refused at probe %d; want %d: %v", calls, probe, err)
-							}
-							r = startFailureOutcome(result(&j, false), err)
-							data, e := os.ReadFile(filepath.Join(store.dir, fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)))
-							var facts memberOutcome
-							if e == nil {
-								e = decodeWorkerJSON(data, &facts)
-							}
-							if e != nil || !facts.recordedInfrastructure() || len(facts.Infrastructure) != 1 || facts.Infrastructure[0].Kind != launchRefused {
-								t.Errorf("missing launch-refused fact: %+v %v", facts, e)
-							}
-						} else {
-							if err != nil {
-								t.Fatal(err)
-							}
-							r = d5Finish(t, p)
-						}
-						if err = q.Complete(r); err != nil {
-							t.Fatal(err)
-						}
-						got := job(t, q, submitted.ID)
-						want := "queued"
-						if attempt == 2 {
-							want = "succeeded"
-						}
-						if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
-							t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
-						}
-					}
-				})
+					r = d5Finish(t, p)
+				}
+				if err = q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, submitted.ID)
+				want := "queued"
+				if attempt == 2 {
+					want = "succeeded"
+				}
+				if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
+					t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -271,114 +273,116 @@ func TestInventoryRereviewAllowanceSingleCardMasks(t *testing.T) {
 }
 
 func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
-	for _, resumable := range []bool{false, true} {
-		for _, probe := range []int{3, 4} {
-			for _, mismatch := range []bool{false, true} {
-				t.Run(fmt.Sprintf("resumable=%t/probe=%d/mismatch=%t", resumable, probe, mismatch), func(t *testing.T) {
-					q, clock := fixture(t)
-					server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-					defer server.Close()
-					w := recoveryWorker(t)
-					w.Clock = clock
-					w.Machine.HostMemoryMeasured = true
-					w.Machine.FreeHostMemoryGB = 64
-					w.Machine.HostAvailableMemoryGB = 64
-					w.Client = Client{URL: server.URL, Token: "test"}
-					w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
-					root, err := w.openStore()
+	// Pairwise cases: each probe site meets both fault kinds and both retry
+	// modes; the full 2x2x2 product covered no additional block (#1086).
+	for _, c := range []struct {
+		resumable, mismatch bool
+		probe               int
+	}{{false, false, 3}, {false, true, 4}, {true, true, 3}, {true, false, 4}} {
+		resumable, probe, mismatch := c.resumable, c.probe, c.mismatch
+		t.Run(fmt.Sprintf("resumable=%t/probe=%d/mismatch=%t", resumable, probe, mismatch), func(t *testing.T) {
+			q, clock := fixture(t)
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			w := recoveryWorker(t)
+			w.Clock = clock
+			w.Machine.HostMemoryMeasured = true
+			w.Machine.FreeHostMemoryGB = 64
+			w.Machine.HostAvailableMemoryGB = 64
+			w.Client = Client{URL: server.URL, Token: "test"}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			root, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.close()
+			root.state.Session = w.Machine.Session
+			spec := spec("production")
+			spec.Resumable = resumable
+			spec.Run.Command = []string{"sh", "-c", "exit 0"}
+			spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", "sleep 60"}, MemoryGB: 1}}
+			spec.Needs.HostMemoryGB = 2
+			submitted := submit(t, q, spec)
+			devices := inventoryReviewDevices()[:1]
+			for attempt := 1; attempt <= 2; attempt++ {
+				reply := check(t, q, w.Machine, nil)
+				if reply.Job == nil {
+					t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
+				}
+				j := *reply.Job
+				store, err := newAttemptStore(root, j)
+				if err != nil {
+					t.Fatal(err)
+				}
+				runner := workerWithPreparedCheckpoint(t, w, store, j)
+				runner.Machine.Device = "0"
+				runner.Machine.Devices = devices
+				calls := 0
+				runner.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
+					calls++
+					if attempt == 1 && calls == probe {
+						if !mismatch {
+							return nil, errors.New("transient probe failure")
+						}
+						changed := append([]MachineDevice(nil), devices...)
+						changed[0].Identity = "swapped-card"
+						return changed, nil
+					}
+					return devices, nil
+				}
+				bound, err := runner.forAttempt(j)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var p *process
+				// Exercise a deferred input observation before the counted launch
+				// probes on both assignments. Restore the real I/O budget immediately.
+				budget := store.extensionFiles.timeout
+				store.extensionFiles.timeout = time.Nanosecond
+				await(t, func() bool {
+					before := calls
+					p, err = bound.start(store, j)
+					store.extensionFiles.timeout = budget
+					if errors.Is(err, errWorkerCheckpoint) && strings.Contains(err.Error(), "input copy pending") {
+						// Preparation has not reached a launch probe. Do not let
+						// its repeated entry probe shift the injected fault.
+						calls = before
+						t.Log("awaiting input preparation before counted launch probes")
+						return false
+					}
+					return true
+				})
+				var r Result
+				if attempt == 1 {
+					if p != nil {
+						r = d5Finish(t, p)
+						if r.Success || !r.Interrupted {
+							t.Fatalf("group refusal not infrastructure: %+v", r)
+						}
+					} else if err == nil {
+						t.Fatal("launch probe did not refuse execution")
+					}
+					if p == nil {
+						r = startFailureOutcome(result(&j, false), err)
+					}
+				} else {
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer root.close()
-					root.state.Session = w.Machine.Session
-					spec := spec("production")
-					spec.Resumable = resumable
-					spec.Run.Command = []string{"sh", "-c", "exit 0"}
-					spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", "sleep 60"}, MemoryGB: 1}}
-					spec.Needs.HostMemoryGB = 2
-					submitted := submit(t, q, spec)
-					devices := inventoryReviewDevices()[:1]
-					for attempt := 1; attempt <= 2; attempt++ {
-						reply := check(t, q, w.Machine, nil)
-						if reply.Job == nil {
-							t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
-						}
-						j := *reply.Job
-						store, err := newAttemptStore(root, j)
-						if err != nil {
-							t.Fatal(err)
-						}
-						runner := workerWithPreparedCheckpoint(t, w, store, j)
-						runner.Machine.Device = "0"
-						runner.Machine.Devices = devices
-						calls := 0
-						runner.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
-							calls++
-							if attempt == 1 && calls == probe {
-								if !mismatch {
-									return nil, errors.New("transient probe failure")
-								}
-								changed := append([]MachineDevice(nil), devices...)
-								changed[0].Identity = "swapped-card"
-								return changed, nil
-							}
-							return devices, nil
-						}
-						bound, err := runner.forAttempt(j)
-						if err != nil {
-							t.Fatal(err)
-						}
-						var p *process
-						// Exercise a deferred input observation before the counted launch
-						// probes on both assignments. Restore the real I/O budget immediately.
-						budget := store.extensionFiles.timeout
-						store.extensionFiles.timeout = time.Nanosecond
-						await(t, func() bool {
-							before := calls
-							p, err = bound.start(store, j)
-							store.extensionFiles.timeout = budget
-							if errors.Is(err, errWorkerCheckpoint) && strings.Contains(err.Error(), "input copy pending") {
-								// Preparation has not reached a launch probe. Do not let
-								// its repeated entry probe shift the injected fault.
-								calls = before
-								t.Log("awaiting input preparation before counted launch probes")
-								return false
-							}
-							return true
-						})
-						var r Result
-						if attempt == 1 {
-							if p != nil {
-								r = d5Finish(t, p)
-								if r.Success || !r.Interrupted {
-									t.Fatalf("group refusal not infrastructure: %+v", r)
-								}
-							} else if err == nil {
-								t.Fatal("launch probe did not refuse execution")
-							}
-							if p == nil {
-								r = startFailureOutcome(result(&j, false), err)
-							}
-						} else {
-							if err != nil {
-								t.Fatal(err)
-							}
-							r = d5Finish(t, p)
-						}
-						if err = q.Complete(r); err != nil {
-							t.Fatal(err)
-						}
-						got := job(t, q, submitted.ID)
-						want := "queued"
-						if attempt == 2 {
-							want = "succeeded"
-						}
-						if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
-							t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
-						}
-					}
-				})
+					r = d5Finish(t, p)
+				}
+				if err = q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, submitted.ID)
+				want := "queued"
+				if attempt == 2 {
+					want = "succeeded"
+				}
+				if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
+					t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
+				}
 			}
-		}
+		})
 	}
 }
