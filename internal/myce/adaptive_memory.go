@@ -257,7 +257,7 @@ func acceptedMemoryPoints(q *Queue, points []*WorkObservation) []*WorkObservatio
 		// keys. A legacy sample must not restore a known inflated host peak.
 		filtered := accepted[:0]
 		for _, p := range accepted {
-			if p.Key.Target.Platform == "xpu" && p.MemoryPeak.GPUHost != nil && !p.MemoryPeak.GPUHost.SiblingAdjusted {
+			if backendFor(p.Key.Target.Platform).deviceHostMemory && p.MemoryPeak.GPUHost != nil && !p.MemoryPeak.GPUHost.SiblingAdjusted {
 				continue
 			}
 			filtered = append(filtered, p)

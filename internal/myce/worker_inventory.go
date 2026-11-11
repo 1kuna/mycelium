@@ -560,7 +560,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			if clock == nil {
 				clock = RealClock{}
 			}
-			d.Telemetry = &DeviceTelemetry{At: clock.Now(), Source: "XPU telemetry not yet sampled"}
+			d.Telemetry = &DeviceTelemetry{At: clock.Now(), Source: backendFor(d.Platform).telemetryPendingSource}
 		}
 	}
 	return physical, err

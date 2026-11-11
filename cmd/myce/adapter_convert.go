@@ -43,7 +43,7 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 	var targets []myce.ExecutionTarget
 	f.Func("target", "explicit legacy target OS/ARCH/PLATFORM (repeatable)", func(value string) error {
 		parts := strings.Split(value, "/")
-		if len(parts) != 3 || !adapterName.MatchString(parts[0]) || !adapterName.MatchString(parts[1]) || !slices.Contains([]string{"cpu", "cuda", "xpu", "metal", "fake"}, parts[2]) {
+		if len(parts) != 3 || !adapterName.MatchString(parts[0]) || !adapterName.MatchString(parts[1]) || !myce.ValidPlatform(parts[2]) {
 			return errors.New("target must be exact OS/ARCH/PLATFORM")
 		}
 		t := myce.ExecutionTarget{OS: parts[0], Arch: parts[1], Platform: parts[2]}
@@ -272,7 +272,7 @@ func convertAdapterProfile(root, path string) (string, string, map[string]any, [
 		problems = append(problems, err)
 	}
 	for _, target := range p.Targets {
-		if !adapterName.MatchString(target.OS) || !adapterName.MatchString(target.Arch) || !slices.Contains([]string{"cpu", "cuda", "xpu", "metal", "fake"}, target.Platform) {
+		if !adapterName.MatchString(target.OS) || !adapterName.MatchString(target.Arch) || !myce.ValidPlatform(target.Platform) {
 			problems = append(problems, errors.New("profile targets require exact OS/arch/platform; no targets are guessed"))
 		}
 	}

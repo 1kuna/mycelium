@@ -59,7 +59,7 @@ func (d *dockerAttempt) observeMemory(j Job, period time.Duration) func() *Attem
 	if a := d.envelope(); a != nil {
 		return w.observeAttemptMemory(a, j, nil)
 	}
-	if j.Spec.Needs.cpuOnly() || w.Machine.GPU != "cuda" && w.Machine.GPU != "xpu" {
+	if j.Spec.Needs.cpuOnly() || backendFor(w.Machine.GPU).attemptMemory == nil {
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())

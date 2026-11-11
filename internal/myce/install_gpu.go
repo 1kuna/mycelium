@@ -160,15 +160,11 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 		return Detection{OS: p.OS, Arch: p.Arch, Platform: "cpu", MemoryMode: "fixed"}, nil
 	}
 	selector := strings.TrimSpace(strings.Split(c.Device, ",")[0])
-	if selector != "" && backendFor(c.Detection.Platform).fixedMemoryDefault {
-		bound, err := WithModelDevice(Model{}, "xpu", selector)
+	if prepare := backendFor(c.Detection.Platform).prepareServiceProbe; prepare != nil {
+		var err error
+		p, err = prepare(p, selector)
 		if err != nil {
 			return Detection{}, err
-		}
-		for key, value := range bound.DeviceEnv {
-			if err = os.Setenv(key, value); err != nil {
-				return Detection{}, err
-			}
 		}
 	}
 	if c.Detection.OS == "linux" {
@@ -176,15 +172,7 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 			return Detection{}, preflightError("gpu_permission_denied", "gpu", "service cannot access configured GPU nodes; repair driver permissions")
 		}
 	}
-	if backendFor(c.Detection.Platform).fixedMemoryDefault {
-		command := p.Command
-		p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			if name == "nvidia-smi" {
-				return nil, exec.ErrNotFound
-			}
-			return command(ctx, name, args...)
-		}
-	}
+
 	d, err := p.DetectDevice(ctx, selector)
 	// Explicit budgets must not require telemetry unavailable on discrete XPUs.
 	var failure *PreflightError
@@ -217,4 +205,28 @@ func DetectServiceHardware(ctx context.Context, c ServiceConfig, p MachineProbe,
 		}
 	}
 	return PreflightHardware(ctx, c, p)
+}
+
+// A scalar Intel service selects its private affinity before probing and never
+// lets an unrelated NVIDIA tool replace that selected runtime's diagnosis.
+func xpuServiceProbe(p MachineProbe, selector string) (MachineProbe, error) {
+	if selector != "" {
+		bound, err := WithModelDevice(Model{}, "xpu", selector)
+		if err != nil {
+			return p, err
+		}
+		for key, value := range bound.DeviceEnv {
+			if err := os.Setenv(key, value); err != nil {
+				return p, err
+			}
+		}
+	}
+	command := p.Command
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "nvidia-smi" {
+			return nil, exec.ErrNotFound
+		}
+		return command(ctx, name, args...)
+	}
+	return p, nil
 }

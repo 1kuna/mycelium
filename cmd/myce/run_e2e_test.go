@@ -84,14 +84,17 @@ func TestRunDevEndToEnd(t *testing.T) {
 		c.Dir, c.Env = root, environment
 		return c
 	}
-	output, err := command("--project", "demo", "--cpu", "1", "--mem", "1G", "--", "sh", "-c", `test -z "$MYCE_TOKEN" && printf 'hello cluster\n' && printf done > effect`).CombinedOutput()
+	output, err := command("--project", "demo", "--cpu", "1", "--mem", "1G", "--", "sh", "-c", `test -z "$MYCE_TOKEN" && printf 'hello cluster\n' && printf done > effect && printf 'effect=%s\n' "$(cat effect)"`).CombinedOutput()
 	if err != nil || !strings.Contains(string(output), "hello cluster\n") || strings.Contains(string(output), token) {
 		t.Fatalf("run: %v %s", err, output)
 	}
-	marker := filepath.Join(root, "workers", "fake-1", "job-files", strings.Fields(string(output))[0], "1", "effect")
-	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
-		t.Fatal("real command effect missing")
+	// Accepted attempts may reclaim undeclared scratch immediately. Read the
+	// actual file in the payload and verify its durable log instead of racing
+	// worker collection after the run returns.
+	if !strings.Contains(string(output), "effect=done\n") {
+		t.Fatal("real command effect missing", string(output))
 	}
+
 	t.Run("tagged-synthetic-resource-probes", func(t *testing.T) {
 		assertSyntheticResourceTelemetry(t, ctx, client, strings.Fields(string(output))[0])
 	})

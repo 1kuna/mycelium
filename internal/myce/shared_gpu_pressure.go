@@ -89,7 +89,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				physicalPressure = m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-floor <= forecast
 			}
 		}
-		if fanOut && card.GPU == "xpu" && !card.UnifiedMemory && forecast > 0 && deviceTelemetryReady(d.Telemetry, q.clock.Now()) {
+		if fanOut && backendFor(card.GPU).deviceHostMemory && !card.UnifiedMemory && forecast > 0 && deviceTelemetryReady(d.Telemetry, q.clock.Now()) {
 			physicalPressure = *d.Telemetry.FreeGB <= forecast
 		}
 		if !uncertain && (!measured || !growth && !physicalPressure || used <= d.BudgetGB && !physicalPressure) {

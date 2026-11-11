@@ -5,14 +5,16 @@ import (
 	"time"
 )
 
-func unifiedCUDA(m *Machine) bool { return m != nil && m.GPU == "cuda" && m.UnifiedMemory }
+func unifiedCUDA(m *Machine) bool {
+	return m != nil && backendFor(m.GPU).unifiedProcessAdmission && m.UnifiedMemory
+}
 
 func hostHasUnifiedCUDA(m *Machine) bool {
 	if unifiedCUDA(m) {
 		return true
 	}
 	for _, d := range m.Devices {
-		if d.Platform == "cuda" && d.UnifiedMemory {
+		if backendFor(d.Platform).unifiedProcessAdmission && d.UnifiedMemory {
 			return true
 		}
 	}
@@ -28,7 +30,7 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 	// explicit reserve or configured physical allowance withholds more RAM.
 	floor := m.ReservedMemoryGB
 	for _, d := range m.Devices {
-		if d.Platform == "cuda" && d.UnifiedMemory {
+		if backendFor(d.Platform).unifiedProcessAdmission && d.UnifiedMemory {
 			floor = max(floor, d.ReserveMemoryGB)
 		}
 	}

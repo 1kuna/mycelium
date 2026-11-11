@@ -50,14 +50,14 @@ func legacyUnifiedMemoryCheckin(c Checkin) Checkin {
 			c.Machine.Devices = slices.Clone(c.Machine.Devices)
 			for n := range c.Machine.Devices {
 				d := &c.Machine.Devices[n]
-				if d.Platform == "cuda" && d.UnifiedMemory {
+				if backendFor(d.Platform).unifiedProcessAdmission && d.UnifiedMemory {
 					d.FreeMemoryGB = 0
 					if d.Reason == "" {
 						d.Reason = deviceUnifiedUncertain
 					}
 				}
 			}
-			if c.Machine.GPU == "cuda" {
+			if backendFor(c.Machine.GPU).unifiedProcessAdmission {
 				c.Machine.FreeMemoryGB = 0
 				if c.Machine.MemoryError == "" {
 					c.Machine.MemoryError = deviceUnifiedUncertain
