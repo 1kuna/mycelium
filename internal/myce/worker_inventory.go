@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	FaultEvidence       []*FaultEvidence     `json:"fault_evidence,omitempty"`
 	RecoveryBlocked     *DeviceHealthFailure `json:"quarantine_recovery_blocked,omitempty"`
 	UnsupportedOnDevice []string             `json:"unsupported_on_device,omitempty"`
 

@@ -401,3 +401,15 @@ and retained history outside the queue mutex, preserving current contact and
 the existing cache freshness contract. Slow-request mutex timing excludes
 response-cache refresh/build time; older status/job mutex figures may include
 that off-lock work and need a direct queue-lock measurement for attribution.
+
+## Fault evidence (next release)
+
+Device `fault_evidence`, job `fault_evidence` and terminal `attempt_history`
+retain bounded attempt/PID/memory/page snapshots for observed driver faults.
+Fatal native signals add `signal_evidence`, including readable fault address,
+loaded-library mapping identities and existing core pointers/capture availability.
+Use one `myce status JOB_ID` inspection and compare kernel, capture and sample
+timestamps; delayed samples, ambiguous CUDA-device attribution and missing native
+cores do not establish a cause. Report `unknown` until the causal chain is proved.
+Core enablement is a separately authorized operator task; agents must not change
+limits, core patterns or drivers. See [fault evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#fault-evidence-next-release).

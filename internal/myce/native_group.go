@@ -27,19 +27,22 @@ const nativeBindAttempts = 3 // Whole-group preparation attempts, including the 
 // Members attach to child cgroups before their exec gates open.
 type nativeMember struct {
 	memberOutcome
-	exitObservation *nativeExitObservation
-	execReleased    bool   // guarded by p.mu; true only after the payload gate opened
-	Name            string `json:"name"`
-	PID             int    `json:"pid,omitempty"`
-	Birth           string `json:"birth,omitempty"`
-	ExitCode        *int   `json:"exit_code,omitempty"`
-	Phase           string `json:"phase"`
-	Cgroup          string `json:"cgroup,omitempty"`
-	memory          *memoryAttempt
-	MemoryGB        float64 `json:"memory_gb,omitempty"`
-	cmd             *exec.Cmd
-	done            chan struct{}
-	err             error
+	PayloadPID       int       `json:"payload_pid,omitempty"`
+	PayloadBirth     string    `json:"payload_birth,omitempty"`
+	PayloadStartedAt time.Time `json:"payload_started_at"`
+	exitObservation  *nativeExitObservation
+	execReleased     bool   // guarded by p.mu; true only after the payload gate opened
+	Name             string `json:"name"`
+	PID              int    `json:"pid,omitempty"`
+	Birth            string `json:"birth,omitempty"`
+	ExitCode         *int   `json:"exit_code,omitempty"`
+	Phase            string `json:"phase"`
+	Cgroup           string `json:"cgroup,omitempty"`
+	memory           *memoryAttempt
+	MemoryGB         float64 `json:"memory_gb,omitempty"`
+	cmd              *exec.Cmd
+	done             chan struct{}
+	err              error
 
 	signalTarget *os.File // Transient pidfd for a namespace member's joined child.
 }
@@ -789,6 +792,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.saveLocked(); err != nil {
 		return err
 	}
+	m.PayloadStartedAt = g.worker.Clock.Now()
 	if err = cmd.Start(); err != nil {
 		return g.recordInfrastructureLocked(launchFailed, m.Name, "", err)
 	}
@@ -800,10 +804,19 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	go func() {
 		waitErr := cmd.Wait()
 		observed := m.exitObservation.observe(cmd)
+		saveErr := collectPublishedExit(observed, func(exit *memberExit) error {
+			g.p.mu.Lock()
+			defer g.p.mu.Unlock()
+			m.err = waitErr
+			m.Exit = exit
+			return g.saveLocked()
+		}, func(exit *memberExit) {
+			g.p.mu.Lock()
+			scope := g.memberSignalCapture(m)
+			g.p.mu.Unlock()
+			g.worker.captureSignalEvidencePID(scope.PID, cmd.Dir, exit, true, scope)
+		})
 		g.p.mu.Lock()
-		m.err = waitErr
-		m.Exit = observed
-		saveErr := g.saveLocked()
 		if saveErr != nil {
 			if waitErr == nil && observed.Status == 0 {
 				// Receipt persistence is a post-exit failure, not a payload exit.

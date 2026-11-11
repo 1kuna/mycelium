@@ -1730,6 +1730,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		m.modelReservationDebtGB = max(0, reservation-m.FreeMemoryGB)
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-reservation)
 		q.withdrawUnavailable(&m)
+		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
 		q.maintain()
 		q.guardSharedGPU(&m)
@@ -3124,6 +3125,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Liveness = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
+	j.FaultEvidence = nil
 	j.AssignedAt = &now
 	if !j.Spec.Needs.cpuOnly() {
 		q.recordDeviceUse(m)

@@ -40,6 +40,7 @@ type acceleratorBackend struct {
 
 	faultReasons              []string
 	faultMatcher              DeviceFaultMatcher
+	allocationFault           func(MachineDevice, string) (string, string)
 	repeatedTeardownAttention bool
 	healthName                string
 	health                    func(MachineProbe, context.Context, MachineDevice) (bool, error)
@@ -62,7 +63,7 @@ func init() {
 			visibleDevicesVariable: "CUDA_VISIBLE_DEVICES", accessNodes: "/dev/nvidia[0-9]*",
 			detect: detectCUDAAccelerator, inventory: cudaAccelerators, liveFreeMemory: cudaFreeMemory,
 			nativeNodes: cudaDeviceNodes, verifyCPUIsolation: verifyCUDASelectNone, fingerprint: cudaFingerprint, faultReasons: []string{"device_fault_nvidia_xid"},
-			faultMatcher: cudaKernelFault, healthName: "nvidia-smi recovery action", health: cudaDeviceHealth,
+			faultMatcher: cudaKernelFault, allocationFault: cudaAllocationKernelFault, healthName: "nvidia-smi recovery action", health: cudaDeviceHealth,
 		},
 		{
 			platform: "xpu", pciVendor: "0x8086", extensionDevice: "xpu:0", resourceName: "Intel (XPU)",

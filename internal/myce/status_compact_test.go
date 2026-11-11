@@ -106,6 +106,9 @@ func statusTestTime(t time.Time) *time.Time { return &t }
 func TestStatusCompactRetainedEvidence(t *testing.T) {
 	small := retainedStatusFixture(t, 8)
 	large := retainedStatusFixture(t, 8000)
+	// Retained driver snapshots must stay out of the default fleet response.
+	large.s.Machines["worker-00"].Devices = []MachineDevice{{ID: "0", FaultEvidence: []*FaultEvidence{{Event: "retained-driver-event", Host: map[string]string{"meminfo": strings.Repeat("0", 8192)}}}}}
+	small.s.Machines["worker-00"].Devices = []MachineDevice{{ID: "0"}}
 	smallJSON, err := small.cachedStatusJSON()
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +116,9 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	largeJSON, err := large.cachedStatusJSON()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(largeJSON, "retained-driver-event") || len(large.s.Machines["worker-00"].Devices[0].FaultEvidence) != 1 {
+		t.Fatal("compact projection leaked or mutated fault evidence")
 	}
 	// Only the retained count's decimal width changes. No retained collection
 	// should enter the default capture, projection, or wire response.

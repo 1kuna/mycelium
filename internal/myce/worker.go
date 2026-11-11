@@ -48,6 +48,9 @@ type Worker struct {
 	ServiceConfig *ServiceConfig
 	fleet         *workerFleetRuntime
 
+	FaultProcessSource      func(map[int]string) ([]int, error)
+	FaultHostSource         func() (map[string]string, []string)
+	SignalEvidenceSource    func(SignalCapture) *SignalEvidence
 	DeviceFaultSource       DeviceFaultSource
 	DeviceHealthProbe       DeviceHealthProbe
 	DeviceHealthReportProbe DeviceHealthReportProbe
@@ -732,7 +735,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			}
 		}
 	}()
-	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
+	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null 5>&- & child=$!; printf '%s\n' "$child" >&5; exec 5>&-; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
 	args = append(args, j.Spec.Run.Command[1:]...)
 	var readyReader, readyWriter, approvalReader, approvalWriter *os.File
 	if j.Spec.StartBy != nil {
@@ -841,6 +844,19 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if j.Spec.Logs == "none" {
 		logName = ""
 	}
+	childReader, childWriter, err := os.Pipe()
+	if err != nil {
+		output.Close()
+		return nil, err
+	}
+	defer childReader.Close()
+	defer childWriter.Close()
+	cmd.ExtraFiles = []*os.File{readyWriter, approvalReader, childWriter}
+	childPID := 0
+	signalScope := SignalCapture{StartedAt: w.Clock.Now(), Directory: cmd.Dir}
+	if memoryAttempt != nil {
+		signalScope.Cgroup = signalCgroup(memoryAttempt.path)
+	}
 	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
 		output.Close()
@@ -891,6 +907,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if readyWriter != nil {
 		readyWriter.Close()
 	}
+	childWriter.Close()
 	payloadPossible := false
 	abort := func(cause error) error {
 		if payloadPossible && !j.Spec.Needs.cpuOnly() {
@@ -974,6 +991,19 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		return nil, abort(err)
 	}
+	// The shell's wait status cannot distinguish a signal from exit(139).
+	// Retain the actual child PID, then require a matching kernel/core record
+	// before calling a shell-reported status a confirmed signal.
+	_ = childReader.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if raw, e := io.ReadAll(io.LimitReader(childReader, 32)); e == nil {
+		childPID, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		signalScope.PID = childPID
+		signalScope.Birth, _ = processBirth(childPID)
+		if commandNamespaceLauncher(cmd) {
+			signalScope.PID = 0
+			signalScope.Birth = ""
+		}
+	}
 	if readyReader != nil {
 		// Bound receipt I/O; queue startup decisions still use its injected Clock.
 		_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -1026,10 +1056,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 		waitErr := cmd.Wait()
 		observed := p.exitObservation.observe(cmd)
-		p.mu.Lock()
-		p.outcome.Exit = observed
-		observationErr := p.saveOutcome(p.outcome)
-		p.mu.Unlock()
+		observationErr := collectPublishedExit(observed, func(exit *memberExit) error {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.outcome.Exit = exit
+			return p.saveOutcome(p.outcome)
+		}, func(exit *memberExit) { w.captureSignalEvidencePID(childPID, cmd.Dir, exit, true, signalScope) })
 		if !j.Spec.Needs.cpuOnly() {
 			p.stop(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace), false)
 		}
@@ -1166,6 +1198,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.Client.faultWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop

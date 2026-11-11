@@ -233,6 +233,7 @@ func (g *nativeGroup) releaseMember(m *nativeMember, gate *os.File) error {
 		return fmt.Errorf("native namespace member handshake: %w", err)
 	}
 	m.signalTarget = target
+	m.PayloadPID, m.PayloadBirth = pid, birth
 	g.custody.Groups[g.supervisor.Process.Pid][pid] = birth
 	if err := g.saveLocked(); err != nil {
 		return err
@@ -354,4 +355,17 @@ func (g *nativeGroup) verifyIsolationListener(ctx context.Context, port string, 
 		return nil
 	}
 	return g.worker.verifyNativeListener(ctx, port, group)
+}
+
+func (g *nativeGroup) memberSignalCapture(m *nativeMember) SignalCapture {
+	r := SignalCapture{StartedAt: m.PayloadStartedAt, Directory: m.cmd.Dir}
+	if m.memory != nil {
+		r.Cgroup = signalCgroup(m.memory.path)
+	}
+	if g.namespace == nil || g.namespace.pid == 0 {
+		r.PID, r.Birth = m.PID, m.Birth
+	} else {
+		r.PID, r.Birth = m.PayloadPID, m.PayloadBirth
+	}
+	return r
 }

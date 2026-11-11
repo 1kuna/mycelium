@@ -16,6 +16,12 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# Platform signal capture helpers are covered by the shared native runner tests.
+SUPPLEMENTAL_CONSUMERS['internal/myce/native_namespace_other.go'] = (
+    'native_group_test.go', 'fault_evidence_test.go')
+SUPPLEMENTAL_CONSUMERS['internal/myce/signal_evidence.go'] = (
+    'fault_evidence_test.go',)
+
 # The shared CLI image helper has no test roots of its own. Exercise its real
 # child-process launch and synthetic-probe boundary, including in quick mode.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)

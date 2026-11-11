@@ -32,6 +32,8 @@ func installSyntheticWorkerHost() {
 	}
 	extensionIdentityProbe = syntheticIdentityProbe
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
+	workerFaultHost = func() (map[string]string, []string) { return nil, []string{"synthetic_host"} }
+	workerSignalEvidence = func(SignalCapture) *SignalEvidence { return &SignalEvidence{CoreCapture: "unavailable"} }
 	workerDiskProbe = func(string) (DiskReading, error) {
 		return DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
 	}
