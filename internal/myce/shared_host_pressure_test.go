@@ -419,16 +419,16 @@ func TestSharedHostPressureOwnerYieldDoesNotConsumeHealthAlert(t *testing.T) {
 	q, clock, m, run := sharedRunning(t, false)
 	clock.Advance(healthAlertCooldown)
 	check(t, q, m, run)
-	before := len(alertsOf(q, "host_unhealthy_or_stale"))
+	before := firings(q, "host_unhealthy_or_stale")
 	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
 	check(t, q, m, run)
-	if len(alertsOf(q, "host_unhealthy_or_stale")) != before {
+	if firings(q, "host_unhealthy_or_stale") != before {
 		t.Fatal("normal owner-pressure yield emitted an infrastructure-failure alert")
 	}
 	assertSharedPressureHealth(t, q, m.ID, "healthy")
 	m.SharedHostPressure = nil
 	check(t, q, m, run)
-	if len(alertsOf(q, "host_unhealthy_or_stale")) != before+1 {
+	if firings(q, "host_unhealthy_or_stale") != before+1 {
 		t.Fatal("owner yield suppressed a subsequent real pressure-signal failure")
 	}
 	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
@@ -462,12 +462,12 @@ func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
 		return q.sharedPressureReason(q.s.Machines[m.ID]) != ""
 	}
 	report(1.5)
-	before := len(alertsOf(q, "host_unhealthy_or_stale"))
+	before := firings(q, "host_unhealthy_or_stale")
 	// Live shape: a 1.5 s old sample, then a 6 s gap until the next report.
 	// Another worker's check-in evaluates health inside that gap.
 	clock.Advance(5500 * time.Millisecond)
 	check(t, q, other, nil)
-	if got := len(alertsOf(q, "host_unhealthy_or_stale")); got != before {
+	if got := firings(q, "host_unhealthy_or_stale"); got != before {
 		t.Fatalf("pending next report raised %d host alerts", got-before)
 	}
 	if withheld() {
@@ -480,7 +480,7 @@ func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
 	// A silent worker's pressure expires once the next report is overdue.
 	clock.Advance(6500*time.Millisecond + 2200*time.Millisecond)
 	check(t, q, other, nil)
-	if !withheld() || len(alertsOf(q, "host_unhealthy_or_stale")) != before+1 {
+	if !withheld() || firings(q, "host_unhealthy_or_stale") != before+1 {
 		t.Fatal("overdue pressure report did not alert and withhold")
 	}
 	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
@@ -496,7 +496,7 @@ func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
 		} else {
 			report(age)
 		}
-		if !withheld() || len(alertsOf(q, "host_unhealthy_or_stale")) != before+2+i {
+		if !withheld() || firings(q, "host_unhealthy_or_stale") != before+2+i {
 			t.Fatalf("pressure fault %d did not alert and withhold", i)
 		}
 		assertSharedPressureHealth(t, q, m.ID, "unhealthy")

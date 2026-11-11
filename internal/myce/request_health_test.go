@@ -34,7 +34,7 @@ func TestRequestHealthAdaptiveReplay(t *testing.T) {
 				for range alertWarmup {
 					step(hosts, baseline, 0)
 				}
-				if len(alertsOf(q, "queue_overload")) != 0 {
+				if firings(q, "queue_overload") != 0 {
 					t.Fatal("healthy baseline alerted")
 				}
 				cost, wait := baseline*10, time.Duration(0)
@@ -46,7 +46,7 @@ func TestRequestHealthAdaptiveReplay(t *testing.T) {
 				}
 				step(hosts*4, cost, wait)
 				step(hosts, baseline, 0)
-				if len(alertsOf(q, "queue_overload")) != 0 {
+				if firings(q, "queue_overload") != 0 {
 					t.Fatal("spike alerted")
 				}
 				for range alertConfirmation {

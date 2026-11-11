@@ -13,7 +13,7 @@ import (
 
 func requireIncident(t *testing.T, q *Queue, kind, key string, count int, active bool) {
 	t.Helper()
-	if got := alertsOf(q, kind); len(got) != count || q.s.Health.Conditions[key].Active != active {
+	if got := alertsOf(q, kind); firings(q, kind) != count || q.s.Health.Conditions[key].Active != active {
 		t.Fatalf("%s: events=%+v condition=%+v; want count=%d active=%v", kind, got, q.s.Health.Conditions[key], count, active)
 	}
 }

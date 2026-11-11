@@ -114,7 +114,7 @@ func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
 	m.HostAvailableMemoryGB++
 	healthy := assignedJob(machineCheck(t, q, m, co))
 	finish(t, q, healthy, true)
-	if len(alertsOf(q, "infrastructure_loss_streak")) != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
+	if firings(q, "infrastructure_loss_streak") != 0 || q.s.Machines[m.ID].HostAvailableMemoryGB != m.HostAvailableMemoryGB {
 		t.Fatal("healthy history triggered a finding or changed capacity")
 	}
 	for _, unsupported := range []bool{false, true} {
@@ -142,7 +142,7 @@ func TestAlertRecoveryHealthyAndUnsupportedHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if len(alertsOf(q, "infrastructure_loss_streak")) != 1 {
+			if firings(q, "infrastructure_loss_streak") != 1 {
 				t.Fatal("unsupported finding repeated")
 			}
 		})

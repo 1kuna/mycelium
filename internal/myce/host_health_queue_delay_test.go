@@ -661,7 +661,7 @@ func TestHostHealthQueueRestartDoesNotAlertEveryHost(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if len(alertsOf(q, "host_degraded")) != 0 {
+			if firings(q, "host_degraded") != 0 {
 				t.Fatal("restart alerted a host for the queue's outage")
 			}
 			if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
@@ -675,7 +675,7 @@ func TestHostHealthQueueRestartDoesNotAlertEveryHost(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if got := len(alertsOf(q, "host_degraded")); got != map[bool]int{true: 0, false: 1}[reports] {
+			if got := firings(q, "host_degraded"); got != map[bool]int{true: 0, false: 1}[reports] {
 				t.Fatalf("host_degraded alerts after grace: %d", got)
 			}
 		})

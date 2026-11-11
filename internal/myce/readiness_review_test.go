@@ -236,7 +236,7 @@ func TestAdaptiveReadinessActivityAndContendedColdAlert(t *testing.T) {
 		n := 0
 		for _, e := range q.s.Health.Events {
 			if e.Kind == "model_load_needs_attention" {
-				n++
+				n += e.Count
 			}
 		}
 		return n
