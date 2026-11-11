@@ -106,6 +106,26 @@ RAM before detection. A bounded native runner check with a memory-using child
 verified stop, whole-session release, retained logging and a successful below-limit
 command; it does not qualify representative owner interference (#389).
 
+**Reaction time and overshoot.** With cgo (every release build), the guard reads
+the process table and libproc in-process (about 1 ms per sample, against about
+70 ms for the earlier `ps`/`vm_stat` probes), so it samples every 200 ms, the
+cgroup sampler's cadence. Three over-limit samples across two periods still
+filter a fork's transient shared pages. A member that exits or is replaced
+mid-sample is dropped from that sample, not charged and not allowed to void it.
+A late sample no longer restarts the window. Overshoot is therefore about the
+growth rate × 0.2–0.8 s. Measured on one M-series Mac
+(`TestDarwinRSSGuardGrowthOvershoot`, 256 MiB limit):
+
+| Synthetic growth | Before: reaction, overshoot | Now: reaction, overshoot |
+|---|---|---|
+| one process, 256 MiB/s | 2.2 s, 560 MiB | 0.6 s, 160 MiB |
+| one process, 1 GiB/s | 2.8 s, ≥2.8 GiB (harness cap) | 0.8 s, 816 MiB |
+| spawned 32 MiB processes, 320 MiB/s | 2.4 s, 736 MiB | 0.2 s, 64 MiB |
+| 256 MiB/s plus short-lived helper churn | never stopped | 0.5 s, 128 MiB |
+
+These are single-host measurements, not per-host qualification. A
+non-cgo Darwin build keeps the `ps` probe and a 1 s period.
+
 ## Boundary and guarantees
 
 Sandboxed native batch commands and their sidecars, including queued extension run/check

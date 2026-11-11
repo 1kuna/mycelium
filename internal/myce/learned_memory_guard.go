@@ -82,7 +82,10 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 		g.lastBytes, g.lastMembers = 0, 0
 		return g.observe(now, roots, bytes, members, err)
 	}
-	if !maps.Equal(roots, g.identity) || now.Before(g.lastObservation) || now.Sub(g.lastObservation) > 2*processMemorySamplePeriod {
+	// A new attempt identity or backward clock restarts the baselines. A late
+	// sample does not: a swap or headroom delta across a longer interval is
+	// still evidence, and the sampler runs late precisely when the host thrashes.
+	if !maps.Equal(roots, g.identity) || now.Before(g.lastObservation) {
 		g.growth, g.previous = memoryGrowth{}, nil
 		g.identity = maps.Clone(roots)
 	}
