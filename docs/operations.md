@@ -721,7 +721,7 @@ each lease and for each queued production job, and upgrades those hosts after
 the lease closes or expires. The earlier manual zero-open check before each
 restart is retired once a queue with #1009 is deployed. Rollback to the previous
 release stays as described in
-[queue-only rollback](#queue-only-rollback-from-r69-to-r68); a newer queue's
+[queue-only rollback](#queue-only-rollback-to-the-previous-release); a newer queue's
 leases are simply ignored by an older one.
 
 Host order, idle-moment selection, helper verification, stale-authorization
@@ -1081,41 +1081,29 @@ Rehearse on an isolated queue fixture before an authorized cutover. Measure disk
 headroom, transfer and verification time, and restore/rejoin time for the actual
 roots; derive downtime and recovery expectations from that rehearsal.
 
-### Queue-only rollback from r6.9 to r6.8
+### Queue-only rollback to the previous release
 
-r6.9 writes normalized-v3 state (individual machine records); r6.8 reads
-normalized-v2 (machines inside the global record). Before starting the r6.8
-queue binary against an r6.9 database:
+Under [MY-42](DECISIONS.md#my-42) only the previous release can read the
+current queue database. The current release and r6.10 both persist
+`myce-normalized-state-v3`, so rolling the queue back needs no conversion:
 
 1. Stop the queue service and prevent its supervisor from restarting it. Verify
    the queue process is gone. Preserve the complete stopped generation described
    below. Keep worker spools, joining identity, file store and configured roots
    in place; workers can reconnect with their existing sessions and custody.
-2. With the **r6.9 binary**, run:
-
-   ```sh
-   myce queue downgrade --db QUEUE_DATABASE --to v2
-   ```
-
-   The command refuses a running queue or unsupported format. It converts the
-   latest committed database, including writes made after migration: job IDs,
-   keyed submissions, decisions, attempt/custody fences, policy and histories
-   are retained. It also preserves unknown JSON fields and auxiliary SQLite
-   tables. It does not run scheduling or startup maintenance. It compares the
-   complete reconstructed state before and after conversion, then commits the
-   records and marker together with SQLite FULL synchronization. An interruption
-   leaves either complete v3 or complete v2 state; retrying the command is safe.
-   No post-migration writes are intentionally discarded.
-3. Start the exact r6.8 queue binary with the preserved config and roots, using
-   the existing installation's release-replacement procedure. Verify the
+2. Start the exact previous queue binary with the preserved config and roots,
+   using the existing installation's release-replacement procedure. Verify the
    expected job IDs, pending custody and worker reconnection before resuming
    submissions. This is an operator-directed queue rollback; it does not
    downgrade or restart workers. Normal restart grace and attempt fencing apply.
 
-Starting r6.9 again accepts v2 and atomically resumes v3 writes. The adjacent
-release test pins r6.8 source `0ca83b30f0b21997574a48cb4d7923093a131001` and
-exercises both directions. Never start r6.8 directly on a v3 database or restore
-only an old DB while leaving a mismatched generation of referenced files.
+Starting the current release again resumes on the same database. The adjacent
+release test (`scripts/upgrade-compat.py`) pins the previous release's source and
+exercises both directions. Releases older than the previous one are refused at
+startup with `unsupported queue persistence format`; their converters, including
+the r6.9-to-r6.8 `myce queue downgrade`, live only in source history (r6.10,
+`302620cacaace8a16e7ed424e1183dbb10f46414`). Never restore only an old DB while
+leaving a mismatched generation of referenced files.
 
 ### Preserve one complete generation
 

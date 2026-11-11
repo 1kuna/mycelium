@@ -120,7 +120,7 @@ Workers send the additive health fields only after the queue advertises
 requires `host_mount_progress_protocol: mount-progress-v1`; v1-only queues still
 receive the original health and collection payloads. A strict older queue receives the
 legacy shape; local evidence still persists and unknown health or a confirmed
-local drain uses reversible availability withholding. A queue downgrade retries the legacy shape once
+local drain uses reversible availability withholding. After a queue rollback the worker retries the legacy shape once
 after a strict-decoder rejection, preserving session and attempt custody.
 
 Drains withhold new command, model and preparation launches without changing

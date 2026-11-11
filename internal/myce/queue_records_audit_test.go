@@ -66,15 +66,15 @@ func init() {
 				put(group+id, v)
 			}
 		}
-		return func() error { return checkQueueRecordsAgainst(q, before, true) }
+		return func() error { return checkQueueRecordsAgainst(q, before) }
 	}
 }
 
 func checkQueueRecords(q *Queue) error {
-	return checkQueueRecordsAgainst(q, q.persisted, q.machineRecords)
+	return checkQueueRecordsAgainst(q, q.persisted)
 }
 
-func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte, machines bool) error {
+func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte) error {
 	if beforeRecords == nil {
 		return nil
 	}
@@ -89,40 +89,38 @@ func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte, machine
 		}
 		return reflect.DeepEqual(before, after)
 	}
-	if machines {
-		for id, m := range q.s.Machines {
-			if _, dirty := q.records.machines[id]; dirty {
-				continue
-			}
-			// These fields are recomputed by refreshHostMemory, never decisions.
-			data, _ := json.Marshal(m)
-			var before, after map[string]any
-			_ = json.Unmarshal(beforeRecords["machines/"+id], &before)
-			_ = json.Unmarshal(data, &after)
-			for _, key := range []string{"host_memory_derivation", "host_memory_policy_mismatch", "memory_allowance_bytes", "memory_allowance_qualification", "effective_host_memory_budget_gb", "host_memory_in_use_gb", "free_host_memory_gb", "tool_inventory", "effective_cpu_cores", "cpu_in_use_cores", "free_cpu_cores", "cpu_capacity_reason", "shared_host_reason"} {
-				delete(before, key)
-				delete(after, key)
-			}
-			if !reflect.DeepEqual(before, after) {
-				fields := []string{}
-				for key, value := range after {
-					if !reflect.DeepEqual(before[key], value) {
-						fields = append(fields, key)
-					}
-				}
-				for key := range before {
-					if _, ok := after[key]; !ok {
-						fields = append(fields, key)
-					}
-				}
-				return fmt.Errorf("machine changed without touchMachine: %s (%v)", id, fields)
-			}
+	for id, m := range q.s.Machines {
+		if _, dirty := q.records.machines[id]; dirty {
+			continue
 		}
-		for key := range beforeRecords {
-			if id, ok := strings.CutPrefix(key, "machines/"); ok && q.s.Machines[id] == nil {
-				if _, dirty := q.records.machines[id]; !dirty {
-					return fmt.Errorf("machine removed without touchMachine: %s", id)
+		// These fields are recomputed by refreshHostMemory, never decisions.
+		data, _ := json.Marshal(m)
+		var before, after map[string]any
+		_ = json.Unmarshal(beforeRecords["machines/"+id], &before)
+		_ = json.Unmarshal(data, &after)
+		for _, key := range []string{"host_memory_derivation", "host_memory_policy_mismatch", "memory_allowance_bytes", "memory_allowance_qualification", "effective_host_memory_budget_gb", "host_memory_in_use_gb", "free_host_memory_gb", "tool_inventory", "effective_cpu_cores", "cpu_in_use_cores", "free_cpu_cores", "cpu_capacity_reason", "shared_host_reason"} {
+			delete(before, key)
+			delete(after, key)
+		}
+		if !reflect.DeepEqual(before, after) {
+			fields := []string{}
+			for key, value := range after {
+				if !reflect.DeepEqual(before[key], value) {
+					fields = append(fields, key)
 				}
+			}
+			for key := range before {
+				if _, ok := after[key]; !ok {
+					fields = append(fields, key)
+				}
+			}
+			return fmt.Errorf("machine changed without touchMachine: %s (%v)", id, fields)
+		}
+	}
+	for key := range beforeRecords {
+		if id, ok := strings.CutPrefix(key, "machines/"); ok && q.s.Machines[id] == nil {
+			if _, dirty := q.records.machines[id]; !dirty {
+				return fmt.Errorf("machine removed without touchMachine: %s", id)
 			}
 		}
 	}
