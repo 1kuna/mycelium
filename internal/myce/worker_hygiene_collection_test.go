@@ -180,3 +180,69 @@ func TestWorkerHygieneCollectionFailedStagingRequiresReceiptAndInactivity(t *tes
 		}
 	}
 }
+
+// Superseded operations' partials go; the current operation's staging, a
+// helper's lock, other names, links, unique data and a shared binary
+// directory all keep their files.
+func TestWorkerHygieneCollectionSupersededStagingKeepsCustody(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	dir := filepath.Dir(f.c.Binary)
+	write := func(path, data string) string {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	older := f.i
+	older.Operation = "older-operation"
+	stale := write(fleetStagingPath(f.c, older), "superseded partial")
+	current := write(fleetStagingPath(f.c, f.i), "current partial")
+	unique := write(filepath.Join(dir, "myce-operator-copy"), "unique operator binary")
+	unknown := write(filepath.Join(dir, ".myce-fleet-unknown.partial"), "unknown name")
+	target := write(filepath.Join(t.TempDir(), "elsewhere"), "linked data")
+	link := filepath.Join(dir, ".myce-fleet-"+strings.Repeat("b", 24)+".partial")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	command := func(context.Context, string, ...string) ([]byte, error) { return []byte("not-found\n"), nil }
+	exists := func(path string) bool { _, err := os.Lstat(path); return err == nil }
+
+	// No receipt proves nothing about any operation.
+	if err := collectFailedFleetStaging(context.Background(), f.c, command); err != nil || !exists(stale) {
+		t.Fatal("staging collected without a receipt", err)
+	}
+	_, hash, err := fleetConfig(f.c.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFleetReceipt(f.c, fleetInstallReceipt{Instruction: f.i, ConfigSHA256: hash, BeforeSHA256: strings.Repeat("a", 64), Phase: "prepared"}); err != nil {
+		t.Fatal(err)
+	}
+	// A running helper holds the update lock: nothing is touched.
+	unlock, err := commandLock(f.c.State, "fleet-update.lock", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := collectFailedFleetStaging(context.Background(), f.c, command); err != nil || !exists(stale) {
+		t.Fatal("staging collected while the update lock was held", err)
+	}
+	unlock()
+	// A shared binary directory may hold another install's live staging.
+	shared := f.c
+	shared.Config = filepath.Join(t.TempDir(), "config.json")
+	if err := collectSupersededFleetStaging(shared, current); err != nil || !exists(stale) {
+		t.Fatal("shared binary directory scanned", err)
+	}
+	if err := collectFailedFleetStaging(context.Background(), f.c, command); err != nil {
+		t.Fatal(err)
+	}
+	if exists(stale) {
+		t.Fatal("superseded staging retained")
+	}
+	for _, keep := range []string{current, unique, unknown, link, target, f.c.Binary, f.c.Config, filepath.Join(f.c.State, fleetUpdateReceiptFile)} {
+		if !exists(keep) {
+			t.Fatal("protected file removed", keep)
+		}
+	}
+}

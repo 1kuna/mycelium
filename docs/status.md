@@ -2692,6 +2692,10 @@ custody and grace checks. The installer already prunes its committed obsolete
 backups while retaining the installed and immediately replaced image. Periodic
 installer cleanup selects only the exact staging path owned by a failed durable
 transaction receipt, with matching config, updater lock and proven helper absence.
+Once the receipt names a different operation, earlier operations' staging
+partials (exact `.myce-fleet-*.partial` regular files) are also removed under the
+updater lock, but only when the binary's directory also holds this install's
+config; a shared binary directory is never scanned (#834).
 It never scans or deletes rollback binaries, bootstrap release archives, active
 state, receipts or unknown staging. Foreign processes, services and shared
 personal/project caches are outside this collector.
