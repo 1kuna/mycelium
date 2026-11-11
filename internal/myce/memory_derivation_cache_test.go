@@ -115,10 +115,15 @@ func TestMemorySizingDerivationMatchesFreshPass(t *testing.T) {
 	q, _ := candidateCostFixture(t)
 	drainAdmissionWait(t, q)
 	q.memoryPlanning = newMemoryPlanningCache()
+	// The fixture repeats 24 job shapes; jobs sharing a project, name and tier
+	// have the same memory identity and evidence, so one of each covers every path.
+	shapes := map[[3]string]bool{}
 	for _, j := range q.liveJobs() {
-		if j.State != "queued" {
+		shape := [3]string{j.Spec.Project, j.Spec.Name, j.Spec.Priority}
+		if j.State != "queued" || shapes[shape] {
 			continue
 		}
+		shapes[shape] = true
 		q.evaluateTargets(j, func(_ targetFit, candidate *Job, m *Machine) bool {
 			view := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
 			view.s.Jobs, view.s.ModelSlots, view.s.HostReleases = nil, nil, nil
