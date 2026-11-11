@@ -1416,6 +1416,8 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		q.applyEfficiencyDiagnostics(diagnostics)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
+		q.maintainDeadEndWaits()
+		q.settleMaintenance()
 		return nil
 	}, nil); err != nil {
 		return err

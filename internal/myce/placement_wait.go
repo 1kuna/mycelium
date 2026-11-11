@@ -156,3 +156,39 @@ func (q *Queue) cardWaitingReason(j *Job, m *Machine) string {
 	}
 	return reservationWaitReason(m, true, 0) + fmt.Sprintf("; card busy: waiting for GPU batch slot on device %s held by %s", device, strings.Join(owners, ", "))
 }
+
+// A dead end is a wait the queue itself judges waiting cannot clear. It fails
+// the job at once with one sentence and one action instead of leaving it
+// queued for days. Capacity, preparation, qualification the queue runs itself,
+// dependencies and holds all stay waits. Runs once per queue tick.
+func (q *Queue) maintainDeadEndWaits() {
+	q.releaseUnusedMemoryExplorations()
+	now := q.clock.Now()
+	for _, j := range q.liveJobs() {
+		if j.State != "queued" || cancelled(j) || j.Spec.ExtensionCheck != nil || j.Spec.FanOut != nil || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
+			continue
+		}
+		reason := q.deadEndReason(j)
+		if reason == "" {
+			continue
+		}
+		q.touchJob(j.ID)
+		q.closeAdmissionWait(j, "failed")
+		j.State, j.Reason, j.DiagnosticCode, j.FinishedAt = "failed", reason, deadEndWait, &now
+		for i := range j.Copies {
+			j.Copies[i].Recoverable = false
+		}
+	}
+}
+
+const deadEndWait = "dead_end_wait"
+
+func (q *Queue) deadEndReason(j *Job) string {
+	if why := q.oomCapacityDeadEnd(j); why != "" {
+		return why
+	}
+	if why := q.extensionDeadEnd(j); why != "" {
+		return why
+	}
+	return q.memorySizingDeadEnd(j)
+}

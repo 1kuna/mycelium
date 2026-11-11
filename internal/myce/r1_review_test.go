@@ -152,6 +152,13 @@ func TestR1VariantOOMReservationFloors(t *testing.T) {
 				}
 				small := placementMachine("small", "separate", 64, 24, e)
 				check(t, q, small, nil)
+				// The larger host is known (unqualified) before the OOM, so
+				// waiting for a larger hypha is not a dead end.
+				known := placementMachine("big", "separate", 128, 48, e)
+				known.GPU = backend
+				known.CapabilityProfile.Accelerators[0].Type = backend
+				known.ExtensionReports = nil
+				check(t, q, known, nil)
 				s := placementSpec(path == "program")
 				if path == "explicit" {
 					s.Kind = ""
