@@ -286,7 +286,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	cacheRoot := f.String("model-cache", "", "worker local model cache directory")
 	secretRoot := f.String("secret-root", "", "worker-local directory of mode-0600 named secrets")
 	modelApprovalRoot := f.String("model-approval-root", "", "worker-local approved model manifests")
-	modelRoot := f.String("model-root", "", "worker NAS model root for relative model paths")
+	modelRoot := f.String("model-root", "", "worker model source/acquisition root on NAS or local disk")
 	var nativeReadRoots, nativeExecuteRoots myce.NativeRootPaths
 	f.Var(&nativeReadRoots, "native-read-root", "operator-granted native read-only root (absolute; repeat; empty clears)")
 	f.Var(&nativeExecuteRoots, "native-exec-root", "operator-granted native read/execute root (absolute; repeat; empty clears)")

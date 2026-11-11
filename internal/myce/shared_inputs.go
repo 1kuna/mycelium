@@ -22,6 +22,7 @@ type SharedInput struct {
 	// Worker-only resolved model sources. These are not authored paths or wire
 	// identity: the manifest still verifies every copied/cloned destination.
 	sources map[string]string
+	model   *ModelSnapshot
 }
 
 // SharedInputEvidence counts successful cache acquisitions during this worker

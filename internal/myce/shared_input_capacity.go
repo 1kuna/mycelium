@@ -160,6 +160,17 @@ func (c *SharedInputCache) refreshCapacityLocked() {
 		return
 	}
 	report.CapacityBytes = uint64(max(0, limit))
+	if c.automatic && c.budget != nil {
+		// Permanent feasibility uses physical capacity. Other caches are
+		// reclaimable by the shared ledger, rather than permanent occupancy.
+		probe := c.diskProbe
+		if probe == nil {
+			probe = workerDiskProbe
+		}
+		if disk, err := probe(c.cache.Root); err == nil && disk.TotalBytes > diskFreeFloor(disk.TotalBytes) {
+			report.CapacityBytes = disk.TotalBytes - diskFreeFloor(disk.TotalBytes)
+		}
+	}
 	occupied := addDiskBytes(uint64(max(0, used)), reserved)
 	if report.CapacityBytes > occupied {
 		report.FreeBytes = report.CapacityBytes - occupied

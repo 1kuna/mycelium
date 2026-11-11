@@ -193,6 +193,7 @@ func fleetActivate(t *testing.T, q *Queue, c *fakeClock) string {
 func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
 	t.Helper()
 	c.Advance(time.Second)
+	drainAdmissionWait(t, q)
 	for _, m := range q.s.Machines {
 		if m.Fleet != nil {
 			m.Fleet.ObservedAt = c.Now()
@@ -208,6 +209,7 @@ func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
 		if _, err := q.Checkin(checkin); err != nil {
 			t.Fatal(err)
 		}
+		drainAdmissionWait(t, q)
 	}
 	q.s.LastWorkerContact = c.Now()
 	if q.fleetQueue != nil && q.fleetQueue.Proof != nil {

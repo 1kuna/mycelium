@@ -567,6 +567,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.worker = &w
 	rt.secretRoot = w.SecretRoot
 	rt.cache = &ModelCache{ApprovalRoot: w.ModelApprovalRoot, FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
+	rt.cache.budget = w.diskBudget
 	rt.engineFactory = w.modelEngine
 	rt.cache.beforeChunk = w.beforeModelCopy
 	rt.cache.Parallel = max(1, w.CopyParallel)
@@ -577,6 +578,12 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		return nil, e
 	}
 	rt.cache.ValidateInventory(w.ModelConfig.Models)
+	for _, model := range w.ModelConfig.Models {
+		rt.cache.knownModels.Store(cacheKey(model), model)
+	}
+	if w.diskBudget != nil {
+		w.diskBudget.add(diskBudgetRoot{name: "models", path: root, candidates: rt.cache.budgetCandidates})
+	}
 	if data, e := os.ReadFile(filepath.Join(dir, "copy-speed.json")); e == nil {
 		if e := decodeWorkerJSON(data, &rt.cache.speed); e != nil {
 			log.Printf("restore model copy speed: %v", e)
