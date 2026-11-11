@@ -4,6 +4,26 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
 
 ## Current rulings
 
+- <a id="my-45"></a>**MY-45 — 2026-11-11 — Fleet roles: one persistent host, the rest on-demand nodes.**
+  Zach: “the only machine that should be running... work, 24/7, and in the
+  background, is the B 70 machine. And then everything else should just be, like,
+  an on demand node. I still want the 2 B 70 GPUs to be part of the Mycelium
+  Fleet ... it should be reserved effectively just for... the persistent projects,
+  so things that have to constantly be online. Best case scenario is that... it
+  would run something lightweight on the B 70, all of the projects would. so that
+  they're not taking up as much RAM, so that we're still able to use the B 70 GPUs
+  with no problem.” The agents' host Mac is the exception: “The host is still part
+  of Mycelium, but it's got... harsher limits set just because that's where
+  everything with the agents is hosted from, and if that machine goes down, then
+  nothing works. So that one's gotta be coveted. But the rest of them are
+  effectively just managed nodes as part of the cluster.”
+  Roles: the queue/GPU host runs every project's always-on services, kept light,
+  and its GPUs stay schedulable; every other machine except the agents' host is a
+  managed on-demand node with nothing persistent on it, so Mycelium can size its
+  capacity from measured OS needs alone; the agents' host stays a Mycelium node
+  under stricter limits. Zach is raising one project's persistent service on a
+  node with that project himself. Received by the Mycelium orchestrator.
+
 - <a id="my-44"></a>**MY-44 — 2026-11-10 — Run whatever can run; no owner approval gates.**
   Zach: “i don't like that things need to be approved by you. mycelium needs to be
   able to run whatever can run on my systems. this is just excess friction”. Said
