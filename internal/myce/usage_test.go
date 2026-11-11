@@ -40,7 +40,7 @@ func TestUsageRecordingBusyIdleAndDecay(t *testing.T) {
 	if math.Abs(r.Machines[0].IdleHours-30.0/3600) > 1e-8 {
 		t.Fatal(r)
 	}
-	u := q.s.FairUsage[fairUsageKey("experiment", "gpu", "atlas")].Seconds
+	u := testFairUsage(q, fairUsageKey("experiment", "gpu", "atlas")).Seconds
 	// First-allocation coverage is retained until completion supplies a measured
 	// cycle; then the 30s idle interval decays on that 120s service quantum.
 	want := 120 * math.Exp2(-30.0/120)

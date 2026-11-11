@@ -215,11 +215,14 @@ func TestCPUFairUsageChargesCoreHoursAndSeparatesGPU(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.RLock()
 	su, bu := q.s.FairUsage[q.fairKey(sj.Spec)], q.s.FairUsage[q.fairKey(bj.Spec)]
+	gpu := q.s.FairUsage[fairUsageKey(q.priorityMatch(sj.Spec).Tier, "gpu", "small")]
+	q.mu.RUnlock()
 	if su.Seconds <= 0 || math.Abs(bu.Seconds/su.Seconds-4) > 1e-9 {
 		t.Fatalf("core-hour charges: small=%g big=%g", su.Seconds, bu.Seconds)
 	}
-	if gpu := q.s.FairUsage[fairUsageKey(q.priorityMatch(sj.Spec).Tier, "gpu", "small")]; gpu.Seconds != 0 {
+	if gpu.Seconds != 0 {
 		t.Fatal("CPU charged as GPU")
 	}
 	finish(t, q, first, true)

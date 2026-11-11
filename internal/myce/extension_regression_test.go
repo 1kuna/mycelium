@@ -237,7 +237,9 @@ func TestExtensionVariantResourceAlternatives(t *testing.T) {
 			check(t, q, m, nil)
 			j := submit(t, q, s)
 			if tc.fair {
+				q.mu.Lock()
 				q.s.FairUsage = map[string]FairUsage{fairUsageKey(q.priorityMatch(j.Spec).Tier, "gpu", s.Project): {Seconds: 100, At: q.clock.Now()}}
+				q.mu.Unlock()
 				s.Project = "other"
 				j = submit(t, q, s)
 			}

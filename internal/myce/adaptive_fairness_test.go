@@ -67,8 +67,10 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 	run := check(t, q, m, nil).Job
 	clock.Advance(20 * time.Second)
 	finish(t, q, run, true)
+	q.mu.RLock()
 	key := q.fairKey(run.Spec)
 	before := q.s.FairUsage[key]
+	q.mu.RUnlock()
 	if before.HorizonSeconds != 20 || before.ServiceSeconds != 20 {
 		t.Fatal("service did not set cycle", before)
 	}
@@ -77,7 +79,7 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	q = reopenTierQueue(t, q, clock)
-	if u := q.s.FairUsage[key]; math.Abs(u.Seconds-before.Seconds/2) > 1e-9 || u.HorizonSeconds != 20 {
+	if u := testFairUsage(q, key); math.Abs(u.Seconds-before.Seconds/2) > 1e-9 || u.HorizonSeconds != 20 {
 		t.Fatal("idle cycle or debt lost on restart", u)
 	}
 	// A fresh burst replaces the old long cycle with its own measured service.
@@ -88,7 +90,7 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if u := q.s.FairUsage[key]; math.Abs(u.HorizonSeconds-.01) > 1e-9 {
+	if u := testFairUsage(q, key); math.Abs(u.HorizonSeconds-.01) > 1e-9 {
 		t.Fatal("tiny burst inherited long history", u)
 	}
 	// Conversely, a sustained allocation grows the history with actual service.
@@ -98,7 +100,7 @@ func TestAdaptiveFairnessDemandCyclesAndRestart(t *testing.T) {
 		clock.Advance(time.Second)
 		check(t, q, m, run)
 	}
-	if u := q.s.FairUsage[key]; u.HorizonSeconds != 40 || u.ServiceSeconds != 40 {
+	if u := testFairUsage(q, key); u.HorizonSeconds != 40 || u.ServiceSeconds != 40 {
 		t.Fatal("sustained service kept tiny horizon", u)
 	}
 	// Single-project debt cannot withhold idle capacity.
@@ -159,21 +161,29 @@ func TestAdaptiveFairnessUnknownCoverageAndOldDebt(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	u := q.s.FairUsage[q.fairKey(run.Spec)]
+	q.mu.RLock()
+	key := q.fairKey(run.Spec)
+	q.mu.RUnlock()
+	u := testFairUsage(q, key)
 	// The default experiment loss timeout supplies only 60s of coverage.
 	if u.ServiceSeconds != 60 || u.Seconds > 60 {
 		t.Fatal("unknown outage invented service", u)
 	}
 	// A pre-adaptive persisted record has no guessed fleet half-life. Local
 	// demand supplies one when an update first observes it.
-	q.s.FairUsage[q.fairKey(run.Spec)] = FairUsage{Seconds: 100, At: clock.Now()}
+	q.mu.Lock()
+	q.s.FairUsage[key] = FairUsage{Seconds: 100, At: clock.Now()}
 	q.s.Jobs[run.ID].State = "succeeded"
+	q.mu.Unlock()
 	waiting := submit(t, q, projectSpec("served"))
 	clock.Advance(7 * time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	u = q.s.FairUsage[q.fairKey(waiting.Spec)]
+	q.mu.RLock()
+	key = q.fairKey(waiting.Spec)
+	q.mu.RUnlock()
+	u = testFairUsage(q, key)
 	if u.WaitSeconds != 7 || u.HorizonSeconds != 7 || u.Seconds != 100 || u.QuantumSeconds != 0 {
 		t.Fatal("legacy debt changed before observed service supplied a scale", u)
 	}
@@ -239,7 +249,10 @@ func TestAdaptiveFairnessReconnectKeepsCoveredAge(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if u := q.s.FairUsage[q.fairKey(run.Spec)]; u.ServiceSeconds != 60 {
+			q.mu.RLock()
+			key := q.fairKey(run.Spec)
+			q.mu.RUnlock()
+			if u := testFairUsage(q, key); u.ServiceSeconds != 60 {
 				t.Fatal("initial coverage", u)
 			}
 			if restart {
@@ -250,7 +263,7 @@ func TestAdaptiveFairnessReconnectKeepsCoveredAge(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if u := q.s.FairUsage[q.fairKey(run.Spec)]; u.ServiceSeconds != 61 || u.HorizonSeconds != 61 {
+			if u := testFairUsage(q, key); u.ServiceSeconds != 61 || u.HorizonSeconds != 61 {
 				t.Fatal("downtime became observed service", u)
 			}
 		})
