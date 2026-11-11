@@ -104,6 +104,9 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
+PYTHON_CLIENT = ('@python-client', 'test_client.DevTests.test_consumer_skill_examples')
+
+
 def changed_symbols(diff):
     symbols = set()
     for receiver, method in re.findall(
@@ -197,8 +200,13 @@ def select(base):
                 test = re.match(r'func (Test\w+)\(', block)
                 if test and any(reference in block for reference in references):
                     packages.setdefault(path.parent, set()).add(test[1])
-    return [(str(directory), '^(' + '|'.join(sorted(tests)) + ')$')
-            for directory, tests in sorted(packages.items())]
+    selection = [(str(directory), '^(' + '|'.join(sorted(tests)) + ')$')
+                 for directory, tests in sorted(packages.items())]
+    # The consumer skill's runnable examples execute in the Python client suite,
+    # which no Go test covers. Quick runs only that contract test (#1224).
+    if any(name.startswith(('skills/', 'clients/python/')) for name in changed):
+        selection.append(PYTHON_CLIENT)
+    return selection
 
 
 # Always-run canaries (#1224): cheap whole-output checks that textual selection
@@ -215,7 +223,10 @@ CANARIES = {
 
 def with_canaries(selection, canaries=CANARIES):
     """Merge canaries into a selection; keep the standalone smoke for no-Go changes."""
-    packages = {directory: set(pattern[2:-2].split('|')) for directory, pattern in selection}
+    # Non-Go entries (@name) pass through; they never replace the Go smoke.
+    extra = [entry for entry in selection if entry[0].startswith('@')]
+    packages = {directory: set(pattern[2:-2].split('|'))
+                for directory, pattern in selection if not directory.startswith('@')}
     if not packages:
         # gate.sh runs this smoke for an empty selection; canaries must not hide it.
         packages['cmd/myce'] = {'TestDevStandaloneSmoke'}
@@ -223,7 +234,7 @@ def with_canaries(selection, canaries=CANARIES):
         if pathlib.Path(directory).is_dir():
             packages.setdefault(directory, set()).update(tests)
     return [(directory, '^(' + '|'.join(sorted(tests)) + ')$')
-            for directory, tests in sorted(packages.items())]
+            for directory, tests in sorted(packages.items())] + extra
 
 
 if __name__ == '__main__':

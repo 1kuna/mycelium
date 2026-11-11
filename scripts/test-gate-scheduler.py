@@ -73,6 +73,21 @@ sys.exit(int(behavior) if behavior.isdigit() else 0)
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_python_client_command_runs_suite_or_named_tests(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('scheduler_module', SCHEDULER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        label, command = module.python_client_command('')
+        self.assertEqual(label, 'python-client')
+        self.assertEqual(command[3:5], ['env', command[4]])
+        self.assertTrue(command[4].startswith('PYTHONPATH='))
+        self.assertEqual(command[5:9], ['python3.11', '-m', 'unittest', 'discover'])
+        self.assertTrue(command[-1].endswith('clients/python/tests'))
+        name = 'test_client.DevTests.test_consumer_skill_examples'
+        label, command = module.python_client_command(name)
+        self.assertEqual((label, command[-1]), ('python-client:' + name, name))
+
     def launch(self, root, entries):
         (root / 'child.py').write_text(CHILD)
         (root / 'entries').write_text(json.dumps(entries))

@@ -86,6 +86,17 @@ def run(entries, cores, command, environment=None):
     return status
 
 
+def python_client_command(names):
+    """The Python client suite (#1224): the whole suite in full, named tests in quick."""
+    client = Path(__file__).resolve().parent.parent / 'clients/python'
+    label = 'python-client' + (':' + names if names else '')
+    target = names.split() if names else ['discover', '-s', str(client / 'tests')]
+    # gate.sh exposes only Python 3.11 (the client needs 3.10+); the system python3 may be older.
+    return label, [sys.executable, str(Path(__file__).with_name('gate-progress.py')), label,
+                   'env', f'PYTHONPATH={client / "src"}{os.pathsep}{client / "tests"}',
+                   'python3.11', '-m', 'unittest', *target]
+
+
 def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
@@ -104,7 +115,9 @@ def main():
         entries = shards.plan(entries, slots)
         # Cross-release proof owns a normal slot and the same watchdog/custody
         # as the tests. Start it early so it overlaps rather than extends them.
-        entries.sort(key=lambda entry: entry.split('\t', 1)[0] != '@upgrade-compat')
+        # The Python client suite (one shared myce dev start) also starts early.
+        entries.sort(key=lambda entry: (entry.split('\t', 1)[0] != '@upgrade-compat',
+                                        entry.split('\t', 1)[0] != '@python-client'))
         Path(selection).with_suffix('.shards.json').write_text(json.dumps(entries, indent=2) + '\n')
         slots = min(9, slots)
         # Limit aggregate CPU pressure instead of giving every process the
@@ -117,6 +130,8 @@ def main():
             return 'upgrade-compat', [sys.executable, str(Path(__file__).with_name('gate-progress.py')),
                                      'upgrade-compat', sys.executable,
                                      str(Path(__file__).with_name('upgrade-compat.py')), 'run']
+        if package == '@python-client':
+            return python_client_command(names)
         if mode != 'full':
             package = subprocess.check_output(['go', 'list', './' + package.removeprefix('./')],
                                               text=True).strip()
