@@ -94,7 +94,7 @@ func copyNASInput(ctx context.Context, client Client, source, target string, exp
 		} else if !os.IsNotExist(err) {
 			return err
 		}
-		_, free, err := inputCacheBudget(filepath.Dir(target), 0, 0, nil)
+		_, free, err := inputCacheBudget(filepath.Dir(target), 0, 0, nil, 0)
 		if err != nil {
 			return err
 		}

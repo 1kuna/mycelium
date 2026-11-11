@@ -155,7 +155,7 @@ func (c *SharedInputCache) refreshCapacityLocked() {
 	if c.automatic {
 		explicit = 0
 	}
-	limit, free, err := inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe)
+	limit, free, err := inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe, c.budget.foreignHeadroom(c.cache.Root))
 	if err != nil {
 		return
 	}
