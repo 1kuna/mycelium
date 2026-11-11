@@ -27,6 +27,10 @@ Use `myce status JOB_ID` and `myce logs JOB_ID` for a real blocker; keep full or
 history status out of loops. Default fleet status is compact current work,
 machines, holds and active alerts; absence is not proof of completion or loss.
 Job reasons there are last committed facts, not a new placement plan.
+Default `myce status --json` is that compact view (a few KB): `counts`,
+`alert_groups`, `hyphas`, running/waiting `jobs` with full IDs and reasons, and
+`paused` grouped by project and reason with their `ids`. Full job objects need
+`myce status JOB_ID --json` or `--sections jobs --json`.
 
 - `myce status --sections jobs,machines` adds detailed diagnostics;
   `--sections work,storage,health,efficiency,usage,diagnostics` selects retained

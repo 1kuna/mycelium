@@ -252,8 +252,11 @@ fleet upgrade, and `summary.alert_groups`.
 From the release containing #1267, the default is a few
 KB. Replaying the 2026-11-11 live fleet snapshot (five hosts, 67 current jobs,
 49 active alert conditions) through it took plain `myce status` from 33,924
-bytes / 267 lines to 3,668 bytes / 31 lines. Default JSON fell only from 154,583
-to 145,233 bytes, because current jobs and machines keep their full fields.
+bytes / 267 lines to 3,668 bytes / 31 lines. From the release containing the
+compact JSON change, default `myce status --json` encodes the same projection
+(below): replaying a 68-job snapshot of the same fleet took it from 156,292 to
+7,542 bytes. `GET /api/status` and Python `client.status()` still return the
+summary snapshot with full current job and machine objects.
 
 - `summary.alert_groups` folds active conditions into one row per kind:
   `kind`, `count`, earliest `since`, and `scopes` (members per host or
@@ -273,6 +276,25 @@ to 145,233 bytes, because current jobs and machines keep their full fields.
   prints only when it differs from the queue's. Estimates that are unknown,
   capability profiles, caches and devices stay in `--sections jobs,machines`.
   `myce status JOB_ID` still prints one job in full.
+- Default `myce status --json` is that compact view as one object. Text and
+  JSON come from the same projection; JSON keeps reasons whole and full IDs:
+
+  | Field | Content |
+  |---|---|
+  | `now`, `queue_release`, `retained_jobs` | Capture time, queue release, all retained jobs including calls |
+  | `counts` | Current jobs by `running` (includes stopping), `waiting`, `paused`, `other` |
+  | `alert_groups` | As `summary.alert_groups` |
+  | `health_alert_delivery` | Present only while alerts await delivery |
+  | `fleet_upgrade`, `host_states`, `holds`, `warning` | Unfinished upgrade lines, non-`healthy` hosts, one line per reservation, exclusion, disabled device or host hold |
+  | `hyphas[]` | `id`, `gpu`, `free_memory_gb`, `availability` (the status sentence), `host_ram_for_admission_gb`, `free_cpu_cores`/`cpu_cores`, `running` (current jobs placed there), `release` (only when it differs or is unknown), `preparing`, `copying` |
+  | `models` | One line per loaded model |
+  | `jobs[]` | Each running, waiting or cleanup job: `id`, `name`, `project`, `class`, `state`, `attempt`, `machine`, `since` (waiting since or started), `reason`, `delivery` |
+  | `paused[]` | One row per project and reason: `project`, `reason`, `count`, `ids` |
+  | `detail` | Where the full objects are |
+
+  Full job and machine objects need `status JOB_ID --json`,
+  `--sections jobs,machines --json`, `--jobs ...` or `--history`; those
+  return the snapshot shape below.
 `health_alert_delivery` retains the notifier configuration and pending count.
 No installation-sized row or byte cap hides current work.
 

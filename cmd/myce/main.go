@@ -909,6 +909,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		if *statusJSON {
+			if s.Summary != nil {
+				// The default is the compact projection; --sections, --jobs and
+				// --history return full objects.
+				return json.NewEncoder(os.Stdout).Encode(myce.NewCompactStatus(s))
+			}
 			return json.NewEncoder(os.Stdout).Encode(s)
 		}
 		printStatus(s, *full)
