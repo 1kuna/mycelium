@@ -504,7 +504,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 }
 
 // Historical records carry explicit migration guidance; names are never parsed
-// or used as aliases. r6.8 state still carries retired source-worker identities.
+// or used as aliases. Retained state still carries retired source-worker identities.
 type MachineReplacement struct {
 	Machine string `json:"machine"`
 	Device  string `json:"device"`
