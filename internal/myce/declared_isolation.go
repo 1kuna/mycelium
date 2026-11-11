@@ -11,12 +11,20 @@ import (
 
 const plainNativeIsolationReason = "plain native job defaults to unsandboxed in v1; set isolation: sandboxed to opt in"
 
-const legacyIsolationReason = "legacy extension registration; author a new version with isolation: sandboxed to opt in"
+// The ci mode is sandboxed plus an attempt-private HOME and, where the
+// platform's base profile leaves them visible, denied home, removable/network
+// volumes and the NAS root (#1298). Workers advertise it separately so an older
+// worker never runs a ci job with only the weaker sandboxed profile.
+const (
+	nativeIsolationCI     = "ci"
+	nativeCICapability    = "native_isolation_ci"
+	legacyIsolationReason = "legacy extension registration; author a new version with isolation: sandboxed to opt in"
+)
 
 // ValidateNativeIsolation is shared by authoring and submission boundaries.
 func ValidateNativeIsolation(mode, reason string) error {
-	if mode != "" && mode != "sandboxed" && mode != "unsandboxed" {
-		return errors.New("isolation must be sandboxed or unsandboxed")
+	if mode != "" && mode != "sandboxed" && mode != nativeIsolationCI && mode != "unsandboxed" {
+		return errors.New("isolation must be sandboxed, ci or unsandboxed")
 	}
 	if mode == "unsandboxed" && strings.TrimSpace(reason) == "" {
 		return errors.New("isolation: unsandboxed requires a nonempty reason")
@@ -64,6 +72,26 @@ func nativeUnsandboxedReasons(j *Job) []string {
 
 func nativeUnsandboxed(j *Job) bool { return len(nativeUnsandboxedReasons(j)) > 0 }
 
+// Placement evaluates every queued candidate registration; a started attempt
+// follows its selected one.
+func nativeCIRequired(j *Job) bool {
+	if j.Spec.Run.Docker {
+		return false
+	}
+	if !j.Spec.extensionJob() {
+		return j.Spec.Isolation == nativeIsolationCI
+	}
+	for _, e := range j.Extensions {
+		if j.State != "queued" && j.Extension != nil && j.Extension.Digest != e.Digest {
+			continue
+		}
+		if e.Isolation == nativeIsolationCI {
+			return true
+		}
+	}
+	return false
+}
+
 func jobNativeIsolationStatus(j *Job) string {
 	// Observation projection removes the executable and frozen registrations.
 	// Its retained diagnostic is authoritative even when empty (sandboxed or
@@ -99,6 +127,7 @@ func (s *workerStore) warnNativeIsolation(j *Job) error {
 // invariant even when the payload has ordinary worker-user host permissions.
 func (w Worker) isolateNativeAttempt(j *Job, namespace *nativeNamespace, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, main bool) error {
 	if !nativeUnsandboxed(j) {
+		w.nativeCI = nativeCIRequired(j)
 		return namespace.isolate(w, cmd, spool, work, env, ports, j.Spec.Needs.Network, main)
 	}
 	root, err := filepath.EvalSymlinks(work)
