@@ -817,7 +817,8 @@ func TestLaunchCapacityBoundedExploration(t *testing.T) {
 // Startup waiting resolves the generated-deadline backlog without rescanning
 // retained attempts per job/target or retaining evidence across mutations.
 func TestLaunchCapacityDeadlinePlanningCache(t *testing.T) {
-	q, _ := largeRetainedHistoryFixture(t)
+	q, _ := largeRetainedHistoryFixture(t, 480)
+	full := len(q.s.Jobs)
 	generated := false
 	for _, j := range q.s.Jobs {
 		if j.State == "queued" && j.Spec.Priority == "production" {
@@ -826,7 +827,7 @@ func TestLaunchCapacityDeadlinePlanningCache(t *testing.T) {
 	}
 	scans, uncached := 0, 0
 	q.observeMemoryHistory = func(jobs int, indexed bool) {
-		if jobs >= 6500 {
+		if jobs >= full {
 			scans++
 			if !indexed {
 				uncached++
