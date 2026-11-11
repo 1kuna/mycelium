@@ -199,6 +199,7 @@ type Queue struct {
 	shards                     checkpointShards
 	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
 	checkpointGrace            time.Duration
+	checkpointExpiryStatus     *CheckpointExpiryStatus
 	nasAvailable               bool
 
 	nextApprovalWarning time.Time
@@ -2403,7 +2404,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	compact := q.observationSelection != nil && q.observationSelection.compact
-	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{CheckpointExpiry: q.checkpointExpiryStatus, EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade

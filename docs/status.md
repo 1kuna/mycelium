@@ -325,7 +325,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 |---|---|
 | `jobs` | Complete selected job status fields, attempts, admission/evidence, eligibility and fresh placement diagnostics |
 | `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
-| `storage` | `storage_observations` and `file_store` (including retained-file accounting) |
+| `storage` | `storage_observations`, `file_store` (including retained-file accounting) and `checkpoint_expiry` (settled NAS checkpoint folders `waiting` for their grace period or a worker, and `undated` ones kept for lack of any timestamp; see [files](files.md#resumable-jobs)) |
 | `work` | `work_curves` |
 | `health` | Retained `health_alerts` event history (large on a busy queue), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |

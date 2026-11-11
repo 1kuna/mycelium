@@ -40,6 +40,7 @@ type queueRecords struct {
 	jobCount, submissionCount int
 	updating                  bool
 	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
+	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
 }
 
 type recordDeadline struct {

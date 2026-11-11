@@ -207,3 +207,101 @@ func TestWorkerCheckpointExpiryRemovesOnlyVerifiedJobFolders(t *testing.T) {
 		t.Fatal("acknowledged reports retained or support kept after a non-advertising reply")
 	}
 }
+
+// Legacy terminal records that never stamped finished_at derive a conservative
+// end time from their own record; records with no timestamp are kept and
+// counted. The fixture models the reported root: 9,322 flat entries growing by
+// about 490 a day (6,857 on Nov 6 to 9,322 on Nov 11).
+func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
+	c := &fakeClock{now: time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)}
+	root := t.TempDir()
+	q := openShardQueue(t, filepath.Join(t.TempDir(), "queue.db"), root, c)
+	defer q.Close()
+	now := c.Now()
+	ptr := func(v time.Time) *time.Time { return &v }
+	const total, perDay = 9322, 490
+	ids := make([]string, total)
+	ago := func(i int) time.Duration { return time.Duration(float64(i) / perDay * float64(24*time.Hour)) }
+	if err := q.update(func() error {
+		for i := range total {
+			// Entry i ended i/perDay days ago; newest first.
+			ended := now.Add(-ago(i))
+			j := &Job{ID: ID(), State: "succeeded", Attempt: 1, ReleaseConfirmed: true}
+			j.Checkpoint = filepath.Join(root, j.ID)
+			j.Queued = ended.Add(-time.Hour)
+			switch {
+			case i%200 == 7: // No timestamp anywhere: kept and counted.
+				j.Queued = time.Time{}
+			case i%100 == 3: // Still active: never eligible.
+				j.State, j.ReleaseConfirmed = "running", false
+			case i%3 == 0: // Stamped terminal time.
+				j.FinishedAt = ptr(ended)
+			case i%3 == 1: // Unstamped; the attempt history records the end.
+				j.AttemptHistory = []AttemptOutcome{{EndedAt: ended.Add(-time.Minute)}}
+				j.Copies = []Copy{{ReleaseConfirmed: true, ReleasedAt: ptr(ended)}}
+			default: // Unstamped with only submission/start times (fallback).
+				j.StartedAt = ptr(ended.Add(-30 * time.Minute))
+			}
+			ids[i] = j.ID
+			q.putJob(j.ID, j)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	status := *q.checkpointExpiryStatus
+	var due, stamped int
+	for _, entry := range q.records.checkpointExpiry {
+		if !now.Before(entry.due) {
+			due++
+		}
+	}
+	for _, id := range ids {
+		if e, ok := q.records.checkpointExpiry[id]; ok && !now.Before(e.due) && q.s.Jobs[id].FinishedAt != nil {
+			stamped++
+		}
+	}
+	derived := q.records.checkpointExpiry[ids[1]].due // i=1: attempt history + release.
+	fallback := q.records.checkpointExpiry[ids[2]].due
+	q.mu.Unlock()
+	t.Logf("legacy fixture: %d entries, %d settled with a basis, %d due now (%d stamped as #1314 allowed, %d newly dated), %d undated kept", total, status.Waiting, due, stamped, due-stamped, status.Undated)
+	// The conservative end is the latest recorded timestamp (the release).
+	if want := now.Add(-ago(1)).Add(DefaultCheckpointExpiryGrace); !derived.Equal(want) {
+		t.Fatalf("derived due %s, want %s", derived, want)
+	}
+	if want := now.Add(-ago(2)).Add(-30 * time.Minute).Add(DefaultCheckpointExpiryGrace); !fallback.Equal(want) {
+		t.Fatalf("fallback due %s, want %s", fallback, want)
+	}
+	undated, active := 0, 0
+	for i := range total {
+		if i%200 == 7 {
+			undated++
+		} else if i%100 == 3 {
+			active++
+		}
+	}
+	if status.Undated != undated || status.Waiting != total-undated-active {
+		t.Fatalf("status %+v, want undated %d waiting %d", status, undated, total-undated-active)
+	}
+	// Within the grace period nothing derived is due; well beyond it, most are.
+	if due-stamped < 4000 || stamped > due/2 {
+		t.Fatalf("legacy dating made too few entries due: due=%d stamped=%d", due, stamped)
+	}
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.CheckpointExpiry == nil || *snap.CheckpointExpiry != status {
+		t.Fatalf("status projection %+v", snap.CheckpointExpiry)
+	}
+	tasks := expiryCheckin(t, q, machine("one", "fake"))
+	if len(tasks) != checkpointExpiryBatch {
+		t.Fatalf("dispatched %d legacy folders", len(tasks))
+	}
+	for _, task := range tasks {
+		if task.Path != task.ID {
+			t.Fatalf("legacy flat path %q", task.Path)
+		}
+	}
+}

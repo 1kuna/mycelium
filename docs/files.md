@@ -894,8 +894,14 @@ from the job's recorded terminal time (`finished_at`). A folder also expires onl
 once nothing can resume or still write it: the job is terminal, any `async_nas`
 delivery is verified, every attempt's release is confirmed and no storage custody
 is parked. Terminal jobs never resume, and retries, fan-out waves and
-resubmissions use new job IDs. Elapsed time alone never qualifies a folder, and
-historical terminal records without `finished_at` are kept. The queue picks
+resubmissions use new job IDs. Elapsed time alone never qualifies a folder.
+Some historical terminal records never stamped `finished_at`. For those, the
+grace period counts from the latest timestamp anywhere in the job's own record:
+attempt ends, stops and releases, cancellation and ledger events, then starts,
+assignment, waiting and submission. That never places the end before any recorded
+activity. A record with no timestamp at all is kept, and `myce status`
+counts it under `checkpoint_expiry.undated` in the storage section, beside
+`waiting` (settled folders waiting for their grace period or a worker). The queue picks
 due jobs from its in-memory records, never from directory scans, and gives a worker that advertises
 `checkpoint-expiry-v1` up to 8 job folders at a time. The worker removes them in
 the background, off the queue lock, and reports each removal. The queue records
