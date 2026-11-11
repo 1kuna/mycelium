@@ -1,15 +1,14 @@
 # Wait and status
 
-Detail for step 3 of [the guide](../SKILL.md). A field your installed component
-doesn't return is unknown; see [capability evidence](release-behavior.md#capability-evidence).
+Detail for "Long waits" in [the guide](../SKILL.md). A field your installed
+queue or worker doesn't return is unknown, not false.
 
 ## Waiting
 
 Keep owned waits in the foreground: one `myce wait JOB_A JOB_B` covers at most
 256 distinct IDs in the CLI. `--json` adds full diagnostics when available;
 state/reason observation continues if optional detail reads are unavailable.
-Batch waits carry revisions; queues below the current/previous release floor
-must be upgraded, and clients do not fall back to per-job polling.
+Batch waits carry revisions, and clients never fall back to per-job polling.
 
 Python callers use `client.wait(JOB_ID)` or `client.wait_many([JOB_A, JOB_B])`;
 a list returns terminal jobs in input order. Keep the installed pinned opener.
@@ -55,13 +54,11 @@ second with an active fleet). Interpret contact and progress at that time;
 re-read once rather than polling if it matters. Mutation acknowledgements and
 accepted-result checks stay the authority for those actions. A cancelled read
 returns retryable 503 `status_unavailable`: back off and keep the same job and
-key. Slow-request mutex timing excludes response-cache build time, so older
-status/job mutex figures that include that work need a direct queue-lock
-measurement for attribution.
+key.
 
 `myce efficiency` gives one read of reservation versus measured use, blocker
-wait totals and wasted attempts; see
-[queue efficiency](release-behavior.md#queue-efficiency-source-audited-verify-installed-support).
+wait totals and wasted attempts; missing samples are unknown, not zero. See
+[queue efficiency](../../../docs/status.md).
 
 ## Host status
 
@@ -75,16 +72,11 @@ inconsistent worker evidence; do not act on device state from it.
 
 ## Recovery and trust
 
-Newer clients recover interrupted transfers and queue restarts within the
-caller's bound. Older clients or observers may need the installation owner to
-verify unchanged trust before same-key replay. Queues with the
-established-response shutdown repair close interrupted TLS sockets before another
-encrypted record is sent; earlier queues can produce a real bad-record-MAC
-refusal during shutdown even with unchanged trust. Keep integrity refusals
-permanent and report them to the authority owner; never broaden the client TLS
-classifier to recover a watch. Verify the running queue separately from CLI and
-observer versions. See [transfer/recovery](../../../docs/files.md) and
-[other contracts](release-behavior.md#other-release-dependent-contracts).
+Clients recover interrupted transfers and queue restarts within the caller's
+bound. Keep integrity refusals permanent and report them to the authority owner;
+never broaden the client TLS classifier to recover a watch. See
+[transfer and recovery](../../../docs/files.md) and
+[request budgets](../../../docs/request-budgets.md).
 
 ## Slow or stalled queue
 
@@ -100,18 +92,14 @@ queue's own p99 request periods with no release while callers wait (at least
 - The queue may still finish the request. Read `myce status` (or the job) once,
   then repeat: resolve, status and other reads are safe, and submission is safe
   with the same key. Unkeyed writes are not repeated for you.
-- An older queue whose ping lacks `queue_progress` gives no evidence. The call
-  then waits for your own bound: `Client(timeout=SECONDS)`, a per-call
-  `timeout=`, or interrupting the CLI.
+- To bound a call yourself, use `Client(timeout=SECONDS)`, a per-call
+  `timeout=`, or interrupt the CLI.
 - Resolve, file preflight and identical extension registration also retry
   429/503 after `Retry-After`.
-- `submission unconfirmed` now names its cause (`queue_stalled`, overload or
+- `submission unconfirmed` names its cause (`queue_stalled`, overload or
   transport); rerun the same command with the same key.
 - Held batch waits (`myce wait`, `wait_many`) are paced by the wait protocol and
   not watched. File transfers use their own byte-progress windows.
-
-Needs a client and queue with #1016 (`queue_progress` on ping); see
-[other contracts](release-behavior.md#other-release-dependent-contracts).
 
 ## Observers and detached completion
 
@@ -135,10 +123,9 @@ survives replacement with the same delivery ID, so receivers deduplicate it. No
 compute is resubmitted. Recovery allowances come from protocol holds, notifier
 deadlines and measured service cost.
 
-Existing observers need a supported handoff or start to gain new behavior; a new
-CLI binary does not replace a running observer. Native login/boot supervision and
-recovery of the supervisor itself remain
-[#1166](https://github.com/1kuna/mycelium/issues/1166). Legacy or unsupervised
+A new CLI binary does not replace a running observer; it needs a supported
+handoff or start. Native login/boot supervision and recovery of the supervisor
+itself remain [#1166](https://github.com/1kuna/mycelium/issues/1166). Unsupervised
 shared-observer recovery belongs to its operator, who preserves all durable arms,
 proves exact owner exit, then replays the original key and binding. Consumers
 keep stable receipts and delivery IDs and never kill a shared observer or edit

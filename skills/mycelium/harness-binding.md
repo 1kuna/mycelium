@@ -1,8 +1,9 @@
 # Harness command routing
 
 For a Claude `PreToolUse` hook matching the shell tool, parse the structured tool
-input and match known heavy launches to the project's profile. Return the
-harness's deny decision with the exact `myce run --profile NAME` replacement, or
+input and match known heavy launches to the project's adapter entry. Return the
+harness's deny decision with the exact `myce run --entry NAME --wait --out DIR`
+replacement, or
 route through a supported tool adapter that runs it once and returns the receipt.
 Permit small read-only commands and the adapter itself to avoid recursion. Do
 not run both the original command and its replacement. Persist/reuse the key in

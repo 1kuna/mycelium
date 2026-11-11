@@ -22,8 +22,7 @@ never switches callers or removes old readers. See [jobs](jobs.md) for keyed
 intent/cancellation, [files](files.md) for custody, and
 [scheduling](scheduling.md) for live portability advice.
 
-From the next release, a non-production entry or profile may omit `targets`
-entirely: it runs on any machine type its platform, Pixi lock and declared
+A non-production entry or profile may omit `targets` entirely: it runs on any machine type its platform, Pixi lock and declared
 tools fit, and Mycelium learns its coverage
 ([entries without targets](#entries-without-targets)). Production entries keep
 explicit targets (MY-19).
@@ -42,7 +41,7 @@ Before authoring, run `myce portability`, then
 `myce portability --adapter .mycelium/adapter.yaml --entry NAME`. Declare verified
 targets and software requirements; Mycelium chooses the host. Document a hard
 host/device exception in `requirement_reasons`. Missing variants are gaps, and
-MY-19 output parity precedes production splits. From the next release, authored `requirement_reasons` are frozen in submitted specs and private receipts. Status/job GET expose sanitized constraint/presence/source metadata, while raw text remains redacted; see [status](status.md#authored-requirement-explanations-748). Static job validation is
+MY-19 output parity precedes production splits. Authored `requirement_reasons` are frozen in submitted specs and private receipts. Status/job GET expose sanitized constraint/presence/source metadata, while raw text remains redacted; see [status](status.md#authored-requirement-explanations-748). Static job validation is
 `myce spec check FILE`; it grants no live admission or native qualification.
 `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` asks the queue,
 read-only, which targets can run a command entry and how to stage what they
@@ -82,7 +81,7 @@ entries:
     run: {command: [python3, -m, pytest]}
 ```
 
-Every other field is optional. From the next release the defaults are:
+Every other field is optional. The defaults are:
 
 | Field | Default |
 | --- | --- |
@@ -207,13 +206,18 @@ The launch check uses the effective PATH, including the prepared environment and
 immutable environment becomes ready; launch rechecks catch subsequent removals.
 This declaration covers the main native command, not Docker/model runtimes.
 
-Installed tools (`environment: {}`), named catalog environments, and existing
-inline `environment: {lock_file: LOCK, python: '3.13', platforms: [cpu]}`
-keep their existing behavior. Inline locks are read and snapshotted by the queue;
-the path must be queue-readable, not merely present on the submitter.
-Project environment submission (#251) and worker build
-eligibility (#252) remain separate work. Existing native composed environment
-maps are supported; single `environment` and `environments` cannot coexist.
+An entry's environment is installed tools (`environment: {}`), a named catalog
+environment, or an inline lock such as
+`environment: {lock_file: uv.lock, python: '3.13'}` or
+`environment: {backend: pixi, lock_file: pixi.lock}`. A relative `lock_file` is
+read from the project root and `myce run` uploads it with its companion
+(`pyproject.toml` for `uv.lock`, `pixi.toml` for `pixi.lock`, `package.json` for
+`package-lock.json`), so the queue needs
+no access to it. An absolute `lock_file` is read by the queue at that path. Either
+way the queue freezes the bytes and their digest into the job
+([project lock files](environments.md#project-lock-files)). Existing native
+composed environment maps are supported; single `environment` and
+`environments` cannot coexist.
 
 Native entries use complete `variants`, each with one exact `target`, `needs`,
 `execution`, optional existing `environments`, and `checks.qualification` plus
@@ -301,7 +305,7 @@ matters, and use a new explicit `--key` for an intentional repeat.
 
 ## Initialize an adapter
 
-From the project's root, from the next release:
+From the project's root:
 
 ```sh
 myce init
@@ -372,7 +376,7 @@ command; broaden the suite and its output checks for the project's needs.
 ## Project profiles
 
 `myce run --profile gate-full` reads `.mycelium/profiles/gate-full.yaml`, submits
-and prints a JSON receipt. From the next release a profile needs only `project` and
+and prints a JSON receipt. A profile needs only `project` and
 `run.command`; `check`, `class`, `needs` and (outside production) `targets` take
 the [adapter defaults](#project-instruction-file). Use `--profile path.yaml` for an explicit file.
 Use `myce run --profile go-test -- -race -run '^TestX$' ./internal/myce` for ad-hoc Go tests with the catalog-backed Go/Python/uv/git environment.
@@ -458,7 +462,10 @@ leave it, absolute links, link loops and entries beneath a link are refused.
 Directory sources reject symlinks. All sources reject hardlinks, special files and
 escaping names. File modes survive the source archive. Inputs map clean destination filenames to explicit local
 files; they are frozen and applied after source extraction. Outputs map required
-relative filenames to ordinary result prefixes. Command exit, then `check` exit,
+relative files, folders (`plots/`) or globs (`"logs/*.txt"`) to ordinary result
+prefixes; `--out DIR` and `myce result recover` recreate the subfolders. `after`
+stages, `output_destination`, `storage_protocol` and extension jobs still name
+individual files ([folder and glob outputs](files.md#folder-and-glob-outputs-1341)). Command exit, then `check` exit,
 then existing attempt-specific output verification must all succeed. Retrieve
 accepted outputs through `Client.DownloadResult` / Python `download_result`;
 these verify their SHA-256 and size.
@@ -494,9 +501,6 @@ for item in data/items/*; do
   myce run --profile analyze --input "item=$item" -- --mode scan
 done
 ```
-
-Upgrade the queue before using the new CLI: the queue must accept the profile's
-`profile_memory` identity field. Older queue versions reject that field.
 
 Each receipt identifies one job. Replay unchanged items to adopt their earlier
 jobs; changing an item or selected source bytes creates new jobs. The first
@@ -539,9 +543,8 @@ queue file-store allowance and disk floor (1%, minimum 256 MiB). Upload creation
 rechecks capacity; preflight makes no reservation. HTTP 507 `file_store_capacity`
 names the store and needed/free/shortfall bytes with a recovery action. The saved
 receipt retains this typed refusal and the CLI exits 75 for retry. `myce status`
-reports queue file-store used, free and reclaimable bytes.
-Deploy the queue before new CLIs: older queues return HTTP 404 for
-`/api/files/preflight`, causing profile submissions to exit 69. See [operations](reference/file-store.md#stored-job-file-retention).
+reports queue file-store used, free and reclaimable bytes. See
+[operations](reference/file-store.md#stored-job-file-retention).
 
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this
@@ -844,11 +847,7 @@ same delivery identity across restart/ambiguous delivery; receivers must dedupli
 that identity. The 30-second hook budget also applies to `--check`. Keep hook
 credentials in private local configuration, with delivery through a quiet channel.
 
-Upgrade the queue before workers: older queues strictly reject the new
-per-attempt `docker_cause` field when a worker reports a pending Docker diagnostic.
-Older workers remain compatible with the new queue. Their aggregate host cause
-can identify a single legacy attempt; exact concurrent-attempt diagnostics require
-upgraded workers. This notification feature does not change retry or release policy.
+This notification feature does not change retry or release policy.
 
 
 ## Write an extension
@@ -968,8 +967,7 @@ variants:
 
 Use the usual pinned environments and native baselines. The standard
 `myce extension check` submits `needs.memory: auto` for this variant. A check
-uses earlier accepted checks of the same variant and work. From the next release,
-a new version also starts from its nearest prior version's accepted memory on
+uses earlier accepted checks of the same variant and work. A new version also starts from its nearest prior version's accepted memory on
 the same platform and native identity. Checks include prior workload peaks when
 both versions and the check launch the same main command, assets and environment.
 Shared incidental helpers alone do not prove workload comparability. Separate
@@ -979,7 +977,7 @@ of the new version replaces the prior; it never grants qualification. Without
 usable evidence, the first run reserves a measured physical host-memory opportunity
 (its card still explores), under the existing
 [memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146).
-From the next release, an unknown native accelerator check waits instead of
+An unknown native accelerator check waits instead of
 using a tiny leftover ledger reservation as a hard limit. A host cgroup OOM
 retains the killed peak as a floor and grows from measured demand, sampling
 growth and ceiling overshoot. Available RAM constrains admission and never sets
@@ -1455,7 +1453,7 @@ remain supported.
 
 ### Execution wall-time allowance
 
-Available from the next release: an entry or profile may declare top-level
+An entry or profile may declare top-level
 `wall_time: 30m`, a positive Go duration measured from accepted Started for each
 attempt. Omission is unlimited. Use measured runtime or a real consumer bound;
 `expected_minutes` and priority `deadline` do not enforce execution duration.
@@ -1465,7 +1463,7 @@ applies (no automatic retry or infrastructure-loss charge). Reconnect and worker
 or queue restart cannot renew the allowance. Job status exposes the limit,
 expiry and remaining seconds. See [the full contract](jobs.md#per-attempt-wall-time).
 
-### Packaged Darwin library dependencies (next release, #866)
+### Packaged Darwin library dependencies
 
 `spec check --resolve` and `portability --adapter` inspect executable files and
 `.dylib`/`.so` library candidates in a selected directory source. Their `linkage`

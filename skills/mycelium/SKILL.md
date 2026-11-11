@@ -7,239 +7,252 @@ description: "Use when work needs fleet compute (heavy tests, builds, sims, trai
 
 # Mycelium
 
-Mycelium runs CPU and GPU work through one queue. You describe what the work
-needs; Mycelium picks the machine, runs it and returns verified output. Every job
-takes one path: **declare needs → submit once → one batched wait → fetch → verify.**
+Mycelium runs your commands on a fleet of CPU and GPU machines through one
+queue. You say what the work needs; Mycelium picks the machine, runs it and
+hands back verified files. Climb the ladder only as far as your work needs.
 
 ## Ground rules
 
-- Use the installed `myce` CLI or Python `Client.from_installed()`; both resolve
-  credentials themselves. Never open, print, copy, pass or set fleet credentials.
+- Use the installed `myce` CLI or Python `Client.from_installed()`; both find
+  their own credentials. Never open, print, copy, pass or set fleet credentials.
   A missing CLI or refused authority is a hold for the installation owner: keep
-  its typed refusal; heavy local execution is not a fallback.
-- Leave machine and device choice to Mycelium. A backend such as `platform: cuda`
-  already selects compatible hardware, even when only one host has it. The worker
-  tells the command what it received through `MYCE_DEVICE` and assigned
-  visibility. Restrict hardware only for a real requirement, such as an exact
-  device under qualification or an owner-dedicated or prohibited host; see
-  [explicit restrictions](references/submit.md#explicit-placement-restrictions).
-- Don't hand-set thread counts or temp dirs: native jobs get `MYCE_CPUS`, thread
-  defaults (`OMP_NUM_THREADS` etc.), `TMPDIR` and `MYCE_SCRATCH_DIR`; see
-  [job environment](../../docs/reference/native-execution.md#job-environment).
-- Open a production lease before a multi-stage production pipeline and close it
-  after, so maintenance keeps a host able to start your next stage; see
-  [production leases](references/waiting.md#production-leases).
-- Check `myce version` and the command's `--help`. A field your installed queue
-  or worker doesn't return is unknown, not false; see
-  [release behavior](references/release-behavior.md).
+  its typed refusal and keep heavy work off your own machine.
+- Describe what the work needs, never which machine: `--gpu cuda` finds CUDA
+  hardware. Pin hardware only for a [real requirement](references/submit.md#explicit-placement-restrictions).
+- `myce COMMAND --help` is the flag reference. A field your installed queue or
+  worker doesn't return is unknown, not false.
 
-## 1. Declare needs
-
-An existing project keeps its work in `.mycelium/adapter.yaml`; use its entry.
-For a new project, one entry is enough. This dependency-free CPU fixture uses
-only tools on each worker's PATH:
+## 1. One command
 
 ```sh
-mkdir -p source .mycelium
-printf 'First-run source fixture\n' > source/README.txt
-printf '.mycelium/receipts/\n' >> .gitignore
-cat > .mycelium/adapter.yaml <<'YAML'
-schema: 1
+myce run -- sh -c 'echo "hello from $(uname -sm)"'
+```
+
+This submits the command, streams its logs and exits with its exit code. It runs
+with the worker's installed tools in an empty folder. `--cpu N`, `--mem 8G` and
+`--gpu cuda|xpu|metal` describe needs; leave memory out and Mycelium learns it.
+
+## 2. Files back
+
+```sh
+myce run --out accepted --output result.txt -- sh -c "printf 'mycelium-ease-audit-ok\n' > result.txt"
+cat accepted/result.txt
+```
+
+`--out DIR` waits, downloads each `--output` the command wrote and checks its
+size and SHA-256. It exits `0` when every file is verified, with the command's
+own code when it failed, and `125` when the job was accepted but the trip didn't
+finish: rerun the same command to pick it back up
+([all exit codes](../../docs/adapter.md#run-wait-and-fetch-in-one-command)).
+Then check the files yourself; exit zero doesn't prove they're right.
+
+## 3. A reusable entry
+
+To send your project's code, its inputs and environment, give the work an entry.
+From the project root:
+
+```sh
+myce init --entry hello -- sh -c "printf 'mycelium-ease-audit-ok\n' > result.txt"
+```
+
+`myce init` writes `.mycelium/adapter.yaml` with one entry. With no command it
+runs `python -m pytest`, and it uses a `pixi.lock` or `uv.lock` it finds as the
+entry's environment. Add the files you want back:
+
+```yaml
 project: example
-default: ease-audit
 entries:
-  ease-audit:
-    source: {directory: source}
-    class: experiment
-    run:
-      command: [sh, -c, "printf 'mycelium-ease-audit-ok\n' > result.txt"]
-    needs: {platform: cpu, cpu_cores: 1, memory_gb: 0.125}
-    targets:
-      - {os: darwin, arch: arm64, platform: cpu}
-      - {os: linux, arch: amd64, platform: cpu}
-      - {os: linux, arch: arm64, platform: cpu}
-    environment: {}
+  hello:
+    run: {command: [sh, -c, "printf 'mycelium-ease-audit-ok\n' > result.txt"]}
     outputs: {result.txt: results}
-    checks:
-      result: [sh, -c, 'test "$(cat result.txt)" = mycelium-ease-audit-ok']
-YAML
 ```
 
-`needs` is what the work uses. `targets` lists the OS/architecture types the
-software supports, not machines; `myce portability` shows your cluster's types.
-On real work, omit memory and Mycelium learns it; the tiny value here only
-bounds the fixture. A directory source includes ignored files except `.git` and
-`.mycelium/receipts`, and refuses links; `source: {git: HEAD, paths: [...]}`
-sends committed bytes instead. GPUs, models, environments, NAS inputs,
-checkpoints and isolation are in the [submit reference](references/submit.md).
+Outputs may be files, folders (`plots/`) or globs (`"logs/*.txt"`), and `--out`
+recreates the subfolders. To get logs from a failed run without exiting 0, add
+`keep_on_failure: [logs/]` and fetch them with `myce result JOB_ID --attempt N
+--out DIR`.
 
-## 2. Submit once
+The entry sends your committed `HEAD`, so commit what it runs. Untracked files
+that aren't ignored make `HEAD` dirty, so ignore your `--out` folder:
 
 ```sh
-myce spec check --resolve --entry ease-audit .mycelium/adapter.yaml
-key="ease-audit-$(date -u +%Y%m%dT%H%M%SZ)"
-myce run --entry ease-audit --key "$key"
+printf 'accepted/\n.mycelium/receipts/\n' >> .gitignore
+git add .gitignore .mycelium/adapter.yaml && git commit -qm "Run hello on Mycelium"
+myce run --entry hello --wait --out accepted
 ```
 
-Resolve is read-only: it reports which targets can run the entry and names
-anything missing. `run` prints a receipt with `job_id`; keep the job ID and key.
-The key makes submission safe to repeat. After a lost reply, `submission
-unconfirmed` or exit 69 `input storage unconfirmed`, rerun the same command with
-the same key and frozen inputs and you get the same job. Changed intent needs a
-new key. A one-off without inputs or outputs can use `myce run --cpu N -- CMD`.
-`myce run --entry NAME --wait --out DIR` submits, waits, fetches verified outputs
-and returns the command's exit code (`1` other job failure, `130` cancelled,
-`125` accepted but not fetched);
-see [run, wait and fetch](../../docs/adapter.md#run-wait-and-fetch-in-one-command).
-To run one command over many inputs, add `pieces:` to the entry, for example
-`- {key: a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}`. Then one
-`run` and one wait cover them all, and results come back as `KEY/OUTPUT`. Don't
-loop or keep one entry per input ([plain pieces](../../docs/jobs.md#plain-command-pieces)).
-Don't add your own short timeout. Calls wait while the queue makes progress and
-fail with `queue_stalled` if it stops; then check `myce status` and repeat the
-same command ([slow or stalled queue](references/wait-and-status.md#slow-or-stalled-queue)).
+The same entry, source and arguments make the same job, so rerunning after a
+lost reply adopts it and fetches again; pass a new `--key NAME` to run again on
+purpose. Arguments after `--` are appended to the command. `myce spec check
+--resolve --entry hello .mycelium/adapter.yaml` previews placement without
+submitting. Only production entries need a target list; every field is in
+[the adapter reference](../../docs/adapter.md).
 
-## 3. One batched wait
+## 4. Environment
 
-```sh
-myce wait JOB_ID
+- **Installed tools** are the default. List what the command calls in
+  `needs: {tools: [git, node]}` so placement skips machines without them.
+- **Locked environments**: `environment: {backend: pixi, lock_file: pixi.lock}`,
+  `{lock_file: uv.lock, python: "3.12"}` or
+  `{backend: npm, lock_file: package-lock.json}`. A relative `lock_file`
+  is read from the project root and uploaded with its companion file; workers
+  install from the lock, never solve, and reuse it
+  ([environments](references/submit.md#environments)).
+- **Threads and scratch** are set for you: `MYCE_CPUS` is the job's CPU share,
+  common thread pools (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `GOMAXPROCS` and
+  others) default to it, and `TMPDIR` and `MYCE_SCRATCH_DIR` point at the
+  attempt's scratch. Size worker pools from `MYCE_CPUS`.
+- **Network** is off for the command unless you declare `needs: {network: true}`.
+
+## 5. Inputs
+
+Small files travel with the job: `inputs: {DEST: local/path}` in the entry, or
+`--input DEST=PATH` for one run. Declare NAS data instead of copying it; the
+worker stages it on local disk and verifies it before the command starts, so
+processing never runs at network speed (MY-36):
+
+```yaml
+    shared_inputs:
+      footage: {nas: media/day1.mov, sha256: SHA256_HEX, size_bytes: 2000000000}
 ```
 
-One foreground `myce wait JOB_A JOB_B` covers up to 256 jobs. A timeout or
-interruption leaves the jobs running; keep the IDs and wait again. Progress
-comes from that wait or one status read, never from polling loops, per-job
-background waiters or repeat submissions. For completion while you're away,
-bind a notifier to your own thread with [T3 binding](t3-binding.md).
+The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
+relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
-When a job fails, read its `finding` first: `myce wait` prints it, and status
-and `myce result` show it. `owner` says whose problem it is (`job`, `mycelium`
-or `unknown`) and `action` is the one thing to do; `mycelium` means not your
-fault, and `cause_unknown` means read `myce logs JOB_ID`. A `queue_admission`
-finding, `admission_requeues` count or `attempt_history[].admission_requeue`
-entry means the queue withdrew launch before your command started: it is not a
-start, a loss or a non-clean attempt.
+## 6. Many pieces
 
-## 4. Fetch, 5. verify
+To run one command over many inputs, add `pieces:` to the entry. One run and one
+wait cover them all, and results come back as `KEY/OUTPUT`:
 
-```sh
-myce result JOB_ID --out accepted
-printf 'mycelium-ease-audit-ok\n' > expected.txt
-cmp expected.txt accepted/result.txt
+```yaml
+    pieces:
+      - {key: a, args: [--slot, a], inputs: {slot.yaml: slots/a.yaml}}
+      - {key: b, args: [--slot, b], inputs: {slot.yaml: slots/b.yaml}}
 ```
 
-Finished jobs' files are kept for 3 days by default, then expire (`result_expired`);
-download results within that window.
+Each piece is its own job, placed, retried and recovered separately, up to 256
+per entry ([pieces](../../docs/jobs.md#plain-command-pieces)).
 
-`myce result` downloads accepted outputs and verifies each file's size and
-SHA-256. Success takes all three: the job `succeeded`, `result` verified the
-files, and your own application check passed (here 23 bytes, newline included).
-A wake, notification, terminal receipt or exit code alone is not success; an
-exit-zero command can still fail its output contract. See [results](references/results.md).
-Before resubmitting, read the job's `command_started` (false: no attempt's command began) and cancel with `myce cancel --wait`, which exits 0 only once the job will not run and its resources are released (75 while release is pending).
+## 7. Checkpoints and resumable work
+
+A stopped job loses everything since its last checkpoint. For anything long,
+save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
+declare `resumable: true`; Python's `mycelium.Checkpoint` and `StopSignal` do
+the saving and the signal. A stop sends SIGTERM to the process group with 10
+seconds (production preemption) or two minutes (deadline, planned leave) before
+SIGKILL, so also save periodically. Checkpoints are kept 72 hours after the job
+ends; declare outputs for anything you need
+([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
+
+## 8. Classes and tiers
+
+The class decides who waits and who gets stopped. Pick it before you submit;
+don't find out by losing work.
+
+| Class | Use for | What happens |
+| --- | --- | --- |
+| `production` | Work a person or customer is waiting on, as your project defines it (user-facing renders, deliveries) | Goes first and is never preempted by a lower tier; takes capacity from deadline and experiment work; must start within its start window (default 150 s) or fails visibly; needs explicit `targets` (MY-19) |
+| `deadline` | Work with a real owner-set date (`--class deadline --deadline RFC3339`) | Ahead of experiments; stops only resumable experiment work |
+| `experiment` (default) | Everything else: CI, research, sweeps, previews | Production can stop it at any time and requeue it; non-resumable work restarts from scratch |
+
+Equal tiers never preempt each other. Within a tier the queue goes by
+readiness, deadline and age, with no ordering hint, so order your own work with
+the right class, `after:` stages and checkpoints rather than pauses or lock
+files. Lost machines and critical Mycelium updates can interrupt any tier; the
+job requeues on the same key and resumes from its checkpoint
+([classes](references/waiting.md#classes-and-preemption)).
+
+## Pipelines
+
+Submit every later stage up front with `after:`, so the queue can see the whole
+pipeline. Each stage starts once its producer's outputs are accepted, and
+cancelling the producer cancels what depends on it:
+
+```yaml
+name: reduce
+project: example
+after: {job: PRODUCER_JOB_ID, outputs: {a.json: a/metrics.json, b.json: b/metrics.json}}
+needs: {platform: cpu, cpu_cores: 1}
+run: {command: [sh, -c, 'cat a.json b.json > combined.json']}
+outputs: {combined.json: results}
+```
+
+`myce run --entry NAME` without `--wait` prints the producer's receipt with
+its `job_id`; outputs of a pieces producer are named `KEY/OUTPUT`. Submit the
+stage with `myce submit FILE` or Python `client.submit(spec)`
+([stages](../../docs/jobs.md#start-a-consumer-after-every-producer-piece-succeeds)).
+Maintenance doesn't yet count a stage still waiting on `after:`, so a production
+pipeline also opens a [production lease](references/waiting.md#production-leases)
+for its run.
+
+## When a job fails or waits
+
+- **Failed:** read its `finding` (printed by `myce wait`, shown by status and
+  `myce result`): `owner` is `job`, `mycelium` or `unknown`, and `action` is the
+  one thing to do. A `dead_end_wait` names what waiting can't fix; do it, then
+  submit again.
+- **Waiting:** read `myce status JOB_ID` once. Its `hold` gives one reason, an
+  owner and one `next:` action. Fix what you authored, or record the owner and
+  action on your work record and move on. Keep the same job and key; resubmitting,
+  pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+- **Long waits:** one foreground `myce wait JOB_A JOB_B` covers up to 256 jobs,
+  and a timeout leaves them running. `queue_stalled` means the queue stopped
+  making progress: read status once, then repeat the same command
+  ([wait and status](references/wait-and-status.md)). For a wake while you're
+  away, bind a notifier ([T3 binding](t3-binding.md)).
+- **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
+  its resources are released (75 while release is pending); `command_started:
+  false` means no command began. `myce pause JOB_ID --reason TEXT` holds your
+  own queued job, and `myce resume JOB_ID` keeps its place.
+
+Finished jobs' files are kept for 3 days by default, then expire
+(`result_expired`); download results within that window.
 
 ## Python
-
-The same journey, run in a fresh directory:
 
 ```python
 from pathlib import Path
 from mycelium import Client
 
 client = Client.from_installed()
-source = Path("README.txt")
-source.write_text("First-run source fixture\n")
-input_ref = client.upload_file(source, project="example")
-job = client.submit_and_wait({
-    "name": "ease-audit",
-    "project": "example",
-    "class": "experiment",
-    "submission_key": "ease-audit-python-01",
-    "files": {"README.txt": input_ref},
-    "run": {"command": ["sh", "-c", "printf 'mycelium-ease-audit-ok\\n' > result.txt"]},
-    "needs": {"platform": "cpu", "cpu_cores": 1, "memory_gb": 0.125},
-    "outputs": {"result.txt": "results"},
-}, timeout=60)
-assert job["state"] == "succeeded", job.get("reason")
-result = client.download_result(job["id"], "result.txt", Path("accepted/result.txt"))
-assert result.read_bytes() == b"mycelium-ease-audit-ok\n"
+outcome = client.run_entry("hello", out="accepted")
+assert Path("accepted/result.txt").read_bytes() == b"mycelium-ease-audit-ok\n"
 ```
 
-For an adapter entry, `client.run_entry(NAME, out=DIR, key=KEY)` does the
-whole trip (submit like `myce run --entry`, wait, fetch, verify) in one call.
-Keep the key and spec unchanged when retrying an uncertain reply. Batch waits
-use `client.wait_many([JOB_A, JOB_B])`. The client retries overload and
-transient TLS failures within your deadline; unkeyed writes and model calls are
-not replayed.
+`run_entry` is `myce run --entry ... --wait --out` (same key, same job) and
+raises `EntryFailedError` on failure. For specs built in code, use
+`client.submit`, `client.wait_many` and `client.download_results`
+([Python client](../../clients/python/README.md)).
 
-## When a job waits
+## What you can now delete
 
-Read `myce status JOB_ID` once. Its `hold` gives one reason, its owner and one
-`next` action (JSON `hold.kind` is the stable code): fix what you authored
-(needs, inputs, recipe), or record that owner and action on your work record
-and keep other work moving. Keep the same job ID and key while
-capacity, preparation, a device or storage recovers. A hold is resolved by its
-owner; resubmitting, pinning a host, editing mounts, raising shared budgets,
-clearing devices or running locally only hides it.
-On the interactive host, owner pressure checkpoints or stops and requeues your
-job (same job and key, no retry charge); wait as normal. Mark long jobs
-resumable to keep progress.
+In an existing project, Mycelium now does these; delete your own:
 
-The queue never parks a job on something waiting can't fix. It reruns its own
-missing steps (an interrupted native check, a memory probe that never launched).
-Otherwise the job fails promptly with `diagnostic_code: dead_end_wait` and a
-reason `dead end: …; action: …`, for example a missing variant, a missing or
-failed native check, memory no host can size, or out of memory on the largest
-host. Do that one action, then submit again.
+- submit, wait, fetch and verify scripts: `myce run --entry NAME --wait --out DIR`;
+- marker files proving a job finished: the exit code and verified files;
+- tar steps: `inputs:`, `pieces:` and folder or glob outputs;
+- exit-0 wrappers that return logs from a failure: `keep_on_failure`;
+- thread-count variables and temp-dir setup: `MYCE_CPUS` and `TMPDIR`;
+- host pins and per-host entries: needs, with no target list off production;
+- shell NAS copies: `shared_inputs`;
+- one submission per input in a loop: `pieces:`.
 
-Class sets urgency: `production` only for work your project's rulings call
-production, `deadline` only with a real owner-set date, `experiment` otherwise.
-Pause only your own queued job with `myce pause JOB_ID --reason TEXT`; `myce
-resume JOB_ID` keeps its key and queue age. [Waiting](references/waiting.md)
-explains each hold kind, admission evidence, reservations and pausing.
-
-Default `myce status` is a compact view of current work, not proof that a job
-finished or was lost; details, history and paging are opt-in through
-[wait and status](references/wait-and-status.md). Status and job reads show the
-last committed state; `freshness.age_seconds` says how old it is. `myce host status HOST`
-exits 0 healthy, 3 degraded (fresh workers, faults named) or 1 for missing or
-stale worker evidence ([host status](references/wait-and-status.md#host-status)).
-
-## Report a problem
-
-Search the public issues first. On your existing work record, note expected and
-observed behavior, component version, job and attempt, and the next owner. The
-public repository gets no credentials, webhook URLs, private paths or
-installation details.
-
-## Try it without a fleet
-
-On macOS or Linux with Git, Go 1.25.6+ and a Unix shell, follow the
-[quick start](../../docs/START-HERE.md#five-minute-start):
-`./myce dev -- sh examples/quickstart.sh` starts a temporary queue and workers
-with fake GPU inventory, runs real commands, waits and fetches verified output.
-It needs no installed fleet and qualifies no hardware. Plain `myce dev` stays
-in the foreground until stopped.
+`myce adapter convert` turns old profiles into minimal entries
+([setup](setup-project.md)).
 
 ## References
 
-For releases containing #1356, `myce init` writes a minimal adapter entry;
-non-production entries may omit targets and learn machine-type coverage.
-Production still requires explicit targets. See [adapter defaults](../../docs/adapter.md).
-
-Load the page for your branch:
-
-- [Submit](references/submit.md): one-offs, GPU and memory, variants and
-  portability, models, environments, NAS inputs, checkpoints, fan-out,
-  isolation, uploads, explicit placement restrictions.
-- [Waiting](references/waiting.md): holds, admission evidence, device and
-  storage holds, urgency, reservations, pausing, production leases.
-- [Wait and status](references/wait-and-status.md): batch waits, status sections,
-  observers and detached completion, progress and ETA, telemetry, project doctor.
-- [Results](references/results.md): output-contract failures, diagnostics,
-  large outputs, release and scratch retention.
-- [Project setup](setup-project.md), [harness binding](harness-binding.md),
-  [T3 binding](t3-binding.md): authoring, profiles, skill install, notifiers.
-- [Release behavior](references/release-behavior.md): capability evidence and
-  component-dependent contracts.
-- [Owner operations](references/owner-operations.md): queue-owner writes, release
-  work, Mycelium repository merges.
+- [Submit](references/submit.md): needs, source and keys, environments,
+  isolation, models, inputs, checkpoints, placement restrictions.
+- [Waiting](references/waiting.md): holds, classes and preemption, device and
+  storage holds, pausing, production leases.
+- [Wait and status](references/wait-and-status.md): batch waits, status,
+  stalled queues, observers, progress.
+- [Results](references/results.md): output failures, diagnostics, large outputs.
+- [Setup](setup-project.md), [harness](harness-binding.md) and
+  [T3 binding](t3-binding.md): adoption, skill install, notifiers.
+- [Owner operations](references/owner-operations.md): queue-owner writes.
+- No fleet: `myce dev -- sh script.sh` runs your script against a temporary
+  queue with fake GPUs ([quick start](../../docs/START-HERE.md)).
+- Problems: search the public issues, then file one with expected and observed
+  behavior, version, job and attempt, and no credentials or private paths.
