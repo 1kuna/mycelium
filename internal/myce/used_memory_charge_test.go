@@ -301,6 +301,7 @@ func TestUsedMemoryOvercommitProductionRules(t *testing.T) {
 func unifiedUsedChargeMachine() Machine {
 	m := unifiedCUDAAdmissionMachine()
 	m.MemoryEnforcement, m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = cgroupEnforced, 100.06, 100
+	m.ReservedMemoryGB = 16 // The measured unified host's explicit reserve: its physical floor.
 	m.FreeMemoryGB, m.TotalMemoryGB = 100, 100
 	return m
 }
