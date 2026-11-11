@@ -463,7 +463,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 				lastErr = err
 				return false
 			}
-			jobs[id] = j
+			jobs[id] = *j
 			work := commandFixturePath(t, ctx, client, id, "work")
 			checkpoint := commandFixturePath(t, ctx, client, id, "checkpoint")
 			if work == "" || checkpoint == "" {
