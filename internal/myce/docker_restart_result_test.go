@@ -15,8 +15,17 @@ import (
 // Freeze the live adapter before driving terminal observations synchronously.
 func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
 	t.Helper()
-	w, s, c, root := dockerFixture(t)
-	p, err := startDockerFixture(w, s, dockerGroupJob(t))
+	return restartResultFixtureCommand(t, nil)
+}
+
+func restartResultFixtureCommand(t *testing.T, command func(string) func(context.Context, ...string) ([]byte, error)) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
+	t.Helper()
+	w, s, c, root := dockerFixtureCommand(t, command)
+	j := dockerGroupJob(t)
+	if command != nil {
+		j.Spec.Logs = "none"
+	}
+	p, err := startDockerFixture(w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
