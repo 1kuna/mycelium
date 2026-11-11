@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -84,6 +85,7 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	var wg sync.WaitGroup
 	const readers = 62
 	errors := make(chan error, readers+1)
+	var lockedReads atomic.Int64
 	ready := make(chan struct{}, readers)
 	for i := range readers {
 		wg.Add(1)
@@ -95,7 +97,13 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 				if i == 0 {
 					_, err = q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 100})
 				} else {
-					_, err = q.jobSnapshot(fmt.Sprintf("queued-%04d", i))
+					span := &requestSpan{}
+					_, err = q.jobSnapshot(fmt.Sprintf("queued-%04d", i), context.WithValue(context.Background(), requestSpanKey{}, span))
+					span.mu.Lock()
+					if span.measured {
+						lockedReads.Add(1)
+					}
+					span.mu.Unlock()
 				}
 				if err != nil {
 					errors <- err
@@ -126,6 +134,11 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	if got := q.s.Jobs[sentinel.ID]; got.State != "running" || got.Attempt != assignment.Attempt || got.Losses != 0 {
 		t.Error("observation load interrupted the production sentinel")
+	}
+	// Structural, load-independent: job reads use the published snapshot and
+	// never take a q.mu turn while check-ins commit (#80-class stalls).
+	if n := lockedReads.Load(); n != 0 {
+		t.Errorf("%d job reads took a queue-mutex turn during check-in contention", n)
 	}
 	p99 := latencies[98]
 	t.Logf("100 check-ins with 62 concurrent observation readers: p99=%s max=%s", p99, latencies[99])

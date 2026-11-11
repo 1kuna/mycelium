@@ -61,6 +61,7 @@ func checkinRetainedHistoryContention(t testing.TB) time.Duration {
 	}
 	var mu sync.Mutex
 	var holds, allHolds, getWaits []time.Duration
+	var lockedGets int
 	q.observeUpdate = func(_, hold time.Duration) {
 		mu.Lock()
 		holds = append(holds, hold)
@@ -102,8 +103,14 @@ func checkinRetainedHistoryContention(t testing.TB) time.Duration {
 				if _, err := q.jobSnapshot(fmt.Sprintf("queued-%03d", i%30), ctx); err != nil {
 					t.Error(err)
 				}
+				span.mu.Lock()
+				locked := span.measured
+				span.mu.Unlock()
 				mu.Lock()
 				getWaits = append(getWaits, span.wait)
+				if locked {
+					lockedGets++
+				}
 				mu.Unlock()
 			}()
 		}
@@ -131,6 +138,11 @@ func checkinRetainedHistoryContention(t testing.TB) time.Duration {
 		if j.State != "running" || j.Attempt != 1 || j.Losses != 0 {
 			t.Errorf("contention interrupted running attempt: %s %s attempt=%d losses=%d", j.ID, j.State, j.Attempt, j.Losses)
 		}
+	}
+	// Structural, load-independent: job GETs read the published snapshot and
+	// never take a q.mu turn behind concurrent check-ins (#80-class stalls).
+	if lockedGets != 0 {
+		t.Errorf("%d of %d job GETs took a queue-mutex turn during check-in contention", lockedGets, len(getWaits))
 	}
 	return a99
 }

@@ -1,0 +1,46 @@
+# Release performance acceptance: the wall-clock bounds that left the race
+# suite (#1224) run here once per release batch, without race instrumentation.
+name: mycelium-release-perf
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command:
+    - bash
+    - -ec
+    - |
+      go mod download
+      benches='BenchmarkStatusReadCheckinContention BenchmarkCheckinRetainedHistoryContention BenchmarkDevFanOutBurst62 BenchmarkDevProductionStart'
+      pattern="^($(echo $benches | tr ' ' '|'))\$"
+      set +e
+      go test ./internal/myce -run '^$' -bench "$pattern" -benchtime=1x -count=1 -timeout 30m > release-perf.log 2>&1
+      status=$?
+      set -e
+      cat release-perf.log
+      verdict=PASS
+      for b in $benches; do
+        if grep -q -- "--- FAIL: $b" release-perf.log || ! grep -q "^$b" release-perf.log; then
+          echo "$b FAIL"; verdict=FAIL
+        else
+          echo "$b PASS"
+        fi
+      done > release-perf.txt
+      [ "$status" = 0 ] || verdict=FAIL
+      echo "$verdict" >> release-perf.txt
+      cat release-perf.txt
+  env:
+    GOMAXPROCS: '4'
+needs:
+  network: true
+  cpu_cores: 4
+  memory_gb: 6
+  platform: cpu
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+environment: mycelium-gate
+outputs:
+  release-perf.txt: results
+  release-perf.log: results
+check: [grep, -qx, PASS, release-perf.txt]

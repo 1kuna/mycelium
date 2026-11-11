@@ -321,6 +321,27 @@ fixture fixes on main and cherry-pick them onto the candidate; each candidate
 change restarts the consecutive-green count. Other main merges do not change
 the candidate. The release is cut from the qualified candidate SHA.
 
+Run the release performance check once per release batch, on the candidate SHA,
+alongside the release full:
+
+```sh
+myce run --profile release-perf
+```
+
+It runs on a fleet Linux CPU worker without race instrumentation, with four cores
+reserved, and executes once each the benchmarks that hold the wall-clock bounds
+the race suite no longer asserts, because shared-host load alone decided them
+(#1224): `BenchmarkStatusReadCheckinContention` (check-in p99 < 500 ms),
+`BenchmarkCheckinRetainedHistoryContention` (all-hold p99 < 100 ms),
+`BenchmarkDevFanOutBurst62` (ack p99 < 500 ms, heartbeat age and no losses) and
+`BenchmarkDevProductionStart` (submit-to-start < 15 s). `release-perf.txt` lists
+PASS/FAIL per benchmark against those unchanged bounds and ends with the overall
+verdict; `release-perf.log` keeps the measurements. Fleet hosts are shared, so a
+FAIL needs a rerun on a quieter host or the same-host comparison against the
+previous release before it counts as a regression. The functional tests keep the
+load-independent checks: reads never take a queue-mutex turn during check-in
+contention, and no attempt is lost.
+
 On the local Darwin gate, declare a release full with
 `./scripts/gate.sh full --priority release`. It keeps its FIFO position, drains
 existing local gates, then holds admission until its cleanup completes. Later
