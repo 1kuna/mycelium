@@ -290,7 +290,7 @@ func (p *process) enforceGrace(now time.Time) {
 
 // Refresh escaper custody while the attempt runs, so a setsid child whose
 // parent exits before the stop is still known by birth (#1322). The cadence
-// matches the Darwin CPU tree sample; each refresh is one process-table read.
+// matches the Darwin CPU tree sample; each refresh is one ps inventory.
 func (p *process) refreshEscapers(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

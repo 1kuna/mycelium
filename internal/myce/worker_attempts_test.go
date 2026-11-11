@@ -24,7 +24,7 @@ func TestAttemptRetriesNativeCleanupWithoutRestart(t *testing.T) {
 	}
 	bin := t.TempDir()
 	wrapper := `#!/bin/sh
-if [ "$*" = "-ax -o pid=,pgid=,stat=" ] && [ -f "$MYCE_TEST_CLEANUP_PS_BLOCK" ]; then
+if [ "$*" = "-ax -o pid=,ppid=,pgid=,stat=" ] && [ -f "$MYCE_TEST_CLEANUP_PS_BLOCK" ]; then
  exit 1
 fi
 exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"

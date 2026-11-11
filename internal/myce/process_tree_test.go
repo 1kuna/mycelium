@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -177,6 +178,32 @@ func TestProcessTreeSetsidEscaper(t *testing.T) {
 				t.Fatalf("release unconfirmed after escaper exit: %+v", result)
 			}
 		})
+	}
+}
+
+// A recorded escaper counts only while its birth matches: a reused PID is
+// never treated as the attempt's process (#1322).
+func TestProcessTreeEscaperBirthFence(t *testing.T) {
+	other := exec.Command("sleep", "60")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	birth, err := processBirth(other.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := 1 << 30 // No live process group or session has this ID.
+	defer forgetGroupCustody(group)
+	for _, recorded := range []string{"0:0", birth} {
+		adoptGroupCustody(group, map[int]string{other.Process.Pid: recorded})
+		members, err := workerGroupMembers(group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if owned := slices.Contains(members, other.Process.Pid); owned != (recorded == birth) {
+			t.Fatalf("birth %q: member=%v", recorded, owned)
+		}
 	}
 }
 
