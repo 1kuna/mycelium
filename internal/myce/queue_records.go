@@ -39,6 +39,7 @@ type queueRecords struct {
 	keys                      recordDeadlines
 	jobCount, submissionCount int
 	updating                  bool
+	checkpointExpiry          map[string]string // Settled job ID -> root-relative checkpoint folder (#894).
 }
 
 type recordDeadline struct {
@@ -119,6 +120,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil || terminal(j.State) {
 		q.evidenceGeneration++
 	}
+	q.indexCheckpointExpiry(id, j)
 	if j == nil {
 		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)

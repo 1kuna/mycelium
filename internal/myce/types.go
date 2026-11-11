@@ -597,6 +597,7 @@ type Job struct {
 	StopAt                *time.Time                   `json:"stop_at,omitempty"`
 	Reason                string                       `json:"reason,omitempty"`
 	Checkpoint            string                       `json:"checkpoint"`
+	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
 }
 type Machine struct {
 	Suspect           bool                     `json:"suspect,omitempty"` // Status-only; uncertainty never proves loss.
@@ -719,22 +720,25 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	contact              *checkinContact   // Queue-local request fence, never serialized.
-	period               time.Duration     // Transport header; not part of strict legacy JSON.
-	ToolInventoryHash    string            `json:"tool_inventory_hash,omitempty"`
-	ToolInventoryVersion uint64            `json:"tool_inventory_version,omitempty"`
-	NASPathReports       []NASPathReport   `json:"nas_path_reports,omitempty"`
-	AttemptProtocol      string            `json:"attempt_protocol,omitempty"`
-	Attempts             []AttemptReport   `json:"attempts,omitempty"`
-	Recovering           bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
-	CurveReports         []WorkObservation `json:"curve_reports,omitempty"`
-	BenchmarkDone        string            `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
-	Started              bool              `json:"started,omitempty"`
-	ModelReports         []ModelReport     `json:"model_reports,omitempty"`
-	PreviousSession      string            `json:"previous_session,omitempty"`
-	Fresh                bool              `json:"fresh,omitempty"`
-	Machine              Machine           `json:"machine"`
-	Running              *Execution        `json:"running,omitempty"`
+	contact              *checkinContact // Queue-local request fence, never serialized.
+	period               time.Duration   // Transport header; not part of strict legacy JSON.
+	ToolInventoryHash    string          `json:"tool_inventory_hash,omitempty"`
+	ToolInventoryVersion uint64          `json:"tool_inventory_version,omitempty"`
+	NASPathReports       []NASPathReport `json:"nas_path_reports,omitempty"`
+	// Sent only after the queue advertises checkpointExpiryProtocol (#894).
+	CheckpointExpiryProtocol string                   `json:"checkpoint_expiry_protocol,omitempty"`
+	CheckpointExpiryReports  []CheckpointExpiryReport `json:"checkpoint_expiry_reports,omitempty"`
+	AttemptProtocol          string                   `json:"attempt_protocol,omitempty"`
+	Attempts                 []AttemptReport          `json:"attempts,omitempty"`
+	Recovering               bool                     `json:"recovering,omitempty"` // Reconcile custody without offering new work.
+	CurveReports             []WorkObservation        `json:"curve_reports,omitempty"`
+	BenchmarkDone            string                   `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Started                  bool                     `json:"started,omitempty"`
+	ModelReports             []ModelReport            `json:"model_reports,omitempty"`
+	PreviousSession          string                   `json:"previous_session,omitempty"`
+	Fresh                    bool                     `json:"fresh,omitempty"`
+	Machine                  Machine                  `json:"machine"`
+	Running                  *Execution               `json:"running,omitempty"`
 }
 type Reply struct {
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
@@ -754,6 +758,8 @@ type Reply struct {
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
 	ToolInventoryVersion       uint64                       `json:"tool_inventory_version,omitempty"`
 	NASPathChecks              []NASPathCheck               `json:"nas_path_checks,omitempty"`
+	CheckpointExpiryProtocol   string                       `json:"checkpoint_expiry_protocol,omitempty"`
+	CheckpointExpiries         []CheckpointExpiry           `json:"checkpoint_expiries,omitempty"`
 	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
 

@@ -710,7 +710,7 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
 }
 func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
-	if _, err := os.Stat(filepath.Dir(j.Checkpoint)); err != nil {
+	if err := ensureCheckpointParent(j.Checkpoint); err != nil {
 		return "", fmt.Errorf("checkpoint root unavailable: %w", err)
 	}
 	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {

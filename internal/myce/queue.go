@@ -196,6 +196,8 @@ type Queue struct {
 	submitVerificationSlot     chan struct{}
 	nasProbe                   checkpointAvailability
 	nasProgress                checkpointIO[int64]
+	shards                     checkpointShards
+	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
 	nasAvailable               bool
 
 	nextApprovalWarning time.Time
@@ -436,6 +438,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	success = true
+	q.kickCheckpointShards()
 	return q, nil
 }
 
@@ -1030,7 +1033,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		} else {
 			id = ID()
 		}
-		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -1496,7 +1499,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	q.kickCheckpointShards()
 	reports := c.Attempts
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {
@@ -1731,6 +1735,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
+		q.checkinCheckpointExpiry(c, &m, &reply)
 		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		for _, d := range m.Devices {
