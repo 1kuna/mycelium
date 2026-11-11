@@ -292,6 +292,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 		}
 		return false
 	})
+	lossesBeforeStop := job(t, q, j.ID).Losses
 	active.Store(true)
 	clock.Advance(signalRefresh)
 	wait(func() bool { return job(t, q, j.ID).State == "queued" })
@@ -300,8 +301,8 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 		t.Fatal("checkpoint not saved", err)
 	}
 	got := job(t, q, j.ID)
-	if got.Losses != 0 {
-		t.Fatal("planned local stop charged loss")
+	if got.Losses != lossesBeforeStop {
+		t.Fatalf("planned local stop charged loss: before=%d after=%d", lossesBeforeStop, got.Losses)
 	}
 	workerFixture(t, q, prepareCheckpoint)
 	wait(func() bool { return job(t, q, j.ID).State == "succeeded" })
