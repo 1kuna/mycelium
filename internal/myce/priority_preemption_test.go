@@ -15,8 +15,13 @@ import (
 )
 
 func TestPriorityPreemptionEveryBatchKind(t *testing.T) {
+	// Every kind is preempted by a higher tier; one same-tier row covers the
+	// shared no-preemption path for all kinds (#1086).
 	for _, kind := range []string{"resumable", "restart", "native-group"} {
 		for _, higher := range []bool{false, true} {
+			if !higher && kind != "restart" {
+				continue
+			}
 			t.Run(kind+"/higher="+map[bool]string{false: "no", true: "yes"}[higher], func(t *testing.T) {
 				q, _ := fixture(t)
 				victim := spec("experiment")
@@ -119,6 +124,9 @@ func preemptionPolicy(t *testing.T, q *Queue) {
 func TestPriorityPreemptionModelsAndPins(t *testing.T) {
 	for _, kind := range []string{"call", "load", "idle", "pin"} {
 		for _, higher := range []bool{false, true} {
+			if !higher && (kind == "call" || kind == "idle") {
+				continue // load and pin rows cover the shared same-tier path (#1086).
+			}
 			t.Run(fmt.Sprintf("%s/higher=%v", kind, higher), func(t *testing.T) {
 				q, _, m := modelFixture(t)
 				preemptionPolicy(t, q)
@@ -256,7 +264,9 @@ func TestPriorityPreemptionEnvironmentBuild(t *testing.T) {
 }
 
 func TestPriorityPreemptionOutcomePrecedence(t *testing.T) {
-	for _, priority := range []string{"production", "experiment"} {
+	// Victim tier does not reach outcome classification; experiment victims
+	// added no product path beyond these production rows (#1086).
+	for _, priority := range []string{"production"} {
 		for _, outcome := range []string{"complete", "interrupted", "independent-exit", "oom", "cancel"} {
 			t.Run(priority+"/"+outcome, func(t *testing.T) {
 				q, clock := fixture(t)

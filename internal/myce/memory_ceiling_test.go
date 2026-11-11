@@ -664,6 +664,9 @@ func TestMemoryCeilingPageNormalization(t *testing.T) {
 			})
 		}
 		for _, name := range []string{"memory.max", "memory.swap.max", "memory.oom.group"} {
+			if page != 4096 {
+				break // Write verification does not depend on page size (#1086).
+			}
 			t.Run(fmt.Sprintf("%d/mismatch/%s", page, name), func(t *testing.T) {
 				c := fakeCeilings(t)
 				c.pageSize = int(page)

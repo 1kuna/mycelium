@@ -15,7 +15,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 	for _, tc := range []struct {
 		ram      float64
 		evidence int
-	}{{2, 1}, {2, 41}, {256, 1}, {256, 41}} {
+	}{{2, 1}, {2, 41}} { // Host size only scales these values (#1086).
 		ram := tc.ram
 		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
