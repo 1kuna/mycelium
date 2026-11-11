@@ -1,0 +1,300 @@
+package myce
+
+import (
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
+	"time"
+)
+
+// CompactStatus is the default `myce status` projection, shared by the text
+// view and `--json`: what runs, what waits and why, what is held, one row per
+// hypha and alerts grouped by kind. Full job and machine objects stay behind
+// `--sections jobs,machines`, `--history` and `status JOB_ID`.
+type CompactStatus struct {
+	Now           time.Time            `json:"now"`
+	QueueRelease  RunningRelease       `json:"queue_release"`
+	RetainedJobs  int                  `json:"retained_jobs"`
+	Counts        map[string]int       `json:"counts"`
+	Alerts        []StatusAlertGroup   `json:"alert_groups,omitempty"`
+	AlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
+	FleetUpgrade  []string             `json:"fleet_upgrade,omitempty"`
+	HostStates    map[string]string    `json:"host_states,omitempty"`
+	Holds         []string             `json:"holds,omitempty"`
+	Warning       string               `json:"warning,omitempty"`
+	Hyphas        []CompactHypha       `json:"hyphas"`
+	Models        []string             `json:"models,omitempty"`
+	Jobs          []CompactJob         `json:"jobs,omitempty"`
+	Paused        []CompactPaused      `json:"paused,omitempty"`
+	Detail        string               `json:"detail"`
+}
+type CompactHypha struct {
+	ID           string   `json:"id"`
+	GPU          string   `json:"gpu"`
+	FreeMemoryGB float64  `json:"free_memory_gb"`
+	Availability string   `json:"availability"`
+	HostRAMGB    *float64 `json:"host_ram_for_admission_gb,omitempty"`
+	FreeCPU      *int     `json:"free_cpu_cores,omitempty"`
+	CPU          *int     `json:"cpu_cores,omitempty"`
+	Running      int      `json:"running,omitempty"`
+	// Release is set only when it differs from the queue's, or is "unknown".
+	Release   string   `json:"release,omitempty"`
+	Preparing []string `json:"preparing,omitempty"`
+	Copying   []string `json:"copying,omitempty"`
+}
+type CompactJob struct {
+	ID       string     `json:"id"`
+	Name     string     `json:"name"`
+	Project  string     `json:"project"`
+	Class    string     `json:"class,omitempty"`
+	State    string     `json:"state"`
+	Attempt  int        `json:"attempt,omitempty"`
+	Machine  string     `json:"machine,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
+	Reason   string     `json:"reason,omitempty"`
+	Delivery string     `json:"delivery,omitempty"`
+	display  string
+	age      string
+}
+type CompactPaused struct {
+	Project string   `json:"project"`
+	Reason  string   `json:"reason"`
+	Count   int      `json:"count"`
+	IDs     []string `json:"ids"`
+}
+
+const compactStatusDetail = "status JOB_ID for one job, --sections jobs,machines for detail, --history for everything"
+
+func compactJobGroup(j *Job) string {
+	switch j.State {
+	case "running", "stopping":
+		return "running"
+	case "queued":
+		return "waiting"
+	case "paused":
+		return "paused"
+	}
+	return "other"
+}
+
+// NewCompactStatus projects a default (summary) snapshot. Reasons are whole;
+// the text view bounds them to one line.
+func NewCompactStatus(s Snapshot) CompactStatus {
+	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail}
+	if s.Summary != nil {
+		c.RetainedJobs, c.Alerts = s.Summary.RetainedJobs, s.Summary.Alerts
+	}
+	if d := s.HealthAlertDelivery; d != nil && d.Pending > 0 {
+		c.AlertDelivery = d
+	}
+	if u := s.FleetUpgrade; u != nil && u.State != "complete" {
+		c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("fleet upgrade %s: release=%s state=%s", u.Operation, u.Release, u.State))
+		for _, h := range u.Hosts {
+			c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("host %s: phase=%s wait=%s failure=%s", h.Host, h.Phase, h.Wait, h.Failure))
+		}
+	}
+	for host, state := range s.HostStates {
+		if state != "healthy" {
+			if c.HostStates == nil {
+				c.HostStates = map[string]string{}
+			}
+			c.HostStates[host] = state
+		}
+	}
+	for _, r := range s.Reservations {
+		c.Holds = append(c.Holds, fmt.Sprintf("reservation %s %s: %s; state=%s job=%s expires=%s", r.ID, r.Selector, r.Text, r.State, r.Job, r.ExpiresAt.UTC().Format(time.RFC3339)))
+	}
+	for _, p := range s.ComponentExclusions {
+		if p.Active {
+			c.Holds = append(c.Holds, fmt.Sprintf("exclusion %s: set by %s since %s; reason=%q", p.Selector, p.SetBy, p.UpdatedAt.UTC().Format(time.RFC3339), p.Reason))
+		}
+	}
+	for _, d := range s.DeviceMaintenance {
+		if d.Disabled {
+			c.Holds = append(c.Holds, fmt.Sprintf("host %s device %s (%s): disabled by operator since %s; reason=%q", d.Host, d.Identity, d.Platform, d.UpdatedAt.UTC().Format(time.RFC3339), d.Reason))
+		}
+	}
+	c.Holds = append(c.Holds, s.HostHolds...)
+	c.Warning = s.Warning
+	running := map[string]int{}
+	for _, j := range s.Jobs {
+		group := compactJobGroup(j)
+		c.Counts[group]++
+		if j.Machine != "" && group != "paused" {
+			running[j.Machine]++
+		}
+	}
+	for _, m := range s.Machines {
+		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID]}
+		if m.HostMemoryMeasured {
+			ram := m.FreeHostMemoryGB
+			h.HostRAMGB = &ram
+		}
+		if m.CapabilityProfile != nil {
+			free, total := m.FreeCPUCores, m.EffectiveCPUCores
+			h.FreeCPU, h.CPU = &free, &total
+		}
+		if m.Release == nil {
+			h.Release = "unknown"
+		} else if s.QueueRelease.Version != "" && m.Release.Version != s.QueueRelease.Version {
+			h.Release = m.Release.Version
+		}
+		for _, r := range m.EnvironmentReports {
+			h.Preparing = append(h.Preparing, r.Key+": "+r.State)
+		}
+		for _, r := range m.CopyReports {
+			h.Copying = append(h.Copying, fmt.Sprintf("%s: %d/%d bytes", r.Model, r.Bytes, r.Total))
+		}
+		c.Hyphas = append(c.Hyphas, h)
+	}
+	for _, m := range s.LoadedModels {
+		c.Models = append(c.Models, strings.TrimSpace(fmt.Sprintf("model %s on %s: %s, calls in flight %d %s", m.Model, m.Machine, m.State, m.InFlight, m.Error)))
+	}
+	for _, j := range s.Jobs {
+		reason := JobReason(j)
+		if compactJobGroup(j) == "paused" {
+			i := slices.IndexFunc(c.Paused, func(p CompactPaused) bool { return p.Project == j.Spec.Project && p.Reason == reason })
+			if i < 0 {
+				c.Paused = append(c.Paused, CompactPaused{Project: j.Spec.Project, Reason: reason})
+				i = len(c.Paused) - 1
+			}
+			c.Paused[i].Count++
+			c.Paused[i].IDs = append(c.Paused[i].IDs, j.ID)
+			continue
+		}
+		if reason == "running now" {
+			reason = ""
+		}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, display: JobState(j), age: JobAge(j, s.Now)}
+		if j.State == "queued" {
+			since := j.WaitingSince
+			if since.IsZero() {
+				since = j.Queued
+			}
+			if !since.IsZero() {
+				row.Since = &since
+			}
+		} else if j.StartedAt != nil {
+			row.Since = j.StartedAt
+		} else if j.AssignedAt != nil {
+			row.Since = j.AssignedAt
+		}
+		if d := j.Delivery; d != nil {
+			row.Delivery = strings.TrimSpace(fmt.Sprintf("attempt=%d: %s bytes=%d attempts=%d %s", d.Attempt, d.State, d.Bytes, d.Attempts, d.Cause))
+		}
+		c.Jobs = append(c.Jobs, row)
+	}
+	slices.SortStableFunc(c.Paused, func(a, b CompactPaused) int { return b.Count - a.Count })
+	return c
+}
+
+// Lines renders the text view: the same fields, reasons bounded to one line.
+func (c CompactStatus) Lines(full bool) []string {
+	var out []string
+	header := fmt.Sprintf("jobs: %d current / %d retained", c.Counts["running"]+c.Counts["waiting"]+c.Counts["paused"]+c.Counts["other"], c.RetainedJobs)
+	for _, group := range []string{"running", "waiting", "paused", "other"} {
+		if c.Counts[group] > 0 {
+			header += fmt.Sprintf(" · %d %s", c.Counts[group], group)
+		}
+	}
+	out = append(out, header+"; "+c.Detail)
+	if len(c.Alerts) > 0 {
+		total := 0
+		for _, g := range c.Alerts {
+			total += g.Count
+		}
+		out = append(out, fmt.Sprintf("alerts: %d active in %d kinds; members: myce efficiency, status --sections machines,jobs", total, len(c.Alerts)))
+		for _, g := range c.Alerts {
+			line := "  " + g.Kind
+			if g.Count > 1 {
+				line += fmt.Sprintf(" ×%d", g.Count)
+			}
+			if len(g.Scopes) > 0 {
+				var scopes []string
+				for _, scope := range slices.Sorted(maps.Keys(g.Scopes)) {
+					if n := g.Scopes[scope]; n > 1 {
+						scopes = append(scopes, fmt.Sprintf("%s %d", scope, n))
+					} else {
+						scopes = append(scopes, scope)
+					}
+				}
+				line += " (" + strings.Join(scopes, ", ") + ")"
+			}
+			out = append(out, line+" since "+g.Since.UTC().Format(time.RFC3339))
+		}
+	}
+	if c.AlertDelivery != nil {
+		out = append(out, c.AlertDelivery.Summary())
+	}
+	if c.QueueRelease.Version != "" {
+		out = append(out, fmt.Sprintf("queue release: %s (%s)", c.QueueRelease.Version, c.QueueRelease.Commit))
+	}
+	out = append(out, c.FleetUpgrade...)
+	for _, host := range slices.Sorted(maps.Keys(c.HostStates)) {
+		out = append(out, fmt.Sprintf("host %s: %s", host, c.HostStates[host]))
+	}
+	out = append(out, c.Holds...)
+	if c.Warning != "" {
+		out = append(out, c.Warning)
+	}
+	for _, h := range c.Hyphas {
+		line := fmt.Sprintf("hypha %s: %s, %.1f GiB free, %s", h.ID, h.GPU, h.FreeMemoryGB, h.Availability)
+		if h.HostRAMGB != nil {
+			line += fmt.Sprintf("; host RAM %.1f GiB for admission", *h.HostRAMGB)
+		}
+		if h.CPU != nil {
+			line += fmt.Sprintf("; CPU %d/%d cores free", *h.FreeCPU, *h.CPU)
+		}
+		if h.Running > 0 {
+			line += fmt.Sprintf("; running %d", h.Running)
+		}
+		if h.Release != "" {
+			line += "; release " + h.Release
+		}
+		out = append(out, line)
+		for _, p := range h.Preparing {
+			out = append(out, "  preparing "+p)
+		}
+		for _, p := range h.Copying {
+			out = append(out, "  copying "+p)
+		}
+	}
+	out = append(out, c.Models...)
+	for _, j := range c.Jobs {
+		id := ShortID(j.ID)
+		if full {
+			id = j.ID
+		}
+		line := fmt.Sprintf("%s %s [%s/%s] %s", id, j.Name, j.Project, j.Class, j.display)
+		if j.Machine != "" {
+			line += " on " + j.Machine
+		}
+		if j.age != "" {
+			line += " " + j.age
+		}
+		if j.Reason != "" {
+			line += "; " + compactLine(j.Reason)
+		}
+		out = append(out, line)
+		if j.Delivery != "" {
+			out = append(out, "  delivery "+j.Delivery)
+		}
+	}
+	for _, p := range c.Paused {
+		out = append(out, fmt.Sprintf("paused %d %s: %s", p.Count, p.Project, compactLine(p.Reason)))
+	}
+	if len(c.Jobs) == 0 && len(c.Paused) == 0 {
+		out = append(out, "No jobs yet.")
+	}
+	return out
+}
+
+// compactLine bounds one free-form reason to a line; status JOB_ID has it whole.
+func compactLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > 160 {
+		return string(r[:157]) + "..."
+	}
+	return s
+}

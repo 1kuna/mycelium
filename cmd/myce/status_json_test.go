@@ -135,7 +135,7 @@ func TestStatusJSONPressureView(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"queue release: " + myce.CurrentRelease().Version + " (" + myce.CurrentRelease().Commit + ")", "worker worker release: v1.2.3 (0123456789abcdef)"} {
+		for _, want := range []string{"queue release: " + myce.CurrentRelease().Version + " (" + myce.CurrentRelease().Commit + ")", "; release v1.2.3\n"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("status missing %q: %s", want, out)
 			}

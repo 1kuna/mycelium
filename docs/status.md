@@ -246,8 +246,55 @@ From the release containing #1120, default `GET /api/status`, `myce status`
 and `myce status --json` are compact. They contain all nonterminal jobs and
 terminal jobs with outstanding cleanup/delivery, current machine capacity and
 availability (including the latest health sample and active preparation identities), host/device holds, current
-fleet upgrade, and `summary.alerts` (active condition identity and onset).
+fleet upgrade, and `summary.alert_groups`.
 `summary.retained_jobs` counts all retained jobs, including calls.
+
+From the release containing #1267, the default is a few
+KB. Replaying the 2026-11-11 live fleet snapshot (five hosts, 67 current jobs,
+49 active alert conditions) through it took plain `myce status` from 33,924
+bytes / 267 lines to 3,668 bytes / 31 lines. From the release containing the
+compact JSON change, default `myce status --json` encodes the same projection
+(below): replaying a 68-job snapshot of the same fleet took it from 156,292 to
+7,542 bytes. `GET /api/status` and Python `client.status()` still return the
+summary snapshot with full current job and machine objects.
+
+- `summary.alert_groups` folds active conditions into one row per kind:
+  `kind`, `count`, earliest `since`, and `scopes` (members per host or
+  `project:NAME`). `efficiency/<subject>/<metric>` and `reports/<host>/<code>`
+  are kinded by metric or code; other keys by their first segment. Hash-like
+  subjects (work profiles, targets, recipe identities) are counted, not named.
+  Members are named by `myce efficiency` (efficiency signals) and by
+  `--sections machines,jobs` (recipe, report and target conditions). This
+  replaces the flat `summary.alerts` list: 18 work profiles with one prediction
+  regression were 18 rows.
+- Replaced per-card worker identities (`replacement` set) are omitted from the
+  default `machines`; `--sections machines` and `--history` keep them.
+- Plain `myce status` prints one line per hypha, one line per running, waiting
+  or cleanup job with its committed reason (bounded to 160 characters), and
+  one line per paused project and reason with a count. Host states print only
+  when not `healthy`, a completed fleet upgrade is omitted, and a worker release
+  prints only when it differs from the queue's. Estimates that are unknown,
+  capability profiles, caches and devices stay in `--sections jobs,machines`.
+  `myce status JOB_ID` still prints one job in full.
+- Default `myce status --json` is that compact view as one object. Text and
+  JSON come from the same projection; JSON keeps reasons whole and full IDs:
+
+  | Field | Content |
+  |---|---|
+  | `now`, `queue_release`, `retained_jobs` | Capture time, queue release, all retained jobs including calls |
+  | `counts` | Current jobs by `running` (includes stopping), `waiting`, `paused`, `other` |
+  | `alert_groups` | As `summary.alert_groups` |
+  | `health_alert_delivery` | Present only while alerts await delivery |
+  | `fleet_upgrade`, `host_states`, `holds`, `warning` | Unfinished upgrade lines, non-`healthy` hosts, one line per reservation, exclusion, disabled device or host hold |
+  | `hyphas[]` | `id`, `gpu`, `free_memory_gb`, `availability` (the status sentence), `host_ram_for_admission_gb`, `free_cpu_cores`/`cpu_cores`, `running` (current jobs placed there), `release` (only when it differs or is unknown), `preparing`, `copying` |
+  | `models` | One line per loaded model |
+  | `jobs[]` | Each running, waiting or cleanup job: `id`, `name`, `project`, `class`, `state`, `attempt`, `machine`, `since` (waiting since or started), `reason`, `delivery` |
+  | `paused[]` | One row per project and reason: `project`, `reason`, `count`, `ids` |
+  | `detail` | Where the full objects are |
+
+  Full job and machine objects need `status JOB_ID --json`,
+  `--sections jobs,machines --json`, `--jobs ...` or `--history`; those
+  return the snapshot shape below.
 `health_alert_delivery` retains the notifier configuration and pending count.
 No installation-sized row or byte cap hides current work.
 
@@ -270,7 +317,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 | `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
 | `storage` | `storage_observations` and `file_store` (including retained-file accounting) |
 | `work` | `work_curves` |
-| `health` | Retained `health_alerts`, independently of current `summary.alerts` |
+| `health` | Retained `health_alerts` event history (large on a busy queue), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
 | `usage` | Complete `usage`, including daily rows, preemptions and production starts |
 | `diagnostics` | `request_latencies`, `fleet_superseded`, `evidence_retention`, and retained `admissions` |
@@ -1300,7 +1347,10 @@ room for driver allocations, fragmentation and outside growth. For example,
 (9.064556 GiB beyond the existing reserve). This is a conservative admission
 policy, not a measured guarantee against driver allocation failures. It costs
 co-tenancy capacity when unmanaged memory uses that remainder. Native
-coexistence/fragmentation qualification remains separate.
+coexistence/fragmentation qualification remains separate. A measured allowance
+on a host without a shared-interactive profile already excludes the idle
+footprint that live used RAM contains, so its floor is the reserve alone; the
+allowance still caps reservations.
 
 The queue checks raw physical availability from the existing host-memory
 observation, subtracting this floor and outstanding reservation growth; the
@@ -1679,6 +1729,11 @@ Matching-session contact cannot renew a negotiated observation. `availability.pr
 `availability.age_seconds` similarly preserve owner observation age across clock
 skew. `host_health.probe` applies the same frozen validity to health evidence;
 `host_probe_unknown` withholds admission when it expires or the source fails.
+After a queue restart, persisted health evidence falls back to wall age, so each
+host stays `host_probe_unknown` for admission until its first report. From the
+release containing the restart fix, that state raises no `host_degraded` alert
+while the worker is unreported and restart grace lasts. Earlier releases alerted
+every host at each restart. A worker still silent when grace ends alerts as usual.
 Older workers retain legacy age rules until upgraded. See
 [adaptive host observations](host-probes.md).
 
@@ -2027,6 +2082,20 @@ recovery rearms it without a wall-time cooldown, so a second real incident is
 not hidden for fifteen minutes. Delivery retries keep the same `delivery_id`.
 Clearing retains the diagnostic event; it sends no second notification and
 changes no admission, retry or release-custody decision.
+
+From the release containing #1267, identical pending
+alerts deliver once. Pending events whose fields other than time, delivery ID
+and recovery receipt match (kind, reason, host, machine, device, project, client
+kind, store, reservation, job, attempt and recipients) form one notification:
+the latest event, with `repeats` (how many more it covers) and `first_at`. One
+acknowledgement marks every member delivered. Every member stays in retained
+history. This matters when a hook is configured after a long unconfigured
+period: on 2026-11-11 the live queue held 22,416 pending events, 12,453 of them
+`host_degraded`/`host_probe_unknown` across all five hosts, which would otherwise
+deliver one per second for hours. 99% were recorded 2026-11-07/08, before #1036
+stopped counting queue delivery delay as report age (#1025); the rest were
+restart bursts and a loaded agents' host. A condition that recovers and fails again
+after its alert was delivered still alerts again.
 
 - `queue_overload`: sustained response-cost or mutex-wait regression against
   this installation's healthy history, separately for each normalized API route.
@@ -2718,6 +2787,10 @@ job history scans or storage work. `at` is its observation time; a new queue
 returns `null` until its first maintenance observation. It does not change
 admission, placement, authored intent or retry decisions.
 
+`myce efficiency` and `myce usage` resolve credentials like `myce status`:
+`--config`, then the installed worker, then the installed queue configuration.
+They no longer require `MYCE_TOKEN`, which consumers must not export.
+
 - `hosts` compares instantaneous reservations with measured Mycelium RAM and
   independent physical used/total RAM. `programs` groups reservation-time and
   measured-use integrals by host, opaque work identity and sizing basis. These
@@ -3040,3 +3113,21 @@ queues negotiate without the additive fields; the worker keeps local receipts.
 GPU-host/native capture qualification remains separate from synthetic laptop
 proof. A recorded event is never itself a causal finding: report `unknown` until
 the retained evidence establishes the actual chain.
+
+## Shared owner yield and measured CPU (#389, next release)
+
+`cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
+below declared cores. Job `cpu_observation` retains the exact sample identity,
+previous elapsed/usage counters and logical-job `peak_cores` lower bound. The
+first reading establishes a counter origin; subsequent adjacent readings raise
+the learned rate. The CPU `resources` entry exposes this learned need. It remains
+valid through checkpoint/requeue, including missing or quieter later telemetry;
+it does not predict a different submission.
+
+`shared_host_pressure` additionally reports `cpu_known` and `cpu_psi` on Linux.
+Memory/CPU PSI and owner latency use this host's learned healthy bands; macOS
+memory warnings and existing host-relative swap-growth/latency health also
+withhold admission. Every running job on the host, production included,
+receives `shared_host_pressure` stop/requeue provenance (MY-45); resumable jobs
+get checkpoint grace. Native containment and stress
+qualification remain separate from these diagnostics and synthetic tests.

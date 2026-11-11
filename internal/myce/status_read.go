@@ -718,6 +718,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 			return Snapshot{}, err
 		}
 		out := v.projectSnapshot(true)
+		out.Machines = dropReplacedStatusMachines(out.Machines)
 		out.Summary, out.HealthAlertDelivery = summary, delivery
 		out.Freshness = q.snapshotFreshness(out.Now, false)
 		return out, ctx.Err()

@@ -78,13 +78,13 @@ func withoutToken(env []string) []string {
 }
 
 func TestDockerSidecarStopRecoveryAndEvidence(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	w, s, c, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	p, err := startDockerFixture(w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	awaitDockerMainStarted(t, p)
 	if err = os.Remove(filepath.Join(root, "running")); err != nil {
 		t.Fatal(err)
 	}

@@ -274,6 +274,17 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/cancel", {}))
         self.assertEqual(APIError(404, '{"code":"job_unknown","will_not_run":null}').code, "job_unknown")
 
+    def test_production_lease_requests(self):
+        client = Client(token="test-only")
+        stage = {"needs": {"memory_gb": 8, "platform": {"required": ["cuda"]}}}
+        with patch.object(client, "_call", return_value={"leases": [{"key": "run/1"}]}) as call:
+            client.open_production_lease("render", "run-1", "2h", [stage])
+            self.assertEqual(call.call_args.args, ("POST", "/api/production-leases",
+                             {"project": "render", "key": "run-1", "ttl": "2h", "stages": [stage]}))
+            client.close_production_lease("render", "run 1")
+            self.assertEqual(call.call_args.args, ("DELETE", "/api/production-leases/render/run%201"))
+            self.assertEqual(client.production_leases(), [{"key": "run/1"}])
+
 
 
     def test_log_pages_and_terminal_drain(self):
@@ -458,6 +469,27 @@ class DevTests(unittest.TestCase):
                 result = subprocess.run([sys.executable, "-c", example], cwd=root,
                                         env=environment, capture_output=True, text=True, timeout=90)
                 self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "accepted/result.txt").read_bytes(),
+                             b"mycelium-ease-audit-ok\n")
+        # The guide's CLI journey: declare, resolve and submit, one wait, fetch
+        # and verify, executed block by block with the receipt's job ID.
+        blocks = re.findall(r"^```sh\n(.*?)^```$", guide.read_text(), re.M | re.S)
+        self.assertEqual(len(blocks), 4, "consumer guide CLI journey changed shape")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "HOME": str(root), "MYCE_QUEUE": self.client.url,
+                           "MYCE_TOKEN": "dev-token",
+                           "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
+            job = None
+            for block in blocks:
+                if job:
+                    block = block.replace("JOB_ID", job)
+                result = subprocess.run(["sh", "-ec", block], cwd=root, env=environment,
+                                        capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if job is None and "--key" in block:
+                    job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
+            self.assertTrue(job, "CLI journey must submit a job")
             self.assertEqual((root / "accepted/result.txt").read_bytes(),
                              b"mycelium-ease-audit-ok\n")
 

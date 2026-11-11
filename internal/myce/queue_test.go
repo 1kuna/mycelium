@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,16 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
 	q.s.PublicationHorizon = filePublicationGrace
 	return q, c
+}
+
+// Whole-state rollback comparisons include asynchronous diagnostic commits.
+// Join those commits before taking a locked snapshot of the transaction state.
+func marshalQueueState(t *testing.T, q *Queue) ([]byte, error) {
+	t.Helper()
+	drainAdmissionWait(t, q)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return json.Marshal(q.s)
 }
 
 // Scheduling and recovery tests model availability without timing filesystem I/O.

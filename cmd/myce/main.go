@@ -246,7 +246,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
 	}
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
+	// Consumer commands resolve the installed authority; the consumer skill forbids
+	// exporting MYCE_TOKEN, so no read may require it.
+	installedClient := slices.Contains([]string{"status", "logs", "ledger", "cancel", "submit", "efficiency", "usage"}, args[0])
+	if installedClient {
 		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
@@ -428,7 +431,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	defer stop()
 	var client myce.Client
 	var invitation *myce.Invitation
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
+	if installedClient {
 		// An omitted endpoint must not mask the installed queue address.
 		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {
@@ -906,6 +909,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		if *statusJSON {
+			if s.Summary != nil {
+				// The default is the compact projection; --sections, --jobs and
+				// --history return full objects.
+				return json.NewEncoder(os.Stdout).Encode(myce.NewCompactStatus(s))
+			}
 			return json.NewEncoder(os.Stdout).Encode(s)
 		}
 		printStatus(s, *full)
@@ -992,11 +1000,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
-	if summary := s.Summary; summary != nil {
-		fmt.Printf("jobs: %d current / %d retained; status JOB_ID for details, --jobs all for pages, --history for full inspection\n", len(s.Jobs), summary.RetainedJobs)
-		for _, alert := range summary.Alerts {
-			fmt.Printf("alert: %s since %s\n", alert.Condition, alert.Since.UTC().Format(time.RFC3339))
-		}
+	if s.Summary != nil {
+		printCompactStatus(os.Stdout, s, full)
+		return
 	}
 	if page := s.JobsPage; page != nil && page.NextBefore != "" {
 		fmt.Printf("jobs: %d of %d retained jobs shown; use status JOB_ID for a known job or status --history for all history\n", page.Returned, page.Total)

@@ -2,11 +2,14 @@ package myce
 
 const workerDiskBudgetProtocol = "worker-disk-budget-v1"
 
+// Queues advertising this accept the foreign-headroom fields on disk budgets.
+const workerDiskHeadroomProtocol = "worker-disk-headroom-v1"
+
 // r6.8 strictly decodes check-ins and predates disk-budget telemetry. Only
 // these new fields wait for an advertisement on the serialized check-in lane.
 type workerDiskBudgetWire struct {
-	machine, session string
-	supported        bool
+	machine, session    string
+	supported, headroom bool
 }
 
 func (w Worker) diskBudgetCheckin(c Checkin) Checkin {
@@ -14,8 +17,11 @@ func (w Worker) diskBudgetCheckin(c Checkin) Checkin {
 		if r.machine != c.Machine.ID || r.session != c.Machine.Session {
 			*r = workerDiskBudgetWire{machine: c.Machine.ID, session: c.Machine.Session}
 		}
-		if r.supported {
+		if r.supported && r.headroom {
 			return c
+		}
+		if r.supported {
+			return withoutDiskHeadroomFields(c)
 		}
 	}
 	return withoutDiskBudgetFields(c)
@@ -29,6 +35,21 @@ func withoutDiskBudgetFields(c Checkin) Checkin {
 		r.UnmanagedCompilerBytes = 0
 		c.Machine.HygieneCollection = &r
 	}
+	return c
+}
+
+// Copies the collection; local evidence keeps its headroom fields.
+func withoutDiskHeadroomFields(c Checkin) Checkin {
+	if c.Machine.HygieneCollection == nil || len(c.Machine.HygieneCollection.DiskBudget) == 0 {
+		return c
+	}
+	r := *c.Machine.HygieneCollection
+	r.DiskBudget = append([]DiskBudgetVolume(nil), r.DiskBudget...)
+	for i := range r.DiskBudget {
+		v := &r.DiskBudget[i]
+		v.ForeignBytes, v.ForeignPeakBytes, v.ForeignPeakGrowthBytes, v.ForeignHeadroomBytes = 0, 0, 0, 0
+	}
+	c.Machine.HygieneCollection = &r
 	return c
 }
 

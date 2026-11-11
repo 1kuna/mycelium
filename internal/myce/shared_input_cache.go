@@ -835,7 +835,7 @@ func (c *SharedInputCache) admit(ctx context.Context, key string, need int64) er
 			explicit = 0
 		}
 		var free int64
-		limit, free, e = inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe)
+		limit, free, e = inputCacheBudget(c.cache.Root, used, explicit, c.diskProbe, c.budget.foreignHeadroom(c.cache.Root))
 		if e != nil {
 			return false, e
 		}

@@ -266,7 +266,7 @@ func TestHealthIncidentLearnedEnvelopeReplay(t *testing.T) {
 	incidentAllowance(t, q, &m, 24)
 	s.SubmissionKey = "learned-incident"
 	queued := submit(t, q, s)
-	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+	if why := memoryEvidenceReason(t, q, queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 		t.Fatal("oversized learned submission lost typed wait", why)
 	}
 	if len(alertsOf(q, kind)) != 1 {

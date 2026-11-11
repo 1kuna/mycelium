@@ -300,7 +300,7 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		}
 		queued, err := q.Submit(s)
 		if mode == "auto" {
-			if err != nil || !strings.HasPrefix(q.memoryEvidenceWaitingReason(queued), memoryEvidenceRecovering+":") {
+			if err != nil || !strings.HasPrefix(memoryEvidenceReason(t, q, queued), memoryEvidenceRecovering+":") {
 				t.Fatalf("learned-only mismatch must wait: %v", err)
 			}
 		} else {
@@ -384,7 +384,7 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 8.5, false)
 	queued := submit(t, q, s)
-	why := q.memoryEvidenceWaitingReason(queued)
+	why := memoryEvidenceReason(t, q, queued)
 	for _, want := range []string{memoryEvidenceRecovering, "8.62506103515625 GiB", "allowance 8 GiB"} {
 		if !strings.Contains(why, want) {
 			t.Errorf("wait %q missing %q", why, want)

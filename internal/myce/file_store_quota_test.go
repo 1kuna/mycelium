@@ -193,12 +193,12 @@ func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
 func TestPolicySetFromOlderClientKeepsFileStoreLimits(t *testing.T) {
 	q, _ := fixture(t)
 	c := retentionClient(t, q)
-	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10, MaxAddedFileBytes24h: 20})
+	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10, MaxAddedFileBytes24h: 20, FileRetention: "72h"})
 	put := func(path string) {
 		t.Helper()
 		record := q.PriorityPolicy()
 		owner := record.Policy.Projects["owner"]
-		owner.MaxRetainedFileBytes, owner.MaxAddedFileBytes24h, owner.Weight = 0, 0, 2
+		owner.MaxRetainedFileBytes, owner.MaxAddedFileBytes24h, owner.FileRetention, owner.Weight = 0, 0, "", 2
 		record.Policy.Projects["owner"] = owner
 		request := map[string]any{"expected_revision": record.Revision, "policy": record.Policy}
 		if err := c.Call(context.Background(), "PUT", path, request, nil); err != nil {
@@ -206,11 +206,11 @@ func TestPolicySetFromOlderClientKeepsFileStoreLimits(t *testing.T) {
 		}
 	}
 	put("/api/policy")
-	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 10 || p.MaxAddedFileBytes24h != 20 || p.Weight != 2 {
+	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 10 || p.MaxAddedFileBytes24h != 20 || p.FileRetention != "72h" || p.Weight != 2 {
 		t.Fatalf("older client round-trip changed limits or lost its edit: %+v", p)
 	}
 	put("/api/policy?file_store_limits=1")
-	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 0 || p.MaxAddedFileBytes24h != 0 {
+	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 0 || p.MaxAddedFileBytes24h != 0 || p.FileRetention != "" {
 		t.Fatalf("current client could not clear limits: %+v", p)
 	}
 }

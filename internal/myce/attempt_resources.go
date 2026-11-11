@@ -445,6 +445,7 @@ func (q *Queue) retainAttemptResources(j *Job, r *AttemptResources) {
 		return
 	}
 	r.ReceivedAt = q.clock.Now()
+	q.observeSharedCPU(j, r)
 	facts := AttemptResourceFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, Resources: r}
 	for i, old := range j.ResourceAttempts {
 		if old.Attempt == facts.Attempt && old.Machine == facts.Machine && old.Session == facts.Session {

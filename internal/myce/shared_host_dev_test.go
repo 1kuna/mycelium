@@ -19,7 +19,11 @@ func TestSharedHostDevPressureCheckpointRequeueAndCancel(t *testing.T) {
 	var pressure atomic.Pointer[SharedHostPressure]
 	pressure.Store(&SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1})
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond, SharedPressureSource: func(context.Context) (SharedHostPressure, error) { return *pressure.Load(), nil }})
+	// This journey advances sensor time explicitly. HTTP/fixture scheduling
+	// must not age otherwise idle custody between drain, budget and profile.
+	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond, SharedPressureSource: func(context.Context) (SharedHostPressure, error) { return *pressure.Load(), nil }}, func(q *Queue) {
+		q.clock.(*devClock).base = &workerFakeClock{now: q.clock.Now()}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
