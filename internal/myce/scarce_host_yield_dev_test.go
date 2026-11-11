@@ -25,7 +25,7 @@ func TestScarceHostYieldDev(t *testing.T) {
 	}
 	root := t.TempDir()
 	const fixtureBudget = 45 * time.Second
-	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: defaultWorkerInterval}, func(q *Queue) {
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "files"), Token: "local-fixture", Workers: 1, Devices: 2, HostID: "scarce", CPUBudgetCores: 2, MemoryGB: 8, Interval: defaultWorkerInterval}, func(q *Queue) {
 		// This journey tests yield, not loss; TestControlClockDeadWorkerDetection
 		// covers loss. Keep scheduler jitter within the existing outer budget.
 		if err := q.SetLossTimeouts(fixtureBudget, fixtureBudget, fixtureBudget); err != nil {

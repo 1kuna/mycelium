@@ -22,7 +22,7 @@ import (
 func TestM3DevTwoGPUScenario(t *testing.T) {
 	root := t.TempDir()
 	cfg := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "two-gpu", MemoryGB: 8, Interval: 10 * time.Millisecond}
-	d, err := StartDev(cfg)
+	d, err := startTestDev(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 			t.Fatalf("payload %d survived teardown: %v", p, err)
 		}
 	}
-	d, err = StartDev(cfg)
+	d, err = startTestDev(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 func TestM3DevModelEnginesPerDevice(t *testing.T) {
 	root := t.TempDir()
 	// Model/device custody is independent of host scheduling and loss timing.
-	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "model-machine", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -241,7 +241,7 @@ func TestMultiCardNoPartialReservationAcrossRaceOrRestart(t *testing.T) {
 func TestMultiCardDevLaunchSeesBothCards(t *testing.T) {
 	root := t.TempDir()
 	cfg := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "local-test", Workers: 1, Devices: 2, HostID: "two-card", MemoryGB: 8, Interval: 10 * time.Millisecond}
-	d, err := StartDev(cfg)
+	d, err := startTestDev(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -185,7 +185,7 @@ func TestModelSnapshotEmulatedSymlinkJob(t *testing.T) {
 	for _, name := range []string{"model.safetensors", "config.json"} {
 		emulateModelSymlink(t, filepath.Join(repo, "snapshots", tinyRevision, name))
 	}
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ModelRoot: root, GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ModelRoot: root, GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

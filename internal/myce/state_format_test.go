@@ -178,7 +178,7 @@ func TestDevStartupRefusalNoWrites(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := stateTree(t, parent)
-			d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(parent, "queue.db"), Checkpoints: filepath.Join(parent, "checkpoints"), Workers: 1, MemoryGB: 8, Token: "synthetic-fixture"})
+			d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(parent, "queue.db"), Checkpoints: filepath.Join(parent, "checkpoints"), Workers: 1, MemoryGB: 8, Token: "synthetic-fixture"})
 			if d != nil {
 				d.Close()
 			}

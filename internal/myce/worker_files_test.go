@@ -111,7 +111,7 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := sharedArchive(t, nas)
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: nas, NASCheckpoints: true, FileStore: filepath.Join(state, "files"), GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: nas, NASCheckpoints: true, FileStore: filepath.Join(state, "files"), GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
 	if err := PrepareStateRoots(state); err != nil {
 		t.Fatal(err)
 	}
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

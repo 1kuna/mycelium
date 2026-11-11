@@ -161,10 +161,10 @@ func TestObserverLegacyBindingKeepsPathAndLocale(t *testing.T) {
 	defer syscall.Kill(state.PID, syscall.SIGKILL)
 	var receipt profileReceipt
 	wait(t, ctx, func() bool {
-		return readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt) == nil && receipt.DeliveryStatus != ""
+		return readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt) == nil && (receipt.DeliveryStatus == "delivered" || receipt.DeliveryStatus == "failed")
 	})
 	if receipt.DeliveryStatus != "delivered" || receipt.Observation != "not_armed" {
-		t.Fatal("legacy binding lost preflight PATH/locale during adoption")
+		t.Fatalf("legacy binding adoption: delivery=%s observation=%s", receipt.DeliveryStatus, receipt.Observation)
 	}
 	var notification profileNotification
 	if err := readProfileJSON(events, &notification); err != nil || notification.JobID != "job" {

@@ -274,7 +274,7 @@ func TestDeviceMaintenanceModelCallsAndLaunches(t *testing.T) {
 // fake accelerators: the sibling finishes while the disabled target waits.
 func TestDeviceMaintenanceDev(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", Workers: 1, Devices: 2, HostID: "two-gpu", MemoryGB: 8, Interval: 20 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", Workers: 1, Devices: 2, HostID: "two-gpu", MemoryGB: 8, Interval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

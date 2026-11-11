@@ -253,7 +253,12 @@ func TestProcessTreeHelper(t *testing.T) {
 		if os.Getenv("TREE_TEST_IGNORE_TERM") != "" {
 			signal.Ignore(syscall.SIGTERM) // Only KILL by exact PID ends this escaper.
 		}
-		if err := os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		// File existence is the readiness handshake. Publish only complete PID bytes
+		// so all process-tree callers can parse the first observation.
+		if err := os.WriteFile(filepath.Join(dir, "pid.tmp"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(dir, "pid.tmp"), filepath.Join(dir, "pid")); err != nil {
 			t.Fatal(err)
 		}
 		select {} // The owner-death watcher or attempt cancellation terminates this helper.

@@ -25,7 +25,7 @@ func TestQueueDiskIOReproduction(t *testing.T) {
 	}
 	root := newTestStateRoot(t)
 	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "disk-io-test", GPU: "cpu", Workers: 1, CPUBudgetCores: 4, Interval: 100 * time.Millisecond}
-	d, err := StartDev(c)
+	d, err := startTestDev(t, c)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -117,7 +117,7 @@ func TestDevClockOrdinaryElapsedTime(t *testing.T) {
 func TestDevClockRestartReset(t *testing.T) {
 	root := t.TempDir()
 	config := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "test", Workers: 1, MemoryGB: 8}
-	d, err := StartDev(config)
+	d, err := startTestDev(t, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestDevClockRestartReset(t *testing.T) {
 	// Reopen the same SQLite queue at the same queue endpoint.
 	config.Address = strings.TrimPrefix(d.URL, "http://")
 	before := RealClock{}.Now()
-	d, err = StartDev(config)
+	d, err = startTestDev(t, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,4 +291,30 @@ func TestResolveExtensionCheckTargetInstalledCPU(t *testing.T) {
 			t.Fatalf("%s accepted missing device", platform)
 		}
 	}
+}
+
+// Dev workers and the queue stop through Close, but NAS preparation intentionally
+// remains independent of shutdown: an uninterruptible filesystem call must not
+// hold up queue replacement. Test-owned roots must outlive that preparation.
+// Register before callers register Close so this join runs after their teardown,
+// including when later dev configuration fails after Open started preparation.
+func startTestDev(t *testing.T, c DevConfig, configure ...func(*Queue)) (*Dev, error) {
+	t.Helper()
+	return startDev(c, func(q *Queue) {
+		t.Cleanup(func() {
+			q.shards.mu.Lock()
+			done := q.shards.done
+			q.shards.mu.Unlock()
+			if done != nil {
+				select {
+				case <-done:
+				case <-time.After(testWaitTimeout):
+					t.Error("checkpoint preparation still owns test root after dev shutdown")
+				}
+			}
+		})
+		for _, fn := range configure {
+			fn(q)
+		}
+	})
 }

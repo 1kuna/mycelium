@@ -73,7 +73,7 @@ func pieceDependencyDevCPU(t *testing.T, transport string) {
 				t.Fatal(err)
 			}
 		}
-		d, err := startDev(c, configureLossTiming)
+		d, err := startTestDev(t, c, configureLossTiming)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -171,7 +171,7 @@ func pieceDependencyDevCPU(t *testing.T, transport string) {
 			t.Fatal(err)
 		}
 		d = nil
-		d, err = startDev(c, configureLossTiming)
+		d, err = startTestDev(t, c, configureLossTiming)
 		if err != nil {
 			t.Fatal(err)
 		}
