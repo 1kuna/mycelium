@@ -16,16 +16,13 @@ import (
 func TestDockerProductionOutcomeCause(t *testing.T) {
 	for _, cause := range []string{"stop-main", "exit-one", "worker-recovery", "exhaustion"} {
 		t.Run(cause, func(t *testing.T) {
-			// Outcome/retry semantics use the shared daemon effects directly.
-			// External CLI startup and read-timeout recovery have separate roots.
-			w, store, clock, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
+			w, store, clock, root := dockerFixture(t)
 			q, _ := fixture(t)
 			q.clock = clock
 			w.CheckpointRoot = q.root
 			m := w.Machine
 			m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.FreeHostMemoryGB = true, 32, 32
 			j := dockerGroupJob(t)
-			j.Spec.Logs = "none"
 			j.Spec.Priority, j.Spec.SubmissionKey = "production", "docker-stage"
 			var probed atomic.Bool
 			if strings.Contains(cause, "readiness") {
@@ -51,7 +48,7 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 				if attempt > 1 {
 					// Each fake daemon uses fixed container IDs. A fresh fixture
 					// models the next attempt without inheriting old daemon objects.
-					w, store, _, root = dockerFixtureCommand(t, fakeDockerGroupCommand)
+					w, store, _, root = dockerFixture(t)
 					w.Clock, w.CheckpointRoot = clock, q.root
 				}
 				running := check(t, q, m, nil).Job
@@ -70,6 +67,11 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 					await(t, probed.Load)
 				} else {
 					await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+					await(t, func() bool {
+						p.docker.mu.Lock()
+						defer p.docker.mu.Unlock()
+						return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+					})
 				}
 				writeMode := func(mode string) {
 					t.Helper()

@@ -15,21 +15,20 @@ import (
 // Freeze the live adapter before driving terminal observations synchronously.
 func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
 	t.Helper()
-	return restartResultFixtureCommand(t, nil)
-}
-
-func restartResultFixtureCommand(t *testing.T, command func(string) func(context.Context, ...string) ([]byte, error)) (Worker, *workerStore, *dockerAttempt, *dockerTestClock, string) {
-	t.Helper()
-	w, s, c, root := dockerFixtureCommand(t, command)
-	j := dockerGroupJob(t)
-	if command != nil {
-		j.Spec.Logs = "none"
-	}
-	p, err := startDockerFixture(w, s, j)
+	w, s, c, root := dockerFixture(t)
+	p, err := startDockerFixture(w, s, dockerGroupJob(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	// A daemon start effect precedes the adapter's durable start receipt.
+	// Closing before that receipt can interrupt launch, rather than freezing
+	// the running execution this fixture promises to recover.
+	await(t, func() bool {
+		p.docker.mu.Lock()
+		defer p.docker.mu.Unlock()
+		return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+	})
 	p.docker.close()
 	return w, s, p.docker, c, root
 }

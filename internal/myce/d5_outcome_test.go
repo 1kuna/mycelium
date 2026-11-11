@@ -266,7 +266,7 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		t.Cleanup(p.docker.close)
 		return d5Finish(t, p)
 	}
-	_, s, d, c, root := restartResultFixtureCommand(t, fakeDockerGroupCommand)
+	_, s, d, c, root := restartResultFixture(t)
 	if tc.priority {
 		d.mu.Lock()
 		d.state.PriorityStop = &PriorityPreemption{Cause: priorityPreemptionCause}

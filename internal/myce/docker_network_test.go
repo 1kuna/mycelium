@@ -301,9 +301,6 @@ func fakeDockerGroupCommand(root string) func(context.Context, ...string) ([]byt
 		}
 		mode, _ := os.ReadFile(filepath.Join(root, "mode"))
 		var out bytes.Buffer
-		if string(mode) == "down" {
-			return nil, errors.New("daemon refuses")
-		}
 		if handled, err := fakeDockerNetwork(root, args, string(mode), &out); handled {
 			return out.Bytes(), err
 		}
