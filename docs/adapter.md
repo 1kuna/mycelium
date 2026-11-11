@@ -462,7 +462,10 @@ leave it, absolute links, link loops and entries beneath a link are refused.
 Directory sources reject symlinks. All sources reject hardlinks, special files and
 escaping names. File modes survive the source archive. Inputs map clean destination filenames to explicit local
 files; they are frozen and applied after source extraction. Outputs map required
-relative filenames to ordinary result prefixes. Command exit, then `check` exit,
+relative files, folders (`plots/`) or globs (`"logs/*.txt"`) to ordinary result
+prefixes; `--out DIR` and `myce result recover` recreate the subfolders. `after`
+stages, `output_destination`, `storage_protocol` and extension jobs still name
+individual files ([folder and glob outputs](files.md#folder-and-glob-outputs-1341)). Command exit, then `check` exit,
 then existing attempt-specific output verification must all succeed. Retrieve
 accepted outputs through `Client.DownloadResult` / Python `download_result`;
 these verify their SHA-256 and size.
