@@ -69,6 +69,11 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	for id, data := range groups["jobs"] {
+		if groups["jobs"][id], err = expandJobRecord(data); err != nil {
+			return nil, err
+		}
+	}
 	// Live keyed answers reference the same committed job instead of duplicating
 	// its payload on every check-in. Removed jobs keep their full retained answer.
 	for id, data := range groups["submissions"] {
@@ -584,5 +589,8 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 		value = &copy
 	}
 	data, err := json.Marshal(value)
+	if j, ok := value.(*Job); ok && err == nil && q.slimJobRecords && strings.HasPrefix(key, "jobs/") && !mutableJob(j) {
+		data = slimJobRecord(data)
+	}
 	return data, nil, err
 }
