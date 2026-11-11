@@ -50,7 +50,10 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	d, c, ctx := devProbe(t)
 	s := spec("experiment")
 	s.Resumable, s.SubmissionKey = false, "lost-post"
-	s.Run.Command = []string{"sh", "-c", `printf x >> "$1"`, "fixture", "{work}/once"}
+	// Keep the exactly-once side effect outside disposable attempt scratch,
+	// so the restart/replay assertions can still observe any duplicate exec.
+	marker := filepath.Join(filepath.Dir(c.Database), "once")
+	s.Run.Command = []string{"sh", "-c", `printf x >> "$1"`, "fixture", marker}
 	var accepted Job
 	// Lose the HTTP response after the real server commits the submission.
 	lost := d.Client()
@@ -180,7 +183,6 @@ func TestDevProbeQueueRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	probeWait(t, ctx, func() bool { st, err := q.HostMaintenanceStatus("dev-host"); return err == nil && st.Healthy })
-	marker := filepath.Join(filepath.Dir(c.Database), "workers", "fake-1", "job-files", accepted.ID, "1", "once")
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "x" {
 		t.Fatal("completed command duplicated or missing", err)
 	}
