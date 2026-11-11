@@ -92,6 +92,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	recovered["requested_by"].(map[string]any)["description"] = "Operator-asserted requester label, not a separately authenticated user identity."
 	recovered["manifest_sha256"].(map[string]any)["description"] = "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time."
 	job["spec_projection"].(map[string]any)["description"] = "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted."
+	job["environment_lock"].(map[string]any)["description"] = "Single-job replies only: the lock_file environment's frozen inputs as sha256 by basename (for Pixi, pixi.lock and pixi.toml) and backend, recorded at acceptance. spec.environment stays projected away."
 	job["start_window"].(map[string]any)["description"] = "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments."
 	job["start_by_explicit"].(map[string]any)["description"] = "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute."
 	specProperties := defs["Spec"].(map[string]any)["properties"].(map[string]any)

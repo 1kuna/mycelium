@@ -866,6 +866,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
 			fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
 			printCancellationScope(os.Stdout, j)
+			if l := j.EnvironmentLock; l != nil {
+				fmt.Print("  environment lock")
+				if l.Backend != "" {
+					fmt.Print(" (", l.Backend, ")")
+				}
+				for _, name := range slices.Sorted(maps.Keys(l.SHA256)) {
+					fmt.Print(" ", name, "=sha256:", l.SHA256[name])
+				}
+				fmt.Println()
+			}
 			for _, a := range j.AttemptHistory {
 				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
 				if a.PriorityStop != nil {

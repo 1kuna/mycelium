@@ -94,14 +94,62 @@ Declare tool, environment, network and model dependencies through their
 [adapter fields](../../../docs/adapter.md); Mycelium cannot infer hidden shell
 dependencies.
 
-Inline jobs accept a project Pixi lock:
-`environment: {backend: pixi, lock_file: /queue/shared/project/pixi.lock, platforms: [cpu]}`.
-The queue reads `pixi.lock` and the adjacent `pixi.toml` at submission; `python`
-is optional. Each input is limited to 1 MiB; oversized inputs report
-`path_diagnostic.cause: too_large`, naming any required companion. Profile
-inputs do not upload these files; workers build the frozen snapshots through
-Pixi. See
+Inline jobs accept a project Pixi lock. Give `lock_file` relative to the
+project root (the folder holding `.mycelium/`, or the working directory), the
+same base as `inputs`; `myce run` uploads `pixi.lock` and the adjacent
+`pixi.toml` with the submission, so the queue needs no path to them. `python`
+is optional. The queue freezes the bytes and their digest into the job, so
+later edits need a new submission:
+
+```sh
+# env/pixi.toml and env/pixi.lock come from `pixi lock` in your project.
+cat > .mycelium/adapter.yaml <<'YAML'
+schema: 1
+project: example
+default: pixi-task
+entries:
+  pixi-task:
+    source: {directory: source}
+    class: experiment
+    run:
+      command: [sh, -c, "printf 'pixi-ok\n' > result.txt"]
+    needs: {platform: cpu, cpu_cores: 1, memory_gb: 0.125}
+    targets:
+      - {os: darwin, arch: arm64, platform: cpu}
+      - {os: linux, arch: amd64, platform: cpu}
+      - {os: linux, arch: arm64, platform: cpu}
+    environment: {backend: pixi, lock_file: env/pixi.lock, platforms: [cpu]}
+    outputs: {result.txt: results}
+    checks:
+      result: [test, -s, result.txt]
+YAML
+myce spec check --resolve --entry pixi-task .mycelium/adapter.yaml
+myce run --entry pixi-task --key "pixi-task-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+An absolute `lock_file` is still read by the queue at its own path. Each
+input is limited to 1 MiB; oversized or missing inputs report a
+`path_diagnostic` (`side: submitter` for a relative lock, `side: queue` for
+an absolute one), naming any required companion. See
 [project lock files](../../../docs/environments.md#project-lock-files).
+
+Workers install with **Pixi 0.81.0** (`pixi install --locked`; they never
+solve). When the queue reads or receives a Pixi lock, it runs the same
+up-to-date check with that version and refuses a stale lock at submission
+and in `myce spec check --resolve` with `job_environment_invalid`, Pixi's
+exact mismatch and the fix. A lock written by an older Pixi can fail here (for
+example `__unix=0` where 0.81 expects `__unix=0=0`): run `pixi lock` with
+Pixi >= 0.81.0, commit the new lock and resubmit. Native extensions with Pixi
+recipes get the same check at registration. If the queue host lacks Pixi
+0.81.0, the check is skipped and the worker still refuses at preparation.
+
+To read back which lock a job froze, `myce status JOB --json` (and the Python
+client's `get(job_id)`) includes `environment_lock`: the backend and each frozen
+input's sha256, for example
+`{"backend": "pixi", "sha256": {"pixi.lock": "…", "pixi.toml": "…"}}`. Compare it
+with `shasum -a 256 env/pixi.lock env/pixi.toml`. It appears on single-job
+replies only, not in status lists; `spec.environment` stays projected away.
+Plain `myce status JOB` prints it as one `environment lock` line.
 
 ## Models
 

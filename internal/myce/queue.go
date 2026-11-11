@@ -862,11 +862,14 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		plainValidationErr = validation.Validate()
 	}
 	var recipes map[string]EnvironmentRecipe
+	var frozenLock *EnvironmentLock
 	var sidecarRecipes map[string]map[string]EnvironmentRecipe
 	var recipeErr error
 	var discovery *CommandDiscovery
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
+		// Digest before freezeRecipes moves the bytes to the file store.
+		frozenLock = environmentLock(recipes)
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
 		}
@@ -1028,6 +1031,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			id = ID()
 		}
 		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
+		// do not keep a second copy in every stored job spec.
+		j.Spec.Environment.Files = nil
+		j.EnvironmentLock = frozenLock
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
@@ -2749,6 +2756,7 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 			}
 		}
 		key := j.Spec.SubmissionKey
+		lock := j.EnvironmentLock
 		// Status projection owns a fully detached view. Redaction can reuse
 		// its fields without another JSON round-trip for every job.
 		*j = statusJobValue(j)
@@ -2758,6 +2766,11 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 			j.Cancellation = &ack
 		}
 		if jobReply {
+			if lock != nil {
+				copied := *lock
+				copied.SHA256 = maps.Clone(lock.SHA256)
+				j.EnvironmentLock = &copied
+			}
 			j.Spec.SubmissionKey = key
 			j.SpecProjection.Omitted = slices.DeleteFunc(j.SpecProjection.Omitted, func(path string) bool {
 				return path == "submission_key"

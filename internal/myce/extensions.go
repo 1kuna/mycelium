@@ -342,6 +342,10 @@ func (q *Queue) AddExtension(e Extension, requestContexts ...context.Context) er
 	if err != nil {
 		return err
 	}
+	// Outside q.mu: the workers' Pixi up-to-date check is a local subprocess.
+	if err := checkExtensionPixiLocks(requestCtx, checked); err != nil {
+		return err
+	}
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	requestUnlock1()

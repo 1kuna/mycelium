@@ -1681,6 +1681,16 @@
         "backend": {
           "type": "string"
         },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "lock_file": {
           "type": "string"
         },
@@ -1700,6 +1710,26 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "EnvironmentLock": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sha256"
+      ],
       "type": "object"
     },
     "EnvironmentRecipe": {
@@ -3087,6 +3117,11 @@
         },
         "environment_failure_log": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "environment_lock": {
+          "$ref": "#/$defs/EnvironmentLock",
+          "description": "Single-job replies only: the lock_file environment's frozen inputs as sha256 by basename (for Pixi, pixi.lock and pixi.toml) and backend, recorded at acceptance. spec.environment stays projected away.",
           "x-contract": "diagnostic"
         },
         "environment_recipes": {
