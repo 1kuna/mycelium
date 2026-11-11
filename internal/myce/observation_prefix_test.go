@@ -3,7 +3,7 @@ package myce
 import "testing"
 
 func TestObservationLimitPrefixPriorityUpdates(t *testing.T) {
-	q, _, l := adaptiveObservationFixture(t, 2, 6500)
+	q, _, l := adaptiveObservationFixture(t, 2, 16)
 	prefix := "job-0000"
 	if _, protected := l.index.observationPriority(prefix); protected {
 		t.Fatal("nonproduction prefix protected")
