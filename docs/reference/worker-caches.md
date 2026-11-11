@@ -121,8 +121,15 @@ publication receipt, including after restart. Scratch goes automatically when:
 - The queue authorized file expiry through `myce file release apply`, or the
   terminal job passed the queue's positive `--file-retention` duration. Physical
   release must be confirmed, and pending delivery or protected-storage custody
-  still prevents collection. An older attempt never inherits a newer success's
-  acceptance; it needs its own release and the terminal job's expiry authority.
+  still prevents collection.
+- The queue confirmed release of that exact attempt and the job has since moved
+  to a later attempt (interrupted, yielded, preempted or requeued). A superseded
+  attempt can never be accepted, so its scratch goes on the next sweep, live or
+  terminal job alike, instead of waiting for file retention. A copy the queue
+  still marks recoverable is kept (`recoverable_attempt`). Checkpoints live in
+  the checkpoint root or the queue file store, not scratch, and pending uploads,
+  diagnostics and replay keep local custody until the queue has them. Partial
+  outputs of a failed or cancelled job are recovered from its current attempt.
 
 The old fixed **24-hour** scratch promise was retired under MY-34. A saved
 24-hour file-retention policy still means 24 hours from the job's finish time;
@@ -158,7 +165,8 @@ read-only exact-attempt check, not an override or a paginated status lookup.
 
 Worker logs report `worker scratch retention` with allocated `retained_bytes`,
 `reclaimed_bytes`, and `retained_bytes_by_reason` (for example `local_custody`,
-`unique_unreleased`, `unknown_job`, `file_retention`, or `queue_unavailable`).
+`unique_unreleased`, `unknown_job`, `file_retention`, `recoverable_attempt`, or
+`queue_unavailable`).
 These are filesystem-block measurements taken in the retention lane, outside
 queue locks and heartbeat work. Hardlinks across attempt folders can overstate
 physical savings; a partially failed deletion is conservatively counted as
