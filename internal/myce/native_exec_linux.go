@@ -47,18 +47,25 @@ func NativeExec(args []string) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("native no_new_privs: %w", err)
 	}
-	// Membership is meaningful only here, after the worker's attachment gate
-	// and any namespace join. Authored environment paths never select grants.
-	metrics, err := nativeCgroupMetrics(p)
-	if err != nil {
-		return fmt.Errorf("native cgroup metrics: %w", err)
-	}
-	p.ReadOnly = append(p.ReadOnly, metrics...)
-	if err := nativeApplyLandlock(p); err != nil {
-		return fmt.Errorf("native Landlock: %w", err)
-	}
-	if err := nativeApplySeccomp(p.Namespace, len(p.Ports) > 0); err != nil {
-		return fmt.Errorf("native seccomp: %w", err)
+	if p.Plain {
+		// An unsandboxed job loses only reads of the worker's credentials.
+		if err := nativeApplyCredentialDeny(p.Deny, p.Read); err != nil {
+			return fmt.Errorf("native credential Landlock: %w", err)
+		}
+	} else {
+		// Membership is meaningful only here, after the worker's attachment gate
+		// and any namespace join. Authored environment paths never select grants.
+		metrics, err := nativeCgroupMetrics(p)
+		if err != nil {
+			return fmt.Errorf("native cgroup metrics: %w", err)
+		}
+		p.ReadOnly = append(p.ReadOnly, metrics...)
+		if err := nativeApplyLandlock(p); err != nil {
+			return fmt.Errorf("native Landlock: %w", err)
+		}
+		if err := nativeApplySeccomp(p.Namespace, len(p.Ports) > 0); err != nil {
+			return fmt.Errorf("native seccomp: %w", err)
+		}
 	}
 	// Keep start-by receipts 3/4 alive until _command-exec consumes them. All
 	// other inherited helper descriptors close at exec, including Go runtime FDs.

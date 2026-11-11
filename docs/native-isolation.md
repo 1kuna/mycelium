@@ -155,12 +155,52 @@ but provides no boundary between jobs running as the same user.
 
 | Platform/mode | Directory and files | Temp | Environment | Control access | Network |
 | --- | --- | --- | --- | --- | --- |
-| Declared unsandboxed / legacy registration / plain native default | Ordinary worker-user file access; managed cwd and private staged source remain, with no kernel content denials. | Managed work/temp/scratch paths; other host temp remains accessible. | Same #219 allowlist and token scrub. | No #177 kernel control/process/IPC protection. Device binding, cgroups, launch gates, fencing and release custody remain. | Ordinary host network access; no native sandbox/network capability required. |
+| Declared unsandboxed / legacy registration / plain native default | Ordinary worker-user file access, except the worker credentials below (#1309); managed cwd and private staged source remain. | Managed work/temp/scratch paths; other host temp remains accessible. | Same #219 allowlist and token scrub. | No #177 kernel control/process/IPC protection. Device binding, cgroups, launch gates, fencing and release custody remain. | Ordinary host network access; no native sandbox/network capability required. |
 | Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
 | Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp` and shared `.scratch`; sibling contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
 | macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` and shared `.scratch` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
 | `isolation: ci` (#1298), either platform | Everything in that platform's sandboxed row, plus: HOME is the attempt-private `{work}/.home`; the worker's shared model cache, model root and operator roots on a network filesystem or below the NAS root aren't granted. macOS also denies reading the worker user's home, `/Users`, `/Volumes`, every non-local mount and the configured NAS root, except this attempt's own grants. | Same as sandboxed. | Same, with a worker-owned HOME that authored `run.env` can't override. | Same as sandboxed. | Same as sandboxed. |
 | Missing/unsupported confinement for a sandboxed stage | Required behavior: sandboxed native launch fails closed. | No implicit unconfined fallback. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
+
+### Worker credentials in unsandboxed jobs (#1309)
+
+A 2026-11-11 probe found that plain native jobs on one Linux arm64, one Linux
+amd64 and one macOS arm64 worker could read the installed worker (and
+co-installed queue) configuration, the fleet environment or joining file that
+holds the token, and the worker user's SSH private keys. On Linux they could also
+read the token from the worker service's `/proc/PID/environ`, because systemd's
+`EnvironmentFile` puts it in the initial environment.
+
+Plain, declared-unsandboxed and legacy native payloads now launch without read
+access to: the Mycelium install root (`~/.local/share/mycelium` and the
+configured one), every installed role's `config.json`, credentials, environment
+and joining files, the worker's secret root and `~/.ssh`. Inside the install root
+they keep this worker's state (their own attempt files), caches, `tools` and
+installed executables. Everything else is unchanged.
+
+- **macOS:** an allow-default Seatbelt profile denies reads and writes of those
+  paths. Seatbelt refuses setuid programs and, under any non-trivial profile,
+  a nested sandbox. `ps`, `top`, `traceroute` and `/usr/bin/sandbox-exec`
+  (SwiftPM manifests and plugins) therefore run outside the profile as before.
+  `crontab`, `at`, `sudo`, `su`, `authopen` and the other setuid tools are
+  refused, as is a program that calls `sandbox_init` itself.
+- **Linux:** the `_native-exec` helper applies a Landlock ruleset handling only
+  file reads and cross-directory renames (ABI 2+), granting both on every entry
+  beside the path to each denied one. No seccomp or network rule applies.
+  Landlock also implies `no_new_privs` (setuid programs such as `sudo` don't
+  elevate), forbids mounts, and prevents ptrace and `/proc/PID/environ` reads of
+  processes outside the job. A file or directory created during the job directly
+  in one of those ancestor directories (`/`, home, `~/.config`, ...), or an
+  existing one replaced there by rename (`git config --global` rewriting
+  `~/.gitconfig`), is not readable by that job; cross-directory renames into
+  them fail with `EXDEV`. Writes are not restricted. A kernel without Landlock
+  ABI 2 runs the job unrestricted and the worker logs a warning.
+- **Linux services:** installed services mark themselves non-dumpable, so a
+  same-user process can't read their environment or attach to them.
+
+This removes direct reads only. An unsandboxed job can still start processes
+outside its restriction through the user's service manager, cron, login
+files or (on macOS) `sandbox-exec`; `isolation: sandboxed` or `ci` is the boundary for untrusted code.
 
 Choose an exception at the extension top level or adapter entry with
 `isolation: unsandboxed` plus a required nonempty `reason`. Main, its sidecars

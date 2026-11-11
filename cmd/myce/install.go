@@ -447,6 +447,9 @@ func serviceCommand(args []string) error {
 			return myce.ErrLegacyLocalDisableReceipts
 		}
 	}
+	if e := myce.ProtectServiceCredentials(); e != nil {
+		return e
+	}
 	c, e := myce.ReadServiceConfig(*path)
 	if e != nil {
 		return e
