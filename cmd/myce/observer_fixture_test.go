@@ -112,12 +112,22 @@ func stopCLIObserverFixtures(root string) error {
 func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) {
 	t.Helper()
 	seen := map[int]bool{}
+	complete := false
+	var entries []string
+	var owner observerDiagnostic
+	var supervisor observerSupervision
+	states := map[int]string{}
+	defer func() {
+		if !complete {
+			t.Logf("observer cleanup incomplete: registrations=%d observer_pid=%d supervisor_pid=%d child_pid=%d process_states=%v", len(entries), owner.PID, supervisor.PID, supervisor.ChildPID, states)
+		}
+	}()
 	wait(t, ctx, func() bool {
-		entries, err := filepath.Glob(filepath.Join(registry, "*.json"))
+		var err error
+		entries, err = filepath.Glob(filepath.Join(registry, "*.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var owner observerDiagnostic
 		if err := readProfileJSON(filepath.Join(registry, "observer.status"), &owner); err == nil {
 			if owner.PID > 0 {
 				seen[owner.PID] = true
@@ -125,7 +135,6 @@ func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) 
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatal(err)
 		}
-		var supervisor observerSupervision
 		if err := readProfileJSON(filepath.Join(registry, "observer.supervision"), &supervisor); err == nil {
 			for _, pid := range []int{supervisor.PID, supervisor.ChildPID} {
 				if pid > 0 {
@@ -140,6 +149,7 @@ func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) 
 		}
 		for pid := range seen {
 			state, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output()
+			states[pid] = strings.TrimSpace(string(state))
 			if err != nil {
 				var exited *exec.ExitError
 				if errors.As(err, &exited) && exited.ExitCode() == 1 && len(state) == 0 && len(exited.Stderr) == 0 {
@@ -151,6 +161,7 @@ func waitCLIObserverFixture(t *testing.T, ctx context.Context, registry string) 
 				return false
 			}
 		}
+		complete = true
 		return true
 	})
 }
