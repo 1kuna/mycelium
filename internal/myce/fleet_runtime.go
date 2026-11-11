@@ -168,6 +168,9 @@ type workerFleetRuntime struct {
 	clock          Clock
 	generation     uint64
 	acks           map[string]fleetAckRetry
+	// From the last check-in reply. Until a reply carries the protocol (a
+	// previous-release queue, or before the first reply) every poll fetches.
+	instructionGated, instructionWaiting bool
 }
 
 type fleetPollResult struct {
@@ -176,6 +179,19 @@ type fleetPollResult struct {
 	attempted      string
 	failed         *fleetLaunchFailure
 	acks           map[string]fleetAckRetry
+	// Set on the poll's input when the queue says no instruction can be
+	// waiting; proof, receipts and acknowledgements still go out.
+	skipInstruction bool
+}
+
+// noteReply records whether the queue says this worker's upgrade instruction
+// may be waiting. Call from the worker loop after each accepted check-in.
+func (r *workerFleetRuntime) noteReply(reply Reply) {
+	if r == nil {
+		return
+	}
+	r.instructionGated = reply.FleetInstructionProtocol == fleetInstructionProtocol
+	r.instructionWaiting = reply.FleetInstructionWaiting
 }
 
 // Delivery state for one acknowledgement body, owned by the worker loop.
@@ -277,7 +293,7 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		pending := make(chan fleetPollResult, 1)
 		r.pending = pending
 		config, client, collect, launch := r.config, r.client, r.collect, r.launch
-		prior, clock := fleetPollResult{attempted: r.attempted, failed: r.failed, failureReceipt: r.failureReceipt, acks: maps.Clone(r.acks)}, r.clock
+		prior, clock := fleetPollResult{attempted: r.attempted, failed: r.failed, failureReceipt: r.failureReceipt, acks: maps.Clone(r.acks), skipInstruction: r.instructionGated && !r.instructionWaiting}, r.clock
 		if clock == nil {
 			clock = RealClock{}
 		}
@@ -362,6 +378,9 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 		if deliverFleetAck(ctx, client, clock, result.acks, "launch/"+failed.Operation+"/"+strconv.Itoa(failed.Revision), failed, false) {
 			result.failed = nil
 		}
+		return result
+	}
+	if prior.skipInstruction {
 		return result
 	}
 	key, err := provisionFleetPublisher(request, config.State, client)

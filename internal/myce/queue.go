@@ -1776,6 +1776,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
 		q.maintain()
+		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))
 		q.guardSharedGPU(&m)
 		defer func() {
 			budget, _ := q.measuredHostMemoryBudget(&m, *q.s.HostMaintenance[hostID(&m)].MemoryBudget)
