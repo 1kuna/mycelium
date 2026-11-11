@@ -50,7 +50,11 @@ checkpoints and other advanced options.
 
 For repeatable project commands with frozen source, recoverable JSON receipts and
 a detached completion notifier, use `myce run --profile NAME`; see
-[agent offload](adapter.md).
+[agent offload](adapter.md). Profile and entry submissions started together from
+one checkout prepare one at a time: a later one prints the current holder of the
+checkout's submission lock and waits. The wait ends at the caller's context
+deadline, the job's `--deadline`, or 30 minutes, whichever is first; only then
+does it exit `75` with `submission_busy` naming the holder.
 
 ## Pause queued work
 

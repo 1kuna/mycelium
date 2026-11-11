@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -176,9 +177,36 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		}
 		return r, e
 	}
-	urgent, err := invoke("--key", "urgent", "--class", "deadline", "--deadline", "2031-02-03T04:05:06Z", "--", "literal")
-	if err != nil || urgent.Spec.Class != "deadline" || urgent.Spec.Deadline == nil {
-		t.Fatalf("urgent receipt: %+v %v", urgent.Spec, err)
+	// Two submissions started together from one checkout both succeed: each
+	// waits for the local submission lock, held here first so both contend (#1383).
+	receiptDir := filepath.Join(root, ".mycelium", "receipts")
+	if err = os.MkdirAll(receiptDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	held, err := waitSubmitLock(ctx, filepath.Join(receiptDir, "submit.lock"), nil, "test holder", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var urgent, concurrent profileReceipt
+	var urgentErr, concurrentErr error
+	var both sync.WaitGroup
+	both.Add(2)
+	go func() {
+		defer both.Done()
+		urgent, urgentErr = invoke("--key", "urgent", "--class", "deadline", "--deadline", "2031-02-03T04:05:06Z", "--", "literal")
+	}()
+	go func() {
+		defer both.Done()
+		concurrent, concurrentErr = invoke("--key", "concurrent", "--", "literal")
+	}()
+	time.Sleep(300 * time.Millisecond) // Old behaviour refused within this window.
+	held.Close()
+	both.Wait()
+	if urgentErr != nil || urgent.Spec.Class != "deadline" || urgent.Spec.Deadline == nil {
+		t.Fatalf("urgent receipt: %+v %v", urgent.Spec, urgentErr)
+	}
+	if concurrentErr != nil || concurrent.JobID == "" || concurrent.JobID == urgent.JobID {
+		t.Fatalf("concurrent receipt: %+v %v", concurrent, concurrentErr)
 	}
 	queued, err := d.Client().GetJob(ctx, urgent.JobID)
 	if err != nil || queued.Spec.Class != urgent.Spec.Class || queued.Spec.Deadline == nil || !queued.Spec.Deadline.Equal(*urgent.Spec.Deadline) {
@@ -442,8 +470,22 @@ check: [true]
 	if err := os.WriteFile(filepath.Join(abandoned, "source.tar"), []byte("disposable staging"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// A held submission lock is waited for until the caller's deadline, then
+	// refused naming the holder (#1383).
+	held, err := waitSubmitLock(context.Background(), filepath.Join(receipts, "submit.lock"), nil, "fixture holder", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	var waitLog bytes.Buffer
+	err = runProfile(short, path, nil, nil, "stable", "", "", "", server.URL, "fixture", io.Discard, &waitLog)
+	cancelShort()
+	if exitCode(err) != 75 || !strings.Contains(err.Error(), "submission_busy") || !strings.Contains(err.Error(), "fixture holder") || !strings.Contains(waitLog.String(), "fixture holder") {
+		t.Fatal("held lock not waited for and named", err, waitLog.String())
+	}
+	held.Close()
 	var out bytes.Buffer
-	err := runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
+	err = runProfile(context.Background(), path, nil, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
 		t.Fatal(err)
 	}

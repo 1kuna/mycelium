@@ -48,7 +48,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
 	key := f.String("key", "", "profile submission key (default: content-derived; reuse to recover)")
 	var inputFlags []string
-	f.Func("input", "per-submission file DEST=PATH (repeatable; requires --profile)", func(value string) error {
+	f.Func("input", "per-submission file DEST=PATH (repeatable; requires --profile or an adapter entry)", func(value string) error {
 		inputFlags = append(inputFlags, value)
 		return nil
 	})
@@ -109,7 +109,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		explicitHostMem = explicitHostMem || v.Name == "host-mem"
 	})
 	if *key != "" || explicitNotify || len(itemInputs) > 0 {
-		return errors.New("--key, --notify and --input require --profile")
+		return errors.New("--key, --notify and --input require --profile or an adapter entry")
 	}
 	if f.NArg() == 0 {
 		return errors.New("usage: myce run [flags] -- <command> [args]")
