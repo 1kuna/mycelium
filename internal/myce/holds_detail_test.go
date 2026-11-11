@@ -43,7 +43,15 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 	}
 	// An attempt-specific custody record drives the existing escalation timer.
 	r := HostRelease{Host: "b70", Job: "old-job", Machine: a.ID, Session: "old-session", Attempt: 1, Docker: true, CleanupSince: &idle}
-	q.s.HostReleases[releaseKey(r)] = r
+	if err := q.update(func() error {
+		if q.s.HostReleases == nil {
+			q.s.HostReleases = map[string]HostRelease{}
+		}
+		q.s.HostReleases[releaseKey(r)] = r
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	c.Advance(2 * time.Minute)
 	// Durable escalation belongs to maintenance, not status observation.
 	if err := q.Tick(); err != nil {

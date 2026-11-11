@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -306,6 +307,21 @@ func TestJobLedgerCustodyFencesAndRollback(t *testing.T) {
 	if next == nil {
 		t.Fatal("no replacement")
 	}
+	// Copy custody must settle even without an aggregate host reservation.
+	if err := q.update(func() error {
+		delete(q.s.HostReleases, releaseKey(HostRelease{Job: old.ID, Machine: old.Machine, Session: old.Session, Attempt: old.Attempt}))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wrong := old
+	wrong.Session = "stale"
+	if err := q.Complete(wrong); !errors.Is(err, ErrStale) {
+		t.Fatal("wrong session release accepted", err)
+	}
+	if job(t, q, j.ID).Copies[0].ReleaseConfirmed {
+		t.Fatal("wrong session settled old custody")
+	}
 	if err := q.Complete(old); !errors.Is(err, ErrStale) {
 		t.Fatal("stale result accepted", err)
 	}
@@ -320,7 +336,7 @@ func TestJobLedgerCustodyFencesAndRollback(t *testing.T) {
 		}
 	}
 	if !released || q.s.Jobs[j.ID].Attempt != next.Attempt {
-		t.Fatal("old release lost or replacement changed")
+		t.Fatalf("old release lost or replacement changed: released=%v copies=%+v entries=%+v", released, job(t, q, j.ID).Copies, page.Entries)
 	}
 	ledgerCustody(t, q, next, "cancelled-replay", "reserved")
 	if _, err := q.CancelJob(next.ID); err != nil {
@@ -330,5 +346,17 @@ func TestJobLedgerCustodyFencesAndRollback(t *testing.T) {
 	if err := q.NativeCustody(replay); !errors.Is(err, ErrStale) {
 		t.Fatal("reservation replay authorized after cancellation", err)
 	}
-
+	path := strings.TrimSuffix(q.lock.Name(), ".lock")
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, q.root, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got := job(t, reopened, j.ID)
+	if got.Attempt != next.Attempt || !got.Copies[0].ReleaseConfirmed || got.Copies[1].ReleaseConfirmed {
+		t.Fatalf("restart changed exact release custody: %+v", got.Copies)
+	}
 }

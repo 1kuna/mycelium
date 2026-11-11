@@ -110,6 +110,30 @@ func TestAdaptiveReadinessDockerColdStartAndShutdown(t *testing.T) {
 }
 
 func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
+	t.Run("nonempty_response_reuses_connection", func(t *testing.T) {
+		var mu sync.Mutex
+		connections := map[string]bool{}
+		var probes atomic.Int32
+		server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			connections[r.RemoteAddr] = true
+			mu.Unlock()
+			_, _ = w.Write([]byte("healthy"))
+			probes.Add(1)
+		}))
+		defer server.Close()
+		l := &LlamaEngine{Clock: RealClock{}, exited: make(chan struct{}), probeLatency: readinessLatency{Mean: 100 * time.Millisecond}}
+		l.startHealthMonitor(server.URL)
+		defer func() { l.monitorCancel(); <-l.monitorDone }()
+		await(t, func() bool { return probes.Load() >= 3 })
+		l.monitorCancel()
+		<-l.monitorDone
+		mu.Lock()
+		defer mu.Unlock()
+		if len(connections) != 1 {
+			t.Fatalf("healthy probes churned TCP connections: %d connections for %d probes", len(connections), probes.Load())
+		}
+	})
 	var completed atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if readinessPause(r.Context(), 40*time.Millisecond) == nil {

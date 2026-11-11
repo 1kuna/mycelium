@@ -388,7 +388,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	// custody and may omit either command after it finishes.
 	status := func() bool {
 		snapshot = myce.Snapshot{}
-		lastErr = client.Call(ctx, "GET", "/api/status?limit=1", nil, &snapshot)
+		lastErr = client.Call(ctx, "GET", "/api/status?jobs=all&limit=1", nil, &snapshot)
 		return lastErr == nil
 	}
 	poll("queue startup", func() bool {
@@ -458,16 +458,12 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			return false
 		}
 		for id := range jobs {
-			found := false
-			for _, j := range snapshot.Jobs {
-				if j.ID == id && j.State == "running" && j.StartedAt != nil {
-					jobs[id] = *j
-					found = true
-				}
-			}
-			if !found {
+			j, err := client.GetJob(ctx, id)
+			if err != nil || j.State != "running" || j.StartedAt == nil {
+				lastErr = err
 				return false
 			}
+			jobs[id] = *j
 			work := commandFixturePath(t, ctx, client, id, "work")
 			checkpoint := commandFixturePath(t, ctx, client, id, "checkpoint")
 			if work == "" || checkpoint == "" {

@@ -63,7 +63,10 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 	clock.Advance(time.Second)
 	m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "configured NAS mount missing"}}
 	check(t, q, m, assigned)
-	if reason := q.startPlacementRejection(q.s.Jobs[j.ID]); reason == "" {
+	q.mu.Lock()
+	reason := q.startPlacementRejection(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	if reason == "" {
 		t.Fatal("mount loss did not fence launch")
 	}
 	// This observation changes launch permission, never exact-attempt custody.

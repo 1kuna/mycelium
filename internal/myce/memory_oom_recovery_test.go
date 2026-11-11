@@ -20,8 +20,14 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			}
 			// Replay the frozen pre-fix offer from the real incident.
 			run.Spec.Needs.HostMemoryGB, run.MemoryEnvelope.HostGB = 2.582660675048828, 2.582660675048828
-			q.s.Jobs[run.ID].Spec.Needs.HostMemoryGB = run.Spec.Needs.HostMemoryGB
-			q.s.Jobs[run.ID].MemoryEnvelope = run.MemoryEnvelope
+			if err := q.update(func() error {
+				j := q.touchJob(run.ID)
+				j.Spec.Needs.HostMemoryGB = run.Spec.Needs.HostMemoryGB
+				j.MemoryEnvelope = run.MemoryEnvelope
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			if err := q.Started(result(run, false)); err != nil {
 				t.Fatal(err)
 			}
@@ -33,6 +39,8 @@ func TestOOMRecoveryUsesDemandNotFreeRAM(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
+			q.mu.Lock()
+			defer q.mu.Unlock()
 			pending := q.s.Jobs[run.ID]
 			var bound float64
 			for _, free := range []float64{19.52, 8, 23} {

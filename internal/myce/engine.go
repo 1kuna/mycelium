@@ -256,6 +256,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 				progress.advance()
 				lastStatus = res.StatusCode
 			}
+			_, _ = io.Copy(io.Discard, res.Body)
 			res.Body.Close()
 			if res.StatusCode >= 200 && res.StatusCode < 300 && ctx.Err() == nil {
 				select {

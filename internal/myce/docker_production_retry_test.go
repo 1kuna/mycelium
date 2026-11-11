@@ -67,6 +67,11 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 					await(t, probed.Load)
 				} else {
 					await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+					await(t, func() bool {
+						p.docker.mu.Lock()
+						defer p.docker.mu.Unlock()
+						return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+					})
 				}
 				writeMode := func(mode string) {
 					t.Helper()

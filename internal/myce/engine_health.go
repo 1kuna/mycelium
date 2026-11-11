@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 )
@@ -70,6 +71,9 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 			res, err := client.Do(req)
 			healthy := err == nil && res.StatusCode >= 200 && res.StatusCode < 300
 			if res != nil {
+				// Finish the response within the existing request deadline so fast
+				// health probes reuse TCP rather than exhausting ephemeral ports.
+				_, _ = io.Copy(io.Discard, res.Body)
 				res.Body.Close()
 			}
 			if ctx.Err() != nil {

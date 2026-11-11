@@ -21,6 +21,14 @@ func restartResultFixture(t *testing.T) (Worker, *workerStore, *dockerAttempt, *
 		t.Fatal(err)
 	}
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+	// A daemon start effect precedes the adapter's durable start receipt.
+	// Closing before that receipt can interrupt launch, rather than freezing
+	// the running execution this fixture promises to recover.
+	await(t, func() bool {
+		p.docker.mu.Lock()
+		defer p.docker.mu.Unlock()
+		return p.docker.state.Containers[p.docker.state.Container].Started && !p.docker.state.Pending
+	})
 	p.docker.close()
 	return w, s, p.docker, c, root
 }
