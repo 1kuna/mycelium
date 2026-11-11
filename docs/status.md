@@ -2545,15 +2545,26 @@ and JSON add `detail`. The scheduler tags the kind where it decides the wait, so
 no view infers the mechanism from reason text. The record changes no admission
 decision.
 
-Job kinds: `upstream`, `paused`, `device_fault_last_healthy`, `launch_capacity`,
-`scarce_host_yield`, `shared_host_backoff`, `storage_root`,
+Job kinds: `upstream`, `paused`, `checkpoint_root` (the queue's checkpoint
+root is unreachable), `device_fault_last_healthy`, `launch_capacity`,
+`helper_charge` (a launch refused with measured helper memory beyond the
+reservation), `scarce_host_yield`, `shared_host_backoff`, `storage_root`,
 `production_parity_hosts`, `production_parity`, `no_matching_device`,
-`log_policy`, `project_cap`, `production_admission`, `production_hold`,
-`production_reserved`, `pinned_model`, `disk_headroom`, Docker cleanup kinds,
-`reservation`, `capacity` (mixed or card/CPU causes), `memory`, `host_backfill`,
-`host_unavailable`, `capability`, `shared_input`, `docker_runtime`, `extension`,
-`no_eligible_host`, `waiting_for_worker` and the preparation and coverage kinds
-below. An unknown kind is unresolved; read its `owner` and `next`.
+`log_policy`, `project_cap`, `production_admission`, `unified_cuda_headroom`
+(a unified-memory host's headroom kept for expected production),
+`production_hold`, `production_reserved`, `pinned_model`, `disk_headroom`,
+Docker cleanup kinds, `reservation`, `capacity` (mixed or card/CPU causes),
+`memory`, `host_memory_headroom`, `cold_probe_margin` (a first run needs host
+memory above its launch margin), `host_backfill`, `host_unavailable`,
+`capability`, `shared_input`, `docker_runtime`, `extension`, `no_eligible_host`,
+`waiting_for_worker`, `model_engine` (a model call waits for its engine to
+recover) and the preparation and coverage kinds below. A queued model call's
+hold comes from the same scheduler wait as a job's. An unknown kind is
+unresolved; read its `owner` and `next`.
+
+A check-in's admission decision (`admission_wait` targets) carries the refusing
+check's `hold` row (kind, owner, reason, clears, next) when that check names
+one; its detail stays on the job's own hold.
 
 `unprepared` means no builder has started; `waiting_for_builder` distinguishes
 an unstarted offer or unavailable preparation core; `building` requires a fresh

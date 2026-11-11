@@ -25,11 +25,14 @@ type AdmissionDetail struct {
 // These are the terms of the failed physical-growth sum, not memory attributed
 // to the launching job. Model terms have no execution or resident sample.
 type HostGrowthContributor struct {
-	ID               string   `json:"id,omitempty"`
-	Attempt          int      `json:"attempt,omitempty"`
-	Kind             string   `json:"kind"`
-	Launching        bool     `json:"launching,omitempty"`
-	ChargeGB         float64  `json:"charge_gb"`
+	ID        string  `json:"id,omitempty"`
+	Attempt   int     `json:"attempt,omitempty"`
+	Kind      string  `json:"kind"`
+	Launching bool    `json:"launching,omitempty"`
+	ChargeGB  float64 `json:"charge_gb"`
+	// HelperGB is the launching attempt's measured helper charge beyond its
+	// reservation, already included in ChargeGB. Older workers omit it.
+	HelperGB         float64  `json:"helper_gb,omitempty"`
 	PendingGB        float64  `json:"pending_gb"`
 	SampleAgeSeconds *float64 `json:"sample_age_seconds,omitempty"`
 	SampleFresh      bool     `json:"sample_fresh"`
@@ -91,7 +94,7 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 	out.Contributors = nil
 	if d.Subcheck == "live_host_growth" {
 		for _, c := range d.Contributors {
-			if !validMemoryValue(c.ChargeGB) || !validMemoryValue(c.PendingGB) {
+			if !validMemoryValue(c.ChargeGB) || !validMemoryValue(c.PendingGB) || !validMemoryValue(c.HelperGB) {
 				continue
 			}
 			if c.Kind == "attempt" {

@@ -116,7 +116,7 @@ func TestMemoryLiveShapeLinuxCacheIsAvailable(t *testing.T) {
 	holder := assignedJob(machineCheck(t, q, m))
 	pending := submit(t, q, cpuSpec(2, 20))
 	machineCheck(t, q, m, holder)
-	why := q.memoryWaitingReason(job(t, q, pending.ID), q.s.Machines)
+	why := holdDetail(q.memoryWait(job(t, q, pending.ID), q.s.Machines))
 	if !strings.Contains(why, "live available 112.0 GiB") {
 		t.Fatal("status mislabels availability as usage", why)
 	}

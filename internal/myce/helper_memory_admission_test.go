@@ -106,8 +106,14 @@ func TestOwnHelperRetainsRemainingDeviceDemand(t *testing.T) {
 			// It cannot prove that the future CUDA allocation already exists.
 			r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 32, sampledAt: clock.Now(), DeviceGB: &tc.device, deviceSampledAt: clock.Now(), deviceResidentGB: tc.device, DeviceGrowthGB: tc.forecast}}
 			rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, report: r, admissionMu: &rt.admissionMu}
-			if err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: m.Session, Key: j.ID, Attempt: "1"}); !errors.Is(err, errWorkerMemory) {
+			err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: m.Session, Key: j.ID, Attempt: "1"})
+			if !errors.Is(err, errWorkerMemory) {
 				t.Fatal("host occupancy erased pending device demand", err)
+			}
+			// The refusal reports the helper charge so the queue's hold names it.
+			var refusal *admissionError
+			if !errors.As(err, &refusal) || len(refusal.detail.Contributors) != 1 || !refusal.detail.Contributors[0].Launching || refusal.detail.Contributors[0].HelperGB <= 0 {
+				t.Fatalf("refusal did not report the helper charge: %+v", refusal)
 			}
 		})
 	}

@@ -240,7 +240,7 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return q.admissionPass(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), predicateInventory) && q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionPass(j, m, q.diskHeadroomReason(j, m) == "", predicateDiskHeadroom) && q.placementPolicyAllowed(j, m, resident)
+	return q.admissionPass(j, m, j.CommandDiscovery == nil || q.inventoryFresh(q.s.Machines[m.ID]), predicateInventory) && q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Started preparation retains demand while contact is suspect. Resource,
@@ -249,7 +249,7 @@ func (q *Queue) placementDemandAllowed(j *Job, m *Machine) bool {
 	if !q.admissionPass(j, m, !(j.StartedAt == nil && q.deviceFaultRetryBlocked(j, m)), predicateDeviceFaultRetry) {
 		return false
 	}
-	return q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionPass(j, m, q.diskHeadroomReason(j, m) == "", predicateDiskHeadroom) && q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementDemandPolicy(j, m, false)
+	return q.admissionPass(j, m, q.yieldPlacementAllows(j, m), predicateYieldPlacement) && q.admissionPass(j, m, j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m), predicateDeviceAdmission) && q.admissionHold(j, m, reasonHold("disk_headroom", q.diskHeadroomReason(j, m)), predicateDiskHeadroom) && q.admissionPass(j, m, q.reservationAllows(j, m), predicateReservation) && q.placementDemandPolicy(j, m, false)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
@@ -268,13 +268,13 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 // Useful demand survives temporary contact suspicion. This predicate grants no
 // assignment or preparation authority; those paths still require fresh contact.
 func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
-	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
+	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
-	if !q.admissionPass(j, m, !q.fleetPausesJob(j), predicateProductionPaused) {
+	if !q.admissionHold(j, m, q.fleetPauseHold(j), predicateProductionPaused) {
 		return false
 	}
-	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionPass(j, m, q.sharedHostBackoffReason(j, m) == "", predicateSharedHostBackoff) || !q.admissionPass(j, m, q.storageRootReason(j, m) == "", predicateStorageRoot)) {
+	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot)) {
 		return false
 	}
 	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, dockerRuntimeFits(j, m), predicateDockerRuntime) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
@@ -289,13 +289,13 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 		}
 	}
 
-	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionPass(j, m, q.startupReleaseHold(hostID(m)).Kind == "", predicateStartupRelease) || !q.admissionPass(j, m, q.dockerHold(hostID(m)).Kind == "", predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
+	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionHold(j, m, heldBy(q.startupReleaseHold(hostID(m))), predicateStartupRelease) || !q.admissionHold(j, m, heldBy(q.dockerHold(hostID(m))), predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
 	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) {
 		return false
 	}
-	if !q.admissionPass(j, m, q.productionAdmissionReason(j, m) == "", predicateProductionAdmission) {
+	if !q.admissionHold(j, m, q.productionAdmissionHold(j, m), predicateProductionAdmission) {
 		return false
 	}
 	if !q.held(hostID(m)) {
@@ -398,17 +398,20 @@ func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
 }
 
 // A fleet upgrade holds new production starts until queue health is verified.
-// Placement refuses on this and the scheduler's wait names it.
-func (q *Queue) fleetPausesJob(j *Job) bool {
-	return j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction()
+// Placement refuses on this hold and the scheduler's wait reports it.
+func (q *Queue) fleetPauseHold(j *Job) *Hold {
+	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
+		return newHold("production_paused", "production starts are paused until the fleet upgrade verifies queue health")
+	}
+	return nil
 }
 
 // Production, disk and Docker fences that hold this job.
 func (q *Queue) holdWait(j *Job) *Hold {
 	for _, m := range q.plannerMachines() {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-			if reason := q.productionAdmissionReason(j, m); reason != "" {
-				return newHold("production_admission", reason)
+			if h := q.productionAdmissionHold(j, m); h != nil {
+				return h
 			}
 		}
 	}

@@ -73,6 +73,8 @@ var holdKinds = map[string]holdKind{
 	"upstream":                 {ownerProducer, "waiting for an upstream result", "the required upstream job succeeds and publishes its result", "complete and publish the required upstream result"},
 	deviceFaultRetryHold:       {ownerQueue, "waiting for healthy accelerator capacity after a driver fault", "another healthy device or host fits, or the quarantined device proves healthy", "wait; Mycelium retries on healthy capacity automatically"},
 	"launch_capacity":          {ownerQueue, "waiting for launch capacity or an exact release", "capacity evidence changes or the pending release is acknowledged", "wait; nothing to do"},
+	"helper_charge":            {ownerQueue, "waiting for launch capacity that covers the job's measured helper memory", "capacity evidence changes or the pending release is acknowledged", "wait; nothing to do"},
+	"checkpoint_root":          {ownerStorage, "saved progress storage is unavailable", "the queue's checkpoint root is reachable again", "restore the queue's checkpoint storage mount"},
 	"scarce_host_yield":        {ownerQueue, "waiting for portable work to yield a scarce host", "the yielding attempt saves its checkpoint and releases the host", "wait; nothing to do"},
 	"shared_host_backoff":      {ownerQueue, "backing off a shared host whose owner needed it", "the host's owner pressure stays quiet for the measured recovery span", "wait; another eligible host can still take it"},
 	"storage_root":             {ownerStorage, "a worker's storage root is unreachable", "the storage root is reachable again", "restore the worker's storage mount"},
@@ -81,6 +83,7 @@ var holdKinds = map[string]holdKind{
 	"log_policy":               {ownerConsumer, "no eligible host supports this log policy", "a host that supports logs: none is eligible", "use the default log policy, or add a host that supports logs: none"},
 	"project_cap":              {ownerQueue, "waiting under the project's concurrency limit", "the project's running work drops below its limit", "wait; nothing to do"},
 	"production_admission":     {ownerQueue, "waiting for production to finish starting", "the production arrival or setup window passes", "wait; nothing to do"},
+	"unified_cuda_headroom":    {ownerQueue, "a unified-memory host's headroom is kept for expected production", "the expected production starts, or another host can take it", "wait; nothing to do"},
 	"production_paused":        {ownerQueue, "production starts are paused for a fleet upgrade", "the upgrade verifies queue health", "wait; nothing to do"},
 	"production_hold":          {ownerQueue, "waiting for a production hold", "production releases the host", "wait; nothing to do"},
 	"production_reserved":      {ownerQueue, "a fitting host is reserved for production", "production demand on that host ends", "wait; nothing to do"},
@@ -92,6 +95,7 @@ var holdKinds = map[string]holdKind{
 	"capacity":                 {ownerQueue, "waiting for capacity on an eligible host", "the named capacity is released", "wait; keep other work moving"},
 	"memory":                   {ownerQueue, "waiting for memory on an eligible host", "enough measured memory is free", "wait; keep other work moving"},
 	"host_memory_headroom":     {ownerQueue, "waiting for host memory on an eligible host", "enough measured host memory is free", "wait; keep other work moving"},
+	"cold_probe_margin":        {ownerQueue, "waiting for host memory above the first-run launch margin", "enough measured host memory is free above the launch margin", "wait; keep other work moving"},
 	memoryEvidenceRecovering:   {ownerQueue, "waiting for safe capacity or fresh comparable memory evidence", "a host fits with safe capacity, or comparable memory evidence arrives", "wait; keep other work moving"},
 	"host_backfill":            {ownerQueue, "waiting for host CPU capacity", "enough host cores are free", "wait; keep other work moving"},
 	"cpu_isolation":            {ownerOperator, "an eligible host cannot keep CPU work off its accelerators", "the host qualifies accelerator isolation, or another host fits", "check the host's installed CUDA/XPU runtimes"},
@@ -102,6 +106,7 @@ var holdKinds = map[string]holdKind{
 	"capability":               {ownerConsumer, "no eligible host has a required capability", "a host with the capability is eligible", "drop the capability requirement, or add a capable host"},
 	"no_eligible_host":         {ownerConsumer, "no host can run this job right now", "an eligible host with enough capacity is online", "check the job's needs and allowed machines"},
 	"waiting_for_worker":       {ownerQueue, "waiting for a worker to take this job", "an eligible worker checks in", "wait; nothing to do"},
+	"model_engine":             {ownerQueue, "waiting for a model engine to recover", "the model engine on an eligible worker is ready", "wait; check the named worker if this persists"},
 	"unknown_observation":      {ownerPolicy, "a required observation is missing or stale", "fresh worker observations arrive", "restore the missing observation named in the detail"},
 	"unprepared":               {ownerQueue, "software is not prepared yet", "the queue prepares the environment", "submit normally; the queue prepares it before launch"},
 	"waiting_for_builder":      {ownerQueue, "waiting for software preparation", "the named preparation finishes", "wait; ask the queue owner if preparation makes no progress"},
@@ -127,6 +132,22 @@ var holdKinds = map[string]holdKind{
 	"production_parity":              {ownerPolicy, "production needs reference-output parity for this variant", "the owner accepts parity for an eligible host", "compare outputs with the reference, then approve the host in production_parity_hosts"},
 }
 
+// reasonHold is a check's hold when it gives a reason, and nil when it passes.
+func reasonHold(kind, reason string) *Hold {
+	if reason == "" {
+		return nil
+	}
+	return newHold(kind, reason)
+}
+
+// heldBy is a host fence's hold when one is set.
+func heldBy(h Hold) *Hold {
+	if h.Kind == "" {
+		return nil
+	}
+	return &h
+}
+
 // newHold fills the shared owner, sentence, clear condition and next action
 // for kind. Detail carries the producing mechanism's evidence.
 func newHold(kind, detail string) *Hold {
@@ -141,6 +162,7 @@ func newHold(kind, detail string) *Hold {
 var holdDiagnosticCodes = map[string]string{
 	memoryEvidenceRecovering:  memoryEvidenceRecovering,
 	"host_memory_headroom":    "host_memory_headroom",
+	"cold_probe_margin":       "host_memory_headroom",
 	"shared_input":            "shared_input_cache",
 	"shared_input_unreported": "shared_input_cache_unreported",
 	"disk_headroom":           "disk_headroom",
@@ -153,14 +175,14 @@ var holdDiagnosticCodes = map[string]string{
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
 	"paused": "holds", "production_admission": "holds", "production_hold": "holds", "production_reserved": "holds",
-	"production_paused": "holds", "pinned_model": "holds", "reservation": "holds",
+	"production_paused": "holds", "pinned_model": "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",
 	"deterministically_failed": "environment", "docker_runtime": "environment", "extension": "environment",
 	"missing_extension": "environment", "execution_coverage": "environment", "native_qualification": "environment",
 	"production_parity": "environment", productionParityHostHold: "environment", "capability": "environment", "log_policy": "environment",
 	"memory": "memory_reservation", "host_memory_headroom": "memory_reservation", memoryEvidenceRecovering: "memory_reservation",
-	"host_backfill":      "memory_reservation",
+	"host_backfill": "memory_reservation", "cold_probe_margin": "memory_reservation",
 	"no_matching_device": "authored_platform_targets", "no_eligible_host": "authored_platform_targets",
 	"project_cap": "priority_fairness",
 	"upstream":    "dependency",

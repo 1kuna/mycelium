@@ -2633,9 +2633,6 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 		if j.RequeuedByOperator {
 			j.Reason = "requeued: disabled by operator; " + j.Reason
 		}
-		if needsCheckpoint(j) && !q.checkpointsAvailable() {
-			j.Reason = "NAS checkpoint root is unreachable"
-		}
 	}
 	if q.startupPending(j) || q.startCapacityPaused(j) {
 		j.Reason = q.startStatusReason(j)
@@ -2663,6 +2660,29 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 }
 
 func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[string]string) *Job {
+	call := q.callView(c)
+	call.QueueOrder = order[c.ID]
+	switch {
+	case c.Error != "":
+		call.State, call.Reason = "failed", c.Error
+	case c.Machine != "":
+		call.State, call.Reason = "running", "model call in flight"
+	default:
+		h := q.waitHold(call)
+		call.Reason, call.wait = h.Detail, h
+		// The queue-order explanation refines only the call's generic waits.
+		if reason := reasons[c.ID]; reason != "" && (h.Kind == "no_eligible_host" || h.Kind == "model_engine" || h.Kind == "waiting_for_worker") {
+			call.Reason = reason
+		}
+	}
+	call.Spec.Class = jobClass(call.Spec)
+	call.PriorityPolicy = q.priorityMatch(call.Spec)
+	return call
+}
+
+// callView is a model call as the scheduler sizes it: the model's memory and
+// log policy on a queued job.
+func (q *Queue) callView(c *ModelCall) *Job {
 	call := callJob(c)
 	call.Spec.Name = "model call: " + c.Model
 	model, _ := q.model(c.Model)
@@ -2671,28 +2691,17 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 	call.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 	call.Machine = c.Machine
 	call.State = "queued"
-	call.Reason = "waiting for model " + c.Model + " on an eligible worker"
-	if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
-		eligible := false
-		for _, worker := range q.s.Machines {
-			if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
-				eligible = true
-				break
-			}
-		}
-		if !eligible {
-			call.Reason = "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers"
-		}
-	}
-	call.QueueOrder = order[c.ID]
-	if reason := reasons[c.ID]; reason != "" {
-		call.Reason = reason
-	}
-	if reason := q.capReason(call); reason != "" {
-		call.Reason = reason
-	}
-	if h := q.holdWait(call); h != nil {
-		call.Reason, call.wait = h.Detail, h
+	return call
+}
+
+// callWait is the scheduler's wait for a model call, in the call's precedence:
+// log policy, host RAM, production/disk/Docker fences, project cap, model
+// placement, engine recovery, then an ordinary wait for a worker.
+func (q *Queue) callWait(c *ModelCall) *Hold {
+	call := q.callView(c)
+	model, _ := q.model(c.Model)
+	if reason := q.logsWaitingReason(call); reason != "" {
+		return newHold("log_policy", reason)
 	}
 	if c.Machine == "" && model.HostMemoryGB > 0 {
 		eligible, room := false, false
@@ -2707,26 +2716,31 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 			}
 		}
 		if eligible && !room {
-			call.Reason, call.wait = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB), nil
+			return newHold("host_memory_headroom", fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB))
 		}
 	}
-	if reason := q.logsWaitingReason(call); reason != "" {
-		call.Reason, call.wait = reason, nil
+	if h := q.holdWait(call); h != nil {
+		return h
 	}
-	if reason := q.engineWaitReason(c); reason != "" && call.Reason == "waiting for model "+c.Model+" on an eligible worker" {
-		call.Reason = reason
+	if reason := q.capReason(call); reason != "" {
+		return newHold("project_cap", reason)
 	}
-	if c.Machine != "" {
-		call.State = "running"
-		call.Reason, call.wait = "model call in flight", nil
+	if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
+		eligible := false
+		for _, worker := range q.s.Machines {
+			if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
+				eligible = true
+				break
+			}
+		}
+		if !eligible {
+			return newHold("no_eligible_host", "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers")
+		}
 	}
-	if c.Error != "" {
-		call.State = "failed"
-		call.Reason, call.wait = c.Error, nil
+	if reason := q.engineWaitReason(c); reason != "" {
+		return newHold("model_engine", reason)
 	}
-	call.Spec.Class = jobClass(call.Spec)
-	call.PriorityPolicy = q.priorityMatch(call.Spec)
-	return call
+	return newHold("waiting_for_worker", "waiting for model "+c.Model+" on an eligible worker")
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {

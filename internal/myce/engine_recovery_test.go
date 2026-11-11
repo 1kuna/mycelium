@@ -75,6 +75,9 @@ func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
 					if job.ID == pending.ID && !strings.Contains(job.Reason, "engine restarting on "+m.ID+", retry at ") {
 						t.Fatalf("missing restart reason: %s", job.Reason)
 					}
+					if job.ID == pending.ID && (job.wait == nil || job.wait.Kind != "model_engine") {
+						t.Fatalf("call wait is not the scheduler's model_engine hold: %+v", job.wait)
+					}
 				}
 				clock.Advance(delay - time.Nanosecond)
 				recoveryReport(t, q, m, s, "failed")

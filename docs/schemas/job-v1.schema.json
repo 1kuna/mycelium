@@ -15,6 +15,9 @@
         "device": {
           "type": "string"
         },
+        "hold": {
+          "$ref": "#/$defs/Hold"
+        },
         "opportunity_seconds": {
           "type": "number"
         },
@@ -2835,6 +2838,9 @@
           "type": "integer"
         },
         "charge_gb": {
+          "type": "number"
+        },
+        "helper_gb": {
           "type": "number"
         },
         "id": {
