@@ -14,6 +14,9 @@ func TestQueueMaintenanceClosureRollbackRestart(t *testing.T) {
 		return &Job{ID: id, State: "queued", Spec: spec("experiment"), Queued: clock.Now(), WaitingSince: clock.Now()}
 	}
 	producer, wave, sibling, downstream, gather := makeJob("producer"), makeJob("wave"), makeJob("sibling"), makeJob("downstream"), makeJob("gather")
+	// This closure exercises extension waves' fail-fast propagation. Plain
+	// command pieces instead let independent siblings settle after a failure.
+	producer.Spec.Extension, downstream.Spec.Extension = "maintenance@1", "maintenance@1"
 	producer.Spec.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "piece"}, {Key: "other"}}, MaxConcurrency: 1}
 	producer.Spec.Outputs = map[string]string{"out": "results"}
 	producer.FanOut = &FanOutProgress{Next: 2, Children: []string{wave.ID, sibling.ID}}
