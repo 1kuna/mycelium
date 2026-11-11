@@ -47,17 +47,18 @@ func newMemorySource(platform string, budget, reserve float64, mode, goos string
 	if mode != "auto" && mode != "unified" && mode != "dedicated" && mode != "fixed" {
 		return nil, fmt.Errorf("unknown memory mode %q", mode)
 	}
-	if platform == "cpu" {
+	backend := backendFor(platform)
+	if backend.cpu {
 		return func(context.Context) (float64, error) { return 0, nil }, nil
 	}
-	if platform != "cuda" && platform != "metal" && platform != "xpu" && platform != "fake" {
+	if backend.platform == "" {
 		return nil, fmt.Errorf("unknown GPU memory platform %q", platform)
 	}
-	if platform == "metal" && mode == "dedicated" {
+	if backend.unifiedMemory && mode == "dedicated" {
 		return nil, fmt.Errorf("metal always uses unified memory; use auto, unified or fixed")
 	}
-	fixed := mode == "fixed" || platform == "fake" || (platform == "xpu" && mode != "unified")
-	if fixed && budget <= 0 && platform != "fake" {
+	fixed := mode == "fixed" || backend.simulated || (backend.fixedMemoryDefault && mode != "unified")
+	if fixed && budget <= 0 && !backend.simulated {
 		return nil, fmt.Errorf("fixed memory source requires a positive --memory-gb budget")
 	}
 	if (fixed || budget > 0) && reserve > budget {
@@ -74,13 +75,13 @@ func newMemorySource(platform string, budget, reserve float64, mode, goos string
 		if !fixed {
 			probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
-			unified := mode == "unified" || platform == "metal"
+			unified := mode == "unified" || backend.unifiedMemory
 			if !unified {
-				out, err := command(probeCtx, "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
-				if err != nil {
-					return 0, fmt.Errorf("query CUDA free memory with nvidia-smi: %w", err)
+				if backend.liveFreeMemory == nil {
+					return 0, fmt.Errorf("live GPU memory source unavailable for %s", platform)
 				}
-				available, err = parseCUDAFreeMemory(out)
+				var err error
+				available, err = backend.liveFreeMemory(probeCtx, command)
 				if errors.Is(err, errUnifiedMemory) && mode == "auto" {
 					unified = true
 				} else if err != nil {
@@ -284,10 +285,10 @@ func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bo
 // DetectUnifiedMemory shares the injected setup command runner.
 func (p MachineProbe) DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bool, error) {
 	command := p.Command
-	if platform == "metal" || mode == "unified" {
+	if backendFor(platform).unifiedMemory || mode == "unified" {
 		return true, nil
 	}
-	if platform != "cuda" || mode != "auto" {
+	if !backendFor(platform).autoUnifiedMemory || mode != "auto" {
 		return false, nil
 	}
 	if command == nil {
@@ -313,4 +314,12 @@ func (p MachineProbe) DetectUnifiedMemory(ctx context.Context, platform, device,
 func guardedHardwareReadFile(path string) ([]byte, error) {
 	probeguard.Check()
 	return os.ReadFile(path)
+}
+
+func cudaFreeMemory(ctx context.Context, command func(context.Context, string, ...string) ([]byte, error)) (float64, error) {
+	out, err := command(ctx, "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits")
+	if err != nil {
+		return 0, fmt.Errorf("query CUDA free memory with nvidia-smi: %w", err)
+	}
+	return parseCUDAFreeMemory(out)
 }

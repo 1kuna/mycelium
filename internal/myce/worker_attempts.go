@@ -984,7 +984,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	telemetryProbe := extensionIdentityProbe()
 	telemetryWorker := Worker{Clock: w.Clock, GPUTelemetryHelper: w.GPUTelemetryHelper}
 	inventory.sampleTelemetry = func(ctx context.Context, devices []MachineDevice) ([]MachineDevice, error) {
-		telemetryWorker.sampleXPUTelemetry(ctx, telemetryProbe, devices)
+		telemetryWorker.sampleDeviceTelemetry(ctx, telemetryProbe, devices)
 		return devices, nil
 	}
 	inventoryDone := make(chan struct{})

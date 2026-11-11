@@ -36,7 +36,8 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 	if device.Reason != "" {
 		return d, preflightError(device.Reason, device.Selector, "component facts are unavailable or ambiguous; restore access and re-detect")
 	}
-	if device.Platform == "metal" {
+	backend := backendFor(device.Platform)
+	if backend.unifiedMemory {
 		d.MemoryMode = "unified"
 		return d, nil
 	}
@@ -50,47 +51,57 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 		// already absent. Keep explicit reserves, never guess a second one.
 		return d, nil
 	}
-	if device.Platform == "cuda" {
-		b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=name,memory.total,pci.bus_id", "--format=csv,noheader,nounits", "--id="+device.Selector)
-		if err != nil {
-			return d, preflightError("gpu_memory_unavailable", "cuda", "CUDA memory unavailable; repair telemetry or specify an explicit fixed device budget")
-		}
-		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-		fields := strings.Split(lines[0], ",")
-		if len(lines) != 1 || len(fields) < 2 || len(fields) > 3 {
-			return d, preflightError("gpu_memory_unavailable", "cuda", "invalid CUDA memory inventory")
-		}
-		if len(fields) == 3 && normalizePCIAddress(fields[2]) != normalizePCIAddress(fact.address) {
-			return d, preflightError("gpu_inventory_invalid", "cuda", "CUDA memory response differs from selected PCI component")
-		}
-		n, err := parseCUDAFreeMemory([]byte(strings.TrimSpace(fields[1])))
-		if errors.Is(err, errUnifiedMemory) {
-			// A PCI transport can exist inside an integrated SoC (GB10 has
-			// current_link_width=1). N/A is not topology evidence. Ask the
-			// CUDA driver for the selected PCI device's integrated property.
-			run := p.Command
-			if p.CommandEnv != nil {
-				bound, bindErr := WithModelDevice(Model{}, "cuda", device.Selector)
-				if bindErr != nil {
-					return d, bindErr
-				}
-				run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-					return p.CommandEnv(ctx, bound.DeviceEnv, name, args...)
-				}
-			}
-			b, propertyErr := run(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
-			if propertyErr == nil && strings.TrimSpace(string(b)) == "1" {
-				fact.integrated, fact.topologyKnown = true, true
-				d.MemoryMode = "unified"
-				return d, nil
-			}
-		}
-		if err != nil || n <= 0 {
-			return d, preflightError("gpu_memory_unavailable", "cuda", "discrete CUDA memory unavailable; specify an explicit fixed device budget")
-		}
-		d.GPU, d.MemoryMode, d.MemoryGB, d.ReserveGB = strings.TrimSpace(fields[0]), "dedicated", n, 0
-		return d, nil
+	if backend.detect != nil {
+		return backend.detect(p, ctx, device, d)
 	}
+	return d, preflightError("gpu_memory_unavailable", device.Platform, "GPU memory detection unavailable")
+}
+
+func detectCUDAAccelerator(p MachineProbe, ctx context.Context, device MachineDevice, d Detection) (Detection, error) {
+	fact := device.pciFact
+
+	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=name,memory.total,pci.bus_id", "--format=csv,noheader,nounits", "--id="+device.Selector)
+	if err != nil {
+		return d, preflightError("gpu_memory_unavailable", "cuda", "CUDA memory unavailable; repair telemetry or specify an explicit fixed device budget")
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	fields := strings.Split(lines[0], ",")
+	if len(lines) != 1 || len(fields) < 2 || len(fields) > 3 {
+		return d, preflightError("gpu_memory_unavailable", "cuda", "invalid CUDA memory inventory")
+	}
+	if len(fields) == 3 && normalizePCIAddress(fields[2]) != normalizePCIAddress(fact.address) {
+		return d, preflightError("gpu_inventory_invalid", "cuda", "CUDA memory response differs from selected PCI component")
+	}
+	n, err := parseCUDAFreeMemory([]byte(strings.TrimSpace(fields[1])))
+	if errors.Is(err, errUnifiedMemory) {
+		// A PCI transport can exist inside an integrated SoC (GB10 has
+		// current_link_width=1). N/A is not topology evidence. Ask the
+		// CUDA driver for the selected PCI device's integrated property.
+		run := p.Command
+		if p.CommandEnv != nil {
+			bound, bindErr := WithModelDevice(Model{}, "cuda", device.Selector)
+			if bindErr != nil {
+				return d, bindErr
+			}
+			run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				return p.CommandEnv(ctx, bound.DeviceEnv, name, args...)
+			}
+		}
+		b, propertyErr := run(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
+		if propertyErr == nil && strings.TrimSpace(string(b)) == "1" {
+			fact.integrated, fact.topologyKnown = true, true
+			d.MemoryMode = "unified"
+			return d, nil
+		}
+	}
+	if err != nil || n <= 0 {
+		return d, preflightError("gpu_memory_unavailable", "cuda", "discrete CUDA memory unavailable; specify an explicit fixed device budget")
+	}
+	d.GPU, d.MemoryMode, d.MemoryGB, d.ReserveGB = strings.TrimSpace(fields[0]), "dedicated", n, 0
+	return d, nil
+}
+
+func detectXPUAccelerator(p MachineProbe, ctx context.Context, device MachineDevice, d Detection) (Detection, error) {
 	budget := device.TotalMemoryGB
 	if budget <= 0 {
 		// Compatibility memory telemetry only. Level Zero established identity.

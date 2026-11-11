@@ -187,21 +187,29 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	demand.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
 	winner := submit(t, q, demand)
 	drainAdmissionWait(t, q)
+	q.mu.Lock()
 	q.stopBatchFor(q.s.Jobs[a.ID], winner)
+	q.mu.Unlock()
 	if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Interrupted: true}); err != nil {
 		t.Fatal(err)
 	}
 	drainAdmissionWait(t, q)
-	if len(q.s.BatchReleases) != 1 {
-		t.Fatal("missing confirmed release credit", q.s.BatchReleases)
-	}
-	for _, target := range q.machineTargets(q.s.Machines[m.ID]) {
-		if target.Device == "1" && q.roomPlan(winner, target, true) != nil {
-			t.Fatal("release on device 0 supplied GPU capacity on device 1")
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if len(q.s.BatchReleases) != 1 {
+			t.Fatal("missing confirmed release credit", q.s.BatchReleases)
 		}
-	}
+		for _, target := range q.machineTargets(q.s.Machines[m.ID]) {
+			if target.Device == "1" && q.roomPlan(winner, target, true) != nil {
+				t.Fatal("release on device 0 supplied GPU capacity on device 1")
+			}
+		}
+	}()
 	machineCheck(t, q, m)
 	drainAdmissionWait(t, q)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if len(q.s.BatchReleases) != 0 {
 		t.Fatal("fresh inventory retained speculative release credit", q.s.BatchReleases)
 	}

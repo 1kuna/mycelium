@@ -358,7 +358,7 @@ func (s Spec) Validate() error {
 		return reject("job_platform_invalid", errors.New("needs.platform must specify exactly one of required, preferred or any"))
 	}
 	for _, v := range append(slices.Clone(p.Required), p.Preferred...) {
-		if !slices.Contains([]string{"cuda", "xpu", "metal", "fake", "cpu"}, v) {
+		if !validGPU(v) {
 			return reject("job_platform_invalid", fmt.Errorf("unknown GPU platform %q", v))
 		}
 	}
