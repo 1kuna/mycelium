@@ -197,13 +197,14 @@ func (q *Queue) retainRelease(j *Job) {
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result, exact bool) bool {
-	// Copy custody is authoritative even without an aggregate host charge.
-	// A stale payload must still commit its exact cleanup acknowledgement.
-	knownCopy := false
+	// Superseded copy custody is authoritative without an aggregate host charge.
+	// Its stale payload must still commit the exact cleanup acknowledgement.
+	// A current terminal result must reach complete's diagnostic publication path.
+	knownSupersededCopy := false
 	if j := q.retainedJob(r.ID); j != nil {
 		for _, c := range j.Copies {
 			if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
-				knownCopy = true
+				knownSupersededCopy = j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session
 				break
 			}
 		}
@@ -212,7 +213,7 @@ func (q *Queue) settleRelease(r Result, exact bool) bool {
 	key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
 	_, ok := q.s.HostReleases[key]
 	delete(q.s.HostReleases, key)
-	return ok || knownCopy
+	return ok || knownSupersededCopy
 }
 func (q *Queue) reconcileHostReleases(c Checkin) {
 	q.confirmPreviousCopies(c)
