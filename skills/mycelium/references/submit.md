@@ -90,9 +90,12 @@ Plain native commands are unsandboxed by default under MY-25: they read
 whatever the worker user can, including NAS shares and other jobs' files.
 From the worker release containing #1309, they (and `isolation: unsandboxed`
 jobs) can't read the worker's installed configuration, fleet credential,
-joining or environment files, or the worker user's `~/.ssh`. A job therefore
-can't submit through the worker's installed authority or use the worker
-user's SSH keys; pass such access as a declared input instead.
+joining or environment files, or the worker user's credential stores (`~/.ssh`,
+`~/.config/gh`, `~/.git-credentials`, `~/.netrc`, `~/.docker/config.json`,
+`~/.aws`, `~/.config/gcloud`, `~/.kube`, the macOS login keychain files). A job
+therefore can't submit through the worker's installed authority or act as the
+worker user on GitHub, registries, clouds or over SSH; pass such access as a
+declared input instead.
 Declare `isolation: sandboxed`, or use managed Docker, for an enforced boundary;
 new native extension registrations have their own sandbox policy.
 

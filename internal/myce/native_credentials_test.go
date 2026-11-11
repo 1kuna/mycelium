@@ -13,7 +13,7 @@ import (
 
 // #1309: a plain (MY-25 default) native job keeps ordinary home access but
 // can read neither this worker's nor a co-installed queue's credential,
-// configuration and environment files, nor the user's SSH keys.
+// configuration and environment files, nor the user's credential stores.
 func TestPlainNativeJobWithholdsCredentials(t *testing.T) {
 	setWorkerSession(t)
 	home, err := filepath.EvalSymlinks(t.TempDir())
@@ -40,6 +40,14 @@ func TestPlainNativeJobWithholdsCredentials(t *testing.T) {
 		write(".config/myce/fleet.env", 0600),
 		write(".config/myce/queue.env", 0600),
 		write(".local/share/mycelium/queue/state/myce.db", 0600),
+		write(".config/gh/hosts.yml", 0600),
+		write(".git-credentials", 0600),
+		write(".netrc", 0600),
+		write(".docker/config.json", 0600),
+		write(".aws/credentials", 0600),
+		write(".config/gcloud/credentials.db", 0600),
+		write(".kube/config", 0600),
+		write("Library/Keychains/login.keychain-db", 0600),
 	}
 	config := filepath.Join(install, "worker/config.json")
 	queueConfig := filepath.Join(install, "queue/config.json")
@@ -51,6 +59,7 @@ func TestPlainNativeJobWithholdsCredentials(t *testing.T) {
 		write("notes.txt", 0600),
 		write(".cache/tool/data", 0600),
 		write(".config/tool/settings", 0600),
+		write(".docker/buildx/current", 0600),
 		write(".local/share/mycelium/worker/myce.bin", 0700),
 		write(".local/share/mycelium/tools/pixi/pixi", 0700),
 	}

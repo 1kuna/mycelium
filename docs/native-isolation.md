@@ -167,16 +167,29 @@ but provides no boundary between jobs running as the same user.
 A 2026-11-11 probe found that plain native jobs on one Linux arm64, one Linux
 amd64 and one macOS arm64 worker could read the installed worker (and
 co-installed queue) configuration, the fleet environment or joining file that
-holds the token, and the worker user's SSH private keys. On Linux they could also
+holds the token, and the worker user's SSH private keys. Both Linux workers'
+GitHub CLI token (`~/.config/gh/hosts.yml`) and two workers' Docker client
+configuration were readable too. On Linux they could also
 read the token from the worker service's `/proc/PID/environ`, because systemd's
 `EnvironmentFile` puts it in the initial environment.
 
 Plain, declared-unsandboxed and legacy native payloads now launch without read
 access to: the Mycelium install root (`~/.local/share/mycelium` and the
 configured one), every installed role's `config.json`, credentials, environment
-and joining files, the worker's secret root and `~/.ssh`. Inside the install root
+and joining files, the worker's secret root, and the worker user's credential
+stores: `~/.ssh`, `~/.config/gh`, `~/.git-credentials`, `~/.netrc`,
+`~/.docker/config.json`, `~/.aws`, `~/.config/gcloud`, `~/.kube` and the macOS
+login keychain files (`~/Library/Keychains/login.keychain-db`, `login.keychain`).
+Each lets its holder act as that user elsewhere, so the list stays this short;
+`nativeCredentialStores` holds it in code. Inside the install root
 they keep this worker's state (their own attempt files), caches, `tools` and
-installed executables. Everything else is unchanged.
+installed executables. Everything else is unchanged. Tools that read those stores
+directly therefore lose them in these jobs: `gh`, git HTTPS credentials from the
+store or `.netrc`, registry logins in Docker's client configuration (the CLI
+warns and continues), the AWS, gcloud and kubectl CLIs. On macOS, `securityd`
+rather than the job reads the keychain: `security find-identity` still listed
+signing identities with the login keychain file denied (one local check; signing
+itself wasn't tested).
 
 - **macOS:** an allow-default Seatbelt profile denies reads and writes of those
   paths. Seatbelt refuses setuid programs and, under any non-trivial profile,
