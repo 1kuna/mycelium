@@ -98,13 +98,16 @@ func constrainedMemoryIdentity(j *Job, estimate memoryEstimate) constrainedMemor
 const darwinGuardReaction = 4 * attemptMemorySamplePeriod
 
 // usedMemoryCharge charges a running job the memory it uses, not its whole
-// declared envelope, where a guard contains its growth (#1044, audit item 3):
+// declared envelope, where a guard contains its growth or, for unified CUDA
+// device memory, where it is measured per process (#1044, audit item 3):
 //
-//   - native CPU-only work with a positive declaration: accelerator memory
-//     (Metal, unified CUDA, driver-pinned host pages) is outside the cgroup and
-//     the RSS guard, so those jobs keep their envelope;
-//   - a guarded dedicated host: Linux cgroup v2 ceilings, or the Darwin RSS
-//     guard. Interactive hosts keep their envelope (MY-45: harsher limits);
+//   - native CPU-only work with a positive declaration on a guarded dedicated
+//     host: Linux cgroup v2 ceilings, or the Darwin RSS guard. Interactive
+//     hosts keep their envelope (MY-45: harsher limits);
+//   - native GPU work on a unified CUDA host with cgroup v2 ceilings (see
+//     unifiedUsedMemoryCharge). Metal and discrete accelerators keep their
+//     envelope: the Darwin guard samples RSS, which never sees Metal buffers,
+//     and no per-process Metal sample exists yet;
 //   - learned evidence for this work on this target (MY-34): a first run with no
 //     accepted history keeps its envelope, and later runs never drop below
 //     what history says the job reaches;
@@ -119,6 +122,10 @@ const darwinGuardReaction = 4 * attemptMemorySamplePeriod
 func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64, ok bool) {
 	if !usedMemoryChargeEligible(j, m, sample, now) {
 		return 0, 0, false
+	}
+	if unifiedDeviceWork(j, m) {
+		charge, growth = unifiedUsedMemoryCharge(j, m, ceiling, sample, now)
+		return charge, growth, true
 	}
 	resident := max(sample.gb, sample.footprintGB)
 	observed := max(sample.peakGB, resident)
@@ -143,23 +150,80 @@ func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySamp
 	return charge, max(0, charge-credit, min(margin, charge)), true
 }
 
+func unifiedDeviceWork(j *Job, m *Machine) bool {
+	return unifiedCUDA(m) && !j.Spec.Needs.cpuOnly()
+}
+
+// Measured on a GB10 unified host on 2026-11-11 (#1044): the attempt cgroup
+// charges and contains host, managed (cudaMallocManaged) and pinned
+// (cudaMallocHost) allocations, but device allocations (cudaMalloc, which the
+// PyTorch caching allocator uses) escape both the cgroup and RSS. NVML still
+// reports them per process, the worker samples that every
+// deviceMemorySamplePeriod, and host availability falls by the same amount.
+// So the host share is contained and the device share is measured.
+//
+// Each share is charged max(accepted peak of this work on this target, attempt
+// high water, live forecast). The peaks drop the learned envelope's measured
+// uncertainty, which on this host was as large as the peaks themselves; growth
+// past them is what yieldMemoryOvercommit stops before the host runs out. The
+// sum, plus the launch drift margin, is bounded by the envelope; observed use
+// above it is kept. Per-process device counters can count one allocation more
+// than once and may overlap cgroup pages (#424), so the sum only overstates,
+// and only the host vector uniquely charged to the cgroup earns credit.
+func unifiedUsedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64) {
+	l := j.MemoryEnvelope.Learned
+	host := max(l.PeakHostGB, sample.peakGB, sample.gb, sample.footprintGB, sample.hostForecast(now))
+	device := max(l.PeakDeviceGB, sample.devicePeakGB, sample.deviceGB, deviceForecast(sample, now))
+	observed := max(sample.peakGB, sample.gb, sample.footprintGB) + max(sample.devicePeakGB, sample.deviceGB)
+	margin := exploratoryDriftMarginGB(m)
+	charge = max(min(host+device+margin, ceiling), observed)
+	return charge, max(0, charge-sample.gb, min(margin, charge))
+}
+
+func deviceForecast(s hostMemorySample, now time.Time) float64 {
+	return s.deviceGB + s.deviceGrowthGB + s.deviceRateGB*now.Sub(s.deviceAt).Seconds()
+}
+
 func usedMemoryChargeEligible(j *Job, m *Machine, sample hostMemorySample, now time.Time) bool {
 	if j == nil || m == nil || j.StartedAt == nil || (j.State != "running" && j.State != "stopping") {
 		return false
 	}
-	n := j.Spec.Needs
-	if j.Spec.Run.Docker || !n.cpuOnly() || n.Memory == "auto" || n.HostMemoryGB <= 0 || m.SharedHost != nil {
-		return false
-	}
-	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" && m.MemoryEnforcement != darwinRSSGuardStatus {
-		return false
-	}
-	e := j.MemoryEnvelope
-	if e == nil || e.Learned == nil || e.Learned.Evidence < 1 || !validMemoryValue(e.Learned.HostGB) || e.Learned.HostGB <= 0 {
+	n, e := j.Spec.Needs, j.MemoryEnvelope
+	if j.Spec.Run.Docker || m.SharedHost != nil || e == nil || e.Learned == nil || e.Learned.Evidence < 1 {
 		return false
 	}
 	if _, fresh := sample.hostGrowth(now); !fresh || !validMemoryValue(sample.footprintGB) || !validMemoryValue(sample.rateGB) {
 		return false
 	}
+	if unifiedDeviceWork(j, m) {
+		return unifiedUsedMemoryEligible(j, m, sample, now)
+	}
+	if !n.cpuOnly() || n.Memory == "auto" || n.HostMemoryGB <= 0 {
+		return false
+	}
+	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" && m.MemoryEnforcement != darwinRSSGuardStatus {
+		return false
+	}
+	if !validMemoryValue(e.Learned.HostGB) || e.Learned.HostGB <= 0 {
+		return false
+	}
 	return max(sample.gb, sample.footprintGB) > 0
+}
+
+// The envelope is fixed at assignment, learned or declared, and the worker
+// applies hostNeed (host plus device) as the attempt's memory.max. One card's
+// NVML sample describes the attempt; RSS and host-delta fallbacks, which
+// require exclusive execution, are estimates and grant nothing.
+func unifiedUsedMemoryEligible(j *Job, m *Machine, sample hostMemorySample, now time.Time) bool {
+	n, l := j.Spec.Needs, j.MemoryEnvelope.Learned
+	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" || !m.HostMemoryMeasured || n.MemoryGB <= 0 || n.HostMemoryGB <= 0 || len(j.AllocatedDevices) > 1 {
+		return false
+	}
+	if l.PeakDeviceGB <= 0 || !validMemoryValue(l.PeakDeviceGB) || !validMemoryValue(l.PeakHostGB) {
+		return false
+	}
+	if sample.source != "" || sample.exclusive || sample.deviceAt.IsZero() || now.Before(sample.deviceAt) || now.Sub(sample.deviceAt) >= deviceMemorySampleFreshFor {
+		return false
+	}
+	return validMemoryValue(sample.deviceGB) && validMemoryValue(sample.deviceGrowthGB) && validMemoryValue(sample.deviceRateGB)
 }

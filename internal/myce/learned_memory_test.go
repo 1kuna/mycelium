@@ -237,6 +237,22 @@ func TestLearnedMemoryUnifiedGPUFirstRunIsBounded(t *testing.T) {
 	if next.MemoryEnvelope.Basis != "exploratory" || next.MemoryEnvelope.Evidence != 0 || next.MemoryEnvelope.HostGB != 80.875 {
 		t.Fatal("missing device sample became accepted", next.MemoryEnvelope)
 	}
+	// A complete host and device sample is exact evidence. The next run records
+	// its accepted peaks, without uncertainty, for the by-use charge (#1044).
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	device := 20.0
+	r = result(next, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, DeviceGB: &device}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	learned := assignGPU(t, q, m, submit(t, q, plainGPUSpec())).MemoryEnvelope.Learned
+	if learned == nil || learned.PeakHostGB != peak || learned.PeakDeviceGB != device || learned.DeviceGB == nil || *learned.DeviceGB < device {
+		t.Fatalf("accepted peaks not recorded: %+v", learned)
+	}
 }
 
 func TestLearnedMemoryUnifiedGPUHostHintKeepsDeviceFigure(t *testing.T) {

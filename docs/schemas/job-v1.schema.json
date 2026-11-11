@@ -3941,6 +3941,12 @@
         "host_gb": {
           "type": "number"
         },
+        "peak_device_gb": {
+          "type": "number"
+        },
+        "peak_host_gb": {
+          "type": "number"
+        },
         "source": {
           "type": "string"
         }

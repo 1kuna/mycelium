@@ -474,6 +474,7 @@ type hostMemorySample struct {
 	source                   string
 	exclusive                bool
 	gb, deviceGB             float64
+	devicePeakGB             float64 // Attempt high water of fresh device samples.
 	residentGB               float64
 	growthGB, deviceGrowthGB float64
 	rateGB, deviceRateGB     float64
@@ -512,7 +513,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {
-			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, retainedGB: old.retainedGB}
+			samples[key] = hostMemorySample{id: old.id, at: old.at, receivedAt: old.receivedAt, period: old.period, peakGB: old.peakGB, devicePeakGB: old.devicePeakGB, retainedGB: old.retainedGB}
 			continue
 		}
 		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) {
@@ -536,6 +537,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 			s.residentGB = sample.deviceResidentGB
 		}
 		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
+		s.devicePeakGB = max(old.devicePeakGB, s.deviceGB)
 		s.period, s.receivedAt = old.period, now
 		if !old.at.IsZero() {
 			if s.id > 0 && old.id == 0 {
