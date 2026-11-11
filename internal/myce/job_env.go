@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,6 +27,29 @@ var jobNetworkVariables = strings.Fields("HTTPS_PROXY https_proxy HTTP_PROXY htt
 // UV_GITHUB_TOKEN) are never forwarded, and URL settings containing @ are
 // dropped. Mycelium owns the cache, paths and retry knobs.
 var buildUVVariables = strings.Fields("UV_LINK_MODE UV_CONCURRENT_BUILDS UV_CONCURRENT_DOWNLOADS UV_CONCURRENT_INSTALLS UV_CONCURRENT_CACHE_READS UV_COMPILE_BYTECODE UV_NATIVE_TLS UV_SYSTEM_CERTS UV_INDEX_STRATEGY UV_INDEX UV_DEFAULT_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_PYTHON_INSTALL_MIRROR UV_TORCH_BACKEND")
+
+// jobThreadVariables size the common runtime thread pools: OpenMP (also
+// PyTorch and most native numeric code), Intel MKL, OpenBLAS, Apple
+// Accelerate (vecLib), NumExpr, Rust Rayon and Go. Unset, each runtime sizes
+// itself to every core on the host, oversubscribing it.
+var jobThreadVariables = strings.Fields("OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS VECLIB_MAXIMUM_THREADS NUMEXPR_NUM_THREADS RAYON_NUM_THREADS GOMAXPROCS")
+
+// jobCPUEnvironment tells a native job its CPU allotment, the cores the host
+// ledger charged it, as MYCE_CPUS, and sizes each thread pool the job left
+// unset to it. A value from run.env or recipe activation wins; only a shared
+// interactive host still lowers one above the allotment. The worker's own
+// thread settings never reach env (jobBaseVariables), so a value present here
+// is the job's.
+func jobCPUEnvironment(env map[string]string, p *SharedHostProfile, cores int) {
+	cores = max(1, cores)
+	env["MYCE_CPUS"] = strconv.Itoa(cores)
+	for _, key := range jobThreadVariables {
+		if env[key] == "" {
+			env[key] = env["MYCE_CPUS"]
+		}
+	}
+	sharedCPUEnvironment(env, p, cores)
+}
 
 var droppedCredentialLogged sync.Map
 
