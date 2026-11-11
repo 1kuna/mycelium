@@ -230,8 +230,11 @@ func (q *Queue) cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot, pr
 	return copy
 }
 
-func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
+// CPU capacity that holds this job on every eligible host. A host that cannot
+// isolate CPU work from its accelerators makes it a CPU isolation wait.
+func cpuWait(j *Job, machines map[string]*Machine) *Hold {
 	reasons := []string{}
+	kind := "capacity"
 	for _, m := range machines {
 		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) {
 			continue
@@ -240,11 +243,14 @@ func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 			continue
 		}
 		if cpuFits(j, m) {
-			return ""
+			return nil
 		}
 		reason := m.CPUCapacityReason
 		if j.Spec.Needs.cpuOnly() && cpuTargetReason(m) != "" {
 			reason = cpuTargetReason(m)
+			if cpuIsolationDiagnostic(m.CPUIsolation) == cpuIsolationUnavailable {
+				kind = "cpu_isolation"
+			}
 		}
 		if reason == "" {
 			_, reason = cpuCapacity(m)
@@ -257,11 +263,11 @@ func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 	slices.Sort(reasons)
 	if len(reasons) == 0 {
 		if !j.Spec.Needs.cpuOnly() {
-			return ""
+			return nil
 		}
-		return "waiting for CPU capacity: no eligible Linux/macOS host online"
+		return newHold("capacity", "waiting for CPU capacity: no eligible Linux/macOS host online")
 	}
-	return fmt.Sprintf("waiting for CPU capacity (%d cores): %s", j.Spec.Needs.cores(), strings.Join(reasons, "; "))
+	return newHold(kind, fmt.Sprintf("waiting for CPU capacity (%d cores): %s", j.Spec.Needs.cores(), strings.Join(reasons, "; ")))
 }
 
 func cpuTargetReason(m *Machine) string {

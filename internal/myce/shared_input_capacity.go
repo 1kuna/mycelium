@@ -289,9 +289,11 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 	return &HTTPError{Status: 409, Code: code, Message: fmt.Sprintf("%s: shared inputs require %d bytes; largest enabled matching worker cache capacity=%d bytes", code, sharedInputRequired(j.Spec, nil), largest)}
 }
 
-func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
+// Shared-input cache space that holds this job on every allowed host, or the
+// missing capacity reports that keep the queue from knowing.
+func sharedInputWait(j *Job, machines map[string]*Machine) *Hold {
 	if len(j.Spec.SharedInputs) == 0 {
-		return ""
+		return nil
 	}
 	var reasons []string
 	for _, m := range machines {
@@ -301,16 +303,16 @@ func sharedInputWaitingReason(j *Job, machines map[string]*Machine) string {
 		for _, candidate := range sharedInputCandidates(j, m) {
 			reason := sharedInputCacheReason(candidate.Spec, m, false)
 			if reason == "" {
-				return ""
+				return nil
 			}
 			reasons = append(reasons, reason)
 		}
 	}
 	if len(reasons) == 0 {
-		return fmt.Sprintf("shared_input_cache_unreported: required=%d bytes; waiting for worker capacity reports", sharedInputRequired(j.Spec, nil))
+		return newHold("shared_input_unreported", fmt.Sprintf("shared_input_cache_unreported: required=%d bytes; waiting for worker capacity reports", sharedInputRequired(j.Spec, nil)))
 	}
 	slices.Sort(reasons)
-	return strings.Join(slices.Compact(reasons), "; ")
+	return newHold("shared_input", strings.Join(slices.Compact(reasons), "; "))
 }
 
 // Queue-owned claims cover the interval between assignment and the next worker

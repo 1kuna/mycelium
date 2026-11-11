@@ -532,30 +532,6 @@ func efficiencyHostIdentity(machines []*Machine) string {
 	return identityHash(inventory)
 }
 
-// Only the sampled reason's category is retained, never worker text. The
-// authoritative planner runs on a detached observation, not under q.mu.
-func efficiencyBlocker(reason string) string {
-	r := strings.ToLower(reason)
-	switch {
-	case strings.Contains(r, "hold"), strings.Contains(r, "validation reservation"), strings.Contains(r, "disabled"), strings.Contains(r, "paused"):
-		return "holds"
-	case strings.Contains(r, "building"), strings.Contains(r, "prepar"), strings.Contains(r, "copying"), strings.Contains(r, "staging"):
-		return "preparation"
-	case strings.Contains(r, "environment"), strings.Contains(r, "software"), strings.Contains(r, "extension"), strings.Contains(r, "qualification"), strings.Contains(r, "parity"):
-		return "environment"
-	case strings.Contains(r, "memory"), strings.Contains(r, "ram envelope"), strings.Contains(r, "host_capacity_accumulation"):
-		return "memory_reservation"
-	case strings.Contains(r, "target"), strings.Contains(r, "platform"), strings.Contains(r, "allow-list"), strings.Contains(r, "no_matching_device"):
-		return "authored_platform_targets"
-	case strings.Contains(r, "priority"), strings.Contains(r, "fair"), strings.Contains(r, "work cap"), strings.Contains(r, "experiment cap"), strings.Contains(r, "share cap"), strings.Contains(r, "ahead"), strings.Contains(r, "backfill"):
-		return "priority_fairness"
-	case strings.Contains(r, "upstream"), strings.Contains(r, "producer"):
-		return "dependency"
-	default:
-		return "capacity"
-	}
-}
-
 // Stranded means the actual current fit succeeds after removing ONLY these
 // authored placement/policy exclusions. Capabilities, qualification, recipes,
 // parity, live resources, custody and preparation all remain required. Targets
@@ -647,7 +623,7 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	v.memoryPlanning = newMemoryPlanningCache()
 	for _, j := range v.liveJobs() {
 		if j.State == "queued" && !cancelled(j) {
-			d.blockers[j.ID] = efficiencyBlockerObservation{Category: efficiencyBlocker(v.waitReason(j)), Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
+			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j).efficiencyCategory(), Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
 			if j.Efficiency != nil {
 				j.Efficiency.advance(v.clock.Now())
 				j.Efficiency.Blocker = d.blockers[j.ID].Category

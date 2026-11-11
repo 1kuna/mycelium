@@ -467,6 +467,9 @@ type Job struct {
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
+	// Set only on status and job-reply copies: the scheduler's wait for this
+	// queued job, as the projection computed it, so status never recomputes it.
+	wait *Hold
 
 	SharedHostBackoff      map[string]SharedHostBackoff `json:"shared_host_backoff,omitempty"`
 	Pause                  *JobPause                    `json:"pause,omitempty"`

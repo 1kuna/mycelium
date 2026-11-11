@@ -77,8 +77,8 @@ func (q *Queue) recoverSharedHostBackoff(m *Machine) {
 	}
 }
 
-// Shared-host backoff and unreachable storage roots, with their hold kind.
-func (q *Queue) hostRetryStorageWaitingReason(j *Job) (string, string) {
+// Shared-host backoff and unreachable storage roots that hold this job.
+func (q *Queue) hostRetryStorageWait(j *Job) *Hold {
 	blocked := false
 	for _, m := range q.s.Machines {
 		if len(m.UnavailableRoots) > 0 || q.sharedHostBackoffReason(j, m) != "" {
@@ -87,7 +87,7 @@ func (q *Queue) hostRetryStorageWaitingReason(j *Job) (string, string) {
 		}
 	}
 	if !blocked {
-		return "", ""
+		return nil
 	}
 	kind := "storage_root"
 	reasons := []string{}
@@ -110,10 +110,13 @@ func (q *Queue) hostRetryStorageWaitingReason(j *Job) (string, string) {
 			reason = q.storageRootReason(j, m)
 		}
 		if reason == "" {
-			return "", ""
+			return nil
 		}
 		reasons = append(reasons, reason)
 	}
+	if len(reasons) == 0 {
+		return nil
+	}
 	slices.Sort(reasons)
-	return kind, strings.Join(slices.Compact(reasons), "; ")
+	return newHold(kind, strings.Join(slices.Compact(reasons), "; "))
 }

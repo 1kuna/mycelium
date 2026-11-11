@@ -27,7 +27,8 @@ func (q *Queue) submissionDeadlineGuidance(j *Job, timing *submissionAdviceTimin
 	timing.next(adviceWaitReason)
 	copy := *j
 	if copy.State == "queued" {
-		copy.Reason = q.waitReason(&copy)
+		copy.wait = q.waitHold(&copy)
+		copy.Reason = copy.wait.Detail
 		timing.next(adviceStatusReason)
 		copy.Reason = q.statusWaitingReason(&copy)
 	}

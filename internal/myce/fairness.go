@@ -478,8 +478,10 @@ func (q *Queue) plannerMachines() []*Machine {
 // queueProjection uses the dispatch comparator on each eligible machine with
 // current batch reservations released. Order is conditional on current inventory
 // and usage: future arrivals, usage and which worker frees first can change it.
-func (q *Queue) queueProjection() (map[string]int, map[string]string) {
-	order, reasons := map[string]int{}, map[string]string{}
+// The holds are the scheduler's wait for each queued job, computed once here;
+// status reads them rather than evaluating the wait again.
+func (q *Queue) queueProjection() (map[string]int, map[string]string, map[string]*Hold) {
+	order, reasons, holds := map[string]int{}, map[string]string{}, map[string]*Hold{}
 	scan := q.placementScan()
 	sets := make([]*candidateSet, 0, len(q.s.Machines))
 	immediate := map[string]*Machine{}
@@ -515,7 +517,8 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		if j.State != "queued" {
 			continue
 		}
-		reasons[j.ID] = q.waitReason(j, scan)
+		holds[j.ID] = q.waitHold(j, scan)
+		reasons[j.ID] = holds[j.ID].Detail
 	}
 	excluded := map[string]bool{}
 	for n := 1; ; n++ {
@@ -563,8 +566,8 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				base = environmentWaitingReason(best, target)
 			}
 		}
-		if strings.HasPrefix(reasons[best.ID], "waiting for software preparation for job ") {
-			base = reasons[best.ID]
+		if h := holds[best.ID]; h != nil && h.Kind == "waiting_for_builder" {
+			base = h.Detail
 		}
 		base += "; " + selected.fairExplanation(best)
 		if winner.ID == best.ID {
@@ -583,7 +586,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		reasons[best.ID] = base + "; " + ahead
 	}
-	return order, reasons
+	return order, reasons, holds
 }
 
 // Admission reservations do not measure compute load. Keep the selected
@@ -624,8 +627,8 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if plan := q.yieldProjection(j); plan != nil && plan.Reason != "" {
 		return newHold("scarce_host_yield", plan.Reason)
 	}
-	if kind, reason := q.hostRetryStorageWaitingReason(j); reason != "" {
-		return newHold(kind, reason)
+	if h := q.hostRetryStorageWait(j); h != nil {
+		return h
 	}
 	if !dependencyReady(j) {
 		if j.Spec.After != nil && j.Spec.After.Piece == "" {
@@ -633,11 +636,11 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		}
 		return newHold("upstream", "waiting for accepted producer piece")
 	}
-	if reason := q.variantParityWaitingReason(j); reason != "" {
-		if strings.HasPrefix(reason, productionParityHostHold+":") {
-			return newHold(productionParityHostHold, reason)
-		}
-		return newHold("production_parity", reason)
+	if h := q.variantParityWait(j); h != nil {
+		return h
+	}
+	if q.fleetPausesJob(j) {
+		return newHold("production_paused", "production starts are paused until the fleet upgrade verifies queue health")
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
@@ -663,11 +666,11 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		copy.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 		j = &copy
 	}
-	if kind, r := q.holdWaitReason(j); r != "" {
-		return newHold(kind, r)
+	if h := q.holdWait(j); h != nil {
+		return h
 	}
-	if kind, reason := q.targetWaitingReason(j, scans...); reason != "" {
-		return newHold(kind, reason)
+	if h := q.targetWait(j, scans...); h != nil {
+		return h
 	}
 	machines := map[string]*Machine{}
 	for _, m := range q.planningMachines(scans...) {
@@ -682,14 +685,14 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		return newHold("waiting_for_builder", reason)
 	}
 	if reason := q.memoryWaitingReason(j, machines); reason != "" {
-		return newHold("memory", reason)
+		return newHold("host_memory_headroom", reason)
 	}
 	if j.Spec.Needs.cpuOnly() {
 		if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
 			return newHold("host_backfill", reason)
 		}
 	}
-	return newHold(waitingReason(j, machines, q.s.Jobs))
+	return waitingHold(j, machines, q.s.Jobs)
 }
 
 // Deficit uses only competing runnable projects. An absent project reserves no

@@ -2527,9 +2527,9 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	sortHolds(out.Holds)
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
-	order, reasons := map[string]int{}, map[string]string{}
+	order, reasons, holds := map[string]int{}, map[string]string{}, map[string]*Hold{}
 	if !compact {
-		order, reasons = q.queueProjection()
+		order, reasons, holds = q.queueProjection()
 	}
 	projectionSample := startStatusProjection(budgets)
 	finishJobWork := projectionSample.measure()
@@ -2549,7 +2549,9 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			copy.Timing = nil
 			out.Jobs = append(out.Jobs, &copy)
 		} else {
-			out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+			j := q.projectJob(stored, order, reasons, forStatus)
+			j.wait = holds[stored.ID]
+			out.Jobs = append(out.Jobs, j)
 		}
 	}
 	for _, c := range q.calls {
@@ -2689,8 +2691,8 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 	if reason := q.capReason(call); reason != "" {
 		call.Reason = reason
 	}
-	if _, reason := q.holdWaitReason(call); reason != "" {
-		call.Reason = reason
+	if h := q.holdWait(call); h != nil {
+		call.Reason, call.wait = h.Detail, h
 	}
 	if c.Machine == "" && model.HostMemoryGB > 0 {
 		eligible, room := false, false
@@ -2705,22 +2707,22 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 			}
 		}
 		if eligible && !room {
-			call.Reason = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB)
+			call.Reason, call.wait = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB), nil
 		}
 	}
 	if reason := q.logsWaitingReason(call); reason != "" {
-		call.Reason = reason
+		call.Reason, call.wait = reason, nil
 	}
 	if reason := q.engineWaitReason(c); reason != "" && call.Reason == "waiting for model "+c.Model+" on an eligible worker" {
 		call.Reason = reason
 	}
 	if c.Machine != "" {
 		call.State = "running"
-		call.Reason = "model call in flight"
+		call.Reason, call.wait = "model call in flight", nil
 	}
 	if c.Error != "" {
 		call.State = "failed"
-		call.Reason = c.Error
+		call.Reason, call.wait = c.Error, nil
 	}
 	call.Spec.Class = jobClass(call.Spec)
 	call.PriorityPolicy = q.priorityMatch(call.Spec)
@@ -2731,41 +2733,20 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	projectCommandStarted(j)
 	q.projectEfficiency(j)
 	j.YieldPlan = q.yieldProjection(j)
-	if j.State == "queued" && strings.HasPrefix(j.Reason, memoryEvidenceRecovering+":") {
-		j.DiagnosticCode = memoryEvidenceRecovering
+	// The code is the scheduler's wait kind, never a reading of its text.
+	if j.State == "queued" && j.wait != nil {
+		if code := holdDiagnosticCodes[j.wait.Kind]; code != "" {
+			j.DiagnosticCode = code
+		}
 	}
-	if j.State == "queued" && strings.HasPrefix(j.Reason, "waiting for RAM envelope:") {
-		j.DiagnosticCode = "host_memory_headroom"
-	}
-	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache:") {
-		j.DiagnosticCode = "shared_input_cache"
-	}
-	if j.State == "queued" && strings.HasPrefix(j.Reason, "shared_input_cache_unreported:") {
-		j.DiagnosticCode = "shared_input_cache_unreported"
-	}
-	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
-		j.DiagnosticCode = "disk_headroom"
-	}
-	if j.State == "queued" && strings.HasPrefix(j.Reason, "host_capacity_accumulation:") {
-		j.DiagnosticCode = "host_capacity_accumulation"
-	}
-	if strings.Contains(j.Reason, cpuIsolationUnavailable) {
+	if j.State != "queued" && j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable {
 		j.DiagnosticCode = cpuIsolationUnavailable
-	}
-	if strings.HasPrefix(j.Reason, "no_matching_device:") {
-		j.DiagnosticCode = "no_matching_device"
 	}
 	if forStatus {
 		q.statusEligibility(j)
 		q.projectVariantEligibility(j)
 		if j.State == "queued" {
 			j.Reason = q.statusWaitingReason(j)
-			if strings.Contains(j.Reason, cpuIsolationUnavailable) {
-				j.DiagnosticCode = cpuIsolationUnavailable
-			}
-			if strings.HasPrefix(j.Reason, "no_matching_device:") {
-				j.DiagnosticCode = "no_matching_device"
-			}
 		}
 		if j.State == "paused" {
 			j.Hold = pauseHold(j)

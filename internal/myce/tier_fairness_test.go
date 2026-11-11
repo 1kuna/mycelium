@@ -158,7 +158,7 @@ func TestTierFairnessFitBackfillAndHistoryIsolation(t *testing.T) {
 	if got := q.pick(&m); got == nil || got.ID != big.ID {
 		t.Fatal("unrelated history affected sharing", got)
 	}
-	order, reasons := q.queueProjection()
+	order, reasons, _ := q.queueProjection()
 	if order[big.ID] != 1 || order[v.ID] != 2 || !strings.Contains(reasons[v.ID], "atlas goes first (verso is ahead of its fair share)") {
 		t.Fatal(order, reasons)
 	}
@@ -189,7 +189,7 @@ func TestTierFairnessWarmthCannotStarveColdProject(t *testing.T) {
 	if got := q.pick(&m); got == nil || got.ID != b.ID {
 		t.Fatal("warm project bypassed fair turn", got)
 	}
-	order, reasons := q.queueProjection()
+	order, reasons, _ := q.queueProjection()
 	if order[b.ID] != 1 || !strings.Contains(reasons[a.ID], "fair share") {
 		t.Fatal(order, reasons)
 	}

@@ -267,15 +267,17 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 	slices.Sort(reasons)
 	return strings.Join(slices.Compact(reasons), "; ")
 }
-func (q *Queue) diskWaitingReason(j *Job, host string) string {
+
+// Disk and output-storage space that holds this job, on host when one is named.
+func (q *Queue) diskWait(j *Job, host string) *Hold {
 	if parkedStorage(j) {
-		return parkedStorageReason
+		return newHold("storage_parked", parkedStorageReason)
 	}
 	if j.OutputAdmissionPending {
-		return outputRetryHold
+		return newHold("file_store_capacity", outputRetryHold)
 	}
 	if !q.hasDiskReports(host) {
-		return ""
+		return nil
 	}
 	reasons := []string{}
 	for _, m := range q.plannerMachines() {
@@ -295,11 +297,14 @@ func (q *Queue) diskWaitingReason(j *Job, host string) string {
 		if reason != "" {
 			reasons = append(reasons, reason)
 		} else {
-			return ""
+			return nil
 		}
 	}
+	if len(reasons) == 0 {
+		return nil
+	}
 	slices.Sort(reasons)
-	return strings.Join(slices.Compact(reasons), "; ")
+	return newHold("disk_headroom", strings.Join(slices.Compact(reasons), "; "))
 }
 
 func (q *Queue) hasDiskReports(host string) bool {

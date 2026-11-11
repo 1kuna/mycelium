@@ -65,7 +65,7 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 		return ""
 	}
 	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
-	if production && !q.productionParityHostAllowed(j, hostID(m)) {
+	if q.parityHostListHolds(j, m) {
 		return productionParityHostHold + ": held: host not in production parity list; " + variantParityAction
 	}
 	approved := slices.Contains(q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()], hostID(m))
@@ -102,26 +102,41 @@ func jobHasVariants(j *Job) bool {
 	return false
 }
 
-func (q *Queue) variantParityWaitingReason(j *Job) string {
+// The owner's production parity host list excludes this host. Placement and
+// the wait both read this one decision.
+func (q *Queue) parityHostListHolds(j *Job, m *Machine) bool {
+	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
+	return !q.commandDiscoveryProduction(j) && j.Spec.ExtensionCheck == nil && production && !q.productionParityHostAllowed(j, hostID(m))
+}
+
+// Variant parity that holds this job on every qualified host, from the first
+// such host's reason.
+func (q *Queue) variantParityWait(j *Job) *Hold {
 	if q.commandDiscoveryProduction(j) {
-		return commandDiscoveryParityAction
+		return newHold("production_parity", commandDiscoveryParityAction)
 	}
 	_, hasPolicy := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
 	if !jobHasVariants(j) && !hasPolicy {
-		return ""
+		return nil
 	}
-	reason := ""
+	var first *Hold
 	for _, m := range q.plannerMachines() {
 		if !q.jobAllowsMachine(j, m.ID) || qualifiedExtension(j, m) == nil {
 			continue
 		}
-		if why := q.variantParityReason(j, m); why == "" {
-			return ""
-		} else if reason == "" {
-			reason = why
+		why := q.variantParityReason(j, m)
+		if why == "" {
+			return nil
+		}
+		if first == nil {
+			kind := "production_parity"
+			if q.parityHostListHolds(j, m) {
+				kind = productionParityHostHold
+			}
+			first = newHold(kind, why)
 		}
 	}
-	return reason
+	return first
 }
 
 // Diagnostic rows describe frozen variants against live host/device targets.

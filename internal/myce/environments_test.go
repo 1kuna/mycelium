@@ -356,7 +356,7 @@ func TestEnvironmentPlacementAndFiltering(t *testing.T) {
 	if fits(j, m, 8) {
 		t.Fatal("any-platform bypassed recipe filtering")
 	}
-	_, reason := waitingReason(j, map[string]*Machine{"mac": m}, nil)
+	reason := waitingHold(j, map[string]*Machine{"mac": m}, nil).Detail
 	if !strings.Contains(reason, "torch-cuda") {
 		t.Fatal(reason)
 	}
