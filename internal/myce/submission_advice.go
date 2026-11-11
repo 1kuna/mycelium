@@ -57,6 +57,7 @@ type submissionAdviceSnapshot struct {
 	generation *readGeneration
 	view       *Queue
 	ledgers    map[string]observationMachineLedger
+	machines   map[string]*Machine // Owned live copy; nil uses the committed generation.
 }
 
 // q.mu is held. Only pin immutable records/configuration and small per-worker
@@ -127,10 +128,14 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 			owned := copyObservationValue(reflect.ValueOf(j)).Interface().(*Job)
 			v.s.Jobs[id], v.observationLive[id] = owned, owned
 		}
-		if err := chargeProjectionValue(ctx, inputs.Machines); err != nil {
-			return nil, err
+		if s.machines != nil {
+			v.s.Machines = s.machines
+		} else {
+			if err := chargeProjectionValue(ctx, inputs.Machines); err != nil {
+				return nil, err
+			}
+			v.s.Machines = copyObservationValue(reflect.ValueOf(inputs.Machines)).Interface().(map[string]*Machine)
 		}
-		v.s.Machines = copyObservationValue(reflect.ValueOf(inputs.Machines)).Interface().(map[string]*Machine)
 	}
 	for key, m := range v.s.Machines {
 		l := s.ledgers[key]
@@ -161,7 +166,7 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 // projection_capacity_exceeded once history outgrew that lane. Share
 // the committed generation instead: retained records stay borrowed read-only
 // and only active jobs, machines and planner indexes are copied and charged.
-// Under q.mu this pins only scalar per-worker ledgers and contact evidence.
+// Under q.mu it copies only configuration, machines and scalar ledgers.
 func (q *Queue) captureResolveView(ctx context.Context) (*Queue, error) {
 	unlock, err := requestObservationLock(ctx, &q.mu)
 	if err != nil {
@@ -179,32 +184,20 @@ func (q *Queue) captureResolveView(ctx context.Context) (*Queue, error) {
 	if !q.simulation {
 		// Configuration setters do not commit, so the published copies can lag
 		// a registered environment or model. Small; charged before copying.
-		config := observationState{Models: q.models, Environments: q.environments}
+		// Check-ins can update machines (contact, inventory) without a commit,
+		// and eligibility depends on them. Machines are few; copy them live.
+		config := observationState{State: state{Machines: q.s.Machines}, Models: q.models, Environments: q.environments, Unreported: q.unreported}
 		if err := chargeProjectionValue(ctx, config); err != nil {
 			unlock()
 			return nil, err
 		}
 		owned := copyObservation(config)
-		snapshot.view.models, snapshot.view.environments = owned.Models, owned.Environments
-	}
-	fresh := make(map[string]readFreshness, len(q.s.Machines))
-	for key, m := range q.s.Machines {
-		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
-	}
-	unlock()
-	v, err := snapshot.planner(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Uncommitted heartbeat contact is newer than the committed machine record.
-	v.unreported = make(map[string]bool, len(fresh))
-	for key, m := range v.s.Machines {
-		if f, ok := fresh[key]; ok {
-			m.LastSeen = f.lastSeen
-			if f.unreported {
-				v.unreported[key] = true
-			}
+		snapshot.view.models, snapshot.view.environments, snapshot.view.unreported = owned.Models, owned.Environments, owned.Unreported
+		snapshot.machines = owned.State.Machines
+		if snapshot.machines == nil {
+			snapshot.machines = map[string]*Machine{}
 		}
 	}
-	return v, nil
+	unlock()
+	return snapshot.planner(ctx)
 }
