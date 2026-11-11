@@ -755,7 +755,9 @@ func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
 }
 
 func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	// Exercise queue escalation with serialized daemon effects. External CLI
+	// startup/timeout behavior has its own lifecycle and helper-budget tests.
+	w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
 	s.close()
 	q, _ := fixture(t)
 	q.clock = c
@@ -770,7 +772,16 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	j := submit(t, q, dockerGroupJob(t).Spec)
+	spec := dockerGroupJob(t).Spec
+	// Queue escalation only needs one network owner. Repeated sidecar launches
+	// learn daemon timing from this fast file-backed fake and can enter startup
+	// cleanup under OS contention before this test ever requests cancellation.
+	// Group lifecycle tests cover sidecar/network ownership separately.
+	spec.Run.DockerSidecars = nil
+	// This daemon is in-process; it has no external logs command. Log retention
+	// is covered by the external-CLI lifecycle and restart fixtures.
+	spec.Logs = "none"
+	j := submit(t, q, spec)
 	await(t, func() bool {
 		c.advance(time.Millisecond)
 		_, e := os.Stat(filepath.Join(root, "running"))
@@ -785,14 +796,20 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(root, "calls"))
 		return strings.Contains(string(data), "network rm")
 	})
-	c.advance(2 * time.Minute)
-	snap, e := q.Snapshot()
-	if e != nil {
-		t.Fatal(e)
+	// A daemon call proves dispatch, not that the worker has reported pending
+	// cleanup. Cross the queue's actual stop deadline and wait for that report.
+	stopping := job(t, q, j.ID)
+	if stopping.StopAt == nil {
+		t.Fatal("cancel did not establish a stop deadline")
 	}
-	if !strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required") {
-		t.Fatalf("network hold not escalated: %v", snap.HostHolds)
-	}
+	c.advance(stopping.StopAt.Sub(c.Now()) + 2*time.Minute)
+	await(t, func() bool {
+		snap, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required")
+	})
 	requireState(t, q, j.ID, "stopping")
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
 	await(t, func() bool { c.advance(time.Millisecond); return job(t, q, j.ID).State == "cancelled" })

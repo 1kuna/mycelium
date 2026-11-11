@@ -314,7 +314,10 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
 	p.native = g
-	p.cancelStart = cancel
+	// Preparation cancellation runs before process control takes p.mu. Once
+	// registered, g.ctx must be cancelled by stopLocked under that mutex, after
+	// which outcome capture sees the corresponding stop/delivery receipt.
+	p.cancelStart = w.cancelStart
 	if memory != nil {
 		g.custody.Cgroup = memory.path
 	}

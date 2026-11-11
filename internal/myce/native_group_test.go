@@ -394,6 +394,13 @@ func TestNativeGroupCancellationPreparing(t *testing.T) {
 	s.Run.Sidecars[0].Env["NATIVE_TEST_UNREADY"] = "1"
 	r := nativeStart(t, s, "fake")
 	nativeFile(t, r.dir, "child.pid")
+	// Process control cancels preparation before acquiring the process mutex.
+	// That early cancellation must not wake a registered group into outcome
+	// classification before stopLocked has recorded signal delivery.
+	r.p.cancelStarting()
+	if r.p.native.ctx.Err() != nil {
+		t.Fatal("preparation cancellation escaped into the registered group")
+	}
 	r.p.stop(r.w.Clock.Now(), time.Second, false)
 	result := nativeFinish(t, r)
 	if !result.Interrupted || result.Success {

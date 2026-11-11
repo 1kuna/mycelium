@@ -17,7 +17,12 @@ func TestReviewNativeExitReceiptFailure(t *testing.T) {
 	r := nativeStart(t, nativeSpec(t), "fake")
 	nativeFile(t, r.dir, "main-ready")
 	blocked := filepath.Join(r.s.dir, "native-"+r.s.state.Identity+".json.tmp")
-	if err := os.Mkdir(blocked, 0700); err != nil {
+	// Serialize fault installation with native receipt writers. A live save
+	// owns the same temporary path until its rename completes.
+	r.p.mu.Lock()
+	err := os.Mkdir(blocked, 0700)
+	r.p.mu.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(blocked)
