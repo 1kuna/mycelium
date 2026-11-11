@@ -25,6 +25,41 @@
         "allocated_bytes"
       ]
     },
+    "FileCollectionStatus": {
+      "properties": {
+        "passes": {
+          "type": "integer"
+        },
+        "yielded_passes": {
+          "type": "integer"
+        },
+        "deferred_passes": {
+          "type": "integer"
+        },
+        "reclaimed_blobs": {
+          "type": "integer"
+        },
+        "reclaimed_bytes": {
+          "type": "integer"
+        },
+        "pending_candidates": {
+          "type": "integer"
+        },
+        "last_reclaim_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "passes",
+        "yielded_passes",
+        "deferred_passes",
+        "reclaimed_blobs",
+        "reclaimed_bytes",
+        "pending_candidates"
+      ]
+    },
     "FileStoreStatus": {
       "properties": {
         "physical": {
@@ -59,6 +94,9 @@
         },
         "reclaimable_bytes": {
           "type": "integer"
+        },
+        "collection": {
+          "$ref": "#/$defs/FileCollectionStatus"
         },
         "limit_bytes": {
           "type": "integer"
