@@ -128,9 +128,19 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 		t.Fatalf("retention amplified default: %d -> %d", len(smallJSON), len(largeJSON))
 	}
 	refreshAllocs := func(q *Queue) float64 {
+		// OS admission probes allocate and yield independently of retained
+		// evidence. Admit once before measuring response construction.
+		ctx, release, err := q.requestBudgets.projectionContext(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
 		return testing.AllocsPerRun(3, func() {
+			allocation := projectionAllocation(ctx)
+			mark := allocation.markProjection()
+			defer allocation.rewindProjection(mark)
 			q.statusCache.data = ""
-			if _, err := q.cachedStatusJSON(); err != nil {
+			if _, err := q.cachedStatusJSON(ctx); err != nil {
 				t.Fatal(err)
 			}
 		})
