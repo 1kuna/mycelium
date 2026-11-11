@@ -71,6 +71,9 @@ type HostMaintenanceStatus struct {
 	PendingCleanup  []string             `json:"pending_cleanup"`
 	MemoryInUseGB   float64              `json:"memory_in_use_gb"`
 	MemoryDebtGB    float64              `json:"memory_debt_gb"`
+	// ProductionBlocker names open production work a planned drain of this
+	// enabled host would strand; drain is refused while it is set.
+	ProductionBlocker string `json:"production_blocker,omitempty"`
 	// Healthy retains the legacy all-workers/all-devices health contract.
 	Healthy   bool   `json:"healthy"`
 	State     string `json:"state"`
@@ -156,7 +159,11 @@ func (q *Queue) HostMaintenanceStatus(host string, requestContexts ...context.Co
 		}
 	}
 	q.refreshHostMemory()
-	return q.hostMaintenanceStatus(host), nil
+	out := q.hostMaintenanceStatus(host)
+	if out.Policy.Mode == "enabled" {
+		out.ProductionBlocker = q.productionDrainBlocker(host)
+	}
+	return out, nil
 }
 func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	out := HostMaintenanceStatus{DeviceUse: q.deviceUseStatus(host), Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
@@ -382,6 +389,13 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	}
 	switch request.Action {
 	case "drain":
+		// A planned drain never strands open production work; disable remains
+		// the explicit out-of-service action.
+		if policy.Mode == "enabled" {
+			if reason := q.productionDrainBlocker(host); reason != "" {
+				return &HTTPError{Status: http.StatusConflict, Code: "production_work_open", Message: "drain would strand open production work: " + reason + "; wait for it to close or expire, or use host disable to take the host out of service now"}
+			}
+		}
 		policy.Mode = "drained"
 		policy.DrainOwner = request.DrainOwner
 	case "disable":

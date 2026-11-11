@@ -26,6 +26,25 @@ new model calls at the idle selection. Batch attempts on other hosts reconnect u
 The queue precedes its colocated worker. This implementation accepts the current
 worker protocols only, so incompatible protocol migrations need a separate plan.
 
+### Open production work (#1009)
+
+A pending host is not selected while draining it would leave open production
+work with no enabled host able to start it. Open work is a project's
+[production lease](../operations.md#production-leases) or a queued production
+job (every production job has a start deadline). Eligibility is the same one a
+submitted job uses: project allowed machines, the stage's allowed/excluded
+machines, platform and memory fit. Its wait reads `waiting for open production
+work: production lease KEY (project P, expires T) has no other enabled host
+that can start it; host admission remains enabled`. Admission stays open, so the
+next pipeline stage starts there. The host upgrades at its next idle moment
+after the lease closes or expires. Other hosts keep upgrading meanwhile.
+
+While the running operation owns a host's drain, a production job whose only
+eligible hosts are drained by it waits under its ordinary start deadline instead
+of failing with `no eligible host is enabled`: the host returns when its step
+verifies. A stopped operation's retained drain is not temporary, so the ordinary
+fail-fast applies again.
+
 ## Helper verification
 
 Each enrolled service fetches approved bytes through the authenticated queue,

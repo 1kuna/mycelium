@@ -2005,6 +2005,18 @@ live fleet rollout require separate authorization. The first release containing
 this feature uses the existing installation path; later capable runtimes can
 receive updates. This amendment authorizes implementation, not a live rollout.
 
+### Amendment to the fleet upgrade: open production work (#1009, MY-35)
+
+A project may declare open production work as an expiring lease (project, key,
+optional stages with job placement fields, TTL). Planned drains, operator or
+fleet-owned, keep at least one enabled host able to start each open lease stage
+and each queued production job; the operator drain refuses with
+`production_work_open`, and the fleet upgrade leaves the host pending with
+admission open. `disable` stays the explicit override. A running upgrade's own
+drain counts as temporary, so production waits for the host under its start
+deadline instead of failing. Leases expire on their own, carry no project
+names in code or configuration, and grant no priority or capacity.
+
 ## Amendment: one project instruction file (#192)
 
 Design amendment, 2026-10-27, for [#192](https://github.com/1kuna/mycelium/issues/192)
