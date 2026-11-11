@@ -113,9 +113,25 @@ func TestCapabilityOOMRetriesOnceOnStrictlyBiggerHypha(t *testing.T) {
 	}
 	small := placementMachine("small", "separate", 64, 24, e)
 	check(t, q, small, nil)
+	// With no known larger host the larger-hypha wait is a dead end: fail at
+	// once with the action instead of waiting for hardware that does not exist.
+	stranded := submit(t, q, placementSpec(false))
+	r := result(check(t, q, small, nil).Job, false)
+	r.OutOfMemory = true
+	clock.Advance(time.Second)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, stranded.ID); got.State != "failed" || !strings.HasPrefix(got.Reason, "dead end: out of memory") || !strings.Contains(got.Reason, "action: ") {
+		t.Fatal("OOM on the largest known host kept waiting", got.State, got.Reason)
+	}
+	// A known but not yet qualified larger host keeps the wait open.
+	unqualified := placementMachine("big", "unified", 128, 128, e)
+	unqualified.ExtensionReports = nil
+	check(t, q, unqualified, nil)
 	j := submit(t, q, placementSpec(true))
 	run := check(t, q, small, nil).Job
-	r := result(run, false)
+	r = result(run, false)
 	r.OutOfMemory = true
 	clock.Advance(time.Second)
 	if err := q.Complete(r); err != nil {

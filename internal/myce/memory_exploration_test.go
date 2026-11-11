@@ -239,6 +239,61 @@ func TestMemoryExplorationFailureCannotLoop(t *testing.T) {
 			if run := check(t, q, darwin, nil).Job; run != nil {
 				t.Fatal("exploration loop after restart", run)
 			}
+			// Waiting cannot clear a spent probe; fail at the next tick with
+			// one action instead of staying queued for days.
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if got := job(t, q, pending.ID); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.HasPrefix(got.Reason, "dead end: no host can size") || !strings.Contains(got.Reason, "action: ") || strings.Contains(got.Reason, "operator") {
+				t.Fatal("dead-end memory wait kept waiting", got.State, got.Reason)
+			}
 		})
+	}
+}
+
+// A probe refused at launch (no process, no peak) learned nothing. The queue
+// returns the claim and measures again instead of parking the job behind
+// "bounded exploration already used".
+func TestMemoryExplorationUnlaunchedProbeIsReturned(t *testing.T) {
+	q, clock, linux, darwin, s := memoryExplorationFixture(t)
+	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+	s.Targets = []ExecutionTarget{machineTarget(&darwin)}
+	queued := submit(t, q, s)
+	run := check(t, q, darwin, nil).Job
+	if run == nil || run.ID != queued.ID || run.MemoryEnvelope.Source != boundedMemoryExploration || len(q.s.MemoryExplorations) != 1 {
+		t.Fatal("not a bounded probe", run)
+	}
+	refused := result(run, false)
+	refused.Interrupted = true
+	refused.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit", Predicate: "memory_capacity", PrelaunchRefused: true}
+	clock.Advance(time.Second)
+	if err := q.Complete(refused); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.MemoryExplorations) != 0 {
+		t.Fatal("unlaunched probe kept its claim")
+	}
+	if got := job(t, q, queued.ID); got.State != "queued" {
+		t.Fatal("unlaunched probe ended the job", got.State, got.Reason)
+	}
+	clock.Advance(time.Second)
+	darwin.HostAvailableMemoryGB--
+	retry := check(t, q, darwin, nil).Job
+	if retry == nil || retry.ID != queued.ID || retry.MemoryEnvelope.Source != boundedMemoryExploration || len(q.s.MemoryExplorations) != 1 {
+		t.Fatal("queue did not probe again", retry, job(t, q, queued.ID).Reason)
+	}
+	// A sampled peak is evidence; that claim stays spent.
+	if err := q.Started(result(retry, false)); err != nil {
+		t.Fatal(err)
+	}
+	memoryExplorationComplete(t, q, clock, retry, 3, false, false)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.MemoryExplorations) != 1 {
+		t.Fatal("measured probe returned its claim")
 	}
 }
