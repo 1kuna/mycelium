@@ -36,6 +36,12 @@ Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintai
   installation and the production database meet the floor. This narrows
   MY-03's compatibility
   prohibition only for the adjacent release pair required by MY-35.
+  On 2026-11-10 the maintainer confirmed r6.8 (`0ca83b30`) is live and required
+  candidate r6.9 to support queue rollback to it, preferably by converting the
+  latest v3 database to v2 without losing jobs, custody or decisions. The WP3
+  persistence worker received this requirement; the adjacent test now pins
+  r6.8, and [the rollback procedure](operations.md#queue-only-rollback-from-r69-to-r68)
+  uses the r6.9 offline downgrade before starting r6.8.
 
 - <a id="my-41"></a>**MY-41 — 2026-11-09 — Fast iteration; development tooling is changeable.**
   Source: Zach, 2026-11-09, relayed in the implementation brief and received by

@@ -5,6 +5,7 @@ package myce
 // worker startup, inventory discovery and installer serialization are real.
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,64 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		upgradeWorker(t, ctx, root)
 	case "install":
 		upgradeInstall(t, ctx, root)
+	case "queue-inspect":
+		db, err := sql.Open("sqlite", filepath.Join(root, "state", "queue.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var marker []byte
+		if err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil {
+			t.Fatal(err)
+		}
+		data, err := readQueueState(db, marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(root, "durable-state.json"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	case "queue-rollback-seed", "queue-rollback-open":
+		q, err := Open(filepath.Join(root, "queue.db"), filepath.Join(root, "checkpoints"), upgradeClock{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer q.Close()
+		if mode == "queue-rollback-seed" {
+			now := q.clock.Now()
+			m := Machine{ID: "rollback-device", HostID: "rollback-host", Session: "rollback-session", GPU: "cpu"}
+			if _, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"}); err != nil {
+				t.Fatal(err)
+			}
+			err = q.update(func() error {
+				for _, state := range []string{"queued", "paused", "running", "succeeded", "failed"} {
+					j := &Job{ID: "rollback-" + state, Spec: Spec{Name: state, Project: "rollback", Priority: "experiment"}, State: state, Queued: now}
+					if state == "succeeded" || state == "failed" {
+						j.FinishedAt = &now
+					}
+					if state == "succeeded" || state == "running" {
+						j.Machine, j.Session, j.Attempt, j.StartedAt = m.ID, m.Session, 3, &now
+					}
+					q.putJob(j.ID, j)
+				}
+				r := HostRelease{Host: m.HostID, Machine: m.ID, Session: m.Session, Job: "rollback-succeeded", Attempt: 3, Until: now.Add(time.Hour)}
+				q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, state := range []string{"queued", "paused", "running", "succeeded", "failed"} {
+			j := q.s.Jobs["rollback-"+state]
+			if j == nil || j.State != state {
+				t.Fatal("reopen lost job or decision", state, j)
+			}
+		}
+		j := q.s.Jobs["rollback-succeeded"]
+		if j.FinishedAt == nil || j.Attempt != 3 || j.Session != "rollback-session" || j.ReleaseConfirmed || len(q.s.HostReleases) != 1 {
+			t.Fatal("reopen lost terminal timestamp or pending custody", j, q.s.HostReleases)
+		}
 	default:
 		t.Fatal("unknown fixture mode")
 	}

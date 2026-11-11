@@ -1024,6 +1024,42 @@ Rehearse on an isolated queue fixture before an authorized cutover. Measure disk
 headroom, transfer and verification time, and restore/rejoin time for the actual
 roots; derive downtime and recovery expectations from that rehearsal.
 
+### Queue-only rollback from r6.9 to r6.8
+
+r6.9 writes normalized-v3 state (individual machine records); r6.8 reads
+normalized-v2 (machines inside the global record). Before starting the r6.8
+queue binary against an r6.9 database:
+
+1. Stop the queue service and prevent its supervisor from restarting it. Verify
+   the queue process is gone. Preserve the complete stopped generation described
+   below. Keep worker spools, joining identity, file store and configured roots
+   in place; workers can reconnect with their existing sessions and custody.
+2. With the **r6.9 binary**, run:
+
+   ```sh
+   myce queue downgrade --db QUEUE_DATABASE --to v2
+   ```
+
+   The command refuses a running queue or unsupported format. It converts the
+   latest committed database, including writes made after migration: job IDs,
+   keyed submissions, decisions, attempt/custody fences, policy and histories
+   are retained. It also preserves unknown JSON fields and auxiliary SQLite
+   tables. It does not run scheduling or startup maintenance. It compares the
+   complete reconstructed state before and after conversion, then commits the
+   records and marker together with SQLite FULL synchronization. A failed or
+   interrupted transaction leaves v3 intact; a completed downgrade is safe to
+   repeat. No post-migration writes are intentionally discarded.
+3. Start the exact r6.8 queue binary with the preserved config and roots, using
+   the existing installation's release-replacement procedure. Verify the
+   expected job IDs, pending custody and worker reconnection before resuming
+   submissions. This is an operator-directed queue rollback; it does not
+   downgrade or restart workers. Normal restart grace and attempt fencing apply.
+
+Starting r6.9 again accepts v2 and atomically resumes v3 writes. The adjacent
+release test pins r6.8 source `0ca83b30f0b21997574a48cb4d7923093a131001` and
+exercises both directions. Never start r6.8 directly on a v3 database or restore
+only an old DB while leaving a mismatched generation of referenced files.
+
 ### Preserve one complete generation
 
 Inventory the active configuration and every referenced root. Preserve privately:

@@ -81,6 +81,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		fmt.Fprintln(os.Stdout, topLevelUsage)
 		return nil
 	}
+	if args[0] == "queue" && len(args) > 1 && args[1] == "downgrade" {
+		return queueDowngradeCommand(args[2:], os.Stdout)
+	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
 	}
