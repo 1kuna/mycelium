@@ -22,6 +22,9 @@ func TestRuntimeLoadAdmissionDoesNotConsumeModelSilence(t *testing.T) {
 				if _, stalled := readinessFromContext(ctx).state(); stalled {
 					t.Error("admission wait classified as model-load silence")
 				}
+				// Transport activity completing that wait must not teach a
+				// model-progress gap either.
+				readinessFromContext(ctx).advance()
 			}
 			if phase == "memory" {
 				rt.memorySource = func(ctx context.Context) (float64, error) {
@@ -37,6 +40,9 @@ func TestRuntimeLoadAdmissionDoesNotConsumeModelSilence(t *testing.T) {
 			}
 			if budget, _ := m.progress.state(); budget != expectedBudget {
 				t.Fatalf("admission wait enlarged the model silence budget: %s", budget)
+			}
+			if elapsed := m.progress.result().Load.Mean; elapsed >= time.Second {
+				t.Fatalf("admission wait taught as model-load latency: %s", elapsed)
 			}
 		})
 	}

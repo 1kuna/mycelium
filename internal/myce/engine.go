@@ -949,6 +949,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	// fresh silence interval after admission and environment preparation.
 	progress.mu.Lock()
 	progress.last, progress.realLast = progress.clock.Now(), RealClock{}.Now()
+	progress.started, progress.realStarted = progress.last, progress.realLast
 	progress.suspended = false
 	progress.mu.Unlock()
 	if e == nil && (model.Engine == "llama.cpp" || model.SizeBytes > 0) {

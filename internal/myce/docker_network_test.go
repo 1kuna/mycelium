@@ -755,7 +755,9 @@ func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
 }
 
 func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
+	// Exercise queue escalation with serialized daemon effects. External CLI
+	// startup/timeout behavior has its own lifecycle and helper-budget tests.
+	w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
 	s.close()
 	q, _ := fixture(t)
 	q.clock = c

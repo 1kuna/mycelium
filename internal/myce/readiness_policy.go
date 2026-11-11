@@ -139,23 +139,30 @@ func (p *readinessProgress) advance() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.clock.Now()
-	p.gap = max(p.gap, now.Sub(p.last), RealClock{}.Now().Sub(p.realLast))
+	if !p.suspended {
+		p.gap = max(p.gap, now.Sub(p.last), RealClock{}.Now().Sub(p.realLast))
+	}
 	p.last = now
 	p.realLast = RealClock{}.Now()
 	p.revision++
 	p.inactive = false
 }
 
-// pause excludes control-plane waits from the model's silence interval. Nested
+// pause excludes control-plane waits from model latency and silence. Nested
 // launch gates preserve an enclosing preparation phase's suspension.
 func (p *readinessProgress) pause() func() {
 	p.mu.Lock()
 	wasSuspended := p.suspended
+	pausedAt, realPausedAt := p.clock.Now(), RealClock{}.Now()
 	p.suspended = true
 	p.mu.Unlock()
 	return func() {
 		p.mu.Lock()
 		p.last, p.realLast = p.clock.Now(), RealClock{}.Now()
+		if !wasSuspended {
+			p.started = p.started.Add(p.last.Sub(pausedAt))
+			p.realStarted = p.realStarted.Add(p.realLast.Sub(realPausedAt))
+		}
 		p.suspended = wasSuspended
 		p.mu.Unlock()
 	}
