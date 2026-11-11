@@ -47,7 +47,7 @@ func TestWorkerHygieneCollectionDoesNotHoldCancelledRelease(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("collection did not reach reference lookup")
 	}
 	cancelAttempt()
@@ -55,7 +55,7 @@ func TestWorkerHygieneCollectionDoesNotHoldCancelledRelease(t *testing.T) {
 	go func() { release(); close(released) }()
 	select {
 	case <-released:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("unrelated collection blocked cancelled attempt release")
 	}
 	// Release/admission can also own the gate while reference lookup is blocked.

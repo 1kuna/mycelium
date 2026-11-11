@@ -65,7 +65,7 @@ func TestMemorySamplingShortHostPeak(t *testing.T) {
 	defer finish()
 	select {
 	case <-f.observed:
-	case <-time.After(time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("short-lived host spike was not sampled before exit")
 	}
 	p := finish()

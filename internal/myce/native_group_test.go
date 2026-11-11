@@ -182,7 +182,7 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 			p.stop(w.Clock.Now(), 0, true)
 			select {
 			case <-p.done:
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Error("native cleanup timed out")
 			}
 		}
@@ -273,7 +273,7 @@ func nativeFinish(t *testing.T, r *nativeTestRun) Result {
 			}
 		}
 		return f.result
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("native group did not finish")
 		return Result{}
 	}

@@ -147,7 +147,7 @@ func TestNativeGroupCgroupRecoveryPreservesOOMWithOperatorStop(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("recovered worker did not stop")
 		}
 	}()
@@ -317,7 +317,7 @@ func d5Finish(t *testing.T, p *process) Result {
 			t.Fatal(f.err)
 		}
 		return f.result
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("attempt did not finish")
 		return Result{}
 	}

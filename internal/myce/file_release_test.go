@@ -395,7 +395,7 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 	go func() { _, err := releaseApply(q, p); done <- err }()
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("apply did not reach commit")
 	}
 	other := spec("experiment")
@@ -406,7 +406,7 @@ func TestFileReleaseReferenceChangeDuringCommit(t *testing.T) {
 	select {
 	case err := <-done:
 		releaseCode(t, err, "file_release_stale")
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("apply stalled")
 	}
 	if job(t, q, j.ID).FilesExpired {

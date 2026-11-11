@@ -118,7 +118,7 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 					if e != nil {
 						t.Error(e)
 					}
-				case <-time.After(10 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Error("restart worker failed to stop")
 				}
 			}()
@@ -271,7 +271,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 		}
 		nativeNoSurvivors(t, &nativeTestRun{p: p, dir: p.job.Spec.Run.Workdir})
 		return finish.result
-	case <-time.After(30 * time.Second):
+	case <-time.After(testWaitTimeout):
 		p.stop(w.Clock.Now(), 0, true)
 		<-p.done
 		t.Fatal("unexpected run timeout")

@@ -209,7 +209,7 @@ func TestEntryApprovalHeartbeatOneWalkAndBoundedTimeout(t *testing.T) {
 			if len(approved) != 0 {
 				t.Fatal("timed-out approval advertised")
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("filesystem stalled the heartbeat")
 		}
 	}

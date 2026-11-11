@@ -145,7 +145,7 @@ while True:signal.pause()
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("alternative worker did not stop")
 		}
 	}()

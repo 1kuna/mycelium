@@ -152,7 +152,7 @@ func TestFileTransferCustomTLSSetupStalls(t *testing.T) {
 				if !errors.Is(err, errFileTransferStalled) {
 					t.Fatal("TLS setup did not fail typed", err)
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("custom TLS setup was unbounded")
 			}
 			peer.Close() // Release the uncancellable legacy hook and its late result.

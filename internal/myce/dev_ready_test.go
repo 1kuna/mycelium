@@ -25,7 +25,7 @@ func TestDevWaitReadyRequiresEveryCurrentWorker(t *testing.T) {
 	clock.Advance(time.Second)
 	check(t, q, first, nil)
 	assertPending() // One worker cannot stand in for the other.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- d.WaitReady(ctx) }()

@@ -89,7 +89,7 @@ func TestMaintenanceDelayedEnvironmentLaunch(t *testing.T) {
 				if delayed == "command" {
 					select {
 					case <-entered:
-					case <-time.After(5 * time.Second):
+					case <-time.After(testWaitTimeout):
 						t.Fatal("did not reach final command gate")
 					}
 					st := change()
@@ -103,7 +103,7 @@ func TestMaintenanceDelayedEnvironmentLaunch(t *testing.T) {
 				rt.mu.Unlock()
 				select {
 				case <-done:
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatal("build did not settle")
 				}
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {

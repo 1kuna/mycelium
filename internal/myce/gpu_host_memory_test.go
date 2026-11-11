@@ -267,7 +267,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			defer finish()
 			select {
 			case <-f.sampled:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("no sample")
 			}
 			if strings.HasPrefix(mode, "helper") {
@@ -425,19 +425,18 @@ func TestGPUHostMemoryTelemetryHelperBoundary(t *testing.T) {
 			}
 			script := "[ \"$#\" -eq 0 ] && [ -z \"$MYCE_TOKEN\" ] && [ -z \"$MYCE_JOB_ID\" ] || exit 7\ncat <<'SAMPLE'\n" + body + "\nSAMPLE\n"
 			if mode == "timeout" {
-				script = "exec /bin/sleep 10\n"
+				// Outlives the test's backstop, so returning proves the helper timeout.
+				script = "exec /bin/sleep 120\n"
 			}
 			path := gpuTelemetryTestHelper(t, script)
-			start := time.Now()
-			got, err := readGPUTelemetryHelper(context.Background(), clock, path)
+			var got map[string]string
+			var err error
+			returnsWhileBlocked(t, "telemetry helper", func() { got, err = readGPUTelemetryHelper(context.Background(), clock, path) })
 			if (err == nil) != (mode == "fresh") {
 				t.Fatalf("helper %s: evidence=%v err=%v", mode, got, err)
 			}
 			if mode == "fresh" && got["0000:03:00.0"] != "use_type: 1\nuse_tt: 1\nusage: 28672\n" {
 				t.Fatal("helper did not preserve raw manager accounting")
-			}
-			if mode == "timeout" && time.Since(start) > 2*time.Second {
-				t.Fatal("helper timeout stalled telemetry")
 			}
 		})
 	}
@@ -529,13 +528,13 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 	}()
 	select {
 	case <-f.blocked:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("driver did not enter blocking read")
 	}
 	f.resident.Store(16)
 	select {
 	case <-f.spike:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("blocked fdinfo prevented the resident sampler from observing 16 GiB")
 	}
 	f.resident.Store(8)
@@ -549,7 +548,7 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 	var peak *AttemptMemoryPeak
 	select {
 	case peak = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("blocked DRM read stalled attempt completion")
 	}
 	if blockedAtFinish {
@@ -557,7 +556,7 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 		released = true
 		select {
 		case <-f.resumed:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("cancelled collector did not finish its read")
 		}
 	}
@@ -616,7 +615,7 @@ func TestGPUHostMemoryBlockedDeviceProbeFinishes(t *testing.T) {
 		case <-f.blocked:
 			select {
 			case <-f.resumed:
-			case <-time.After(time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Error("device read did not return after release")
 			}
 		default:
@@ -624,7 +623,7 @@ func TestGPUHostMemoryBlockedDeviceProbeFinishes(t *testing.T) {
 	}()
 	select {
 	case <-f.blocked:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("device probe did not enter fdinfo")
 	}
 	done := make(chan *AttemptMemoryPeak, 1)

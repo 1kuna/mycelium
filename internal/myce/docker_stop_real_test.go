@@ -103,7 +103,7 @@ while True: time.sleep(.05)
 				if !f.result.Success {
 					t.Fatalf("main result: %+v", f.result)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("stop timeout")
 			}
 			data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json"))

@@ -174,7 +174,7 @@ func startHarness(t *testing.T, w Worker, h *machineHarness) (context.CancelFunc
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("machine worker did not stop")
 		}
 	})
@@ -274,7 +274,7 @@ func TestMachineWorkerParallelReadinessUploadAndControl(t *testing.T) {
 	awaitFile(t, filepath.Join(w.StateDir, "job-files", "slow", "1", "slow-ready"))
 	select {
 	case <-h.logEntered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("upload did not block")
 	}
 	awaitFile(t, filepath.Join(w.StateDir, "job-files", "neighbor", "1", "neighbor"))

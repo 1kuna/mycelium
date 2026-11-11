@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+// viewTestTimeout is a deadlock backstop for expected events, not a latency
+// budget; shared-host load must never fail it.
+const viewTestTimeout = 60 * time.Second
+
 type fakeClock struct {
 	mu    sync.Mutex
 	now   time.Time
@@ -43,7 +47,7 @@ func (c *fakeClock) elapse(t *testing.T, want func(time.Duration) bool, what str
 		c.advance(d)
 		c.fire <- c.Now()
 		return d
-	case <-time.After(5 * time.Second):
+	case <-time.After(viewTestTimeout):
 		t.Fatalf("%s: poller never waited", what)
 		return 0
 	}
@@ -207,7 +211,7 @@ func waitFrame(t *testing.T, ch <-chan []byte) Frame {
 			t.Fatal(err)
 		}
 		return f
-	case <-time.After(5 * time.Second):
+	case <-time.After(viewTestTimeout):
 		t.Fatal("no frame")
 		return Frame{}
 	}

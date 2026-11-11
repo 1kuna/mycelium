@@ -51,7 +51,7 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 		case <-ready:
 		case err := <-done:
 			t.Fatalf("worker exited before the blocked calls: %v", err)
-		case <-time.After(3 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("worker did not enter the blocked calls")
 		}
 	}
@@ -61,13 +61,13 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("idle installed worker requires a queue reply to exit after TERM")
 	}
 	for _, canceled := range []<-chan struct{}{canceled, inventoryCanceled} {
 		select {
 		case <-canceled:
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("shutdown left checkin or GPU inventory alive")
 		}
 	}
@@ -142,7 +142,7 @@ func testWorkerServiceStagingShutdown(t *testing.T, docker, restart bool) {
 	defer func() { unblock(); cancel(); <-a.done }()
 	select {
 	case <-entered:
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		data, _ := os.ReadFile(filepath.Join(s.dir, s.stateName))
 		t.Fatalf("input staging did not enter: %s", data)
 	}

@@ -181,7 +181,7 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 						t.Fatal("missing exhaustion reason", got.Reason)
 					}
 					t.Logf("attempt=%d interrupted=%v state=%s retries=%d reason=%s", attempt, finish.result.Interrupted, got.State, got.InfrastructureRetries, got.Reason)
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Fatal("Docker outcome did not settle")
 				}
 			}

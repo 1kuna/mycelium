@@ -712,7 +712,7 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 		if err = q.Complete(finish.result); err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("late create cleanup did not settle")
 	}
 	got := job(t, q, j.ID)

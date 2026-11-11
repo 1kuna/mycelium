@@ -284,7 +284,7 @@ func TestWorkCurveFakeClockOwnerReturnAndBudget(t *testing.T) {
 		select {
 		case <-ctx.Done():
 			return CurveMeasurement{}, ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("owner return failed to cancel")
 			return CurveMeasurement{}, nil
 		}
@@ -303,7 +303,7 @@ func TestWorkCurveFakeClockOwnerReturnAndBudget(t *testing.T) {
 		select {
 		case <-ctx.Done():
 			return CurveMeasurement{}, ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("Clock budget did not cancel")
 			return CurveMeasurement{}, nil
 		}

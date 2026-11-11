@@ -30,7 +30,7 @@ func TestReviewNativeExitReceiptFailure(t *testing.T) {
 	var f workerFinish
 	select {
 	case f = <-r.p.done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("no completion")
 	}
 	r.finished = true

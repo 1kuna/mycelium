@@ -28,7 +28,7 @@ func TestJoiningProbeIndependentOfLargeStatus(t *testing.T) {
 		}
 		api.ServeHTTP(w, r)
 	}))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	client, err := ResolveJoining(ctx, invitation, "", &fakeDiscovery{})
 	if err != nil || client.URL != server.URL {
@@ -100,7 +100,7 @@ func TestJoiningProbeOldQueueNeverDrainsLargeStatus(t *testing.T) {
 				// Withhold EOF: draining this body cannot succeed within any budget.
 				<-r.Context().Done()
 			}))
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 			defer cancel()
 			client, err := ResolveJoining(ctx, invitation, "", &fakeDiscovery{})
 			if err != nil || client.URL != server.URL {

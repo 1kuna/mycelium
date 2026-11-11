@@ -187,7 +187,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 	go func() { r, _ := q.Checkin(Checkin{Machine: m}); done <- r }()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("filesystem fault did not enter")
 	}
 	select {
@@ -307,7 +307,7 @@ func TestWorkerForceStopsBlockedSaveAtGrace(t *testing.T) {
 		if !f.result.Interrupted || f.result.Success {
 			t.Fatalf("blocked save not interrupted: %+v", f.result)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("force-stop waits on checkpoint save")
 	}
 }
@@ -402,7 +402,7 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
 	defer cancel()
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)

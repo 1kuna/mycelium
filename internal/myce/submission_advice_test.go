@@ -115,7 +115,7 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 	go func() { defer close(done); handler.ServeHTTP(w, r) }()
 	select {
 	case <-committed:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("submission never committed")
 	}
 	control := make(chan error, 1)
@@ -128,14 +128,14 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("advice blocked a later control commit")
 	}
 	q.mu.Lock()
 	release.Do(func() { close(resume) })
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		q.mu.Unlock()
 		t.Fatal("submission response reacquired q.mu after commit")
 	}
@@ -157,6 +157,10 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 // keyed replay, and must keep the committed policy and frozen spec.
 func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 	q, clock := fixture(t)
+	// The receipt must not wait for the off-lock evidence build, which decodes
+	// the held history record; that independence exists only in production's
+	// asynchronous mode.
+	asynchronousAdmissionWait(t, q)
 	budgetHost(q, 64<<20, 1)
 	q.s.Jobs["retained"] = &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
 	if err := q.update(func() error { return nil }); err != nil {
@@ -199,7 +203,7 @@ func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 		go func() { handler.ServeHTTP(w, r); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(3 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Fatal("production receipt waited for optional retained diagnostics")
 		}
 		var got Job

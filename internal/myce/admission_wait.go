@@ -26,6 +26,23 @@ type admissionWaitBuilder struct {
 	next    time.Time
 	done    chan struct{}
 	latest  uint64
+	// synchronous makes the committing caller publish its own capture before
+	// returning, with no cooldown. Production keeps it false.
+	synchronous bool
+}
+
+// synchronousAdmissionWaitDefault is the builder mode a queue opens with.
+// Production leaves it false; this package's tests set it true so fixtures
+// that read planning state never race a background publication.
+var synchronousAdmissionWaitDefault = false
+
+// WithSynchronousAdmissionWait selects the admission-wait evidence mode. When
+// on, a committing transaction returns only after its post-commit capture,
+// and any capture still pending from a concurrent commit, has been published
+// or fenced off. Builds stay serialized and revision-ordered. Production uses
+// the asynchronous, cooled-down builder; tests of that path opt into it here.
+func WithSynchronousAdmissionWait(on bool) QueueOption {
+	return func(q *Queue) { q.admissionWaitBuild.synchronous = on }
 }
 
 func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
@@ -44,23 +61,54 @@ func (q *Queue) enqueueAdmissionWait(c *admissionWaitCapture) {
 		c = mergeAdmissionWaitCaptures(b.pending, c)
 	}
 	b.pending = c
+	if b.synchronous {
+		q.drainAdmissionWaitLocked(b)
+		return
+	}
 	if b.running || c.queueClock.Now().Before(b.next) {
 		return
 	}
 	c, b.pending = b.pending, nil
 	b.running, b.done = true, make(chan struct{})
-	go func() {
-		started := holdNow(c.clock)
-		q.finishAdmissionWait(c)
-		elapsed := max(0, holdNow(c.clock).Sub(started))
-		b.mu.Lock()
-		// Rate decisions use the injected queue Clock; cost measurement uses
-		// the captured observational Clock, independently of scheduling time.
-		b.next = c.queueClock.Now().Add(max(elapsed, c.service))
-		b.running = false
-		close(b.done)
+	go q.runAdmissionWait(b, c)
+}
+
+// runAdmissionWait performs one claimed build and records its cooldown.
+func (q *Queue) runAdmissionWait(b *admissionWaitBuilder, c *admissionWaitCapture) {
+	started := holdNow(c.clock)
+	q.finishAdmissionWait(c)
+	elapsed := max(0, holdNow(c.clock).Sub(started))
+	b.mu.Lock()
+	// Rate decisions use the injected queue Clock; cost measurement uses
+	// the captured observational Clock, independently of scheduling time.
+	b.next = c.queueClock.Now().Add(max(elapsed, c.service))
+	b.running = false
+	close(b.done)
+	b.mu.Unlock()
+}
+
+// drainAdmissionWaitLocked runs builds inline until none is running or
+// pending. Called with b.mu held; it releases b.mu while a build runs. The
+// caller owns no q.mu here: the evidence commit takes it itself.
+func (q *Queue) drainAdmissionWaitLocked(b *admissionWaitBuilder) {
+	for {
+		if b.running {
+			done := b.done
+			b.mu.Unlock()
+			<-done
+			b.mu.Lock()
+			continue
+		}
+		if b.pending == nil {
+			return
+		}
+		c := b.pending
+		b.pending = nil
+		b.running, b.done = true, make(chan struct{})
 		b.mu.Unlock()
-	}()
+		q.runAdmissionWait(b, c)
+		b.mu.Lock()
+	}
 }
 
 // The commit already freezes these inputs for supported status reads. Capturing

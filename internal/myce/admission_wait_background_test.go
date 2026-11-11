@@ -24,6 +24,7 @@ func (c *admissionWaitGateClock) Now() time.Time {
 
 func TestAdmissionWaitBackgroundCoalescesAndPaces(t *testing.T) {
 	q, clock := fixture(t)
+	asynchronousAdmissionWait(t, q)
 	m := cpuMachine("worker", "host", "cpu", 1, 16)
 	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
 		t.Fatal(err)
@@ -162,6 +163,8 @@ func TestAdmissionWaitBackgroundFencesResumeAndRetry(t *testing.T) {
 // build's tail after the final check-in. Pending cooldown work is not forced.
 func BenchmarkAdmissionWaitCheckin(b *testing.B) {
 	q, workers := candidateCostFixture(b)
+	drainAdmissionWait(b, q)
+	asynchronousAdmissionWait(b, q)
 	clock := q.clock.(*workerFakeClock)
 	for i := 160; i < 6500; i++ {
 		source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]

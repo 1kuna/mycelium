@@ -25,7 +25,7 @@ func TestWaitParentDeath(t *testing.T) {
 	parent.Store(1)
 	select {
 	case <-ctx.Done():
-	case <-time.After(time.Second):
+	case <-time.After(devTestTimeout):
 		t.Fatal("parent death did not end wait")
 	}
 }

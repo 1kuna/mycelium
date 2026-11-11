@@ -18,7 +18,8 @@ func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
 	t.Setenv("MYCE_TEST_DEVICE_CHILD", pidFile)
 	// The query exits, but a descendant retains stdout/stderr. CommandContext
 	// alone cannot interrupt Output's pipe-copy goroutines after that exit.
-	script := "#!/bin/sh\nsleep 5 &\necho $! > \"$MYCE_TEST_DEVICE_CHILD\"\nexit 0\n"
+	// The descendant outlives the test's backstop; cleanup kills it.
+	script := "#!/bin/sh\nsleep 120 &\necho $! > \"$MYCE_TEST_DEVICE_CHILD\"\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,11 +36,10 @@ func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
 		}
 	})
 	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}}
-	start := time.Now()
-	_, _, err := w.attemptDeviceMemoryReading(context.Background(), map[int]bool{42: true}, nil, nil)
-	if elapsed := time.Since(start); elapsed >= 4*time.Second {
-		t.Fatalf("inherited pipe stalled device query for %s", elapsed)
-	}
+	var err error
+	returnsWhileBlocked(t, "device query with inherited pipe", func() {
+		_, _, err = w.attemptDeviceMemoryReading(context.Background(), map[int]bool{42: true}, nil, nil)
+	})
 	if err != errAttemptMemoryPending {
 		t.Fatalf("incomplete query must remain unknown: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestAttemptMemoryNonreclaimableRequiresCompleteSampling(t *testing.T) {
 			defer finish()
 			select {
 			case <-f.sampled:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("host sampler did not produce a sample")
 			}
 			p := finish()

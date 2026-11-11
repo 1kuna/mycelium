@@ -228,7 +228,7 @@ func TestNativeIsolationHardware(t *testing.T) {
 						if f.err != nil || f.result.ReleasePending {
 							t.Errorf("failure cleanup: %+v", f)
 						}
-					case <-time.After(10 * time.Second):
+					case <-time.After(testWaitTimeout):
 						t.Error("failure cleanup unconfirmed")
 					}
 				}

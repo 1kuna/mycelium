@@ -298,7 +298,7 @@ func TestResolveExtensionCheckTargetInstalledCPU(t *testing.T) {
 // hold up queue replacement. Test-owned roots must outlive that preparation.
 // Register before callers register Close so this join runs after their teardown,
 // including when later dev configuration fails after Open started preparation.
-func startTestDev(t *testing.T, c DevConfig, configure ...func(*Queue)) (*Dev, error) {
+func startTestDev(t testing.TB, c DevConfig, configure ...func(*Queue)) (*Dev, error) {
 	t.Helper()
 	return startDev(c, func(q *Queue) {
 		t.Cleanup(func() {

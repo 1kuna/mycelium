@@ -81,7 +81,7 @@ func TestS6ReviewOnboardingWhileDrained(t *testing.T) {
 	go func() { done <- w.Run(ctx) }()
 	select {
 	case <-settled:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("worker did not settle")
 	}
 	st, err := q.HostMaintenanceStatus("host")
@@ -153,7 +153,7 @@ func TestMaintenanceRunningBenchmark(t *testing.T) {
 					if err != nil && !errors.Is(err, context.Canceled) {
 						t.Error(err)
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Error("worker did not stop")
 				}
 			}()
@@ -234,13 +234,13 @@ func TestMaintenanceDelayedBenchmarkCommand(t *testing.T) {
 					if err != nil && !errors.Is(err, context.Canceled) {
 						t.Error(err)
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(testWaitTimeout):
 					t.Error("worker did not stop")
 				}
 			}()
 			select {
 			case <-entered:
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("no benchmark authorization")
 			}
 			name := action

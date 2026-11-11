@@ -45,7 +45,7 @@ func TestDockerSlowStartHasIndependentBudget(t *testing.T) {
 		if !f.result.Success || f.result.ReleasePending {
 			t.Fatalf("slow successful start lost: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("slow start did not finish")
 	}
 }
@@ -101,7 +101,7 @@ func TestDockerCancelledStartRestartAfterRemoval(t *testing.T) {
 		if f.result.Success || f.result.ReleasePending || !f.result.Interrupted {
 			t.Fatalf("restart lost exact cleanup/outcome: %+v", f)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("restart after removal retained fence")
 	}
 }
@@ -172,7 +172,7 @@ func TestDockerCancelledStartSettlesExactContainer(t *testing.T) {
 				if f.result.Success || f.result.ReleasePending || !f.result.Interrupted {
 					t.Fatalf("cancelled start did not release as interruption: %+v", f)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(testWaitTimeout):
 				t.Fatal("cancelled start retained permanent fence")
 			}
 			data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))

@@ -68,7 +68,7 @@ func TestRQv2WorkerRecoversRunningContainer(t *testing.T) {
 		if got.State != "succeeded" || got.InfrastructureRetries != 0 || got.Attempt != 1 {
 			t.Fatalf("live recovered attempt must complete without requeue: state=%s retries=%d attempt=%d error=%s", got.State, got.InfrastructureRetries, got.Attempt, f.result.Error)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("recovery did not settle")
 	}
 }
@@ -201,7 +201,7 @@ func TestRQv2OperatorMarkerPreservesSavedStageFailure(t *testing.T) {
 			if err != nil {
 				t.Error(err)
 			}
-		case <-time.After(8 * time.Second):
+		case <-time.After(testWaitTimeout):
 			t.Error("worker did not stop")
 		}
 	}()
