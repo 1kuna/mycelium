@@ -157,6 +157,10 @@ func TestSubmissionAdviceDoesNotHoldQueueAfterCommit(t *testing.T) {
 // keyed replay, and must keep the committed policy and frozen spec.
 func TestProductionSubmitReceiptDoesNotDecodeHistory(t *testing.T) {
 	q, clock := fixture(t)
+	// The receipt must not wait for the off-lock evidence build, which decodes
+	// the held history record; that independence exists only in production's
+	// asynchronous mode.
+	asynchronousAdmissionWait(t, q)
 	budgetHost(q, 64<<20, 1)
 	q.s.Jobs["retained"] = &Job{ID: "retained", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
 	if err := q.update(func() error { return nil }); err != nil {
