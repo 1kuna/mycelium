@@ -442,7 +442,10 @@ func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
 	}
 	// Open production work, declared or queued, keeps an enabled host able to
 	// start its next stage. Expiry or closure releases the wait; no deadline here.
-	if reason := q.productionDrainBlocker(h.Host); reason != "" {
+	// A critical update may interrupt production (MY-39): it checkpoints and
+	// requeues, and requeued production waits for the host under the
+	// upgrade's temporary drain instead of failing.
+	if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical {
 		return "waiting for open production work: " + reason + "; host admission remains enabled"
 	}
 	return ""

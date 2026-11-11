@@ -266,3 +266,59 @@ func TestFleetOwnedDrainMakesProductionWaitThenStoppedDrainFails(t *testing.T) {
 		t.Fatal("retained drain did not fail fast", got.State, got.Reason)
 	}
 }
+
+// A critical update may interrupt production (MY-39): an open lease does not
+// hold its host. The running stage gets the ordinary checkpoint stop, and a
+// stage submitted during the upgrade's drain waits for the host to return.
+func TestCriticalFleetUpgradeProceedsPastProductionLease(t *testing.T) {
+	q, c, gpu, _ := productionLeaseFleet(t)
+	if _, err := q.OpenProductionLease(ProductionLeaseRequest{Project: "test", Key: "pipeline", TTL: "6h", Stages: []ProductionStage{cudaStage()}}); err != nil {
+		t.Fatal(err)
+	}
+	s := cudaProductionSpec()
+	s.StartWindow = "10m" // Covers stop grace and service-health verification.
+	first := submit(t, q, s)
+	run := check(t, q, gpu, nil).Job
+	if run == nil || run.ID != first.ID {
+		t.Fatal("stage 1 not assigned")
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{Urgency: "critical"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		fleetTick(t, q)
+		if h := q.fleetActiveHost(); h != nil && h.Host == "gpu-host" {
+			break
+		}
+		fleetActivate(t, q, c)
+	}
+	h := q.fleetActiveHost()
+	if h == nil || h.Host != "gpu-host" || h.CriticalStopAt == nil || !q.fleetDrainTemporary("gpu-host") {
+		t.Fatal("critical update waited on the lease", q.fleetUpgradeStatus())
+	}
+	if got := job(t, q, first.ID); got.State != "stopping" {
+		t.Fatal("running stage not asked to checkpoint and stop", got.State)
+	}
+	stopped := result(run, false)
+	stopped.Interrupted = true
+	if err := q.Complete(stopped); err != nil {
+		t.Fatal(err)
+	}
+	next := submit(t, q, s)
+	fleetTick(t, q)
+	for _, id := range []string{first.ID, next.ID} {
+		if got := job(t, q, id); got.State != "queued" {
+			t.Fatal("stage failed during the critical drain", id, got.State, got.Reason)
+		}
+	}
+	for q.s.FleetUpgrade.State != "complete" {
+		fleetActivate(t, q, c)
+		fleetTick(t, q)
+	}
+	if q.maintenanceBlocked("gpu-host") {
+		t.Fatal("critical update kept its drain")
+	}
+}
