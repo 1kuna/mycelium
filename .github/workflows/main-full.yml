@@ -13,26 +13,66 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# One `myce run --entry --out` per platform does the whole trip (#1341): submit
+# the checked-out commit, wait, fetch verified outputs, and on SIGINT/SIGTERM
+# cancel by key. The entry's result check makes success mean the suite passed.
+# Public logs carry fixed lines only; command logs and receipts stay in the
+# runner's private temp folder. Only the listed variables reach myce, which
+# reopens authority from the host's installed configuration: no GitHub
+# credentials or MYCE_TOKEN cross over. Requires an installed myce with #1343.
+env:
+  KEY: main-ci:${{ github.sha }}
+  OWNER: ${{ github.run_id }}:${{ github.run_attempt }}
+
 jobs:
   full:
     if: github.repository == '1kuna/mycelium' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, mycelium-ci]
     timeout-minutes: 360
     steps:
-      - name: Reserve time for gate cancellation before the job limit
-        run: |
-          python3 - <<'PY'
-          import os, time
-          with open(os.environ['GITHUB_ENV'], 'a') as stream:
-              stream.write(f'MYCELIUM_CI_DEADLINE={time.monotonic() + 350 * 60}\n')
-          PY
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
       - name: Test the event commit
-        run: python3 scripts/actions-full.py
+        # GitHub's six-hour job limit is external; stopping here leaves time for cleanup.
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          echo "Main full source: $GITHUB_SHA (github.sha)" | tee -a "$GITHUB_STEP_SUMMARY"
+          platforms=(darwin linux) entries=(mycelium-gate-full-darwin mycelium-gate-full) pids=()
+          for i in 0 1; do
+            env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" myce run --entry "${entries[i]}" \
+              --key "$KEY:${platforms[i]}:$OWNER" --out "$RUNNER_TEMP/${platforms[i]}" >"$RUNNER_TEMP/${platforms[i]}.log" 2>&1 &
+            pids[i]=$!
+          done
+          # Forward the runner's stop signal; myce cancels by key and exits 130 once confirmed.
+          trap 'kill -TERM "${pids[@]}" 2>/dev/null' INT TERM
+          failed=0
+          printf '| Platform | Result | Mycelium job |\n| --- | --- | --- |\n' >>"$GITHUB_STEP_SUMMARY"
+          for i in 0 1; do
+            # A trapped signal interrupts wait; keep waiting until myce itself exits.
+            while wait "${pids[i]}"; code=$?; [ "$code" -gt 128 ] && kill -0 "${pids[i]}" 2>/dev/null; do :; done
+            job=$(sed -nE 's/^([A-Za-z0-9_-]+) submitted.*/\1/p' "$RUNNER_TEMP/${platforms[i]}.log" | head -1)
+            case $code in
+              0) state=succeeded ;;
+              130) state=cancelled ;;
+              2|125) state='infrastructure failure' ;;
+              64|65|69|74|75|78) state="submission refused (exit $code)" ;;
+              *) state="failed (exit $code)" ;;
+            esac
+            [ "$code" = 0 ] || failed=1
+            echo "${platforms[i]}: $state; job ${job:-none}"
+            echo "| ${platforms[i]} | $state | ${job:-none} |" >>"$GITHUB_STEP_SUMMARY"
+          done
+          exit $failed
       - name: Cancel any unfinished gates owned by this attempt
-        if: always()
+        if: failure() || cancelled()
         timeout-minutes: 5
-        run: python3 scripts/actions-full.py --cleanup-only
+        shell: bash
+        run: |
+          for platform in darwin linux; do
+            env -i HOME="$HOME" PATH="$PATH" myce cancel --wait --project mycelium --key "$KEY:$platform:$OWNER" >/dev/null 2>&1 \
+              && echo "$platform: cleanup confirmed" || { echo "$platform: cleanup unconfirmed"; s=1; }
+          done
+          exit ${s:-0}

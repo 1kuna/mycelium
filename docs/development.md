@@ -929,10 +929,13 @@ The summary's tested SHA matches the event commit carrying the workflow check.
 The workflow's own check reports success/failure. No commit-status writer or
 personal access token is needed.
 
-[`scripts/actions-full.py`](../scripts/actions-full.py) freezes the corresponding
-platform full-gate profile to the event SHA and submits it once for
-Darwin arm64 and once for Linux, eligible on either amd64 or arm64. CI preserves
-the profile's targets, resources, environment, output contract and check. Linux is one chosen
+The [`main-full` workflow](../.github/workflows/main-full.yml) runs one
+`myce run --entry NAME --key KEY --out DIR` per platform (#1341): the
+`mycelium-gate-full-darwin` adapter entry for Darwin arm64 and
+`mycelium-gate-full` for Linux, eligible on either amd64 or arm64. The adapter
+freezes the checked-out event commit (`git: HEAD`) and keeps the entry's
+targets, resources, environment, output contract and result check. The runner's
+installed `myce` must include `run --wait/--out` (#1343). Linux is one chosen
 target per run, not an architecture matrix. The temporary architecture
 exclusion from [#527](https://github.com/1kuna/mycelium/issues/527) is removed after
 the bounded native gate-like I/O measurement described in
@@ -941,15 +944,16 @@ Linux full profile and converted adapter already included both architectures.
 Their measured 6 GiB declaration and Darwin's `memory: auto` remain as documented
 above; #767 did not establish an unconstrained Linux auto envelope.
 There are no host pins; Mycelium chooses each worker and
-provides the existing `mycelium-gate` environment. Both submissions happen
-before `myce wait` waits for all jobs, even if one fails. Successful jobs also
-require `myce result` to download the accepted, verified `gate-result.txt` marker.
+provides the existing `mycelium-gate` environment. Both runs start together and
+CI waits for both, even if one fails. The entry's result check runs inside the
+job, so success means `gate-result.txt` reads `gate full: exit=0`; `--out` then
+downloads the accepted, size- and SHA-256-verified outputs.
 The event checkout supplies its profiles, relative inputs and helpers together.
-The runner freezes source/inputs, waits and verifies small accepted results; full suites never run on it directly. A profile exit 78 with `no_qualified_target`
+The runner freezes source/inputs, waits and verifies small accepted results; full suites never run on it directly. A submission exit 78 with `no_qualified_target`
 is a qualification/total-allowance refusal, not a busy-worker indication. Busy
-qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
-host-memory need and allowance numerically for that refusal; other qualification
-details remain in the private receipt. It does not retry an impossible allowance
+qualified hosts accept queued jobs and `myce run` waits for them. CI reports
+`submission refused (exit 78)`; the qualification details stay in the private
+run log. It does not retry an impossible allowance
 or weaken the learned memory envelope. Darwin proves the native CGO target; Linux
 proves its native builds and full race/dev suite.
 
@@ -961,39 +965,38 @@ cancelled key cannot poison a rerun. There is no automatic retry loop.
 The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
-SIGINT, SIGTERM, timeout and all normal/error exits cancel both intended keys
-using `myce cancel --project mycelium --key KEY`. This also fences a submission
-whose receipt was lost or which reaches the queue after cancellation. The
-submitter stops and reaps its active CLI child before cleanup. An `always()`
-workflow step repeats this idempotent cleanup if Actions interrupts the submitter
-before it finishes. Terminal suite results are preserved by the queue's existing
+On SIGINT or SIGTERM the step forwards SIGTERM to each `myce run` by PID; `myce
+run` cancels its key and exits 130 once the queue confirms. When the step fails
+or is cancelled, a final step runs `myce cancel --wait --project mycelium --key
+KEY` for both keys. This also fences a submission whose receipt was lost or which
+reaches the queue after cancellation. Terminal suite results are preserved by the queue's existing
 cancellation semantics. Queued gates lose their capacity-accumulation claim;
 running gates follow normal stop/release custody. Cleanup never scans jobs by
 age or cancels PR gates, another project's jobs, another merge or another attempt.
 
-GitHub's six-hour job limit is an external owner deadline. A monotonic budget
-starts before checkout and interrupts normal submitter work after 350 minutes,
-leaving five minutes for its two cancellation requests (150 seconds each) and
-five minutes for Actions overhead. The workflow explicitly keeps the 360-minute
-job limit; its final cleanup step also has a five-minute bound. These reserves
-trade up to ten minutes of possible gate progress for cleanup before GitHub can
-kill the job. A timeout fails CI and cancels unfinished gates even if healthy;
+GitHub's six-hour job limit is an external owner deadline. The test step has a
+345-minute limit, which leaves checkout and the five-minute cleanup step inside
+the 360-minute job limit. These reserves trade up to fifteen minutes of possible
+gate progress for cleanup before GitHub can kill the job. A timeout fails CI and cancels unfinished gates even if healthy;
 it is not a new general gate watchdog. Cleanup reports only fixed confirmation
 states; unconfirmed cancellation fails CI and requires private reconciliation
 with that attempt's exact keys. An unavailable queue or abruptly lost runner can
-prevent confirmation; repeat `scripts/actions-full.py --cleanup-only` with the
-original SHA, run ID and attempt environment after authority is restored.
-Only never-started concurrency-pending workflows are replaced. Both the submitter
-and final cleanup step use the event SHA for this attempt's keys.
+prevent confirmation; repeat `myce cancel --wait --project mycelium --key
+main-ci:SHA:OS:RUN_ID:RUN_ATTEMPT` for both platforms after authority is restored.
+Only never-started concurrency-pending workflows are replaced. Both steps use the
+event SHA for this attempt's keys.
 
-Inspect failures privately with `myce logs JOB_ID`; public logs and
-the summary contain only job IDs, fixed states and exit codes, never raw CLI
-receipts, remote reasons or host paths.
+Each `myce run`'s output goes to a private file in the runner's temporary
+folder, which is emptied after the job. Inspect failures privately with `myce
+logs JOB_ID`; public logs and the summary contain only job IDs, fixed states and
+exit codes, never raw CLI receipts, remote reasons or host paths. A failed suite
+shows the command's exit code, `failed (exit N)`.
 
 A submission refusal or outage is an **infrastructure failure**, distinct from a
-submitted suite reporting `failed`. Its platform row says `infrastructure failure`
-and the workflow emits a `CI infrastructure failure` error annotation: that
-platform has no verified suite result. Submission may have been accepted despite
+submitted suite reporting `failed`. Its platform row says `submission refused (exit N)`, or
+`infrastructure failure` for exit 125 (wait, download or cancel failure after
+acceptance) and exit 2 (an installed CLI without `--out`): that platform has no
+verified suite result. Submission may have been accepted despite
 a lost reply. Resolve the infrastructure problem privately, then
 repeat cleanup for the original attempt. Optional CI failures are reported on
 that run; later pushes test their own event commits rather than retrying historical failures.
@@ -1017,8 +1020,8 @@ credentials are not copied into the workspace, workflow, Actions secrets or
 step environment. Start/configure the runner with a clean environment and no
 `MYCE_*`, `GH_TOKEN` or `GITHUB_TOKEN` variables. Launch the service through
 `env -i` with explicit HOME, USER, LOGNAME, PATH and locale settings, so it cannot
-inherit credentials from the user service manager either. The submitter gives CLI children
-only HOME, PATH, temporary/locale settings and GitHub's process-cleanup marker;
+inherit credentials from the user service manager either. The workflow starts `myce` through `env -i`
+with only HOME, PATH and TMPDIR;
 no GitHub token, fleet token or notifier is inherited. Profiles contain only
 the gate's authored environment. Mycelium's worker also filters `MYCE_TOKEN`
 from payload environments. This is a trusted-main service, not an isolation
@@ -1067,7 +1070,8 @@ cleans old workspace state. Source-upload staging is removed by the CLI after
 confirmed submission. Runner diagnostic logs stay private; do not upload them
 as public artifacts. Use normal queue artifact retention for fleet outputs.
 
-Validate offline with `python3 scripts/test-actions-full.py` and the quick gate. After merge, verify the push-to-main run
+Validate workflow changes with the quick gate and a targeted run of the step
+against a stub `myce` (pass, failure and SIGINT/SIGTERM forwarding). After merge, verify the push-to-main run
 uses the registered self-hosted runner and reports both accepted platform
 results and the tested event SHA before calling activation complete. No full
 suite runs on a PR push.
