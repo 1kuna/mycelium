@@ -85,6 +85,16 @@ Quick is feedback for the selected change, not evidence that every test passed.
 Module dependency changes also require an explicit `full`. The selector
 regression can be run with `python3 scripts/test-gate-related.py`.
 
+Every quick selection also includes a fixed canary set (`CANARIES` in
+`scripts/gate-related.py`, #1224): the complete planning-outcome digest, status
+rendering in `internal/myce` and `cmd/myce`, and opening the previous release's
+database. Textual selection missed exactly these whole-output checks for several
+merges on 2026-11-11. They cost about 12 s of race test time (11.8 s in
+`internal/myce`, 0.5 s in `cmd/myce`, measured on the development host), and they
+make quick always build the shared Docker simulator image, which is normally
+cached. A docs-only change still runs the standalone dev smoke. Renaming a
+canary away fails the selector regression.
+
 Run `./scripts/gate.sh full` once for a batch before deployment. It runs the lean
 full race suite once, including dev checkpoint/resume, model and enrollment
 end-to-end tests. It does not repeat those packages in a second race pair or a
@@ -926,6 +936,21 @@ tests pass. No independent review, review rounds, exact-head full gate per PR,
 main-CI wait or gate-exception procedure is required. Run the full suite once
 per release batch and fix breakage forward. Automatic main runs remain diagnostic
 feedback; failures are work to fix, not a hold on unrelated merges.
+
+Immediately before merging, run `scripts/gate-merge-check.sh` on the committed
+branch (#1224). It fetches `origin/main` and first runs
+`scripts/gate-revert-check.py`, which fails if the branch would restore any file
+to an older version that a newer main commit changed. It prints each file and
+the commits it would undo, so a stale tree committed onto a fresh tip cannot
+silently revert merged work, as the holds commit did to #1356 and #1357. For an
+intended revert, pass `--allow-reverts` and say so in the PR. The script then
+writes the would-be merge with `git merge-tree` (no working-tree change), checks
+it out at `.gate/merge-check`, and runs `go build ./...`, `go vet ./...` and a
+Linux `go vet ./...`. A conflict or a compile/vet failure means main would break
+as it did after #1359: rebase and rerun. It takes about 13 s warm and 35 s cold
+on the development host. Replaying today's 103 PR merges flagged only the holds
+PR and its intended repair; replaying #1359 onto its actual main fails to
+compile, as main did. The detector regression is `python3 scripts/test-gate-revert-check.py`.
 
 Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
