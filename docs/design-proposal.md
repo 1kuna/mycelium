@@ -1677,9 +1677,9 @@ unified hosts. An unknown device peak cannot supply an exact unified estimate.
 Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
-For unified CUDA, retain a physical free-RAM floor equal to the larger of the
-existing OS/driver reserve (at least 16 GiB) and physical RAM minus the configured
-host allowance. Fresh raw host observations and outstanding growth bound queue
+For unified CUDA, retain a physical free-RAM floor equal to the existing
+OS/driver reserve (at least 16 GiB); see the 2026-11-11 amendments for the
+allowance. Fresh raw host observations and outstanding growth bound queue
 admission; workers recheck raw RAM at launch. Cgroup credit never reduces the
 device vector. Lower tiers must also leave room for a sole qualified host's
 queued or forecast production envelope with existing estimator margins. Existing
@@ -2756,9 +2756,13 @@ floor is compared with live used RAM, which already contains the OS, driver and
 idle-service footprint. A measured allowance already excludes that footprint,
 so physical RAM minus a measured allowance subtracts it twice. With a measured
 allowance and no shared-interactive profile, the floor is the existing OS/driver
-reserve alone, and the allowance still caps reservations. Authored allowances
-and shared-interactive hosts keep the larger of the reserve and physical RAM
-minus the allowance.
+reserve alone, and the allowance still caps reservations. The same holds for an
+authored allowance: an allowance of any origin caps charges and is never a
+floor, so the idle footprint is not withheld twice (orchestrator decision,
+2026-11-11, under MY-34; this replaces the earlier agent design that kept the
+complement for authored allowances). Only shared-interactive hosts keep the
+larger of the reserve and physical RAM minus the allowance, as their stricter
+owner protection under MY-45.
 
 ## Amendment: host roles and measured capacity (2026-11-11)
 

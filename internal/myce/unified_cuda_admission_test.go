@@ -15,6 +15,7 @@ func unifiedCUDAAdmissionMachine() Machine {
 	m.CapabilityProfile.SystemMemoryBytes = 121 << 30
 	m.FreeMemoryGB, m.TotalMemoryGB = 96, 96
 	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 96, 90
+	m.ReservedMemoryGB = 25 // The physical floor is the reserve; the allowance caps charges.
 	m.MemoryCeilingSlackGB = .125
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 15}
 	return m
@@ -89,11 +90,19 @@ func TestUnifiedCUDAAdmissionModelLaunchRechecksFloor(t *testing.T) {
 	if err := rt.checkLoadMemory(t.Context(), loading); err != nil {
 		t.Fatal("physical recovery did not permit model", err)
 	}
+	// The runtime reads a changed allowance at once. An authored allowance
+	// caps the charge; it is never a floor on free RAM.
 	rt.mu.Lock()
-	rt.memoryMachine.HostMemoryBudgetGB = 64 // New floor = 121 - 64 = 57 GiB.
+	rt.memoryMachine.HostMemoryBudgetGB = 64
 	rt.mu.Unlock()
-	if err := rt.checkLoadMemory(t.Context(), loading); err == nil || !strings.Contains(err.Error(), "insufficient host RAM") {
-		t.Fatal("model retained a stale allowance floor", err)
+	if err := rt.checkLoadMemory(t.Context(), loading); err != nil {
+		t.Fatal("authored allowance became a physical floor", err)
+	}
+	rt.mu.Lock()
+	rt.memoryMachine.HostMemoryBudgetGB = 30 // Below the 32.125 GiB charge.
+	rt.mu.Unlock()
+	if err := rt.checkLoadMemory(t.Context(), loading); admissionDetail(err, Job{}) == nil || admissionDetail(err, Job{}).Subcheck != "configured_host_allowance" {
+		t.Fatal("model retained a stale allowance", err)
 	}
 	// Legacy admission-only models may omit host RAM; CUDA still uses physical RAM.
 	rt.mu.Lock()
@@ -379,8 +388,9 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 }
 
 // Live numbers from the measured unified host (2026-11-11): 121.06 GiB, idle
-// maximum 5.00, explicit reserve 16, measured allowance 100.06. Live used RAM
-// already holds the idle footprint, so the floor is the reserve alone (not 21).
+// maximum 5.00, explicit reserve 16, allowance 100.06. Live used RAM already
+// holds the idle footprint, so with a measured or authored allowance the floor
+// is the reserve alone (not 21). Only the shared-interactive host keeps 21.
 func TestUnifiedCUDAFloorMeasuredAllowanceCountsBaselineOnce(t *testing.T) {
 	m := unifiedCUDAAdmissionMachine()
 	total := 121.06
@@ -393,7 +403,7 @@ func TestUnifiedCUDAFloorMeasuredAllowanceCountsBaselineOnce(t *testing.T) {
 		floor    float64
 	}{
 		{"measured", true, false, 16},
-		{"authored", false, false, 21},
+		{"authored", false, false, 16},
 		{"measured-shared", true, true, 21},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
