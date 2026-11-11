@@ -23,6 +23,9 @@ takes one path: **declare needs → submit once → one batched wait → fetch �
   visibility. Restrict hardware only for a real requirement, such as an exact
   device under qualification or an owner-dedicated or prohibited host; see
   [explicit restrictions](references/submit.md#explicit-placement-restrictions).
+- Open a production lease before a multi-stage production pipeline and close it
+  after, so maintenance keeps a host able to start your next stage; see
+  [production leases](references/waiting.md#production-leases).
 - Check `myce version` and the command's `--help`. A field your installed queue
   or worker doesn't return is unknown, not false; see
   [release behavior](references/release-behavior.md).
@@ -186,7 +189,7 @@ Load the page for your branch:
   portability, models, environments, NAS inputs, checkpoints, fan-out,
   isolation, uploads, explicit placement restrictions.
 - [Waiting](references/waiting.md): blockers, admission evidence, device and
-  storage holds, urgency, reservations, pausing.
+  storage holds, urgency, reservations, pausing, production leases.
 - [Wait and status](references/wait-and-status.md): batch waits, status sections,
   observers and detached completion, progress and ETA, telemetry, project doctor.
 - [Results](references/results.md): output-contract failures, diagnostics,

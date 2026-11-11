@@ -655,6 +655,19 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+For a critical update (MY-39), add `--urgency critical`. Each host is still
+updated one at a time, but when it is selected the queue requests the existing
+planned-maintenance stop at once instead of waiting for an idle moment:
+resumable work checkpoints within the usual stop grace and is requeued, and
+the selected queue also stops its model streams. Open production leases do not
+hold a critical update; production requeued or submitted during the upgrade's
+drain waits for the host to return. Exact release is still required before
+restart, and an elapsed grace never proves it. Status lists each host's
+`stop_requests` (the attempt, whether it was resumable, its accepted progress
+before the stop). Resume and fix-forward must repeat the same urgency; a
+replaced critical operation keeps its stop records in `fleet_superseded`.
+Without the flag, urgency is normal.
+
 For a queue hotfix that should wait for production to finish, use
 `myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
 `--queue-only` selects only the queue service, including when workers share its
@@ -701,6 +714,16 @@ operation for the workers without restarting the already-current queue.
 These options require a queue version that implements them; they cannot change
 restart behavior inside an older installed queue or helper.
 
+A rollout needs no consumer confirmation. Projects with open production work,
+including stages they have not submitted yet, declare it with a
+[production lease](#production-leases); the rollout keeps an enabled host for
+each lease and for each queued production job, and upgrades those hosts after
+the lease closes or expires. The earlier manual zero-open check before each
+restart is retired once a queue with #1009 is deployed. Rollback to the previous
+release stays as described in
+[queue-only rollback](#queue-only-rollback-from-r69-to-r68); a newer queue's
+leases are simply ignored by an older one.
+
 Host order, idle-moment selection, helper verification, stale-authorization
 recovery and per-host failure handling are in
 [fleet upgrade internals](reference/fleet-upgrades.md). When an operation stops,
@@ -726,6 +749,35 @@ No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time
 never proves release. Native service/signing qualification and the first live
 rollout remain separate from the laptop acceptance tests.
+
+## Production leases
+
+A project declares open production work so maintenance never breaks an
+in-flight pipeline, including the stages it has not submitted yet (#1009):
+
+```sh
+myce fleet lease open --project P --key RUN --for 4h --platform cuda --memory-gb 24
+myce fleet lease close --project P --key RUN
+myce fleet lease list
+```
+
+Python: `client.open_production_lease(project, key, "4h", stages)`,
+`client.close_production_lease(project, key)`, `client.production_leases()`.
+HTTP: `POST /api/production-leases` (`project`, `key`, `ttl`, optional `stages`),
+`DELETE /api/production-leases/PROJECT/KEY`, `GET /api/production-leases`.
+
+Each stage carries the placement fields of a job (`needs`, `allowed_machines`,
+`excluded_machines`); without stages the lease covers any host the project may
+use. Reopening the same key renews it with a new expiry. The lease always ends
+on its own; the project picks the duration. It grants no priority and reserves
+no capacity. While it is open:
+
+- `myce host drain` of an enabled host refuses with HTTP 409
+  `production_work_open` when that host is the last enabled one able to start a
+  declared stage or a queued production job. `myce host status HOST` shows the
+  same reason as `production_blocker`. `myce host disable` remains the explicit
+  out-of-service action and is not refused.
+- `myce fleet upgrade` leaves that host pending with admission open, as above.
 
 ## Preserve learned curves across a release
 

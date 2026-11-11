@@ -165,6 +165,30 @@ Pause only your own queued job: `myce pause JOB_ID --reason TEXT`, optionally
 running attempts cannot be paused; cancelling and resubmitting does not improve
 their place. Shared policy belongs to the queue owner.
 
+## Production leases
+
+Before a multi-stage production pipeline, declare it so host drains and fleet
+upgrades never strand a stage you haven't submitted yet. While the lease is
+open, a planned drain keeps at least one enabled host able to start each
+declared stage; queued production jobs get the same protection without a lease.
+
+```sh
+myce fleet lease open --project P --key RUN --for 4h --platform cuda --memory-gb 24
+myce fleet lease close --project P --key RUN
+```
+
+Python: `client.open_production_lease(project, run_key, "4h", [{"needs": {...}}])`
+and `client.close_production_lease(project, run_key)`. Each stage takes a job's
+placement fields (`needs`, `allowed_machines`, `excluded_machines`); without
+stages the lease covers any host your project may use. Pick a duration that
+covers the pipeline, reopen the same key to renew, and close it when the last
+stage is submitted. It expires on its own, grants no priority and reserves no
+capacity. A critical Mycelium update may still checkpoint and requeue production
+work (MY-39); requeued or newly submitted stages wait for the host to return.
+`myce fleet lease` needs a queue release containing #1009; on an older queue the
+request is refused and maintenance coordination stays manual. See
+[production leases](../../../docs/operations.md#production-leases).
+
 Estimates need comparable complete work and stay uncertain; they are not
 deadlines. Distinguish queue wait, preparation, execution, output acceptance and
 release. See [status contracts](../../../docs/status.md).

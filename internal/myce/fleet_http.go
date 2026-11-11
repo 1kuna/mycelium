@@ -13,6 +13,7 @@ import (
 )
 
 func (a API) registerFleetUpgrade(mux *requestMux) {
+	a.registerProductionLeases(mux)
 	mux.HandleFunc("POST /api/fleet/upgrade", func(w http.ResponseWriter, r *http.Request) {
 		var request FleetUpgradeRequest
 		if !decode(w, r, &request) {

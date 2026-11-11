@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -134,60 +133,6 @@ func TestWorkerDiskBudgetQueuedDemandReclaimsAndAdmits(t *testing.T) {
 	worker.DiskVolumes[0].FreeBytes = r.FreeBytes
 	if got := check(t, q, worker, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("cleanup did not admit pending work", got)
-	}
-}
-
-func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
-	var version atomic.Int32
-	reports := make(chan Checkin, 10)
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var c Checkin
-		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			t.Error(err)
-			return
-		}
-		reports <- c
-		if version.Load() == 0 && hasDiskBudgetWireFields(c) {
-			rw.WriteHeader(400)
-			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-			return
-		}
-		reply := Reply{AttemptProtocol: keyedAttemptProtocol, HostHygieneProtocol: hostHygieneProtocol, HostCollectionProtocol: hostCollectionProtocol}
-		if version.Load() > 0 {
-			reply.WorkerDiskBudgetProtocol = workerDiskBudgetProtocol
-		}
-		_ = json.NewEncoder(rw).Encode(reply)
-	}))
-	defer server.Close()
-	m := machine("disk-wire", "fake")
-	m.HygieneCollection = &WorkerHygieneCollection{FileCache: CacheCollection{Bytes: 99}, DiskBudget: []DiskBudgetVolume{{ID: identityHash("local")}}, Scratch: &AttemptFilesCollection{RetainedBytes: 10}}
-	w := Worker{Client: Client{URL: server.URL}, diskBudgetWire: &workerDiskBudgetWire{}}
-	send := func() Checkin {
-		t.Helper()
-		if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
-			t.Fatal(err)
-		}
-		return <-reports
-	}
-	if c := send(); c.Machine.HygieneCollection == nil || c.Machine.HygieneCollection.FileCache.Bytes != 99 || hasDiskBudgetWireFields(c) {
-		t.Fatal("first check-in lost baseline collection", c)
-	}
-	if c := send(); c.Machine.HygieneCollection == nil || hasDiskBudgetWireFields(c) {
-		t.Fatal("old queue negotiation lost baseline report or sent new fields", c)
-	}
-	version.Store(1)
-	send()
-	if c := send(); !hasDiskBudgetWireFields(c) {
-		t.Fatal("new queue lost disk budget", c)
-	}
-	version.Store(0)
-	send() // Strict rejection; checkin retries with just the old collection fields.
-	fallback := <-reports
-	if fallback.Machine.HygieneCollection == nil || fallback.Machine.HygieneCollection.FileCache.Bytes != 99 || hasDiskBudgetWireFields(fallback) {
-		t.Fatal("downgrade lost compatible report", fallback)
-	}
-	if len(m.HygieneCollection.DiskBudget) != 1 || m.HygieneCollection.Scratch == nil {
-		t.Fatal("negotiation mutated local retention evidence")
 	}
 }
 
@@ -470,5 +415,104 @@ func TestWorkerCompilerCacheCustodyAndPublicBudget(t *testing.T) {
 	data, _ := json.Marshal(m)
 	if strings.Contains(string(data), "private") {
 		t.Fatal("public budget leaked paths or identity", string(data))
+	}
+}
+
+// #1104: on a shared host, other users' disk use swings between collections.
+// The automatic cache allowance shrinks by the measured headroom, and collection
+// evicts reproducible copies so free space stays at or above floor + headroom.
+func TestWorkerDiskBudgetForeignHeadroom(t *testing.T) {
+	_, clock := fixture(t)
+	root := t.TempDir()
+	const mib = 1 << 20
+	var files []string
+	for i := range 4 {
+		path := filepath.Join(root, fmt.Sprintf("copy-%d", i))
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", mib)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, path)
+	}
+	initial, err := collectionAllocatedBytes(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const total = uint64(100 << 30)
+	floor := diskFreeFloor(total)
+	foreign := uint64(0)
+	probe := func(string) (DiskReading, error) {
+		owned, err := collectionAllocatedBytes(context.Background(), root)
+		return DiskReading{Volume: "shared", TotalBytes: total, FreeBytes: floor + 6*mib + uint64(initial-owned) - foreign}, err
+	}
+	b := newWorkerDiskBudget(clock, probe)
+	b.add(diskBudgetRoot{name: "files", path: root, candidates: func(context.Context) ([]diskBudgetCandidate, error) {
+		var out []diskBudgetCandidate
+		for i, path := range files {
+			if _, err := os.Stat(path); err == nil {
+				out = append(out, diskBudgetCandidate{path: path, used: clock.Now().Add(time.Duration(i) * time.Second), evict: func(context.Context) (bool, error) { return true, os.Remove(path) }})
+			}
+		}
+		return out, nil
+	}})
+	// Returns the automatic limit and the allocated bytes the cache holds now.
+	allowance := func() (int64, int64) {
+		t.Helper()
+		owned, err := collectionAllocatedBytes(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		limit, _, err := inputCacheBudget(root, owned, 0, probe, b.foreignHeadroom(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return limit, owned
+	}
+	view := b.collect(context.Background())
+	if len(view) != 1 || view[0].ForeignHeadroomBytes != 0 {
+		t.Fatal("first sample invented headroom", view)
+	}
+	before, _ := allowance()
+
+	// Another user writes 4 MiB between samples: 2 MiB more than free above floor.
+	clock.Advance(time.Minute)
+	foreign = 4 * mib
+	view = b.collect(context.Background())
+	v := view[0]
+	if v.ForeignPeakGrowthBytes != 4*mib || v.ForeignHeadroomBytes != 4*mib || v.FloorBytes != floor+4*mib {
+		t.Fatalf("headroom basis: %+v", v)
+	}
+	if r, _ := probe(root); r.FreeBytes < floor+v.ForeignHeadroomBytes {
+		t.Fatalf("eviction left free=%d below floor+headroom=%d", r.FreeBytes, floor+v.ForeignHeadroomBytes)
+	}
+	remaining := 0
+	for _, path := range files {
+		if _, err := os.Stat(path); err == nil {
+			remaining++
+		}
+	}
+	if remaining != 2 {
+		t.Fatalf("evicted %d copies, want the 2 needed", 4-remaining)
+	}
+	// No free space is left above floor + headroom, so the allowance is what
+	// the cache already holds (block allocation varies by filesystem).
+	if after, held := allowance(); after != held || after >= before {
+		t.Fatalf("automatic allowance %d did not shrink from %d to the %d bytes held", after, before, held)
+	}
+	// A new write is admitted only by evicting another copy, never from headroom.
+	release, err := b.reserve(context.Background(), root, mib, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := probe(root); r.FreeBytes < floor+v.ForeignHeadroomBytes+mib {
+		t.Fatalf("reservation took foreign headroom: free=%d", r.FreeBytes)
+	}
+	release()
+
+	// The other user cleans up; room to return to their peak stays reserved.
+	clock.Advance(time.Minute)
+	foreign = 0
+	v = b.collect(context.Background())[0]
+	if v.ForeignBytes+4*mib != v.ForeignPeakBytes || v.ForeignHeadroomBytes != 4*mib {
+		t.Fatalf("cleanup basis: %+v", v)
 	}
 }

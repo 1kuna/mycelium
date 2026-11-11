@@ -29,6 +29,43 @@ type workerDiskBudget struct {
 	controlGrowth   map[string]uint64
 	controlPrevious map[string]uint64
 	inventoryDir    string
+	// Read by cache sizing under cache locks, so it has its own short lock
+	// rather than waiting behind a reclaim that holds mu.
+	foreignMu sync.Mutex
+	foreign   map[string]foreignDiskUse
+}
+
+// Other users' disk use on one volume: total minus free minus the allocated
+// bytes Mycelium owns there (the queue's own store counts as another user).
+// Their headroom is the larger of the room to return to their highest observed
+// use and their fastest observed growth between two collections, the cadence at
+// which this worker can evict. Below their peak the first covers a return to it;
+// at the peak the second covers one more interval of growth. Both are measured
+// since this worker started; on a host nobody else writes to, the headroom stays
+// zero. A large permanent deletion by another user reserves at most the space it
+// freed, so it never shrinks Mycelium below where it was before.
+type foreignDiskUse struct{ current, peak, peakGrowth uint64 }
+
+func (f foreignDiskUse) headroom() uint64 {
+	return max(f.peak-min(f.peak, f.current), f.peakGrowth)
+}
+
+// Zero for an unmeasured volume or a worker without a budget.
+func (b *workerDiskBudget) foreignHeadroom(path string) uint64 {
+	if b == nil {
+		return 0
+	}
+	r, err := b.probe(path)
+	if err != nil {
+		return 0
+	}
+	return b.foreignHeadroomFor(r.Volume)
+}
+
+func (b *workerDiskBudget) foreignHeadroomFor(volume string) uint64 {
+	b.foreignMu.Lock()
+	defer b.foreignMu.Unlock()
+	return b.foreign[volume].headroom()
 }
 
 type diskBudgetFloorKey struct{}
@@ -59,6 +96,12 @@ type DiskBudgetVolume struct {
 	Pressure               bool      `json:"pressure,omitempty"`
 	Warning                string    `json:"warning,omitempty"`
 	ControlGrowthBytes     uint64    `json:"control_growth_bytes"`
+	// Headroom kept free for other users, and its basis (foreignDiskUse).
+	// Sent only to queues advertising workerDiskHeadroomProtocol.
+	ForeignBytes           uint64 `json:"foreign_bytes,omitempty"`
+	ForeignPeakBytes       uint64 `json:"foreign_peak_bytes,omitempty"`
+	ForeignPeakGrowthBytes uint64 `json:"foreign_peak_growth_bytes,omitempty"`
+	ForeignHeadroomBytes   uint64 `json:"foreign_headroom_bytes,omitempty"`
 }
 
 func newWorkerDiskBudget(clock Clock, probe func(string) (DiskReading, error)) *workerDiskBudget {
@@ -93,7 +136,7 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 	if err != nil || r.TotalBytes == 0 {
 		return nil, errors.New("disk_headroom: filesystem measurement unavailable")
 	}
-	floor = max(floor, addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]))
+	floor = max(floor, addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume)))
 	if err = b.reclaim(ctx, r.Volume, root, need, floor); err != nil {
 		return nil, err
 	}
@@ -168,6 +211,18 @@ func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, nee
 // The existing retention lane owns inventory. Free-space deltas are compared
 // with an inode-union allocation ledger; deletion savings always come from a
 // fresh statfs reading rather than the sum of hardlinked candidate sizes.
+func (b *workerDiskBudget) observeForeign(volume string, current, growth uint64) foreignDiskUse {
+	b.foreignMu.Lock()
+	defer b.foreignMu.Unlock()
+	if b.foreign == nil {
+		b.foreign = map[string]foreignDiskUse{}
+	}
+	f := b.foreign[volume]
+	f.current, f.peak, f.peakGrowth = current, max(f.peak, current), max(f.peakGrowth, growth)
+	b.foreign[volume] = f
+	return f
+}
+
 func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 	if b == nil {
 		return nil
@@ -188,7 +243,8 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			continue
 		}
 		before := r.FreeBytes
-		floor := addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[volume])
+		base := addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[volume])
+		floor := addDiskBytes(base, b.foreignHeadroomFor(volume))
 		for _, active := range b.floors[volume] {
 			floor = max(floor, active)
 		}
@@ -227,7 +283,6 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			out = append(out, v)
 			continue
 		}
-		v.Pressure = r.FreeBytes < addDiskBytes(v.FloorBytes, v.ReservedBytes)
 		if old, ok := b.previous[volume]; ok && v.At.After(old.At) {
 			// Signed growth: Mycelium cleanup can hide a simultaneous foreign write.
 			growth := float64(old.FreeBytes) - float64(v.FreeBytes) - float64(v.OwnedBytes-old.OwnedBytes)
@@ -240,6 +295,16 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 				v.ExhaustionSeconds = &seconds
 			}
 		}
+		foreign := b.observeForeign(volume, r.TotalBytes-min(r.TotalBytes, addDiskBytes(r.FreeBytes, uint64(max(0, v.OwnedBytes)))), v.UnexplainedGrowthBytes)
+		v.ForeignBytes, v.ForeignPeakBytes, v.ForeignPeakGrowthBytes, v.ForeignHeadroomBytes = foreign.current, foreign.peak, foreign.peakGrowth, foreign.headroom()
+		if next := addDiskBytes(base, v.ForeignHeadroomBytes); next > v.FloorBytes {
+			// New foreign evidence raised the headroom: evict for it now rather
+			// than at the next collection. Keep this sample's free/owned pair so
+			// the next growth comparison stays consistent.
+			_ = b.reclaim(ctx, volume, roots[0].path, 0, next)
+			v.FloorBytes = next
+		}
+		v.Pressure = r.FreeBytes < addDiskBytes(v.FloorBytes, v.ReservedBytes)
 		b.previous[volume] = v
 		if b.inventoryDir != "" {
 			if control, err := b.probe(b.inventoryDir); err == nil && control.Volume == volume {
