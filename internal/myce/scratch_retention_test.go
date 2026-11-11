@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -33,7 +34,7 @@ func TestScratchRetentionQueueAuthority(t *testing.T) {
 		{name: "reviewed owner release", state: "failed", ownerRelease: true, wantRemoved: true},
 		{name: "automatic keeps unique failure", state: "failed"},
 		{name: "automatic keeps unique cancellation", state: "cancelled"},
-		{name: "old attempt not accepted by newer success", state: "succeeded", oldAttempt: true},
+		{name: "released attempt superseded by newer success", state: "succeeded", oldAttempt: true, wantRemoved: true},
 		{name: "unreleased terminal", state: "failed", policy: time.Hour, unreleased: true},
 		{name: "wrong worker", state: "succeeded", foreign: true},
 		{name: "parked custody", state: "succeeded", parked: true, expired: true},
@@ -168,6 +169,86 @@ func TestScratchRetentionReportingAndUnavailableQueue(t *testing.T) {
 	for _, id := range []string{"unavailable", "live", "legacy"} {
 		if _, err := os.Stat(filepath.Join(dir, "job-files", id, "1", "data")); err != nil {
 			t.Fatal("protected data lost", id, err)
+		}
+	}
+}
+
+// Repeated yields/requeues kept one released scratch copy per attempt for the
+// whole terminal file-retention window, filling worker disks. Superseded
+// released attempts go on the next sweep; the current, recoverable, unreleased
+// and locally held attempts stay.
+func TestScratchRetentionCollectsSupersededAttempts(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.ConfigureFileRetention(7 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	client := retentionClient(t, q)
+	m := machine("worker", "fake")
+	j := submit(t, q, spec("experiment"))
+	dir := t.TempDir()
+	payload := func(attempt int) string {
+		return filepath.Join(dir, "job-files", j.ID, strconv.Itoa(attempt), "partial")
+	}
+	var running *Job
+	for attempt := 1; attempt <= 6; attempt++ {
+		running = check(t, q, m, nil).Job
+		if running == nil || running.ID != j.ID || running.Attempt != attempt {
+			cur := job(t, q, j.ID)
+			t.Fatalf("attempt %d not assigned: %+v state=%s reason=%q", attempt, running, cur.State, cur.Reason)
+		}
+		if err := os.MkdirAll(filepath.Dir(payload(attempt)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(payload(attempt), make([]byte, 8192), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 6 {
+			if err := q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: attempt}, Interrupted: true, PoliteStop: true}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		clock.Advance(time.Hour)
+	}
+	if err := q.update(func() error {
+		for i := range q.s.Jobs[j.ID].Copies {
+			c := &q.s.Jobs[j.ID].Copies[i]
+			if c.Attempt < 6 && !c.ReleaseConfirmed {
+				t.Fatalf("requeued attempt %d not released", c.Attempt)
+			}
+			c.Recoverable = c.Attempt == 2
+			c.ReleaseConfirmed = c.ReleaseConfirmed && c.Attempt != 3
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Attempt 4 still owes the queue a pending upload/replay.
+	pending := workerState{Result: &Result{Execution: Execution{ID: j.ID, Attempt: 4}, ReleasePending: true}}
+	if err := saveWorkerJSON(dir, "state-attempt-pending.json", pending); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Client: client, Machine: m, Clock: clock}
+	c := &attemptFilesCollector{ctx: context.Background(), report: AttemptFilesCollection{Reasons: map[string]int64{}}}
+	c.resolve = func(id string, attempt int) (AttemptFilesDisposition, error) {
+		var d AttemptFilesDisposition
+		err := w.Client.Call(context.Background(), "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: Execution{ID: id, Attempt: attempt}, Machine: m.ID}, &d)
+		return d, err
+	}
+	if err := pruneAttemptFiles(dir, clock.Now(), c); err != nil {
+		t.Fatal(err)
+	}
+	for attempt, wantRemoved := range map[int]bool{1: true, 2: false, 3: false, 4: false, 5: true, 6: false} {
+		_, err := os.Stat(payload(attempt))
+		if removed := errors.Is(err, os.ErrNotExist); removed != wantRemoved || err != nil && !removed {
+			t.Errorf("attempt %d removed=%t want=%t: %v", attempt, removed, wantRemoved, err)
+		}
+	}
+	if c.report.ReclaimedBytes <= 0 {
+		t.Fatal("no reclaimed bytes reported", c.report)
+	}
+	for _, reason := range []string{"recoverable_attempt", "unresolved_custody", "local_custody"} {
+		if c.report.Reasons[reason] <= 0 {
+			t.Error("missing retention reason", reason, c.report)
 		}
 	}
 }

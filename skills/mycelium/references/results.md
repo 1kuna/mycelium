@@ -51,7 +51,9 @@ and [operations](../../../docs/operations.md).
 
 ## Worker scratch
 
-Accepted exact-attempt scratch is reclaimed automatically. Terminal failed or
+Accepted exact-attempt scratch is reclaimed automatically, and so is a released
+attempt the job has moved past (interrupted, yielded, preempted or requeued):
+recover partial files from the job's current attempt. Terminal failed or
 cancelled scratch follows the queue's positive file-retention policy or an
 explicit owner file release; there is no fixed 24-hour promise (MY-34). Unknown
 data and pending upload, replay or custody stay protected. Recover needed partial

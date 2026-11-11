@@ -64,6 +64,21 @@ func (q *Queue) attemptFilesDisposition(r AttemptFilesRequest) AttemptFilesDispo
 	if parkedStorageCustody(j) {
 		return keep("parked_storage_custody")
 	}
+	// A released attempt the job has moved past (interrupted, yielded, preempted,
+	// requeued) can never be accepted: results, delivery and partial-output
+	// recovery belong to the current attempt. Checkpoints live in the checkpoint
+	// root or queue file store, and diagnostics and pending uploads keep local
+	// custody until the queue has them, so its scratch is disposable now rather
+	// than after the terminal file-retention window. Repeated requeues otherwise
+	// pile one scratch copy per attempt onto the worker disk.
+	if r.Attempt < j.Attempt {
+		for _, copy := range j.Copies {
+			if copy.Attempt == r.Attempt && copy.Machine == r.Machine && copy.Recoverable {
+				return keep("recoverable_attempt")
+			}
+		}
+		return AttemptFilesDisposition{Reclaim: true, Reason: "superseded_attempt"}
+	}
 	if j.Attempt == r.Attempt && j.Machine == r.Machine && j.State == "succeeded" {
 		return AttemptFilesDisposition{Reclaim: true, Reason: "accepted_result"}
 	}
