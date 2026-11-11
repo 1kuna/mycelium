@@ -660,6 +660,7 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if reason := q.capReason(j); reason != "" {
 		return newHold("project_cap", reason)
 	}
+	authored := j // Explained as submitted; the model's sizing serves placement checks.
 	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
 		copy := cloneJob(j)
 		copy.Spec.Needs.MemoryGB = model.MemoryGB
@@ -692,7 +693,11 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 			return newHold("host_backfill", reason)
 		}
 	}
-	return waitingHold(j, machines, q.s.Jobs)
+	h := waitingHold(j, machines, q.s.Jobs)
+	if h.Kind == "waiting_for_worker" || h.Kind == "no_eligible_host" {
+		h.Detail = q.noFitDetail(authored, h.Kind == "waiting_for_worker")
+	}
+	return h
 }
 
 // Deficit uses only competing runnable projects. An absent project reserves no

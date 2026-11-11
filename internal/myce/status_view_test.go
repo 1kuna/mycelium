@@ -260,8 +260,7 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	target := q.s.Machines[m.ID]
 	target.FreeHostMemoryGB = 1
 	probe := *q.s.Jobs[j.ID]
-	probe.Reason = "no machine in the fleet can run this right now"
-	body = q.statusWaitingReason(&probe)
+	body = q.noFitDetail(&probe, false)
 	if !strings.Contains(body, "needs 3.0 GiB free accelerator memory and 2.0 GiB host RAM") || strings.Contains(body, "needs 0.0 GiB") {
 		t.Errorf("sized need missing: %s", body)
 	}
@@ -276,7 +275,7 @@ func TestStatusViewFloorFreeAutoMemoryWithoutHypha(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			q, _, _, s := floorFreeFitFixture(t, 0)
 			s.Needs.Memory = "auto"
-			j := &Job{Spec: s, State: "queued", Reason: "no machine in the fleet can run this right now"}
+			j := &Job{Spec: s, State: "queued"}
 			if scenario == "project excludes fleet" {
 				q.s.Policies = map[string]ProjectPolicy{s.Project: {Weight: 1, AllowedMachines: []string{"other-host"}}}
 			} else {
@@ -286,7 +285,7 @@ func TestStatusViewFloorFreeAutoMemoryWithoutHypha(t *testing.T) {
 				j.Spec.Needs.Memory = ""
 				j.Extensions = []Extension{{Variants: []ExtensionVariant{{Needs: ResourceNeeds{Memory: "auto"}}}}}
 			}
-			reason := q.statusWaitingReason(j)
+			reason := q.noFitDetail(j, false)
 			if !strings.Contains(reason, "memory is sized per hypha") || !strings.Contains(reason, "hypha is available to size it against") || strings.Contains(reason, "0.0 GiB") {
 				t.Fatalf("misleading unsized memory: %s", reason)
 			}

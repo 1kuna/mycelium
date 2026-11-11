@@ -65,12 +65,12 @@ func TestProductionStartDeadlineDefault(t *testing.T) {
 	j := submit(t, q, s)
 	c.Advance(149 * time.Second)
 	waiting := job(t, q, j.ID)
-	if waiting.State != "queued" || !strings.Contains(waiting.Reason, "needs xpu") || !strings.Contains(waiting.Reason, "1s left to start") {
+	if waiting.State != "queued" || !strings.Contains(waiting.Reason, "with Intel (XPU)") || !strings.Contains(waiting.Reason, "1s left to start") {
 		t.Fatalf("waiting: %+v", waiting)
 	}
 	c.Advance(time.Second)
 	failed := job(t, q, j.ID)
-	if failed.State != "failed" || !strings.Contains(failed.Reason, "production start deadline exceeded") || !strings.Contains(failed.Reason, "needs xpu") {
+	if failed.State != "failed" || !strings.Contains(failed.Reason, "production start deadline exceeded") || !strings.Contains(failed.Reason, "with Intel (XPU)") {
 		t.Fatalf("expired: %+v", failed)
 	}
 	if check(t, q, machine("b70", "xpu"), nil).Job != nil {
