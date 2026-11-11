@@ -18,12 +18,17 @@ the file. Resolve does not submit, upload, prepare an environment or qualify a
 device. An unchecked dependency, unknown observation or missing qualification
 has an owner action; a fitting target is not evidence of native output parity.
 
-Describe needs, class and verified targets. Memory may be omitted for automatic
-learning; declared limits retain their containment meaning. Keep a pin for a
-hard requirement with its evidence, not convenience or urgency. Mycelium chooses
-placement; preparation, immutable dependency locks and a successful smoke test
-do not establish MY-19 production parity. Native variants need their own
-qualification and output criteria. See [adapters/variants](../../docs/adapter.md),
+Describe needs, class and verified targets; submit the work without a host or
+device selector. Memory may be omitted for automatic learning; declared limits
+retain their containment meaning. Register supported implementations as variants
+of one extension, with each variant's target, resources, environment and native
+check. Mycelium selects among qualified variants automatically. A single
+implementation for one OS/architecture/backend is a real coverage limit; a pin
+does not make it portable. Use `myce portability --extension NAME@VERSION` for
+the observed gaps and preparation actions. Preparation, immutable dependency
+locks and a successful smoke test do not establish MY-19 production parity.
+Native variants need their own qualification and output criteria.
+See [adapters/variants](../../docs/adapter.md),
 [environments](../../docs/environments.md) and [scheduling](../../docs/scheduling.md).
 Check [setup](setup-project.md) before using managed CPU target discovery.
 
@@ -72,6 +77,38 @@ resume/result contract, committed progress and exact release; a stop request is
 not migration. Disposable non-resumable experiments need the explicit supported
 preemptible contract, not an inference from experiment class. See
 [checkpoint/yield contracts](../../docs/files.md) and [scheduling](../../docs/scheduling.md).
+
+## Explicit placement restrictions
+
+Use `allowed_machines`, an approved host exclusion, or `needs.gpu.devices` only
+when the task actually restricts hardware: a specific physical device, an
+owner-approved dedicated machine, an explicit prohibition on a personal host,
+or a native qualification/benchmark of exact hardware. Record the requirement
+and evidence in `requirement_reasons`. Capacity waiting, urgency, a previous
+incident, cached software, or a machine's familiar name are not requirements.
+Declare the environment and stage inputs instead of pinning to their location.
+Application backend flags are fine when they consume the worker's assigned
+visibility; do not set `MYCE_DEVICE` to choose a physical card before submission.
+
+Apply placement changes to future work. Preserve the frozen spec, original key
+and receipts of accepted or unconfirmed submissions. If a consumer includes a
+host list in its key/environment identity, removing it needs a deliberate
+future-operation migration; rewriting an accepted operation can duplicate work.
+
+A configured project/work `production_parity_hosts` list is an owner restriction
+on every production placement, including fan-out and recovery. Mycelium already
+enforces it; consumers need no matching job pin. Native qualification, measured
+quality and historical registration cannot admit an unlisted host. An empty
+list holds production; only the owner can widen it after output comparison.
+Checks and experiments can collect that evidence. A removed host's queued
+binding is placed again; running execution and release custody stay with the
+current attempt. Parity-held production cannot withhold another project's
+environment preparation on an unapproved host.
+
+For throughput comparisons, declare the implementations and comparable workload
+identity so Mycelium learns placement from accepted measurements. Use the exact
+hardware qualification path only when measuring or qualifying that hardware is
+the task; ordinary final runs go through the unpinned adapter entry.
 
 ## Wait and check status
 
@@ -264,6 +301,15 @@ the next owner and action on the existing issue. Unknown telemetry, unconfirmed
 cleanup, build offers and prepared environments are different states; only
 actual fresh reports prove progress. Do not erase custody, raise shared budgets,
 repeat submissions or run heavy work locally to bypass a hold.
+
+On queue builds with placement coverage diagnostics, `missing_extension` needs
+a registered implementation; `execution_coverage` needs a compatible variant;
+`native_qualification` needs its exact native check; `production_parity` or
+`production_parity_hosts` needs reference-output evidence and the stated owner.
+These differ from occupied capacity or environment preparation. Detailed status
+also explains a single freshly observed compatible host and an owner's parity
+list size. These are current coverage limits, not instructions to add a pin.
+Stale or missing inventory is unknown, not proof that hardware is unique.
 
 Default status is a partial history view. Prefer the known job ID or batched
 wait; full history/paging is explicit. Estimates require comparable complete
