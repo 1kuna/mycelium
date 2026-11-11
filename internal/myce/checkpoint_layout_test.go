@@ -126,3 +126,14 @@ func TestCheckpointShardPreparationRetriesWithoutCreatingRoot(t *testing.T) {
 		t.Fatal("not ready after the root appeared")
 	}
 }
+
+// jobCheckpointDir finds a dev job's folder whether it was submitted before or
+// after the background shard preparation finished.
+func jobCheckpointDir(root, id string) string {
+	if shard := checkpointShard(id); shard != "" {
+		if path := filepath.Join(root, shard, id); func() bool { _, err := os.Stat(path); return err == nil }() {
+			return path
+		}
+	}
+	return filepath.Join(root, id)
+}
