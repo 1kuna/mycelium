@@ -85,6 +85,9 @@ func checkQueueRecordsAgainst(q *Queue, beforeRecords map[string][]byte, stored 
 		if err != nil {
 			return false
 		}
+		if old, err = expandJobRecord(old); err != nil {
+			return false
+		}
 		var before, after any
 		if json.Unmarshal(old, &before) != nil || json.Unmarshal(data, &after) != nil {
 			return false
