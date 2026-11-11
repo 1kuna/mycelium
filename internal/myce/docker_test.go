@@ -68,21 +68,19 @@ func TestDockerCLIHelper(t *testing.T) {
 	args = args[1:]
 	root := os.Getenv("MYCE_TEST_DOCKER_ROOT")
 	if args[0] == "late-create" || args[0] == "late" {
-		deadline := time.After(10 * time.Second)
 		for {
-			if _, err := os.Stat(filepath.Join(root, "release-late")); err == nil {
-				break
+			if _, err := os.Stat(filepath.Join(root, "late-accepted")); err == nil {
+				if _, err := os.Stat(filepath.Join(root, "release-late")); err == nil {
+					break
+				}
 			}
-			select {
-			case <-deadline:
-				os.Exit(3)
-			case <-time.After(5 * time.Millisecond):
-			}
+			time.Sleep(5 * time.Millisecond)
 		}
+		// Publish create visibility only after its live state is ready.
+		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
 		if args[0] == "late-create" {
 			_ = os.WriteFile(filepath.Join(root, "created"), []byte("id1"), 0600)
 		}
-		_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
 		os.Exit(0)
 	}
 	if args[0] == "--host" {
@@ -151,11 +149,12 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 		if string(mode) == "late-create" {
-			c := exec.Command(os.Args[0], "-test.run=^TestDockerCLIHelper$", "--", "late-create")
-			c.Env = os.Environ()
-			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			_ = c.Start()
-			time.Sleep(time.Minute)
+			if err := os.WriteFile(filepath.Join(root, "late-accepted"), nil, 0600); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			fmt.Fprintln(os.Stderr, "connection closed before create reply")
+			os.Exit(1)
 		}
 		_ = os.WriteFile(filepath.Join(root, "created"), []byte("id1"), 0600)
 		fmt.Println("id1")
@@ -166,10 +165,10 @@ func TestDockerCLIHelper(t *testing.T) {
 			os.Exit(0)
 		}
 		if string(mode) == "late" {
-			c := exec.Command(os.Args[0], "-test.run=^TestDockerCLIHelper$", "--", "late")
-			c.Env = os.Environ()
-			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			_ = c.Start()
+			if err := os.WriteFile(filepath.Join(root, "late-accepted"), nil, 0600); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
 			// The daemon keeps the accepted request after its reply is lost.
 			fmt.Fprintln(os.Stderr, "connection closed before start reply")
 			os.Exit(1)
@@ -389,6 +388,27 @@ func dockerCLITestBinary(t *testing.T) string {
 	return dockerCLIExecutable.path
 }
 
+// A daemon is outside the CLI's process tree: killing a timed-out CLI must
+// not cancel an accepted request. Own and join this simulator from the test,
+// and release it only after the CLI records acceptance and the test permits it.
+func dockerLateFixture(t *testing.T, mode string) (Worker, *workerStore, *dockerTestClock, string) {
+	t.Helper()
+	w, store, clock, root := dockerFixture(t)
+	if err := os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	daemon := exec.CommandContext(ctx, dockerCLITestBinary(t), "-test.run=^TestDockerCLIHelper$", "--", mode)
+	daemon.Env = os.Environ()
+	daemon.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := daemon.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = daemon.Wait() })
+	return w, store, clock, root
+}
+
 func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string) {
 	t.Helper()
 	return dockerFixtureCommand(t, nil)
@@ -565,8 +585,7 @@ func TestDockerDaemonRefusalRetriesWithoutRelease(t *testing.T) {
 	}
 }
 func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late"), 0600)
+	w, s, c, root := dockerLateFixture(t, "late")
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 	p, e := startDockerFixture(w, s, j)
@@ -898,8 +917,7 @@ func TestDockerRealCheckpointResume(t *testing.T) {
 }
 
 func TestDockerAcceptedStartObservationSettlesLostResponse(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late"), 0600)
+	w, s, c, root := dockerLateFixture(t, "late")
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 	p, e := startDockerFixture(w, s, j)
@@ -1197,10 +1215,7 @@ func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
 }
 
 func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
-	w.dockerCallTimeout = 2 * time.Second
-	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600)
+	w, s, c, root := dockerLateFixture(t, "late-create")
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 	p, err := startDockerFixture(w, s, j)

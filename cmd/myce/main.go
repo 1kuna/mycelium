@@ -530,6 +530,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		// Reject invalid admission limits before opening storage and starting
+		// background checkpoint preparation.
+		if *uploadSpoolBytes == 0 || *uploadSpoolBytes < -1 {
+			return errors.New("upload-spool-bytes must be positive or -1 for automatic capacity")
+		}
 		debugListener, debugServer, err := queueDebugListener(*debugListen)
 		if err != nil {
 			return err
