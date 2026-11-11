@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -15,14 +14,14 @@ func TestRetainedKeyAnswerSurvivesRejectedResult(t *testing.T) {
 	s.SubmissionKey = "rollback-deadline"
 	submit(t, q, s)
 	c.Advance(ProductionStartTimeout + time.Second)
-	before, err := json.Marshal(q.s)
+	before, err := marshalQueueState(t, q)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Complete(Result{Execution: Execution{ID: "missing", Attempt: 1}, Machine: "missing", Session: "missing"}); !errors.Is(err, ErrStale) {
 		t.Fatalf("expected stale result: %v", err)
 	}
-	after, err := json.Marshal(q.s)
+	after, err := marshalQueueState(t, q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +51,7 @@ func retainedLossFixture(t *testing.T) (*Queue, *fakeClock, *Job, Result) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	finished := q.s.Jobs[j.ID]
+	finished := job(t, q, j.ID)
 	if finished.State != "succeeded" || !finished.ReleaseConfirmed || finished.Losses != 1 {
 		t.Fatal("expected a completed retry with one earlier infrastructure loss")
 	}
@@ -72,11 +71,11 @@ func TestRetainedOperatorRefundSurvivesRestart(t *testing.T) {
 	if err := q.Complete(r); !errors.Is(err, ErrStale) {
 		t.Fatalf("old-attempt payload was not rejected: %v", err)
 	}
-	if q.s.Jobs[j.ID].Losses != 0 {
+	if job(t, q, j.ID).Losses != 0 {
 		t.Fatal("exact operator stop did not refund the loss")
 	}
 	q = reopenCancellationQueue(t, q, c)
-	if got := q.s.Jobs[j.ID]; got.Losses != 0 || got.State != "succeeded" {
+	if got := job(t, q, j.ID); got.Losses != 0 || got.State != "succeeded" {
 		t.Fatal("operator refund or successful retry changed on restart")
 	}
 }
@@ -84,7 +83,7 @@ func TestRetainedOperatorRefundSurvivesRestart(t *testing.T) {
 func TestRetainedOperatorRefundRollsBackOnWriteFailure(t *testing.T) {
 	q, _, _, r := retainedLossFixture(t)
 	r.OperatorStop, r.Interrupted = true, true
-	before, err := json.Marshal(q.s)
+	before, err := marshalQueueState(t, q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +93,7 @@ func TestRetainedOperatorRefundRollsBackOnWriteFailure(t *testing.T) {
 	if err := q.Complete(r); err == nil || errors.Is(err, ErrStale) {
 		t.Fatalf("expected persistence failure: %v", err)
 	}
-	after, err := json.Marshal(q.s)
+	after, err := marshalQueueState(t, q)
 	if err != nil {
 		t.Fatal(err)
 	}

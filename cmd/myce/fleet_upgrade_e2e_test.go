@@ -327,7 +327,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	}
 	address := listener.Addr().String()
 	_ = listener.Close()
-	client := myce.Client{URL: "http://" + address, Token: token, HTTP: &http.Client{Timeout: 2 * time.Second}}
+	// Every request uses the acceptance journey's existing context. A separate
+	// two-second HTTP deadline made normal loaded commits fail submission before
+	// the fixture could exercise any rollout behavior.
+	client := myce.Client{URL: "http://" + address, Token: token, HTTP: &http.Client{}}
 	var managers []*fleetE2EManager
 	install := func(role, host string) *fleetE2EManager {
 		t.Helper()

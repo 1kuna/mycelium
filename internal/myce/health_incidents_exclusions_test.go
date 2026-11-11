@@ -87,7 +87,7 @@ func TestHealthIncidentInheritedAutoMemoryReplay(t *testing.T) {
 			if queued.Spec.Needs.Memory != "" {
 				t.Fatal("fixture did not inherit auto from variant")
 			}
-			if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+			if why := memoryEvidenceReason(t, q, queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 				t.Fatal("inherited learned sizing lost typed wait", why)
 			}
 			kind := "learned_envelope_exceeds_allowances"
@@ -167,7 +167,7 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 	}
 	s.Needs.Memory, s.RequireTarget = "auto", true
 	queued := submit(t, q, s)
-	if why := q.memoryEvidenceWaitingReason(queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+	if why := memoryEvidenceReason(t, q, queued); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 		t.Fatal("oversized learned work lost typed wait", why)
 	}
 	if assigned := assignedJob(machineCheck(t, q, m)); assigned != nil {

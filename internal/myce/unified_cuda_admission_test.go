@@ -172,50 +172,65 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 	if reason := job(t, q, j.ID).Reason; !strings.Contains(reason, "unified CUDA production headroom") {
 		t.Fatal("missing production headroom reason", reason)
 	}
-	if q.held(m.HostID) {
-		t.Fatal("forecast changed production takeover")
-	}
 	productionCandidate := *job(t, q, j.ID)
 	productionCandidate.Spec.Priority = "production"
-	if reason := q.productionAdmissionReason(&productionCandidate, q.s.Machines[m.ID]); reason != "" {
-		t.Fatal("co-tenant guard refused production itself", reason)
-	}
-	// A smaller co-tenant fits with the production envelope and physical floor.
 	small := *job(t, q, j.ID)
 	small.Spec.Needs.MemoryGB, small.Spec.Needs.HostMemoryGB = 8, 4
-	target := q.s.Machines[m.ID]
-	if reason := q.productionAdmissionReason(&small, target); reason != "" {
-		t.Fatal("small co-tenant withheld", reason)
-	}
-	// Rechecking an assigned, unstarted offer must not charge it twice.
-	small.State, small.Machine, small.Session = "running", m.ID, m.Session
-	copy := *target
-	copy.FreeHostMemoryGB = hostNeed(target, 24, 8) // Exactly the production envelope remains.
-	if reason := q.productionAdmissionReason(&small, &copy); reason != "" {
-		t.Fatal("unstarted offer charged twice", reason)
+	func() {
+		// Internal policy helpers and their borrowed records share the same
+		// mutex as asynchronous admission-evidence publication.
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if q.held(m.HostID) {
+			t.Fatal("forecast changed production takeover")
+		}
+		if reason := q.productionAdmissionReason(&productionCandidate, q.s.Machines[m.ID]); reason != "" {
+			t.Fatal("co-tenant guard refused production itself", reason)
+		}
+		// A smaller co-tenant fits with the production envelope and physical floor.
+		target := q.s.Machines[m.ID]
+		if reason := q.productionAdmissionReason(&small, target); reason != "" {
+			t.Fatal("small co-tenant withheld", reason)
+		}
+		// Rechecking an assigned, unstarted offer must not charge it twice.
+		small.State, small.Machine, small.Session = "running", m.ID, m.Session
+		copy := *target
+		copy.FreeHostMemoryGB = hostNeed(target, 24, 8) // Exactly the production envelope remains.
+		if reason := q.productionAdmissionReason(&small, &copy); reason != "" {
+			t.Fatal("unstarted offer charged twice", reason)
+		}
+	}()
+	admissionReason := func() string {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID])
 	}
 	// Qualification elsewhere does not authorize bypassing a bound host's
 	// work-scoped production parity policy (#401).
 	other := unifiedCUDAAdmissionMachine()
 	other.ID, other.HostID, other.Session = "other", "other-host", "other-session"
 	check(t, q, other, nil)
-	q.s.Jobs[demand.ID].Spec.AllowedMachines = []string{m.ID, other.ID}
-	q.s.Jobs[demand.ID].ProductionHost = m.HostID
-	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason == "" {
-		t.Fatal("unapproved alternative bypassed production binding")
-	}
-	q.s.Jobs[demand.ID].ProductionHost = ""
-	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason != "" {
-		t.Fatal("qualified unbound alternative did not remove sole-host protection", reason)
-	}
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		q.s.Jobs[demand.ID].Spec.AllowedMachines = []string{m.ID, other.ID}
+		q.s.Jobs[demand.ID].ProductionHost = m.HostID
+		if reason := q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID]); reason == "" {
+			t.Fatal("unapproved alternative bypassed production binding")
+		}
+		q.s.Jobs[demand.ID].ProductionHost = ""
+		if reason := q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID]); reason != "" {
+			t.Fatal("qualified unbound alternative did not remove sole-host protection", reason)
+		}
+	}()
 	if _, err := q.ChangeHostMaintenance(other.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {
 		t.Fatal(err)
 	}
-	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason == "" {
+	if reason := admissionReason(); reason == "" {
 		t.Fatal("unavailable alternative bypassed production headroom")
 	}
 	clock.Advance(100 * time.Second)
-	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason != "" {
+	if reason := admissionReason(); reason != "" {
 		t.Fatal("overrunning producer permanently withheld CUDA", reason)
 	}
 	if err := q.Cancel(demand.ID); err != nil {

@@ -250,14 +250,14 @@ func TestDockerLogsNoneRecovery(t *testing.T) {
 }
 
 func testDockerLogsNoneRecovery(t *testing.T, missingFlag bool) {
-	w, s, clock, root := dockerFixture(t)
+	w, s, clock, root := dockerGroupFixture(t)
 	j := dockerGroupJob(t)
 	j.Spec.Logs = "none"
 	p, err := startDockerFixture(w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+	awaitDockerMainStarted(t, p)
 	if err := os.Remove(filepath.Join(root, "running")); err != nil {
 		t.Fatal(err)
 	}
