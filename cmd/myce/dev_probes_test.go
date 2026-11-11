@@ -122,9 +122,22 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 			}
 		}
 	}
+	// A per-request timeout is an unavailable observation, not a command
+	// failure. Keep observing within the unchanged total fixture deadline;
+	// authentication, decoding and other unexpected errors still fail at once.
+	readReady := func(err error) bool {
+		t.Helper()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
 	waitFor(func() bool {
 		var s myce.Snapshot
-		if client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &s) != nil {
+		if !readReady(client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &s)) {
 			return false
 		}
 		for _, m := range s.Machines {
@@ -160,8 +173,8 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	}
 	waitFor(func() bool {
 		var s myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &s); err != nil {
-			t.Fatal(err)
+		if !readReady(client.Call(ctx, "GET", "/api/status?detail=full", nil, &s)) {
+			return false
 		}
 		for _, j := range s.Jobs {
 			if j.ID == job.ID {
@@ -210,8 +223,8 @@ cat expected > effect`}
 		}
 		waitFor(func() bool {
 			current, err := client.GetJob(ctx, job.ID)
-			if err != nil {
-				t.Fatal(err)
+			if !readReady(err) {
+				return false
 			}
 			p := current.ApplicationProgress
 			return current.State == "running" && p != nil && p.Completed == 10 && p.Total == 10 && p.StageIndex != nil && *p.StageIndex == 1 && p.StageCount != nil && *p.StageCount == 2 && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
@@ -219,8 +232,8 @@ cat expected > effect`}
 		// Status JSON and the job reply expose the same attempt's evidence.
 		waitFor(func() bool {
 			var snapshot myce.Snapshot
-			if err := client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &snapshot); err != nil {
-				t.Fatal(err)
+			if !readReady(client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &snapshot)) {
+				return false
 			}
 			for _, current := range snapshot.Jobs {
 				if current.ID == job.ID && current.ApplicationProgress != nil {
@@ -236,14 +249,14 @@ cat expected > effect`}
 		}
 		waitFor(func() bool {
 			current, err := client.GetJob(ctx, job.ID)
-			return err == nil && current.State == "running" && current.ApplicationProgress != nil && current.ApplicationProgress.StageIndex != nil && *current.ApplicationProgress.StageIndex == 2 && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
+			return readReady(err) && current.State == "running" && current.ApplicationProgress != nil && current.ApplicationProgress.StageIndex != nil && *current.ApplicationProgress.StageIndex == 2 && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
 		})
 		if err := os.WriteFile(filepath.Join(work, "release"), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 		waitFor(func() bool {
 			current, err := client.GetJob(ctx, job.ID)
-			return err == nil && current.State == "succeeded" && current.ReleaseConfirmed && len(current.OutputRefs) == 1
+			return readReady(err) && current.State == "succeeded" && current.ReleaseConfirmed && len(current.OutputRefs) == 1
 		})
 		download := filepath.Join(root, "progress-result")
 		if err := client.DownloadResult(ctx, job.ID, "effect", download); err != nil {
@@ -258,7 +271,7 @@ cat expected > effect`}
 		t.Fatal(err)
 	}
 	waitFor(func() bool {
-		return client.Call(ctx, "GET", "/api/hosts/smoke-host/maintenance", nil, &maintenance) == nil && maintenance.Quiescent
+		return readReady(client.Call(ctx, "GET", "/api/hosts/smoke-host/maintenance", nil, &maintenance)) && maintenance.Quiescent
 	})
 	t.Log("PASS: standalone binary, authenticated API, command effect/exact release, queue maintenance; child and listener joined")
 }

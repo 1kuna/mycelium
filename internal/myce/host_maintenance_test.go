@@ -634,9 +634,7 @@ func TestMaintenancePlannedCausePersistsAndStageFailureWins(t *testing.T) {
 }
 
 func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
-	// This incident simulates an explicit lost CLI reply, not cold initialization expiry.
-	w.dockerCallTimeout = 2 * time.Second
+	w, store, clock, root := dockerLateFixture(t, "late-create")
 	q, _ := fixture(t)
 	q.clock = clock
 	m := w.Machine
@@ -676,9 +674,6 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 		t.Fatal("no assignment")
 	}
 	w.CheckpointRoot = q.root
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("late-create"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	p, err := startDockerFixture(w, store, *j)
 	if err != nil {
 		t.Fatal(err)
