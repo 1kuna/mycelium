@@ -639,6 +639,16 @@ Queue `file_store.projects` reports per-project retained and 24-hour added
 bytes, limits and any quota refusal; see
 [per-project quotas](reference/file-store.md#per-project-file-store-quotas-464).
 
+Queue `file_store.collection` counts published-blob collection since the queue
+process opened its store: `passes`, `yielded_passes` (stopped after a batch
+because a control request was waiting on the queue), `deferred_passes` (an
+upload or publication held the file fence), `reclaimed_blobs`,
+`reclaimed_bytes`, `pending_candidates` left by the last pass, and
+`last_reclaim_at` (queue clock). Every pass collects at least one batch before
+it can yield, so rising `passes` with flat `reclaimed_bytes` and nonzero
+`pending_candidates` means collection is stalled
+([#1375](https://github.com/1kuna/mycelium/issues/1375)).
+
 Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`
 comes from the physical probe; `remaining_upload_bytes` counts only unwritten
 tus lengths, and `reserved_output_bytes` counts existing output commitments not

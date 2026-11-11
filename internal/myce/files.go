@@ -136,6 +136,8 @@ type FileStore struct {
 	root                        string
 	limit                       int64
 	mu                          sync.Mutex // In-memory creations only.
+	collectionMu                sync.Mutex // collection only; never held with q.mu or for I/O.
+	collection                  FileCollectionStatus
 	uploadFilesMu               sync.RWMutex
 	creations                   map[string]*uploadCreation
 	allocationGeneration        uint64

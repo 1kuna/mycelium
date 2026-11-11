@@ -28,12 +28,58 @@ type FileStoreStatus struct {
 	UsedBytes                        uint64                  `json:"used_bytes"`
 	FreeBytes                        uint64                  `json:"free_bytes"`
 	ReclaimableBytes                 uint64                  `json:"reclaimable_bytes"`
+	Collection                       *FileCollectionStatus   `json:"collection,omitempty"`
 	LimitBytes                       uint64                  `json:"limit_bytes"`
 	DiskFreeBytes                    uint64                  `json:"disk_free_bytes"`
 	FloorBytes                       uint64                  `json:"floor_bytes"`
 	Error                            string                  `json:"error,omitempty"`
 	// Which bound set FreeBytes, for refusal explanations; not public status.
 	allowanceFree, volumeFree, diskTotal uint64
+}
+
+// Published-blob collection since this queue process opened its store. Passes
+// growing while reclaimed bytes stay flat and pending_candidates stays nonzero
+// is a stalled collector.
+type FileCollectionStatus struct {
+	Passes uint64 `json:"passes"`
+	// Stopped after a batch because a control request was waiting on the queue.
+	YieldedPasses uint64 `json:"yielded_passes"`
+	// Stopped because an upload or publication held the file fence.
+	DeferredPasses    uint64     `json:"deferred_passes"`
+	ReclaimedBlobs    uint64     `json:"reclaimed_blobs"`
+	ReclaimedBytes    uint64     `json:"reclaimed_bytes"`
+	PendingCandidates int        `json:"pending_candidates"`
+	LastReclaimAt     *time.Time `json:"last_reclaim_at,omitempty"`
+}
+
+func (s *FileStore) noteCollection(at time.Time, blobs, bytes uint64, deferred, yielded bool, pending int) {
+	s.collectionMu.Lock()
+	defer s.collectionMu.Unlock()
+	c := &s.collection
+	c.Passes++
+	if deferred {
+		c.DeferredPasses++
+	}
+	if yielded {
+		c.YieldedPasses++
+	}
+	c.ReclaimedBlobs += blobs
+	c.ReclaimedBytes = addDiskBytes(c.ReclaimedBytes, bytes)
+	c.PendingCandidates = pending
+	if blobs > 0 {
+		c.LastReclaimAt = &at
+	}
+}
+
+func (s *FileStore) collectionStatus() *FileCollectionStatus {
+	s.collectionMu.Lock()
+	defer s.collectionMu.Unlock()
+	c := s.collection
+	if c.LastReclaimAt != nil {
+		at := *c.LastReclaimAt
+		c.LastReclaimAt = &at
+	}
+	return &c
 }
 
 type storedPayload struct {
@@ -252,6 +298,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
 	status.Projects = v.projects.usage(now)
+	status.Collection = store.collectionStatus()
 	if err != nil {
 		status.Error = "file store capacity unavailable"
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
@@ -387,13 +434,17 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 	if store == nil || len(markers) == 0 {
 		return nil
 	}
+	attempted := false
 	for hash, at := range markers {
 		if (FileRef{SHA256: hash}).validate() != nil {
 			continue
 		}
-		if requestCtx.Err() != nil || q.fileReclaimUnderPressure() {
+		// Each upload commits its own transaction; under control pressure a pass
+		// still settles one before yielding, so a busy queue cannot stall it.
+		if requestCtx.Err() != nil || attempted && q.fileReclaimUnderPressure() {
 			break
 		}
+		attempted = true
 		if !q.fileLifecycle.TryLock() {
 			return nil
 		}
