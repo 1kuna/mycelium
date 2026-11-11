@@ -1377,6 +1377,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					// Retry next successful check-in; no filesystem paths or errors in logs.
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
+				w.fleet.noteReply(reply)
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				w.expireCheckpoints(reply.CheckpointExpiries, root.state.CheckpointRoot)
 				if reply.SharedHost != nil {

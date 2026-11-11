@@ -3,9 +3,12 @@ package myce
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,12 +181,39 @@ func TestScratchRetentionReportingAndUnavailableQueue(t *testing.T) {
 // whole terminal file-retention window, filling worker disks. Superseded
 // released attempts go on the next sweep; the current, recoverable, unreleased
 // and locally held attempts stay.
+//
+// One pass asks the queue once (#slim-chatty-calls). A previous-release queue
+// has only the single-folder route, which the worker falls back to, and a
+// previous-release worker still uses it against this queue (MY-42).
 func TestScratchRetentionCollectsSupersededAttempts(t *testing.T) {
+	for _, mode := range []string{"current", "previous queue", "previous worker"} {
+		t.Run(mode, func(t *testing.T) { scratchRetentionSupersededAttempts(t, mode) })
+	}
+}
+
+func scratchRetentionSupersededAttempts(t *testing.T, mode string) {
 	q, clock := fixture(t)
 	if err := q.ConfigureFileRetention(7 * 24 * time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	client := retentionClient(t, q)
+	_ = retentionClient(t, q)
+	var single, batch atomic.Int32
+	api := API{Queue: q, Token: "test"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workers/attempt-files":
+			single.Add(1)
+		case "/api/workers/attempt-files/batch":
+			batch.Add(1)
+			if mode == "previous queue" {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		api.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client := Client{URL: server.URL, Token: "test"}
 	m := machine("worker", "fake")
 	j := submit(t, q, spec("experiment"))
 	dir := t.TempDir()
@@ -235,8 +265,27 @@ func TestScratchRetentionCollectsSupersededAttempts(t *testing.T) {
 		err := w.Client.Call(context.Background(), "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: Execution{ID: id, Attempt: attempt}, Machine: m.ID}, &d)
 		return d, err
 	}
-	if err := pruneAttemptFiles(dir, clock.Now(), c); err != nil {
-		t.Fatal(err)
+	if mode == "previous worker" {
+		if err := pruneAttemptFiles(dir, clock.Now(), c); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		w.hygieneCollector = &workerHygieneCollector{}
+		if err := w.retainWorkerFiles(context.Background(), dir, clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+		c.report = *w.hygieneCollector.report.Scratch
+	}
+	// Attempt 4 is locally held; the other five folders need the queue.
+	wantSingle, wantBatch := int32(5), int32(0)
+	switch mode {
+	case "current":
+		wantSingle, wantBatch = 0, 1
+	case "previous queue":
+		wantBatch = 1
+	}
+	if single.Load() != wantSingle || batch.Load() != wantBatch {
+		t.Fatalf("queue requests single=%d batch=%d, want %d and %d", single.Load(), batch.Load(), wantSingle, wantBatch)
 	}
 	for attempt, wantRemoved := range map[int]bool{1: true, 2: false, 3: false, 4: false, 5: true, 6: false} {
 		_, err := os.Stat(payload(attempt))

@@ -39,6 +39,8 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 			PublicKey []byte `json:"public_key"`
 		}{key}, nil)
 	})
+	// Polled by previous-release workers every heartbeat; current workers fetch
+	// only when their check-in reply says an instruction may be waiting.
 	mux.HandleFunc("GET /api/fleet/instruction", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var out FleetUpdateInstruction
@@ -164,4 +166,16 @@ func (a API) fleetArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.Copy(w, io.LimitReader(response.Body, artifact.Size+1))
+}
+
+// Workers that see this protocol in the check-in reply fetch their instruction
+// only while FleetInstructionWaiting is set, instead of on every heartbeat.
+const fleetInstructionProtocol = "fleet-instruction-waiting-v1"
+
+// q.mu held, after maintenance. fleetInstruction can only return work for the
+// active host of a running upgrade, so only that host's workers need to ask.
+// The instruction request itself keeps every proof, custody and session fence.
+func (q *Queue) fleetInstructionWaiting(host string) bool {
+	u, h := q.s.FleetUpgrade, q.fleetActiveHost()
+	return u != nil && u.State == "running" && h != nil && h.Host == host
 }

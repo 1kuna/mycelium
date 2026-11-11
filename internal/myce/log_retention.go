@@ -292,7 +292,19 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 			published[e.ID][strconv.Itoa(e.Attempt)] = true
 		}
 	}
-	var result error
+	// Staging folders of a held job may belong to its current attempt.
+	local := func(job, name string) bool {
+		return custody[job][name] || custody[job] != nil && strings.HasPrefix(name, ".")
+	}
+	var queries []Execution
+	for _, job := range jobs {
+		for _, name := range listed[job.Name()] {
+			if attempt, ok := attemptFolderNumber(name); ok && !local(job.Name(), name) && !published[job.Name()][name] {
+				queries = append(queries, Execution{ID: job.Name(), Attempt: attempt})
+			}
+		}
+	}
+	result := collector.prefetch(queries)
 	for _, job := range jobs {
 		names, ok := listed[job.Name()]
 		if !ok {
@@ -300,8 +312,7 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 		}
 		for _, name := range names {
 			path := filepath.Join(root, job.Name(), name)
-			// Staging folders of a held job may belong to its current attempt.
-			if custody[job.Name()][name] || custody[job.Name()] != nil && strings.HasPrefix(name, ".") {
+			if local(job.Name(), name) {
 				_, err := collector.record(path, "local_custody")
 				result = errors.Join(result, err)
 				continue

@@ -799,6 +799,11 @@ type Reply struct {
 	Leave             bool                `json:"leave"`
 	UserCancel        bool                `json:"user_cancel,omitempty"`
 	GraceSeconds      float64             `json:"grace_seconds"`
+
+	// Sent with fleetInstructionProtocol: true while a running upgrade has
+	// reached this worker's host. Without the protocol the worker polls.
+	FleetInstructionProtocol string `json:"fleet_instruction_protocol,omitempty"`
+	FleetInstructionWaiting  bool   `json:"fleet_instruction_waiting,omitempty"`
 }
 
 // AttemptReport binds heartbeat, progress and Started to an exact execution.

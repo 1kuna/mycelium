@@ -417,3 +417,99 @@ func TestFleetRuntimeCachedProofExpiresWithoutRenewingObservation(t *testing.T) 
 		t.Fatal("stale manager proof remained eligible")
 	}
 }
+
+// Current workers fetch their instruction only when the check-in reply says one
+// may be waiting; with no protocol (before the first reply, or a previous-release
+// queue) they keep fetching every poll (MY-42).
+func TestFleetRuntimeFetchesInstructionOnlyWhenWaiting(t *testing.T) {
+	c := fleetRuntimeTestConfig(t)
+	key := bytes.Repeat([]byte{1}, ed25519.PublicKeySize)
+	if err := os.WriteFile(filepath.Join(c.State, "fleet-publisher.pub"), key, 0600); err != nil {
+		t.Fatal(err)
+	}
+	i := FleetUpdateInstruction{Operation: "upgrade", Revision: 1, Host: "host", Machine: "worker", Session: "session", PublisherKey: key}
+	var fetches, launches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fleet/instruction" {
+			t.Error("unexpected request", r.URL.Path)
+		}
+		fetches.Add(1)
+		_ = json.NewEncoder(w).Encode(i)
+	}))
+	defer server.Close()
+	r := &workerFleetRuntime{config: c, client: Client{URL: server.URL}, clock: RealClock{}, collect: func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
+		return &FleetRuntimeProof{Session: "session", ServiceHealthy: true, ObservedAt: (RealClock{}).Now()}, nil
+	}, launch: func(context.Context, ServiceConfig, FleetUpdateInstruction) error { launches.Add(1); return nil }}
+	m := Machine{ID: "worker", HostID: "host", Session: "session"}
+	for n, step := range []struct {
+		reply             Reply
+		fetches, launches int32
+	}{
+		{Reply{FleetInstructionProtocol: "unset"}, 1, 1}, // no reply yet
+		{Reply{FleetInstructionProtocol: fleetInstructionProtocol}, 1, 1},
+		{Reply{FleetInstructionProtocol: fleetInstructionProtocol, FleetInstructionWaiting: true}, 2, 1},
+		{Reply{}, 3, 1}, // previous-release queue
+	} {
+		if n > 0 {
+			r.noteReply(step.reply)
+		}
+		r.observe(context.Background(), m, true)
+		result := <-r.pending
+		r.pending, r.attempted, r.proof = nil, result.attempted, result.proof
+		if fetches.Load() != step.fetches || launches.Load() != step.launches {
+			t.Fatalf("step %d: fetches=%d launches=%d", n, fetches.Load(), launches.Load())
+		}
+		if r.proof == nil {
+			t.Fatalf("step %d: proof withheld", n)
+		}
+	}
+}
+
+// Every instruction the queue would issue is flagged on the same check-in, so
+// an upgrade reaches a current worker within one check-in of being staged.
+func TestFleetInstructionWaitingFlagsEveryIssuableInstruction(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a", "b")
+	checkIn := func(id string) (Machine, bool) {
+		t.Helper()
+		m := cloneMachine(q.s.Machines[id])
+		m.Fleet.ObservedAt = c.Now()
+		reply := check(t, q, m, nil)
+		if reply.FleetInstructionProtocol != fleetInstructionProtocol {
+			t.Fatal("check-in reply lacks the instruction protocol")
+		}
+		return m, reply.FleetInstructionWaiting
+	}
+	for _, w := range workers {
+		if _, waiting := checkIn(w.ID); waiting {
+			t.Fatal("instruction flagged without an upgrade")
+		}
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	activated := map[string]bool{}
+	for step := 0; q.s.FleetUpgrade.State == "running"; step++ {
+		if step > 8 {
+			t.Fatalf("upgrade did not finish: %+v", q.fleetUpgradeStatus())
+		}
+		h := q.fleetActiveHost()
+		for _, w := range workers {
+			m, waiting := checkIn(w.ID)
+			i, err := q.fleetInstruction(hostID(&m), m.ID, m.Session)
+			if err != nil || i.Operation != "" && !waiting || waiting != (h != nil && h.Host == hostID(&m)) {
+				t.Fatalf("worker %s waiting=%t instruction=%q active=%+v err=%v", m.ID, waiting, i.Operation, q.fleetUpgradeStatus().Hosts, err)
+			}
+		}
+		activated[fleetActivate(t, q, c)] = true
+		fleetTick(t, q)
+	}
+	if q.s.FleetUpgrade.State != "complete" || !activated["a/worker-a"] || !activated["b/worker-b"] {
+		t.Fatalf("workers not upgraded: %v %+v", activated, q.fleetUpgradeStatus())
+	}
+	for _, w := range workers {
+		if _, waiting := checkIn(w.ID); waiting {
+			t.Fatal("instruction flagged after completion")
+		}
+	}
+}
