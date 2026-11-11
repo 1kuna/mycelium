@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -326,36 +327,148 @@ func saveWorkerJSON(dir, name string, v any) error {
 	return d.Sync()
 }
 
-// Inspect both the leader and surviving descendants. The per-execution
-// marker prevents PID/PGID reuse from targeting an unrelated process group.
+// Inspect the attempt's process group and session, every descendant of those
+// members, and escapers recorded earlier: a payload that setsid-spawns a child
+// leaves the attempt's group and session, and once its parent exits it is
+// reparented to init, so neither PGID, SID nor PPID reach it (#1322). Each
+// escaper seen as a descendant is recorded with its kernel birth, and later
+// counts (with its own descendants) only while that birth matches, so PID
+// reuse never targets an unrelated process. Linux cgroups additionally contain
+// escapers whenever a memory cgroup is available; this covers macOS and
+// cgroup-less Linux, between inventories a double fork can still escape.
 func workerGroupMembers(group int) ([]int, error) {
 	if group <= 0 {
 		return nil, errors.New("invalid process group")
 	}
-	out, err := processPS("-ax", "-o", "pid=,pgid=,stat=")
+	rows, err := processInventory()
 	if err != nil {
 		return nil, fmt.Errorf("inspect process groups: %w", err)
 	}
-	var members []int
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 3 {
+	escapedCustody.Lock()
+	defer escapedCustody.Unlock()
+	recorded := escapedCustody.groups[group]
+	byPID := make(map[int]processRow, len(rows))
+	children := map[int][]int{}
+	for _, r := range rows {
+		byPID[r.pid] = r
+		children[r.ppid] = append(children[r.ppid], r.pid)
+	}
+	owned := map[int]bool{}
+	var todo []int
+	for _, r := range rows {
+		member := r.pgid == group
+		if !member {
+			session, sessionErr := unix.Getsid(r.pid)
+			if sessionErr != nil && !errors.Is(sessionErr, syscall.ESRCH) {
+				return nil, sessionErr
+			}
+			member = sessionErr == nil && session == group
+		}
+		if member {
+			owned[r.pid] = true
+			todo = append(todo, r.pid)
+		}
+	}
+	for pid, saved := range recorded {
+		if _, live := byPID[pid]; !live || owned[pid] {
 			continue
 		}
-		pid, e1 := strconv.Atoi(fields[0])
-		pgid, e2 := strconv.Atoi(fields[1])
-		if e1 != nil || e2 != nil {
-			return nil, errors.New("invalid process inventory")
+		birth, err := processBirth(pid)
+		if errors.Is(err, os.ErrNotExist) || err == nil && birth != saved {
+			delete(recorded, pid)
+			continue
 		}
-		session, sessionErr := unix.Getsid(pid)
-		if sessionErr != nil && !errors.Is(sessionErr, syscall.ESRCH) {
-			return nil, sessionErr
+		if err != nil {
+			return nil, err
 		}
-		if (pgid == group || sessionErr == nil && session == group) && !strings.HasPrefix(fields[2], "Z") {
+		owned[pid] = true
+		todo = append(todo, pid)
+	}
+	for i := 0; i < len(todo); i++ {
+		for _, child := range children[todo[i]] {
+			if owned[child] || child <= 1 {
+				continue
+			}
+			birth, err := processBirth(child)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if recorded == nil {
+				recorded = map[int]string{}
+				escapedCustody.groups[group] = recorded
+			}
+			recorded[child] = birth
+			owned[child] = true
+			todo = append(todo, child)
+		}
+	}
+	var members []int
+	for pid := range owned {
+		if !byPID[pid].zombie {
 			members = append(members, pid)
 		}
 	}
+	sort.Ints(members)
 	return members, nil
+}
+
+// Escapers recorded per attempt group for this worker process. Recovery seeds
+// it from persisted custody births; a confirmed-empty group forgets it.
+var escapedCustody = struct {
+	sync.Mutex
+	groups map[int]map[int]string
+}{groups: map[int]map[int]string{}}
+
+func adoptGroupCustody(group int, births map[int]string) {
+	escapedCustody.Lock()
+	defer escapedCustody.Unlock()
+	if escapedCustody.groups[group] == nil {
+		escapedCustody.groups[group] = map[int]string{}
+	}
+	for pid, birth := range births {
+		if pid != group && birth != "" {
+			escapedCustody.groups[group][pid] = birth
+		}
+	}
+}
+
+func forgetGroupCustody(group int) {
+	escapedCustody.Lock()
+	defer escapedCustody.Unlock()
+	delete(escapedCustody.groups, group)
+}
+
+type processRow struct {
+	pid, ppid, pgid int
+	zombie          bool
+}
+
+func psProcessInventory() ([]processRow, error) {
+	out, err := processPS("-ax", "-o", "pid=,ppid=,pgid=,stat=")
+	if err != nil {
+		return nil, err
+	}
+	var rows []processRow
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 4 {
+			return nil, errors.New("invalid process inventory")
+		}
+		pid, e1 := strconv.Atoi(fields[0])
+		ppid, e2 := strconv.Atoi(fields[1])
+		pgid, e3 := strconv.Atoi(fields[2])
+		if e1 != nil || e2 != nil || e3 != nil {
+			return nil, errors.New("invalid process inventory")
+		}
+		rows = append(rows, processRow{pid: pid, ppid: ppid, pgid: pgid, zombie: strings.HasPrefix(fields[3], "Z")})
+	}
+	return rows, nil
 }
 
 // macOS can return EPERM for a group whose last process is exiting. Treat
@@ -415,6 +528,7 @@ func waitWorkerGroup(group int, clock Clock) error {
 			return err
 		}
 		if len(members) == 0 {
+			forgetGroupCustody(group)
 			return nil
 		}
 		if !clock.Now().Before(deadline) {
@@ -619,6 +733,7 @@ func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) 
 		}
 	}
 	for group, births := range st.Groups {
+		adoptGroupCustody(group, births)
 		members, err := inspectWorkerGroup(group, clock)
 		if err != nil {
 			return err
