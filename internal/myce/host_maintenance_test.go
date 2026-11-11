@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -942,6 +943,44 @@ func TestMaintenanceQuarantinedDeviceDegraded(t *testing.T) {
 	status, err = q.HostMaintenanceStatus(m.HostID)
 	if err != nil || status.State != "unhealthy" || status.Healthy {
 		t.Fatal("stale host must remain unhealthy", status, err)
+	}
+}
+
+// A drain waiting on a running attempt names it in compact status, one line per
+// host, from the same Quiescent predicate; the line clears once the host is quiet.
+func TestMaintenanceNotQuiescentInCompactStatus(t *testing.T) {
+	q, _ := fixture(t)
+	a, b := maintenanceMachines()
+	active := maintenanceAssign(t, q, a, "experiment")
+	if err := q.Started(result(active, false)); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, b, nil)
+	maintenanceChange(t, q, "drain", false)
+	read := func() CompactStatus {
+		q.statusCache.data, q.statusCache.compact = "", ""
+		r := httptest.NewRequest("GET", "/api/status", nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		var view CompactStatus
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+		return view
+	}
+	view := read()
+	if len(view.NotQuiescent) != 1 || view.NotQuiescent[0].Host != "host" || view.NotQuiescent[0].Mode != "drained" ||
+		len(view.NotQuiescent[0].Attempts) != 1 || view.NotQuiescent[0].Attempts[0].JobID != active.ID || view.NotQuiescent[0].Attempts[0].Attempt != 1 || view.NotQuiescent[0].Attempts[0].State != "running" {
+		t.Fatalf("not quiescent: %+v", view.NotQuiescent)
+	}
+	want := "not quiescent host (drained): job " + ShortID(active.ID) + " " + active.Spec.Name + " attempt 1 running"
+	if text := strings.Join(view.Lines(false), "\n"); !strings.Contains(text, want) {
+		t.Fatalf("missing %q in:\n%s", want, text)
+	}
+	finish(t, q, active, true)
+	if view = read(); len(view.NotQuiescent) != 0 {
+		t.Fatalf("quiet host still listed: %+v", view.NotQuiescent)
 	}
 }
 

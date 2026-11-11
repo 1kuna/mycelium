@@ -137,13 +137,8 @@ type productionDemand struct {
 func (q *Queue) productionDemands() []productionDemand {
 	var out []productionDemand
 	for _, l := range q.openProductionLeases() {
-		stages := l.Stages
-		if len(stages) == 0 {
-			stages = []ProductionStage{{Needs: ResourceNeeds{Platform: Platform{Any: true}}}}
-		}
 		label := fmt.Sprintf("production lease %s (project %s, expires %s)", l.Key, l.Project, l.ExpiresAt.UTC().Format(time.RFC3339))
-		for _, s := range stages {
-			j := &Job{Spec: Spec{Project: l.Project, Priority: "production", Needs: s.Needs, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines}}
+		for _, j := range l.stageJobs() {
 			out = append(out, productionDemand{job: j, label: label})
 		}
 	}
@@ -155,6 +150,35 @@ func (q *Queue) productionDemands() []productionDemand {
 		}
 	}
 	return out
+}
+
+// stageJobs is each declared stage as the job placement would evaluate; a
+// lease without stages stands for any work the project may run.
+func (l ProductionLease) stageJobs() []*Job {
+	stages := l.Stages
+	if len(stages) == 0 {
+		stages = []ProductionStage{{Needs: ResourceNeeds{Platform: Platform{Any: true}}}}
+	}
+	var out []*Job
+	for _, s := range stages {
+		out = append(out, &Job{Spec: Spec{Project: l.Project, Priority: "production", Needs: s.Needs, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines}})
+	}
+	return out
+}
+
+// productionLeaseHosts lists the hosts able to start any stage of the lease:
+// planned drains keep at least one of them enabled while it is open.
+func (q *Queue) productionLeaseHosts(l ProductionLease) []string {
+	var hosts []string
+	for _, j := range l.stageJobs() {
+		for _, h := range q.startEligibleHosts(j) {
+			if !slices.Contains(hosts, h) {
+				hosts = append(hosts, h)
+			}
+		}
+	}
+	slices.Sort(hosts)
+	return hosts
 }
 
 // productionDrainBlocker names open production work that draining host would

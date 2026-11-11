@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -13,7 +14,94 @@ import (
 type StatusSummary struct {
 	RetainedJobs int                `json:"retained_jobs"`
 	Alerts       []StatusAlertGroup `json:"alert_groups"`
+	Leases       []StatusLease      `json:"production_leases,omitempty"`
+	NotQuiescent []StatusQuiescence `json:"not_quiescent,omitempty"`
 	Diagnostics  string             `json:"diagnostics"`
+}
+
+// StatusQuiescence explains one host that a drain, disable or running fleet
+// upgrade is waiting on: hostMaintenanceStatus(host).Quiescent is false (the
+// same predicate drains and upgrades use), with the attempts holding it and any
+// other unmet condition (stale workers, cleanup, calls, sidecars, preparation).
+type StatusQuiescence struct {
+	Host     string         `json:"host"`
+	Mode     string         `json:"mode"`
+	Attempts []StatusHolder `json:"attempts,omitempty"`
+	Other    []string       `json:"other,omitempty"`
+}
+type StatusHolder struct {
+	JobID   string `json:"job_id"`
+	Name    string `json:"name,omitempty"`
+	Attempt int    `json:"attempt"`
+	State   string `json:"state"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// notQuiescentHosts runs under q.mu with the compact capture: only hosts a
+// drain, disable or the active fleet step is waiting on, so its cost is bounded
+// by in-progress maintenance, not fleet size.
+func (q *Queue) notQuiescentHosts() []StatusQuiescence {
+	upgrading := ""
+	if h := q.fleetActiveHost(); h != nil {
+		upgrading = h.Host
+	}
+	var hosts []string
+	for _, m := range q.s.Machines {
+		if host := hostID(m); m.Replacement == nil && !slices.Contains(hosts, host) && (q.maintenanceBlocked(host) || host == upgrading) {
+			hosts = append(hosts, host)
+		}
+	}
+	slices.Sort(hosts)
+	var out []StatusQuiescence
+	for _, host := range hosts {
+		st := q.hostMaintenanceStatus(host)
+		if st.Quiescent {
+			continue
+		}
+		row := StatusQuiescence{Host: host, Mode: st.Policy.Mode}
+		if host == upgrading {
+			row.Mode += "; fleet upgrade"
+		}
+		for _, a := range st.Attempts {
+			holder := StatusHolder{JobID: a.ID, Attempt: a.Attempt, State: a.State, Reason: a.StopCause}
+			if j := q.s.Jobs[a.ID]; j != nil {
+				holder.Name = j.Spec.Name
+			}
+			row.Attempts = append(row.Attempts, holder)
+		}
+		if len(st.Workers) == 0 {
+			row.Other = append(row.Other, "no worker has reported")
+		}
+		for _, w := range st.Workers {
+			if !w.Fresh {
+				row.Other = append(row.Other, "worker "+w.Machine.ID+" has no fresh custody report")
+			}
+		}
+		row.Other = append(row.Other, st.PendingCleanup...)
+		for _, n := range []struct {
+			count int
+			what  string
+		}{{st.Calls, "model calls"}, {st.Sidecars, "sidecars"}, {st.Preparations, "preparations"}} {
+			if n.count > 0 {
+				row.Other = append(row.Other, fmt.Sprintf("%d %s", n.count, n.what))
+			}
+		}
+		if !q.maintenanceBlocked(host) {
+			row.Other = append(row.Other, "admission still enabled until its next idle moment")
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// StatusLease is one open production lease (#1009): its project and key,
+// expiry, and the hosts able to start a declared stage, which planned drains
+// and fleet upgrades keep at least one of enabled until it closes or expires.
+type StatusLease struct {
+	Project   string    `json:"project"`
+	Key       string    `json:"key"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Hosts     []string  `json:"hosts"`
 }
 
 // StatusAlertGroup folds active conditions of one kind into one row: the same
@@ -273,6 +361,10 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		s.Machines[id] = &copy
 	}
 	summary := &StatusSummary{RetainedJobs: len(q.s.Jobs) + len(q.calls), Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
+	for _, l := range q.openProductionLeases() {
+		summary.Leases = append(summary.Leases, StatusLease{Project: l.Project, Key: l.Key, ExpiresAt: l.ExpiresAt, Hosts: q.productionLeaseHosts(l)})
+	}
+	summary.NotQuiescent = q.notQuiescentHosts()
 	selection.page.Total, selection.page.Returned = len(selection.ids), len(selection.ids)
 	inputs := observationState{State: s, Models: q.models, Calls: q.calls, Unreported: q.unreported}
 	if err := chargeProjectionValue(ctx, inputs); err != nil {

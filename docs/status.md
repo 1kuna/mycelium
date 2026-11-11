@@ -294,6 +294,8 @@ snapshot for every read; the CLI projects that snapshot itself.
   | `alert_groups` | As `summary.alert_groups` |
   | `health_alert_delivery` | Present only while alerts await delivery |
   | `fleet_upgrade`, `host_states`, `holds`, `warning` | Unfinished upgrade lines, non-`healthy` hosts, one line per reservation, exclusion, disabled device or host hold |
+  | `production_leases` | One row per open production lease: `project`, `key`, `expires_at`, `hosts` (hosts able to start a declared stage, which planned drains and fleet upgrades keep one of enabled). Text: `production lease PROJECT/KEY: expires T; holds HOSTS` |
+  | `not_quiescent` | One row per host that a drain, disable or the active fleet upgrade step is waiting on (`quiescent: false` in `myce host status`): `host`, `mode`, `attempts[]` (`job_id`, `name`, `attempt`, `state`, `reason` = stop cause) and `other` (stale workers, cleanup, calls, sidecars, preparations, admission still enabled). Text: `not quiescent HOST (MODE): job ID NAME attempt N STATE; ...` |
   | `hyphas[]` | `id`, `gpu`, `free_memory_gb`, `availability` (the status sentence), `host_ram_for_admission_gb`, `free_cpu_cores`/`cpu_cores`, `running` (current jobs placed there), `release` (only when it differs or is unknown), `preparing`, `copying` |
   | `models` | One line per loaded model |
   | `jobs[]` | Each running, waiting or cleanup job: `id`, `name`, `project`, `class`, `state`, `attempt`, `machine`, `since` (waiting since or started), `reason`, `delivery` |
