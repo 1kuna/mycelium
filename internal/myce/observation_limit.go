@@ -36,9 +36,6 @@ func newObservationLimit(clock Clock, q *Queue) *observationLimit {
 	return &observationLimit{clock: clock, pressure: q.mu.enablePressure(clock),
 		index: q.waitIndex(), active: make(map[*observationRead]struct{}), costs: make(map[string]observationCost)}
 }
-func observationRequest(r *http.Request) bool {
-	return observationRouteClass(r) != ""
-}
 
 // Finite classes only: never retain a URL, job identity, query or peer address.
 func observationRouteClass(r *http.Request) string {

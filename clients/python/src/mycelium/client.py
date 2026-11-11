@@ -13,11 +13,14 @@ import datetime as dt
 import json
 import os
 import ssl
+import shutil
 import socket
+import subprocess
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 import time
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -31,6 +34,8 @@ except PackageNotFoundError:
 USER_AGENT = "mycelium-python/" + CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+# Labels the client's own readers send; any other mapping is labelled python.
+_READER_ORIGINS = {"job_spec", "extension"}
 
 
 class UnsupportedTLSRuntimeError(RuntimeError):
@@ -98,6 +103,70 @@ class APIError(RuntimeError):
         super().__init__(message)
 
 
+@dataclass
+class EntryOutcome:
+    """The finished trip of Client.run_entry.
+
+    exit_code matches the CLI: 0 when the job succeeded and its outputs were
+    downloaded and verified, the command's own exit status when it failed with
+    one, otherwise 1. files maps each accepted output name to its local path.
+    """
+    job: dict[str, Any]
+    receipt: dict[str, Any]
+    exit_code: int
+    files: dict[str, Path] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0
+
+
+class EntryPreparationError(RuntimeError):
+    """myce run --entry refused or could not confirm the submission.
+
+    exit_code and reason are the CLI's (64 invalid entry or input, 65 changed
+    intent or rejected, 69 queue unavailable, 75 busy). receipt, when printed,
+    keeps the key: rerunning with the same key resumes without duplicating work.
+    """
+
+    def __init__(self, exit_code: int, reason: str, receipt: dict[str, Any] | None):
+        super().__init__(f"myce run --entry exited {exit_code}: {reason}")
+        self.exit_code, self.reason, self.receipt = exit_code, reason, receipt
+
+
+class EntryFailedError(RuntimeError):
+    """A run_entry job ended failed or cancelled; outcome keeps job and exit_code."""
+
+    def __init__(self, outcome: EntryOutcome):
+        job, short = outcome.job, outcome.job["id"][:8]
+        super().__init__(f"job {short} {job['state']}: {job.get('reason', '')}; "
+                         f"run myce logs {short} for the traceback")
+        self.outcome, self.exit_code = outcome, outcome.exit_code
+
+
+class EntryInterrupted(KeyboardInterrupt):
+    """Ctrl-C during run_entry's wait; the job was asked to cancel by key.
+
+    cancelled is True when the queue acknowledged that the job will not run
+    again (running cleanup may still be pending), False when unconfirmed.
+    """
+
+    def __init__(self, job_id: str, project: str, key: str, cancelled: bool):
+        state = "acknowledged" if cancelled else "unconfirmed; cancel with myce cancel " + job_id
+        super().__init__(f"run_entry interrupted; cancellation {state}")
+        self.job_id, self.project, self.key, self.cancelled = job_id, project, key, cancelled
+
+
+def _exit_code(job: Mapping[str, Any]) -> int:
+    if job["state"] == "succeeded":
+        return 0
+    cause = job.get("execution_cause") or {}
+    code = cause.get("exit_code")
+    if job["state"] == "failed" and cause.get("class") == "command_exit" and isinstance(code, int) and 0 < code <= 255:
+        return code
+    return 1
+
+
 # Transport failures and typed HTTP refusals handled by the shared request policy.
 REQUEST_ERRORS = (APIError, URLError, TimeoutError, ConnectionError, ssl.SSLError)
 
@@ -130,6 +199,11 @@ def _read_reply(response: Any) -> bytes:
     if length is not None and length.isdigit() and len(body) < int(length):
         raise IncompleteReplyError("queue reply ended early")
     return body
+
+
+def _local_name(name: str) -> bool:
+    return bool(name) and not name.startswith("/") and "\\" not in name and ":" not in name and all(
+        part not in {"", ".", ".."} for part in name.split("/"))
 
 
 def _normalize(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -191,6 +265,9 @@ class Client:
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("queue URL must be an HTTP(S) URL without credentials, query or fragment")
         self.token = os.environ.get("MYCE_TOKEN", "") if token is None else token
+        # run_entry hands the CLI the same authority without passing the token:
+        # "environment" (MYCE_TOKEN), ("installed", config) or None (explicit).
+        self._authority: Any = "environment" if token is None else None
         if not self.token:
             raise ValueError("set MYCE_TOKEN or pass token explicitly")
         if (timeout is not None and timeout <= 0) or (poll_interval is not None and poll_interval <= 0):
@@ -228,6 +305,7 @@ class Client:
         address, token, opener = installed_authority(config)
         client = cls(address, token, timeout=timeout, poll_interval=poll_interval, transfer_timeout=transfer_timeout)
         client._urlopen = opener
+        client._authority = ("installed", config)
         return client
 
     @staticmethod
@@ -397,9 +475,22 @@ class Client:
         """
         if not isinstance(job, Mapping):
             return self.submit_yaml(job, timeout=timeout)
-        if timeout is not None:
-            return self._call("POST", "/api/jobs", _normalize(job), timeout=timeout)
-        return self._call("POST", "/api/jobs", _normalize(job))
+        spec = _normalize(job)
+        # A mapping built here is labelled python; the client's own YAML and
+        # extension readers keep theirs. A label copied from a Job reply is replaced.
+        if spec.get("authoring_origin") not in _READER_ORIGINS:
+            spec["authoring_origin"] = "python"
+        options = {} if timeout is None else {"timeout": timeout}
+        try:
+            return self._call("POST", "/api/jobs", spec, **options)
+        except APIError as error:
+            # A queue older than the python label rejects it before creating
+            # anything; it records the submission as api instead.
+            if (spec["authoring_origin"] != "python" or error.code != "job_execution_invalid"
+                    or "authoring_origin" not in error.body):
+                raise
+            del spec["authoring_origin"]
+            return self._call("POST", "/api/jobs", spec, **options)
 
     def submit_yaml(self, source: str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Load YAML safely. Pass Path for a file, str for YAML text."""
@@ -442,10 +533,7 @@ class Client:
         """
         if not extension or not key or not project or not str(outputs):
             raise ValueError("run requires extension, outputs directory, key and project")
-        def local_name(name: str) -> bool:
-            return bool(name) and not name.startswith("/") and "\\" not in name and ":" not in name and all(
-                part not in {"", ".", ".."} for part in name.split("/"))
-        if not all(local_name(name) for name in inputs):
+        if not all(_local_name(name) for name in inputs):
             raise ValueError("input names must be clean relative paths")
         files = {name: self.upload_file(source, project=project, class_=class_) for name, source in inputs.items()}
         job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
@@ -457,19 +545,84 @@ class Client:
             short = job["id"][:8]
             raise APIError(409, json.dumps({"code": "job_" + job["state"], "job_id": job["id"],
                 "error": f"job {short} {job['state']}: {job.get('reason', '')}; run myce logs {short} for the traceback"}))
-        names = job.get("output_refs", {})
-        if not all(local_name(name) for name in names):
-            raise ValueError("result names must be clean relative paths")
-        root = Path(outputs).absolute()
-        for name in names:
-            destination = root / name
-            for parent in destination.parents:
-                if parent == root:
-                    break
-                if parent.is_symlink():
-                    raise ValueError("result parent must be a directory, not a symlink")
-            self.download_result(job["id"], name, destination)
+        self.download_results(job, outputs)
         return job
+
+    def run_entry(self, name: str | None = None, *, out: str | Path | None = None,
+                  wait: bool = True, args: Sequence[str] = (),
+                  inputs: Mapping[str, str | Path] | None = None, key: str | None = None,
+                  class_: str | None = None, root: str | Path | None = None,
+                  adapter: str | Path | None = None, timeout: float | None = None,
+                  check: bool = True, myce: str | Path | None = None) -> Any:
+        """Run a .mycelium/adapter.yaml entry: submit, wait, download and verify.
+
+        Submission is myce run --entry itself, so source freezing, the key,
+        environment locks and the local receipt match the CLI exactly: the same
+        entry and key from Python or the CLI is one job. name defaults to the
+        adapter's default entry; args are appended to its command; inputs add
+        per-submission files {DEST: PATH}. root is the project directory (default:
+        the current directory); adapter overrides root/.mycelium/adapter.yaml.
+
+        wait=False returns the receipt (job_id, key, project). Otherwise it waits,
+        downloads every accepted output into out and returns an EntryOutcome. A
+        failed or cancelled job raises EntryFailedError unless check=False. A
+        timeout raises TimeoutError and leaves the job running. Ctrl-C cancels
+        the job by key and raises EntryInterrupted. The CLI (myce on PATH, or
+        myce=) uses this client's authority: from_installed() or MYCE_TOKEN.
+        """
+        if wait and out is None:
+            raise ValueError("run_entry needs out=DIR when wait=True")
+        binary = str(myce) if myce is not None else shutil.which("myce")
+        if not binary:
+            raise FileNotFoundError("run_entry needs the installed myce CLI on PATH (or pass myce=)")
+        if self._authority is None:
+            raise ValueError("run_entry uses installed authority: construct with Client.from_installed() "
+                             "or set MYCE_TOKEN in the environment")
+        root = Path.cwd() if root is None else Path(root).absolute()
+        adapter = root / ".mycelium" / "adapter.yaml" if adapter is None else Path(adapter).absolute()
+        command = [binary, "run", "--queue", self.url, "--adapter", str(adapter)]
+        environment = dict(os.environ)
+        if self._authority != "environment":
+            # Installed authority only: an exported credential must not override it.
+            for variable in ("MYCE_TOKEN", "MYCE_QUEUE", "MYCE_JOINING_FILE"):
+                environment.pop(variable, None)
+            if self._authority[1] is not None:
+                command += ["--config", str(Path(self._authority[1]).absolute())]
+        if name:
+            command += ["--entry", name]
+        if key:
+            command += ["--key", key]
+        if class_:
+            command += ["--class", class_]
+        for dest, local in (inputs or {}).items():
+            command += ["--input", f"{dest}={local}"]
+        command += ["--", *map(str, args)]
+        prepared = subprocess.run(command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True)
+        lines = [line for line in prepared.stdout.splitlines() if line.strip()]
+        try:
+            receipt = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            receipt = None
+        if prepared.returncode != 0 or not isinstance(receipt, dict) or not receipt.get("job_id"):
+            reason = (prepared.stderr.strip().splitlines() or ["no receipt printed"])[-1]
+            raise EntryPreparationError(prepared.returncode, reason, receipt if isinstance(receipt, dict) else None)
+        if not wait:
+            return receipt
+        try:
+            job = self.wait(receipt["job_id"], timeout=timeout)
+        except KeyboardInterrupt:
+            try:
+                cancelled = bool(self.cancel_submission(receipt["project"], receipt["key"]).get("will_not_run"))
+            except REQUEST_ERRORS:
+                cancelled = False
+            raise EntryInterrupted(receipt["job_id"], receipt["project"], receipt["key"], cancelled) from None
+        outcome = EntryOutcome(job=job, receipt=receipt, exit_code=_exit_code(job))
+        if outcome.ok:
+            outcome.files = self.download_results(job, out)
+        elif check:
+            raise EntryFailedError(outcome)
+        return outcome
 
     def _file_request(self, method, path, data=None, headers=None, size=0, *, timing=None, deadline=None, retry=True):
         end = deadline if deadline is not None else (None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout)
@@ -682,6 +835,38 @@ class Client:
             ref = (job.get("output_refs") or {}).get(artifact)
         if ref is None:
             raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
+        return self._download_ref(ref, destination)
+
+    def download_results(self, job: str | Mapping[str, Any], destination: str | Path) -> dict[str, Path]:
+        """Download every accepted output of a succeeded job into a directory.
+
+        job is an ID or a Job reply from get() or wait(). Each file lands at destination/NAME and is
+        checked against its recorded size and SHA-256. Returns {name: path}.
+        Raises APIError (result_expired, request_stale) when the job has no
+        accepted result to fetch.
+        """
+        if isinstance(job, str):
+            job = self.get(job)
+        if job.get("files_expired"):
+            raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
+        if job["state"] != "succeeded":
+            raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
+        refs = job.get("output_refs") or {}
+        if not all(_local_name(name) for name in refs):
+            raise ValueError("result names must be clean relative paths")
+        root = Path(destination).absolute()
+        files = {}
+        for name, ref in refs.items():
+            target = root / name
+            for parent in target.parents:
+                if parent == root:
+                    break
+                if parent.is_symlink():
+                    raise ValueError("result parent must be a directory, not a symlink")
+            files[name] = self._download_ref(ref, target)
+        return files
+
+    def _download_ref(self, ref: Mapping[str, Any], destination: str | Path) -> Path:
         sha, size = ref["sha256"], ref["size_bytes"]
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
             raise ValueError("invalid artifact identity")

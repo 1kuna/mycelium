@@ -14,13 +14,13 @@ func TestProfileTargetChangedBeforeStart(t *testing.T) {
 	if j == nil {
 		t.Fatal("not assigned")
 	}
-	if !q.startPlacementAllowed(j) {
+	if q.startPlacementRejection(j) != "" {
 		t.Fatal("original target not allowed")
 	}
 	if err := q.update(func() error { q.touchMachine(m.ID).CapabilityProfile.Arch = "arm64"; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if q.startPlacementAllowed(j) {
+	if q.startPlacementRejection(j) == "" {
 		t.Fatal("changed arch passed final launch gate")
 	}
 	if err := q.Started(result(j, true)); err == nil {

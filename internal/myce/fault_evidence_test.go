@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -172,10 +171,10 @@ func TestSignalEvidenceSyntheticExitsAndCoreMetadata(t *testing.T) {
 			w := Worker{SignalEvidenceSource: func(request SignalCapture) *SignalEvidence {
 				pid, at := request.PID, request.ObservedAt
 				evidence := &SignalEvidence{CoreCapture: "disabled_soft_limit"}
-				applyCoreMetadata(evidence, []byte(fmt.Sprintf(`{"COREDUMP_PID":"42","COREDUMP_SIGNAL":"%d","COREDUMP_TIMESTAMP":"%d","COREDUMP_FILENAME":"/operator-cores/core.42","COREDUMP_PROC_MAPS":"1000-2000 r-xp 00001000 08:01 123 /runtime/libc.so.6\n","COREDUMP_ENVIRON":"TOKEN=secret"}`, signal, at.UnixMicro())), pid, at)
+				applyCoreMetadataFor(evidence, []byte(fmt.Sprintf(`{"COREDUMP_PID":"42","COREDUMP_SIGNAL":"%d","COREDUMP_TIMESTAMP":"%d","COREDUMP_FILENAME":"/operator-cores/core.42","COREDUMP_PROC_MAPS":"1000-2000 r-xp 00001000 08:01 123 /runtime/libc.so.6\n","COREDUMP_ENVIRON":"TOKEN=secret"}`, signal, at.UnixMicro())), SignalCapture{PID: pid, StartedAt: at, ObservedAt: at})
 				return evidence
 			}}
-			w.captureSignalEvidence(&exec.Cmd{Process: &os.Process{Pid: 42}}, e)
+			w.captureSignalEvidencePID(42, "", e, false)
 			r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: memberOutcome{Exit: e}})
 			if r.SignalEvidence == nil || len(r.SignalEvidence.Libraries) != 1 || r.SignalEvidence.Libraries[0].Name != "libc.so.6" || r.SignalEvidence.Signal != crashSignal(signal) || r.SignalEvidence.CoreCapture != "systemd_core_recorded" {
 				t.Fatal(r.SignalEvidence)
@@ -197,7 +196,7 @@ func TestSignalEvidenceSyntheticExitsAndCoreMetadata(t *testing.T) {
 		t.Fatal("pipe handler availability inferred from ignored soft limit")
 	}
 	e := &SignalEvidence{CoreCapture: "unavailable"}
-	applyCoreMetadata(e, []byte(`{"COREDUMP_PID":"42","COREDUMP_TIMESTAMP":"1","COREDUMP_SIGNAL":"11","COREDUMP_FILENAME":"/old/core"}`), 42, clock.Now())
+	applyCoreMetadataFor(e, []byte(`{"COREDUMP_PID":"42","COREDUMP_TIMESTAMP":"1","COREDUMP_SIGNAL":"11","COREDUMP_FILENAME":"/old/core"}`), SignalCapture{PID: 42, StartedAt: clock.Now(), ObservedAt: clock.Now()})
 	if e.CorePointer != "" {
 		t.Fatal("old PID core misattributed")
 	}

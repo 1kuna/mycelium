@@ -195,7 +195,7 @@ func (q *Queue) detectHealth() {
 		if q.unreported[m.ID] && q.inRestartGrace(now) {
 			stale = false
 		}
-		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
+		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		cause := "host_health_unavailable"
 		if stale {
 			cause = "host_silent"

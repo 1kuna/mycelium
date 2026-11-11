@@ -15,7 +15,8 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from mycelium import APIError, Checkpoint, Client, IncompleteReplyError, StopSignal
+from mycelium import (APIError, Checkpoint, Client, EntryFailedError, EntryInterrupted, EntryPreparationError,
+                      IncompleteReplyError, StopSignal)
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -446,6 +447,16 @@ class DevTests(unittest.TestCase):
         cls.output.close()
         cls.directory.cleanup()
 
+    def wait_observers(self, home):
+        # myce run arms a detached receipt observer under HOME. Once every job is
+        # terminal it exits on its own, but only while the queue is reachable, and
+        # it writes under HOME until then, so wait before HOME is removed.
+        observers = home / ("Library/Caches" if sys.platform == "darwin" else ".cache") / "myce/observers"
+        end = time.monotonic() + 30
+        while list(observers.glob("*.json")) and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertEqual(list(observers.glob("*.json")), [], "receipt observers did not finish")
+
     def spec(self, command, **extra):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
 
@@ -478,7 +489,8 @@ class DevTests(unittest.TestCase):
         self.assertEqual(len(blocks), 4, "consumer guide CLI journey changed shape")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            environment = {**os.environ, "HOME": str(root), "MYCE_QUEUE": self.client.url,
+            environment = {**os.environ, "HOME": str(root), "XDG_CACHE_HOME": str(root / ".cache"),
+                           "MYCE_QUEUE": self.client.url,
                            "MYCE_TOKEN": "dev-token",
                            "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
             job = None
@@ -493,6 +505,7 @@ class DevTests(unittest.TestCase):
             self.assertTrue(job, "CLI journey must submit a job")
             self.assertEqual((root / "accepted/result.txt").read_bytes(),
                              b"mycelium-ease-audit-ok\n")
+            self.wait_observers(root)
 
     def test_consumer_skill_relative_pixi_lock(self):
         # The submit reference's relative Pixi lock example: the CLI uploads the
@@ -509,7 +522,8 @@ class DevTests(unittest.TestCase):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text(text)
             (root / ".mycelium").mkdir()
-            environment = {**os.environ, "HOME": str(root), "MYCE_QUEUE": self.client.url,
+            environment = {**os.environ, "HOME": str(root), "XDG_CACHE_HOME": str(root / ".cache"),
+                           "MYCE_QUEUE": self.client.url,
                            "MYCE_TOKEN": "dev-token",
                            "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run(["sh", "-ec", blocks[0]], cwd=root, env=environment,
@@ -522,6 +536,73 @@ class DevTests(unittest.TestCase):
             self.assertEqual(lock["sha256"]["pixi.lock"],
                              hashlib.sha256((root / "env/pixi.lock").read_bytes()).hexdigest())
             self.client.cancel(job)
+            self.client.wait(job, timeout=30)
+            self.wait_observers(root)
+
+    def test_run_entry_matches_cli_trip(self):
+        # #1341: run_entry submits through myce run --entry (same source, key and
+        # receipt), then waits, downloads, verifies and cancels on Ctrl-C itself.
+        project = self.root / "entry-project"
+        (project / "source").mkdir(parents=True)
+        (project / ".mycelium").mkdir()
+        (project / "source/README.txt").write_text("fixture\n")
+        targets = "[{os: darwin, arch: arm64, platform: cpu}, {os: darwin, arch: amd64, platform: cpu}, " \
+                  "{os: linux, arch: amd64, platform: cpu}, {os: linux, arch: arm64, platform: cpu}]"
+        recipe = f"source: {{directory: source}}\n    needs: {{platform: cpu, cpu_cores: 1, memory_gb: 0.125}}\n    targets: {targets}\n"
+        (project / ".mycelium/adapter.yaml").write_text(f"""schema: 1
+project: python-entry
+default: write
+entries:
+  write:
+    {recipe}    run: {{command: [sh, -c, 'mkdir -p out && printf "$0\\n" > out/result.txt']}}
+    outputs: {{out/result.txt: results}}
+  fail:
+    {recipe}    run: {{command: [sh, -c, 'exit 7']}}
+  sleep:
+    {recipe}    run: {{command: [sh, -c, 'sleep 60']}}
+""")
+        home = self.root / "entry-home"
+        home.mkdir(exist_ok=True)
+        # No installed authority in HOME: the CLI uses the environment token only.
+        with patch.dict(os.environ, {"MYCE_TOKEN": "dev-token", "HOME": str(home),
+                                     "XDG_CACHE_HOME": str(home / ".cache")}):
+            client = Client(self.client.url, poll_interval=0.05)
+            myce = self.root / "myce"
+            outcome = client.run_entry(out=project / "accepted", root=project, args=["hello"],
+                                       key="entry-ok", timeout=60, myce=myce)
+            self.assertTrue(outcome.ok)
+            self.assertEqual(outcome.files["out/result.txt"].read_bytes(), b"hello\n")
+            self.assertEqual(outcome.job["spec"]["authoring_origin"], "adapter")
+            # The same key is the same job, whether through Python or the CLI.
+            again = client.run_entry(out=project / "again", root=project, args=["hello"],
+                                     key="entry-ok", wait=False, myce=myce)
+            self.assertEqual(again["job_id"], outcome.job["id"])
+            cli = subprocess.run([str(myce), "run", "--queue", client.url, "--entry", "write", "--key", "entry-ok", "--", "hello"],
+                                 cwd=project, capture_output=True, text=True, timeout=60)
+            self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+            self.assertEqual(json.loads(cli.stdout.splitlines()[-1])["job_id"], outcome.job["id"])
+            self.assertEqual(client.download_results(outcome.job["id"], project / "fetched"),
+                             {"out/result.txt": (project / "fetched/out/result.txt").absolute()})
+
+            with self.assertRaises(EntryFailedError) as failed:
+                client.run_entry("fail", out=project / "failed", root=project, key="entry-fail", timeout=60, myce=myce)
+            self.assertEqual((failed.exception.exit_code, failed.exception.outcome.job["state"]), (7, "failed"))
+            unchecked = client.run_entry("fail", out=project / "failed", root=project, key="entry-fail",
+                                         check=False, myce=myce)
+            self.assertEqual((unchecked.exit_code, unchecked.files), (7, {}))
+
+            with patch.object(client, "wait", side_effect=KeyboardInterrupt):
+                with self.assertRaises(EntryInterrupted) as interrupted:
+                    client.run_entry("sleep", out=project / "slept", root=project, key="entry-sleep", myce=myce)
+            self.assertTrue(interrupted.exception.cancelled)
+            self.assertEqual(client.wait(interrupted.exception.job_id, timeout=30)["state"], "cancelled")
+
+            with self.assertRaises(EntryPreparationError) as refused:
+                client.run_entry("absent", out=project / "x", root=project, myce=myce)
+            self.assertEqual(refused.exception.exit_code, 64)
+        self.wait_observers(home)
+        with self.assertRaisesRegex(ValueError, "installed authority"):
+            self.client.run_entry(out=project / "x", root=project, myce=myce)
 
     def test_cancel_running_by_key(self):
         spec = self.spec([sys.executable, "-u", "-c",
@@ -591,6 +672,7 @@ class DevTests(unittest.TestCase):
         self.assertIn("first", "".join(c["text"] for c in chunks))
         self.assertIn("last", "".join(c["text"] for c in chunks))
         self.assertEqual(self.client.wait(job["id"], timeout=10)["state"], "succeeded")
+        self.assertEqual(self.client.get(job["id"])["spec"]["authoring_origin"], "python")
         self.assertEqual(list(self.client.logs(job["id"], after=chunks[-1]["seq"])), [])
         self.assertEqual(original["needs"]["platform"], ["fake"])
         failed = self.client.submit(self.spec([sys.executable, "-c", "raise SystemExit(7)"]))

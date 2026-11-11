@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -37,6 +38,8 @@ type checkpointShards struct {
 	ready   atomic.Bool
 	mu      sync.Mutex
 	running bool
+	closed  bool
+	prepare func(string) error // Optional preparation seam for lifecycle tests.
 	next    time.Time
 	done    chan struct{} // Closed when the in-flight preparation finishes; tests wait on it.
 }
@@ -77,6 +80,9 @@ func (q *Queue) kickCheckpointShards() <-chan struct{} {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	if s.running {
 		return s.done
 	}
@@ -85,8 +91,12 @@ func (q *Queue) kickCheckpointShards() <-chan struct{} {
 	}
 	s.running, s.done = true, make(chan struct{})
 	done, root := s.done, q.root
+	prepare := s.prepare
+	if prepare == nil {
+		prepare = prepareCheckpointShards
+	}
 	go func() {
-		err := prepareCheckpointShards(root)
+		err := prepare(root)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.running = false
@@ -99,6 +109,29 @@ func (q *Queue) kickCheckpointShards() <-chan struct{} {
 		close(done)
 	}()
 	return done
+}
+
+// Storage ownership must not be released while background preparation is still
+// writing its root. A stuck filesystem operation cannot be cancelled; report an
+// incomplete drain within the existing filesystem budget instead of claiming a
+// clean close or waiting forever. Never hold q.mu during the drain.
+func (q *Queue) closeCheckpointShards() error {
+	s := &q.shards
+	s.mu.Lock()
+	s.closed = true
+	done := s.done
+	s.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), networkFilesystemBudget)
+	defer cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("checkpoint shard preparation still running at close: %w", ctx.Err())
+	}
 }
 
 func prepareCheckpointShards(root string) error {

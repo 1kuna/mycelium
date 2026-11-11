@@ -10,12 +10,13 @@ import "time"
 // the same physical reading, applied once: never a second subtraction.
 
 // resolveHostAllowance picks the host's one allowance: the queue's host policy
-// (measured from idle history, else its authored fallback), else the workers'
-// own flags. Each worker enforces the allowance it last acknowledged, so until
-// every live worker acknowledges a change the queue admits within the lower of
-// the new allowance and theirs. A pending acknowledgement is a readiness and
-// health signal (HostMemoryPolicyMismatch), never an admission pause: a
-// measured allowance shifts with idle history and must not stall its host.
+// (measured from idle history, else its authored fallback), lowered to any live
+// worker's own acknowledged allowance. Workers adopt the policy from every
+// check-in reply and enforce what they acknowledged, so until they acknowledge
+// a change the queue admits within the lower value: a fall applies at once, a
+// rise after acknowledgement, and admission never pauses. A pending
+// acknowledgement of the authored value or of the measured mode (a measured
+// value moves with history) is HostMemoryPolicyMismatch: host readiness only.
 func (q *Queue) resolveHostAllowance(m *Machine) {
 	m.hostBudgetGB, m.HostMemoryDerivation, m.HostMemoryPolicyMismatch = 0, nil, false
 	policy := q.s.HostMaintenance[hostID(m)].MemoryBudget
@@ -24,21 +25,13 @@ func (q *Queue) resolveHostAllowance(m *Machine) {
 		m.hostBudgetGB, m.HostMemoryDerivation = budget.GiB, derivation
 	}
 	for _, w := range q.s.Machines {
-		if hostID(w) != hostID(m) {
+		if hostID(w) != hostID(m) || w.Gone || w.Replacement != nil {
 			continue
 		}
-		live := !w.Gone && w.Replacement == nil
-		switch {
-		case policy == nil:
-			// Without a policy, sibling flags must agree with each other.
-			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || w.HostMemoryBudgetGB != m.HostMemoryBudgetGB
-		case policy.Measured:
-			// The measured value moves with history; the mode is the contract.
-			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || live && !w.HostMemoryBudgetMeasured
-		default:
-			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || w.HostMemoryBudgetGB != m.hostBudgetGB || w.HostMemoryBudgetMeasured
+		if policy != nil && (w.HostMemoryBudgetMeasured != policy.Measured || !policy.Measured && w.HostMemoryBudgetGB != policy.GiB) {
+			m.HostMemoryPolicyMismatch = true
 		}
-		if live && (w.HostMemoryBudgetGB > 0 || w.HostMemoryBudgetMeasured) && (m.hostBudgetGB <= 0 && m.HostMemoryDerivation == nil || w.HostMemoryBudgetGB < m.hostBudgetGB) {
+		if (w.HostMemoryBudgetGB > 0 || w.HostMemoryBudgetMeasured) && (m.hostBudgetGB <= 0 && m.HostMemoryDerivation == nil || w.HostMemoryBudgetGB < m.hostBudgetGB) {
 			m.hostBudgetGB = w.HostMemoryBudgetGB
 		}
 	}

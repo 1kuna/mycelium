@@ -58,7 +58,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	s := spec("experiment")
 	s.Run.Command = []string{"sh", "-c", `mkfifo -m 600 "$WAIT_FIFO" "$SIGNAL_FIFO" || exit 1; exec 3<> "$WAIT_FIFO"; trap 'echo term > "$SIGNAL_FIFO"' TERM; echo ready; while :; do read line <&3; done`}
 	s.Run.Env = map[string]string{"WAIT_FIFO": "{work}/wait", "SIGNAL_FIFO": "{work}/signal"}
-	submit(t, q, s)
+	j := submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	stateDir := t.TempDir()
@@ -72,29 +72,30 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 		}
 		close(release)
 		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+				return true
+			default:
+				return false
 			}
-		case <-time.After(3 * time.Second):
-			t.Error("worker cleanup timed out")
-		}
+		})
 	}()
-	bootstrap := time.NewTicker(time.Millisecond)
-	defer bootstrap.Stop()
-	timeout := time.After(3 * time.Second)
-waitingUpload:
-	for {
+	// Launch and first upload are asynchronous I/O. Advance bootstrap time only
+	// until the held request enters; all stop assertions below freeze time.
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
 		select {
 		case <-entered:
-			break waitingUpload
-		case <-bootstrap.C:
-			clock.Advance(time.Millisecond)
-		case <-timeout:
-			t.Fatal("no upload")
+			return true
+		default:
+			return false
 		}
-	}
+	})
 	var state workerState
 	data, err := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 	if err != nil {
@@ -116,32 +117,33 @@ waitingUpload:
 		}
 	}()
 	submit(t, q, spec("production"))
-	select {
-	case term := <-terms:
-		if term != "term" {
-			t.Fatal(term)
+	await(t, func() bool {
+		select {
+		case term := <-terms:
+			if term != "term" {
+				t.Fatal(term)
+			}
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("SIGTERM blocked behind log upload")
+	})
+	// TERM must arrive while this same request remains held. Use the queue's
+	// original absolute grace deadline, excluding launch and observation time.
+	deadline := job(t, q, j.ID).StopAt
+	if deadline == nil || !clock.Now().Before(*deadline) {
+		t.Fatal("TERM not observed before the original stop deadline")
 	}
-	// The command keeps running after TERM. The original 10-second deadline
-	// must kill it while the same upload remains blocked and the queue is silent.
-	clock.Advance(9 * time.Second)
-	if _, err := os.Stat(filepath.Join(stateDir, state.Identity+".result.json")); err == nil {
+	clock.Advance(deadline.Sub(clock.Now()) - time.Second)
+	resultPath := filepath.Join(stateDir, state.Identity+".result.json")
+	if _, err := os.Stat(resultPath); err == nil {
 		t.Fatal("killed before grace")
 	}
 	clock.Advance(time.Second)
-	timeout = time.After(time.Second)
-	for {
-		if _, err := os.Stat(filepath.Join(stateDir, state.Identity+".result.json")); err == nil {
-			break
-		}
-		select {
-		case <-bootstrap.C:
-		case <-timeout:
-			t.Fatal("SIGKILL did not enforce fake-clock deadline during blocked network call")
-		}
-	}
+	// Keep fake time fixed at the deadline and network release held until the
+	// forced result is durably published. Blocking stop behind upload/check-in
+	// can never satisfy this fence, regardless of real scheduling latency.
+	await(t, func() bool { _, err := os.Stat(resultPath); return err == nil })
 }
 
 func TestWorkerStopEventPreservesQueueDeadline(t *testing.T) {
@@ -158,12 +160,15 @@ func TestWorkerStopEventPreservesQueueDeadline(t *testing.T) {
 	events := make(chan WorkerEvent)
 	w := Worker{Clock: clock, Machine: machine("one", "fake"), Client: Client{URL: server.URL}}
 	go w.watchStops(ctx, events)
-	select {
-	case got := <-events:
-		if !got.deadline.Equal(deadline) {
-			t.Fatalf("deadline extended: %s, want %s", got.deadline, deadline)
+	await(t, func() bool {
+		select {
+		case got := <-events:
+			if !got.deadline.Equal(deadline) {
+				t.Fatalf("deadline extended: %s, want %s", got.deadline, deadline)
+			}
+			return true
+		default:
+			return false
 		}
-	case <-time.After(time.Second):
-		t.Fatal("no event")
-	}
+	})
 }

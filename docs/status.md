@@ -451,8 +451,9 @@ Python `Client.get()` and `Client.list()`.
 
 On releases with #775, `spec.authoring_origin` records the reader used at first
 acceptance: `profile`, `adapter`, `job_spec` (explicit YAML/JSON or Python YAML),
-`command` (one-off CLI), `extension` (Go/Python extension run helper), or `api`
-(otherwise unmarked new API/SDK submissions). Generated qualification jobs are
+`command` (one-off CLI), `extension` (Go/Python extension run helper), `python`
+(mappings built with the Python client), or `api` (otherwise unmarked new
+API/SDK submissions). Generated qualification jobs are
 `extension_check`; generated fan-out execution records are `fan_out_child`,
 while their parent retains its reader label. Count those separately from
 independent submissions. CLI status and the status page show the same label.
@@ -1507,8 +1508,14 @@ workers fresh with consistent budget and usable memory and inventory reports.
 work/cleanup count zero. Degraded inventory or memory probes can leave `healthy`
 false while `quiescent` is true, allowing `disable --stop --wait` to complete.
 Sidecars are conservatively counted until their exact attempt is released.
-Plain status exits nonzero when worker health is incomplete; mutations exit
-zero on durable acceptance. Queue maintenance status has no privileged
+Plain status prints the JSON on stdout in every case and exits by `state`
+(#1187): 0 `healthy`; 3 `degraded` (all known workers fresh with consistent
+memory and inventory evidence, while a device reason, unavailable root or host
+hygiene reason withholds capacity), with a stderr line naming each worker,
+component, reason and what clears it, such as `myce device clear-quarantine`
+for a `device_fault_*` quarantine; 1 `unhealthy` (`host health incomplete:
+missing, stale or inconsistent worker evidence`). Mutations exit zero on
+durable acceptance. Queue maintenance status has no privileged
 local-exclusion verdict.
 
 The optional wait reads this status until quiescent or the injected deadline.
@@ -1750,7 +1757,11 @@ observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
 On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
 measured period/cost and frozen validity in seconds. Local sample age must remain
-below that validity, including time waiting behind queue transactions.
+below that validity at each report, including time waiting behind queue
+transactions. Between reports the sample stays fresh until the next report is
+due: its processing time plus that validity plus `delivery_seconds`, the
+session's measured check-in delivery prediction frozen at acceptance (#684).
+`age_seconds` is the age at that report, not the current age.
 Matching-session contact cannot renew a negotiated observation. `availability.probe` and
 `availability.age_seconds` similarly preserve owner observation age across clock
 skew. `host_health.probe` applies the same frozen validity to health evidence;

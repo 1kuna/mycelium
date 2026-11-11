@@ -433,3 +433,73 @@ func TestSharedHostPressureOwnerYieldDoesNotConsumeHealthAlert(t *testing.T) {
 	}
 	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
 }
+
+// #684 live storm: a fresh measured observation expired between check-ins
+// whenever the next report reached the queue later than its frozen validity,
+// because validity predicts the worker's next send, not that report's
+// delivery. Every queue transaction then raised a host alert that the next
+// check-in cleared. Reported samples, missing samples and a silent worker
+// must still alert and withhold new work.
+func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
+	q, clock, m, run := sharedRunning(t, false)
+	other := machine("other", "fake")
+	check(t, q, other, nil)
+	// Three completed check-ins of this session each took one second from
+	// arrival to completion: a delivery prediction of about 2.1 s.
+	for range 3 {
+		settle := q.beginWorkerCheckin(m.ID, m.Session, time.Second, true)
+		clock.Advance(time.Second)
+		settle(true)
+	}
+	probe := &ProbeObservation{PeriodSeconds: 1, CostSeconds: .01, ValidSeconds: 6.5}
+	report := func(age float64) {
+		m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, AgeSeconds: age, Probe: probe}
+		check(t, q, m, run)
+	}
+	withheld := func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		return q.sharedPressureReason(q.s.Machines[m.ID]) != ""
+	}
+	report(1.5)
+	before := len(alertsOf(q, "host_unhealthy_or_stale"))
+	// Live shape: a 1.5 s old sample, then a 6 s gap until the next report.
+	// Another worker's check-in evaluates health inside that gap.
+	clock.Advance(5500 * time.Millisecond)
+	check(t, q, other, nil)
+	if got := len(alertsOf(q, "host_unhealthy_or_stale")); got != before {
+		t.Fatalf("pending next report raised %d host alerts", got-before)
+	}
+	if withheld() {
+		t.Fatal("pending next report withheld new work as unknown pressure")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "healthy")
+	clock.Advance(500 * time.Millisecond)
+	report(.5)
+
+	// A silent worker's pressure expires once the next report is overdue.
+	clock.Advance(6500*time.Millisecond + 2200*time.Millisecond)
+	check(t, q, other, nil)
+	if !withheld() || len(alertsOf(q, "host_unhealthy_or_stale")) != before+1 {
+		t.Fatal("overdue pressure report did not alert and withhold")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+	report(.5)
+	assertSharedPressureHealth(t, q, m.ID, "healthy")
+
+	// A stopped sensor fails at the report whose sample reached validity, and
+	// a failed probe sends none; both alert and withhold immediately.
+	for i, age := range []float64{6.5, -1} {
+		if age < 0 {
+			m.SharedHostPressure = nil
+			check(t, q, m, run)
+		} else {
+			report(age)
+		}
+		if !withheld() || len(alertsOf(q, "host_unhealthy_or_stale")) != before+2+i {
+			t.Fatalf("pressure fault %d did not alert and withhold", i)
+		}
+		assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+		report(.5)
+	}
+}

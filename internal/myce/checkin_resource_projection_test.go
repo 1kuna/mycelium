@@ -151,13 +151,7 @@ func BenchmarkCheckinResourceProjection(b *testing.B) {
 							span := &requestSpan{}
 							ctx := context.WithValue(context.Background(), requestSpanKey{}, span)
 							id := fmt.Sprintf("queued-%03d", (i*4+n)%30)
-							var err error
-							if n%2 == 0 {
-								_, err = q.jobSnapshot(id, ctx)
-							} else {
-								_, err = q.waitJobSnapshot(id, ctx)
-							}
-							if err != nil {
+							if _, err := q.jobSnapshot(id, ctx); err != nil {
 								b.Error(err)
 							}
 							readWaits[n] = span.wait

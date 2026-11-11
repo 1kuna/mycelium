@@ -28,7 +28,10 @@ type SharedHostPressure struct {
 	WakeDelayMS float64                 `json:"wake_delay_ms"` // Normal-priority timer wake lateness.
 	AgeSeconds  float64                 `json:"age_seconds"`
 	ReceivedAt  time.Time               `json:"received_at"`
-	sampledAt   time.Time
+	// Queue-owned: this session's measured check-in delivery prediction,
+	// frozen at acceptance. Never accepted from a worker.
+	DeliverySeconds float64 `json:"delivery_seconds,omitempty"`
+	sampledAt       time.Time
 }
 
 const sharedHostPressureCause = "shared_host_pressure"
@@ -74,6 +77,7 @@ func (q *Queue) acceptSharedPressure(m, old *Machine) {
 		return
 	}
 	p.ReceivedAt = q.clock.Now().Add(-time.Duration(p.AgeSeconds * float64(time.Second)))
+	p.DeliverySeconds = q.checkinDeliveryUpper(m)
 	// Only fresh observations can train, and an adverse episode freezes the
 	// healthy baseline. OS warning/critical levels remain physical signals.
 	first := learned.At.IsZero()
@@ -121,7 +125,14 @@ func (q *Queue) sharedPressureFresh(m *Machine) bool {
 		return false
 	}
 	if p.Probe != nil {
-		return now.Sub(p.ReceivedAt) < p.Probe.freshness()
+		// #684: validity predicts the worker's next send (period, probe cost and
+		// learned report gap), not that report's delivery to the queue. Judge
+		// the sample at each report, then allow the next report until it is due:
+		// this report's time plus validity plus measured check-in delivery.
+		// A stopped sensor still fails at the next report, where its age
+		// reaches validity; a silent worker expires here.
+		reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
+		return now.Sub(reportAt) < p.Probe.freshness()+time.Duration(p.DeliverySeconds*float64(time.Second))
 	}
 	// Legacy protocol: reuse bounded matching-session contact during queue delay. Successive
 	// pending requests must never extend one observation beyond that budget.

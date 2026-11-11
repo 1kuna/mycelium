@@ -6,6 +6,7 @@ const (
 	OriginAdapter        = "adapter"
 	OriginJobSpec        = "job_spec"
 	OriginAPI            = "api"
+	OriginPython         = "python"
 	OriginCommand        = "command"
 	OriginExtension      = "extension"
 	OriginExtensionCheck = "extension_check"
@@ -16,7 +17,7 @@ const (
 // never infer an old reader from payloads, names, paths or extension identity.
 func (s Spec) Origin() string {
 	switch s.AuthoringOrigin {
-	case OriginProfile, OriginAdapter, OriginJobSpec, OriginAPI, OriginCommand,
+	case OriginProfile, OriginAdapter, OriginJobSpec, OriginAPI, OriginPython, OriginCommand,
 		OriginExtension, OriginExtensionCheck, OriginFanOutChild:
 		return s.AuthoringOrigin
 	default:

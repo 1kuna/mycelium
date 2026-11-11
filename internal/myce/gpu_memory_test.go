@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 func TestMemorySourceCUDA(t *testing.T) {
 	ctx := context.WithValue(context.Background(), struct{}{}, "command context")
 	calls := 0
-	source, err := newMemorySourceWithCommand("cuda", 0, 1, func(got context.Context, name string, args ...string) ([]byte, error) {
+	source, err := newMemorySource("cuda", 0, 1, "auto", runtime.GOOS, guardedHardwareReadFile, func(got context.Context, name string, args ...string) ([]byte, error) {
 		if got.Value(struct{}{}) != ctx.Value(struct{}{}) || name != "nvidia-smi" || !reflect.DeepEqual(args, []string{"--query-gpu=memory.free", "--format=csv,noheader,nounits"}) {
 			t.Fatalf("unexpected command: context=%v name=%q args=%v", got, name, args)
 		}
@@ -38,7 +39,7 @@ func TestMemorySourceCUDA(t *testing.T) {
 }
 
 func TestMemorySourceCUDABudgetCap(t *testing.T) {
-	source, err := newMemorySourceWithCommand("cuda", 8, 2, func(context.Context, string, ...string) ([]byte, error) {
+	source, err := newMemorySource("cuda", 8, 2, "auto", runtime.GOOS, guardedHardwareReadFile, func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("16384\n"), nil
 	})
 	if err != nil {
@@ -52,7 +53,7 @@ func TestMemorySourceCUDABudgetCap(t *testing.T) {
 func TestMemorySourceCUDARejectsBadOutput(t *testing.T) {
 	for _, output := range []string{"", " \n", "[N/A", "N/A]", "1 MiB", "-1", "NaN", "Inf", "-Inf", "1e309", "1024\n\n2048", "1024\nwrong", "1024,2048", "8192\n4096"} {
 		t.Run(output, func(t *testing.T) {
-			source, err := newMemorySourceWithCommand("cuda", 16, 0, func(context.Context, string, ...string) ([]byte, error) {
+			source, err := newMemorySource("cuda", 16, 0, "auto", runtime.GOOS, guardedHardwareReadFile, func(context.Context, string, ...string) ([]byte, error) {
 				return []byte(output), nil
 			})
 			if err != nil {
@@ -73,7 +74,7 @@ func TestMemorySourceCUDARejectsBadOutput(t *testing.T) {
 
 func TestMemorySourceCUDACommandFailure(t *testing.T) {
 	want := errors.New("command unavailable")
-	source, err := newMemorySourceWithCommand("cuda", 16, 0, func(context.Context, string, ...string) ([]byte, error) {
+	source, err := newMemorySource("cuda", 16, 0, "auto", runtime.GOOS, guardedHardwareReadFile, func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("8192"), want
 	})
 	if err != nil {
@@ -87,7 +88,7 @@ func TestMemorySourceCUDACommandFailure(t *testing.T) {
 func TestMemorySourceConfiguredBudget(t *testing.T) {
 	for _, platform := range []string{"fake", "xpu"} {
 		t.Run(platform, func(t *testing.T) {
-			source, err := newMemorySourceWithCommand(platform, 12.5, 2.25, func(context.Context, string, ...string) ([]byte, error) {
+			source, err := newMemorySource(platform, 12.5, 2.25, "auto", runtime.GOOS, guardedHardwareReadFile, func(context.Context, string, ...string) ([]byte, error) {
 				t.Fatal("configured memory must not run a command")
 				return nil, nil
 			})
@@ -139,7 +140,7 @@ func TestMemorySourceInvalidConfiguration(t *testing.T) {
 	if _, err := NewMemorySource("unknown", 8, 0); err == nil {
 		t.Fatal("accepted unknown platform")
 	}
-	if _, err := newMemorySourceWithCommand("cuda", 0, 0, nil); err == nil {
+	if _, err := newMemorySource("cuda", 0, 0, "auto", runtime.GOOS, guardedHardwareReadFile, nil); err == nil {
 		t.Fatal("accepted nil CUDA command runner")
 	}
 }
@@ -148,7 +149,7 @@ func TestMemorySourceCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, platform := range []string{"cuda", "fake", "xpu", "metal"} {
-		source, err := newMemorySourceWithCommand(platform, 8, 0, func(context.Context, string, ...string) ([]byte, error) {
+		source, err := newMemorySource(platform, 8, 0, "auto", runtime.GOOS, guardedHardwareReadFile, func(context.Context, string, ...string) ([]byte, error) {
 			t.Fatal("canceled source must not run a command")
 			return nil, nil
 		})
@@ -163,7 +164,7 @@ func TestMemorySourceCanceledContext(t *testing.T) {
 
 // A wedged driver command must not indefinitely stop worker heartbeats or leave.
 func TestMemorySourceCUDABoundsHungProbe(t *testing.T) {
-	source, err := newMemorySourceWithCommand("cuda", 0, 0, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+	source, err := newMemorySource("cuda", 0, 0, "auto", runtime.GOOS, guardedHardwareReadFile, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("GPU probe has no deadline")
 		}

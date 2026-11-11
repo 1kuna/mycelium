@@ -21,7 +21,7 @@ func TestHostBackfillCPUAccumulates(t *testing.T) {
 		hosts int
 		ram   float64
 		cores bool
-	}{{1, 64, false}, {200, 1024, false}, {1, 64, true}} {
+	}{{1, 64, false}, {4, 1024, false}, {1, 64, true}} {
 		t.Run(fmt.Sprintf("hosts=%d/ram=%g/cores=%v", tc.hosts, tc.ram, tc.cores), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuBackfillMachine("large", tc.ram)

@@ -678,10 +678,6 @@ type DoctorProbe struct {
 	Queue   func(context.Context, ServiceConfig) error
 }
 
-func LocalDoctorProbe(token string) DoctorProbe {
-	return LocalDoctorProbeWithMachine(token, LocalMachineProbe())
-}
-
 func LocalDoctorProbeWithMachine(token string, machine MachineProbe) DoctorProbe {
 	return DoctorProbe{Machine: machine, NAS: func(ctx context.Context, path string) error {
 		if machine.Command == nil {

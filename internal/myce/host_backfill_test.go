@@ -20,8 +20,9 @@ func backfillMachine(id string, ram float64) Machine {
 
 // Backfill tests exercise placement over an existing fleet, not enrollment
 // throughput. Enroll one representative peer through Checkin, then load identical
-// idle peers in one durable fixture transaction. All 200 distinct physical hosts
-// remain visible to every real submission/check-in/completion below.
+// idle peers in one durable fixture transaction. Every distinct physical host
+// remains visible to every real submission/check-in/completion below; four hosts
+// cover the multi-host placement fence as fully as 200 did (#1086 coverage check).
 func seedBackfillPeers(t *testing.T, q *Queue, exemplar string, hosts int) {
 	t.Helper()
 	accepted := q.s.Machines[exemplar]
@@ -67,7 +68,7 @@ func TestHostBackfillAccumulatesForAccelerator(t *testing.T) {
 		hosts int
 		ram   float64
 		cores bool
-	}{{1, 16, false}, {200, 1024, false}, {1, 64, true}} {
+	}{{1, 16, false}, {4, 1024, false}, {1, 64, true}} {
 		t.Run(fmt.Sprintf("hosts=%d/ram=%g/cores=%v", tc.hosts, tc.ram, tc.cores), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := backfillMachine("accelerator", tc.ram)

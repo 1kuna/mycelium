@@ -363,3 +363,14 @@ func TestAttemptStorageCheckpointPublicationLifetime(t *testing.T) {
 		})
 	}
 }
+
+// samplePublishedStorage drives one publication-storage sample, as the
+// worker's publication observer does.
+func samplePublishedStorage(j Job, r Result, state string, metadata ...string) Result {
+	o := publicationStorageObserver(j, r, state, metadata...)
+	if o != nil {
+		o.sample()
+		r.StoragePeak = o.snapshot()
+	}
+	return r
+}

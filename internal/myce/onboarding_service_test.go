@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -77,7 +78,7 @@ func TestOnboardingLinuxLingeringActionAndRefusal(t *testing.T) {
 				t.Fatal(report, err)
 			}
 			action := "loginctl enable-linger " + strconv.Itoa(os.Getuid())
-			if containsString(calls, action) != (mode == "enable") {
+			if slices.Contains(calls, action) != (mode == "enable") {
 				t.Fatal(calls)
 			}
 			for _, call := range calls {

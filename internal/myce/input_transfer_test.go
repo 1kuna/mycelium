@@ -388,3 +388,16 @@ func TestInputTransferLocalFailureDoesNotRecover(t *testing.T) {
 		})
 	}
 }
+
+// copyFileDownload mirrors the download path's local write and sync
+// classification so recovery tests can inject sink faults.
+func copyFileDownload(dst interface {
+	io.Writer
+	Sync() error
+}, src io.Reader) (int64, error) {
+	n, err := io.Copy(fileDownloadWriter{dst}, src)
+	if syncErr := dst.Sync(); syncErr != nil {
+		return n, fmt.Errorf("%w: %w", errFileTransferLocal, syncErr)
+	}
+	return n, err
+}

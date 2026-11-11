@@ -224,17 +224,6 @@ func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string,
 	return o
 }
 
-// Publication can allocate a second immutable copy after compute exits. Keep
-// that simultaneous workspace+spool peak in the same exact result, on replay too.
-func samplePublishedStorage(j Job, r Result, state string, metadata ...string) Result {
-	o := publicationStorageObserver(j, r, state, metadata...)
-	if o != nil {
-		o.sample()
-		r.StoragePeak = o.snapshot()
-	}
-	return r
-}
-
 func publicationStorageObserver(j Job, r Result, state string, metadata ...string) *storageObserver {
 	if r.StoragePeak == nil {
 		return nil
