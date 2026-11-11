@@ -105,9 +105,6 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 	for _, selection := range []string{"1", "", "0,1"} {
 		t.Run("selection="+selection, func(t *testing.T) {
 			q, _ := fixture(t)
-			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
-				t.Fatal(err)
-			}
 			m := machine("inventory-worker", "fake", "inventory-host")
 			m.Device = selection
 			stateDir := newTestStateRoot(t)
@@ -131,19 +128,15 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 			}
 			spec := spec("experiment")
 			spec.Resumable = false
-			spec.Outputs = map[string]string{"devices": "results"}
-			spec.Run.Command = []string{"sh", "-c", `printf '%s' "$MYCE_DEVICES" > "$1"`, "sh", "{work}/devices"}
+			// Accepted completion may immediately collect attempt scratch. Keep
+			// this fixture-owned observation outside that disposable directory.
+			marker := filepath.Join(t.TempDir(), "devices")
+			spec.Run.Command = []string{"sh", "-c", `printf '%s' "$MYCE_DEVICES" > "$1"`, "sh", marker}
 			var j Job
 			if err := client.Call(context.Background(), "POST", "/api/jobs", spec, &j); err != nil {
 				t.Fatal(err)
 			}
 			awaitInventoryReview(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
-			// Completion may immediately collect attempt scratch. Read the
-			// verified accepted output through the same real API as consumers.
-			marker := filepath.Join(t.TempDir(), "devices")
-			if err := client.DownloadResult(context.Background(), j.ID, "devices", marker); err != nil {
-				t.Fatal(err)
-			}
 			data, err := os.ReadFile(marker)
 			if err != nil || string(data) != wantIDs[0] || !slices.Equal(job(t, q, j.ID).AllocatedDevices, []string{wantIDs[0]}) {
 				t.Fatalf("payload devices=%q placement=%v err=%v", data, job(t, q, j.ID).AllocatedDevices, err)
