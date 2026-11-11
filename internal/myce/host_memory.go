@@ -69,56 +69,7 @@ func (q *Queue) refreshHostMemory() {
 	q.hostMemoryLedgers = make(map[string]*HostMemoryLedger, len(q.s.Machines))
 	charges := map[string]*HostMemoryLedger{}
 	for _, m := range q.s.Machines {
-		available := m.HostAvailableMemoryGB
-		observedAt, availableKnown := m.LastSeen, m.HostMemoryMeasured && m.HostMemoryError == ""
-		for _, other := range q.s.Machines {
-			if hostID(other) == hostID(m) && !other.Gone {
-				observedAt = minTime(observedAt, other.LastSeen)
-				availableKnown = availableKnown && other.HostMemoryMeasured && other.HostMemoryError == ""
-				if !other.HostMemoryMeasured || other.HostMemoryError != "" {
-					available = 0
-				} else {
-					available = min(available, other.HostAvailableMemoryGB)
-				}
-			}
-		}
-
-		m.hostBudgetGB = 0
-		m.HostMemoryDerivation = nil
-		m.HostMemoryPolicyMismatch = false
-		for _, other := range q.s.Machines {
-			if hostID(other) != hostID(m) {
-				continue
-			}
-			if policy := q.s.HostMaintenance[hostID(m)].MemoryBudget; policy != nil && policy.Measured && (other.Gone || other.Replacement != nil) {
-				continue
-			}
-			if other.HostMemoryBudgetGB != m.HostMemoryBudgetGB {
-				m.HostMemoryPolicyMismatch = true
-			}
-			if other.HostMemoryBudgetGB > 0 && (m.hostBudgetGB == 0 || other.HostMemoryBudgetGB < m.hostBudgetGB) {
-				m.hostBudgetGB = other.HostMemoryBudgetGB
-			}
-		}
-		if policy, ok := q.s.HostMaintenance[hostID(m)]; ok && policy.MemoryBudget != nil {
-			budget, derivation := q.measuredHostMemoryBudget(m, *policy.MemoryBudget)
-			m.hostBudgetGB, m.HostMemoryDerivation = budget.GiB, derivation
-			for _, other := range q.s.Machines {
-				if policy.MemoryBudget.Measured && (other.Gone || other.Replacement != nil) {
-					continue
-				}
-				if hostID(other) == hostID(m) && (other.HostMemoryBudgetGB != m.hostBudgetGB || other.HostMemoryBudgetMeasured != policy.MemoryBudget.Measured) {
-					m.HostMemoryPolicyMismatch = true
-				}
-			}
-		}
-		allowance, _ := hostMemoryAllowance(m.hostBudgetGB)
-		m.HostMemoryAllowanceBytes = allowance.Bytes
-		m.HostMemoryQualification = ""
-		if allowance.Bytes > 0 {
-			m.HostMemoryQualification = "UNQUALIFIED"
-		}
-		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
+		q.resolveHostAllowance(m)
 		owners := charges[hostID(m)]
 		if owners == nil {
 			owners = q.hostMemoryLedger(m)
@@ -130,22 +81,12 @@ func (q *Queue) refreshHostMemory() {
 		ledger := &copy
 		reserved, growth := ledger.ReservedGB, ledger.GrowthGB
 		m.HostMemoryInUseGB = reserved
-		// Availability already has the operator reserve removed. Full envelopes
-		// still consume the static budget; only unused growth consumes live RAM.
-		room := available - growth
-		room = q.unifiedCUDAHostRoom(m, room, growth)
-		if m.hostBudgetGB > 0 || m.HostMemoryDerivation != nil {
-			room = min(room, m.hostBudgetGB-reserved)
-		}
-		if d := m.HostMemoryDerivation; d != nil && d.Source == "quiescent_v1" {
-			// Existing after-reserve telemetry and learned reserve are upper
-			// bounds on the same physical pool, never independent allocations.
-			room = min(room, m.MemoryObservation.TotalGB-m.MemoryObservation.UsedGB-d.ReserveGB-growth)
-		}
-		room = q.sharedHostRoom(m, room, reserved, growth)
+		// Full charges consume the allowance; only unused growth consumes live RAM.
+		capacity, available, availableKnown, observedAt := q.hostLiveCapacity(m)
+		room := q.hostMemoryRoom(m, capacity, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
-		ledger.AvailableGB, ledger.AllowanceGB = available, m.hostBudgetGB
+		ledger.AvailableGB, ledger.CapacityGB, ledger.AllowanceGB = available, capacity, m.hostBudgetGB
 		ledger.ObservedAt, ledger.AvailableKnown = observedAt, availableKnown
 		ledger.SignedRoomGB, ledger.DebtGB, ledger.FreeGB = room, m.hostReservationDebtGB, m.FreeHostMemoryGB
 		q.hostMemoryLedgers[m.ID] = ledger

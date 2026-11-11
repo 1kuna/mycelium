@@ -920,9 +920,7 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				why += "; " + memoryCapacityRemedies
 			}
 			if unifiedCUDA(m) {
-				if floor, ok := unifiedCUDAFloor(m); ok {
-					why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", floor)
-				}
+				why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", q.hostMemoryMargin(m, m))
 			}
 			if m.HostMemoryPolicyMismatch {
 				why += "; host allowance policy mismatch"

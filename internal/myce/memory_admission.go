@@ -40,6 +40,7 @@ type HostMemoryLedger struct {
 	ObservedAt     time.Time         `json:"observed_at"`
 	AvailableKnown bool              `json:"available_known"`
 	AvailableGB    float64           `json:"available_gb"`
+	CapacityGB     float64           `json:"capacity_gb"`
 	AllowanceGB    float64           `json:"allowance_gb"`
 	ReservedGB     float64           `json:"reserved_gb"`
 	GrowthGB       float64           `json:"growth_gb"`
@@ -297,11 +298,12 @@ func (q *Queue) yieldMemoryOvercommit() {
 			h.availableKnown = false
 			continue
 		}
+		live := q.workerLiveMemory(m, m)
 		if !h.alive {
-			h.availableGB = m.HostAvailableMemoryGB
+			h.availableGB = live
 		}
 		h.alive = true
-		h.availableGB = min(h.availableGB, m.HostAvailableMemoryGB)
+		h.availableGB = min(h.availableGB, live)
 		h.driftGB = max(h.driftGB, exploratoryDriftMarginGB(m))
 	}
 	horizon := q.preemptionGrace()

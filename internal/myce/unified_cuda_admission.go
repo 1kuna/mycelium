@@ -62,32 +62,6 @@ func remainingAllocationGrowth(m *Machine, device, reservation float64, sample h
 	return growth
 }
 
-// Read only check-in snapshots under q.mu. Raw available RAM already includes
-// all managed and unmanaged allocations: never add the external-RSS history.
-// Subtract only outstanding growth and the reserve, once each.
-func (q *Queue) unifiedCUDAHostRoom(m *Machine, room, growth float64) float64 {
-	if !hostHasUnifiedCUDA(m) {
-		return room
-	}
-	for _, sibling := range q.s.Machines {
-		if hostID(sibling) != hostID(m) || sibling.Gone {
-			continue
-		}
-		o := sibling.MemoryObservation
-		floor, ok := unifiedCUDAFloor(sibling)
-		now := q.clock.Now()
-		// Physical RAM is sampled for each accepted check-in. Reuse that
-		// session's adaptive contact and frozen host-health delivery evidence;
-		// an unrelated fixed age must not turn healthy slow control into debt.
-		// Continuing contact still cannot renew expired/failed sensor evidence.
-		if !ok || !validHostMemoryObservation(o) || !q.workerFresh(sibling, now) || !q.hostHealthEvidenceValid(sibling, now) {
-			return min(room, -growth)
-		}
-		room = min(room, o.TotalGB-o.UsedGB-floor-growth)
-	}
-	return room
-}
-
 // Existing holds still own takeover/preemption. This additional admission-only
 // check protects a sole qualified destination for queued, forecast production
 // before the dependency becomes runnable. Cancellation removes it immediately.
