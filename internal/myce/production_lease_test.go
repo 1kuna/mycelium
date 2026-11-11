@@ -322,3 +322,51 @@ func TestCriticalFleetUpgradeProceedsPastProductionLease(t *testing.T) {
 		t.Fatal("critical update kept its drain")
 	}
 }
+
+// Default status names each open lease once: project/key, expiry and the hosts
+// able to start a stage (which planned drains keep one of enabled).
+func TestProductionLeaseInCompactStatus(t *testing.T) {
+	q, c, _, _ := productionLeaseFleet(t)
+	if _, err := q.OpenProductionLease(ProductionLeaseRequest{Project: "render", Key: "run-7", TTL: "2h", Stages: []ProductionStage{cudaStage()}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.OpenProductionLease(ProductionLeaseRequest{Project: "notes", Key: "any", TTL: "1h"}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() CompactStatus {
+		q.statusCache.data, q.statusCache.compact = "", ""
+		r := httptest.NewRequest("GET", "/api/status", nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		var view CompactStatus
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+		return view
+	}
+	view := read()
+	want := []StatusLease{
+		{Project: "notes", Key: "any", ExpiresAt: c.Now().Add(time.Hour), Hosts: []string{"gpu-host", "other-host"}},
+		{Project: "render", Key: "run-7", ExpiresAt: c.Now().Add(2 * time.Hour), Hosts: []string{"gpu-host"}},
+	}
+	if len(view.Leases) != len(want) {
+		t.Fatalf("leases: %+v", view.Leases)
+	}
+	for i, l := range view.Leases {
+		if l.Project != want[i].Project || l.Key != want[i].Key || !l.ExpiresAt.Equal(want[i].ExpiresAt) || strings.Join(l.Hosts, ",") != strings.Join(want[i].Hosts, ",") {
+			t.Fatalf("lease %d: %+v want %+v", i, l, want[i])
+		}
+	}
+	text := strings.Join(view.Lines(false), "\n")
+	if !strings.Contains(text, "production lease render/run-7: expires "+want[1].ExpiresAt.UTC().Format(time.RFC3339)+"; holds gpu-host\n") {
+		t.Fatal(text)
+	}
+	c.Advance(90 * time.Minute) // the notes lease has expired
+	if err := q.CloseProductionLease("render", "run-7"); err != nil {
+		t.Fatal(err)
+	}
+	if view = read(); len(view.Leases) != 0 || strings.Contains(strings.Join(view.Lines(false), "\n"), "production lease") {
+		t.Fatalf("closed or expired lease still shown: %+v", view.Leases)
+	}
+}

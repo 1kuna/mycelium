@@ -13,7 +13,18 @@ import (
 type StatusSummary struct {
 	RetainedJobs int                `json:"retained_jobs"`
 	Alerts       []StatusAlertGroup `json:"alert_groups"`
+	Leases       []StatusLease      `json:"production_leases,omitempty"`
 	Diagnostics  string             `json:"diagnostics"`
+}
+
+// StatusLease is one open production lease (#1009): its project and key,
+// expiry, and the hosts able to start a declared stage, which planned drains
+// and fleet upgrades keep at least one of enabled until it closes or expires.
+type StatusLease struct {
+	Project   string    `json:"project"`
+	Key       string    `json:"key"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Hosts     []string  `json:"hosts"`
 }
 
 // StatusAlertGroup folds active conditions of one kind into one row: the same
@@ -273,6 +284,9 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		s.Machines[id] = &copy
 	}
 	summary := &StatusSummary{RetainedJobs: len(q.s.Jobs) + len(q.calls), Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
+	for _, l := range q.openProductionLeases() {
+		summary.Leases = append(summary.Leases, StatusLease{Project: l.Project, Key: l.Key, ExpiresAt: l.ExpiresAt, Hosts: q.productionLeaseHosts(l)})
+	}
 	selection.page.Total, selection.page.Returned = len(selection.ids), len(selection.ids)
 	inputs := observationState{State: s, Models: q.models, Calls: q.calls, Unreported: q.unreported}
 	if err := chargeProjectionValue(ctx, inputs); err != nil {
