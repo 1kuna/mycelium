@@ -30,10 +30,10 @@ func TestProductionHoldParitySpillover(t *testing.T) {
 			if mode == "other work approval" {
 				work = "program:sample-script"
 			}
-			policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{work: approved}}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
+			setParityHosts(t, q, "test", work, approved...)
 			a := placementMachine("a", "separate", 64, 8, e)
 			b, other := placementMachine("b", "separate", 64, 8, e), placementMachine("other", "separate", 64, 8, e)
 			a.HostID, b.HostID, other.HostID = "hold-host", "hold-host", "other-host"
@@ -135,59 +135,15 @@ func TestProductionHoldParitySpillover(t *testing.T) {
 	}
 }
 
-func TestProductionParityPolicyPersists(t *testing.T) {
-	q, c := fixture(t)
-	record := q.PriorityPolicy()
-	if len(record.Policy.Projects["test"].ProductionParityHosts) != 0 {
-		t.Fatal("parity must default to no approved hosts")
-	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{"approved-host": {}}); err != nil {
-		t.Fatal(err)
-	}
-	record.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"approved-host"}}}
-	if _, err := q.SetPriorityPolicy(record.Revision, record.Policy); err != nil {
-		t.Fatal(err)
-	}
-	// Input and exported slices cannot mutate the live policy without its CAS.
-	record.Policy.Projects["test"].ProductionParityHosts["kind:sample"][0] = "unapproved-host"
-	exported := q.PriorityPolicy()
-	exported.Policy.Projects["test"].ProductionParityHosts["kind:sample"][0] = "unapproved-host"
-	exported.Policy.Projects["test"].ProductionParityHosts["program:sample-script"] = []string{"unapproved-host"}
-	path, root := q.dbPathForTest(t), q.root
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(path, root, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	record = reopened.PriorityPolicy()
-	if approvals := record.Policy.Projects["test"].ProductionParityHosts; len(approvals) != 1 || len(approvals["kind:sample"]) != 1 || approvals["kind:sample"][0] != "approved-host" || record.Revision != 1 {
-		t.Fatalf("approval not preserved: %+v", record)
-	}
-	record.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {" "}}}
-	if _, err := reopened.SetPriorityPolicy(record.Revision, record.Policy); err == nil {
-		t.Fatal("empty host accepted")
-	}
-	record.Policy.Projects["test"] = ProjectPolicy{Weight: 1}
-	if _, err := reopened.SetPriorityPolicy(record.Revision, record.Policy); err != nil {
-		t.Fatal(err)
-	}
-	if len(reopened.PriorityPolicy().Policy.Projects["test"].ProductionParityHosts) != 0 {
-		t.Fatal("consumer could not withdraw approval")
-	}
-}
-
 func TestProductionParityPolicyRejectsUnknownHosts(t *testing.T) {
-	for _, entry := range []string{"policy API", "project config"} {
+	for _, entry := range []string{"parity add", "project config"} {
 		t.Run(entry, func(t *testing.T) {
 			q, _ := fixture(t)
 			record := q.PriorityPolicy()
 			record.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"unknown-host"}}}
 			var err error
-			if entry == "policy API" {
-				_, err = q.SetPriorityPolicy(record.Revision, record.Policy)
+			if entry == "parity add" {
+				_, err = q.AddParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: "unknown-host", Evidence: "job"})
 			} else {
 				err = q.ConfigureProjects(record.Policy.Projects)
 			}

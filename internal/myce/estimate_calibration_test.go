@@ -360,11 +360,7 @@ func TestEstimateCalibrationQualificationAndParity(t *testing.T) {
 	if got := job(t, q, production.ID); !strings.Contains(got.Reason, "MY-19") {
 		t.Fatal("missing parity reason", got.Reason)
 	}
-	policy := q.PriorityPolicy()
-	policy.Policy.Projects[s.Project] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{s.workType(): {hostID(&m)}}}
-	if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-		t.Fatal(err)
-	}
+	setParityHosts(t, q, s.Project, s.workType(), hostID(&m))
 	m.ExtensionReports[0].Qualified = false
 	check(t, q, m, nil)
 	if _, ok := q.estimateCompletion(q.s.Jobs[production.ID], q.s.Machines[m.ID]); ok {

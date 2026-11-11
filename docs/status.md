@@ -2472,16 +2472,16 @@ From the next release, nonterminal native variant jobs expose
   selection, reservation, forecast or proof of reference-output parity.
 - Assigned attempts say alternatives require requeue. Terminal jobs keep their
   historical placement receipt rather than projecting new alternatives.
-- A newly registered multi-variant production implementation requires owner
-  approval of the candidate physical host in the existing
-  `policy.projects[PROJECT].production_parity_hosts[WORK]`. The reason explains
-  reference-output comparison and `myce policy get/set`. Checks/experiments can
-  obtain evidence; historical registrations/replays and accepted jobs are kept.
+- A newly registered multi-variant production implementation requires the
+  candidate physical host on the project's own `production_parity_hosts` list
+  for that work. The reason explains reference-output comparison and
+  `myce parity add --evidence JOB_ID`. Checks/experiments can obtain evidence;
+  historical registrations/replays and accepted jobs are kept.
 
 An explicit work parity list also constrains historical extensions without
 variants. When that list excludes every qualified candidate, status reports
 `production_parity_hosts: held: host not in production parity list` and the
-typed `hold.kind` is `production_parity_hosts`, owned by the queue owner.
+typed `hold.kind` is `production_parity_hosts`, owned by the consumer (the project).
 The action is reference-output comparison and explicit physical-host approval
 for that exact work. A queued binding to a removed host is cleared and placed
 again; running attempts retain their execution and release custody.
@@ -2594,8 +2594,8 @@ Detailed queued observations also explain when only one freshly observed
 physical host passes permanent requirements, deduplicating devices on a host.
 This is current coverage, not proof of a permanent hardware monopoly or a reason
 to pin a job. Authored host restrictions are not relabeled as observed uniqueness.
-Configured production parity lists report their distinct host count and owner
-authority even while an approved target waits for capacity or preparation.
+Configured production parity lists report their distinct host count and that
+the project widens them with `myce parity add`, even while an approved target waits for capacity or preparation.
 The existing small default status remains a lifecycle projection; use a job ID
 or explicit detailed sections for these diagnostics.
 

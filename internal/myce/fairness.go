@@ -197,6 +197,8 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 		policy := q.effectivePriorityPolicy()
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: q.policyRevision() + 1, Policy: policy}
 		q.s.Policies = copy
+		q.seedProjectParity(copy)
+		q.mirrorProjectParity()
 		return nil
 	}, nil, false, func() { q.reindexProjectFileDeadlines(previous) })
 }

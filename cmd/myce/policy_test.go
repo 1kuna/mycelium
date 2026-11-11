@@ -45,6 +45,19 @@ func TestPolicyCLI(t *testing.T) {
 	if err := yaml.NewEncoder(&out).Encode(policy); err != nil {
 		t.Fatal(err)
 	}
+	// The parity list is project-owned: queue policy cannot widen it.
+	refused := filepath.Join(t.TempDir(), "refused.yaml")
+	if err := os.WriteFile(refused, out.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyCommand([]string{"set", refused, "--if-revision", "0"}, &out); err == nil || !strings.Contains(err.Error(), "parity_hosts_project_owned") || !strings.Contains(err.Error(), "myce parity add") {
+		t.Fatal("policy set edited a project's parity list:", err)
+	}
+	policy.Projects = map[string]myce.ProjectPolicy{"test": {Weight: 1}}
+	out.Reset()
+	if err := yaml.NewEncoder(&out).Encode(policy); err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(t.TempDir(), "policy.yaml")
 	if err := os.WriteFile(file, out.Bytes(), 0600); err != nil {
 		t.Fatal(err)
@@ -59,7 +72,7 @@ func TestPolicyCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var record myce.PriorityPolicyRecord
-	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 || !reflect.DeepEqual(record.Policy.Projects["test"].ProductionParityHosts, map[string][]string{"kind:sample": {"approved-host"}}) {
+	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 || !reflect.DeepEqual(record.Policy.Projects["test"], myce.ProjectPolicy{Weight: 1}) {
 		t.Fatalf("%s %v", out.String(), err)
 	}
 	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err == nil {

@@ -107,6 +107,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerComponentExclusions(mux)
 	a.registerReservations(mux)
 	a.registerPriorityPolicy(mux)
+	a.registerProjectParity(mux)
 	a.registerFiles(mux)
 	a.registerFileRelease(mux)
 	a.registerAttemptFiles(mux)

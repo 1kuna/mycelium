@@ -98,11 +98,7 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			}
 			if restriction == "parity" {
 				s.Class = "production"
-				policy := q.PriorityPolicy()
-				policy.Policy.Projects[s.Project] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{s.workType(): {hostID(&a)}}}
-				if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-					t.Fatal(err)
-				}
+				setParityHosts(t, q, s.Project, s.workType(), hostID(&a))
 			}
 			j := submit(t, q, s)
 			before := storedTestJob(t, q, j.ID)
@@ -114,8 +110,8 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			if unique != (restriction != "authored") {
 				t.Fatal("confused authored pin with observed coverage", got.Hold)
 			}
-			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "policy approves 1 physical hosts") {
-				t.Fatal("owner's restriction not explained", got.Hold)
+			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "list approves 1 physical hosts") {
+				t.Fatal("project's parity restriction not explained", got.Hold)
 			}
 			after := storedTestJob(t, q, j.ID)
 			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {

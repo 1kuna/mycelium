@@ -51,10 +51,10 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			}
 			policy := q.PriorityPolicy()
 			policy.Policy.Hosts = map[string]HostPolicy{hostID(&a): {}, hostID(&b): {ProductionHold: true}}
-			policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"extension:" + e.Name: {hostID(&a)}}}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
+			setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&a))
 			spec := variantSpec(e, "production")
 			spec.Workload = &Workload{InputShape: "recording-v1", Units: 1}
 			spec.FanOut = &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "recording"}}}
@@ -98,11 +98,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			}
 			// A later owner change fences the already accepted child's next
 			// admission, even if a scheduler binding still names this host.
-			policy = q.PriorityPolicy()
-			policy.Policy.Projects["test"].ProductionParityHosts[spec.workType()] = []string{hostID(&b)}
-			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-				t.Fatal(err)
-			}
+			setParityHosts(t, q, "test", spec.workType(), hostID(&b))
 			parityReason := func(id string, m *Machine) string {
 				q.mu.Lock()
 				defer q.mu.Unlock()
@@ -119,11 +115,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if reason := parityReason(experiment.ID, &a); reason != "" {
 				t.Fatal("production list restricted an experiment", reason)
 			}
-			policy = q.PriorityPolicy()
-			policy.Policy.Projects["test"].ProductionParityHosts[spec.workType()] = []string{}
-			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-				t.Fatal(err)
-			}
+			setParityHosts(t, q, "test", spec.workType())
 			if parityReason(parent.ID, &b) == "" {
 				t.Fatal("empty owner list admitted production")
 			}
@@ -161,10 +153,10 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 			check(t, q, b, nil)
 			policy := q.PriorityPolicy()
 			policy.Policy.Hosts = map[string]HostPolicy{hostID(&a): {ProductionHold: true}, hostID(&b): {ProductionHold: true}}
-			policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"extension:" + e.Name: {hostID(&a)}}}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
+			setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&a))
 			first := submit(t, q, variantSpec(e, "production"))
 			running := check(t, q, a, nil).Job
 			if running == nil || running.ID != first.ID {
@@ -179,13 +171,13 @@ func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
 				t.Fatal("queued production was not bound to the reference host")
 			}
 			policy = q.PriorityPolicy()
-			policy.Policy.Projects["test"].ProductionParityHosts[queued.Spec.workType()] = []string{hostID(&b)}
 			if !keepHolds {
 				policy.Policy.Hosts = map[string]HostPolicy{}
 			}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
+			setParityHosts(t, q, "test", queued.Spec.workType(), hostID(&b))
 			// The policy write persists without scheduling. Reopen with the
 			// old binding still present, as it can be during an upgrade.
 			if savedJob(queued.ID).ProductionHost != hostID(&a) {
@@ -216,11 +208,7 @@ func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	}
 	m := placementMachine("candidate", "separate", 64, 8, e)
 	check(t, q, m, nil)
-	policy := q.PriorityPolicy()
-	policy.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {}}}
-	if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-		t.Fatal(err)
-	}
+	setParityHosts(t, q, "test", "kind:sample")
 	spec := placementSpec(false)
 	spec.Priority = "production"
 	queued := submit(t, q, spec)
@@ -232,14 +220,10 @@ func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Reason, "held: host not in production parity list") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "queue owner" {
+	if !strings.Contains(got.Reason, "held: host not in production parity list") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "consumer" {
 		t.Fatalf("legacy parity-only hold is not actionable: reason=%q blocker=%+v", got.Reason, got.Hold)
 	}
-	policy = q.PriorityPolicy()
-	policy.Policy.Projects["test"].ProductionParityHosts[spec.workType()] = []string{hostID(&m)}
-	if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-		t.Fatal(err)
-	}
+	setParityHosts(t, q, "test", spec.workType(), hostID(&m))
 	if assigned := check(t, q, m, nil).Job; assigned == nil || assigned.ID != queued.ID {
 		t.Fatal("owner approval did not release the held legacy job", assigned)
 	}
