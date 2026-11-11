@@ -2823,6 +2823,9 @@
         "available_known": {
           "type": "boolean"
         },
+        "capacity_gb": {
+          "type": "number"
+        },
         "captured_at": {
           "format": "date-time",
           "type": "string"
@@ -2861,6 +2864,7 @@
         "observed_at",
         "available_known",
         "available_gb",
+        "capacity_gb",
         "allowance_gb",
         "reserved_gb",
         "growth_gb",
