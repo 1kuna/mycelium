@@ -2,14 +2,11 @@ package myce
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -121,46 +118,5 @@ func TestWorkerHygieneCollectionPublicDiagnostics(t *testing.T) {
 	publicWorkerCollection(safe)
 	if safe.HygieneCollection.FileCache.Error != "file_cache_collect_changed" || safe.HygieneCollection.Environments.Error != "environment_references_unavailable" {
 		t.Fatal("known diagnostic was lost")
-	}
-}
-
-func TestWorkerHygieneCollectionWireSupportIsIndependent(t *testing.T) {
-	var version atomic.Int32
-	reports := make(chan Checkin, 8)
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		var c Checkin
-		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			t.Error(err)
-			return
-		}
-		reports <- c
-		reply := Reply{AttemptProtocol: keyedAttemptProtocol, HostHygieneProtocol: hostHygieneProtocol}
-		if version.Load() > 0 {
-			reply.HostCollectionProtocol = hostCollectionProtocol
-		}
-		_ = json.NewEncoder(rw).Encode(reply)
-	}))
-	defer server.Close()
-	m := machine("collector-wire", "fake")
-	m.HostHealth = &HostHealth{}
-	m.HygieneCollection = &WorkerHygieneCollection{}
-	w := Worker{Client: Client{URL: server.URL}, hygieneWire: &workerHygieneWire{}}
-	send := func() Checkin {
-		t.Helper()
-		if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
-			t.Fatal(err)
-		}
-		return <-reports
-	}
-	if c := send(); c.Machine.HygieneCollection != nil || c.Machine.HostHealth != nil {
-		t.Fatal("unnegotiated fields sent")
-	}
-	if c := send(); c.Machine.HygieneCollection != nil || c.Machine.HostHealth == nil {
-		t.Fatal("health-only queue received collector fields")
-	}
-	version.Store(1)
-	send()
-	if c := send(); c.Machine.HygieneCollection == nil || c.Machine.HostHealth == nil {
-		t.Fatal("collector support was not negotiated")
 	}
 }

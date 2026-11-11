@@ -113,40 +113,6 @@ func deviceHealthFailure(normal bool, err error) *DeviceHealthFailure {
 	return &DeviceHealthFailure{Code: code}
 }
 
-func legacyDeviceRecoveryCheckin(c Checkin) Checkin {
-	c.Machine.Devices = slices.Clone(c.Machine.Devices)
-	for i := range c.Machine.Devices {
-		c.Machine.Devices[i].Recovery = nil
-		c.Machine.Devices[i].RecoveryBlocked = nil
-		c.Machine.Devices[i].UnsupportedOnDevice = nil
-	}
-	return c
-}
-
-func hasDeviceRecovery(c Checkin) bool {
-	return slices.ContainsFunc(c.Machine.Devices, func(d MachineDevice) bool {
-		return d.Recovery != nil || d.RecoveryBlocked != nil || len(d.UnsupportedOnDevice) > 0
-	})
-}
-
-func (w Worker) deviceRecoveryCheckin(c Checkin) Checkin {
-	r := w.unifiedMemoryWire
-	if r == nil || r.machine != c.Machine.ID || r.session != c.Machine.Session {
-		return legacyDeviceRecoveryCheckin(c)
-	}
-	c.Machine.Devices = slices.Clone(c.Machine.Devices)
-	for i := range c.Machine.Devices {
-		if !r.recoverySupported {
-			c.Machine.Devices[i].Recovery = nil
-		}
-		if !r.healthSupported {
-			c.Machine.Devices[i].RecoveryBlocked = nil
-			c.Machine.Devices[i].UnsupportedOnDevice = nil
-		}
-	}
-	return c
-}
-
 type DeviceRecovery struct {
 	ObservedAt         time.Time `json:"observed_at,omitempty"` // Queue-owned receipt of a quarantined-to-healthy transition.
 	FaultEvent         string    `json:"fault_event"`

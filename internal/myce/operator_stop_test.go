@@ -136,11 +136,21 @@ func TestOperatorStopMarkerReconcilesWorkerWithQueue(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			s.state.Session = m.Session
+			if e = s.save(); e != nil {
+				t.Fatal(e)
+			}
+			child, e := newAttemptStore(s, *old)
+			if e != nil {
+				t.Fatal(e)
+			}
+			child.lock, s.lock = s.lock, nil
+			s = child
 			s.state = workerState{Session: m.Session, Identity: "operator-old", Job: old, Log: "operator-old.log", CheckpointRoot: q.root}
 			if e = s.save(); e != nil {
 				t.Fatal(e)
 			}
-			data, e := os.ReadFile(filepath.Join(s.dir, "state.json"))
+			data, e := os.ReadFile(filepath.Join(s.dir, s.stateName))
 			if e != nil {
 				t.Fatal(e)
 			}

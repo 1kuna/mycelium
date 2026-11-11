@@ -19,15 +19,14 @@ func TestWaitActionableBlockerThenQuietSuccess(t *testing.T) {
 	b := &myce.Blocker{Code: "waiting_for_builder", Dependency: "environment tools", Owner: "queue", Action: "wait for the offered builder", Evidence: "no builder report"}
 	var done atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// This legacy queue fixture has no batch endpoint.
-		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
-			http.NotFound(w, r)
-			return
-		}
 		j := myce.Job{ID: "cpu-job", State: "queued", Blocker: b}
 		if done.Load() {
 			j.State, j.Blocker = "succeeded", nil
 			j.DeadlineGuidance = &myce.DeadlineGuidance{Example: "deadline tutorial"}
+		}
+		if r.URL.Path == "/api/wait" {
+			json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: j.ID, State: j.State, Revision: 1}}})
+			return
 		}
 		json.NewEncoder(w).Encode(j)
 	}))

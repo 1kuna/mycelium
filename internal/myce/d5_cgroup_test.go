@@ -106,6 +106,16 @@ func TestNativeGroupCgroupRecoveryPreservesOOMWithOperatorStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.state.Session = m.Session
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	child, err := newAttemptStore(store, *running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child.lock, store.lock = store.lock, nil
+	store = child
 	store.state = workerState{Job: running, Session: m.Session, Identity: identity, Log: identity + ".log"}
 	if err := store.save(); err != nil {
 		t.Fatal(err)

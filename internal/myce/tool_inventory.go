@@ -108,12 +108,11 @@ func (q *Queue) acceptToolInventory(c Checkin, m, old *Machine, prepared *toolIn
 	return nil
 }
 
-// A worker sends the legacy full shape until the queue advertises support.
-// No extra request fields reach strict older queues. A lost reply leaves the
+// Both supported releases accept versioned inventories. A lost reply leaves the
 // prior acknowledgement unchanged, so retry resends the full snapshot safely.
 type workerToolReport struct {
 	machine, session string
-	supported        bool
+	initialized      bool
 	hash             string
 	version          uint64
 	acknowledged     string
@@ -137,7 +136,7 @@ func (r *workerToolReport) checkin(c Checkin) Checkin {
 	if hash != r.hash {
 		r.hash, r.version = hash, r.version+1
 	}
-	if r.supported && hash != "" {
+	if r.initialized && hash != "" {
 		c.ToolInventoryHash, c.ToolInventoryVersion = hash, r.version
 		if r.acknowledged == hash {
 			c.Machine.ToolInventory = nil
@@ -146,12 +145,12 @@ func (r *workerToolReport) checkin(c Checkin) Checkin {
 	return c
 }
 func (r *workerToolReport) accept(c Checkin, reply Reply) {
-	r.supported = reply.ToolInventoryProtocol == toolInventoryProtocol
+	r.initialized = true
 	r.acknowledged = ""
-	if r.supported && c.ToolInventoryHash == "" && reply.ToolInventoryRequired {
+	if c.ToolInventoryHash == "" && reply.ToolInventoryRequired {
 		r.version = max(r.version, reply.ToolInventoryVersion) + 1
 	}
-	if r.supported && !reply.ToolInventoryRequired && reply.ToolInventoryHash == r.hash && reply.ToolInventoryVersion == c.ToolInventoryVersion {
+	if !reply.ToolInventoryRequired && reply.ToolInventoryHash == r.hash && reply.ToolInventoryVersion == c.ToolInventoryVersion {
 		r.acknowledged = r.hash
 	}
 }

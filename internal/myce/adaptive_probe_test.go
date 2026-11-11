@@ -1,12 +1,8 @@
 package myce
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
@@ -44,64 +40,6 @@ func TestAdaptiveProbeTinyLargeIdleAndSlow(t *testing.T) {
 	}
 }
 
-func TestAdaptiveProbeWireNegotiationAndDowngrade(t *testing.T) {
-	q, clock := fixture(t)
-	handler := API{q, "test"}.Handler()
-	strict := false
-	var reports []Checkin
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		data, _ := io.ReadAll(r.Body)
-		var c Checkin
-		if err := json.Unmarshal(data, &c); err != nil {
-			t.Error(err)
-			return
-		}
-		reports = append(reports, c)
-		if strict {
-			if hasHostProbeFields(c) || c.ToolInventoryHash != "" {
-				rw.WriteHeader(400)
-				json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-				return
-			}
-			json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol})
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(data))
-		handler.ServeHTTP(rw, r)
-	}))
-	defer server.Close()
-	m := machine("probe-wire", "fake")
-	observation := &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}
-	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, Probe: observation}
-	m = profileAvailability(m, Availability{Mode: "daily", Available: true, Signals: idleSignals(), AgeSeconds: .25, Probe: observation})
-	w := Worker{Clock: clock, Client: Client{URL: server.URL, Token: "test"}, toolReport: &workerToolReport{}, hygieneWire: &workerHygieneWire{}}
-	send := func() {
-		t.Helper()
-		if _, err := w.checkin(t.Context(), Checkin{Machine: m}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	send()
-	send()
-	if hasHostProbeFields(reports[0]) || !hasHostProbeFields(reports[1]) {
-		t.Fatal("probe fields were not negotiated")
-	}
-	if m.SharedHostPressure.Probe != observation || machineAvailability(&m).AgeSeconds != .25 {
-		t.Fatal("wire adaptation changed local facts")
-	}
-	strict = true
-	send()
-	send()
-	if len(reports) != 5 {
-		t.Fatal("downgrade did not use one legacy retry", len(reports))
-	}
-	for _, c := range reports[3:] {
-		if hasHostProbeFields(c) || c.Machine.Session != m.Session || c.AttemptProtocol != keyedAttemptProtocol {
-			t.Fatal("downgrade changed protocol/custody")
-		}
-	}
-}
-
 func TestAdaptiveProbeQueueOwnerAgeAndClockSkew(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("owner-age", "fake")
@@ -122,7 +60,7 @@ func TestAdaptiveProbeQueueOwnerAgeAndClockSkew(t *testing.T) {
 	}
 }
 
-func TestAdaptiveProbeHealthFreshnessAndLegacyDrain(t *testing.T) {
+func TestAdaptiveProbeHealthFreshness(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("health-probe", "fake")
 	m.HostHealth = &HostHealth{AgeSeconds: 1, Probe: &ProbeObservation{PeriodSeconds: 2, CostSeconds: .1, ValidSeconds: 3}, History: []HostHealthSample{{At: clock.Now()}}}
@@ -133,11 +71,6 @@ func TestAdaptiveProbeHealthFreshnessAndLegacyDrain(t *testing.T) {
 	clock.Advance(2 * time.Second)
 	if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
 		t.Fatal("stale health admitted", reason)
-	}
-	m.HostHealth.AgeSeconds = 3
-	legacy := legacyHostProbeCheckin(Checkin{Machine: m})
-	if legacy.Machine.Leaving || !availabilityBlocked(&legacy.Machine) || legacy.Machine.HostHealth.DrainReason != "host_probe_unknown" || legacy.Machine.HostHealth.Probe != nil || m.HostHealth.Probe == nil {
-		t.Fatal("downgrade lost unknown-health drain or changed local facts")
 	}
 	m.HostHealth.AgeSeconds = 0
 	m.HostHealth.History[0].Error = "host_sensor_unavailable"
@@ -304,54 +237,31 @@ func TestAdaptiveProbeHealthyCyclesKeepEvidence(t *testing.T) {
 	}
 }
 
-func TestAdaptiveProbeUnknownHealthNegotiationRecovers(t *testing.T) {
+func TestAdaptiveProbeUnknownHealthRecovers(t *testing.T) {
 	q, clock := fixture(t)
-	handler := API{q, "test"}.Handler()
-	legacy := false
-	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		if !legacy {
-			handler.ServeHTTP(rw, r)
-			return
-		}
-		data, _ := io.ReadAll(r.Body)
-		var c Checkin
-		_ = json.Unmarshal(data, &c)
-		if c.Machine.HostHealth != nil || hasHostProbeFields(c) || c.ToolInventoryHash != "" {
-			rw.WriteHeader(400)
-			_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(data))
-		recorded := httptest.NewRecorder()
-		handler.ServeHTTP(recorded, r)
-		var reply Reply
-		_ = json.Unmarshal(recorded.Body.Bytes(), &reply)
-		reply.HostProbeProtocol, reply.HostHygieneProtocol, reply.ToolInventoryProtocol, reply.HostCollectionProtocol = "", "", "", ""
-		rw.WriteHeader(recorded.Code)
-		_ = json.NewEncoder(rw).Encode(reply)
-	}))
+	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()
 	m := machine("health-recovery", "fake")
-	w := Worker{Clock: clock, Client: Client{URL: server.URL, Token: "test"}, toolReport: &workerToolReport{}, hygieneWire: &workerHygieneWire{}}
-	for _, downgrade := range []bool{false, true} {
-		legacy = downgrade
-		m.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
-		for _, healthy := range []bool{false, true} {
-			if healthy {
-				m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}, History: []HostHealthSample{{At: clock.Now()}}}
-			}
-			reply, err := w.checkin(t.Context(), Checkin{Machine: m})
-			if err != nil {
-				t.Fatal(err)
-			}
-			stored := q.s.Machines[m.ID]
-			if reply.Leave || stored.Leaving {
-				t.Fatal("temporary health uncertainty latched permanent leave", downgrade, healthy)
-			}
-			blocked := availabilityBlocked(stored) || q.hostHygieneReason(stored) != ""
-			if blocked == healthy {
-				t.Fatal("health admission failed to withhold or recover", downgrade, healthy, blocked)
-			}
+	w := Worker{Clock: clock, Client: Client{URL: server.URL, Token: "test"}, toolReport: &workerToolReport{}}
+	m.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
+	for _, healthy := range []bool{false, true} {
+		if healthy {
+			m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2}, History: []HostHealthSample{{At: clock.Now()}}}
+		}
+		reply, err := w.fixtureCheckin(t.Context(), Checkin{Machine: m})
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		stored := q.s.Machines[m.ID]
+		leaving := stored.Leaving
+		blocked := availabilityBlocked(stored) || q.hostHygieneReason(stored) != ""
+		q.mu.Unlock()
+		if reply.Leave || leaving {
+			t.Fatal("temporary health uncertainty latched permanent leave", healthy)
+		}
+		if blocked == healthy {
+			t.Fatal("health admission failed to withhold or recover", healthy, blocked)
 		}
 	}
 }

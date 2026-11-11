@@ -254,7 +254,7 @@ func TestPortabilityDevMixedInventory(t *testing.T) {
 		m.CapabilityProfile.OS = target.OS
 		m.CapabilityProfile.Arch = target.Arch
 		var reply Reply
-		if err := client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, Recovering: true}, &reply); err != nil {
+		if err := client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, Recovering: true}, &reply); err != nil {
 			t.Fatal(err)
 		}
 	}

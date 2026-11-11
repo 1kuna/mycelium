@@ -257,31 +257,6 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 	}
 }
 
-func TestTierFairnessLegacyUsageMigration(t *testing.T) {
-	t.Parallel()
-	q, c := fixture(t)
-	// Emulate the old persisted record, whose project totals had no tier metadata.
-	if err := q.update(func() error {
-		q.s.FairUsageVersion = 0
-		q.s.FairUsage = map[string]FairUsage{"atlas": {Seconds: 120, At: c.Now()}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenTierQueue(t, q, c)
-	key := fairUsageKey("experiment", "gpu", "atlas")
-	if q.s.FairUsageVersion != 1 || len(q.s.FairUsage) != 1 || q.s.FairUsage[key].Seconds != 120 {
-		t.Fatal(q.s.FairUsage)
-	}
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	q = reopenTierQueue(t, q, c)
-	if len(q.s.FairUsage) != 1 || q.s.FairUsage[key].Seconds != 120 {
-		t.Fatal("migration repeated", q.s.FairUsage)
-	}
-}
-
 func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
 	t.Parallel()
 	q, c, m := modelFixture(t)
@@ -462,5 +437,24 @@ func TestTierFairnessCappedDemandDoesNotStopBackfill(t *testing.T) {
 	}
 	if reason := q.capReason(q.s.Jobs[waiting.ID]); !strings.Contains(reason, "concurrent work cap") {
 		t.Fatal(reason)
+	}
+}
+
+func TestTierFairnessRetiredUsageRefused(t *testing.T) {
+	q, c := fixture(t)
+	if err := q.update(func() error { q.s.FairUsageVersion = 0; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	path := strings.TrimSuffix(q.lock.Name(), ".lock")
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, q.root, c)
+	if err == nil {
+		reopened.Close()
+		t.Fatal("unversioned fair usage accepted")
+	}
+	if !strings.Contains(err.Error(), "unsupported fair-usage format") {
+		t.Fatal(err)
 	}
 }

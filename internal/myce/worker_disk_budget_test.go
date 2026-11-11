@@ -161,7 +161,7 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 	defer server.Close()
 	m := machine("disk-wire", "fake")
 	m.HygieneCollection = &WorkerHygieneCollection{FileCache: CacheCollection{Bytes: 99}, DiskBudget: []DiskBudgetVolume{{ID: identityHash("local")}}, Scratch: &AttemptFilesCollection{RetainedBytes: 10}}
-	w := Worker{Client: Client{URL: server.URL}, hygieneWire: &workerHygieneWire{}}
+	w := Worker{Client: Client{URL: server.URL}, diskBudgetWire: &workerDiskBudgetWire{}}
 	send := func() Checkin {
 		t.Helper()
 		if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
@@ -169,7 +169,9 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 		}
 		return <-reports
 	}
-	send()
+	if c := send(); c.Machine.HygieneCollection == nil || c.Machine.HygieneCollection.FileCache.Bytes != 99 || hasDiskBudgetWireFields(c) {
+		t.Fatal("first check-in lost baseline collection", c)
+	}
 	if c := send(); c.Machine.HygieneCollection == nil || hasDiskBudgetWireFields(c) {
 		t.Fatal("old queue negotiation lost baseline report or sent new fields", c)
 	}

@@ -611,31 +611,7 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	// Decode only known retired settings for saved-config overlays. They have no
-	// runtime representation and disappear when the current config is written.
-	legacy := struct {
-		*ServiceConfig
-		HostStateDir    json.RawMessage `json:"host_state_dir"`
-		StartDisabled   json.RawMessage `json:"start_disabled"`
-		RequiredWorkers json.RawMessage `json:"required_workers"`
-	}{ServiceConfig: &c}
-	e = decoder.Decode(&legacy)
-	// Like environment sizing, retire only the exact old default. Earlier
-	// configurations did not distinguish an explicit 10 GiB from the default.
-	// New explicit values record intent, including an explicit 10 GiB.
-	if e == nil && c.Role == "worker" && c.FileCacheBytes == 10<<30 && !c.FileCacheBytesExplicit {
-		c.FileCacheBytes = 0
-	}
-	// Retire the exact installer default that throttled serialized control work
-	// past worker authorization/loss deadlines (#108). Saved upgrades otherwise
-	// preserve old defaults forever. Distinct operator overrides stay explicit.
-	if e == nil && c.Role == "queue" && c.Nice == 10 && c.CPUQuota == "25%" {
-		c.Nice, c.CPUQuota = 0, ""
-	}
-	// Retire only the exact former queue default; keep explicit custom caps.
-	if e == nil && c.Role == "queue" && c.MemoryMax == "512M" {
-		c.MemoryMax = "infinity"
-	}
+	e = decoder.Decode(&c)
 	if e == nil {
 		_, e = deviceAllowance(c.Device)
 	}

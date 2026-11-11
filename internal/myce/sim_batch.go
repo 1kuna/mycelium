@@ -71,8 +71,7 @@ func simBatchInventory(m *Machine, extensions map[string]Extension) {
 		r.Setup, r.Qualified, r.CheckID = true, true, "synthetic-reference"
 		m.Devices[0].ExtensionReports = append(m.Devices[0].ExtensionReports, r)
 	}
-	// Virtual workers use the legacy single-assignment transport. Mirror their
-	// one component's qualification for that path, just as device views do.
+	// Expose the same device qualification to synthetic model planning.
 	m.ExtensionReports = slices.Clone(m.Devices[0].ExtensionReports)
 }
 

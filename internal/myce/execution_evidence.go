@@ -69,31 +69,3 @@ func (e *executionEvidenceError) Unwrap() error { return e.cause }
 
 const executionEvidenceProtocolHeader = "X-Myce-Execution-Evidence"
 const executionEvidenceProtocol = "execution-evidence-v1"
-
-// Negotiate the additive worker field before sending it to a strict old queue.
-// Always strip a copy, preserving the durable result for a later upgrade.
-func executionEvidenceWireInput(in any, supported bool) (any, bool) {
-	switch v := in.(type) {
-	case *Result:
-		if v != nil {
-			return executionEvidenceWireInput(*v, supported)
-		}
-	case *LogChunk:
-		if v != nil {
-			return executionEvidenceWireInput(*v, supported)
-		}
-	case Result:
-		has := v.ExecutionEvidence != nil
-		if !supported {
-			v.ExecutionEvidence = nil
-		}
-		return v, has && supported
-	case LogChunk:
-		has := v.ExecutionEvidence != nil
-		if !supported {
-			v.ExecutionEvidence = nil
-		}
-		return v, has && supported
-	}
-	return in, false
-}

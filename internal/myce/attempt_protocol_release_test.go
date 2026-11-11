@@ -15,7 +15,7 @@ import (
 // Release installations with a few dozen environments exceed the ordinary
 // 1 MiB JSON budget; the old worker masks that 400 as a protocol-upgrade 426.
 func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
-	const queueVersion = "v3.1.0-rc.20261104.s072.abce497.1"
+	const queueVersion = "v3.1.0-rc.20261110.s076r6.9"
 	previousVersion := BuildVersion
 	BuildVersion = queueVersion
 	t.Cleanup(func() { BuildVersion = previousVersion })
@@ -36,13 +36,11 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 		cache[key] = tools
 	}
 	inventory := preparedToolInventory(cache, environments, "")
-	for _, version := range []string{queueVersion, "v3.1.0-rc.20261104.s072.abce497", "v3.1.0-rc.20261104.s071.100840b"} {
+	for _, version := range []string{queueVersion, "v3.1.0-rc.20261110.s076r6.8"} {
 		t.Run(version, func(t *testing.T) {
 			m := machine("release-worker", "fake")
 			m.Release = &RunningRelease{Version: version, Commit: "fixture"}
-			if version != "v3.1.0-rc.20261104.s071.100840b" {
-				m.Environments, m.ToolInventory = environments, inventory
-			}
+			m.Environments, m.ToolInventory = environments, inventory
 			c := Checkin{Machine: m, Fresh: true}
 			data, err := json.Marshal(c)
 			if err != nil {
@@ -52,7 +50,7 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 				t.Fatal("fixture must reproduce the release's oversized inventory")
 			}
 			w := Worker{Machine: m, Clock: clock, Client: client}
-			reply, err := w.checkin(context.Background(), c)
+			reply, err := w.fixtureCheckin(context.Background(), c)
 			if err != nil {
 				c.AttemptProtocol = keyedAttemptProtocol
 				raw := client.Call(context.Background(), "POST", "/api/workers/checkin", c, nil)
@@ -69,7 +67,7 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 		m := machine("oversized-worker", "fake")
 		m.ToolInventory = map[string][]string{"": {strings.Repeat("x", 8<<20)}}
 		w := Worker{Machine: m, Clock: clock, Client: client}
-		_, err := w.checkin(context.Background(), Checkin{Machine: m})
+		_, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m})
 		var refusal *HTTPError
 		if !errors.As(err, &refusal) || refusal.Status != http.StatusRequestEntityTooLarge || refusal.Code != "request_too_large" {
 			t.Fatalf("size refusal masked as protocol incompatibility: %v", err)

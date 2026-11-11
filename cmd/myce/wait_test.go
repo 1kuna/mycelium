@@ -48,11 +48,9 @@ func waitOpenQueue(t *testing.T, db, checkpoints string, clock *waitClock) *myce
 	return q
 }
 
-// legacyCLICheckin preserves the headerless wire contract in CLI fixtures.
-// Unknown first arrivals are idle; a real old worker sends again after its
-// default one-second interval. Already qualified reports do not advance time.
-func legacyCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myce.Reply, error) {
-	reply, err := q.Checkin(report)
+// Headerless direct fixtures establish cadence before assignment.
+func currentCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myce.Reply, error) {
+	reply, err := fixtureQueueCheckin(q, report)
 	if err != nil {
 		return reply, err
 	}
@@ -63,7 +61,7 @@ func legacyCLICheckin(q *myce.Queue, clock *waitClock, report myce.Checkin) (myc
 	for _, m := range snapshot.Machines {
 		if m.ID == report.Machine.ID && m.Session == report.Machine.Session && m.Suspect && reply.Job == nil && len(reply.Attempts) == 0 {
 			clock.advance(time.Second)
-			return q.Checkin(report)
+			return fixtureQueueCheckin(q, report)
 		}
 	}
 	return reply, nil
@@ -129,7 +127,7 @@ func waitFinish(t *testing.T, q *myce.Queue, clock *waitClock, success bool) {
 	var reply myce.Reply
 	wait(t, ctx, func() bool {
 		var err error
-		reply, err = legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		reply, err = currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -393,19 +391,15 @@ func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
 			client := myce.Client{URL: "http://fixture.invalid/private-endpoint", Token: "private-token", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
 				// Adaptive retry spacing learns request cost from this clock.
 				clock.advance(time.Second)
-				if r.Method == "POST" {
-					return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
-				}
-
 				calls++
-				status, body := http.StatusOK, `{"id":"job","state":"running"}`
+				status, body := http.StatusOK, `{"jobs":[{"id":"job","state":"running","revision":1,"spec":{}}]}`
 				if calls > 1 && clock.Now().Sub(started) < 75*time.Second {
 					if tc.err != nil {
 						return nil, tc.err
 					}
 					status, body = http.StatusServiceUnavailable, `{"error":"private response details"}`
 				} else if calls > 1 {
-					body = `{"id":"job","state":"succeeded"}`
+					body = `{"jobs":[{"id":"job","state":"succeeded","revision":2}]}`
 				}
 				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})}}
@@ -468,20 +462,20 @@ func TestWaitDeadlineCancelsInFlightRequest(t *testing.T) {
 	}
 }
 
-func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
+func TestWaitUsesBatchReads(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)}
-	var queries []string
+	calls := 0
 	client := myce.Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method == "POST" {
-			return &http.Response{StatusCode: 404, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		if r.Method != "POST" || r.URL.Path != "/api/wait" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL)
 		}
-
-		queries = append(queries, r.URL.RawQuery)
+		calls++
 		state := "running"
-		if len(queries) == 4 {
+		if calls == 4 {
 			state = "succeeded"
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"id":"exact-job-id","state":%q}`, state)))}, nil
+		body := fmt.Sprintf(`{"jobs":[{"id":"exact-job-id","state":%q,"revision":%d,"spec":{}}]}`, state, calls)
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}}
 	var out bytes.Buffer
 	err := waitJobs(context.Background(), client, []string{"exact-job"}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
@@ -491,15 +485,15 @@ func TestWaitUsesLightweightReadsAfterInitial(t *testing.T) {
 		clock.advance(d)
 		return nil
 	})
-	if err != nil || out.String() != "exact-job-id succeeded\n" || fmt.Sprint(queries) != "[ view=wait view=wait view=wait]" {
-		t.Fatalf("err=%v output=%q queries=%q", err, out.String(), queries)
+	if err != nil || out.String() != "exact-job-id succeeded\n" || calls != 4 {
+		t.Fatalf("err=%v output=%q calls=%d", err, out.String(), calls)
 	}
 }
 
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	reply, err := legacyCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: myce.Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatalf("assignment: %v %+v %s", err, reply, waitAssignmentDiagnostics(q))
 	}
@@ -638,16 +632,11 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 			reason := strings.Repeat("scheduler explanation ", 60) + "\nfull reason"
 			states := []string{"queued", "queued", "running", "succeeded"}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !structured && r.Method == "POST" {
-					http.NotFound(w, r)
+				if r.Method == "POST" && r.URL.Path == "/api/wait" {
+					json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), Revision: uint64(step + 1), Spec: &myce.WaitSpec{}}}})
 					return
 				}
 				if structured {
-					w.Header().Set("X-Myce-Wait", "batch-v1")
-					if r.Method == "POST" && r.URL.Path == "/api/wait" {
-						json.NewEncoder(w).Encode(myce.WaitReply{Jobs: []myce.WaitState{{ID: "job", State: states[step], Reason: fmt.Sprintf("%s %d", reason, step), Revision: uint64(step + 1)}}})
-						return
-					}
 					if r.URL.Path != "/api/jobs/job" || r.URL.RawQuery != "" {
 						projectedReads.Add(1)
 						http.Error(w, "JSON must use full job reads", http.StatusBadRequest)
@@ -687,9 +676,9 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	}
 	// The public flag must select the structured renderer too.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// This legacy queue fixture has no batch endpoint.
+		// Both supported releases return batch state and full terminal details.
 		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
-			http.NotFound(w, r)
+			fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded","revision":1}]}`)
 			return
 		}
 		fmt.Fprint(w, `{"id":"job","state":"succeeded","reason":"full terminal reason"}`)
@@ -699,4 +688,26 @@ func TestWaitConciseStatesAndJSONReasons(t *testing.T) {
 	if err := waitCommand(context.Background(), []string{"job", "--json", "--queue", server.URL, "--token", "fixture"}, &out, io.Discard); err != nil || !strings.Contains(out.String(), `"reason":"full terminal reason"`) {
 		t.Fatal("--json flag", err, out.String())
 	}
+}
+
+func fixtureQueueCheckin(q *myce.Queue, c myce.Checkin) (myce.Reply, error) {
+	keyed := c.AttemptProtocol != ""
+	c.AttemptProtocol = "keyed-attempt-v1"
+	if c.Running != nil {
+		c.Attempts = []myce.AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
+	}
+	c.Running, c.Started = nil, false
+	r, err := q.CheckinKeyed(c)
+	if !keyed {
+		for _, a := range r.Attempts {
+			if a.Job != nil {
+				r.Job = a.Job
+			}
+			if len(c.Attempts) == 1 && c.Attempts[0].ID == a.ID && c.Attempts[0].Attempt == a.Attempt && c.Attempts[0].Session == a.Session {
+				r.Stop, r.Kill, r.Hold = a.Stop, a.Kill, a.Hold
+				r.GraceSeconds, r.PriorityStop, r.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
+			}
+		}
+	}
+	return r, err
 }

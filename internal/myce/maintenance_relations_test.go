@@ -100,13 +100,11 @@ func TestQueueMaintenanceClosureRollbackRestart(t *testing.T) {
 }
 
 func TestQueueMaintenanceOncePerCheckin(t *testing.T) {
-	for _, keyed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "legacy", true: "keyed"}[keyed], func(t *testing.T) {
+	for _, devices := range []bool{false, true} {
+		t.Run(map[bool]string{false: "scalar inventory", true: "device inventory"}[devices], func(t *testing.T) {
 			q, _ := fixture(t)
 			m := machine("worker", "fake")
-			protocol := ""
-			if keyed {
-				protocol = keyedAttemptProtocol
+			if devices {
 				m = m3Machine()
 			}
 			calls := 0
@@ -118,10 +116,7 @@ func TestQueueMaintenanceOncePerCheckin(t *testing.T) {
 			checkin := func(reports []AttemptReport) Reply {
 				t.Helper()
 				calls = 0
-				c := Checkin{Machine: m, period: time.Second, AttemptProtocol: protocol, Attempts: reports}
-				if !keyed && len(reports) > 0 {
-					c.Running, c.Attempts = &reports[0].Execution, nil
-				}
+				c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}
 				r, err := q.Checkin(c)
 				if err != nil {
 					t.Fatal(err)
@@ -134,12 +129,10 @@ func TestQueueMaintenanceOncePerCheckin(t *testing.T) {
 			checkin(nil)
 			j := submit(t, q, spec("experiment"))
 			r := checkin(nil)
-			assigned := r.Job
-			if keyed {
-				for _, directive := range r.Attempts {
-					if directive.Job != nil {
-						assigned = directive.Job
-					}
+			var assigned *Job
+			for _, directive := range r.Attempts {
+				if directive.Job != nil {
+					assigned = directive.Job
 				}
 			}
 			if assigned == nil || assigned.ID != j.ID {

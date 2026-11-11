@@ -2,8 +2,6 @@ package myce
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"testing"
@@ -183,73 +181,6 @@ func TestModelIntervalsRollbackAndUnknownLegacyTimes(t *testing.T) {
 	after := intervalPage(t, q, 0, -1, 256)
 	if after.HighWater != page.HighWater || q.s.ModelSlots[slotKey(m.ID, "test")].Interval.ReleasedAt != nil {
 		t.Fatal("aborted transition leaked", after)
-	}
-}
-
-func TestModelIntervalsReupgradeAfterOlderStateRewrite(t *testing.T) {
-	q, clock, _ := modelFixture(t)
-	addModelCall(t, q, "experiment")
-	before := intervalPage(t, q, 0, -1, 256)
-	var sequence int
-	var name, path string
-	if err := q.db.QueryRow("PRAGMA database_list").Scan(&sequence, &name, &path); err != nil {
-		t.Fatal(err)
-	}
-	root := q.root
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	// Emulate a retained legacy whole-state serializer rewriting state/slots. Its
-	// serializer drops unknown fields but leaves unrelated SQLite tables intact.
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var raw []byte
-	raw, err = readQueueState(db, normalizedQueueMarker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var base map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &base); err != nil {
-		t.Fatal(err)
-	}
-	delete(base, "model_interval_high_water")
-	delete(base, "model_interval_since")
-	var slots map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(base["model_slots"], &slots); err != nil {
-		t.Fatal(err)
-	}
-	for _, slot := range slots {
-		delete(slot, "interval")
-	}
-	base["model_slots"], err = json.Marshal(slots)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err = json.Marshal(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("UPDATE queue SET data=? WHERE id=1", raw); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Hour)
-	restarted, err := Open(path, root, clock)
-	if err != nil {
-		t.Fatal("re-upgrade failed with retained interval history", err)
-	}
-	defer restarted.Close()
-	after := intervalPage(t, restarted, 0, -1, 256)
-	if after.HighWater <= before.HighWater || after.Entries[0].Attempt != before.Entries[0].Attempt {
-		t.Fatal("re-upgrade lost or reused sequences", after)
-	}
-	last := after.Entries[len(after.Entries)-1]
-	if last.Kind != "observed" || last.AssignedAt != nil || !after.CoverageSince.Equal(clock.Now()) {
-		t.Fatal("rollback gap fabricated coverage", after)
 	}
 }
 

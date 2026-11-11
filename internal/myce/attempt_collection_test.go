@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -83,9 +84,8 @@ func TestAttemptProtocolCollectionControls(t *testing.T) {
 	owned := AttemptDirective{Execution: key.Execution, Session: key.Session, Stop: true, GraceSeconds: 7}
 	for _, decisions := range [][]AttemptDirective{{other, owned}, {owned, other}, {other}} {
 		reply, err := workerAttemptReply(c, Reply{AttemptProtocol: keyedAttemptProtocol, Attempts: decisions})
-		want := len(decisions) == 2
-		if err != nil || reply.Stop != want || reply.Kill || reply.Hold || want && reply.GraceSeconds != 7 {
-			t.Fatalf("control collection misrouted: %+v %v", reply, err)
+		if err != nil || reply.Stop || reply.Kill || reply.Hold || !reflect.DeepEqual(reply.Attempts, decisions) {
+			t.Fatalf("control collection changed or became unaddressed: %+v %v", reply, err)
 		}
 	}
 	for _, decisions := range [][]AttemptDirective{{owned, owned}, {owned, {Execution: other.Execution}}} {

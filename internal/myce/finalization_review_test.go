@@ -3,7 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,57 +98,29 @@ func TestReviewCheckDirectorySpecificCause(t *testing.T) {
 
 }
 
-func TestReviewOldQueueKeepsSupportedEvidence(t *testing.T) {
-	wire := &resourceWire{}
-	wire.supported.Store(true)
-	wire.cpuPressure.Store(true)
-	wire.executionEvidence.Store(true)
+func TestCurrentWireRetainsEvidenceAndRefusesInvalidShape(t *testing.T) {
 	calls := 0
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		w.Header().Set(resourceProtocolHeader, resourceProtocol)
-		w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
-		w.Header().Set(executionEvidenceProtocolHeader, executionEvidenceProtocol)
 		var got Result
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
-		if calls == 1 {
-			if got.ExecutionCause == nil || got.ExecutionCause.Finalization == nil {
-				t.Error("first request omitted finalization")
-			}
-			if got.CleanupCause == nil || got.CleanupCause.Admission == nil || len(got.CleanupCause.Admission.Contributors) != 1 {
-				t.Error("first request omitted admission contributors")
-			}
-			http.Error(w, `{"code":"request_invalid","error":"unknown finalization field"}`, 400)
-			return
+		if got.Resources == nil || got.Resources.CPU.Pressure == nil || got.ExecutionEvidence == nil || got.ExecutionCause == nil || got.ExecutionCause.Finalization == nil || got.CleanupCause == nil || got.CleanupCause.Admission == nil || len(got.CleanupCause.Admission.Contributors) != 1 {
+			t.Error("current evidence omitted")
 		}
-		t.Logf("legacy retry resources_present=%t execution_evidence_present=%t", got.Resources != nil, got.ExecutionEvidence != nil)
-		if got.Resources == nil || got.ExecutionEvidence == nil {
-			t.Error("BUG: finalization downgrade discarded advertised supported telemetry")
-		}
-		if got.Resources != nil && got.Resources.CPU.Pressure == nil || got.ExecutionCause == nil || got.ExecutionCause.Finalization != nil {
-			t.Error("retry changed supported CPU pressure or retained finalization")
-		}
-		if got.CleanupCause == nil || got.CleanupCause.Admission == nil || len(got.CleanupCause.Admission.Contributors) != 0 {
-			t.Error("retry retained unsupported admission contributors")
-		}
-		fmt.Fprint(w, `{"ok":true}`)
+		http.Error(w, `{"code":"request_invalid","error":"invalid fixture"}`, 400)
 	}))
 	defer api.Close()
 	zero := 0
 	cause := &RuntimeCause{Operation: "outputs", Class: "not_regular", Finalization: &FinalizationDetail{Step: "output_validation", Error: "not_regular", CommandExitCode: &zero}}
 	result := Result{ExecutionCause: cause, CleanupCause: &RuntimeCause{Operation: "launch", Class: "resource_limit", Admission: &AdmissionDetail{Contributors: []HostGrowthContributor{{Kind: "attempt", ChargeGB: 4}}}}, Resources: &AttemptResources{CPU: AttemptCPUTime{Pressure: &IOPressure{}}}, ExecutionEvidence: &ExecutionEvidence{Main: executionMayHaveRun}}
-	if err := (Client{URL: api.URL, resourceWire: wire}).Call(context.Background(), "POST", "/api/workers/complete", result, nil); err != nil {
-		t.Fatal(err)
+	err := (Client{URL: api.URL}).Call(context.Background(), "POST", "/api/workers/complete", result, nil)
+	var refusal *HTTPError
+	if !errors.As(err, &refusal) || refusal.Code != "request_invalid" || calls != 1 {
+		t.Fatalf("invalid request retried with stripped evidence: calls=%d err=%v", calls, err)
 	}
-	if calls != 2 {
-		t.Fatalf("calls=%d", calls)
-	}
-	if !wire.supported.Load() || !wire.cpuPressure.Load() || !wire.executionEvidence.Load() || result.ExecutionCause.Finalization == nil {
-		t.Fatal("downgrade changed supported protocols or durable result")
-	}
-	if len(result.CleanupCause.Admission.Contributors) != 1 {
-		t.Fatal("downgrade changed durable admission contributors")
+	if result.ExecutionCause.Finalization == nil || len(result.CleanupCause.Admission.Contributors) != 1 {
+		t.Fatal("durable evidence changed")
 	}
 }

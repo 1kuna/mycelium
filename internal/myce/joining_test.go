@@ -230,7 +230,7 @@ func TestProfileCheckinAndPersistence(t *testing.T) {
 	m := machine("profile-test", "fake")
 	m.CapabilityProfile = &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", Onboarding: "hardware-facts-only; throughput pending", MemoryLayout: "unified", SystemMemoryBytes: 16 << 30, LogicalCPUs: 8, RecordedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	var reply Reply
-	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m, Fresh: true}, &reply); err != nil {
+	if err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, Fresh: true}, &reply); err != nil {
 		t.Fatal(err)
 	}
 	var snapshot Snapshot

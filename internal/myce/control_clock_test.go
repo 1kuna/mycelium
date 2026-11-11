@@ -184,7 +184,7 @@ func TestControlClockHTTPAdvertisedCadence(t *testing.T) {
 	defer server.Close()
 	w := Worker{Client: Client{URL: server.URL, Token: "test"}, Interval: 7 * time.Second}
 	m := machine("worker", "fake")
-	if _, err := w.checkin(context.Background(), Checkin{Machine: m}); err != nil {
+	if _, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	if got := q.machineLossTimeout(m.ID); got != 14*time.Second {
@@ -210,7 +210,9 @@ func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
 		clock.Advance(service)
 		q.mu.Unlock()
 		var err error
-		reply, err = q.checkinContext(context.Background(), Checkin{Machine: m, period: period, contact: contact})
+		c := keyedFixtureCheckin(Checkin{Machine: m, period: period, contact: contact})
+		reply, err = q.checkinContext(context.Background(), c)
+		reply = fixtureReply(c, reply)
 		settle(err == nil)
 		if err != nil {
 			t.Fatal(err)
@@ -296,12 +298,12 @@ func TestControlClockLegacyFirstWorkAfterOneInterval(t *testing.T) {
 	w := Worker{Machine: machine("legacy", "fake"), Interval: 12 * time.Second, Client: Client{URL: server.URL, Token: "test"}}
 	j := submit(t, q, spec("production"))
 	c := Checkin{Machine: w.Machine}
-	first, err := w.checkin(context.Background(), c)
+	first, err := w.fixtureCheckin(context.Background(), c)
 	if err != nil || first.Job != nil || len(first.Attempts) != 0 {
 		t.Fatalf("empty idle reply did not remain idle: %+v %v", first, err)
 	}
 	clock.Advance(w.Interval)
-	second, err := w.checkin(context.Background(), c)
+	second, err := w.fixtureCheckin(context.Background(), c)
 	if err != nil || second.Job == nil || second.Job.ID != j.ID || len(second.Attempts) != 1 {
 		t.Fatalf("legacy work waited beyond one observed interval: %+v %v", second, err)
 	}
@@ -506,7 +508,7 @@ func TestControlClockFirstSessionResponseProtected(t *testing.T) {
 			}
 			m, peer := machine("worker", "fake"), machine("peer", "fake")
 			check(t, q, peer, nil)
-			c := Checkin{Machine: m}
+			c := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}
 			if replacement {
 				check(t, q, m, nil)
 				c.Machine.Session = "replacement-session"
@@ -678,12 +680,14 @@ func TestControlClockConcurrentReconnectsDoNotLearnOutage(t *testing.T) {
 	defer settleB(false)
 	// Both arrivals exist before either serialized transaction publishes. A late
 	// pending reconnect must not masquerade as a survivor from before the outage.
-	r, err := q.checkinContext(ctx, Checkin{Machine: worker, Running: &Execution{ID: job.ID, Attempt: job.Attempt}, period: time.Second, contact: a})
+	c := keyedFixtureCheckin(Checkin{Machine: worker, Running: &Execution{ID: job.ID, Attempt: job.Attempt}, period: time.Second, contact: a})
+	r, err := q.checkinContext(ctx, c)
+	r = fixtureReply(c, r)
 	if err != nil || r.Stop {
 		t.Fatal("first returning attempt lost custody", err)
 	}
 	settleA(true)
-	if _, err := q.checkinContext(ctx, Checkin{Machine: peer, period: time.Second, contact: b}); err != nil {
+	if _, err := q.checkinContext(ctx, keyedFixtureCheckin(Checkin{Machine: peer, period: time.Second, contact: b})); err != nil {
 		t.Fatal(err)
 	}
 	settleB(true)

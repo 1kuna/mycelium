@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"mycelium/internal/myce"
 )
 
@@ -209,7 +209,7 @@ func TestAdapterSharedInputUploadNamespaces(t *testing.T) {
 			m := myce.Machine{Capabilities: []string{"native_isolation_landlock", "shared_inputs_v1"}, SharedInputCache: &myce.SharedInputCapacity{CapacityBytes: 1 << 20, FreeBytes: 1 << 20}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
 				HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
 				CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
-			if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+			if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 				t.Fatal(err)
 			}
 			const token = "adapter-input-fixture-token"

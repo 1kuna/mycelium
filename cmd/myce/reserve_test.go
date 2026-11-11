@@ -18,7 +18,7 @@ import (
 func TestReserveCLI(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	m := maintenanceCLIWorker("worker")
-	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+	if _, err := fixtureQueueCheckin(q, myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	bound, err := q.Submit(myce.Spec{Name: "validation", Project: "test", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}})

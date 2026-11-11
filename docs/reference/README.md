@@ -22,3 +22,5 @@ its procedure.
 | [Queue disk I/O](queue-io.md) | Disk contention evidence, SQLite limits, systemd I/O weights |
 | [Completion observer](completion-observer.md) | Observer supervision, upgrade, legacy recovery, delivery acceptance |
 | [Migration archive](migrations.md) | Retired migration policy and parked storage guards |
+
+The [release floor](version-floor.md) records the supported adjacent pair and the exact retained contracts.

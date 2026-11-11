@@ -323,6 +323,13 @@ func TestProductionStartLatencyFakeClock(t *testing.T) {
 	if !check(t, q, m, run).Kill {
 		t.Fatal("did not kill at production grace")
 	}
+	// The keyed worker explicitly acknowledges the stopped execution; an
+	// empty heartbeat alone cannot discharge its process custody.
+	released := result(run, false)
+	released.ReleaseOnly = true
+	if err := q.Complete(released); err != nil {
+		t.Fatal(err)
+	}
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil || assigned.ID != prod.ID {
 		t.Fatal("production not assigned first", assigned)

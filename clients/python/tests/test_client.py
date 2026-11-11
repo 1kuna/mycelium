@@ -142,17 +142,14 @@ class FileTransferTimeoutTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
-    def test_wait_uses_lightweight_view_and_keeps_terminal_payload(self):
+    def test_batch_wait_keeps_terminal_payload(self):
         client = Client(token="fixture")
         terminal = {"id": "job/one", "state": "succeeded", "output_refs": {"result": {"size_bytes": 10}}}
-        replies = [{"id": "job/one", "state": "running"}, terminal]
-        with patch.object(client, "_wait_batch", side_effect=APIError(404, "unsupported")), patch.object(client, "_call", side_effect=lambda *_args, **_kwargs: json.dumps(replies.pop(0)).encode()) as call, patch(
-                "mycelium.client.time.sleep") as pause:
+        replies = [[{"id": "job/one", "state": "running", "revision": 1, "spec": {}}],
+                   [{"id": "job/one", "state": "succeeded", "revision": 2, "spec": {}}]]
+        with patch.object(client, "_wait_batch", side_effect=replies), patch.object(client, "_call", return_value=json.dumps(terminal).encode()) as call, patch("mycelium.client.time.sleep") as pause:
             self.assertEqual(client.wait("job/one"), terminal)
-            self.assertEqual([item.args for item in call.call_args_list], [
-                ("GET", "/api/jobs/job%2Fone"),
-                ("GET", "/api/jobs/job%2Fone?view=wait"),
-            ])
+            self.assertEqual([item.args for item in call.call_args_list], [("GET", "/api/jobs/job%2Fone?view=wait")])
             self.assertEqual(pause.call_count, 1)
             self.assertGreater(pause.call_args.args[0], 0)
 

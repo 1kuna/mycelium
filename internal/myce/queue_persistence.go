@@ -12,7 +12,6 @@ import (
 
 // A JSON string deliberately fails closed in older binaries expecting a state
 // object. All fragments and this marker commit in the same SQLite transaction.
-var legacyNormalizedQueueMarker = []byte(`"myce-normalized-state-v1"`)
 var fieldQueueMarker = []byte(`"myce-normalized-state-v2"`)
 var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
@@ -21,8 +20,8 @@ type queueRecordReader interface {
 }
 
 func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
-	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, legacyNormalizedQueueMarker) && !bytes.Equal(data, fieldQueueMarker) {
-		return data, nil
+	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, fieldQueueMarker) {
+		return nil, fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v2 or normalized-state-v3")
 	}
 	records, err := readQueueRecords(db)
 	if err != nil {
@@ -123,13 +122,10 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			next[key] = q.persisted[key]
 			return nil
 		}
-		if splitPersistenceKey(key) && !q.fragmented {
-			return nil
-		}
 		// Ordinary records fit one page and retain the original compact row.
 		// No fragment preparation or extra B-tree keys are needed for them.
 		compact := len(data) <= q.persistencePageBytes && len(q.persisted[key]) <= q.persistencePageBytes
-		if splitPersistenceKey(key) && q.fragmented && !compact {
+		if splitPersistenceKey(key) && !compact {
 			var prepared map[string]json.RawMessage
 			if len(fields) > 0 {
 				prepared = fields[0]
@@ -266,29 +262,9 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-
-	if !q.fragmented {
-		// Convert every old logical record atomically with the new format marker.
-		// Unchanged cold jobs must migrate too, without touching scheduling state.
-		migration := make(map[string][]byte, len(q.persisted)+len(next))
-		for key, data := range q.persisted {
-			migration[key] = data
-		}
-		for key, data := range next {
-			migration[key] = data
-		}
-		for key, data := range migration {
-			if !splitPersistenceKey(key) {
-				continue
-			}
-			if data != nil {
-				if err := q.writeFields(key, nil, data, measured, exec, nil); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	if !q.fragmented || !q.machineRecords {
+	// r6.8 uses the field layout. Publish its per-machine successor and the
+	// marker atomically; below-floor monolithic/v1 conversion is removed.
+	if !q.machineRecords {
 		if _, err := exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
 			return nil, err
 		}
@@ -303,15 +279,14 @@ func (q *Queue) loadPersistedState() error {
 	} else if err != nil {
 		return err
 	}
-	if !bytes.Equal(marker, normalizedQueueMarker) && !bytes.Equal(marker, legacyNormalizedQueueMarker) && !bytes.Equal(marker, fieldQueueMarker) {
-		return nil
+	if !bytes.Equal(marker, normalizedQueueMarker) && !bytes.Equal(marker, fieldQueueMarker) {
+		return fmt.Errorf("unsupported queue persistence format")
 	}
 	records, err := readQueueRecords(q.db)
 	if err != nil {
 		return err
 	}
 	q.persisted = records
-	q.fragmented = !bytes.Equal(marker, legacyNormalizedQueueMarker)
 	q.machineRecords = bytes.Equal(marker, normalizedQueueMarker)
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {

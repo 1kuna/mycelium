@@ -3,7 +3,6 @@ package myce
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +28,9 @@ func bundleHistory(t *testing.T, q *Queue, payload int) {
 		e.Version = fmt.Sprint(i + 1)
 		e.Files["payload"] = bytes.Repeat([]byte{byte(i)}, payload)
 		e = freezeComposition(t, e)
+		if err := q.files.freezeExtension(&e); err != nil {
+			t.Fatal(err)
+		}
 		extensions[i] = e
 		q.s.Extensions[extensionKey(e)] = e
 	}
@@ -95,7 +97,7 @@ func TestExtensionBundleStoreRetainedHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyPath := filepath.Join(dir, "copy.db")
-	// SQLite's own verified snapshot path; migrate a copy, never a live queue.
+	// SQLite's own verified snapshot path; reopen a copy, never a live queue.
 	if _, err := q.db.Exec("VACUUM INTO ?", copyPath); err != nil {
 		t.Fatal(err)
 	}
@@ -110,21 +112,21 @@ func TestExtensionBundleStoreRetainedHistory(t *testing.T) {
 	if err := q.db.QueryRow("SELECT SUM(length(data)) FROM queue_state").Scan(&afterBytes); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("retained fragments: %d -> %d bytes; warmed no-op after migration: %s / %d B per mutation", beforeBytes, afterBytes, afterTime, afterAlloc)
-	// The full diagnostic measured 7.4 MB/op after migration (27.8 MB under
+	t.Logf("retained fragments: %d -> %d bytes; warmed no-op after reopen: %s / %d B per mutation", beforeBytes, afterBytes, afterTime, afterAlloc)
+	// The full diagnostic measured 7.4 MB/op after reopen (27.8 MB under
 	// race) versus 820 MB embedded (2.30 GB under race). This scaled fixture
 	// measured 3.24 MB/op under race; 4 MiB allows allocator/metadata variation
 	// while rejecting bundle copies. Wall timing is reported separately.
 	if afterAlloc > 4<<20 {
 		t.Errorf("mutation still copies bundle volume: %d B/op, embedded volume %d", afterAlloc, beforeBytes)
 	}
-	if afterBytes > beforeBytes/16 {
-		t.Errorf("bundle bytes remain in mutable state: %d -> %d", beforeBytes, afterBytes)
+	if afterBytes > beforeBytes*2 {
+		t.Errorf("bundle bytes grew in mutable state: %d -> %d", beforeBytes, afterBytes)
 	}
 	first := q.s.Jobs["retained-000"]
 	replay := submit(t, q, first.Spec)
 	if replay.ID != first.ID || len(replay.Extensions[0].Files["payload"]) != 32<<10 {
-		t.Fatal("keyed answer lost bundle after migration")
+		t.Fatal("keyed answer lost bundle after reopen")
 	}
 	frozen, err := q.extensionByDigest(first.Extensions[0].Digest)
 	if err != nil || !reflect.DeepEqual(frozen.Files, replay.Extensions[0].Files) {
@@ -137,7 +139,7 @@ func TestExtensionBundleStoreRetainedHistory(t *testing.T) {
 	q = nil
 	q = open(copyPath)
 	if !reflect.DeepEqual(persisted, q.persisted) {
-		t.Fatal("second startup changed migrated fragments")
+		t.Fatal("second startup changed frozen fragments")
 	}
 	if len(q.bundleReferences()) != 13 {
 		t.Fatalf("deduplication: %d bundles", len(q.bundleReferences()))
@@ -148,7 +150,7 @@ func TestExtensionBundleStoreRetainedHistory(t *testing.T) {
 	}
 }
 
-func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
+func TestExtensionBundleStoreFrozenRecipes(t *testing.T) {
 	q, clock := fixture(t)
 	e := compositionExtension(t, true)
 	// Build hooks carry the full extension folder, including immutable scripts.
@@ -161,27 +163,18 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := q.files.freezeExtension(&e); err != nil {
+		t.Fatal(err)
+	}
 	q.s.Extensions = map[string]Extension{extensionKey(e): e}
 	j := &Job{ID: "retained", State: "succeeded", Extensions: []Extension{e}, EnvironmentRecipes: map[string]EnvironmentRecipe{"main": e.Variants[0].Environments["main"]}, SidecarEnvironmentRecipes: map[string]map[string]EnvironmentRecipe{"helper": {"main": e.Variants[0].Environments["main"]}}}
 	q.s.Jobs[j.ID] = j
 	jobWant := cloneJob(j)
+	if err := q.files.hydrateJob(&jobWant); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
-	}
-	old := q.persisted
-	if _, err := q.db.Exec("PRAGMA query_only=ON"); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate interruption after all blobs are durable, before metadata commit.
-	if err := q.migrateBundleFiles(); err == nil {
-		t.Fatal("migration unexpectedly committed")
-	}
-	for key, want := range old {
-		got := durableQueueRecord(t, q.db, key)
-		var before, after any
-		if json.Unmarshal(want, &before) != nil || json.Unmarshal(got, &after) != nil || !reflect.DeepEqual(before, after) {
-			t.Fatal("failed migration changed durable state")
-		}
 	}
 	dbPath := q.lock.Name()[:len(q.lock.Name())-len(".lock")]
 	root := q.root
@@ -255,7 +248,7 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 	}
 	d, err := startDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: extensionRoot, HostID: "bundle-check-host", Token: "bundle-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
 		bundleHistory(t, q, 32<<10)
-		if err := q.migrateBundleFiles(); err != nil {
+		if err := q.verifyBundleFiles(); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -351,12 +344,15 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 	t.Logf("real sidecar check: %d check, %d concurrent ticks, %d status reads; worker checkins every 10ms", checks, traffic.ticks, traffic.reads)
 }
 
-func TestExtensionBundleStoreRejectsCorruptMigration(t *testing.T) {
+func TestExtensionBundleStoreRejectsEmbeddedState(t *testing.T) {
 	q, clock := fixture(t)
 	e := fakeExtension(t)
 	e.Files["run.sh"] = []byte("changed after freezing")
-	q.s.Extensions = map[string]Extension{extensionKey(e): e}
-	if err := q.update(func() error { return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("extensions/" + extensionKey(e))
+		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	dbPath := q.lock.Name()[:len(q.lock.Name())-len(".lock")]
@@ -366,49 +362,39 @@ func TestExtensionBundleStoreRejectsCorruptMigration(t *testing.T) {
 	reopened, err := Open(dbPath, q.root, clock)
 	if err == nil {
 		reopened.Close()
-		t.Fatal("migration accepted a changed bundle under the old digest")
+		t.Fatal("startup accepted an embedded bundle")
 	}
-	if !strings.Contains(err.Error(), "bundle digest mismatch") {
+	if !strings.Contains(err.Error(), "unsupported embedded extension bundle") {
 		t.Fatal(err)
 	}
 }
 
-func TestExtensionBundleStoreRepairsCorruptBlobFromEmbeddedCopy(t *testing.T) {
+func TestExtensionBundleStoreRejectsCorruptReference(t *testing.T) {
 	q, clock := fixture(t)
 	e := fakeExtension(t)
-	frozen := e
-	if err := q.files.freezeExtension(&frozen); err != nil {
+	if err := q.files.freezeExtension(&e); err != nil {
 		t.Fatal(err)
 	}
-	ref := *frozen.FilesRef
-	// Preserve a good embedded copy in durable state, as after an interrupted
-	// migration, while the previously published blob has been corrupted.
-	e.FilesRef = &ref
-	q.s.Extensions = map[string]Extension{extensionKey(e): e}
-	if err := q.update(func() error { return nil }); err != nil {
+	if err := q.update(func() error {
+		q.touchCatalog("extensions/" + extensionKey(e))
+		q.s.Extensions = map[string]Extension{extensionKey(e): e}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(q.files.blob(ref), []byte("corrupt"), 0600); err != nil {
+	if err := os.WriteFile(q.files.blob(*e.FilesRef), []byte("corrupt"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	dbPath := strings.TrimSuffix(q.lock.Name(), ".lock")
+	path := strings.TrimSuffix(q.lock.Name(), ".lock")
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(dbPath, q.root, clock, WithCheckpointAvailability(func() bool { return true }))
-	if err != nil {
-		t.Fatal("startup rejected the good embedded copy", err)
+	reopened, err := Open(path, q.root, clock)
+	if err == nil {
+		reopened.Close()
+		t.Fatal("startup accepted corrupt frozen bundle")
 	}
-	defer reopened.Close()
-	if err := reopened.files.verify(context.Background(), ref); err != nil {
-		t.Fatal("stored blob was not repaired", err)
-	}
-	got, err := reopened.extensionByDigest(e.Digest)
-	if err != nil || !reflect.DeepEqual(got.Files, e.Files) {
-		t.Fatal("repaired bundle differs from embedded copy", err)
-	}
-	stored := reopened.s.Extensions[extensionKey(e)]
-	if len(stored.Files) != 0 || stored.FilesRef == nil || *stored.FilesRef != ref {
-		t.Fatal("startup did not commit the repaired reference")
+	if !strings.Contains(err.Error(), "integrity") && !strings.Contains(err.Error(), "mismatch") {
+		t.Fatal(err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -65,7 +66,14 @@ func TestUpgradeCompatProcess(t *testing.T) {
 		if mode == "queue-rollback-seed" {
 			now := q.clock.Now()
 			m := Machine{ID: "rollback-device", HostID: "rollback-host", Session: "rollback-session", GPU: "cpu", FreeMemoryGB: 64, HostMemoryMeasured: true, CapabilityProfile: &CapabilityProfile{Version: 0, OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 16, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30}}
-			if _, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"}); err != nil {
+			// Both releases expose the keyed HTTP contract; their in-process
+			// method names differ after removal of the pre-keyed adapter.
+			server := httptest.NewServer(API{q, "upgrade-fixture"}.Handler())
+			client := Client{URL: server.URL, Token: "upgrade-fixture"}
+			var reply Reply
+			err = client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: m, AttemptProtocol: "keyed-attempt-v1"}, &reply)
+			server.Close()
+			if err != nil {
 				t.Fatal(err)
 			}
 			err = q.update(func() error {
