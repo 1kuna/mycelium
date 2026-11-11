@@ -112,14 +112,14 @@ A change under `skills/` or `clients/python/` also selects the consumer skill
 contract test, `test_client.DevTests.test_consumer_skill_examples`. It executes
 the guide's CLI ladder and Python example against a real `myce dev`, and no Go
 test covers it (#1224). It runs under the gate's Python 3.11 and costs one
-`myce dev` start, roughly two minutes. Only that test runs in quick; the rest of
-the Python client suite runs in full.
+`myce dev` start: 28 s measured with a warm build cache. Only that test runs in
+quick; the rest of the Python client suite runs in full.
 
 Run `./scripts/gate.sh full` once for a batch before deployment. It runs the lean
 full race suite once, including dev checkpoint/resume, model and enrollment
 end-to-end tests. It does not repeat those packages in a second race pair or a
 separate dev run. It also runs the whole Python client suite
-(`clients/python/tests`, about 170 s, most of it one shared `myce dev` start)
+(`clients/python/tests`, 87 tests, 71-86 s measured warm here)
 as one early-starting entry beside the cross-release check. Tests for the
 optional PyYAML and OpenAI extras skip, because the offline gate interpreter
 does not have them. For an authorized urgent hotfix: run quick, deploy, run full
