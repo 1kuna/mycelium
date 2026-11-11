@@ -636,7 +636,8 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			if errors.As(e, &h) && h.Code == "project_file_store_quota" {
 				return capacityFailure("submit", profileInputNames(r, p, itemInputs), e)
 			}
-			if errors.As(e, &h) {
+			overloaded := errors.As(e, &h) && (h.Status == 429 || h.Status >= 500)
+			if errors.As(e, &h) && !overloaded {
 				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
 					r.PathDiagnostic = h.PathDiagnostic
 					r.RefusalCode, r.RefusalReason = h.Code, h.Message
@@ -647,7 +648,8 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				}
 				return profileFailure(out, &r, 65, "submission_rejected: queue rejected the saved intent")
 			}
-			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key")
+			// Name the cause (overload, stall, transport) so a timeout is not mistaken for an outage (#1016).
+			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key (cause: "+e.Error()+")")
 		}
 		r.JobID, r.Status = j.ID, j.State
 		r.SubmissionReused = j.SubmissionReused
