@@ -44,6 +44,23 @@ func (b *testLogBuffer) Reset() {
 	b.buf.Reset()
 }
 
+func testLogEvent(t testing.TB, output, event string) string {
+	t.Helper()
+	var found string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(" "+line+" ", " event="+event+" ") {
+			if found != "" {
+				t.Fatalf("duplicate %s event: %s", event, output)
+			}
+			found = line
+		}
+	}
+	if found == "" {
+		t.Fatalf("missing %s event: %s", event, output)
+	}
+	return found
+}
+
 // The writer checks the production logging boundary, not just the log text.
 type launchLogWriter struct {
 	q *Queue
@@ -126,6 +143,7 @@ func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 	if strings.Count(line, "event=slow_launch_authorization") != 1 || strings.Contains(line, "private") {
 		t.Fatal("missing, duplicated or unsafe slow request log", line)
 	}
+	line = testLogEvent(t, line, "slow_launch_authorization")
 	fields := map[string]float64{}
 	for _, word := range strings.Fields(line) {
 		key, value, ok := strings.Cut(word, "=")

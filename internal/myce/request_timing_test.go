@@ -89,6 +89,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 		}
 	}
 	var total, wait, hold, after float64
+	line = testLogEvent(t, line, "slow_request")
 	i := strings.Index(line, "duration_ms=")
 	if _, err := fmt.Sscanf(line[i:], "duration_ms=%f mutex_measured=true mutex_wait_ms=%f mutex_hold_ms=%f after_unlock_ms=%f", &total, &wait, &hold, &after); err != nil {
 		t.Fatal(err, line)
