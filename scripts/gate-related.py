@@ -201,9 +201,34 @@ def select(base):
             for directory, tests in sorted(packages.items())]
 
 
+# Always-run canaries (#1224): cheap whole-output checks that textual selection
+# missed on 2026-11-11 (planning digest, status rendering, previous-release open).
+# About 12 s of race test time. A canary renamed away fails test-gate-related.py.
+CANARIES = {
+    'internal/myce': ('TestCheckinPlanningOutcomeEquivalence', 'TestStatusReadPlanningEquivalence',
+                      'TestStatusCompactRetainedEvidence', 'TestStatusPageRendersSnapshot',
+                      'TestQueuePersistenceOpensPreviousReleaseDatabase'),
+    'cmd/myce': ('TestCompactStatusIsSmallAndKeepsWhatMatters', 'TestStatusFullIDsAndOneBasedAttempts',
+                 'TestStatusShowsProfileQualificationAndEveryWaitingReason'),
+}
+
+
+def with_canaries(selection, canaries=CANARIES):
+    """Merge canaries into a selection; keep the standalone smoke for no-Go changes."""
+    packages = {directory: set(pattern[2:-2].split('|')) for directory, pattern in selection}
+    if not packages:
+        # gate.sh runs this smoke for an empty selection; canaries must not hide it.
+        packages['cmd/myce'] = {'TestDevStandaloneSmoke'}
+    for directory, tests in canaries.items():
+        if pathlib.Path(directory).is_dir():
+            packages.setdefault(directory, set()).update(tests)
+    return [(directory, '^(' + '|'.join(sorted(tests)) + ')$')
+            for directory, tests in sorted(packages.items())]
+
+
 if __name__ == '__main__':
     try:
-        for directory, pattern in select(sys.argv[1]):
+        for directory, pattern in with_canaries(select(sys.argv[1])):
             print(f'{directory}\t{pattern}')
     except ValueError as error:
         print(f'quick: {error}; run ./scripts/gate.sh full', file=sys.stderr)

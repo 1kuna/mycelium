@@ -252,6 +252,34 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_canaries_merge_into_selection_and_keep_smoke(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                os.makedirs('internal/myce')
+                os.makedirs('cmd/myce')
+                canaries = {'internal/myce': ('TestDigest',), 'cmd/myce': ('TestRender',),
+                            'absent': ('TestGone',)}
+                self.assertEqual(related.with_canaries(
+                    [('internal/myce', '^(TestChanged|TestDigest)$')], canaries), [
+                    ('cmd/myce', '^(TestRender)$'),
+                    ('internal/myce', '^(TestChanged|TestDigest)$')])
+                # A docs-only change still runs the standalone smoke beside them.
+                self.assertEqual(related.with_canaries([], canaries), [
+                    ('cmd/myce', '^(TestDevStandaloneSmoke|TestRender)$'),
+                    ('internal/myce', '^(TestDigest)$')])
+            finally:
+                os.chdir(previous)
+
+    def test_canaries_name_existing_tests(self):
+        # A renamed or deleted canary would silently match nothing under -run.
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for directory, tests in related.CANARIES.items():
+            source = ''.join(path.read_text() for path in (root / directory).glob('*_test.go'))
+            for test in tests:
+                self.assertRegex(source, rf'(?m)^func {test}\(t \*testing\.T\)', f'{directory} {test}')
+
 
 if __name__ == '__main__':
     unittest.main()
