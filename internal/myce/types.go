@@ -118,6 +118,10 @@ type Environment struct {
 	LockFile  string   `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
 	Python    string   `json:"python,omitempty" yaml:"python,omitempty"`
 	Platforms []string `json:"platforms,omitempty" yaml:"platforms,omitempty"`
+	// Files carries a submitter-uploaded lock and its companions by basename
+	// (myce run --profile with a relative lock_file). The queue freezes these
+	// bytes instead of reading lock_file from its own filesystem.
+	Files map[string][]byte `json:"files,omitempty" yaml:"-"`
 }
 
 func (e *Environment) UnmarshalYAML(n *yaml.Node) error {
@@ -373,6 +377,9 @@ func (s Spec) Validate() error {
 	}
 	if s.Environment.LockFile != "" && s.Environment.Backend != "pixi" && s.Environment.Python == "" {
 		return reject("job_environment_invalid", errors.New("lock_file environment requires python version"))
+	}
+	if len(s.Environment.Files) > 0 && s.Environment.LockFile == "" {
+		return reject("job_environment_invalid", errors.New("environment files belong to a lock_file environment"))
 	}
 	for _, p := range s.Environment.Platforms {
 		if !validGPU(p) {

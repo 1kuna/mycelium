@@ -275,8 +275,8 @@ or per-host recipe registration is needed for the job's declared dependencies.
 ## Project lock files
 
 A job can bypass the named catalog, including when a catalog with unrelated
-entries is loaded. This is the existing queue-local inline mechanism; it is not
-approval for a project-carried recipe registration service (#251/#252):
+entries is loaded. The lock travels with the job; no operator registers it and
+the queue does not restart:
 
 ```yaml
 environment:
@@ -292,30 +292,48 @@ The lock file's basename must be exactly `uv.lock`, `pyproject.toml`, or
 `requirements.txt` (or `pixi.lock` with `backend: pixi`); names such as
 `download-requirements.txt` are rejected.
 
-The queue process must be able to read the input files at submission time,
-using its own filesystem paths and permissions. For `requirements.txt`, only
-that file is read; for `uv.lock` or `pyproject.toml`, both adjacent files are
-required. For `backend: pixi`, `pixi.lock` and its adjacent `pixi.toml` are
-required; `python` is optional because Pixi owns the interpreter. Omit `backend`
-or use `backend: uv` for the existing Python lock path, which requires `python`.
-Use an absolute path visible to the queue, such as
-`/queue/nas/project/requirements.txt`. A NAS path must use the queue's mount
-path, which may differ from the submitter's or worker's mount path. Relative
-inline paths resolve from the queue process's working directory, not beside the
-profile (relative catalog inputs instead resolve beside the catalog).
+For `requirements.txt`, only that file is frozen; for `uv.lock` or
+`pyproject.toml`, both adjacent files are required. For `backend: pixi`,
+`pixi.lock` and its adjacent `pixi.toml` are required; `python` is optional
+because Pixi owns the interpreter. Omit `backend` or use `backend: uv` for the
+existing Python lock path, which requires `python`.
 
-`myce run --profile` sends `environment.lock_file` unchanged. Its source archive
-and `inputs` uploads do not turn that path into a queue-readable environment
-input: a submitter-local lock works only if the queue can also read that exact
-path. The snapshot-at-submission behavior included in s062 (#526) freezes inputs
-already readable by the queue; it does **not** upload arbitrary submitter-local
-lock files, their companions, or a dependency workspace. Put the lock on
-queue-readable storage before submitting, or ask the queue operator to register a named catalog recipe and select it with
-`environment: NAME`. The queue snapshots Python/Pixi inputs for workers; workers do
-not need the original lock path.
+Where the bytes come from depends on the path:
+
+- **Relative path with `myce run --profile` or `myce run --entry`.** The CLI
+  reads the lock and its companions from the project root (the folder holding
+  `.mycelium/`, else the working directory; the same base as `inputs`) and
+  uploads them in the submission as `environment.files`. The queue needs no
+  path to them, and `myce spec check --resolve` checks the same files.
+
+  ```yaml
+  environment: {backend: pixi, lock_file: env/pixi.lock, platforms: [cpu]}
+  ```
+
+  Submitter-side failures use `side: submitter` and base `project-root`.
+- **Absolute path, or any path in a job spec submitted directly to the API.**
+  The queue process reads the files at submission time with its own paths and
+  permissions, for example `/queue/nas/project/requirements.txt`. A NAS path
+  must use the queue's mount path, which may differ from the submitter's or
+  worker's. A relative path without uploaded files resolves from the queue
+  process's working directory (relative catalog inputs instead resolve beside
+  the catalog).
+
+API clients can upload directly: `environment.files` maps each required
+basename to its bytes (base64 in JSON) and must contain exactly the required
+set. Either way, the queue freezes the content and its digest into the job at
+acceptance, so identical content reuses the same environment wherever it came
+from, and workers never need the original path. With the CLI, changed lock
+bytes change the submission intent: an automatic key makes a new job, and an
+explicit `--key` reused with changed bytes fails with `submission_key_conflict`. The uploaded copy is not kept in the stored job spec. The source archive
+and `inputs` still do not carry a dependency workspace; to share one recipe
+across projects, ask the queue operator to register a named catalog recipe and
+select it with `environment: NAME`.
 
 A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
-rejected before acceptance with HTTP 400 `job_environment_invalid`. Failed reads and oversized inputs (`cause: too_large`)
+rejected before acceptance: queue-side reads and malformed uploads with HTTP
+400 `job_environment_invalid`, and submitter-side reads by the CLI with
+`profile_input_invalid` before anything is sent. Failed reads and oversized inputs (`cause: too_large`)
 carry a `path_diagnostic` with `field`, `side`, `path`, `resolution_base`,
 `cause` and, when required, `companion`. The CLI renders the same information.
 For example, a caller-supplied `locks/uv.lock` missing its adjacent manifest gives:

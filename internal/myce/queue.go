@@ -1028,6 +1028,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			id = ID()
 		}
 		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
+		// do not keep a second copy in every stored job spec.
+		j.Spec.Environment.Files = nil
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil

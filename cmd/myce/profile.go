@@ -205,6 +205,21 @@ func readProfile(name string) (executionProfile, string, []byte, error) {
 	return p, root, data, nil
 }
 
+// attachEnvironmentLock uploads a relative inline lock and its companions,
+// read from the project root like inputs. Absolute paths stay queue-side reads.
+func attachEnvironmentLock(s *myce.Spec, root string) error {
+	e := &s.Environment
+	if e.LockFile == "" || filepath.IsAbs(e.LockFile) || e.Files != nil {
+		return nil
+	}
+	files, err := myce.ReadEnvironmentLock(e.Backend, e.LockFile, filepath.Join(root, e.LockFile), e.LockFile, "submitter", "project-root")
+	if err != nil {
+		return err
+	}
+	e.Files = files
+	return nil
+}
+
 func (p executionProfile) placementAdvisories() []string {
 	var variants []myce.ExtensionVariant
 	if p.Native != nil {
@@ -273,6 +288,17 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			Intent, Class string
 			Deadline      *time.Time
 		}{intent, p.Class, p.Deadline})
+	}
+	// Uploaded lock bytes are intent: an in-place edit is a new submission, and
+	// reusing an explicit key with changed bytes conflicts.
+	if err = attachEnvironmentLock(&p.Spec, root); err != nil {
+		return waitError(64, "profile_input_invalid: "+err.Error())
+	}
+	if len(p.Environment.Files) > 0 {
+		intent = profileHash(struct {
+			Intent      string
+			Environment map[string][]byte
+		}{intent, p.Environment.Files})
 	}
 	if len(itemRefs) > 0 {
 		// Local filenames are not identity: identical bytes at another path adopt.
