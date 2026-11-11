@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -17,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: current and previous release only. Pin the signed r6.7 source;
-# r6.8 is the current release. Advance this pair together at each release.
-PREVIOUS = "f010f15abc5483c527f4226cbf298966a35f2b33"
-OLD_VERSION = "v3.1.0-rc.20261110.s076r6.7"
-VERSION = "v3.1.0-rc.20261110.s076r6.8"
+# MY-42: candidate r6.9 must interoperate with the live r6.8 release.
+# Advance this pair together at each release.
+PREVIOUS = "0ca83b30f0b21997574a48cb4d7923093a131001"
+OLD_VERSION = "v3.1.0-rc.20261110.s076r6.8"
+VERSION = "v3.1.0-rc.20261110.s076r6.9"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 
 
@@ -217,7 +218,7 @@ def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, conf
             # without requiring one unbounded response to finish in ten seconds.
             seen, before = set(), ""
             while True:
-                query = urllib.parse.urlencode(dict(jobs="all", limit=1000, before=before))
+                query = urllib.parse.urlencode(dict(jobs="all", limit=1000, before=before, sections="jobs,machines,work"))
                 request = urllib.request.Request(url + "/api/status?" + query,
                                                  headers={"Authorization": "Bearer upgrade-fixture"})
                 try:
@@ -273,7 +274,12 @@ def run(args):
             ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),
+            ("queue rollback preserves decisions and custody", lambda: queue_rollback(candidate, previous, scratch)),
         ]
+        if args.case:
+            cases = [(name, case) for name, case in cases if args.case in name]
+            if not cases:
+                raise ValueError("no compatibility case matches --case")
         for name, case in cases:
             try:
                 case()
@@ -287,11 +293,11 @@ def run(args):
 def inventory_restarts(candidate, previous, scratch, tools):
     root = scratch / "inventory-restarts"
     queue_root = root / "queue"
+    allow_disk_budget_retry = False
 
     def accepted_hash_only(value):
         rows = json.loads(value)
-        if any(row["status"] != 200 for row in rows):
-            raise RuntimeError(f"inventory check-in refused: {rows}")
+        validate_inventory_receipts(rows, allow_disk_budget_retry)
         return len(rows) >= 3 and rows[-1]["hash"] and rows[-1]["inventory_keys"] == 0
 
     with contextlib.ExitStack() as queues:
@@ -328,12 +334,74 @@ def inventory_restarts(candidate, previous, scratch, tools):
             # Reopen the same persisted state with the previous release while
             # the current worker keeps its session and keyed attempt protocol.
             queues.close()
+            database = queue_root / "state/queue.db"
+            # Read the stopped candidate through production code before/after
+            # conversion, and through the exact previous binary before startup.
+            before = inspect_queue(candidate[0], queue_root)
+            with sqlite3.connect(database) as db:
+                marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
+                assert json.loads(marker) == "myce-normalized-state-v3", "candidate did not write v3"
+            command([str(candidate[1]), "queue", "downgrade", "--db", str(database), "--to", "v2"])
+            after = inspect_queue(previous[0], queue_root)
+            assert before == after, "downgrade changed durable jobs, custody or decisions"
+            assert len(after["jobs"]) >= 6286 and after["machines"], "rollback fixture lost IDs"
+            allow_disk_budget_retry = True
             queue = queues.enter_context(process(previous[0], "queue", queue_root, listen=address))
             assert await_file(queue_root / "url", queue) == url
             rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
             assert all(row["session"] == session and row["attempt_protocol"] == "keyed-attempt-v1"
                        for row in rows), "previous queue changed session or attempt protocol"
-    print("upgrade-compat: PASS current restart -> previous queue -> full inventory refresh", flush=True)
+    print("upgrade-compat: PASS v3 -> verified v2 downgrade -> exact previous queue reopen; all IDs/state intact; inventory refresh", flush=True)
+
+
+def validate_inventory_receipts(rows, allow_disk_budget_retry=False):
+    refused = [i for i, row in enumerate(rows) if row["status"] != 200]
+    if not refused:
+        return
+    # The worker keeps its r6.9 negotiation across queue replacement. r6.8
+    # strictly rejects the post-r6.8 disk-budget fields, then the worker's
+    # narrow compatibility path retries once without them. All other refusals,
+    # repeated refusals and changes to the attempt/session/inventory fence fail.
+    if allow_disk_budget_retry and refused == [0] and rows[0]["status"] == 400:
+        error = json.loads(rows[0].get("error", "{}"))
+        fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes")
+        message = error.get("error", "")
+        unknown_fields = (message == "body must be one JSON object with known fields and valid field types"
+                          or any('unknown field "' + f + '"' in message for f in fields))
+        if error.get("code") == "request_invalid" and unknown_fields and rows[0].get("disk_budget_fields"):
+            if len(rows) > 1:
+                assert not rows[1]["disk_budget_fields"], "disk-budget retry retained rejected fields"
+                for key in ("session", "attempt_protocol", "hash", "disk_budget_baseline_sha256"):
+                    assert rows[1][key] == rows[0][key], "disk-budget retry changed " + key
+            return
+    raise RuntimeError(f"inventory check-in refused: {rows}")
+
+
+def queue_rollback(candidate, previous, scratch):
+    root = scratch / "queue-rollback"
+    with process(candidate[0], "queue-rollback-seed", root) as child:
+        if child.wait(timeout=20):
+            raise RuntimeError("rollback seed failed")
+    database = root / "state/queue.db"
+    with sqlite3.connect(database) as db:
+        marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
+        assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
+    command([str(candidate[1]), "queue", "downgrade", "--db", str(database), "--to", "v2"])
+    with process(previous[0], "queue-rollback-open", root) as child:
+        if child.wait(timeout=20):
+            raise RuntimeError("previous release did not preserve IDs, decisions and custody")
+    # A rollback remains reversible: current startup can consume previous writes.
+    with process(candidate[0], "queue-rollback-open", root) as child:
+        if child.wait(timeout=20):
+            raise RuntimeError("re-upgrade did not preserve IDs, decisions and custody")
+    print("upgrade-compat: PASS v3 -> v2 -> exact r6.8 Open -> current Open; queued/paused/running/terminal IDs and pending custody intact", flush=True)
+
+
+def inspect_queue(binary, root):
+    with process(binary, "queue-inspect", root) as child:
+        if child.wait(timeout=20):
+            raise RuntimeError("queue inspection failed")
+    return json.loads((root / "durable-state.json").read_text())
 
 
 
@@ -444,6 +512,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["prepare", "run"])
     parser.add_argument("--candidate", help="Git revision for incident reproduction; default actual checkout bytes")
+    parser.add_argument("--case", help="run only cases whose names contain this text")
     args = parser.parse_args()
     install_signal_handlers()
     signal.alarm(600)
