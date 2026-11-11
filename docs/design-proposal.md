@@ -2698,3 +2698,16 @@ Fleet, maintenance, placement, inventory and stale-host diagnostics use the same
 confirmed-contact and suspicion calculations, frozen at status capture time. LastSeen remains an actual
 accepted queue timestamp. Physical memory/disk/pressure/probe sample validity
 still ages independently; liveness never manufactures fresh sensor evidence.
+
+## Amendment: count the idle footprint once (2026-11-11)
+
+The maintainer stated on 2026-11-11 that hosts running only Mycelium jobs should
+give their memory to jobs; MY-34 applies. The unified CUDA physical free-RAM
+floor is compared with live used RAM, which already contains the OS, driver and
+idle-service footprint. A measured allowance already excludes that footprint,
+so physical RAM minus a measured allowance subtracts it twice. With a measured
+allowance and no shared-interactive profile, the floor is the existing OS/driver
+reserve alone, and the allowance still caps reservations. Authored allowances
+and shared-interactive hosts keep the larger of the reserve and physical RAM
+minus the allowance.
+

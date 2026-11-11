@@ -373,3 +373,34 @@ func TestUnifiedCUDAAdmissionAdaptiveObservation(t *testing.T) {
 		t.Fatalf("silent worker granted physical credit: %g", got)
 	}
 }
+
+// Live numbers from the measured unified host (2026-11-11): 121.06 GiB, idle
+// maximum 5.00, explicit reserve 16, measured allowance 100.06. Live used RAM
+// already holds the idle footprint, so the floor is the reserve alone (not 21).
+func TestUnifiedCUDAFloorMeasuredAllowanceCountsBaselineOnce(t *testing.T) {
+	m := unifiedCUDAAdmissionMachine()
+	total := 121.06
+	m.CapabilityProfile.SystemMemoryBytes = uint64(total * (1 << 30))
+	m.ReservedMemoryGB, m.HostMemoryBudgetGB = 16, 100.06
+	for _, tc := range []struct {
+		name     string
+		measured bool
+		shared   bool
+		floor    float64
+	}{
+		{"measured", true, false, 16},
+		{"authored", false, false, 21},
+		{"measured-shared", true, true, 21},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.HostMemoryBudgetMeasured, m.SharedHost = tc.measured, nil
+			if tc.shared {
+				m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
+			}
+			floor, ok := unifiedCUDAFloor(&m)
+			if !ok || math.Abs(floor-tc.floor) > 1e-6 {
+				t.Fatal(floor, ok)
+			}
+		})
+	}
+}
