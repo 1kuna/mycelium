@@ -376,7 +376,11 @@ Two intervals are the minimum evidence of continuation rather than one counter
 batch; the detection cost is two measured sampling periods. An isolated batch
 under normal pressure does not prove thrashing. Each receipt records the baseline,
 its evidence digest and the observed windows. Hosts without that qualification
-retain the strict new-swapout stop. Missing nonce-bound cleanup receipts, SSH failure
+retain the strict new-swapout stop. Checksum-pinned calibration inputs are copied into gate-owned state when loaded;
+removing a source worktree does not remove its qualification evidence. Missing
+evidence drops that calibration with a warning and uses default admission
+after active calibrated owners finish. A checksum mismatch still refuses.
+Missing nonce-bound cleanup receipts, SSH failure
 or supervisor death retain capacity; exit status alone never releases it. These floors preserve room for the workstation
 and recovery after the 2026-11-02/03 saturation incident.
 

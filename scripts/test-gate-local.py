@@ -58,6 +58,7 @@ class LocalGateTests(unittest.TestCase):
             launcher = '''import importlib.util,json,pathlib,signal,sys
 s=importlib.util.spec_from_file_location('capacity',sys.argv[1]); c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[]
+c._memory.evidence_directory=lambda:r/'evidence'
 c.local_worker_usage=lambda:None;c.native_full_custody=lambda:False;c.check_pressure=lambda:None
 c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.os.cpu_count=lambda:18
 slot=c.acquire(r,mode='full',source_root=r/'dead'/'source')
@@ -205,6 +206,10 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
         fakehome = tempfile.TemporaryDirectory()
         self.addCleanup(fakehome.cleanup)
         fakebin = Path(fakehome.name)
+        for memory in (capacity._memory, measurement.memory):
+            retained = patch.object(memory, 'evidence_directory', return_value=fakebin / 'evidence')
+            retained.start()
+            self.addCleanup(retained.stop)
         docker = fakebin / 'docker'
         docker.write_text('#!/bin/sh\nif [ "$1:$2" = context:inspect ]; then printf \'"unix:///var/run/docker.sock"\\n\';\nelif [ "$1:$2" = context:ls ]; then printf \'"default"\\n\';\nelif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
         docker.chmod(0o755)
@@ -220,6 +225,75 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
         mock = patch.object(capacity.os, 'cpu_count', return_value=18)
         mock.start()
         self.addCleanup(mock.stop)
+
+    def test_calibration_survives_source_worktree_removal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB)):
+                first = capacity.acquire(root, mode='full')
+                first.release()
+                (root / 'resource-measurements.jsonl').unlink()
+                second = capacity.acquire(root, mode='full')
+                try:
+                    self.assertEqual(second.owner['admission_protocol'], 2)
+                    self.assertEqual(capacity._memory.retained_calibration(config), config)
+                finally:
+                    second.release()
+
+    def test_missing_calibration_falls_back_without_losing_fifo_or_live_custody(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            config['quick_memory_measurement'] = dict(peak_bytes=1, evidence=[])
+            (root / 'gate-capacity.json').write_text(json.dumps(config))
+            (root / 'resource-measurements.jsonl').unlink()
+            group = root / 'local-go-resource-group.custody'
+            group.write_text(json.dumps(dict(resource_group='live owner custody')))
+            lane = root / 'local-go-slot-3'
+            lane.mkdir()
+            owner = lane / 'owner.json'
+            owner.write_text(json.dumps(dict(pid=os.getpid(), process_identity=capacity.process_identity(os.getpid()))))
+            waits = []
+
+            def cleanup(_):
+                tickets = capacity.full_waiters(root)
+                self.assertEqual(len(tickets), 1)
+                waits.append(tickets[0])
+                self.assertEqual(json.loads(group.read_text())['resource_group'], 'live owner custody')
+                self.assertTrue(owner.exists())
+                owner.unlink()
+                lane.rmdir()
+                group.unlink()  # Simulate its owner's confirmed cleanup.
+
+            warning = io.StringIO()
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
+                  patch.object(capacity, 'time', Mock(sleep=cleanup)),
+                  contextlib.redirect_stderr(warning)):
+                run = capacity.acquire(root, mode='full', wait=True)
+                try:
+                    self.assertNotIn('admission_protocol', run.owner)
+                    self.assertEqual(run.owner['memory_requirement_at_entry_bytes'], 22 * capacity.GIB)
+                    self.assertEqual(len(waits), 1)
+                finally:
+                    run.release()
+                # A dead/empty former group must also self-reclaim on fallback.
+                group.write_text(json.dumps(dict(resource_group='empty former custody')))
+                run = capacity.acquire(root, mode='full')
+                run.release()
+                self.assertFalse(group.exists())
+            self.assertIn('evidence is missing', warning.getvalue())
+            self.assertEqual(json.loads((root / 'gate-capacity.json').read_text()), config)
+
+    def test_retained_calibration_digest_mismatch_still_refuses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            (root / 'resource-measurements.jsonl').write_text('changed evidence')
+            with self.assertRaisesRegex(ValueError, 'digest changed'):
+                capacity._memory.retained_calibration(config)
 
     def test_legacy_owners_are_preserved_and_new_owner_releases_only_its_lane(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -670,7 +744,8 @@ finally: slot.release()
             root = Path(folder).resolve()
             launcher = """import importlib.util,pathlib,sys,time,types
 s=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
-r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[];c.native_full_custody=lambda:False
+r=pathlib.Path(sys.argv[2]);c.root=lambda _:r;c.legacy_directories=lambda _:[]
+c._memory.evidence_directory=lambda:r/'evidence';c.native_full_custody=lambda:False
 c.available_memory=lambda:64*c.GIB;c.total_memory=lambda:64*c.GIB;c.check_pressure=lambda:None
 c.local_worker_usage=lambda:None;c.os.cpu_count=lambda:18
 original_sleep=time.sleep
