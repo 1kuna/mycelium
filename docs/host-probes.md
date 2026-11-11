@@ -36,7 +36,15 @@ evidence. Both ages are captured at send time, after report preparation. Local
 health admission reads do not train report cadence. During initial learning,
 evidence can still expire: contact alone never proves that a sensor is healthy. A stopped sensor expires at its last completed
 observation's frozen period, cost prediction and learned report-gap prediction,
-even if the worker continues checking in.
+even if the worker continues checking in. That validity predicts the worker's
+next send, not that report's arrival, so the queue judges a measured
+shared-pressure sample at each report and then keeps it until the next report
+is due: the report's processing time plus frozen validity plus the session's
+measured check-in delivery prediction (`delivery_seconds`, frozen at
+acceptance). A stopped sensor fails at the report where its age reaches
+validity; a missing or failed sample fails at once; a silent worker expires
+when that next report is overdue. Health, alerts and admission read this one
+predicate (#684).
 The prediction uses RFC 6298's
 1/8 mean and 1/4 deviation smoothing. These dimensionless coefficients supply
 statistical memory and a jitter allowance; they are not fleet latency thresholds.

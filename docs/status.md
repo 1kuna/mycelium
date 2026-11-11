@@ -1752,7 +1752,11 @@ observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
 On negotiated `host-probe-v1` workers, `shared_host_pressure.probe` reports
 measured period/cost and frozen validity in seconds. Local sample age must remain
-below that validity, including time waiting behind queue transactions.
+below that validity at each report, including time waiting behind queue
+transactions. Between reports the sample stays fresh until the next report is
+due: its processing time plus that validity plus `delivery_seconds`, the
+session's measured check-in delivery prediction frozen at acceptance (#684).
+`age_seconds` is the age at that report, not the current age.
 Matching-session contact cannot renew a negotiated observation. `availability.probe` and
 `availability.age_seconds` similarly preserve owner observation age across clock
 skew. `host_health.probe` applies the same frozen validity to health evidence;

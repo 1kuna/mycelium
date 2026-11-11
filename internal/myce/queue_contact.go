@@ -277,6 +277,18 @@ func (q *Queue) lastContact(m *Machine, now time.Time) time.Time {
 	return q.contactTime(m, now, true)
 }
 
+// checkinDeliveryUpper predicts, in seconds, how long this session's next
+// check-in takes from arrival to completion (mean plus four deviations of
+// completed check-ins). Zero until a check-in of the session has completed.
+func (q *Queue) checkinDeliveryUpper(m *Machine) float64 {
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
+		return c.delivery.upper()
+	}
+	return 0
+}
+
 // Pending requests protect their sender, but cannot identify a continuously
 // reporting survivor when deciding whether a fleet outage preceded reconnects.
 func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time.Time {
