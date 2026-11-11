@@ -281,6 +281,19 @@ recheck current full reservations rather than trusting an earlier available-RAM
 sample. This addresses measured head-of-line stalls with no active local gates,
 without lowering an envelope or changing a resource guard.
 
+For release acceptance, freeze a candidate branch such as `release/r6.11` and
+run repeated full sweeps there before repairing newly discovered flakes. Land
+fixture fixes on main and cherry-pick them onto the candidate; each candidate
+change restarts the consecutive-green count. Other main merges do not change
+the candidate. The release is cut from the qualified candidate SHA.
+
+On the local Darwin gate, declare a release full with
+`./scripts/gate.sh full --priority release`. It keeps its FIFO position, drains
+existing local gates, then holds admission until its cleanup completes. Later
+quick requests wait or use an authorized fleet fallback; no owner is manually
+stopped. Quick/command requests cannot claim this priority. Every memory, CPU,
+VM and disk guard still applies. Ordinary fulls retain shared admission.
+
 Local admission automatically archives a slot or custody record when its holder
 PID is absent (including a zombie), or its recorded start identity differs from
 the live process. The host admission lock serializes reclamation and new
