@@ -3,7 +3,9 @@ package myce
 import (
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -493,6 +495,47 @@ func stringBool(v bool) string {
 	}
 	return "false"
 }
+
+// compactStatusFinding reads the public status endpoint as a consumer would.
+func compactStatusFinding(t *testing.T, q *Queue, path, id string) *JobFinding {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", path, nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	API{Queue: q, Token: "secret"}.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("status %s: %d", path, w.Code)
+	}
+	if path == "/api/status" {
+		// The default compact view: the finding is its own field and its own
+		// unclipped text line, not a tail cut off the reason.
+		var view CompactStatus
+		if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		for _, j := range view.Jobs {
+			if j.ID == id {
+				if j.Finding != nil && (strings.Contains(j.Reason, "finding (") || !slices.Contains(view.Lines(true), "  "+j.Finding.Text())) {
+					t.Fatalf("compact finding duplicated or clipped: %q %q", j.Reason, view.Lines(true))
+				}
+				return j.Finding
+			}
+		}
+		t.Fatalf("compact status omitted job %s", id)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(w.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("status %s: %v", path, err)
+	}
+	for _, j := range snap.Jobs {
+		if j.ID == id {
+			return j.Finding
+		}
+	}
+	t.Fatalf("status %s omitted job %s", path, id)
+	return nil
+}
+
 func TestThreeAttempts(t *testing.T) {
 	t.Parallel()
 	q, c := fixture(t)
@@ -520,6 +563,9 @@ func TestThreeAttempts(t *testing.T) {
 			if public, err := q.jobSnapshot(j.ID); err != nil || public.Finding == nil || public.Finding.Code != "infrastructure_retry" {
 				t.Fatalf("requeue finding: %+v %v", public, err)
 			}
+			if f := compactStatusFinding(t, q, "/api/status", j.ID); f == nil || f.Code != "infrastructure_retry" {
+				t.Fatalf("default compact status lost the requeue finding: %+v", f)
+			}
 		}
 	}
 	requireState(t, q, j.ID, "failed")
@@ -529,6 +575,9 @@ func TestThreeAttempts(t *testing.T) {
 	public, err := q.jobSnapshot(j.ID)
 	if err != nil || public.Finding == nil || public.Finding.Owner != "mycelium" || !strings.Contains(public.Finding.What, "3 attempts") {
 		t.Fatalf("exhaustion finding: %+v %v", public, err)
+	}
+	if f := compactStatusFinding(t, q, "/api/status?jobs=recent", j.ID); f == nil || *f != *public.Finding {
+		t.Fatalf("recent compact status lost the failure finding: %+v", f)
 	}
 	waited, err := q.waitIndex().wait(t.Context(), WaitRequest{IDs: []string{j.ID}})
 	if err != nil || len(waited.Jobs) != 1 || waited.Jobs[0].Finding == nil || *waited.Jobs[0].Finding != *public.Finding {
