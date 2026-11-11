@@ -103,7 +103,10 @@ bind a notifier to your own thread with [T3 binding](t3-binding.md).
 When a job fails, read its `finding` first: `myce wait` prints it, and status
 and `myce result` show it. `owner` says whose problem it is (`job`, `mycelium`
 or `unknown`) and `action` is the one thing to do; `mycelium` means not your
-fault, and `cause_unknown` means read `myce logs JOB_ID`.
+fault, and `cause_unknown` means read `myce logs JOB_ID`. A `queue_admission`
+finding, `admission_requeues` count or `attempt_history[].admission_requeue`
+entry means the queue withdrew launch before your command started: it is not a
+start, a loss or a non-clean attempt.
 
 ## 4. Fetch, 5. verify
 

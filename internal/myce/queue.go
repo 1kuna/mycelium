@@ -2280,6 +2280,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.
 		q.requeueStartRefusal(j)
+		if j.State == "queued" {
+			admissionRequeueOutcome(&outcome)
+		}
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -3192,8 +3195,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		q.touchMachine(m.ID)
 	}
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
-	j.Starts = max(j.Starts, j.Attempt) + 1
-	j.Attempt = j.Starts
+	// Starts plus admission requeues is the issued-attempt high-water mark, so
+	// an uncounted refusal or a recovered older copy never reissues a number.
+	j.Attempt = max(j.Starts+j.AdmissionRequeues, j.Attempt) + 1
+	j.Starts = j.Attempt - j.AdmissionRequeues
 	if j.storedFileResults() {
 		j.OutputRefs = nil
 		j.PendingOutputRefs = nil

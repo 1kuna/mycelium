@@ -29,9 +29,14 @@ func startRefusalBeforeMain(j *Job, r Result) bool {
 		e != nil && e.Main == executionNotStarted
 }
 
+// #1299: the queue's own admission withdrew this attempt before main ran, so
+// it is an admission requeue, not an execution start or an interrupted attempt.
+// The attempt number stays spent (AdmissionRequeues keeps the high-water mark),
+// so stale reports from it are still rejected.
 func (q *Queue) requeueStartRefusal(j *Job) {
 	q.touchJob(j.ID)
 	deadline, caller := j.Spec.StartBy, absoluteStartBy(j)
+	attempt, machine, session := j.Attempt, j.Machine, j.Session
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false
 	}
@@ -39,6 +44,22 @@ func (q *Queue) requeueStartRefusal(j *Job) {
 	if caller {
 		j.Spec.StartBy = deadline // A never-executed main cannot extend a caller cutoff.
 	}
+	if j.State != "queued" {
+		return // Cancelled or failed by requeue: keep the recorded ending.
+	}
+	if j.Starts > 0 {
+		j.Starts--
+		j.AdmissionRequeues++
+	}
+	for i := range j.AttemptHistory {
+		if h := &j.AttemptHistory[i]; h.Attempt == attempt && h.Machine == machine && h.Session == session {
+			admissionRequeueOutcome(h)
+		}
+	}
+}
+
+func admissionRequeueOutcome(o *AttemptOutcome) {
+	o.Interrupted, o.AdmissionRequeue = false, true
 }
 
 func recordedStartRefusal(j *Job) string {

@@ -566,6 +566,7 @@ type Job struct {
 	StartedAt             *time.Time                   `json:"started_at,omitempty"`
 	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
 	Starts                int                          `json:"starts"`
+	AdmissionRequeues     int                          `json:"admission_requeues,omitempty"`
 	InfrastructureRetries int                          `json:"infrastructure_retries,omitempty"`
 	Losses                int                          `json:"losses"`
 	Progress              int64                        `json:"progress"`
