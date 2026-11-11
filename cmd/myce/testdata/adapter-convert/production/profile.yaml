@@ -1,0 +1,9 @@
+name: release
+project: example
+class: production
+source: {git: HEAD}
+run: {command: [sh, -c, 'echo ok > out.txt']}
+needs: {cpu_cores: 1, memory: auto, platform: cpu}
+targets: [{os: OS, arch: ARCH, platform: cpu}]
+outputs: {out.txt: results}
+check: [test, -s, out.txt]

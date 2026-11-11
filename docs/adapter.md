@@ -1215,8 +1215,10 @@ myce adapter convert \
 Profiles must agree on their project. Extension-only conversion requires
 `--project NAME`; an explicit project must match every profile. Entry names
 retain the original `name`. Conflicting names are refused, even for identical
-sources. `--default ENTRY` chooses the default; otherwise the first sorted entry
-name is used. Source-flag order does not change the output.
+sources. With several entries, `--default ENTRY` chooses the default; otherwise
+the first sorted entry name is used. A single entry is the default, so no
+`default` (or `schema`) line is written. Source-flag order does not change the
+output.
 
 `--out` alone reports a plan and writes nothing. After reviewing stdout and the
 report, repeat the same invocation with `--apply`. Apply requires `--out` and an
@@ -1224,9 +1226,31 @@ existing parent directory, and creates the destination exclusively. Existing
 files and symlinks are refused, including the input files. Originals stay in
 place; conversion does not switch callers or retire old readers.
 
-Profile fields remain unchanged except `project` moves to the header and
-`check` becomes `checks.result`. Targets, machine allowlists, run argv/env,
-memory class, input/output filenames, diagnostics and source selection survive.
+Profiles convert to the minimal entry form. `project` moves to the header,
+`check` becomes `checks.result`, and fields equal to an adapter default are
+omitted: `name` (the entry key), `class: experiment`, the default needs
+`{cpu_cores: 1, memory: auto, platform: cpu}`, `source: {git: HEAD}` and an
+absent check. Only `run.command` and `project` are required; `class`, `needs`,
+`check`, `targets` and `source` may be missing (a missing source becomes git
+`HEAD`, the adapter default, and the report says so).
+
+Targets on non-production entries are dropped and named in the report: such an
+entry runs wherever its needs fit and the queue learns coverage. Pass
+`--keep-targets` to keep them pinned (this repository's own gate adapter does,
+to keep separate darwin and linux entries). Production entries always keep
+explicit targets, and a production profile without targets is refused.
+
+Inline lock environments (`environment: {lock_file: uv.lock | pixi.lock |
+requirements.txt, ...}`, with `backend: pixi` for Pixi) are kept as written;
+`myce run` uploads the lock and its companion (`pyproject.toml`, `pixi.toml`)
+from the project root exactly as the profile reader did. Older shapes the
+profile reader still accepts, such as `priority:` instead of `class:`, scalar
+`environment: NAME`, scalar `platform:` and `memory_gb:`, convert unchanged.
+Machine allowlists, run argv/env, memory class, input/output filenames,
+diagnostics and source selection survive. A field the adapter cannot represent
+(for example `run.docker`, `run.workdir`, sidecars or `execution`) is refused
+with one message naming it, and nothing is printed or written. Check the
+result with `myce spec check --resolve ADAPTER`.
 Standard `.mycelium/profiles/` roots are respected; convert Git profiles from
 their original project root. Other explicit profile paths already resolve from
 the invocation root. Runtime `--input` arguments remain caller-owned.

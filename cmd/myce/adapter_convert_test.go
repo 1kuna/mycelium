@@ -68,10 +68,14 @@ func TestAdapterConvertProfilePreservesFieldsAndApply(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(conversionProfile), &old); err != nil {
 		t.Fatal(err)
 	}
+	if len(p.Targets) != 0 {
+		t.Fatalf("non-production targets kept: %+v", p.Targets)
+	}
+	old.Targets = nil
 	if !reflect.DeepEqual(p.Spec, old.Spec) || !reflect.DeepEqual(p.Source, old.Source) || !reflect.DeepEqual(p.Check, old.Check) || p.MemoryClass != old.MemoryClass {
 		t.Fatalf("profile semantics changed:\nold=%+v\nnew=%+v", old, p)
 	}
-	if !strings.Contains(report.String(), "check -> checks.result") || !strings.Contains(report.String(), "no files written") {
+	if !strings.Contains(report.String(), "check -> checks.result") || !strings.Contains(report.String(), "targets linux/amd64/cpu dropped") || !strings.Contains(report.String(), "no files written") {
 		t.Fatal(report.String())
 	}
 	want := out.String()
@@ -155,7 +159,8 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 	}
 	out.Reset()
 	report.Reset()
-	args = []string{"convert", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-quick.yaml", "--profile", ".mycelium/profiles/gate-quick-darwin.yaml"}
+	// The repo's gates pin darwin and linux entries, so keep their targets.
+	args = []string{"convert", "--keep-targets", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-quick.yaml", "--profile", ".mycelium/profiles/gate-quick-darwin.yaml"}
 	if err := adapterCommand(context.Background(), args, &out, &report); err != nil {
 		t.Fatalf("%v\n%s", err, report.String())
 	}
@@ -168,7 +173,7 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 	}
 	wantBytes := out.String()
 	out.Reset()
-	args = []string{"convert", "--profile", ".mycelium/profiles/gate-quick-darwin.yaml", "--profile", ".mycelium/profiles/gate-quick.yaml", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml"}
+	args = []string{"convert", "--keep-targets", "--profile", ".mycelium/profiles/gate-quick-darwin.yaml", "--profile", ".mycelium/profiles/gate-quick.yaml", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml"}
 	if err := adapterCommand(context.Background(), args, &out, &report); err != nil || out.String() != wantBytes {
 		t.Fatalf("source order changed output: %v", err)
 	}

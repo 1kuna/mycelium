@@ -1,4 +1,3 @@
-default: http-stage
 entries:
     http-stage:
         class: batch
@@ -56,4 +55,3 @@ entries:
                 platform: fake
         version: "1"
 project: adapter-example
-schema: 1

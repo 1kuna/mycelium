@@ -1,0 +1,4 @@
+name: docker-job
+project: example
+source: {git: HEAD}
+run: {command: [sh, run.sh], docker: true}
