@@ -164,6 +164,11 @@ and its referenced blobs intact. The authenticated worker endpoint
 `POST /api/workers/attempt-files` takes `id`, `attempt`, and `machine` and returns
 `reclaim`, a fixed `reason`, and an optional policy deadline `until`; it is a
 read-only exact-attempt check, not an override or a paginated status lookup.
+Each retention pass sends one `POST /api/workers/attempt-files/batch` with
+`machine` and `attempts` (`id`, `attempt` pairs) and gets `dispositions` back in
+the same order; the queue takes its lock for one lookup at a time. Against a
+previous-release queue, which answers that route with a plain 404, the worker
+falls back to one single-attempt request per folder.
 
 Worker logs report `worker scratch retention` with allocated `retained_bytes`,
 `reclaimed_bytes`, and `retained_bytes_by_reason` (for example `local_custody`,
