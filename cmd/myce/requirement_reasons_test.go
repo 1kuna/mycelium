@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,21 +101,41 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 	if err := os.WriteFile(raw, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Eligibility is an observation, and a loaded reader may run between fresh
-	// worker check-ins. Wait for fresh inventory; every other resolve error and
-	// every explanation/privacy assertion still fails immediately.
+	// Exercise stale then fresh inventory with a controlled queue clock, so the
+	// retry classification is checked on every run instead of only under load.
+	q, clock, _, _ := waitQueue(t)
+	machine := myce.Machine{ID: host, HostID: "reasons-host", Session: "reasons-session", GPU: "cpu", CPUIsolation: "select-none",
+		Capabilities:       []string{"native_isolation_landlock", "native_isolation_seatbelt"},
+		HostMemoryMeasured: true, HostAvailableMemoryGB: 16, FreeHostMemoryGB: 16,
+		CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH,
+			LogicalCPUs: 8, SystemMemoryBytes: 16 << 30, MemoryLayout: "separate"}}
+	checkin := myce.Checkin{Machine: machine}
+	if _, err := currentCLICheckin(q, clock, checkin); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(time.Hour)
+	server := httptest.NewServer(myce.API{Queue: q, Token: "reasons-fixture"}.Handler())
+	defer server.Close()
+	staleObserved := false
 	wait(t, ctx, func() bool {
 		var report bytes.Buffer
-		err := specCommand([]string{"check", "--resolve", "--json", "--queue", d.URL, "--token", "reasons-fixture", raw}, &report, &report)
+		err := specCommand([]string{"check", "--resolve", "--json", "--queue", server.URL, "--token", "reasons-fixture", raw}, &report, &report)
 		if strings.Contains(report.String(), "Host pin has no declared") || strings.Contains(report.String(), "private raw-job") {
 			t.Fatal("raw-job explanation ignored or leaked", &report)
 		}
 		if err == nil {
+			if !staleObserved {
+				t.Fatal("raw-job resolve did not exercise stale inventory")
+			}
 			return true
 		}
 		var observation myce.ResolveReport
-		if json.Unmarshal(report.Bytes(), &observation) != nil || len(observation.Targets) != 1 || observation.Targets[0].Machine != host || observation.Targets[0].Freshness != "stale" || observation.Hold == nil || observation.Hold.Kind != "unknown_observation" || observation.Hold.Reason != "worker inventory" || len(observation.Findings) != 0 {
+		if json.Unmarshal(report.Bytes(), &observation) != nil || len(observation.Targets) != 1 || observation.Targets[0].Machine != host || observation.Targets[0].Freshness != "stale" || observation.Hold == nil || observation.Hold.Kind != "unknown_observation" || observation.Hold.Reason != "a required observation is missing or stale" || observation.Hold.Detail != "inventory is missing or stale" || len(observation.Findings) != 0 {
 			t.Fatal("raw-job resolve", err, &report)
+		}
+		staleObserved = true
+		if _, err := currentCLICheckin(q, clock, checkin); err != nil {
+			t.Fatal(err)
 		}
 		return false
 	})
