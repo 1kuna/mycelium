@@ -57,7 +57,7 @@ func printCompactStatus(w io.Writer, s myce.Snapshot, full bool) {
 		fmt.Fprintln(w, s.HealthAlertDelivery.Summary())
 	}
 	if s.QueueRelease.Version != "" {
-		fmt.Fprintf(w, "queue release: %s\n", s.QueueRelease.Version)
+		fmt.Fprintf(w, "queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
 	}
 	if u := s.FleetUpgrade; u != nil && u.State != "complete" {
 		fmt.Fprintf(w, "fleet upgrade %s: release=%s state=%s\n", u.Operation, u.Release, u.State)
