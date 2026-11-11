@@ -2234,9 +2234,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.retainAttemptResources(j, r.Resources)
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
+		// Contact, but not a report: only a check-in rebuilds the reported
+		// half after restart, so it alone clears unreported.
 		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
-		delete(q.unreported, m.ID)
 	}
 	diskFailure := attemptDiskLimitFailure(r)
 	if diskFailure {
@@ -2826,9 +2827,8 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 		return err
 	}
 	if m := q.s.Machines[l.Machine]; m != nil && m.Session == l.Session {
-		q.touchMachine(m.ID)
+		q.touchMachine(m.ID) // Contact only; see the result path.
 		m.LastSeen = q.clock.Now()
-		delete(q.unreported, m.ID)
 		q.republishContact()
 	}
 	return nil
