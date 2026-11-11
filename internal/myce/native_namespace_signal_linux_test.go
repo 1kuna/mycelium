@@ -37,6 +37,16 @@ while :; do read line <&5; done
 	}
 	gate.Close()
 	awaitFile(t, filepath.Join(dir, "main-ready"))
+	g.p.mu.Lock()
+	scope := g.memberSignalCapture(main)
+	payloadPID, payloadBirth := main.PayloadPID, main.PayloadBirth
+	g.p.mu.Unlock()
+	if payloadPID <= 0 || payloadPID == main.PID || payloadBirth == "" || scope.PID != payloadPID || scope.Birth != payloadBirth {
+		t.Fatalf("signal capture selected namespace launcher: scope=%+v payload=%d", scope, payloadPID)
+	}
+	if birth, err := processBirth(payloadPID); err != nil || birth != payloadBirth {
+		t.Fatalf("payload identity not retained: %v", err)
+	}
 	saveGate, err := os.OpenFile(filepath.Join(dir, "save-fifo"), os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)

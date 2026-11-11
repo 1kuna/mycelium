@@ -1,6 +1,8 @@
 package myce
 
-import "context"
+import (
+	"context"
+)
 
 // Worker defaults are factories so package tests can inject a complete synthetic
 // host before any worker goroutine starts. Inventory remains explicitly injected.
@@ -14,8 +16,10 @@ var workerMachineProbe = LocalMachineProbe
 // WorkerProbeDefaults groups host sources used when a worker has no override.
 // Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
-	HostHealth func(context.Context) (HostHealthReading, error)
-	MountRoots func(context.Context) ([]string, error)
+	FaultHost      func() (map[string]string, []string)
+	SignalEvidence func(SignalCapture) *SignalEvidence
+	HostHealth     func(context.Context) (HostHealthReading, error)
+	MountRoots     func(context.Context) ([]string, error)
 	// Nil disables the current worker-tree RSS observation.
 	MemoryRSS    MemorySource
 	Disk         func(string) (DiskReading, error)
@@ -37,6 +41,12 @@ type WorkerProbeDefaults struct {
 // It must not run concurrently with workers or fingerprint readers.
 func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerHostHealthSource = p.HostHealth
+	if p.FaultHost != nil {
+		workerFaultHost = p.FaultHost
+	}
+	if p.SignalEvidence != nil {
+		workerSignalEvidence = p.SignalEvidence
+	}
 	if p.MountRoots != nil {
 		workerMountRoots = p.MountRoots
 	}
