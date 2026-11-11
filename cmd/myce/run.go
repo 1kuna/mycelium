@@ -56,14 +56,10 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	// --wait and --out opt into one exit contract: the command's own code,
-	// 130 for a confirmed interrupt, runInfraExit for everything else.
+	// --wait and --out opt into the run_wait.go exit contract.
 	waitMode := *wait || *outDir != ""
-	if waitMode {
-		defer func() { resultErr = runWaitContract(resultErr) }()
-		if *detach {
-			return errors.New("--detach cannot be combined with --wait or --out")
-		}
+	if waitMode && *detach {
+		return waitError(64, "--detach cannot be combined with --wait or --out")
 	}
 	itemInputs := map[string]string{}
 	for _, value := range inputFlags {
@@ -119,7 +115,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		return errors.New("usage: myce run [flags] -- <command> [args]")
 	}
 	if (*outDir == "") != (len(outputs) == 0) {
-		return errors.New("--out and --output go together: myce run --out DIR --output NAME -- <command>")
+		return waitError(64, "--out and --output go together: myce run --out DIR --output NAME -- <command>")
 	}
 	if *cpu <= 0 {
 		return errors.New("cpu must be positive")

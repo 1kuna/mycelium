@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -149,7 +151,19 @@ type sharedProfileGroup struct {
 	pending       bool
 	cancel        context.CancelFunc
 	retrying      bool
+	// unreachableSince is the first unanswered read in the current outage; any
+	// queue answer, including an overload refusal, clears it.
+	unreachableSince time.Time
 }
+
+// observerUnreachableLimit ends observation of an authority whose queue has
+// not answered at all for this long, as after a dev queue's teardown or a
+// decommissioned queue; without it the detached observer never exits. It is
+// well beyond queue restarts, upgrades and host reboots (minutes). Giving up
+// only ends observation: the receipt records transport_error, a notifier is
+// told observation_failed, the job continues, and rerunning the same command
+// re-arms. Monotonic time excludes the submitter's own sleep.
+const observerUnreachableLimit = time.Hour
 
 func waitSharedProfiles(ctx context.Context, root string) error {
 	if os.Getenv("MYCE_SHARED_OBSERVER") != "1" {
@@ -402,6 +416,20 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// A removed observer root or receipt folder (a finished test's HOME, a
+		// deleted project) can never record an outcome again; holding it would
+		// keep this process alive forever.
+		if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		for entry, w := range watches {
+			if _, err := os.Stat(w.registration.Directory); errors.Is(err, fs.ErrNotExist) {
+				_ = os.Remove(entry)
+				w.lock.Close()
+				delete(watches, entry)
+				_ = diagnostics.record("receipt_removed", w.receipt.JobID, nil, true)
+			}
 		}
 		pass++
 		quiesce := func() {
@@ -656,10 +684,40 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 		return true
 	}
 	started := clock.Now()
+	all := entries
+	// unreachable records an unanswered read and, past observerUnreachableLimit,
+	// ends every watch of this authority. Cancellation and deadlines are not
+	// evidence about the queue.
+	unreachable := func(err error) bool {
+		// A queue reply carries its error code; a bare 5xx is a proxy or load
+		// balancer in front of a queue that is not answering.
+		var api *myce.HTTPError
+		if errors.As(err, &api) && (api.Code != "" || api.Status < 500) {
+			group.unreachableSince = time.Time{}
+			return false
+		}
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		if group.unreachableSince.IsZero() {
+			group.unreachableSince = clock.Now()
+		}
+		if clock.Now().Sub(group.unreachableSince) < observerUnreachableLimit {
+			return false
+		}
+		trace.phase("queue_unreachable", "", err)
+		for _, entry := range all {
+			finish(entry, nil, fmt.Errorf("queue unreachable for %s; observation ended, job continues: %w", observerUnreachableLimit, err))
+		}
+		return true
+	}
 	sample := watches[entries[0]].registration
 	c, e := runClient(sample.Observer.Config, sample.Observer.Joining, sample.Observer.Queue, sample.Token)
 	if e != nil {
 		trace.phase("authority_failed", "", e)
+		if unreachable(e) {
+			return
+		}
 		group.pace.Observe(clock.Now().Sub(started), false)
 		group.next = clock.Now().Add(group.pace.ServiceDelay(e, nil))
 		group.retrying = true
@@ -686,6 +744,9 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 		if finalErr != nil {
 			trace.phase("terminal_read_failed", id, finalErr)
 			if myce.RetryStatusRead(finalErr) {
+				if unreachable(finalErr) {
+					return true, true
+				}
 				group.pace.Observe(clock.Now().Sub(started), false)
 				group.next = clock.Now().Add(group.pace.ServiceDelay(finalErr, nil))
 				group.retrying = true
@@ -696,6 +757,7 @@ func readSharedProfileAuthority(ctx context.Context, entries []string, watches m
 			return true, false
 		}
 		trace.phase("terminal_read_complete", id, nil)
+		group.unreachableSince = time.Time{}
 		delete(group.terminal, id)
 		if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
 			finish(entry, j, nil)
@@ -777,6 +839,8 @@ batchLoop:
 					}
 					if !myce.RetryStatusRead(jobErr) {
 						finish(entry, nil, jobErr)
+					} else if unreachable(jobErr) {
+						return
 					} else {
 						group.pace.Observe(clock.Now().Sub(started), false)
 						group.next = clock.Now().Add(group.pace.ServiceDelay(jobErr, nil))
@@ -792,6 +856,8 @@ batchLoop:
 				for _, entry := range batch {
 					finish(entry, nil, readErr)
 				}
+			} else if unreachable(readErr) {
+				return
 			}
 			group.pace.Observe(clock.Now().Sub(started), false)
 			group.next = clock.Now().Add(group.pace.ServiceDelay(readErr, nil))
@@ -800,6 +866,7 @@ batchLoop:
 		}
 		trace.phase("batch_read_complete", "", nil)
 		group.retrying = false
+		group.unreachableSince = time.Time{}
 		changed := false
 		for _, state := range reply.Jobs {
 			changed = changed || group.after[state.ID] != state.Revision

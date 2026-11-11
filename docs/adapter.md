@@ -262,17 +262,18 @@ relative files the command writes in its working folder. Mycelium attaches a
 small stored `.myce-outputs` manifest listing them, so the outputs return
 through the verified file store.
 
-Exit codes with `--wait` or `--out`:
+Exit codes with `--wait` or `--out` match the Python client's `run_entry`:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The command succeeded and every output was verified into `DIR` |
-| `1`–`255` | The command's own exit code |
+| `0` | The job succeeded and every output was verified into `DIR` |
+| the command's own | The job failed with the command's exit code (`1`–`255`) |
+| `1` | The job failed or was cancelled without a command exit code (lost machine, signal, cancelled elsewhere) |
 | `130` | Interrupted (Ctrl-C or SIGTERM); cancellation confirmed, job will not run |
-| `125` | Mycelium or `myce run` failed, not the command: usage, submission refusal, queue or transport failure, a job lost, killed by a signal or cancelled elsewhere, output download/verification failure, or an unconfirmed cancellation |
+| `64`, `65`, `69`, `74`, `75`, `78` | Submission refused, with the typed codes in [project profiles](#project-profiles); `64` also covers flag misuse |
+| `125` | The job was accepted but `myce run` could not finish the trip: waiting or transport failure, output download/verification failure, an unconfirmed cancellation, or parent exit |
 
-The stderr reason names the cause; a command that itself exits `125` is told
-apart only by that line. On Ctrl-C or SIGTERM the run cancels by project and
+The stderr reason names the cause. On Ctrl-C or SIGTERM the run cancels by project and
 submission key, then repeats the idempotent cancel for up to 10 seconds until
 a running process's release is confirmed and says so (`release confirmed`, or
 `release still pending`). An unconfirmed cancellation exits `125` and prints the
@@ -727,7 +728,14 @@ state alone and attempting a notifier event with `status: observation_failed` an
 `observation_error`, even on interruption.
 Transient queue outages retry inside the observer. Permanent TLS identity or
 certificate verification failures end observation and notify `tls_identity`.
-Observation normally has no time limit. Rerun after observer loss or delivery
+Observation has no time limit while the queue answers, so a long job on a live
+queue keeps its observer. If the queue gives no answer at all (no reply, or a
+bare proxy 5xx) for one hour of the submitter's awake time, the observer ends
+that observation with `transport_error` and notifies `observation_failed`; the
+job continues. An answer of any kind, an overload refusal included, resets the
+hour, which is well beyond queue restarts, upgrades and host reboots. A
+receipt folder or observer registry that is deleted retires its watch at once,
+and the observer exits when nothing is left. Rerun after observer loss or delivery
 failure to recover the same job
 and retry the same event delivery identity. IDs include a per-receipt nonce, so
 recreating a receipt cannot suppress a new event at a deduplicating receiver.

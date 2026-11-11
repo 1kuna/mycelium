@@ -264,8 +264,8 @@ entries:
 		if stdout, stderr, code = entry("--wait", "--out", entryOut, "--", "fail"); code != 9 || !strings.Contains(stdout+stderr, "adapter-failing") {
 			t.Fatalf("entry command exit: code=%d %s %s", code, stdout, stderr)
 		}
-		if output, err := command("--entry", "absent", "--wait").CombinedOutput(); exitOf(err) != runInfraExit || !strings.Contains(string(output), "adapter_invalid") {
-			t.Fatalf("infrastructure exit: %v %s", err, output)
+		if output, err := command("--entry", "absent", "--wait").CombinedOutput(); exitOf(err) != 64 || !strings.Contains(string(output), "adapter_invalid") {
+			t.Fatalf("typed refusal exit: %v %s", err, output)
 		}
 		// SIGTERM cancels the entry's job and waits for confirmed release.
 		running := command("--entry", "work", "--wait", "--", "sleep")
@@ -298,5 +298,5 @@ entries:
 			}
 		}
 	})
-	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release, --wait/--out entry and inline outputs, exit 9 and 125, SIGTERM confirmed cancel; owned dev joined and listener closed")
+	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release, --wait/--out entry and inline outputs, exit 9 and typed refusal 64, SIGTERM confirmed cancel; owned dev joined and listener closed")
 }

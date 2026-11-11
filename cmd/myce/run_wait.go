@@ -17,11 +17,15 @@ import (
 	"mycelium/internal/myce"
 )
 
-// runInfraExit is the --wait/--out exit code for every outcome that is not the
-// command's own result: usage, submission refusal, queue or transport failure,
-// a job lost or cancelled elsewhere, output download/verification failure and
-// an unconfirmed interrupt. 125 follows the container-runner convention
-// (docker/podman run) for "the runner failed, not the command".
+// Exit codes under --wait/--out match the Python client's run_entry (#1341 F):
+// 0 success with outputs verified, the command's own code when it failed with
+// one, otherwise 1 for a failed or cancelled job, and 130 for an interrupt whose
+// cancellation the queue confirmed. Submission refusals keep their typed codes
+// (64, 65, 69, 74, 75, 78) and usage errors exit 64. runInfraExit is reserved
+// for a trip that failed after the queue accepted the job, where the Python
+// client raises instead: waiting/transport failure, output download or
+// verification failure, an unconfirmed cancellation, or parent exit. 125 follows
+// the container-runner convention (docker/podman run) for "the runner failed".
 const runInfraExit = 125
 
 // runCancelBudget bounds interrupt cleanup. It matches the usual grace between
@@ -29,38 +33,13 @@ const runInfraExit = 125
 // printed before a supervisor kills this process.
 const runCancelBudget = 10 * time.Second
 
-// runOwnExit marks the command's own exit code (or a confirmed interrupt) so
-// the --wait contract passes it through instead of reporting runInfraExit.
-type runOwnExit struct{ err *exitError }
-
-func (e *runOwnExit) Error() string { return e.err.Error() }
-func (e *runOwnExit) Unwrap() error { return e.err }
-
-func ownExit(code int, message string) error {
-	return &runOwnExit{&exitError{code, errors.New(message)}}
-}
-
-// runWaitContract maps every non-command failure to runInfraExit.
-func runWaitContract(err error) error {
-	var own *runOwnExit
-	if err == nil || errors.As(err, &own) {
-		return err
-	}
-	return &exitError{runInfraExit, err}
-}
-
 // redactRunError never repeats credentials from transport/remote diagnostic
-// text, preserving the exit code and whether it is the command's own.
+// text, preserving the exit code.
 func redactRunError(err error, token string) error {
 	if err == nil || token == "" {
 		return err
 	}
-	e := &exitError{exitCode(err), errors.New(strings.ReplaceAll(err.Error(), token, "[redacted]"))}
-	var own *runOwnExit
-	if errors.As(err, &own) {
-		return &runOwnExit{e}
-	}
-	return e
+	return &exitError{exitCode(err), errors.New(strings.ReplaceAll(err.Error(), token, "[redacted]"))}
 }
 
 // runOutputManifest carries inline --output names as the job's one stored
@@ -76,7 +55,7 @@ func attachRunOutputs(s *myce.Spec, outputs []string) (string, func(), error) {
 	s.Outputs = map[string]string{}
 	for _, name := range outputs {
 		if !profileRelative(name) || name == runOutputManifest {
-			return "", nil, errors.New("--output must be a clean relative path")
+			return "", nil, waitError(64, "--output must be a clean relative path")
 		}
 		s.Outputs[name] = "results"
 	}
@@ -117,14 +96,14 @@ func runReceiptWait(ctx context.Context, submit func(io.Writer) error, parentPID
 		return submitErr
 	}
 	if ctx.Err() != nil && !parsed {
-		return errors.New("run interrupted before a receipt was written; rerun the same command to recover or cancel it")
+		return waitError(runInfraExit, "run interrupted before a receipt was written; rerun the same command to recover or cancel it")
 	}
 	if ctx.Err() == nil && (!parsed || r.JobID == "") {
-		return errors.New("submission returned no job receipt")
+		return waitError(runInfraExit, "submission returned no job receipt")
 	}
 	c, err := runClient(config, joining, address, token)
 	if err != nil {
-		return err
+		return waitError(runInfraExit, "job "+r.JobID+" accepted, but its queue authority is unavailable: "+err.Error())
 	}
 	if c.HTTP != nil {
 		defer c.HTTP.CloseIdleConnections()
@@ -167,9 +146,16 @@ func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key 
 		return cancelRunJob(c, project, key, contract)
 	}
 	if observerCtx.Err() != nil {
-		return waitError(4, "run observer parent exited; job continues")
+		code := 4
+		if contract {
+			code = runInfraExit
+		}
+		return waitError(code, "run observer parent exited; job continues")
 	}
 	if err != nil {
+		if contract {
+			return waitError(runInfraExit, err.Error())
+		}
 		return err
 	}
 	if j.State == "succeeded" {
@@ -181,17 +167,14 @@ func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key 
 			return nil
 		}
 		if err = fetchAcceptedResult(ctx, c, j.ID, outDir, errOut); err != nil {
-			return err
+			return waitError(runInfraExit, err.Error())
 		}
 		fmt.Fprintf(errOut, "%s outputs verified: %d file(s) in %s\n", j.ID, len(j.OutputRefs), outDir)
 		return nil
 	}
 	message := fmt.Sprintf("job %s %s: %s", j.ID, j.State, myce.JobReason(j))
 	if cause := j.ExecutionCause; j.State == "failed" && cause != nil && cause.Class == "command_exit" && cause.ExitCode != nil && *cause.ExitCode > 0 && *cause.ExitCode <= 255 {
-		return ownExit(*cause.ExitCode, message)
-	}
-	if contract {
-		return waitError(runInfraExit, message)
+		return waitError(*cause.ExitCode, message)
 	}
 	return waitError(1, message)
 }
@@ -221,7 +204,7 @@ func cancelRunJob(c myce.Client, project, key string, contract bool) error {
 		select {
 		case <-cleanup.Done():
 			timer.Stop()
-			return ownExit(130, "run interrupted; cancellation confirmed (job will not run); process release still pending after "+runCancelBudget.String())
+			return waitError(130, "run interrupted; cancellation confirmed (job will not run); process release still pending after "+runCancelBudget.String())
 		case <-timer.C:
 		}
 		if next, e := c.CancelSubmission(cleanup, project, key); e == nil && next.WillNotRun {
@@ -232,5 +215,5 @@ func cancelRunJob(c myce.Client, project, key string, contract bool) error {
 	if ack.Release != nil {
 		release = *ack.Release
 	}
-	return ownExit(130, "run interrupted; cancellation confirmed (release "+release+")")
+	return waitError(130, "run interrupted; cancellation confirmed (release "+release+")")
 }
