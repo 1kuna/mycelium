@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression checks for observed compatibility-supervisor review failures."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import signal
@@ -17,6 +18,18 @@ spec.loader.exec_module(compat)
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_inventory_restart_only_accepts_one_exact_disk_budget_retry(self):
+        fence = dict(session="same-session", attempt_protocol="keyed-attempt-v1", hash="same-inventory")
+        refused = dict(fence, status=400, error=json.dumps(dict(code="request_invalid", error='json: unknown field "disk_budget"')))
+        accepted = dict(fence, status=200)
+        compat.validate_inventory_receipts([refused, accepted], True)
+        for rows, allow in [([refused, accepted], False), ([accepted, refused], True), ([refused, refused], True),
+                            ([dict(refused, error=json.dumps(dict(code="request_invalid", error='unknown field "attempts"')))], True)]:
+            with self.assertRaises(RuntimeError):
+                compat.validate_inventory_receipts(rows, allow)
+        with self.assertRaises(AssertionError):
+            compat.validate_inventory_receipts([refused, dict(accepted, session="different")], True)
+
     def test_sigterm_reaps_detached_command_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

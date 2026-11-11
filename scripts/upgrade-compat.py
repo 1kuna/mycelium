@@ -276,6 +276,10 @@ def run(args):
             ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),
             ("queue rollback preserves decisions and custody", lambda: queue_rollback(candidate, previous, scratch)),
         ]
+        if args.case:
+            cases = [(name, case) for name, case in cases if args.case in name]
+            if not cases:
+                raise ValueError("no compatibility case matches --case")
         for name, case in cases:
             try:
                 case()
@@ -289,11 +293,11 @@ def run(args):
 def inventory_restarts(candidate, previous, scratch, tools):
     root = scratch / "inventory-restarts"
     queue_root = root / "queue"
+    allow_disk_budget_retry = False
 
     def accepted_hash_only(value):
         rows = json.loads(value)
-        if any(row["status"] != 200 for row in rows):
-            raise RuntimeError(f"inventory check-in refused: {rows}")
+        validate_inventory_receipts(rows, allow_disk_budget_retry)
         return len(rows) >= 3 and rows[-1]["hash"] and rows[-1]["inventory_keys"] == 0
 
     with contextlib.ExitStack() as queues:
@@ -341,6 +345,7 @@ def inventory_restarts(candidate, previous, scratch, tools):
             after = inspect_queue(previous[0], queue_root)
             assert before == after, "downgrade changed durable jobs, custody or decisions"
             assert len(after["jobs"]) >= 6286 and after["machines"], "rollback fixture lost IDs"
+            allow_disk_budget_retry = True
             queue = queues.enter_context(process(previous[0], "queue", queue_root, listen=address))
             assert await_file(queue_root / "url", queue) == url
             rows = json.loads(await_file(queue_root / "receipts.json", worker, refreshed))
@@ -349,12 +354,32 @@ def inventory_restarts(candidate, previous, scratch, tools):
     print("upgrade-compat: PASS v3 -> verified v2 downgrade -> exact previous queue reopen; all IDs/state intact; inventory refresh", flush=True)
 
 
+def validate_inventory_receipts(rows, allow_disk_budget_retry=False):
+    refused = [i for i, row in enumerate(rows) if row["status"] != 200]
+    if not refused:
+        return
+    # The worker keeps its r6.9 negotiation across queue replacement. r6.8
+    # strictly rejects the post-r6.8 disk-budget fields, then the worker's
+    # narrow compatibility path retries once without them. All other refusals,
+    # repeated refusals and changes to the attempt/session/inventory fence fail.
+    if allow_disk_budget_retry and refused == [0] and rows[0]["status"] == 400:
+        error = json.loads(rows[0].get("error", "{}"))
+        fields = ("disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes")
+        message = error.get("error", "")
+        if error.get("code") == "request_invalid" and any('unknown field "' + f + '"' in message for f in fields):
+            if len(rows) > 1:
+                for key in ("session", "attempt_protocol", "hash"):
+                    assert rows[1][key] == rows[0][key], "disk-budget retry changed " + key
+            return
+    raise RuntimeError(f"inventory check-in refused: {rows}")
+
+
 def queue_rollback(candidate, previous, scratch):
     root = scratch / "queue-rollback"
     with process(candidate[0], "queue-rollback-seed", root) as child:
         if child.wait(timeout=20):
             raise RuntimeError("rollback seed failed")
-    database = root / "queue.db"
+    database = root / "state/queue.db"
     with sqlite3.connect(database) as db:
         marker, = db.execute("SELECT data FROM queue WHERE id=1").fetchone()
         assert json.loads(marker) == "myce-normalized-state-v3", "rollback seed did not write v3"
@@ -484,6 +509,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["prepare", "run"])
     parser.add_argument("--candidate", help="Git revision for incident reproduction; default actual checkout bytes")
+    parser.add_argument("--case", help="run only cases whose names contain this text")
     args = parser.parse_args()
     install_signal_handlers()
     signal.alarm(600)

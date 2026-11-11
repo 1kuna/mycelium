@@ -1046,9 +1046,9 @@ queue binary against an r6.9 database:
    are retained. It also preserves unknown JSON fields and auxiliary SQLite
    tables. It does not run scheduling or startup maintenance. It compares the
    complete reconstructed state before and after conversion, then commits the
-   records and marker together with SQLite FULL synchronization. A failed or
-   interrupted transaction leaves v3 intact; a completed downgrade is safe to
-   repeat. No post-migration writes are intentionally discarded.
+   records and marker together with SQLite FULL synchronization. An interruption
+   leaves either complete v3 or complete v2 state; retrying the command is safe.
+   No post-migration writes are intentionally discarded.
 3. Start the exact r6.8 queue binary with the preserved config and roots, using
    the existing installation's release-replacement procedure. Verify the
    expected job IDs, pending custody and worker reconnection before resuming
