@@ -74,6 +74,33 @@ classifier to recover a watch. Verify the running queue separately from CLI and
 observer versions. See [transfer/recovery](../../../docs/files.md) and
 [other contracts](release-behavior.md#other-release-dependent-contracts).
 
+## Slow or stalled queue
+
+Under load a control call (resolve, submit, preflight, status, cancel) can take
+longer than 10 s and still be healthy, so the CLI and Python client set no
+fixed request timeout. A call still waiting after one second reads
+`GET /api/ping`, which takes no queue lock. The call keeps waiting while the
+queue's lock releases advance or nobody waits on the lock. It fails with
+`queue_stalled` (Python `QueueStalledError`, a `TimeoutError`) after four of the
+queue's own p99 request periods with no release while callers wait (at least
+4 s), or when ping gives no answer for that long.
+
+- The queue may still finish the request. Read `myce status` (or the job) once,
+  then repeat: resolve, status and other reads are safe, and submission is safe
+  with the same key. Unkeyed writes are not repeated for you.
+- An older queue whose ping lacks `queue_progress` gives no evidence. The call
+  then waits for your own bound: `Client(timeout=SECONDS)`, a per-call
+  `timeout=`, or interrupting the CLI.
+- Resolve, file preflight and identical extension registration also retry
+  429/503 after `Retry-After`.
+- `submission unconfirmed` now names its cause (`queue_stalled`, overload or
+  transport); rerun the same command with the same key.
+- Held batch waits (`myce wait`, `wait_many`) are paced by the wait protocol and
+  not watched. File transfers use their own byte-progress windows.
+
+Needs a client and queue with #1016 (`queue_progress` on ping); see
+[other contracts](release-behavior.md#other-release-dependent-contracts).
+
 ## Observers and detached completion
 
 For detached completion, bind a notifier to your own thread with

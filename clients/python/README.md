@@ -191,7 +191,13 @@ byte service time and gaps, and fail with `TransferStalledError` (code
 continue indefinitely while progressing. Before two wire observations establish a service period, and while
 waiting for queue verification before headers, there is no throughput estimate:
 set `Client(transfer_timeout=SECONDS)` to bound each transfer operation explicitly.
-API calls also have no default deadline; `Client(timeout=SECONDS)` preserves an
+API calls also have no default deadline. A call still waiting after one second
+reads `GET /api/ping` and keeps waiting while the queue's lock makes progress;
+it raises `QueueStalledError` (code `queue_stalled`, a `TimeoutError`) once the
+queue holds its lock with callers waiting, or does not answer, for four of its
+own p99 request periods (at least 4 s). The request may still complete; reads
+and keyed submissions are safe to repeat. Older queues without progress
+evidence leave the call to your bound. `Client(timeout=SECONDS)` preserves an
 explicit socket/request budget. `wait(timeout=SECONDS)` bounds the complete wait
 without cancelling the job, and the job's own deadline also bounds observation.
 Waits negotiate batch revisions when available, fall back on old queues, back off

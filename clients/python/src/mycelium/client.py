@@ -14,6 +14,7 @@ import json
 import os
 import ssl
 import socket
+import threading
 from pathlib import Path
 import time
 from typing import Any, Callable, Iterator, Mapping
@@ -21,7 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from .adaptive import Pace, retry_after
+from .adaptive import RECOVERY_PERIOD, Pace, retry_after
 
 try:
     CLIENT_VERSION = version("mycelium-client")
@@ -49,6 +50,24 @@ class TransferStalledError(TimeoutError):
     def __init__(self, message: str, code: str | None = None):
         super().__init__(f"{code}: {message}" if code else message)
         self.code = code
+
+
+class QueueStalledError(TimeoutError):
+    """The queue stopped making progress while this call waited.
+
+    The queue may still complete the request. Read-only calls and keyed
+    submissions are safe to repeat. code is "queue_stalled".
+    """
+    code = "queue_stalled"
+
+    def __init__(self, method: str, path: str, waited: float, window: float, cause: Exception | None = None):
+        reason = (f"the queue did not answer progress checks ({cause})" if cause is not None
+                  else "the queue held its lock with callers waiting")
+        super().__init__(
+            f"queue_stalled: {method} {path} waited {waited:.3f}s; {reason} for {window:.3f}s "
+            "(four measured request periods); the request may still complete. Check the queue with "
+            "`myce status` or its service log; read-only calls and keyed submissions are safe to repeat")
+        self.method, self.path, self.waited, self.window, self.cause = method, path, waited, window, cause
 
 
 class _UploadPendingError(ConnectionError):
@@ -184,6 +203,8 @@ class Client:
         self._clock = time
         self._jitter = None
         self._urlopen = urlopen
+        # Waits for an in-flight call; tests substitute their clock.
+        self._await = lambda event, seconds: event.wait(seconds)
         # Tests shorten the file transfer budgets; None uses the defaults.
         self._transfer_idle: float | None = None
 
@@ -290,9 +311,82 @@ class Client:
         budget = self.timeout if timeout is None else timeout
         end = None if budget is None else self._clock.monotonic() + budget
         def attempt(remaining: float | None) -> Any:
-            with self._open_request(request, timeout=remaining) as response:
-                return _read_reply(response) if raw else json.load(response)
+            def run() -> Any:
+                with self._open_request(request, timeout=remaining) as response:
+                    return _read_reply(response) if raw else json.load(response)
+            return self._watched(method, path, run)
         return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none", end=end)
+
+    def _watched(self, method: str, path: str, run: Callable[[], Any]) -> Any:
+        """Bound one call by queue progress instead of a fixed timeout.
+
+        A call still waiting after one transport recovery period reads
+        GET /api/ping. It keeps waiting while the queue releases its lock or
+        nobody waits on it, and raises QueueStalledError once releases have not
+        moved, with callers waiting, for four of the queue's own p99 request
+        periods (at least four recovery periods), or ping gave no answer for that
+        long. A queue without progress evidence leaves the call to the caller's
+        timeout. Held batch waits read the wait index and are not watched.
+        """
+        if path.split("?", 1)[0] in {"/api/ping", "/api/wait"}:
+            return run()
+        outcome: dict[str, Any] = {}
+        done = threading.Event()
+
+        def worker() -> None:
+            try:
+                outcome["value"] = run()
+            except BaseException as error:  # Re-raised in the caller's thread.
+                outcome["error"] = error
+            finally:
+                done.set()
+
+        threading.Thread(target=worker, name="mycelium-call", daemon=True).start()
+        if self._watch_progress(method, path, done):
+            done.wait()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["value"]
+
+    def _watch_progress(self, method: str, path: str, done: threading.Event) -> bool:
+        """Return True when the call should simply finish; raise on a stall."""
+        started = progress_at = self._clock.monotonic()
+        window, wait = 4 * RECOVERY_PERIOD, RECOVERY_PERIOD  # fast calls never probe
+        releases, seen, cause = None, False, None
+        request = Request(self.url + "/api/ping", method="GET", headers={
+            "Authorization": "Bearer " + self.token, "User-Agent": USER_AGENT})
+        while not self._await(done, wait):
+            probe_started = self._clock.monotonic()
+            try:
+                with self._open_request(request, timeout=window) as response:
+                    progress = json.load(response).get("queue_progress")
+            except APIError as error:
+                if error.status == 404:
+                    return True  # No evidence from this queue: the caller's timeout applies.
+                progress, cause = None, error
+            except (ValueError, AttributeError):
+                return True
+            except REQUEST_ERRORS as error:
+                progress, cause = None, error
+            else:
+                if not isinstance(progress, dict):
+                    return True
+            now = self._clock.monotonic()
+            if progress is not None:
+                cause = None
+                p99 = float(progress.get("p99_ms") or 0) / 1000
+                window = max(4 * RECOVERY_PERIOD, 4 * (p99 + now - probe_started))
+                if not seen or progress.get("releases") != releases or not progress.get("waiting"):
+                    progress_at = now
+                seen, releases = True, progress.get("releases")
+            quiet = now - progress_at
+            if quiet >= window:
+                if done.is_set():
+                    return True
+                raise QueueStalledError(method, path, now - started, window, cause)
+            # Probe about four times per window, and again just as it would close.
+            wait = max(RECOVERY_PERIOD, min(window / 4, window - quiet))
+        return True
 
     def submit(self, job: Mapping[str, Any] | str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Submit a mapping, YAML text, or a pathlib.Path to a YAML file.

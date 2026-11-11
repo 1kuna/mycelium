@@ -84,6 +84,9 @@ The key makes submission safe to repeat. After a lost reply, `submission
 unconfirmed` or exit 69 `input storage unconfirmed`, rerun the same command with
 the same key and frozen inputs and you get the same job. Changed intent needs a
 new key. A one-off without inputs or outputs can use `myce run --cpu N -- CMD`.
+Don't add your own short timeout. Calls wait while the queue makes progress and
+fail with `queue_stalled` if it stops; then check `myce status` and repeat the
+same command ([slow or stalled queue](references/wait-and-status.md#slow-or-stalled-queue)).
 
 ## 3. One batched wait
 
