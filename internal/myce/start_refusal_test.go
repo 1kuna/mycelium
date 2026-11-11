@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -47,7 +46,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				var logs bytes.Buffer
+				var logs testLogBuffer
 				old := log.Writer()
 				log.SetOutput(&logs)
 				defer log.SetOutput(old)

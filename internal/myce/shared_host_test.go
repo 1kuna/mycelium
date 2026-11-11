@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -373,7 +372,7 @@ func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	old := sharedHostSetBackgroundPriority
 	writer := log.Writer()
-	var warnings bytes.Buffer
+	var warnings testLogBuffer
 	log.SetOutput(&warnings)
 	sharedHostSetBackgroundPriority = func(int) error { return syscall.EPERM }
 	t.Cleanup(func() { sharedHostSetBackgroundPriority = old; log.SetOutput(writer) })

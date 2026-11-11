@@ -63,7 +63,7 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 			s := spec("experiment")
 			tc.prepare(t, q, &s)
 			s.Run.Env = map[string]string{"PRIVATE": "env-secret"}
-			var logs bytes.Buffer
+			var logs testLogBuffer
 			old := log.Writer()
 			log.SetOutput(&logs)
 			defer log.SetOutput(old)

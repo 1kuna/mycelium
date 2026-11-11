@@ -59,7 +59,7 @@ func TestJobGetVolumePaysExpensiveSinkWithoutConcurrentSummaries(t *testing.T) {
 func TestJobGetVolume(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)}
 	v := newJobGetVolume(clock)
-	var output bytes.Buffer
+	var output testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(old)
@@ -126,7 +126,7 @@ func TestJobGetVolumeBoundedConcurrent(t *testing.T) {
 func TestJobGetVolumeHTTPRouting(t *testing.T) {
 	q, clock := fixture(t)
 	handler := (API{Queue: q, Token: "fixture"}).Handler()
-	var output bytes.Buffer
+	var output testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(old)
@@ -153,7 +153,7 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 	// rate exhaustion is replaced by measured pressure and a real in-flight read.
 	rateClock := &fakeClock{now: clock.Now()}
 	handler := (API{Queue: q, Token: "fixture"}).handler("", rateClock)
-	var output bytes.Buffer
+	var output testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(old)
@@ -232,7 +232,7 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 func TestJobGetVolumeRejectedConcurrent(t *testing.T) {
 	clock := &workerFakeClock{now: time.Unix(1, 0)}
 	v := newJobGetVolume(clock)
-	var output bytes.Buffer
+	var output testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(old)

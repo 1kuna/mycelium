@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,7 +39,7 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 	spec.Run.Command = []string{"sh", "-c", "touch " + marker}
 	spec.Run.Env = map[string]string{"PRIVATE_VALUE": "private-secret"}
 	submitted := submit(t, q, spec)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)

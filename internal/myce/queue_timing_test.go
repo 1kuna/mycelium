@@ -7,15 +7,65 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Logging may outlive the control call that triggered admission capture.
+// Readers and resets must share a lock with writes, not just log.Logger's
+// writer lock. Keep the buffer private so snapshots cannot alias live bytes.
+type testLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *testLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *testLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *testLogBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *testLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
+func testLogEvent(t testing.TB, output, event string) string {
+	t.Helper()
+	var found string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(" "+line+" ", " event="+event+" ") {
+			if found != "" {
+				t.Fatalf("duplicate %s event: %s", event, output)
+			}
+			found = line
+		}
+	}
+	if found == "" {
+		t.Fatalf("missing %s event: %s", event, output)
+	}
+	return found
+}
 
 // The writer checks the production logging boundary, not just the log text.
 type launchLogWriter struct {
 	q *Queue
 	t *testing.T
-	bytes.Buffer
+	testLogBuffer
 }
 
 func (w *launchLogWriter) Write(b []byte) (int, error) {
@@ -26,7 +76,7 @@ func (w *launchLogWriter) Write(b []byte) (int, error) {
 			w.q.mu.Unlock()
 		}
 	}
-	return w.Buffer.Write(b)
+	return w.testLogBuffer.Write(b)
 }
 
 func TestQueueMutexHoldTelemetry(t *testing.T) {
@@ -93,6 +143,7 @@ func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {
 	if strings.Count(line, "event=slow_launch_authorization") != 1 || strings.Contains(line, "private") {
 		t.Fatal("missing, duplicated or unsafe slow request log", line)
 	}
+	line = testLogEvent(t, line, "slow_launch_authorization")
 	fields := map[string]float64{}
 	for _, word := range strings.Fields(line) {
 		key, value, ok := strings.Cut(word, "=")

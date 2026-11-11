@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -465,20 +464,15 @@ func TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
-	probe, _ := os.Open(blob)
+	probe, err := os.Open(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clones := cloneSharedFile(probe, filepath.Join(t.TempDir(), "probe"))
 	probe.Close()
-	free := func() int64 {
-		var st syscall.Statfs_t
-		if err := syscall.Statfs(w.modelSnapshots.cache.Root, &st); err != nil {
-			t.Fatal(err)
-		}
-		return int64(st.Bavail) * int64(st.Bsize)
-	}
 	if err := PrepareStateRoots(w.modelSnapshots.cache.Root); err != nil {
 		t.Fatal(err)
 	}
-	before := free()
 	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/large"))
 	if err != nil {
 		t.Fatal(err)
@@ -488,9 +482,12 @@ func TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) {
 			release()
 		}
 	}()
-	if used := before - free(); clones && used >= int64(len(weights)) {
-		t.Fatalf("same-volume snapshot used %d bytes for a %d-byte clone", used, len(weights))
-	} else if !clones {
+	cached := filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")
+	if clones {
+		// Inspect these files' shared extents instead of free space on a
+		// volume used concurrently by unrelated tests and processes.
+		assertSharedFileClone(t, blob, cached)
+	} else {
 		t.Log("volume cannot clone; the snapshot was copied")
 	}
 	// A download job rewriting the hub blob in place must not reach the view.
@@ -502,7 +499,6 @@ func TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	cached := filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")
 	if data, _ := os.ReadFile(cached); string(data) != weights {
 		t.Fatal("source write changed the verified snapshot view")
 	}

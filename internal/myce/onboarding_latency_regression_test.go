@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"log"
 	"os"
@@ -159,7 +158,7 @@ func TestOnboardingSlowCompletingDeleteAndHungDelete(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			c, command := onboardingNAS(t, "darwin")
-			var logs bytes.Buffer
+			var logs testLogBuffer
 			previous := log.Writer()
 			log.SetOutput(&logs)
 			defer log.SetOutput(previous)

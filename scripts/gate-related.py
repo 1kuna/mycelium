@@ -45,6 +45,9 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
 # Platform clone helpers are exercised through model snapshot staging.
 for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
+for platform in ('darwin', 'linux', 'other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/model_snapshots_clone_{platform}_test.go'] = (
+        'model_snapshots_test.go',)
 
 # Local-volume platform probes are exercised through real installer preflight.
 for source in ('model_root_local_darwin', 'model_root_local_linux', 'model_root_local_other'):

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -175,7 +174,7 @@ func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 		if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 			t.Fatal(err)
 		}
-		var logs bytes.Buffer
+		var logs testLogBuffer
 		old := log.Writer()
 		log.SetOutput(&logs)
 		defer log.SetOutput(old)

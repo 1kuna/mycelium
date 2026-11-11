@@ -292,7 +292,7 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 		}
 		before[path] = data
 	}
-	var warnings bytes.Buffer
+	var warnings enrollmentLogBuffer
 	writer := log.Writer()
 	log.SetOutput(&warnings)
 	defer log.SetOutput(writer)

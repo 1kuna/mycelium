@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -755,7 +754,7 @@ func TestFileRetentionRetriesRemovalFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(testFileRetention)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previous)
@@ -854,7 +853,7 @@ func TestFileRetentionDeferredDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Advance(testFileRetention)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previous)

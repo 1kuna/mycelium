@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -45,7 +44,7 @@ func TestRequestTimingObservationRefresh(t *testing.T) {
 
 func TestRequestTimingSlowHandler(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
@@ -90,6 +89,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 		}
 	}
 	var total, wait, hold, after float64
+	line = testLogEvent(t, line, "slow_request")
 	i := strings.Index(line, "duration_ms=")
 	if _, err := fmt.Sscanf(line[i:], "duration_ms=%f mutex_measured=true mutex_wait_ms=%f mutex_hold_ms=%f after_unlock_ms=%f", &total, &wait, &hold, &after); err != nil {
 		t.Fatal(err, line)
@@ -105,7 +105,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 
 func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
@@ -226,7 +226,7 @@ func (w delayedRequestResponse) WriteHeader(status int) {
 
 func TestRequestTimingConnectRedirectPrivacy(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)

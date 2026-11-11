@@ -156,6 +156,11 @@ class RelatedTests(unittest.TestCase):
                     'package p\nfunc hostBackfillLoadFixture() int { return 1 }\n')
                 (root / 'checkin_candidate_cost_test.go').write_text(
                     'package p\nfunc TestCandidateCostPlacementEquivalence(t *testing.T) { helper(t) }\n')
+                for platform in ('darwin', 'linux', 'other'):
+                    (root / f'model_snapshots_clone_{platform}_test.go').write_text(
+                        'package p\nfunc assertSharedFileClone() int { return 1 }\n')
+                (root / 'model_snapshots_test.go').write_text(
+                    'package p\nfunc TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) { helper(t) }\n')
                 git('add', '.')
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
                 for source, method in [('attempt_memory', 'peak'), ('queue', 'complete')]:
@@ -172,6 +177,13 @@ class RelatedTests(unittest.TestCase):
                     'package p\nfunc hostBackfillLoadFixture() int { return 2 }\n')
                 self.assertEqual(related.select('HEAD'), [
                     ('internal/myce', '^(TestCandidateCostPlacementEquivalence)$')])
+                git('restore', 'internal/myce/host_backfill_cost_test.go')
+                for platform in ('darwin', 'linux', 'other'):
+                    helper = root / f'model_snapshots_clone_{platform}_test.go'
+                    helper.write_text('package p\nfunc assertSharedFileClone() int { return 2 }\n')
+                    self.assertEqual(related.select('HEAD'), [
+                        ('internal/myce', '^(TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites)$')])
+                    git('restore', str(helper))
             finally:
                 os.chdir(previous)
 

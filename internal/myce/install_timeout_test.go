@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -23,7 +22,7 @@ func TestInstallSystemdUnavailableTimeout(t *testing.T) {
 		{name: "unsupported-query", err: errors.New("unsupported property")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var warning bytes.Buffer
+			var warning testLogBuffer
 			previous := log.Writer()
 			log.SetOutput(&warning)
 			defer log.SetOutput(previous)

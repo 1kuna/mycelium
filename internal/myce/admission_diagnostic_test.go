@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,7 +87,7 @@ func TestAdmissionDiagnosticRetained(t *testing.T) {
 			if r.ExecutionCause == nil || !r.ExecutionCause.PrelaunchRefused {
 				t.Fatal("receipt lost refusal proof", r)
 			}
-			var logs bytes.Buffer
+			var logs testLogBuffer
 			old := log.Writer()
 			log.SetOutput(&logs)
 			defer log.SetOutput(old)
