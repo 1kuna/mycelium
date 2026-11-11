@@ -189,7 +189,7 @@ func (q *Queue) actionableBlocker(j *Job) (blocker *Blocker) {
 					staleCompatible = true
 					continue
 				}
-				b.Code, b.Dependency, b.Action = "native_qualification", "qualified implementation", "prepare and run the registered extension's native check on compatible hardware; qualification selects exact hardware, ordinary submissions do not; keep the queued job identity"
+				b.Code, b.Dependency, b.Owner, b.Action = "native_qualification", "qualified implementation", "queue", "wait; the queue prepares and runs the registered extension's native check on compatible hardware itself, and fails the job with its action if the check fails or is undeclared; keep the queued job identity"
 				return b
 			}
 		}

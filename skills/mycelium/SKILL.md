@@ -23,6 +23,9 @@ takes one path: **declare needs → submit once → one batched wait → fetch �
   visibility. Restrict hardware only for a real requirement, such as an exact
   device under qualification or an owner-dedicated or prohibited host; see
   [explicit restrictions](references/submit.md#explicit-placement-restrictions).
+- Open a production lease before a multi-stage production pipeline and close it
+  after, so maintenance keeps a host able to start your next stage; see
+  [production leases](references/waiting.md#production-leases).
 - Check `myce version` and the command's `--help`. A field your installed queue
   or worker doesn't return is unknown, not false; see
   [release behavior](references/release-behavior.md).
@@ -152,6 +155,13 @@ On the interactive host, owner pressure checkpoints or stops and requeues your
 job (same job and key, no retry charge); wait as normal. Mark long jobs
 resumable to keep progress.
 
+The queue never parks a job on something waiting can't fix. It reruns its own
+missing steps (an interrupted native check, a memory probe that never launched).
+Otherwise the job fails promptly with `diagnostic_code: dead_end_wait` and a
+reason `dead end: …; action: …`, for example a missing variant, a missing or
+failed native check, memory no host can size, or out of memory on the largest
+host. Do that one action, then submit again.
+
 Class sets urgency: `production` only for work your project's rulings call
 production, `deadline` only with a real owner-set date, `experiment` otherwise.
 Pause only your own queued job with `myce pause JOB_ID --reason TEXT`; `myce
@@ -186,7 +196,7 @@ Load the page for your branch:
   portability, models, environments, NAS inputs, checkpoints, fan-out,
   isolation, uploads, explicit placement restrictions.
 - [Waiting](references/waiting.md): blockers, admission evidence, device and
-  storage holds, urgency, reservations, pausing.
+  storage holds, urgency, reservations, pausing, production leases.
 - [Wait and status](references/wait-and-status.md): batch waits, status sections,
   observers and detached completion, progress and ETA, telemetry, project doctor.
 - [Results](references/results.md): output-contract failures, diagnostics,

@@ -274,6 +274,17 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/cancel", {}))
         self.assertEqual(APIError(404, '{"code":"job_unknown","will_not_run":null}').code, "job_unknown")
 
+    def test_production_lease_requests(self):
+        client = Client(token="test-only")
+        stage = {"needs": {"memory_gb": 8, "platform": {"required": ["cuda"]}}}
+        with patch.object(client, "_call", return_value={"leases": [{"key": "run/1"}]}) as call:
+            client.open_production_lease("render", "run-1", "2h", [stage])
+            self.assertEqual(call.call_args.args, ("POST", "/api/production-leases",
+                             {"project": "render", "key": "run-1", "ttl": "2h", "stages": [stage]}))
+            client.close_production_lease("render", "run 1")
+            self.assertEqual(call.call_args.args, ("DELETE", "/api/production-leases/render/run%201"))
+            self.assertEqual(client.production_leases(), [{"key": "run/1"}])
+
 
 
     def test_log_pages_and_terminal_drain(self):

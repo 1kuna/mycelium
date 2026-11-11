@@ -4,10 +4,11 @@ import "math"
 
 // Automatic input caches use current physical headroom, rather than a fraction
 // frozen at startup. Occupancy is added back once: eviction exchanges used
-// blocks for free blocks without shrinking the allowance. Other writers are
-// already excluded by filesystem free space. The existing disk floor protects
-// control state, logs and filesystem metadata.
-func inputCacheBudget(root string, used, explicit int64, probe func(string) (DiskReading, error)) (limit, free int64, err error) {
+// blocks for free blocks without shrinking the allowance. Other writers' current
+// use is already excluded by filesystem free space; foreignHeadroom keeps room
+// for their measured swings and growth (see foreignDiskUse). The existing disk
+// floor protects control state, logs and filesystem metadata.
+func inputCacheBudget(root string, used, explicit int64, probe func(string) (DiskReading, error), foreignHeadroom uint64) (limit, free int64, err error) {
 	if probe == nil {
 		probe = workerDiskProbe
 	}
@@ -15,7 +16,7 @@ func inputCacheBudget(root string, used, explicit int64, probe func(string) (Dis
 	if err != nil {
 		return 0, 0, err
 	}
-	floor := diskFreeFloor(disk.TotalBytes)
+	floor := addDiskBytes(diskFreeFloor(disk.TotalBytes), foreignHeadroom)
 	if disk.FreeBytes > floor {
 		free = int64(min(uint64(math.MaxInt64), disk.FreeBytes-floor))
 	}

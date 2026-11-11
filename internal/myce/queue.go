@@ -67,6 +67,7 @@ type state struct {
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	FleetSuperseded        []FleetSupersession            `json:"fleet_superseded,omitempty"`
+	ProductionLeases       map[string]ProductionLease     `json:"production_leases,omitempty"`
 
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
@@ -1415,6 +1416,8 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		q.applyEfficiencyDiagnostics(diagnostics)
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
+		q.maintainDeadEndWaits()
+		q.settleMaintenance()
 		return nil
 	}, nil); err != nil {
 		return err
@@ -1484,7 +1487,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {

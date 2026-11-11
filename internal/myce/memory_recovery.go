@@ -1,5 +1,10 @@
 package myce
 
+import (
+	"slices"
+	"strings"
+)
+
 const memoryEvidenceRecovering = "memory_evidence_recovering"
 
 const measuredOOMRecoverySource = "exploratory OOM recovery from measured demand"
@@ -125,4 +130,57 @@ func (q *Queue) recoveryMemoryRoom(j *Job, m *Machine) (float64, string) {
 		room -= j.Spec.Needs.MemoryGB
 	}
 	return max(0, room), why
+}
+
+// memorySizingDeadEnd: every target that could otherwise run this auto-memory
+// job refuses with the queue's own "retrying unchanged cannot fix capacity"
+// judgement. Targets that fail structurally are unrelated; any other failure
+// (capacity, preparation, qualification) can clear, so the job keeps waiting.
+func (q *Queue) memorySizingDeadEnd(j *Job) string {
+	if !memoryMayAuto(j) {
+		return ""
+	}
+	var refusals []string
+	live := false
+	q.evaluateTargetsMemory(j, true, func(fit targetFit, candidate *Job, m *Machine) bool {
+		if fit.excluded {
+			return true
+		}
+		if fit.failures == 0 {
+			live = true
+			return false
+		}
+		memory := false
+		for _, dimension := range fit.failed {
+			switch dimension {
+			case "platform", "target", "device", "excluded_machines", "allow-list", "cores", "hardware capacity", "Docker runtime", "card group":
+				return true // this target can never serve the job
+			case "memory envelope":
+				memory = true
+			case "host memory", "GPU memory":
+			default:
+				live = true
+				return false
+			}
+		}
+		refusal := ""
+		if candidate.MemoryEnvelope != nil {
+			refusal = candidate.MemoryEnvelope.Refusal
+		}
+		if !memory || !strings.Contains(refusal, memoryCapacityRemedies) {
+			live = true
+			return false
+		}
+		refusal = strings.TrimSuffix(strings.TrimSuffix(refusal, memoryCapacityRemedies), "; ")
+		if refusal == "" {
+			refusal = "no measured comparable demand fits"
+		}
+		refusals = append(refusals, m.ID+": "+refusal)
+		return true
+	})
+	if live || len(refusals) == 0 {
+		return ""
+	}
+	slices.Sort(refusals)
+	return "dead end: no host can size this auto-memory job (" + strings.Join(slices.Compact(refusals), "; ") + "); action: resubmit with an explicit memory figure that fits a host, or reduce the workload's memory use"
 }

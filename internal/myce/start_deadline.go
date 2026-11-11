@@ -278,14 +278,29 @@ func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
 }
 
 // An unknown fleet may still join; an explicit operator disable is not incoming room.
+// A drain owned by the running fleet upgrade is temporary: the host returns
+// when its step verifies, so production waits under its ordinary start deadline
+// instead of failing. A stopped operation's retained drain is not temporary.
 func (q *Queue) allStartHostsDisabled(j *Job) bool {
+	hosts := q.startEligibleHosts(j)
+	for _, host := range hosts {
+		if !q.maintenanceBlocked(host) || q.fleetDrainTemporary(host) {
+			return false
+		}
+	}
+	return len(hosts) > 0
+}
+
+// startEligibleHosts lists the physical hosts whose policy and capacity could
+// start j, independent of maintenance mode and temporary availability.
+func (q *Queue) startEligibleHosts(j *Job) []string {
 	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
 		copy := cloneJob(j)
 		copy.Spec.Needs.MemoryGB = model.MemoryGB
 		copy.Spec.Needs.Platform = Platform{Required: model.Platforms}
 		j = &copy
 	}
-	found := false
+	var hosts []string
 	for _, m := range q.plannerMachines() {
 		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
@@ -300,12 +315,11 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 		if !fitsWithoutHostMemory(j, &capacity, memory) {
 			continue
 		}
-		found = true
-		if !q.maintenanceBlocked(hostID(m)) {
-			return false
+		if host := hostID(m); !slices.Contains(hosts, host) {
+			hosts = append(hosts, host)
 		}
 	}
-	return found
+	return hosts
 }
 
 func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementRejection(j) == "" }
