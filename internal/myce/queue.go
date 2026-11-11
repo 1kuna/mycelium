@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -1513,6 +1514,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 	}
 	identities := q.snapshotCheckinMemoryIdentities(ctx)
+	var releaseStops []AttemptDirective
 	err = q.updateRequest(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1610,6 +1612,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			}
 		}
 		q.reconcileHostReleases(c)
+		releaseStops = q.unheldCopyStops(c.Machine.ID, c.Machine.Session, reports)
 		if m.TotalMemoryGB == 0 {
 			m.TotalMemoryGB = m.FreeMemoryGB
 			if old != nil {
@@ -1917,6 +1920,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	}
 	reply = attemptReply(c, reply)
 	if err == nil {
+		reply.Attempts = append(reply.Attempts, releaseStops...)
 		err = q.hydrateReply(&reply, ctx)
 	}
 	return reply, err
@@ -3058,6 +3062,54 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()
 	}
 	return reply
+}
+
+// An attempt that is no longer its job's live execution (the job finished or
+// moved on) gets no other control, so a lost assignment's custody would stay
+// pending forever (#1021). Address a keyed stop to each unconfirmed copy on
+// this exact worker session that the worker did not report. The worker
+// acknowledges only a key it does not hold, and the start gate refuses launches
+// for non-current executions, so no process can exist when that ack arrives.
+// Omission alone never confirms release.
+func (q *Queue) unheldCopyStops(machine, session string, reports []AttemptReport) []AttemptDirective {
+	reported := map[attemptKey]bool{}
+	for _, r := range reports {
+		reported[attemptKey{r.ID, r.Attempt, r.Session}] = true
+	}
+	var out []AttemptDirective
+	add := func(j *Job) {
+		for _, c := range j.Copies {
+			if c.ReleaseConfirmed || c.Machine != machine || c.Session != session || reported[attemptKey{j.ID, c.Attempt, c.Session}] {
+				continue
+			}
+			if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && (j.ReleaseConfirmed || j.State == "running" || j.State == "stopping") {
+				continue // The current execution keeps its ordinary offer/stop protocol.
+			}
+			out = append(out, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: c.Attempt}, Session: c.Session, Stop: true, Kill: true, UserCancel: cancelled(j)})
+		}
+	}
+	// Unconfirmed custody keeps a job mutable, so live and removed-but-mutable
+	// records cover every candidate without scanning retained history.
+	for _, j := range q.liveJobs() {
+		add(j)
+	}
+	if q.records != nil {
+		for id, j := range q.records.removed {
+			if q.s.Jobs[id] == nil {
+				add(j)
+			}
+		}
+	} else {
+		for _, r := range q.s.Submissions {
+			if r.Job != nil && q.s.Jobs[r.JobID] == nil {
+				add(r.Job)
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b AttemptDirective) int {
+		return cmp.Or(strings.Compare(a.ID, b.ID), cmp.Compare(a.Attempt, b.Attempt))
+	})
+	return out
 }
 
 // The bounded legacy adapter retains its original scalar recovery limit.
