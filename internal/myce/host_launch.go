@@ -65,7 +65,43 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 // An already assigned batch retains its authorization/custody across suspicion.
 // New preparation launches still require live arrival evidence.
 func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
-	return m != nil && q.hostHygieneReason(m) == "" && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m)
+	return m != nil && q.hostHygieneReason(m) == "" && q.hostSessionOpen(m, session)
+}
+
+func (q *Queue) hostSessionOpen(m *Machine, session string) bool {
+	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m)
+}
+
+// #1299: placement refuses drained hosts, so a drain present when an assigned
+// production attempt reaches its main gate was raised after its admission. A
+// memory drain alone (pressure or swap growth) then does not refuse main; that
+// would discard prepared work for a signal the attempt already passed. It still
+// refuses when the condition is real: measured available memory is unknown or
+// below the attempt pressure floor (hostPressureEvidence's AvailableFloorGB),
+// or the drain is any other hygiene fault.
+func (q *Queue) assignedLaunchAllowed(m *Machine, session string, j *Job) bool {
+	if !q.hostSessionOpen(m, session) {
+		return false
+	}
+	switch q.hostHygieneReason(m) {
+	case "":
+		return true
+	case "host_memory_pressure", "host_swap_growth":
+		return j != nil && j.Spec.Priority == "production" && assignedHeadroomSufficient(m, j)
+	}
+	return false
+}
+
+func assignedHeadroomSufficient(m *Machine, j *Job) bool {
+	if !m.HostMemoryMeasured || !validMemoryValue(m.HostAvailableMemoryGB) {
+		return false
+	}
+	reserve := 0.0
+	if o := m.MemoryObservation; o != nil && validMemoryValue(o.ReserveGB) {
+		reserve = o.ReserveGB
+	}
+	floor := max(reserve, .125, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)*.25)
+	return m.HostAvailableMemoryGB >= floor
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 	return q.authorizeLaunchContext(context.Background(), l)
@@ -104,7 +140,9 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		// custody, just as an assigned batch does. Suspicion blocks new starts;
 		// the current session, stop and preparation fences still apply below.
 		continuing := p.Started && p.Machine == l.Machine && p.Session == l.Session && p.Kind == l.Kind && p.Key == l.Key
-		if l.Kind == "batch" || continuing {
+		if l.Kind == "batch" {
+			allowed = q.assignedLaunchAllowed(m, l.Session, batch)
+		} else if continuing {
 			allowed = q.hostSessionLaunchAllowed(m, l.Session)
 		}
 		if !allowed {

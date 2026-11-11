@@ -2974,7 +2974,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
 		predicate := "host_launch"
-		if q.hostSessionLaunchAllowed(m, r.Session) {
+		if q.assignedLaunchAllowed(m, r.Session, j) {
 			predicate = q.startPlacementRejection(j)
 		}
 		if predicate != "" {
