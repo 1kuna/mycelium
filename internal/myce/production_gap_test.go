@@ -42,7 +42,7 @@ func TestPreemptedWorkSkipsHostBetweenProductionStages(t *testing.T) {
 				t.Helper()
 				var out string
 				if err := q.update(func() error {
-					out = q.productionAdmissionReason(q.s.Jobs[lj.ID], q.s.Machines[m.ID])
+					out = holdDetail(q.productionAdmissionHold(q.s.Jobs[lj.ID], q.s.Machines[m.ID]))
 					return nil
 				}); err != nil {
 					t.Fatal(err)

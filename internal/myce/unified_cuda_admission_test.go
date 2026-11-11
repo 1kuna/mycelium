@@ -181,6 +181,12 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 	if reason := job(t, q, j.ID).Reason; !strings.Contains(reason, "unified CUDA production headroom") {
 		t.Fatal("missing production headroom reason", reason)
 	}
+	q.mu.Lock()
+	wait := q.waitHold(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	if wait.Kind != "unified_cuda_headroom" {
+		t.Fatalf("production headroom hold kind: %+v", wait)
+	}
 	productionCandidate := *job(t, q, j.ID)
 	productionCandidate.Spec.Priority = "production"
 	small := *job(t, q, j.ID)
@@ -193,26 +199,26 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 		if q.held(m.HostID) {
 			t.Fatal("forecast changed production takeover")
 		}
-		if reason := q.productionAdmissionReason(&productionCandidate, q.s.Machines[m.ID]); reason != "" {
+		if reason := holdDetail(q.productionAdmissionHold(&productionCandidate, q.s.Machines[m.ID])); reason != "" {
 			t.Fatal("co-tenant guard refused production itself", reason)
 		}
 		// A smaller co-tenant fits with the production envelope and physical floor.
 		target := q.s.Machines[m.ID]
-		if reason := q.productionAdmissionReason(&small, target); reason != "" {
+		if reason := holdDetail(q.productionAdmissionHold(&small, target)); reason != "" {
 			t.Fatal("small co-tenant withheld", reason)
 		}
 		// Rechecking an assigned, unstarted offer must not charge it twice.
 		small.State, small.Machine, small.Session = "running", m.ID, m.Session
 		copy := *target
 		copy.FreeHostMemoryGB = hostNeed(target, 24, 8) // Exactly the production envelope remains.
-		if reason := q.productionAdmissionReason(&small, &copy); reason != "" {
+		if reason := holdDetail(q.productionAdmissionHold(&small, &copy)); reason != "" {
 			t.Fatal("unstarted offer charged twice", reason)
 		}
 	}()
 	admissionReason := func() string {
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		return q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID])
+		return holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID]))
 	}
 	// Qualification elsewhere does not authorize bypassing a bound host's
 	// work-scoped production parity policy (#401).
@@ -224,11 +230,11 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 		defer q.mu.Unlock()
 		q.s.Jobs[demand.ID].Spec.AllowedMachines = []string{m.ID, other.ID}
 		q.s.Jobs[demand.ID].ProductionHost = m.HostID
-		if reason := q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID]); reason == "" {
+		if reason := holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID])); reason == "" {
 			t.Fatal("unapproved alternative bypassed production binding")
 		}
 		q.s.Jobs[demand.ID].ProductionHost = ""
-		if reason := q.productionAdmissionReason(q.s.Jobs[j.ID], q.s.Machines[m.ID]); reason != "" {
+		if reason := holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID])); reason != "" {
 			t.Fatal("qualified unbound alternative did not remove sole-host protection", reason)
 		}
 	}()
@@ -278,7 +284,7 @@ func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		target := allocationMachine(q.s.Machines[m.ID], []string{"0"})
-		return q.productionAdmissionReason(experiment, target)
+		return holdDetail(q.productionAdmissionHold(experiment, target))
 	}
 	reason := admissionReason()
 	// The measured bound no longer withholds a universal 25% margin.

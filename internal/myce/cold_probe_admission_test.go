@@ -249,3 +249,26 @@ func TestColdProbeAdmissionRefusalRetainsReserveAtHistoryRollover(t *testing.T) 
 		t.Fatal("history rollover allowed another oversized retry", err)
 	}
 }
+
+// A first run held only by the cold-probe drift margin reports its own hold
+// kind, with the host-memory diagnostic code it always had; a mixed refusal
+// stays ordinary memory.
+func TestColdProbeMarginHold(t *testing.T) {
+	q, _, m, s := coldProbeAdmissionFixture(t, true)
+	queued := submit(t, q, s)
+	q.mu.Lock()
+	target := *q.s.Machines[m.ID]
+	j := *q.s.Jobs[queued.ID]
+	q.mu.Unlock()
+	// Room at or below the ceiling slack plus the drift margin leaves no launch headroom.
+	q.mu.Lock()
+	target.EffectiveHostMemoryBudgetGB = target.MemoryCeilingSlackGB + q.jobProbeDriftMarginGB(&j, &target)
+	_, why, temporary := q.exploratoryMemoryStatus(&j, &target)
+	q.mu.Unlock()
+	if !temporary || memoryRefusalKind(&JobMemoryEnvelope{Refusal: why}, "memory") != "cold_probe_margin" || holdDiagnosticCodes["cold_probe_margin"] != "host_memory_headroom" {
+		t.Fatalf("cold-probe margin refusal %q", why)
+	}
+	if memoryRefusalKind(&JobMemoryEnvelope{Refusal: memoryCapacityRemedies}, "memory") != "memory" {
+		t.Fatal("another envelope refusal took the cold-probe kind")
+	}
+}

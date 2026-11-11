@@ -347,7 +347,7 @@ func resourceKey(j *Job) batchResourceKey {
 }
 
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
-	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
+	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
 	key := resourceKey(j)
@@ -615,11 +615,19 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 // mechanism that produced it. Each branch names its kind where it decides, so
 // status and resolve never infer the mechanism from the reason text.
 func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
+	if c := q.calls[j.ID]; c != nil {
+		return q.callWait(c)
+	}
+	// Every target's checkpoint admission fails while the queue's own root is
+	// unreachable, so that is the wait for runnable work, whatever else holds it.
+	if j.State == "queued" && needsCheckpoint(j) && !q.checkpointsAvailable() && dependencyReady(j) {
+		return newHold("checkpoint_root", "NAS checkpoint root is unreachable")
+	}
 	if reason := q.deviceFaultRetryWaitingReason(j, scans...); reason != "" {
 		return newHold(deviceFaultRetryHold, reason)
 	}
 	if j.State == "queued" && q.launchCapacityPending(j) {
-		return newHold("launch_capacity", "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered")
+		return launchCapacityHold(j)
 	}
 	if why := q.yieldWaitReason(j); why != "" {
 		return newHold("scarce_host_yield", why)
@@ -639,8 +647,8 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.variantParityWait(j); h != nil {
 		return h
 	}
-	if q.fleetPausesJob(j) {
-		return newHold("production_paused", "production starts are paused until the fleet upgrade verifies queue health")
+	if h := q.fleetPauseHold(j); h != nil {
+		return h
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
@@ -685,8 +693,8 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
 		return newHold("waiting_for_builder", reason)
 	}
-	if reason := q.memoryWaitingReason(j, machines); reason != "" {
-		return newHold("host_memory_headroom", reason)
+	if h := q.memoryWait(j, machines); h != nil {
+		return h
 	}
 	if j.Spec.Needs.cpuOnly() {
 		if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {

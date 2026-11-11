@@ -105,6 +105,27 @@ func (q *Queue) launchCapacityBlocked(j *Job, m *Machine) bool {
 	return ok && h.Evidence == q.launchCapacityEvidence(j, m)
 }
 
+// The pending launch-capacity wait. A refusal whose launching attempt carried
+// measured helper charge beyond its reservation is its own kind.
+func launchCapacityHold(j *Job) *Hold {
+	detail := "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered"
+	helper := 0.0
+	for _, w := range j.LaunchCapacityWait {
+		if w.Attempt != j.Attempt || w.Admission == nil {
+			continue
+		}
+		for _, c := range w.Admission.Contributors {
+			if c.Launching {
+				helper = max(helper, c.HelperGB)
+			}
+		}
+	}
+	if helper > 0 {
+		return newHold("helper_charge", detail+fmt.Sprintf("; launch helpers charged %.3f GiB beyond the reservation", helper))
+	}
+	return newHold("launch_capacity", detail)
+}
+
 func (q *Queue) launchCapacityPending(j *Job) bool {
 	if len(j.LaunchCapacityWait) == 0 {
 		return false

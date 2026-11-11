@@ -1062,6 +1062,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		if j.ReleaseConfirmed {
 			continue
 		}
+		helper := 0.0
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
 		charge, pending := memoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
@@ -1089,6 +1090,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 				// forecast/overshoot, after crediting only direct device occupancy.
 				ownDevicePending = max(0, helperDeviceCharge(&j, sample, now)-ownResident)
 				pending += expanded - charge
+				helper = expanded - charge
 				charge = expanded
 				ownCharge, ownPending = charge, pending
 				if fresh {
@@ -1098,7 +1100,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		ram += charge
 		growth += pending
-		c := HostGrowthContributor{ID: j.ID, Attempt: j.Attempt, Kind: "attempt", Launching: slices.Contains(launching, jobKey(j)), ChargeGB: charge, PendingGB: pending, SampleFresh: fresh}
+		c := HostGrowthContributor{ID: j.ID, Attempt: j.Attempt, Kind: "attempt", Launching: slices.Contains(launching, jobKey(j)), ChargeGB: charge, PendingGB: pending, HelperGB: helper, SampleFresh: fresh}
 		if !sample.at.IsZero() && !now.Before(sample.at) {
 			age := now.Sub(sample.at).Seconds()
 			c.SampleAgeSeconds = &age

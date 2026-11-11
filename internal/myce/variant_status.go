@@ -124,19 +124,28 @@ func (q *Queue) variantParityWait(j *Job) *Hold {
 		if !q.jobAllowsMachine(j, m.ID) || qualifiedExtension(j, m) == nil {
 			continue
 		}
-		why := q.variantParityReason(j, m)
-		if why == "" {
+		h := q.variantParityHold(j, m)
+		if h == nil {
 			return nil
 		}
 		if first == nil {
-			kind := "production_parity"
-			if q.parityHostListHolds(j, m) {
-				kind = productionParityHostHold
-			}
-			first = newHold(kind, why)
+			first = h
 		}
 	}
 	return first
+}
+
+// variantParityHold is the per-target parity check: the owner's host list
+// holds, or the variant needs reference-output parity.
+func (q *Queue) variantParityHold(j *Job, m *Machine) *Hold {
+	why := q.variantParityReason(j, m)
+	if why == "" {
+		return nil
+	}
+	if q.parityHostListHolds(j, m) {
+		return newHold(productionParityHostHold, why)
+	}
+	return newHold("production_parity", why)
 }
 
 // Diagnostic rows describe frozen variants against live host/device targets.

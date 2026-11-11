@@ -109,30 +109,32 @@ func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
 	return ""
 }
 
-func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
+// productionAdmissionHold is the per-target production admission check. The
+// unified-CUDA headroom reservation is its own hold kind.
+func (q *Queue) productionAdmissionHold(j *Job, m *Machine) *Hold {
 	// Revalidate offers and unstarted payloads, leaving Started custody alone.
 	if j.Spec.Priority == "production" || j.StartedAt != nil && j.State != "queued" {
-		return ""
+		return nil
 	}
 	if j.Spec.Needs.cpuOnly() && m.Devices != nil {
 		m = cpuMachineView(m)
 	}
 	host := hostID(m)
 	if b := j.ProductionBackoff[host]; q.clock.Now().Before(b.Until) {
-		return fmt.Sprintf("host %s: production preemption back-off; retry in %.0fs", host, b.Until.Sub(q.clock.Now()).Seconds())
+		return newHold("production_admission", fmt.Sprintf("host %s: production preemption back-off; retry in %.0fs", host, b.Until.Sub(q.clock.Now()).Seconds()))
 	}
 	if reason := q.productionGapReason(j, m, host); reason != "" {
-		return reason
+		return newHold("production_admission", reason)
 	}
 	if reason := q.unifiedCUDAProductionReason(j, m); reason != "" {
-		return reason
+		return newHold("unified_cuda_headroom", reason)
 	}
 	setup, known := measuredSetupSeconds(j, m, false)
 	if !known || setup <= 0 {
-		return ""
+		return nil
 	}
 	if q.fleetPausesProduction() {
-		return ""
+		return nil
 	}
 	soonest, id := setup, ""
 	for _, demand := range q.liveJobs() {
@@ -161,9 +163,9 @@ func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
 		}
 	}
 	if id != "" {
-		return fmt.Sprintf("host %s: predictable production demand %s in ~%.0fs; measured setup %.0fs exceeds free window", host, id, soonest, setup)
+		return newHold("production_admission", fmt.Sprintf("host %s: predictable production demand %s in ~%.0fs; measured setup %.0fs exceeds free window", host, id, soonest, setup))
 	}
-	return ""
+	return nil
 }
 
 // Only forecast declared pieces already running under active production. An

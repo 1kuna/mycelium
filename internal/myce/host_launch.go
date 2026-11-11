@@ -216,7 +216,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			}
 		}
 		if !p.Started {
-			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionReason(j, allocationMachine(m, []string{p.Device})) != "" {
+			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionHold(j, allocationMachine(m, []string{p.Device})) != nil {
 				reject("production_admission")
 				return nil
 			}

@@ -315,3 +315,41 @@ func TestActionableBlockerNativeResolveQualification(t *testing.T) {
 		t.Fatalf("%+v", r.Hold)
 	}
 }
+
+// An unreachable checkpoint root is the scheduler's hold, so the hold, its
+// reason and every read agree instead of status overriding the text.
+func TestCheckpointRootHold(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 8, 16)
+	check(t, q, m, nil)
+	s := cpuSpec(1, 1)
+	j := submit(t, q, s)
+	fakeCheckpointAvailability(t, q, false)
+	if check(t, q, m, nil).Job != nil {
+		t.Fatal("checkpoint-dependent job started without its root")
+	}
+	got, err := q.jobSnapshot(j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := q.publicSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aggregate *Job
+	for _, row := range snapshot.Jobs {
+		if row.ID == j.ID {
+			aggregate = row
+		}
+	}
+	if got.Hold == nil || got.Hold.Kind != "checkpoint_root" || got.Reason != "saved progress storage is unavailable" || aggregate == nil || !reflect.DeepEqual(got.Hold, aggregate.Hold) || aggregate.Reason != got.Reason {
+		t.Fatalf("GET=%+v %q aggregate=%+v", got.Hold, got.Reason, aggregate)
+	}
+	fakeCheckpointAvailability(t, q, true)
+	q.mu.Lock()
+	wait := q.waitHold(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	if wait.Kind == "checkpoint_root" {
+		t.Fatalf("restored root kept its hold: %+v", wait)
+	}
+}

@@ -823,6 +823,18 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 	return estimate
 }
 
+// The cold-probe drift margin's refusal; exploratoryMemoryStatus alone writes it.
+const coldProbeMarginRefusal = "exploratory first run needs physical headroom above launch slack"
+
+// The hold kind of a resolved envelope's refusal: the cold-probe drift margin
+// is its own kind, every other refusal is ordinary memory.
+func memoryRefusalKind(e *JobMemoryEnvelope, fallback string) string {
+	if strings.HasPrefix(e.Refusal, coldProbeMarginRefusal) {
+		return "cold_probe_margin"
+	}
+	return fallback
+}
+
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger
 // and release predicates; the normal planner alone can authorize stops.
 func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
@@ -876,15 +888,17 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 	slack := m.MemoryCeilingSlackGB + drift
 	q.observeMemoryAdmissionDrift(j, m, drift)
 	if room <= slack {
-		return 0, fmt.Sprintf("exploratory first run needs physical headroom above launch slack (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
+		return 0, fmt.Sprintf(coldProbeMarginRefusal+" (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
 	}
 	return room - slack, "", false
 }
 
 // Use the same candidates, policy and telemetry as dispatch. This diagnostic
 // grants no resources and does not initiate preparation or release work.
-func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string {
+func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 	var reasons []string
+	// One kind when every blocked target agrees, as targetWait reports.
+	kinds := map[string]bool{}
 	for _, m := range machines {
 		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) {
 			continue
@@ -904,13 +918,14 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			}
 			if candidate.MemoryEnvelope.Refusal != "" {
 				reasons = append(reasons, m.ID+": "+candidate.MemoryEnvelope.Refusal)
+				kinds[memoryRefusalKind(candidate.MemoryEnvelope, "host_memory_headroom")] = true
 				continue
 			}
 			if !fitsResources(candidate, m, max(m.FreeMemoryGB, m.TotalMemoryGB)) {
 				continue
 			}
 			if hostFits(m, n.MemoryGB, n.HostMemoryGB) {
-				return ""
+				return nil
 			}
 			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live available %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Origin())
 			if candidate.MemoryEnvelope.Source == spentMemoryExploration {
@@ -923,13 +938,18 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				why += "; host telemetry unavailable"
 			}
 			reasons = append(reasons, why)
+			kinds["host_memory_headroom"] = true
 		}
 	}
 	slices.Sort(reasons)
 	if len(reasons) == 0 {
-		return ""
+		return nil
 	}
-	return "waiting for RAM envelope: " + strings.Join(reasons, "; ")
+	kind := "host_memory_headroom"
+	if len(kinds) == 1 && kinds["cold_probe_margin"] {
+		kind = "cold_probe_margin"
+	}
+	return newHold(kind, "waiting for RAM envelope: "+strings.Join(reasons, "; "))
 }
 
 func estimatePhysicalSource(source string) bool {

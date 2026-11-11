@@ -9,6 +9,8 @@ import (
 // AdmissionDecision is an observation of a real check-in branch, never a
 // reconstructed diagnostic. Times belong to the injected queue clock. Predicate
 // values are code-owned enums; worker text and job payloads are never copied.
+// Hold is the refusing check's hold row (kind, owner, reason, clears, next)
+// without its detail, which stays with the job's wait.
 type AdmissionOutcome string
 type AdmissionStage string
 type AdmissionPredicate string
@@ -30,6 +32,7 @@ type AdmissionDecision struct {
 	Outcome            AdmissionOutcome   `json:"outcome"`
 	Stage              AdmissionStage     `json:"stage"`
 	Predicate          AdmissionPredicate `json:"predicate"`
+	Hold               *Hold              `json:"hold,omitempty"`
 	OpportunitySeconds float64            `json:"opportunity_seconds"`
 }
 
@@ -106,7 +109,7 @@ func (q *Queue) beginAdmissionCandidate(j *Job, m *Machine) (*AdmissionDecision,
 	t.active, t.activeJob = nil, ""
 	if t.machine == m.ID {
 		if d, ok := t.jobs[j.ID][targetKey(m)]; ok {
-			d.Outcome, d.Stage, d.Predicate = AdmissionNotSelected, AdmissionEligibility, predicateCandidateUnavailable
+			d.Outcome, d.Stage, d.Predicate, d.Hold = AdmissionNotSelected, AdmissionEligibility, predicateCandidateUnavailable, nil
 			t.active, t.activeJob = &d, j.ID
 		}
 	}
@@ -121,7 +124,7 @@ func (q *Queue) endAdmissionCandidate(j *Job, m *Machine, candidate *Job, previo
 	if t.active != nil {
 		d := *t.active
 		if candidate != nil {
-			d.Outcome, d.Predicate = AdmissionNotSelected, predicateSelectionOrder
+			d.Outcome, d.Predicate, d.Hold = AdmissionNotSelected, predicateSelectionOrder, nil
 		} else {
 			d.Outcome = AdmissionRejected
 		}
@@ -136,11 +139,28 @@ func (q *Queue) admissionPass(j *Job, m *Machine, pass bool, reason AdmissionPre
 	if pass {
 		return true
 	}
+	q.admissionRefused(j, m, reason, nil)
+	return false
+}
+
+// admissionHold is admissionPass for a per-target check that names its hold:
+// nil passes, and a refusal records the hold on the decision.
+func (q *Queue) admissionHold(j *Job, m *Machine, h *Hold, reason AdmissionPredicate) bool {
+	if h == nil {
+		return true
+	}
+	q.admissionRefused(j, m, reason, h)
+	return false
+}
+
+func (q *Queue) admissionRefused(j *Job, m *Machine, reason AdmissionPredicate, h *Hold) {
 	t := q.admissionTrace
 	if t != nil && t.active != nil && t.activeJob == j.ID && t.machine == m.ID && t.active.Device == m.Device && t.active.Predicate == predicateCandidateUnavailable {
-		t.active.Predicate = reason
+		t.active.Predicate, t.active.Hold = reason, nil
+		if h != nil {
+			t.active.Hold = &Hold{Kind: h.Kind, Owner: h.Owner, Reason: h.Reason, Clears: h.Clears, Next: h.Next}
+		}
 	}
-	return false
 }
 
 func (q *Queue) admissionGate(j *Job, m *Machine, pass bool, reason AdmissionPredicate) bool {
@@ -151,7 +171,7 @@ func (q *Queue) admissionGate(j *Job, m *Machine, pass bool, reason AdmissionPre
 	if t != nil && t.selecting && t.machine == m.ID {
 		targets := t.jobs[j.ID]
 		if d, ok := targets[targetKey(m)]; ok && d.Outcome == AdmissionNotSelected {
-			d.Outcome, d.Stage, d.Predicate = AdmissionRejected, AdmissionPlacement, reason
+			d.Outcome, d.Stage, d.Predicate, d.Hold = AdmissionRejected, AdmissionPlacement, reason, nil
 			targets[targetKey(m)] = d
 		}
 	}
@@ -164,6 +184,10 @@ func sameAdmissionDecision(a, b *AdmissionDecision) bool {
 	}
 	x, y := *a, *b
 	x.At, y.At = time.Time{}, time.Time{}
+	if (x.Hold == nil) != (y.Hold == nil) || x.Hold != nil && *x.Hold != *y.Hold {
+		return false
+	}
+	x.Hold, y.Hold = nil, nil
 	return x == y
 }
 

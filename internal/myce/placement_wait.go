@@ -62,7 +62,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				block("capability", targetFitReason("environment", candidate, m))
 			}
 			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
-				block("memory", targetFitReason("memory envelope", candidate, m))
+				block(memoryRefusalKind(candidate.MemoryEnvelope, "memory"), targetFitReason("memory envelope", candidate, m))
 			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.
@@ -121,6 +121,11 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 		// Preserve authored placement context when a pinned host's temporary
 		// blocker is more specific than the ordinary allowed-machine wait.
 		reason = "waiting for allowed machines: " + strings.Join(j.Spec.AllowedMachines, ", ") + "; " + reason
+	}
+	// The cold-probe margin is its own kind only when it alone holds the job.
+	if kinds["cold_probe_margin"] && len(kinds) > 1 {
+		delete(kinds, "cold_probe_margin")
+		kinds["memory"] = true
 	}
 	kind := "capacity"
 	if len(kinds) == 1 {
