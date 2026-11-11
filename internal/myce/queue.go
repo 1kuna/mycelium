@@ -128,7 +128,8 @@ type Queue struct {
 
 	readGeneration       *readGeneration
 	publishedReads       atomic.Pointer[publishedReadIndex]
-	readRoot             *readNode // q.mu; immutable committed input generations.
+	readWarm             readWarmer // Decodes new published records off q.mu.
+	readRoot             *readNode  // q.mu; immutable committed input generations.
 	readModels           *ModelConfig
 	readEnvironments     *EnvironmentCatalog
 	readRuntime          *observationState
@@ -454,6 +455,7 @@ func (q *Queue) SetRestartGrace(d time.Duration) {
 	if len(q.unreported) > 0 {
 		q.restartUntil = q.clock.Now().Add(d)
 		q.restartControlUntil = q.controlNow() + d
+		q.republishReads()
 	}
 }
 
@@ -469,6 +471,7 @@ func (q *Queue) SetProductionInfrastructureRetries(n int) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.productionInfrastructureRetries = min(n, 2)
+	q.republishReads()
 	return nil
 }
 
@@ -481,6 +484,7 @@ func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) 
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.lossTimeouts = [3]time.Duration{production, deadline, experiment}
+	q.republishReads()
 	return nil
 }
 func (q *Queue) machineLossTimeout(id string) time.Duration {
@@ -2832,6 +2836,7 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 		q.touchMachine(m.ID)
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
+		q.republishContact()
 	}
 	return nil
 }

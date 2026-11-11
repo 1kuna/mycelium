@@ -171,41 +171,48 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
-The page and `GET /api/status` share a snapshot for a lease learned from local
-capture/hit costs and mutation intervals. Job receipts use the same cost-based
-policy with their own generations. From the release containing #1052's second
-read correction, completed default-status and job-receipt generations are read
-without acquiring the live queue mutex or entering projection admission. Cache
-metadata locks cover only completed-response metadata, never a rebuild. A slow
-inspection or other in-flight projection therefore cannot shed these cheap
-reads behind it. Their response copies still consume the queue's measured
-memory allowance; a cache hit is not an exemption from physical capacity.
-Negotiated default-status reads reuse a published page when its history rows
-fit the peer's page-planning allowance. A default-status miss, expiry or invalidation still
-uses control-pressure admission before projection. Legacy scalar wait admission
-and the independent batch-wait index retain their existing behavior.
-Status snapshots do
-not drive start authorization, cancellation or result publication.
-Terminal job commits and their release acknowledgements invalidate the shared
-snapshot immediately. If one commits while status is projecting or waiting for
-usage/file-store I/O, status recaptures before returning, including uncached
-filtered and full views. Per-job GETs follow the committed-capture contract below.
-Status recapture can repeat observation work during
-completions; discarded response allocations are released before retrying rather
-than accumulating as if every discarded generation were still in flight.
-Cold immutable-decode allowances remain charged through the request because
-their cached records can survive a response retry.
-Ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
-injected queue time at capture, rather than the response completion time.
+Every status view (the page, default, `view=snapshot`, sections, history pages
+and `detail=full`) and every `GET /api/jobs/{id}` is projected from the queue's
+last committed publication. Each successful commit (every check-in, submit and
+the one-second maintenance tick) publishes an immutable snapshot of its records
+and observation context; accepted logs and startup configuration republish it
+too. Readers never acquire the live queue mutex and never wait for a writer, so
+a burst of status or job reads cannot delay submits, check-ins or scheduling.
+Unknown or ambiguous job IDs are answered from the same publication. Because a
+build owns no live queue work, default status and job receipts do not enter
+control-pressure admission. Legacy scalar wait admission and the independent
+batch-wait index retain their existing behavior. Newly published records are
+decoded once in the background, off the queue lock and outside every request,
+so concurrent reads do not each charge the same retained history. A history page
+copies only its returned rows; other retained work contributes its shared
+immutable summary. Response copies still consume the queue's measured memory
+allowance: `detail=full` still returns (and charges) all retained history.
 
-Every status and inspection response includes additive `freshness` metadata:
-`captured_at` equals `now`; `served_at` is the queue time when the response is
-assembled; `age_seconds` is their nonnegative difference; and `cached` says
-whether this request reused a previously completed default-status generation.
-The age includes projection and observation I/O, even for an uncached response.
-The injected read clock is frozen before off-lock projection and observation I/O.
-It excludes JSON encoding and network transfer after assembly. Interpret a
-cached or slow observation at its capture time, including worker freshness.
+The page and `GET /api/status` share a cached response for a lease learned from
+local build/hit costs and mutation intervals. Job receipts use the same
+cost-based policy with their own generations. Cache metadata locks cover only
+completed-response metadata, never a rebuild. Negotiated default-status reads
+reuse a published page when its history rows fit the peer's page-planning
+allowance. Status snapshots do not drive start authorization, cancellation or
+result publication. Terminal job commits and their release acknowledgements
+publish a new terminal fence and invalidate the shared response. If one is
+published while status is projecting or waiting for usage/file-store I/O,
+status projects the newer publication before returning, including uncached
+filtered and full views. Discarded response allocations are released before
+retrying rather than accumulating as if every discarded generation were still
+in flight. Ordinary worker check-ins do not invalidate the cache. Snapshot `now`
+is the injected queue time when the read started, rather than the response
+completion time.
+
+Every status and inspection response, and every job receipt, includes additive
+`freshness` metadata: `captured_at` is when the committed state it projects was
+published; `served_at` is the queue time when the response is assembled;
+`age_seconds` is their nonnegative difference; and `cached` says whether this
+request reused a previously completed status or receipt generation. The age
+therefore covers time since that commit as well as projection and observation
+I/O. With an active fleet it is normally about a second or less; a large age
+means the queue has not committed recently, so interpret contact and progress
+at `captured_at`. It excludes JSON encoding and network transfer after assembly.
 Old CLIs continue to decode the existing fields.
 
 From s072, machine `shared_input_cache` reports `capacity_bytes`, `free_bytes`

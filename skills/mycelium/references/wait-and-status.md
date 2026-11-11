@@ -47,15 +47,17 @@ Retry-After and typed recovery diagnostics without changing identity or trust to
 evade them; permanent authority, TLS, integrity and configuration refusals go to
 their owner.
 
-A per-job GET completes from one published committed observation, cold and
-parent reads included, without waiting on the live control mutex; treat it as a
-point-in-time observation. Mutation acknowledgements and accepted-result checks
-stay the authority for those actions. A cancelled read returns retryable 503
-`status_unavailable`: back off and keep the same job and key. Status builds
-derive worker-contact diagnostics and retained history outside the queue mutex;
-slow-request mutex timing excludes response-cache build time, so older status/job
-mutex figures that include that work need a direct queue-lock measurement for
-attribution.
+Status reads and per-job GETs complete from the queue's last committed
+publication, without waiting on the live control mutex; treat each as a
+point-in-time observation. Their `freshness.captured_at` is when that state was
+committed and `freshness.age_seconds` is its age when served (normally about a
+second with an active fleet). Interpret contact and progress at that time;
+re-read once rather than polling if it matters. Mutation acknowledgements and
+accepted-result checks stay the authority for those actions. A cancelled read
+returns retryable 503 `status_unavailable`: back off and keep the same job and
+key. Slow-request mutex timing excludes response-cache build time, so older
+status/job mutex figures that include that work need a direct queue-lock
+measurement for attribution.
 
 `myce efficiency` gives one read of reservation versus measured use, blocker
 wait totals and wasted attempts; see

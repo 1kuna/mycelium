@@ -158,7 +158,9 @@ func TestStatusReadFreshness(t *testing.T) {
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
 			t.Fatal(w.Code, w.Body.String())
 		}
-		if got.Freshness == nil || got.Freshness.Cached || got.Freshness.AgeSeconds != 2 || !got.Freshness.CapturedAt.Equal(got.Now) || !got.Freshness.ServedAt.Equal(clock.Now()) {
+		// Reads project the last committed publication: its age covers all
+		// time since that commit, including the 2 s spent on this response.
+		if got.Freshness == nil || got.Freshness.Cached || got.Freshness.AgeSeconds < 2.5 || got.Freshness.AgeSeconds != clock.Now().Sub(first.Now).Seconds() || !got.Freshness.CapturedAt.Equal(first.Now) || !got.Freshness.ServedAt.Equal(clock.Now()) {
 			t.Fatalf("%s: delayed capture disguised as current: %+v", path, got.Freshness)
 		}
 	}

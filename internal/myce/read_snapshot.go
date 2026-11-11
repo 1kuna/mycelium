@@ -356,7 +356,10 @@ func (q *Queue) publishReadRuntime() {
 	for id, samples := range q.hostMemorySamples {
 		q.readSamples[id] = maps.Clone(samples)
 	}
-	published := &publishedReadIndex{root: q.readRoot, calls: value.Calls, capture: q.freezeReadCapture()}
+	// The terminal revision is read after invalidateTerminalStatus and stored
+	// with the capture, so a status cache entry built from this publication
+	// can never claim a later terminal fence it does not contain.
+	published := &publishedReadIndex{root: q.readRoot, calls: value.Calls, capture: q.freezeReadCapture(), terminal: q.statusCache.terminalRevision.Load()}
 	// Cache lookups/removal and capture publication share this short fence.
 	// Projection and metadata copying remain outside it; unchanged commits keep
 	// their entries. An in-flight old response may finish but cannot repopulate
@@ -376,28 +379,162 @@ func (q *Queue) publishReadRuntime() {
 	q.jobSnapshotsMu.Unlock()
 	q.readInvalidations = nil
 	q.readDependenciesInvalid = false
+	q.readWarm.start(&q.publishedReads)
+}
+
+// readWarmer decodes newly published immutable records once, in one background
+// goroutine, outside q.mu and outside every request. Without it each
+// concurrent read charged the same shared cold decode to its own request share,
+// and a share smaller than retained history refused every full or paged status
+// (projection_capacity_exceeded) until some read managed to decode it.
+// Decoded records are the queue's resident read cache, like q.s itself; a
+// commit adds only its changed records, so steady-state work is incremental.
+// The serving queue (Run) enables it; library and offline callers decode on
+// demand as before.
+type readWarmer struct {
+	enabled, running, pending atomic.Bool
+	idle                      sync.WaitGroup // tests: wait for a warm pass to finish
+}
+
+func (w *readWarmer) enable(published *atomic.Pointer[publishedReadIndex]) {
+	w.enabled.Store(true)
+	w.start(published)
+}
+
+func (w *readWarmer) start(published *atomic.Pointer[publishedReadIndex]) {
+	if !w.enabled.Load() {
+		return
+	}
+	w.pending.Store(true)
+	if !w.running.CompareAndSwap(false, true) {
+		return
+	}
+	w.idle.Add(1)
+	go func() {
+		defer w.idle.Done()
+		for {
+			w.pending.Store(false)
+			if index := published.Load(); index != nil {
+				readWalk(index.root, false, func(key string, r *readRecord) {
+					if !r.decoded.Load() {
+						_, _ = r.decode(key)
+					}
+				})
+			}
+			w.running.Store(false)
+			if !w.pending.Load() || !w.running.CompareAndSwap(false, true) {
+				return
+			}
+		}
+	}()
+}
+
+// q.mu is held. Startup configuration setters change capture inputs (file
+// store, retention, grace and loss settings) without a commit. Republish the
+// unchanged records with that configuration, so committed reads include it.
+func (q *Queue) republishReads() {
+	if q.readGeneration != nil && !q.simulation && (q.records == nil || !q.records.updating) {
+		q.publishReadRuntime()
+	}
+}
+
+// q.mu is held. An accepted log renews worker contact without a commit.
+// Republish the capture (contact, freshness and ledgers) over the same records,
+// so committed reads see that contact without taking q.mu themselves.
+func (q *Queue) republishContact() {
+	index := q.publishedReads.Load()
+	if index == nil || index.capture == nil || q.simulation {
+		return
+	}
+	next := *index
+	next.capture = q.freezeReadCapture()
+	q.publishedReads.Store(&next)
 }
 
 // Prefix resolution needs only immutable committed identities. A cache hit
 // must not queue behind the writer merely to resolve the same job again.
 type publishedReadIndex struct {
-	root    *readNode
-	calls   map[string]*ModelCall
-	capture *committedReadCapture
+	root     *readNode
+	calls    map[string]*ModelCall
+	capture  *committedReadCapture
+	terminal uint64 // statusCache.terminalRevision at publication
+}
+
+// One response projects one publication. Pinning it in the request context lets
+// nested status projections and the cache agree on the generation they used.
+type pinnedReadKey struct{}
+
+func pinRead(ctx context.Context, index *publishedReadIndex) context.Context {
+	if index == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, pinnedReadKey{}, index)
+}
+
+func (q *Queue) readIndex(ctx context.Context) *publishedReadIndex {
+	if index, ok := ctx.Value(pinnedReadKey{}).(*publishedReadIndex); ok {
+		return index
+	}
+	return q.publishedReads.Load()
+}
+
+// The terminal fence of the publication a status read would use now.
+func (q *Queue) statusRevision(ctx context.Context) uint64 {
+	if index := q.readIndex(ctx); index != nil {
+		return index.terminal
+	}
+	return q.statusCache.terminalRevision.Load()
+}
+
+// committedClock is a detached view's projection clock plus the time its
+// committed inputs were published. Freshness reports the latter's age.
+type committedClock struct{ at, committed time.Time }
+
+func (c committedClock) Now() time.Time { return c.at }
+
+// readCommitted is when the state behind a view was captured. A live capture
+// is current at its own clock.
+func readCommitted(c Clock) time.Time {
+	if v, ok := c.(committedClock); ok {
+		return v.committed
+	}
+	return c.Now()
+}
+
+// detachedClock freezes a view's clock at at, carrying the source's commit time.
+func (q *Queue) detachedClock(at time.Time) Clock {
+	if c, ok := q.clock.(committedClock); ok {
+		return committedClock{at: at, committed: c.committed}
+	}
+	return observationClock{at}
+}
+
+// Offline imports and test fixtures may install records without a commit.
+// Inspect that only when no writer holds or waits for the queue: TryLock never
+// queues, so a committed read never waits behind a writer.
+func (q *Queue) unpublishedRecords() bool {
+	if !q.mu.TryLock() {
+		return false
+	}
+	defer q.mu.Unlock()
+	return q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
 }
 
 // A generation materializes the immutable input maps once, off the writer path.
 // Concurrent readers share that assembly and the unchanged records' decoders.
 // It never shares a mutable diagnostic planner or a projected response.
 type readGeneration struct {
-	root      *readNode
-	once      sync.Once
-	liveOnce  sync.Once
-	liveState state
-	liveErr   error
-	state     state
-	records   *queueRecords
-	err       error
+	root       *readNode
+	once       sync.Once
+	liveOnce   sync.Once
+	liveState  state
+	liveErr    error
+	memoryOnce sync.Once
+	memory     map[string]*externalMemoryRing
+	memoryErr  error
+	state      state
+	records    *queueRecords
+	err        error
 }
 
 func (g *readGeneration) inputs(ctx context.Context) (state, *queueRecords, error) {
@@ -506,8 +643,15 @@ func (g *readGeneration) jobInputs(ctx context.Context, id string) (state, *queu
 			return s, nil, ctx.Err()
 		}
 	}
+	s, err := g.liveInputs(ctx)
+	return s, nil, err
+}
+
+// Live work, catalogs and references, shared by queued receipts and status.
+// Retained history is neither decoded nor charged.
+func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 	if err := g.chargeDecode(ctx, true, ""); err != nil {
-		return state{}, nil, err
+		return state{}, err
 	}
 	g.liveOnce.Do(func() {
 		value, err := readGet(g.root, "state").decode("state")
@@ -566,9 +710,72 @@ func (g *readGeneration) jobInputs(ctx context.Context, id string) (state, *queu
 		resolveReadSubmissionJobs(s)
 	})
 	if g.liveErr != nil {
-		return state{}, nil, g.liveErr
+		return state{}, g.liveErr
 	}
-	return g.liveState, nil, ctx.Err()
+	return g.liveState, ctx.Err()
+}
+
+// The compact status view: live inputs plus per-host external memory rings,
+// which maintenance diagnostics read. Both are bounded by fleet size and
+// current work, not retained history.
+func (g *readGeneration) statusInputs(ctx context.Context) (state, error) {
+	s, err := g.liveInputs(ctx)
+	if err != nil {
+		return state{}, err
+	}
+	if err := g.chargeDecodeGroup(ctx, "external_memory"); err != nil {
+		return state{}, err
+	}
+	g.memoryOnce.Do(func() {
+		g.memory = map[string]*externalMemoryRing{}
+		readWalkPrefix(g.root, "external_memory/", func(key string, record *readRecord) {
+			if g.memoryErr != nil {
+				return
+			}
+			value, err := record.decode(key)
+			if err != nil {
+				g.memoryErr = err
+				return
+			}
+			g.memory[strings.TrimPrefix(key, "external_memory/")] = value.(*externalMemoryRing)
+		})
+	})
+	if g.memoryErr != nil {
+		return state{}, g.memoryErr
+	}
+	s.ExternalMemory = g.memory
+	return s, ctx.Err()
+}
+
+// job decodes one committed job record, charging only that record.
+func (g *readGeneration) job(ctx context.Context, id string) (*Job, error) {
+	record := readGet(g.root, "jobs/"+id)
+	if record == nil {
+		return nil, nil
+	}
+	if err := g.chargeDecode(ctx, false, id); err != nil {
+		return nil, err
+	}
+	value, err := record.decode("jobs/" + id)
+	if err != nil {
+		return nil, err
+	}
+	return value.(*Job), nil
+}
+
+func readWalkPrefix(n *readNode, prefix string, visit func(string, *readRecord)) {
+	if n == nil {
+		return
+	}
+	if n.key >= prefix {
+		readWalkPrefix(n.left, prefix, visit)
+	}
+	if strings.HasPrefix(n.key, prefix) {
+		visit(n.key, n.record)
+	}
+	if n.key < prefix || strings.HasPrefix(n.key, prefix) {
+		readWalkPrefix(n.right, prefix, visit)
+	}
 }
 
 // A commit publishes the complete observation context with its immutable root.
@@ -586,6 +793,8 @@ type committedReadCapture struct {
 	contactInputs *Queue // Immutable scalar inputs; derive contact diagnostics off-lock.
 	ledgers       map[string]observationMachineLedger
 	fresh         map[string]readFreshness
+	retained      int                 // jobs plus calls, for the compact summary
+	delivery      HealthAlertDelivery // counts over retained health events
 }
 
 func (q *Queue) freezeReadCapture() *committedReadCapture {
@@ -602,7 +811,8 @@ func (q *Queue) freezeReadCapture() *committedReadCapture {
 		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
 	}
 	return &committedReadCapture{generation: generation, models: models, environments: environments, runtime: runtime, source: source,
-		contactInputs: q.captureContactInputs(source.clock), ledgers: ledgers, fresh: fresh}
+		contactInputs: q.captureContactInputs(source.clock), ledgers: ledgers, fresh: fresh,
+		retained: len(q.s.Jobs) + len(q.calls), delivery: *q.healthAlertDelivery()}
 }
 
 // Reference walks, cancellation, capacity scans and recursive copying run on
@@ -611,18 +821,10 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 	ctx := requestContext(contexts)
 	started := readWallStart(q.observeRead)
 	var capture *committedReadCapture
-	if id != "" {
-		if published := q.publishedReads.Load(); published != nil {
-			capture = published.capture
-		}
+	if published := q.readIndex(ctx); published != nil {
+		capture = published.capture
 	}
-	// Offline imports may install unpublished records. Inspect that path only
-	// if the writer is immediately available; a committed read never queues.
-	imported := false
-	if capture != nil && q.mu.TryLock() {
-		imported = q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
-		q.mu.Unlock()
-	}
+	imported := capture != nil && q.unpublishedRecords()
 	if capture == nil {
 		unlock, err := requestObservationLock(ctx, &q.mu)
 		if err != nil {
@@ -633,13 +835,9 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 		unlock()
 	}
 	// Capture the read clock before any off-lock projection or observation I/O.
-	// Freshness includes that work; sampling afterward would report a delayed
-	// uncached status as age zero. Published job inputs still use the current
-	// injected read time rather than the older commit's runtime clock.
+	// Published inputs use the current injected read time rather than the older
+	// commit's runtime clock; freshness reports the commit's age separately.
 	readAt := q.clock.Now()
-	if id == "" {
-		readAt = capture.source.clock.Now()
-	}
 	observeRead(q.observeRead, id, started, started)
 	if err := ctx.Err(); err != nil {
 		return nil, fileStoreObservation{}, err
@@ -647,7 +845,7 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 	if imported || capture.generation == nil {
 		return q.captureStatusObservation(id, options, ctx)
 	}
-	source, err := capture.observationQueue(ctx, id, readAt)
+	source, err := capture.readQueue(ctx, id, readAt, q)
 	if err != nil {
 		return nil, fileStoreObservation{}, err
 	}
@@ -656,12 +854,96 @@ func (q *Queue) captureReadObservation(id string, options *statusOptions, contex
 
 // Materialize immutable committed inputs without taking the writer mutex.
 func (capture *committedReadCapture) observationQueue(ctx context.Context, id string, readAt time.Time) (*Queue, error) {
+	return capture.readQueue(ctx, id, readAt, nil)
+}
+
+// Status (id "") derives worker contact from live contact state; see
+// statusContactInputs. A receipt keeps the commit-time contact view.
+func (capture *committedReadCapture) readQueue(ctx context.Context, id string, readAt time.Time, live *Queue) (*Queue, error) {
+	if id != "" {
+		live = nil
+	}
+	return capture.detachedQueue(ctx, readAt, live, func(g *readGeneration) (state, *queueRecords, error) {
+		if id == "" {
+			return g.inputs(ctx)
+		}
+		return g.jobInputs(ctx, id)
+	})
+}
+
+// statusContactInputs overlays live worker contact on the commit's machine and
+// running-work inputs, at the read clock. Pending check-ins are registered under
+// contactMu, never q.mu, so a check-in queued behind a long writer still counts
+// as contact rather than silence (#684); the reader takes only contactMu.
+func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time) *Queue {
+	base := capture.contactInputs
+	v := &Queue{clock: observationClock{at}, simulation: base.simulation, lossTimeouts: base.lossTimeouts,
+		restartUntil: base.restartUntil, restartControlUntil: base.restartControlUntil,
+		s: base.s, calls: base.calls, contacts: make(map[string]*workerContact, len(base.s.Machines))}
+	if base.mu.control != nil {
+		v.mu.control = &controlClock{clock: v.clock.Now, at: at, opportunity: q.controlNow()}
+	}
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	for id := range base.s.Machines {
+		if c := q.contacts[id]; c != nil {
+			copy := *c
+			copy.pending = make(map[*checkinContact]struct{}, len(c.pending))
+			for pending := range c.pending {
+				p := *pending
+				copy.pending[&p] = struct{}{}
+			}
+			v.contacts[id] = &copy
+		}
+	}
+	return v
+}
+
+// statusQueue materializes only what the compact status view reads.
+func (capture *committedReadCapture) statusQueue(ctx context.Context, readAt time.Time, live *Queue) (*Queue, error) {
+	return capture.detachedQueue(ctx, readAt, live, func(g *readGeneration) (state, *queueRecords, error) {
+		s, err := g.statusInputs(ctx)
+		if err != nil {
+			return state{}, nil, err
+		}
+		// Reservation cleanup consults its job even after it became history.
+		// Decode just those records instead of all retained work.
+		var extra map[string]*Job
+		for _, r := range s.Reservations {
+			if r.Job == "" || s.Jobs[r.Job] != nil || extra[r.Job] != nil {
+				continue
+			}
+			j, err := g.job(ctx, r.Job)
+			if err != nil {
+				return state{}, nil, err
+			}
+			if j != nil {
+				if extra == nil {
+					extra = map[string]*Job{}
+				}
+				extra[r.Job] = j
+			}
+		}
+		if extra != nil {
+			s.Jobs = maps.Clone(s.Jobs)
+			maps.Copy(s.Jobs, extra)
+		}
+		return s, nil, nil
+	})
+}
+
+func (capture *committedReadCapture) detachedQueue(ctx context.Context, readAt time.Time, live *Queue, load func(*readGeneration) (state, *queueRecords, error)) (*Queue, error) {
 	base := capture.source
 	// Preserve the original capture clock and service opportunity while deriving
 	// contact. A later read clock may age suspicion, but cannot renew its grace.
 	contact := &Queue{clock: base.clock, restartUntil: base.restartUntil}
-	capture.contactInputs.freezeContactView(contact)
-	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
+	inputs := capture.contactInputs
+	if live != nil {
+		inputs = capture.statusContactInputs(live, readAt)
+		contact.clock = inputs.clock
+	}
+	inputs.freezeContactView(contact)
+	source := &Queue{clock: committedClock{at: readAt, committed: base.clock.Now()}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
 		restartUntil: contact.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: contact.contacts, detachedRead: true}
@@ -671,11 +953,7 @@ func (capture *committedReadCapture) observationQueue(ctx context.Context, id st
 	generation, models, environments, runtime := capture.generation, capture.models, capture.environments, capture.runtime
 	ledgers, fresh := capture.ledgers, capture.fresh
 	var err error
-	if id == "" {
-		source.s, source.records, err = generation.inputs(ctx)
-	} else {
-		source.s, source.records, err = generation.jobInputs(ctx, id)
-	}
+	source.s, source.records, err = load(generation)
 	if err != nil {
 		return nil, err
 	}
@@ -709,11 +987,12 @@ func (capture *committedReadCapture) observationQueue(ctx context.Context, id st
 func (q *Queue) resolveReadJobID(ctx context.Context, id string) (string, error) {
 	if index := q.publishedReads.Load(); index != nil {
 		resolved, err := resolveReadIndex(ctx, index.root, index.calls, id)
-		if err == nil {
-			return resolved, nil
-		}
 		// Offline import/test callers can install unpublished jobs. Preserve
-		// that path; ordinary committed IDs never enter the live mutex.
+		// that path only while the writer is free; an unknown or ambiguous ID
+		// is answered from committed state rather than waiting for a writer.
+		if err == nil || !q.unpublishedRecords() {
+			return resolved, err
+		}
 	}
 	if err := admitObservationProjection(ctx); err != nil {
 		return "", err
@@ -791,10 +1070,7 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 	}
 	var failure error
 	charge := func(key string, r *readRecord) {
-		if r == nil {
-			return
-		}
-		if failure != nil || r.decoded.Load() {
+		if r == nil || failure != nil || r.decoded.Load() {
 			return
 		}
 		group, name, _ := strings.Cut(key, "/")
@@ -807,48 +1083,7 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 		if live && (group == "external_memory" || group == "health_events") {
 			return
 		}
-		var target reflect.Type
-		switch group {
-		case "state":
-			target = reflect.TypeFor[*state]()
-		case "jobs":
-			target = reflect.TypeFor[*Job]()
-		case "submissions":
-			target = reflect.TypeFor[*submissionRecord]()
-		case "extensions":
-			target = reflect.TypeFor[*Extension]()
-		case "work_observations":
-			target = reflect.TypeFor[*WorkObservation]()
-		case "storage_observations":
-			target = reflect.TypeFor[*StorageObservation]()
-		case "external_memory":
-			target = reflect.TypeFor[*externalMemoryRing]()
-		case "health_events":
-			target = reflect.TypeFor[*HealthAlert]()
-		}
-		fitting := allocation.limit - allocation.held
-		data := r.data
-		start, end := 0, 0
-		if group == "jobs" {
-			start, end = readJobLedgerSpan(data, 1)
-		} else if group == "submissions" {
-			start, end = readJobLedgerSpan(data, 2)
-		}
-		// The immutable source bytes are already resident. Only non-ledger
-		// bytes require token scratch/copies; discarded ledger values are
-		// scanned in place by decodeReadJob, without typed allocations.
-		wire := 6 * int64(len(data)-(end-start))
-		if !allocation.chargeRetained(wire) {
-			failure = projectionRefusal(fitting)
-			return
-		}
-		if end > start {
-			data = append(append(make([]byte, 0, len(data)-(end-start)), data[:start]...), data[end:]...)
-		}
-		cost, err := jsonAllocationCost(data, target, max(0, fitting-wire))
-		if err != nil || !allocation.chargeRetained(cost) {
-			failure = projectionRefusal(fitting)
-		}
+		failure = chargeReadRecord(allocation, group, r)
 	}
 	if selected != "" {
 		charge("state", readGet(g.root, "state"))
@@ -860,4 +1095,67 @@ func (g *readGeneration) chargeDecode(ctx context.Context, live bool, selected s
 		return failure
 	}
 	return ctx.Err()
+}
+
+// chargeDecodeGroup charges the cold decode of one record group only.
+func (g *readGeneration) chargeDecodeGroup(ctx context.Context, group string) error {
+	allocation := projectionAllocation(ctx)
+	if allocation == nil {
+		return ctx.Err()
+	}
+	var failure error
+	readWalkPrefix(g.root, group+"/", func(_ string, r *readRecord) {
+		if failure == nil && !r.decoded.Load() {
+			failure = chargeReadRecord(allocation, group, r)
+		}
+	})
+	if failure != nil {
+		return failure
+	}
+	return ctx.Err()
+}
+
+func chargeReadRecord(allocation *requestAllocation, group string, r *readRecord) error {
+	var target reflect.Type
+	switch group {
+	case "state":
+		target = reflect.TypeFor[*state]()
+	case "jobs":
+		target = reflect.TypeFor[*Job]()
+	case "submissions":
+		target = reflect.TypeFor[*submissionRecord]()
+	case "extensions":
+		target = reflect.TypeFor[*Extension]()
+	case "work_observations":
+		target = reflect.TypeFor[*WorkObservation]()
+	case "storage_observations":
+		target = reflect.TypeFor[*StorageObservation]()
+	case "external_memory":
+		target = reflect.TypeFor[*externalMemoryRing]()
+	case "health_events":
+		target = reflect.TypeFor[*HealthAlert]()
+	}
+	fitting := allocation.limit - allocation.held
+	data := r.data
+	start, end := 0, 0
+	if group == "jobs" {
+		start, end = readJobLedgerSpan(data, 1)
+	} else if group == "submissions" {
+		start, end = readJobLedgerSpan(data, 2)
+	}
+	// The immutable source bytes are already resident. Only non-ledger
+	// bytes require token scratch/copies; discarded ledger values are
+	// scanned in place by decodeReadJob, without typed allocations.
+	wire := 6 * int64(len(data)-(end-start))
+	if !allocation.chargeRetained(wire) {
+		return projectionRefusal(fitting)
+	}
+	if end > start {
+		data = append(append(make([]byte, 0, len(data)-(end-start)), data[:start]...), data[end:]...)
+	}
+	cost, err := jsonAllocationCost(data, target, max(0, fitting-wire))
+	if err != nil || !allocation.chargeRetained(cost) {
+		return projectionRefusal(fitting)
+	}
+	return nil
 }
