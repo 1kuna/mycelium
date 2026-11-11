@@ -772,7 +772,11 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	j := submit(t, q, dockerGroupJob(t).Spec)
+	spec := dockerGroupJob(t).Spec
+	// This daemon is in-process; it has no external logs command. Log retention
+	// is covered by the external-CLI lifecycle and restart fixtures.
+	spec.Logs = "none"
+	j := submit(t, q, spec)
 	await(t, func() bool {
 		c.advance(time.Millisecond)
 		_, e := os.Stat(filepath.Join(root, "running"))
