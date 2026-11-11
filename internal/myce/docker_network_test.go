@@ -773,6 +773,11 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	spec := dockerGroupJob(t).Spec
+	// Queue escalation only needs one network owner. Repeated sidecar launches
+	// learn daemon timing from this fast file-backed fake and can enter startup
+	// cleanup under OS contention before this test ever requests cancellation.
+	// Group lifecycle tests cover sidecar/network ownership separately.
+	spec.Run.DockerSidecars = nil
 	// This daemon is in-process; it has no external logs command. Log retention
 	// is covered by the external-CLI lifecycle and restart fixtures.
 	spec.Logs = "none"
