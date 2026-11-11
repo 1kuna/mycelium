@@ -446,6 +446,9 @@ type processRow struct {
 	zombie          bool
 }
 
+// Linux reads ps; Darwin replaces this with one kernel table read.
+var processInventory = psProcessInventory
+
 func psProcessInventory() ([]processRow, error) {
 	out, err := processPS("-ax", "-o", "pid=,ppid=,pgid=,stat=")
 	if err != nil {

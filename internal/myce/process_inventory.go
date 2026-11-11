@@ -1,10 +1,14 @@
+//go:build darwin
+
 package myce
 
 import "golang.org/x/sys/unix"
 
 // One kernel process-table read, without forking ps: periodic custody
 // refreshes stay cheap (a ps tree inventory measured 32ms).
-func processInventory() ([]processRow, error) {
+func init() { processInventory = kernelProcessInventory }
+
+func kernelProcessInventory() ([]processRow, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return psProcessInventory()
