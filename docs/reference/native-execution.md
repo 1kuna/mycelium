@@ -68,6 +68,27 @@ credential filtering remain in effect. Linux fallback does not protect all
 metadata operations, including `chmod`; macOS protects targeted spool and
 credential contents while unrelated host metadata/files remain visible.
 
+### Job environment
+
+Every native command and sidecar, on every host, is told what it was given;
+jobs need not set these themselves:
+
+- `MYCE_CPUS`: the job's CPU allotment, the `needs.cpu_cores` the host ledger
+  charged it (at least 1). The worker always sets it.
+- `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`, `RAYON_NUM_THREADS` and
+  `GOMAXPROCS` default to `MYCE_CPUS` (OpenMP and PyTorch, MKL, OpenBLAS, Apple
+  Accelerate, NumExpr, Rayon, Go). A value the job sets in `run.env`, a sidecar's
+  `env` or its environment activation wins. On a shared interactive host only, a
+  value above the allotment is lowered to it. The worker's own settings never
+  pass through.
+- `TMPDIR`, `TMP` and `TEMP`: the attempt's `{work}/.tmp`, and
+  `MYCE_SCRATCH_DIR`: its `{work}/.scratch`. The worker owns both and they
+  override authored values; retention and cleanup follow the attempt.
+
+Docker jobs get their own `MYCE_*` paths (see [files](../files.md)) and are not
+covered by the thread defaults above.
+
 Payloads are offline by default. Add `needs.network: true` for payload-time
 downloads or API calls. Worker-owned environment/input preparation keeps its
 network access. Placement requires protected outbound capability; submission

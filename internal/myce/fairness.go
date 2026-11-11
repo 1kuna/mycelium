@@ -605,29 +605,39 @@ func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
+	return q.waitHold(j, scans...).Detail
+}
+
+// waitHold is the scheduler's current reason for a queued job, tagged with the
+// mechanism that produced it. Each branch names its kind where it decides, so
+// status and resolve never infer the mechanism from the reason text.
+func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if reason := q.deviceFaultRetryWaitingReason(j, scans...); reason != "" {
-		return reason
+		return newHold(deviceFaultRetryHold, reason)
 	}
 	if j.State == "queued" && q.launchCapacityPending(j) {
-		return "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered"
+		return newHold("launch_capacity", "waiting for launch capacity or exact release; unchanged capacity evidence is not re-offered")
 	}
 	if why := q.yieldWaitReason(j); why != "" {
-		return why
+		return newHold("scarce_host_yield", why)
 	}
 	if plan := q.yieldProjection(j); plan != nil && plan.Reason != "" {
-		return plan.Reason
+		return newHold("scarce_host_yield", plan.Reason)
 	}
-	if reason := q.hostRetryStorageWaitingReason(j); reason != "" {
-		return reason
+	if kind, reason := q.hostRetryStorageWaitingReason(j); reason != "" {
+		return newHold(kind, reason)
 	}
 	if !dependencyReady(j) {
 		if j.Spec.After != nil && j.Spec.After.Piece == "" {
-			return "waiting for upstream fan-out parent success"
+			return newHold("upstream", "waiting for upstream fan-out parent success")
 		}
-		return "waiting for accepted producer piece"
+		return newHold("upstream", "waiting for accepted producer piece")
 	}
 	if reason := q.variantParityWaitingReason(j); reason != "" {
-		return reason
+		if strings.HasPrefix(reason, productionParityHostHold+":") {
+			return newHold(productionParityHostHold, reason)
+		}
+		return newHold("production_parity", reason)
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
@@ -638,14 +648,14 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 			}
 		}
 		if !found {
-			return "no_matching_device: no selected device is online and compatible"
+			return newHold("no_matching_device", "no_matching_device: no selected device is online and compatible")
 		}
 	}
 	if reason := q.logsWaitingReason(j); reason != "" {
-		return reason
+		return newHold("log_policy", reason)
 	}
 	if reason := q.capReason(j); reason != "" {
-		return reason
+		return newHold("project_cap", reason)
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
 		copy := cloneJob(j)
@@ -653,11 +663,11 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 		copy.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 		j = &copy
 	}
-	if r := q.holdWaitReason(j); r != "" {
-		return r
+	if kind, r := q.holdWaitReason(j); r != "" {
+		return newHold(kind, r)
 	}
-	if reason := q.targetWaitingReason(j, scans...); reason != "" {
-		return reason
+	if kind, reason := q.targetWaitingReason(j, scans...); reason != "" {
+		return newHold(kind, reason)
 	}
 	machines := map[string]*Machine{}
 	for _, m := range q.planningMachines(scans...) {
@@ -666,20 +676,20 @@ func (q *Queue) waitReason(j *Job, scans ...*placementScan) string {
 		}
 	}
 	if reason := q.environmentFailureWaitingReason(j, machines); reason != "" {
-		return reason
+		return newHold("deterministically_failed", reason)
 	}
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
-		return reason
+		return newHold("waiting_for_builder", reason)
 	}
 	if reason := q.memoryWaitingReason(j, machines); reason != "" {
-		return reason
+		return newHold("memory", reason)
 	}
 	if j.Spec.Needs.cpuOnly() {
 		if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
-			return reason
+			return newHold("host_backfill", reason)
 		}
 	}
-	return waitingReason(j, machines, q.s.Jobs)
+	return newHold(waitingReason(j, machines, q.s.Jobs))
 }
 
 // Deficit uses only competing runnable projects. An absent project reserves no

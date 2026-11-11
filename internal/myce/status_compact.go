@@ -194,14 +194,15 @@ func (o *statusOptions) includes(section string) bool {
 // Whitelist current lifecycle facts before copying. Retained attempts, ledgers,
 // fan-out member manifests and evidence never enter the default capture.
 func compactStatusJob(j *Job) Job {
-	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
+	started := commandStarted(j)
+	return Job{ID: j.ID, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, CommandStarted: &started,
 		Copies: compactStatusCopies(j.Copies),
 		Spec: Spec{Workload: j.Spec.Workload, QualityTolerance: j.Spec.QualityTolerance, ExtensionCheck: compactStatusCheck(j.Spec.ExtensionCheck), Logs: j.Spec.Logs, AuthoringOrigin: j.Spec.Origin(), AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, Priority: j.Spec.Priority,
 			Deadline: j.Spec.Deadline, StartWindow: j.Spec.StartWindow, Resumable: j.Spec.Resumable, Preemptible: j.Spec.Preemptible, Needs: j.Spec.Needs, StartBy: j.Spec.StartBy,
 			Program: compactStatusProgram(j.Spec.Program), Kind: j.Spec.Kind, WallTime: j.Spec.WallTime},
 		Queued: j.Queued, AssignedAt: j.AssignedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 		WaitingSince: j.WaitingSince, Starts: j.Starts, AdmissionRequeues: j.AdmissionRequeues, Losses: j.Losses, PreemptionCount: j.PreemptionCount,
-		AllocatedDevices: j.AllocatedDevices, Blocker: j.Blocker, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
+		AllocatedDevices: j.AllocatedDevices, Hold: j.Hold, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
 		ReleaseConfirmed: j.ReleaseConfirmed, LastStopOutcome: j.LastStopOutcome, StopAt: j.StopAt,
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
 		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause, ProductionHost: j.ProductionHost,

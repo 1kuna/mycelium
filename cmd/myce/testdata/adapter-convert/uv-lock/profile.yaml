@@ -1,0 +1,9 @@
+name: uv-tests
+project: example
+class: experiment
+source: {git: HEAD}
+run: {command: [python, -c, 'print(1)']}
+needs: {cpu_cores: 1, memory: auto, platform: cpu}
+targets: [{os: linux, arch: amd64, platform: cpu}, {os: darwin, arch: arm64, platform: cpu}]
+environment: {lock_file: uv.lock, python: '3.12'}
+check: [test, -n, ok]

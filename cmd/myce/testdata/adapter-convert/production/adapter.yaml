@@ -1,0 +1,20 @@
+entries:
+    release:
+        checks:
+            result:
+                - test
+                - -s
+                - out.txt
+        class: production
+        outputs:
+            out.txt: results
+        run:
+            command:
+                - sh
+                - -c
+                - echo ok > out.txt
+        targets:
+            - arch: ARCH
+              os: OS
+              platform: cpu
+project: example

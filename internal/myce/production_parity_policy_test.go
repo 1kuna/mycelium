@@ -232,8 +232,8 @@ func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Reason, "held: host not in production parity list") || len(got.VariantEligibility) != 0 || got.Blocker == nil || got.Blocker.Code != productionParityHostHold || got.Blocker.Owner != "queue owner" {
-		t.Fatalf("legacy parity-only hold is not actionable: reason=%q blocker=%+v", got.Reason, got.Blocker)
+	if !strings.Contains(got.Reason, "held: host not in production parity list") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "queue owner" {
+		t.Fatalf("legacy parity-only hold is not actionable: reason=%q blocker=%+v", got.Reason, got.Hold)
 	}
 	policy = q.PriorityPolicy()
 	policy.Policy.Projects["test"].ProductionParityHosts[spec.workType()] = []string{hostID(&m)}

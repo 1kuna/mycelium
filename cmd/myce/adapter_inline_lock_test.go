@@ -37,7 +37,7 @@ check: [test, -s, marker.txt]
 			}
 			conversionWrite(t, "old.yaml", profile)
 			var out bytes.Buffer
-			if err := adapterCommand(context.Background(), []string{"convert", "--profile", "old.yaml"}, &out, io.Discard); err != nil {
+			if err := adapterCommand(context.Background(), []string{"convert", "--profile", "old.yaml", "--keep-targets"}, &out, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			conversionWrite(t, "adapter.yaml", out.String())

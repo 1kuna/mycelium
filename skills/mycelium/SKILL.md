@@ -23,6 +23,9 @@ takes one path: **declare needs → submit once → one batched wait → fetch �
   visibility. Restrict hardware only for a real requirement, such as an exact
   device under qualification or an owner-dedicated or prohibited host; see
   [explicit restrictions](references/submit.md#explicit-placement-restrictions).
+- Don't hand-set thread counts or temp dirs: native jobs get `MYCE_CPUS`, thread
+  defaults (`OMP_NUM_THREADS` etc.), `TMPDIR` and `MYCE_SCRATCH_DIR`; see
+  [job environment](../../docs/reference/native-execution.md#job-environment).
 - Open a production lease before a multi-stage production pipeline and close it
   after, so maintenance keeps a host able to start your next stage; see
   [production leases](references/waiting.md#production-leases).
@@ -125,6 +128,7 @@ SHA-256. Success takes all three: the job `succeeded`, `result` verified the
 files, and your own application check passed (here 23 bytes, newline included).
 A wake, notification, terminal receipt or exit code alone is not success; an
 exit-zero command can still fail its output contract. See [results](references/results.md).
+Before resubmitting, read the job's `command_started` (false: no attempt's command began) and cancel with `myce cancel --wait`, which exits 0 only once the job will not run and its resources are released (75 while release is pending).
 
 ## Python
 
@@ -162,9 +166,10 @@ not replayed.
 
 ## When a job waits
 
-Read `myce status JOB_ID` once. Its blocker names an owner and an action: fix
-what you authored (needs, inputs, recipe), or record that owner and action on
-your work record and keep other work moving. Keep the same job ID and key while
+Read `myce status JOB_ID` once. Its `hold` gives one reason, its owner and one
+`next` action (JSON `hold.kind` is the stable code): fix what you authored
+(needs, inputs, recipe), or record that owner and action on your work record
+and keep other work moving. Keep the same job ID and key while
 capacity, preparation, a device or storage recovers. A hold is resolved by its
 owner; resubmitting, pinning a host, editing mounts, raising shared budgets,
 clearing devices or running locally only hides it.
@@ -183,7 +188,7 @@ Class sets urgency: `production` only for work your project's rulings call
 production, `deadline` only with a real owner-set date, `experiment` otherwise.
 Pause only your own queued job with `myce pause JOB_ID --reason TEXT`; `myce
 resume JOB_ID` keeps its key and queue age. [Waiting](references/waiting.md)
-explains each blocker, admission evidence, reservations and pausing.
+explains each hold kind, admission evidence, reservations and pausing.
 
 Default `myce status` is a compact view of current work, not proof that a job
 finished or was lost; details, history and paging are opt-in through
@@ -215,7 +220,7 @@ Load the page for your branch:
 - [Submit](references/submit.md): one-offs, GPU and memory, variants and
   portability, models, environments, NAS inputs, checkpoints, fan-out,
   isolation, uploads, explicit placement restrictions.
-- [Waiting](references/waiting.md): blockers, admission evidence, device and
+- [Waiting](references/waiting.md): holds, admission evidence, device and
   storage holds, urgency, reservations, pausing, production leases.
 - [Wait and status](references/wait-and-status.md): batch waits, status sections,
   observers and detached completion, progress and ETA, telemetry, project doctor.

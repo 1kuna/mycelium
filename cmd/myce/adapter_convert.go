@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -22,7 +23,7 @@ type adapterConversionSource struct{ kind, path string }
 // recipe, migrates a report, or changes a saved operation's frozen identity.
 func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if len(args) == 0 || args[0] != "convert" {
-		return errors.New("usage: myce adapter convert --profile PATH | --extension DIR [--project NAME] [--target OS/ARCH/PLATFORM] [--default ENTRY] [--out PATH] [--apply]")
+		return errors.New("usage: myce adapter convert --profile PATH | --extension DIR [--project NAME] [--target OS/ARCH/PLATFORM] [--default ENTRY] [--keep-targets] [--out PATH] [--apply]")
 	}
 	f := flag.NewFlagSet("adapter convert", flag.ContinueOnError)
 	f.SetOutput(errOut)
@@ -40,6 +41,7 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 	def := f.String("default", "", "default entry (otherwise first name in sorted order)")
 	path := f.String("out", "", "reviewed new output path; no write without --apply")
 	apply := f.Bool("apply", false, "create --out exclusively; never overwrite")
+	keepTargets := f.Bool("keep-targets", false, "keep non-production profile targets (dropped by default)")
 	var targets []myce.ExecutionTarget
 	f.Func("target", "explicit legacy target OS/ARCH/PLATFORM (repeatable)", func(value string) error {
 		parts := strings.Split(value, "/")
@@ -85,8 +87,9 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 		var name, sourceProject string
 		var entry map[string]any
 		var sourceErrors []error
+		var notes []string
 		if source.kind == "profile" {
-			name, sourceProject, entry, sourceErrors = convertAdapterProfile(root, source.path)
+			name, sourceProject, entry, notes, sourceErrors = convertAdapterProfile(root, source.path, *keepTargets)
 		} else {
 			name, entry, sourceErrors = convertAdapterExtension(root, source.path, targets, usedTargets)
 		}
@@ -108,7 +111,11 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 		}
 		owners[name], entries[name] = source.path, entry
 		if source.kind == "profile" {
-			report = append(report, fmt.Sprintf("profile %s -> entry %s: project -> header; check -> checks.result; remaining fields preserved. Caller: %s --entry %s (same appended argv and --input).", source.path, name, caller, name))
+			extra := ""
+			if len(notes) > 0 {
+				extra = "; " + strings.Join(notes, "; ")
+			}
+			report = append(report, fmt.Sprintf("profile %s -> entry %s: project -> header; check -> checks.result; default-valued fields omitted%s; remaining fields preserved. Caller: %s --entry %s (same appended argv and --input).", source.path, name, extra, caller, name))
 		} else {
 			report = append(report, fmt.Sprintf("extension %s -> entry %s: directory source; default_class -> class; outputs -> filename: results; check -> checks.qualification; complete native recipes preserved. Caller: %s --entry %s with explicit caller inputs. Frozen bundle identity changes: fresh native qualification required; no reports migrated.", source.path, name, caller, name))
 		}
@@ -121,7 +128,7 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 	if *project == "" {
 		problems = append(problems, errors.New("extension sources have no project: supply --project NAME or a profile with the same project"))
 	}
-	if *def == "" && len(entries) > 0 {
+	if *def == "" && len(entries) > 1 {
 		names := make([]string, 0, len(entries))
 		for name := range entries {
 			names = append(names, name)
@@ -139,7 +146,12 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 	if len(problems) > 0 {
 		return conversionFailure(errOut, problems)
 	}
-	data, err := yaml.Marshal(map[string]any{"schema": 1, "project": *project, "default": *def, "entries": entries})
+	// schema defaults to 1 and a single entry is the default.
+	header := map[string]any{"project": *project, "entries": entries}
+	if len(entries) > 1 || *def != "" && len(entries) == 1 {
+		header["default"] = *def
+	}
+	data, err := yaml.Marshal(header)
 	if err != nil {
 		return err
 	}
@@ -149,7 +161,13 @@ func adapterCommand(ctx context.Context, args []string, out, errOut io.Writer) e
 	for _, line := range report {
 		fmt.Fprintln(errOut, line)
 	}
-	fmt.Fprintf(errOut, "Project: %s; default entry: %s. Review source roots, caller inputs and the YAML before apply. Existing profiles/extensions, queued jobs, keys, receipts and checkpoints are unchanged.\n", *project, *def)
+	shown := *def
+	if shown == "" {
+		for name := range entries {
+			shown = name // The only entry.
+		}
+	}
+	fmt.Fprintf(errOut, "Project: %s; default entry: %s. Review source roots, caller inputs and the YAML before apply. Existing profiles/extensions, queued jobs, keys, receipts and checkpoints are unchanged.\n", *project, shown)
 	if _, err = out.Write(data); err != nil {
 		return err
 	}
@@ -212,18 +230,22 @@ func readConversionYAML(path string, value any) (map[string]any, error) {
 	return authored, err
 }
 
-func convertAdapterProfile(root, path string) (string, string, map[string]any, []error) {
+// convertAdapterProfile emits the minimal entry: fields equal to the adapter
+// defaults (name, class experiment, default needs, source git HEAD, no check)
+// are omitted, and non-production targets are dropped unless keepTargets.
+func convertAdapterProfile(root, path string, keepTargets bool) (string, string, map[string]any, []string, []error) {
 	var p executionProfile
 	entry, err := readConversionYAML(path, &p)
 	if err != nil {
-		return "", "", nil, []error{err}
+		return "", "", nil, nil, []error{err}
 	}
 	var problems []error
+	var notes []string
 	if !adapterName.MatchString(p.Name) {
 		problems = append(problems, errors.New("profile name must be a valid entry name; no filename-derived name is guessed"))
 	}
-	if p.Project == "" || p.Class == "" || len(p.Targets) == 0 || len(p.Run.Command) == 0 || p.Run.Command[0] == "" || len(p.Check) == 0 || p.Check[0] == "" {
-		problems = append(problems, errors.New("profile requires project, class, exact targets, run.command and check"))
+	if p.Project == "" || len(p.Run.Command) == 0 || p.Run.Command[0] == "" || len(p.Check) > 0 && p.Check[0] == "" {
+		problems = append(problems, errors.New("profile requires project and run.command (check, class, needs, targets and source are optional)"))
 	}
 	// The old profile reader supports only finite plain commands. Do not turn a
 	// previously invalid profile into a different native/execution contract.
@@ -236,7 +258,7 @@ func convertAdapterProfile(root, path string) (string, string, map[string]any, [
 			modes++
 		}
 	}
-	if modes != 1 || p.Source.Paths != nil && (len(p.Source.Paths) == 0 || p.Source.Git == "") {
+	if modes > 1 || modes == 0 && !reflect.ValueOf(p.Source).IsZero() || p.Source.Paths != nil && (len(p.Source.Paths) == 0 || p.Source.Git == "") {
 		problems = append(problems, errors.New("source requires exactly one of git, directory or snapshot; paths require git"))
 	}
 	// Profiles under .mycelium/profiles resolve from their containing project;
@@ -250,33 +272,62 @@ func convertAdapterProfile(root, path string) (string, string, map[string]any, [
 		if p.Source.Git != "" {
 			problems = append(problems, errors.New("Git profile belongs to a different root; invoke conversion from that project to preserve its source"))
 		}
-		if source, ok := entry["source"].(map[string]any); ok {
-			for _, field := range []string{"directory", "snapshot"} {
-				if value, ok := source[field].(string); ok && !filepath.IsAbs(value) {
-					source[field], _ = filepath.Rel(root, filepath.Join(oldRoot, value))
-				}
+		relocate := func(m map[string]any, field string) {
+			if value, ok := m[field].(string); ok && value != "" && !filepath.IsAbs(value) {
+				m[field], _ = filepath.Rel(root, filepath.Join(oldRoot, value))
 			}
 		}
+		if source, ok := entry["source"].(map[string]any); ok {
+			relocate(source, "directory")
+			relocate(source, "snapshot")
+		}
+		// An inline lock is read from the project root, like inputs.
+		if environment, ok := entry["environment"].(map[string]any); ok {
+			relocate(environment, "lock_file")
+		}
 		if inputs, ok := entry["inputs"].(map[string]any); ok {
-			for name, value := range inputs {
-				if local, ok := value.(string); ok && !filepath.IsAbs(local) {
-					inputs[name], _ = filepath.Rel(root, filepath.Join(oldRoot, local))
-				}
+			for name := range inputs {
+				relocate(inputs, name)
 			}
 		}
 	}
 	delete(entry, "project")
-	entry["checks"] = map[string]any{"result": entry["check"]}
 	delete(entry, "check")
+	delete(entry, "name") // The entry key is the job name.
+	if len(p.Check) > 0 {
+		entry["checks"] = map[string]any{"result": p.Check}
+	}
+	if p.Class == "experiment" && p.Priority == "" {
+		delete(entry, "class")
+	}
+	if _, ok := entry["needs"]; ok && reflect.DeepEqual(p.Needs, defaultEntryNeeds()) {
+		delete(entry, "needs")
+	}
+	if reflect.DeepEqual(p.Source, profileSource{Git: "HEAD"}) {
+		delete(entry, "source")
+	} else if modes == 0 {
+		notes = append(notes, "no source -> git HEAD (adapter default)")
+	}
+	if len(p.Targets) > 0 && !keepTargets && !entryProduction(p.Spec) {
+		delete(entry, "targets")
+		var dropped []string
+		for _, t := range p.Targets {
+			dropped = append(dropped, t.OS+"/"+t.Arch+"/"+t.Platform)
+		}
+		notes = append(notes, "targets "+strings.Join(dropped, ", ")+" dropped: a non-production entry runs wherever its needs fit (--keep-targets pins them)")
+	}
 	if err := validateConvertedEntry(entry); err != nil {
 		problems = append(problems, err)
+	}
+	if entryProduction(p.Spec) && len(p.Targets) == 0 && !myce.WantsCommandDiscovery(p.Spec) {
+		problems = append(problems, errors.New(productionTargetsRequired))
 	}
 	for _, target := range p.Targets {
 		if !adapterName.MatchString(target.OS) || !adapterName.MatchString(target.Arch) || !myce.ValidPlatform(target.Platform) {
 			problems = append(problems, errors.New("profile targets require exact OS/arch/platform; no targets are guessed"))
 		}
 	}
-	return p.Name, p.Project, entry, problems
+	return p.Name, p.Project, entry, notes, problems
 }
 
 func convertAdapterExtension(root, folder string, targets []myce.ExecutionTarget, used map[myce.ExecutionTarget]bool) (string, map[string]any, []error) {

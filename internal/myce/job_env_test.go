@@ -70,12 +70,20 @@ func TestJobEnvironmentAllowlistBatchCommand(t *testing.T) {
 	s.Run.Sidecars = nil
 	s.Run.Command = []string{"sh", "-c", `env > "$NATIVE_TEST_DIR/plain.env"`}
 	s.Run.Env["RUN_ENV"] = "kept"
+	// The job's own thread setting wins, even above its allotment off a shared host.
+	s.Run.Env["OMP_NUM_THREADS"] = "3"
+	s.Needs.CPUCores = 2
+	t.Setenv("MKL_NUM_THREADS", "64") // the worker's own setting is not the job's
 	r := nativeStart(t, s, "fake")
 	if result := nativeFinish(t, r); !result.Success {
 		t.Fatal(result)
 	}
 	env := parseEnvDump(t, filepath.Join(r.dir, "plain.env"))
-	requireJobEnv(t, "batch", env, map[string]string{"RUN_ENV": "kept", "MYCE_JOB_ID": r.j.ID, "MYCE_ATTEMPT": "1", "MYCE_CHECKPOINT_DIR": "*", "MYCE_PROCESS_ID": "*", "MYCE_PLATFORM": "cpu-fake", "MYCE_MACHINE": "native"})
+	requireJobEnv(t, "batch", env, map[string]string{"RUN_ENV": "kept", "MYCE_JOB_ID": r.j.ID, "MYCE_ATTEMPT": "1", "MYCE_CHECKPOINT_DIR": "*", "MYCE_PROCESS_ID": "*", "MYCE_PLATFORM": "cpu-fake", "MYCE_MACHINE": "native",
+		"MYCE_CPUS": "2", "OMP_NUM_THREADS": "3", "MKL_NUM_THREADS": "2", "GOMAXPROCS": "2", "MYCE_SCRATCH_DIR": "*"})
+	if !strings.HasPrefix(env["TMPDIR"], r.dir) && !strings.Contains(env["TMPDIR"], r.j.ID) {
+		t.Errorf("TMPDIR %q is not the attempt's", env["TMPDIR"])
+	}
 }
 
 func TestJobEnvironmentAllowlistNativeGroup(t *testing.T) {
@@ -88,13 +96,40 @@ func TestJobEnvironmentAllowlistNativeGroup(t *testing.T) {
 	s.Run.Env["DISPLAY"] = ":authored"
 	s.Run.Sidecars[0].Command = []string{"sh", "-c", `env > "$NATIVE_TEST_DIR/side.env.partial" && mv "$NATIVE_TEST_DIR/side.env.partial" "$NATIVE_TEST_DIR/side.env"; exec sleep 60`}
 	s.Run.Sidecars[0].Readiness = nil
+	s.Run.Sidecars[0].Env["RAYON_NUM_THREADS"] = "5"
 	r := nativeStart(t, s, "fake")
 	if result := nativeFinish(t, r); !result.Success {
 		t.Fatal(result)
 	}
 	main, side := parseEnvDump(t, filepath.Join(r.dir, "main.env")), parseEnvDump(t, filepath.Join(r.dir, "side.env"))
-	requireJobEnv(t, "main", main, map[string]string{"RUN_ENV": "kept", "DISPLAY": ":authored", "MYCE_JOB_ID": r.j.ID, "MYCE_ATTEMPT": "1", "MYCE_CHECKPOINT_DIR": "*", "MYCE_SIDECAR_HELPER_URL": "*"}, "DISPLAY")
-	requireJobEnv(t, "sidecar", side, map[string]string{"NATIVE_TEST_MODE": "side", "MYCE_JOB_ID": r.j.ID, "MYCE_SIDECAR_PORT": "*"})
+	requireJobEnv(t, "main", main, map[string]string{"RUN_ENV": "kept", "DISPLAY": ":authored", "MYCE_JOB_ID": r.j.ID, "MYCE_ATTEMPT": "1", "MYCE_CHECKPOINT_DIR": "*", "MYCE_SIDECAR_HELPER_URL": "*", "MYCE_CPUS": "1", "RAYON_NUM_THREADS": "1"}, "DISPLAY")
+	requireJobEnv(t, "sidecar", side, map[string]string{"NATIVE_TEST_MODE": "side", "MYCE_JOB_ID": r.j.ID, "MYCE_SIDECAR_PORT": "*", "MYCE_CPUS": "1", "OMP_NUM_THREADS": "1", "RAYON_NUM_THREADS": "5"})
+}
+
+// Ordinary hosts (Linux and Darwin share this path) keep any job value; a
+// shared interactive host lowers only values above the allotment.
+func TestJobCPUEnvironmentHostPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile *SharedHostProfile
+		want    map[string]string
+	}{
+		{"ordinary", nil, map[string]string{"MYCE_CPUS": "4", "OMP_NUM_THREADS": "64", "GOMAXPROCS": "2", "MKL_NUM_THREADS": "4", "VECLIB_MAXIMUM_THREADS": "4", "RAYON_NUM_THREADS": "4"}},
+		{"shared", &SharedHostProfile{InteractiveReserveGB: 1}, map[string]string{"MYCE_CPUS": "4", "OMP_NUM_THREADS": "4", "GOMAXPROCS": "2", "MKL_NUM_THREADS": "4", "VECLIB_MAXIMUM_THREADS": "4", "RAYON_NUM_THREADS": "4"}},
+	} {
+		env := map[string]string{"OMP_NUM_THREADS": "64", "GOMAXPROCS": "2", "MYCE_CPUS": "99"}
+		jobCPUEnvironment(env, tc.profile, 4)
+		for _, k := range jobThreadVariables {
+			if _, ok := tc.want[k]; !ok && env[k] != "4" {
+				t.Errorf("%s %s=%q, want 4", tc.name, k, env[k])
+			}
+		}
+		for k, v := range tc.want {
+			if env[k] != v {
+				t.Errorf("%s %s=%q, want %q", tc.name, k, env[k], v)
+			}
+		}
+	}
 }
 
 func TestJobEnvironmentAllowlistExtensionCommand(t *testing.T) {

@@ -1,0 +1,11 @@
+entries:
+    pixi-tests:
+        environment:
+            backend: pixi
+            lock_file: pixi.lock
+        run:
+            command:
+                - pixi
+                - run
+                - test
+project: example

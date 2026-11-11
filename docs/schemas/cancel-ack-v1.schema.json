@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Mycelium cancellation acknowledgement v1",
-  "description": "Successful cancellation reply. Excludes new attempts and assignments after acknowledgement; an already assigned attempt may still begin before the next worker check. Consumers needing execution exclusion wait for confirmed release. Expired coverage is not consumer completion.",
+  "description": "Successful cancellation reply. Excludes new attempts and assignments after acknowledgement; an already assigned attempt may still begin before the next worker check. Consumers needing execution exclusion wait for confirmed release. Expired coverage is not consumer completion. Confirmed cancel, the resubmission answer, is will_not_run with release confirmed or not_applicable: myce cancel exits 0 only then, exits 75 while release is pending or null, and --wait observes this acknowledgement until confirmed.",
   "type": "object",
   "properties": {
     "job_id": {

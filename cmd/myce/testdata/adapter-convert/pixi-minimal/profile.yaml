@@ -1,0 +1,4 @@
+name: pixi-tests
+project: example
+run: {command: [pixi, run, test]}
+environment: {backend: pixi, lock_file: pixi.lock}

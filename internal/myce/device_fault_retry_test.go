@@ -23,8 +23,8 @@ func TestDeviceFaultRetryCapacity(t *testing.T) {
 		t.Fatal("group retry would consume all surviving devices")
 	}
 	j.Spec.Needs.MemoryGB = 16
-	if reason := q.deviceFaultRetryWaitingReason(&j); !deviceFaultRetryReason(reason) {
-		t.Fatal("undersized single cards hid a held group's typed blocker", reason)
+	if h := q.waitHold(&j); h.Kind != deviceFaultRetryHold {
+		t.Fatal("undersized single cards hid a held group's typed blocker", h)
 	}
 	j.Spec.Needs.MemoryGB = s.Needs.MemoryGB
 	m.Devices = slices.Clone(m.Devices[:2])

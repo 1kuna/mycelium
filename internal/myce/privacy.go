@@ -97,16 +97,9 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 	}
 	// Hold text is derived from worker reports too. Sanitize that projection,
 	// rather than only the machine field from which it was built.
-	for i := range s.HoldsDetail {
-		detail := &s.HoldsDetail[i]
-		if replacement, unsafe := unsafeDockerHolds[detail.Text]; unsafe {
-			old := detail.Text
-			detail.Text = replacement
-			for n, text := range s.HostHolds {
-				if text == old {
-					s.HostHolds[n] = detail.Text
-				}
-			}
+	for i := range s.Holds {
+		if replacement, unsafe := unsafeDockerHolds[s.Holds[i].Detail]; unsafe {
+			s.Holds[i].Detail = replacement
 		}
 	}
 
@@ -242,7 +235,7 @@ func statusJobValue(job *Job) Job {
 		case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
 			j.Reason = "production start deadline exceeded"
 		case strings.HasPrefix(j.Reason, "environment failed:"):
-			j.Blocker = &Blocker{"deterministically_failed", "environment", "consumer", "fix the recipe and resubmit with changed immutable inputs", j.Reason}
+			j.Hold = newHold("deterministically_failed", j.Reason)
 			// Authenticated job status deliberately includes the preparation
 			// diagnostic, like the corresponding job log. Logs:none omits output.
 		case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):

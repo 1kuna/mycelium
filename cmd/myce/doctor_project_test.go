@@ -134,13 +134,13 @@ func TestProjectDoctorHoldsAndCompletion(t *testing.T) {
 				}
 				switch scenario {
 				case "failed preparation":
-					report.Blocker = &myce.Blocker{Code: "deterministically_failed", Dependency: "environment", Owner: "consumer", Action: "fix immutable recipe", Evidence: "package version is unavailable"}
+					report.Hold = &myce.Hold{Kind: "deterministically_failed", Reason: "environment", Owner: "consumer", Next: "fix immutable recipe", Detail: "package version is unavailable"}
 				case "resource pressure":
-					report.Blocker = &myce.Blocker{Code: "resource_pressure", Dependency: "host memory", Owner: "queue owner", Action: "wait for memory", Evidence: "requires 4 GiB; available 0.5 GiB"}
+					report.Hold = &myce.Hold{Kind: "resource_pressure", Reason: "host memory", Owner: "queue owner", Next: "wait for memory", Detail: "requires 4 GiB; available 0.5 GiB"}
 				case "cold environment":
-					report.Blocker = &myce.Blocker{Code: "unprepared", Dependency: "environment", Owner: "queue", Action: "submit normally"}
+					report.Hold = &myce.Hold{Kind: "unprepared", Reason: "environment", Owner: "queue", Next: "submit normally"}
 				case "unknown observation":
-					report.Blocker = &myce.Blocker{Code: "unknown_observation", Dependency: "inventory", Owner: "queue owner", Action: "restore observations"}
+					report.Hold = &myce.Hold{Kind: "unknown_observation", Reason: "inventory", Owner: "queue owner", Next: "restore observations"}
 				case "target constraint":
 					report.Targets = []myce.ResolveTarget{{Reason: "requires linux/arm64; no matching target"}}
 				}

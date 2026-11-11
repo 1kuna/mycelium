@@ -1,0 +1,13 @@
+name: legacy-suite
+project: example
+priority: experiment
+source: {git: HEAD, paths: [src/], allow_dirty: true}
+run:
+  command: [python, -m, pytest, 'literal $HOME']
+  env: {THREADS: '2'}
+needs: {cpu_cores: 2, memory_gb: 1, platform: cpu}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+environment: {lock_file: requirements.txt, python: '3.13', platforms: [cpu]}
+memory_class: per_item
+resumable: true
+check: [test, -s, report.xml]

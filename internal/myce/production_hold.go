@@ -289,7 +289,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 		}
 	}
 
-	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionPass(j, m, q.startupReleaseBlocker(hostID(m)) == "", predicateStartupRelease) || !q.admissionPass(j, m, q.dockerBlocker(hostID(m)) == "", predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
+	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionPass(j, m, q.startupReleaseHold(hostID(m)).Kind == "", predicateStartupRelease) || !q.admissionPass(j, m, q.dockerHold(hostID(m)).Kind == "", predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
 	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) {
@@ -304,11 +304,8 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionPass(j, m, j.Spec.Priority == "production", predicateProductionHold) {
 		return false
 	}
-	return q.admissionPass(j, m, q.hostBlockers(hostID(m)) == "", predicateHostRelease)
-}
-func (q *Queue) hostBlockers(host string) string {
-	text, _ := q.hostBlockerState(host)
-	return text
+	text, _ := q.hostBlockerState(hostID(m))
+	return q.admissionPass(j, m, text == "", predicateHostRelease)
 }
 
 // Unknown release gets attention only after ordinary kill/report latency.
@@ -383,49 +380,48 @@ func (q *Queue) hostBlockerState(host string) (string, hostBlockerClass) {
 	}
 	return "", hostBlockerClass{}
 }
-func (q *Queue) holdReason(host string) string { return q.productionHoldDetail(host).Text }
-func (q *Queue) productionHoldDetail(host string) HoldDetail {
-	detail := HoldDetail{Host: host, Kind: "production_hold", Text: host + ": production hold"}
+func (q *Queue) productionHold(host string) Hold {
 	if b, class := q.hostBlockerState(host); b != "" {
-		return productionBlockerDetail(host, b, class)
+		return productionBlockerHold(host, b, class)
 	}
-	return detail
+	return scopedHold("production_hold", host, host+": production hold", false)
 }
 
 // Classification is explicit: new blocker paths cannot silently become routine.
-func productionBlockerDetail(host, text string, class hostBlockerClass) HoldDetail {
-	detail := HoldDetail{Host: host, Kind: "unclassified", OperatorActionRequired: true, Text: host + ": production hold; " + text}
+func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
+	detail := host + ": production hold; " + text
 	switch class.Kind {
 	case "production_stopping", "production_release_unknown":
-		detail.Kind = class.Kind
-		detail.OperatorActionRequired = class.OperatorActionRequired
+		return scopedHold(class.Kind, host, detail, class.OperatorActionRequired)
 	}
-	return detail
+	return scopedHold("unclassified", host, detail, true)
 }
 
-func (q *Queue) holdWaitReason(j *Job) string {
+// Production, disk and Docker fences that hold this job, with their hold kind.
+func (q *Queue) holdWaitReason(j *Job) (string, string) {
 	for _, m := range q.plannerMachines() {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if reason := q.productionAdmissionReason(j, m); reason != "" {
-				return reason
+				return "production_admission", reason
 			}
 		}
 	}
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
-		return reason
+		return "disk_headroom", reason
 	}
 	for _, m := range q.plannerMachines() {
 		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-			if b := q.dockerBlocker(hostID(m)); b != "" {
-				return b
+			if h := q.dockerHold(hostID(m)); h.Reason != "" {
+				return h.Kind, h.Detail
 			}
 		}
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		if reason := q.productionOccupancyReason(j); reason != "" {
-			return reason + "; production hold bound to " + j.ProductionHost + "; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host"
+			return "production_hold", reason + "; production hold bound to " + j.ProductionHost + "; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host"
 		}
-		return q.holdReason(j.ProductionHost)
+		h := q.productionHold(j.ProductionHost)
+		return h.Kind, h.Detail
 	}
 	if j.Spec.Priority == "production" && j.ProductionHost == "" {
 		for _, m := range q.plannerMachines() {
@@ -437,7 +433,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 				if slotOnTarget(slot, m) && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
 					model, _ := q.model(slot.Model)
 					if model.MemoryGB+j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
-						return "pinned model " + slot.Model + " on " + m.ID + " prevents production placement"
+						return "pinned_model", "pinned model " + slot.Model + " on " + m.ID + " prevents production placement"
 					}
 				}
 			}
@@ -446,11 +442,11 @@ func (q *Queue) holdWaitReason(j *Job) string {
 	if j.Spec.Priority != "production" {
 		for _, m := range q.plannerMachines() {
 			if q.held(hostID(m)) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-				return "host " + hostID(m) + " reserved for production"
+				return "production_reserved", "host " + hostID(m) + " reserved for production"
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // A bound host stays authoritative unless equal-or-higher production prevents
@@ -549,7 +545,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
+		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerHold(hostID(m)).Kind != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {
@@ -646,7 +642,7 @@ func (q *Queue) maintainHolds() {
 			j.ProductionHost = target
 			j.RequireProductionParity = true
 		}
-		if j.State == "queued" && j.ProductionHost != "" && (q.dockerBlocker(j.ProductionHost) != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
+		if j.State == "queued" && j.ProductionHost != "" && (q.dockerHold(j.ProductionHost).Kind != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
 			if target := q.productionTarget(j, nil); target != "" {
 				if j.ProductionHost != target || j.RequireProductionParity != (j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil) {
 					q.touchJob(j.ID)
@@ -802,15 +798,14 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 	return false
 }
 
-// Lost/stopping Docker executions fence the physical host, even without host policy.
-func (q *Queue) dockerBlocker(host string) string { return q.dockerHoldDetail(host).Text }
-
-func (q *Queue) dockerHoldDetail(host string) HoldDetail {
-	best := HoldDetail{}
+// Lost/stopping Docker executions fence the physical host, even without host
+// policy. The zero Hold means no fence.
+func (q *Queue) dockerHold(host string) Hold {
+	best := Hold{}
 	severity := 0
-	choose := func(detail HoldDetail, rank int) {
-		if rank > severity || rank == severity && detail.Text < best.Text {
-			best, severity = detail, rank
+	choose := func(h Hold, rank int) {
+		if rank > severity || rank == severity && h.Detail < best.Detail {
+			best, severity = h, rank
 		}
 	}
 	for _, m := range q.s.Machines {
@@ -825,21 +820,18 @@ func (q *Queue) dockerHoldDetail(host string) HoldDetail {
 		case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
 			kind, rank, action = "docker_transition", 1, false
 		}
-		choose(HoldDetail{Host: host, Kind: kind, OperatorActionRequired: action, Text: host + ": Docker cleanup unconfirmed; " + m.DockerCleanup}, rank)
+		choose(scopedHold(kind, host, host+": Docker cleanup unconfirmed; "+m.DockerCleanup, action), rank)
 	}
 	for _, r := range q.s.HostReleases {
 		if !r.Docker || r.Host != host || q.dockerReleaseLive(r) {
 			continue
 		}
-		detail := HoldDetail{Host: host, Kind: "docker_cleanup_waiting", Text: host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)}
-		rank := 2
+		detail := host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
 		if r.EscalatedAt != nil {
-			detail.Kind = "docker_cleanup_operator_action"
-			detail.OperatorActionRequired = true
-			detail.Text += "; operator action required (myce resolve-docker)"
-			rank = 5
+			choose(scopedHold("docker_cleanup_operator_action", host, detail+"; operator action required (myce resolve-docker)", true), 5)
+			continue
 		}
-		choose(detail, rank)
+		choose(scopedHold("docker_cleanup_waiting", host, detail, false), 2)
 	}
 	return best
 }

@@ -1,0 +1,16 @@
+entries:
+    uv-tests:
+        checks:
+            result:
+                - test
+                - -n
+                - ok
+        environment:
+            lock_file: uv.lock
+            python: "3.12"
+        run:
+            command:
+                - python
+                - -c
+                - print(1)
+project: example

@@ -563,14 +563,14 @@ func (q *Queue) BeginShutdown() {
 }
 
 func (q *Queue) Close() error {
+	err := q.closeCheckpointShards()
 	if q.stopping.Load() {
 		log.Printf("event=queue_shutdown phase=storage_wait")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	var err error
 	if q.usageReader != nil {
-		err = q.usageReader.Close()
+		err = errors.Join(err, q.usageReader.Close())
 	}
 	err = errors.Join(err, q.db.Close())
 	if q.uploadSpool.lock != nil {
@@ -2413,7 +2413,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	compact := q.observationSelection != nil && q.observationSelection.compact
-	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade
@@ -2454,22 +2454,12 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	out.Warning = strings.Join(warnings, "; ")
 	for host := range q.s.Hosts {
 		if q.held(host) {
-			detail := q.productionHoldDetail(host)
-			out.HostHolds = append(out.HostHolds, detail.Text)
-			out.HoldsDetail = append(out.HoldsDetail, detail)
+			out.Holds = append(out.Holds, q.productionHold(host))
 		}
 	}
 	hosts := map[string]bool{}
 	for _, m := range q.s.Machines {
 		hosts[hostID(m)] = true
-	}
-	for host := range hosts {
-		if detail := q.dockerHoldDetail(host); detail.Text != "" {
-			if !slices.Contains(out.HostHolds, detail.Text) {
-				out.HostHolds = append(out.HostHolds, detail.Text)
-			}
-			out.HoldsDetail = append(out.HoldsDetail, detail)
-		}
 	}
 	// Also report fences without a configured production policy or live worker.
 	for _, r := range q.s.HostReleases {
@@ -2485,31 +2475,23 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	}
 
 	out.HostStates = make(map[string]string, len(hosts))
-	for host, hasMachine := range hosts {
+	for host := range hosts {
 		out.HostStates[host] = q.hostMaintenanceStatus(host).State
 		out.DeviceMaintenance = append(out.DeviceMaintenance, q.deviceMaintenanceStatus(host)...)
-		if !hasMachine {
-			if detail := q.dockerHoldDetail(host); detail.Text != "" {
-				out.HoldsDetail = append(out.HoldsDetail, detail)
-			}
+		if h := q.dockerHold(host); h.Kind != "" {
+			out.Holds = append(out.Holds, h)
 		}
-		if detail := q.startupReleaseDetail(host); detail.Text != "" {
-			out.HoldsDetail = append(out.HoldsDetail, detail)
+		if h := q.startupReleaseHold(host); h.Kind != "" {
+			out.Holds = append(out.Holds, h)
 		}
 		if q.maintenanceBlocked(host) {
-			out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
+			h := scopedHold("host_disabled", host, "host "+host+" disabled by operator", true)
+			h.Next = strings.ReplaceAll(h.Next, "HOST", host)
+			out.Holds = append(out.Holds, h)
 		}
 	}
 	slices.SortFunc(out.DeviceMaintenance, func(a, b DeviceMaintenance) int {
 		return strings.Compare(a.Host+"/"+deviceMaintenanceKey(a.Platform, a.Identity), b.Host+"/"+deviceMaintenanceKey(b.Platform, b.Identity))
-	})
-	sort.Strings(out.HostHolds)
-	sort.Slice(out.HoldsDetail, func(i, j int) bool {
-		a, b := out.HoldsDetail[i], out.HoldsDetail[j]
-		if a.Host != b.Host {
-			return a.Host < b.Host
-		}
-		return a.Kind < b.Kind
 	})
 	// Retained diagnostics are absent from compact captures; explicit section/full
 	// reads preserve every existing evidence field.
@@ -2530,6 +2512,8 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	}
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
+	out.Holds = append(out.Holds, operatorHolds(out.Reservations, out.ComponentExclusions, out.DeviceMaintenance)...)
+	sortHolds(out.Holds)
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := map[string]int{}, map[string]string{}
@@ -2694,7 +2678,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 	if reason := q.capReason(call); reason != "" {
 		call.Reason = reason
 	}
-	if reason := q.holdWaitReason(call); reason != "" {
+	if _, reason := q.holdWaitReason(call); reason != "" {
 		call.Reason = reason
 	}
 	if c.Machine == "" && model.HostMemoryGB > 0 {
@@ -2733,6 +2717,7 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	projectCommandStarted(j)
 	q.projectEfficiency(j)
 	j.YieldPlan = q.yieldProjection(j)
 	if j.State == "queued" && strings.HasPrefix(j.Reason, memoryEvidenceRecovering+":") {
@@ -2770,6 +2755,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 			if strings.HasPrefix(j.Reason, "no_matching_device:") {
 				j.DiagnosticCode = "no_matching_device"
 			}
+		}
+		if j.State == "paused" {
+			j.Hold = pauseHold(j)
 		}
 		key := j.Spec.SubmissionKey
 		lock := j.EnvironmentLock

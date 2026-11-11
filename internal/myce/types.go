@@ -455,7 +455,7 @@ type Job struct {
 	ResourceAttempts        []AttemptResourceFacts `json:"resource_attempts,omitempty"`
 	ResourceAttemptsDropped int                    `json:"resource_attempts_dropped,omitempty"`
 	Efficiency              *JobEfficiency         `json:"efficiency,omitempty"`
-	Blocker                 *Blocker               `json:"blocker,omitempty"`
+	Hold                    *Hold                  `json:"hold,omitempty"`
 	// Finding is derived on each read and never persisted; see JobFinding.
 	Finding         *JobFinding            `json:"finding,omitempty"`
 	WallTime        *WallTimeStatus        `json:"wall_time,omitempty"`
@@ -526,6 +526,8 @@ type Job struct {
 	CleanupCause   *RuntimeCause   `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
+	// Reply-only projection of launch and Started evidence; never stored.
+	CommandStarted *bool `json:"command_started,omitempty"`
 
 	// Derived status-only policy projection; a pointer preserves an empty host list.
 	EligibleHosts           *[]string `json:"eligible_hosts,omitempty"`
@@ -854,16 +856,6 @@ type LogChunk struct {
 	Text   string `json:"text"`
 }
 
-// HoldDetail describes a host fence independently of its compatibility text.
-// A missing ClearsAt is not a promise of automatic recovery.
-type HoldDetail struct {
-	Host                   string     `json:"host"`
-	Kind                   string     `json:"kind"`
-	OperatorActionRequired bool       `json:"operator_action_required"`
-	ClearsAt               *time.Time `json:"clears_at,omitempty"`
-	Text                   string     `json:"text"`
-}
-
 type Snapshot struct {
 	Summary             *StatusSummary       `json:"summary,omitempty"`
 	Efficiency          *EfficiencyReport    `json:"efficiency,omitempty"`
@@ -888,16 +880,16 @@ type Snapshot struct {
 	Admissions       []HostAdmissions        `json:"admissions,omitempty"`
 	WorkCurves       []WorkObservation       `json:"work_curves"`
 	PriorityPolicy   PriorityPolicyRecord    `json:"priority_policy"`
-	HoldsDetail      []HoldDetail            `json:"holds_detail"`
-	HostHolds        []string                `json:"host_holds,omitempty"`
-	Now              time.Time               `json:"now"`
-	Usage            UsageReport             `json:"usage"`
-	SyncRequests     []SyncRequest           `json:"sync_requests"`
-	Pins             []ModelPin              `json:"pins"`
-	LoadedModels     []ModelSlot             `json:"loaded_models"`
-	Warning          string                  `json:"warning,omitempty"`
-	Jobs             []*Job                  `json:"jobs"`
-	Machines         []*Machine              `json:"machines"`
+	// Host and device fences, each one hold record.
+	Holds        []Hold        `json:"holds"`
+	Now          time.Time     `json:"now"`
+	Usage        UsageReport   `json:"usage"`
+	SyncRequests []SyncRequest `json:"sync_requests"`
+	Pins         []ModelPin    `json:"pins"`
+	LoadedModels []ModelSlot   `json:"loaded_models"`
+	Warning      string        `json:"warning,omitempty"`
+	Jobs         []*Job        `json:"jobs"`
+	Machines     []*Machine    `json:"machines"`
 
 	// Operator-retired fleet operations, oldest first (audit record, #588).
 	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`
