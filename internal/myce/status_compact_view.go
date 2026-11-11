@@ -19,6 +19,7 @@ type CompactStatus struct {
 	Counts        map[string]int       `json:"counts"`
 	Alerts        []StatusAlertGroup   `json:"alert_groups,omitempty"`
 	Leases        []StatusLease        `json:"production_leases,omitempty"`
+	NotQuiescent  []StatusQuiescence   `json:"not_quiescent,omitempty"`
 	AlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
 	FleetUpgrade  []string             `json:"fleet_upgrade,omitempty"`
 	HostStates    map[string]string    `json:"host_states,omitempty"`
@@ -83,7 +84,7 @@ func compactJobGroup(j *Job) string {
 func NewCompactStatus(s Snapshot) CompactStatus {
 	c := CompactStatus{Now: s.Now, QueueRelease: s.QueueRelease, Counts: map[string]int{}, Hyphas: []CompactHypha{}, Detail: compactStatusDetail, Freshness: s.Freshness}
 	if s.Summary != nil {
-		c.RetainedJobs, c.Alerts, c.Leases = s.Summary.RetainedJobs, s.Summary.Alerts, s.Summary.Leases
+		c.RetainedJobs, c.Alerts, c.Leases, c.NotQuiescent = s.Summary.RetainedJobs, s.Summary.Alerts, s.Summary.Leases, s.Summary.NotQuiescent
 	}
 	if d := s.HealthAlertDelivery; d != nil && d.Pending > 0 {
 		c.AlertDelivery = d
@@ -240,6 +241,22 @@ func (c CompactStatus) Lines(full bool) []string {
 			hosts = "holds " + strings.Join(l.Hosts, ", ")
 		}
 		out = append(out, fmt.Sprintf("production lease %s/%s: expires %s; %s", l.Project, l.Key, l.ExpiresAt.UTC().Format(time.RFC3339), hosts))
+	}
+	for _, h := range c.NotQuiescent {
+		var parts []string
+		for _, a := range h.Attempts {
+			part := fmt.Sprintf("job %s", ShortID(a.JobID))
+			if a.Name != "" {
+				part += " " + a.Name
+			}
+			part += fmt.Sprintf(" attempt %d %s", a.Attempt, a.State)
+			if a.Reason != "" {
+				part += " (" + a.Reason + ")"
+			}
+			parts = append(parts, part)
+		}
+		parts = append(parts, h.Other...)
+		out = append(out, fmt.Sprintf("not quiescent %s (%s): %s", h.Host, h.Mode, strings.Join(parts, "; ")))
 	}
 	out = append(out, c.Holds...)
 	if c.Warning != "" {
