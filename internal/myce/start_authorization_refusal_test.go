@@ -83,8 +83,10 @@ func TestStartAuthorizationRefusalAfterStarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := job(t, q, a.ID)
-	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || !got.Spec.StartBy.Equal(deadline) {
-		t.Fatalf("refusal charged or caller cutoff moved: %+v", got)
+	// #1299: the refused span (assignment to refusal) is returned to the
+	// caller's cutoff; the remainder at assignment applies from the requeue.
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || !got.Spec.StartBy.Equal(deadline.Add(clock.Now().Sub(*a.AssignedAt))) {
+		t.Fatalf("refusal charged or caller cutoff not restored: %+v", got)
 	}
 	if err := q.update(func() error { q.touchMachine(m.ID).Leaving = false; return nil }); err != nil {
 		t.Fatal(err)

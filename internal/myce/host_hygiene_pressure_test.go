@@ -79,10 +79,12 @@ func TestHostHygieneIdlePSIAdmissionReplay(t *testing.T) {
 			}
 			finish(t, q, run, true)
 			// Genuine pressure must still drain even after the new worker has
-			// learned ordinary PSI. Swap alone supplies independent harm here.
+			// learned ordinary PSI. Swap alone supplies independent harm here:
+			// 1 MiB/s is material once the host is nearly full (#1299 floor).
 			for i := range hostHealthConfirmation {
 				sample(6, float64(i+1)*(1<<20), .001)
 			}
+			m.HostAvailableMemoryGB = .25
 			report()
 			stored = q.s.Machines[m.ID]
 			if h.DrainReason != "host_memory_pressure" || stored.HostHealth.DrainReason != "host_memory_pressure" || q.hostLaunchAllowed(stored, m.Session) || q.hostMaintenanceStatus(m.HostID).Healthy {
@@ -127,5 +129,61 @@ func TestHostHygienePSIWakeCorroboration(t *testing.T) {
 	}
 	if e := stored.HostHealth.PressureEvaluation; len(e.Corroboration) != 1 || e.Corroboration[0] != "wake_latency" {
 		t.Fatal("missing wake corroboration", e)
+	}
+}
+
+// #1299: b70 drained on PSI 0.03% plus 13 MB/s swap growth while 20+ GiB was
+// available, because a zero-swap baseline made any growth anomalous. The
+// worker and the queue both require material swap: above the baseline's
+// measured swap jitter and, over the confirmation horizon, above one percent
+// of available memory. A nearly full host still drains on the same growth.
+func TestHostHygieneSwapFloorPairsWithHeadroom(t *testing.T) {
+	const growth = 13 << 20 // bytes per second, the observed b70 rate
+	for _, tc := range []struct {
+		name      string
+		available float64 // GiB; zero is unknown headroom
+		drain     bool
+	}{{"plentiful", 20, false}, {"nearly-full", 0.5, true}, {"unknown", 0, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			h := HostHealth{}
+			swap := 3.2 * (1 << 30)
+			sample := func(psi, growth float64) {
+				clock.Advance(signalRefresh)
+				swap += growth * signalRefresh.Seconds()
+				h.observe(HostHealthSample{At: clock.Now(), HostHealthReading: HostHealthReading{
+					Pressure: psi, SwapBytes: swap, WakeSeconds: .00005, Load: 6, pressurePSI: true, availableBytes: tc.available * (1 << 30),
+				}})
+			}
+			for range hostHealthHistorySize {
+				sample(0, 0)
+			}
+			for range hostHealthConfirmation {
+				sample(.03, growth)
+			}
+			if got := h.DrainReason != ""; got != tc.drain {
+				t.Fatalf("worker drain=%q, want drain=%t", h.DrainReason, tc.drain)
+			}
+			// The queue applies the same floor to a report, using its own
+			// headroom measurement: an older worker's swap-only latch clears
+			// when headroom is plentiful and stays when the host is nearly full.
+			m := cpuMachine("worker", "host", "cpu", 4, 31)
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = tc.available > 0, tc.available
+			legacy := h
+			legacy.DrainReason = "host_memory_pressure"
+			data, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.HostHealth = &HostHealth{}
+			if err := json.Unmarshal(data, m.HostHealth); err != nil {
+				t.Fatal(err)
+			}
+			check(t, q, m, nil)
+			stored := q.s.Machines[m.ID]
+			if allowed := q.hostLaunchAllowed(stored, m.Session); allowed == tc.drain {
+				t.Fatalf("queue launch allowed=%t with %g GiB available: %+v", allowed, tc.available, stored.HostHealth.PressureEvaluation)
+			}
+		})
 	}
 }
