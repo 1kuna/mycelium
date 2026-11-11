@@ -606,11 +606,11 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("experiment")
 			want := ""
-			reasonPrefix := "no machine in the fleet"
+			reasonPrefix := "can run this job right now"
 			switch kind {
 			case "platform":
 				s.Needs.Platform = Platform{Required: []string{"metal"}}
-				want = "needs metal"
+				want = "with Apple Metal"
 			case "pinned":
 				s.AllowedMachines = []string{"mac"}
 				want = "allowed machines: mac"
@@ -621,7 +621,7 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 				want = "installed=false, builder=false"
 			case "memory":
 				s.Needs.MemoryGB = 80
-				want = "80.0 GB"
+				want = "80.0 GiB free accelerator memory"
 			}
 			giveUp := c.Now().Add(time.Minute)
 			s.GiveUpAt = &giveUp

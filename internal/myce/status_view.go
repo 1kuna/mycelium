@@ -2,7 +2,6 @@ package myce
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 )
@@ -268,7 +267,7 @@ func JobWork(j *Job) string {
 }
 
 // Called under the queue lock on a detached status copy. The scheduler's reason
-// remains authoritative; only its generic no-fit explanation needs more detail.
+// is authoritative; status only words it for readers.
 func (q *Queue) statusWaitingReason(j *Job) string {
 	j.Hold = q.jobHold(j)
 	return q.statusWaitingReasonDetail(j)
@@ -290,92 +289,6 @@ func (q *Queue) statusWaitingReasonDetail(j *Job) string {
 	// Environment keys may be absolute lock-file paths. Never display them.
 	if key := j.Spec.Environment.Key(); key != "" {
 		reason = strings.ReplaceAll(reason, key, "required software")
-	}
-	if strings.HasPrefix(reason, "no machine in the fleet can run this right now") || reason == "waiting for a worker to pull this job" {
-		blocked := []string{}
-		sizedNeeds := []string{}
-		possible := 0
-		for _, m := range q.plannerMachines() {
-			if !q.projectAllows(j.Spec.Project, m.ID) {
-				continue
-			}
-			copy := cloneMachine(m)
-			copy.Gone, copy.Leaving, copy.CheckpointUnavailable = false, false, false
-			copy.MemoryError = ""
-			if a := machineAvailability(&copy); a != nil {
-				a.Available = true
-			}
-			// Reuse fitting at the reported capacity, without making a dispatch choice.
-			fit := false
-			for _, candidate := range q.memoryCandidates(j, &copy) {
-				n := candidate.Spec.Needs
-				if n.Memory == "auto" {
-					detail := fmt.Sprintf("%s needs %.1f GiB free accelerator memory and %.1f GiB host RAM", m.ID, n.MemoryGB, hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))
-					if n.cpuOnly() {
-						detail = fmt.Sprintf("%s needs %d logical cores and %.1f GiB host RAM", m.ID, n.cores(), hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))
-					}
-					detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
-					if candidate.MemoryEnvelope.Refusal != "" {
-						detail = m.ID + ": " + candidate.MemoryEnvelope.Refusal
-					}
-					sizedNeeds = append(sizedNeeds, detail)
-				}
-				fit = fit || hostFits(&copy, n.MemoryGB, n.HostMemoryGB) && fitsResources(candidate, &copy, max(m.TotalMemoryGB, m.FreeMemoryGB))
-			}
-			if !fit {
-				continue
-			}
-			possible++
-			state := HyphaAvailability(m)
-			if q.maintenanceBlocked(hostID(m)) {
-				state = "planned host maintenance"
-			}
-			if state == "available for work" && q.machineLimitReason(m) != "" {
-				state = admissionWords(q.machineLimitReason(m))
-			}
-			if state == "available for work" && m.CheckpointUnavailable && needsCheckpoint(j) {
-				state = "waiting for saved progress storage"
-			}
-			if state != "available for work" {
-				blocked = append(blocked, m.ID+": "+state)
-			}
-		}
-		if possible > 0 && len(blocked) == possible {
-			slices.Sort(blocked)
-			return strings.Join(blocked, "; ")
-		}
-		if reason == "waiting for a worker to pull this job" {
-			return "waiting for a hypha to take this job"
-		}
-		qualifier := ""
-		if j.Spec.extensionJob() {
-			qualifier = "qualified "
-		}
-		if len(sizedNeeds) > 0 {
-			slices.Sort(sizedNeeds)
-			return "no " + qualifier + "hypha can run this job right now; " + strings.Join(slices.Compact(sizedNeeds), "; ")
-		}
-		autoMemory := j.Spec.Needs.Memory == "auto"
-		for _, extension := range j.Extensions {
-			for _, variant := range extension.Variants {
-				autoMemory = autoMemory || variant.Needs.Memory == "auto"
-			}
-		}
-		if autoMemory {
-			return "memory is sized per hypha; no " + qualifier + "hypha is available to size it against"
-		}
-		resources := []string{}
-		for _, platform := range j.Spec.Needs.Platform.Required {
-			resources = append(resources, resourceWords(platform))
-		}
-		required := ""
-		if len(resources) > 0 {
-			required = " with " + strings.Join(resources, " or ")
-		}
-		if j.Spec.Needs.cpuOnly() {
-			return fmt.Sprintf("no %shypha can run this CPU job right now; it needs %d logical cores and %.1f GiB host RAM", qualifier, j.Spec.Needs.cores(), j.Spec.Needs.HostMemoryGB)
-		}
-		return fmt.Sprintf("no %shypha%s can run this job right now; it needs %.1f GiB free accelerator memory and %.1f GiB free system memory", qualifier, required, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	}
 	reason = strings.NewReplacer(
 		"waiting for a worker to pull this job", "waiting for a hypha to take this job",
