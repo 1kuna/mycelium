@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -109,6 +111,102 @@ func TestProcessTreeCancellation(t *testing.T) {
 	}
 }
 
+// #1322: a payload's setsid child leaves the attempt's group and session and is
+// reparented once its parent dies. Yield (TERM, then KILL), preemption, user
+// cancellation and a parent that exits normally must all end the escaper
+// before release is confirmed.
+func TestProcessTreeSetsidEscaper(t *testing.T) {
+	if os.Getenv(processSessionVariable) != "" && os.Getenv("TREE_TEST_DRIVER") == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestProcessTreeSetsidEscaper$")
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, processSessionVariable+"=") {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
+		cmd.Env = append(cmd.Env, "TREE_TEST_DRIVER=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("outer session fixture: %v\n%s", err, out)
+		}
+		return
+	}
+	for _, stop := range []string{"yield", "preempt", "cancel", "exit"} {
+		t.Run(stop, func(t *testing.T) {
+			w := recoveryWorker(t)
+			w.Machine.GPU = "cpu"
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			dir := t.TempDir()
+			mode := "setsid"
+			if stop == "exit" {
+				mode = "setsid-exit"
+			}
+			j := recoveryJob(t, []string{os.Args[0], "-test.run=^TestProcessTreeHelper$"})
+			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			j.Spec.Run.Env = map[string]string{"TREE_TEST_DIR": dir, "TREE_TEST_MODE": mode, "TREE_TEST_OWNER": strconv.Itoa(os.Getpid())}
+			var p *process
+			await(t, func() bool { p, err = w.start(store, j); return !errors.Is(err, errWorkerCheckpoint) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { p.stopDirective(w.Clock.Now(), 0, true, true) })
+			pid := processTreeFixturePID(t, dir)
+			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+			if session, err := unix.Getsid(pid); err != nil || session == p.cmd.Process.Pid {
+				t.Fatalf("fixture did not leave the attempt session: %d %v", session, err)
+			}
+			switch stop {
+			case "yield":
+				p.stopDirective(w.Clock.Now(), 50*time.Millisecond, false, false)
+			case "preempt":
+				p.stopDirective(w.Clock.Now(), 0, true, false)
+			case "cancel":
+				p.stopDirective(w.Clock.Now(), 0, true, true)
+			case "exit":
+				p.refreshEscapers(w.Clock.Now()) // The attempt actor's periodic custody refresh.
+				if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result := d5Finish(t, p)
+			if _, err := processBirth(pid); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("release confirmed=%v while escaper %d remains: %v", !result.ReleasePending, pid, err)
+			}
+			if result.ReleasePending {
+				t.Fatalf("release unconfirmed after escaper exit: %+v", result)
+			}
+		})
+	}
+}
+
+// A recorded escaper counts only while its birth matches: a reused PID is
+// never treated as the attempt's process (#1322).
+func TestProcessTreeEscaperBirthFence(t *testing.T) {
+	other := exec.Command("sleep", "60")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	birth, err := processBirth(other.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := 1 << 30 // No live process group or session has this ID.
+	defer forgetGroupCustody(group)
+	for _, recorded := range []string{"0:0", birth} {
+		adoptGroupCustody(group, map[int]string{other.Process.Pid: recorded})
+		members, err := workerGroupMembers(group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if owned := slices.Contains(members, other.Process.Pid); owned != (recorded == birth) {
+			t.Fatalf("birth %q: member=%v", recorded, owned)
+		}
+	}
+}
+
 func processTreeFixturePID(t *testing.T, dir string) int {
 	t.Helper()
 	nativeFile(t, dir, "pid")
@@ -152,6 +250,9 @@ func TestProcessTreeHelper(t *testing.T) {
 	}
 
 	if os.Getenv("TREE_TEST_MODE") == "orphan" {
+		if os.Getenv("TREE_TEST_IGNORE_TERM") != "" {
+			signal.Ignore(syscall.SIGTERM) // Only KILL by exact PID ends this escaper.
+		}
 		if err := os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -159,6 +260,21 @@ func TestProcessTreeHelper(t *testing.T) {
 	}
 	command := []string{os.Args[0], "-test.run=^TestProcessTreeHelper$"}
 	childEnv := []string{"PATH=" + os.Getenv("PATH"), "TREE_TEST_DIR=" + dir, "TREE_TEST_MODE=orphan", "TREE_TEST_OWNER=" + os.Getenv("TREE_TEST_OWNER")}
+	if mode := os.Getenv("TREE_TEST_MODE"); strings.HasPrefix(mode, "setsid") {
+		// #1322: the escaper leaves the attempt's process group and session.
+		cmd := exec.Command(command[0], command[1:]...)
+		cmd.Env = append(childEnv, "TREE_TEST_IGNORE_TERM=1")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		nativeFile(t, dir, "pid")
+		if mode == "setsid-exit" {
+			nativeFile(t, dir, "go") // Exit only after the worker could see the tree.
+			return
+		}
+		select {} // The attempt's stop ends this parent; the escaper outlives it.
+	}
 	if os.Getenv("TREE_TEST_MODE") == "complete" {
 		cmd := exec.Command(command[0], command[1:]...)
 		cmd.Env = processSessionEnvironment(childEnv)

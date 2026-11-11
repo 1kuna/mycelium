@@ -238,6 +238,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		now := w.Clock.Now()
 		if p != nil {
 			p.enforceGrace(now)
+			p.refreshEscapers(now)
 			select {
 			case f := <-p.done:
 				w.control.remove(p.job)

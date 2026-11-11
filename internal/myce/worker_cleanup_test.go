@@ -23,7 +23,7 @@ func TestWorkerCleanupInspectionPreservesSuccessfulOutputs(t *testing.T) {
 	bin := t.TempDir()
 	denied := filepath.Join(bin, "deny")
 	wrapper := `#!/bin/sh
-if [ "$*" = "-ax -o pid=,pgid=,stat=" ] && [ -f "$MYCE_TEST_CLEANUP_DENIED" ]; then exit 1; fi
+if [ "$*" = "-ax -o pid=,ppid=,pgid=,stat=" ] && [ -f "$MYCE_TEST_CLEANUP_DENIED" ]; then exit 1; fi
 exec "$MYCE_TEST_REAL_PS" "$@"
 `
 	if err := os.WriteFile(filepath.Join(bin, "ps"), []byte(wrapper), 0700); err != nil {

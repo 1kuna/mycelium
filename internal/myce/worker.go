@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -177,6 +178,8 @@ type process struct {
 	exitObservation  nativeExitObservation
 	saveOutcome      func(memberOutcome) error
 	saveCustody      func() error
+	refreshCustody   func() error
+	custodyAt        time.Time
 
 	machine    string
 	docker     *dockerAttempt
@@ -284,6 +287,20 @@ func (p *process) enforceGrace(now time.Time) {
 		p.stopLocked(now, 0, true)
 	}
 }
+
+// Refresh escaper custody while the attempt runs, so a setsid child whose
+// parent exits before the stop is still known by birth (#1322). The cadence
+// matches the Darwin CPU tree sample; each refresh is one ps inventory.
+func (p *process) refreshEscapers(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.refreshCustody == nil || p.killed || now.Sub(p.custodyAt) < attemptStorageSamplePeriod {
+		return
+	}
+	p.custodyAt = now
+	_ = p.refreshCustody() // A failed refresh keeps the prior custody; stop rechecks.
+}
+
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	if p.stopAdmission != nil {
 		p.stopAdmission()
@@ -990,6 +1007,25 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return err
 		}
 		return saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody)
+	}
+	if memoryAttempt == nil {
+		// Without a cgroup, an escaper is reachable only while it is still a
+		// descendant (#1322): record the live tree on the attempt's own cadence.
+		p.refreshCustody = func() error {
+			group := cmd.Process.Pid
+			saved := maps.Clone(custody.Groups[group])
+			current := workerState{}
+			if err := recordWorkerGroup(&current, group); err != nil {
+				return err
+			}
+			next := current.Groups[group]
+			next[group] = saved[group]
+			if maps.Equal(saved, next) {
+				return nil
+			}
+			custody.Groups[group] = next
+			return saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody)
+		}
 	}
 	p.saveOutcome = func(facts memberOutcome) error { return saveWorkerJSON(s.dir, identity+".outcome.json", facts) }
 	if w.control != nil {
