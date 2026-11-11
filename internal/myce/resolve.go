@@ -81,7 +81,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if req.Recipe != nil {
 		return q.resolveNative(req, ctx)
 	}
-	view, _, err := q.captureObservation("", ctx)
+	view, err := q.captureResolveView(ctx)
 	if err != nil {
 		return ResolveReport{}, err
 	}

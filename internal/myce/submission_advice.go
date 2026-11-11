@@ -57,6 +57,7 @@ type submissionAdviceSnapshot struct {
 	generation *readGeneration
 	view       *Queue
 	ledgers    map[string]observationMachineLedger
+	machines   map[string]*Machine // Owned live copy; nil uses the committed generation.
 }
 
 // q.mu is held. Only pin immutable records/configuration and small per-worker
@@ -127,10 +128,14 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 			owned := copyObservationValue(reflect.ValueOf(j)).Interface().(*Job)
 			v.s.Jobs[id], v.observationLive[id] = owned, owned
 		}
-		if err := chargeProjectionValue(ctx, inputs.Machines); err != nil {
-			return nil, err
+		if s.machines != nil {
+			v.s.Machines = s.machines
+		} else {
+			if err := chargeProjectionValue(ctx, inputs.Machines); err != nil {
+				return nil, err
+			}
+			v.s.Machines = copyObservationValue(reflect.ValueOf(inputs.Machines)).Interface().(map[string]*Machine)
 		}
-		v.s.Machines = copyObservationValue(reflect.ValueOf(inputs.Machines)).Interface().(map[string]*Machine)
 	}
 	for key, m := range v.s.Machines {
 		l := s.ledgers[key]
@@ -153,4 +158,46 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 	v.observationScan.observationOwner = v
 	v.observationScan.memory = v.memoryPlanning
 	return v, nil
+}
+
+// Resolve plans one hypothetical job, the same question submission advice
+// answers. The full status capture copied and charged every retained execution
+// into one request lane, so a read-only check could be refused with
+// projection_capacity_exceeded once history outgrew that lane. Share
+// the committed generation instead: retained records stay borrowed read-only
+// and only active jobs, machines and planner indexes are copied and charged.
+// Under q.mu it copies only configuration, machines and scalar ledgers.
+func (q *Queue) captureResolveView(ctx context.Context) (*Queue, error) {
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return nil, err
+	}
+	// Offline imports can install records the committed generation lacks.
+	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+	if imported || q.readGeneration == nil && !q.simulation {
+		unlock()
+		v, _, err := q.captureObservation("", ctx)
+		return v, err
+	}
+	snapshot := q.captureSubmissionAdvice()
+	snapshot.view.evidenceRetention = q.evidenceRetention
+	if !q.simulation {
+		// Configuration setters do not commit, so the published copies can lag
+		// a registered environment or model. Small; charged before copying.
+		// Check-ins can update machines (contact, inventory) without a commit,
+		// and eligibility depends on them. Machines are few; copy them live.
+		config := observationState{State: state{Machines: q.s.Machines}, Models: q.models, Environments: q.environments, Unreported: q.unreported}
+		if err := chargeProjectionValue(ctx, config); err != nil {
+			unlock()
+			return nil, err
+		}
+		owned := copyObservation(config)
+		snapshot.view.models, snapshot.view.environments, snapshot.view.unreported = owned.Models, owned.Environments, owned.Unreported
+		snapshot.machines = owned.State.Machines
+		if snapshot.machines == nil {
+			snapshot.machines = map[string]*Machine{}
+		}
+	}
+	unlock()
+	return snapshot.planner(ctx)
 }
