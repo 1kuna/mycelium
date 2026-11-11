@@ -134,7 +134,7 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_private_memory_writers_include_unchanged_consumers(self):
+    def test_private_helpers_include_unchanged_consumers(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
             os.chdir(directory)
@@ -152,6 +152,10 @@ class RelatedTests(unittest.TestCase):
                 (root / 'process_memory_test.go').write_text('package p\nfunc TestAttemptMemoryEventCountsPersist(t *testing.T) { helper(t) }\n')
                 (root / 'attempt_memory_facts_test.go').write_text('package p\nfunc TestAttemptMemoryFactsAcceptedGET(t *testing.T) { helper(t) }\n')
                 (root / 'unrelated_test.go').write_text('package p\nfunc TestUnrelated(t *testing.T) {}\n')
+                (root / 'host_backfill_cost_test.go').write_text(
+                    'package p\nfunc hostBackfillLoadFixture() int { return 1 }\n')
+                (root / 'checkin_candidate_cost_test.go').write_text(
+                    'package p\nfunc TestCandidateCostPlacementEquivalence(t *testing.T) { helper(t) }\n')
                 git('add', '.')
                 git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
                 for source, method in [('attempt_memory', 'peak'), ('queue', 'complete')]:
@@ -162,6 +166,12 @@ class RelatedTests(unittest.TestCase):
                     self.assertIn('TestAttemptMemoryFactsAcceptedGET', selected[0][1])
                     self.assertNotIn('TestUnrelated', selected[0][1])
                     git('restore', f'internal/myce/{source}.go')
+                # Benchmark-only fixture edits still select bounded planner
+                # correctness coverage rather than refusing or selecting all.
+                (root / 'host_backfill_cost_test.go').write_text(
+                    'package p\nfunc hostBackfillLoadFixture() int { return 2 }\n')
+                self.assertEqual(related.select('HEAD'), [
+                    ('internal/myce', '^(TestCandidateCostPlacementEquivalence)$')])
             finally:
                 os.chdir(previous)
 
