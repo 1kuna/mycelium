@@ -245,6 +245,7 @@ func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string,
 	r.Key = hex.EncodeToString(h[:])
 	return r, nil
 }
+
 // environmentLock digests the frozen lock inputs of resolved recipes. Every
 // platform recipe of one lock_file environment freezes the same files.
 func environmentLock(recipes map[string]EnvironmentRecipe) *EnvironmentLock {
