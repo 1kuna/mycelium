@@ -112,9 +112,10 @@ type state struct {
 	FairUsageVersion int                          `json:"fair_usage_version,omitempty"`
 	FairUsage        map[string]FairUsage         `json:"fair_usage,omitempty"`
 	UsageAt          time.Time                    `json:"usage_at,omitempty"`
+	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
+
 	// Per adapter/profile entry without targets (#853): recipe, proven and skipped types.
 	EntryCoverage map[string]entryCoverageRecord `json:"entry_coverage,omitempty"`
-	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
 
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
