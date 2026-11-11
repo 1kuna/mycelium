@@ -872,7 +872,46 @@ already prepared attempt's saves. If a writer publishes a new generation during
 copying, preparation retries rather than combining its manifest with an older payload list.
 This isolates disconnected copies so they cannot overwrite each other's saves.
 Old step-1 checkpoint files directly in the job folder are also preserved when
-resuming. Checkpoints remain after completion or failure.
+resuming.
+
+**Layout (#894).** Thousands of job folders directly under one SMB root made
+every listing and metadata operation there slow on every host. With
+`myce queue` and `myce dev`, the queue first creates 256 shard folders `00`–`ff`
+and a `.myce-checkpoint-shards-v1` marker in the root, outside its lock and in
+the background, then gives new jobs `SHARD/JOB_ID`, where the shard is the first
+two hex digits of the job ID. Until that succeeds, or while the root is missing,
+new jobs keep `JOB_ID`; the queue never creates the root itself and retries
+preparation at most once a minute. A job keeps the path recorded when it was
+submitted, so existing flat folders stay readable and resume on every retry.
+The previous release's workers need only an existing parent folder, which the
+queue already created; current workers recreate a missing shard beneath an
+existing root.
+
+**Settled expiry (#894).** Checkpoints are not results: a NAS checkpoint is kept
+for 72 h after the job ends; declare outputs for anything needed longer. The
+queue setting `myce queue --checkpoint-expiry-grace` (default `72h`) is measured
+from the job's recorded terminal time (`finished_at`). A folder also expires only
+once nothing can resume or still write it: the job is terminal, any `async_nas`
+delivery is verified, every attempt's release is confirmed and no storage custody
+is parked. Terminal jobs never resume, and retries, fan-out waves and
+resubmissions use new job IDs. Elapsed time alone never qualifies a folder.
+Some historical terminal records never stamped `finished_at`. For those, the
+grace period counts from the latest timestamp anywhere in the job's own record:
+attempt ends, stops and releases, cancellation and ledger events, then starts,
+assignment, waiting and submission. That never places the end before any recorded
+activity. A record with no timestamp at all is kept, and `myce status`
+counts it under `checkpoint_expiry.undated` in the storage section, beside
+`waiting` (settled folders waiting for their grace period or a worker). The queue picks
+due jobs from its in-memory records, never from directory scans, and gives a worker that advertises
+`checkpoint-expiry-v1` up to 8 job folders at a time. The worker removes them in
+the background, off the queue lock, and reports each removal. The queue records
+`checkpoint_expired` on the job, which survives restart. A worker removes nothing
+unless the root contains the queue's marker, so an empty local mountpoint never
+counts as the share. It refuses any path other than the job's own flat or
+sharded folder and never follows a symlinked shard. A failed or unfinished
+removal is reissued after 30 minutes, or sooner if that worker restarts or
+leaves. Jobs that never started, and file-store checkpoints, which file retention
+already governs, are not touched.
 
 **Every save must be atomic:** write to a temporary file in the same directory,
 flush and fsync it, rename it into place, then fsync the directory (except the

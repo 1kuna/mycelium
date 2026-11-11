@@ -39,6 +39,8 @@ type queueRecords struct {
 	keys                      recordDeadlines
 	jobCount, submissionCount int
 	updating                  bool
+	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
+	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
 }
 
 type recordDeadline struct {
@@ -119,6 +121,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil || terminal(j.State) {
 		q.evidenceGeneration++
 	}
+	q.indexCheckpointExpiry(id, j)
 	if j == nil {
 		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)

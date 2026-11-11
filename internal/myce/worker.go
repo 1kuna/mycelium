@@ -30,6 +30,7 @@ type Worker struct {
 	hygieneCollector     *workerHygieneCollector
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
 	diskBudgetWire       *workerDiskBudgetWire
+	checkpointExpiry     *workerCheckpointExpiry
 	toolReport           *workerToolReport // Serial check-in negotiation, shared by value copies.
 	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver
@@ -1221,6 +1222,7 @@ func (w Worker) Run(stop context.Context) error {
 	w.controlLatency = &workerControlLatency{}
 	w.toolReport = &workerToolReport{}
 	w.diskBudgetWire = &workerDiskBudgetWire{}
+	w.checkpointExpiry = newWorkerCheckpointExpiry()
 	if w.rootMonitor == nil {
 		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	}

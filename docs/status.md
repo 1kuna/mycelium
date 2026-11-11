@@ -325,7 +325,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 |---|---|
 | `jobs` | Complete selected job status fields, attempts, admission/evidence, eligibility and fresh placement diagnostics |
 | `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
-| `storage` | `storage_observations` and `file_store` (including retained-file accounting) |
+| `storage` | `storage_observations`, `file_store` (including retained-file accounting) and `checkpoint_expiry` (settled NAS checkpoint folders `waiting` for their grace period or a worker, and `undated` ones kept for lack of any timestamp; see [files](files.md#resumable-jobs)) |
 | `work` | `work_curves` |
 | `health` | Retained `health_alerts` event history (large on a busy queue), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
@@ -1084,6 +1084,13 @@ diagnostics, not retry charges: two starts and zero losses can include a planned
 requeue followed by one command failure. A launch refusal without an availability
 flag is still charged a loss under the existing retry rules.
 
+When the queue's own start fence (launch authorization, start placement or
+hand-off) refuses an attempt before its main command starts, the attempt is an
+admission requeue: its history entry has `admission_requeue: true` and no
+`interrupted`, the job's `starts` does not count it, and `admission_requeues`
+does. The attempt number stays spent, so the retry gets the next number and
+reports from the refused attempt are rejected as stale.
+
 Queue-driven cancellation and an assigned attempt's start-deadline expiry also
 record exact-attempt endings, without inventing a worker execution cause or
 physical-release evidence. Never-assigned jobs have no attempt entry. Late exact
@@ -1102,7 +1109,13 @@ uses that cause in its reason, without implying a worker restart. Actual fresh
 worker-session recovery retains its separate restart diagnostic. Authorization
 failures still consume the existing infrastructure retry/loss budget, except
 when the queue's start fence refused placement: that attempt requeues without a
-loss or retry charge. The queue log line `event=launch_placement_rejected`
+loss or retry charge. After Started authorization, that exemption needs the
+worker's `execution_evidence` for that exact attempt with `main: not_started`.
+A refusal with missing, `unknown`, `may_have_run` or other-attempt evidence is
+charged as an ordinary loss and infrastructure retry: the queue's refusal record
+names the fence predicate, not whether it refused main's gate or a helper's
+custody, and a helper gate can be refused after main started. Current workers
+send that evidence; older workers' post-Started refusals are charged. The queue log line `event=launch_placement_rejected`
 names the failed `predicate` (`disk_floor`, `machine_unavailable`,
 `preparation_stopping`, `execution_target`, `cpu_fit` or `placement_policy`).
 
@@ -1348,19 +1361,17 @@ capacity do not withhold co-tenants indefinitely. A dependent-stage forecast
 expires when the measured producer overruns. No prediction of future,
 unsubmitted jobs is made.
 
-The physical free-RAM floor is **max(existing unified-CUDA reserve, physical RAM
-minus the configured host allowance)**. The existing OS/driver reserve is at
-least 16 GiB; a larger configured device reserve is retained. Similarly,
-a tighter operator allowance retains the larger remainder, providing additional
-room for driver allocations, fragmentation and outside growth. For example,
-121.064556 GiB physical RAM and a 96 GiB allowance yield a 25.064556 GiB floor
-(9.064556 GiB beyond the existing reserve). This is a conservative admission
-policy, not a measured guarantee against driver allocation failures. It costs
-co-tenancy capacity when unmanaged memory uses that remainder. Native
-coexistence/fragmentation qualification remains separate. A measured allowance
-on a host without a shared-interactive profile already excludes the idle
-footprint that live used RAM contains, so its floor is the reserve alone; the
-allowance still caps reservations.
+The physical free-RAM floor is the existing unified-CUDA reserve: the OS/driver
+reserve is at least 16 GiB, and a larger configured device reserve is retained.
+An allowance, measured or authored, caps reservations and is never a floor:
+live used RAM already contains the idle footprint it excludes, so physical RAM
+minus the allowance would withhold that footprint twice. For example, 121.06 GiB
+physical RAM, 4 GiB idle use, a 16 GiB reserve and a 96 GiB authored allowance
+offer 96 GiB at idle (previously 92). Only a shared-interactive host keeps the
+larger of its reserve and physical RAM minus its allowance. This is a
+conservative admission policy, not a measured guarantee against driver
+allocation failures; native coexistence/fragmentation qualification remains
+separate.
 
 The queue checks raw physical availability from the existing host-memory
 observation, subtracting this floor and outstanding reservation growth; the
@@ -2520,7 +2531,7 @@ require the matching client and queue release; they are not rollout evidence.
 ## Job findings
 
 Failed jobs, and queued or running jobs that Mycelium requeued after an
-infrastructure loss, carry one additive `finding` with `code`, `owner`, `what`
+infrastructure loss or a queue admission refusal, carry one additive `finding` with `code`, `owner`, `what`
 and `action`. `owner` is `job` (the command or its declaration), `mycelium`
 (host or queue infrastructure, not the job's fault) or `unknown` (no typed
 cause was recorded). `what` is one sentence of measured evidence and what
@@ -2535,7 +2546,8 @@ queue-owned reasons; they are never persisted and never copy worker text.
 Covered classes include output-contract failures after exit 0 (`output_*`),
 publication failures (`output_publication`), resource stops (`memory_limit`,
 `out_of_memory`, `memory_exceeds_hosts`, `wall_time_limit`, `disk_limit`),
-infrastructure requeues and exhaustion, launch failures (`library_missing`,
+infrastructure requeues and exhaustion, queue admission requeues before the
+command started (`queue_admission`, owner `mycelium`), launch failures (`library_missing`,
 `tools_missing`, `input_unavailable`, `launch_*`), upstream dependencies,
 nonzero exits and payload signals. A failure with no typed cause reports
 `cause_unknown` rather than a guess. Succeeded and cancelled jobs carry none;

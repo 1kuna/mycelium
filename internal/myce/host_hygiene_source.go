@@ -56,6 +56,7 @@ func localHostHealth(ctx context.Context) (HostHealthReading, error) {
 			}
 		}
 		r.SwapBytes = max(0, values["SwapTotal:"]-values["SwapFree:"]) * 1024
+		r.availableBytes = values["MemAvailable:"] * 1024
 	} else if runtime.GOOS == "darwin" {
 		b, err := exec.CommandContext(ctx, "/usr/sbin/sysctl", "-n", "vm.loadavg", "kern.memorystatus_vm_pressure_level", "vm.swapusage").Output()
 		if err != nil {

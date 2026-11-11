@@ -9,37 +9,37 @@ import "time"
 // launch and as the parent memory ceiling. Every protection is a margin on
 // the same physical reading, applied once: never a second subtraction.
 
-// resolveHostAllowance picks the host's one allowance source: the queue's host
-// policy (measured from idle history, else its authored fallback), else the
-// workers' own flags. Workers enforce it once they acknowledge it.
+// resolveHostAllowance picks the host's one allowance: the queue's host policy
+// (measured from idle history, else its authored fallback), else the workers'
+// own flags. Each worker enforces the allowance it last acknowledged, so until
+// every live worker acknowledges a change the queue admits within the lower of
+// the new allowance and theirs. A pending acknowledgement is a readiness and
+// health signal (HostMemoryPolicyMismatch), never an admission pause: a
+// measured allowance shifts with idle history and must not stall its host.
 func (q *Queue) resolveHostAllowance(m *Machine) {
-	m.hostBudgetGB = 0
-	m.HostMemoryDerivation = nil
-	m.HostMemoryPolicyMismatch = false
-	for _, other := range q.s.Machines {
-		if hostID(other) != hostID(m) {
-			continue
-		}
-		if policy := q.s.HostMaintenance[hostID(m)].MemoryBudget; policy != nil && policy.Measured && (other.Gone || other.Replacement != nil) {
-			continue
-		}
-		if other.HostMemoryBudgetGB != m.HostMemoryBudgetGB {
-			m.HostMemoryPolicyMismatch = true
-		}
-		if other.HostMemoryBudgetGB > 0 && (m.hostBudgetGB == 0 || other.HostMemoryBudgetGB < m.hostBudgetGB) {
-			m.hostBudgetGB = other.HostMemoryBudgetGB
-		}
-	}
-	if policy, ok := q.s.HostMaintenance[hostID(m)]; ok && policy.MemoryBudget != nil {
-		budget, derivation := q.measuredHostMemoryBudget(m, *policy.MemoryBudget)
+	m.hostBudgetGB, m.HostMemoryDerivation, m.HostMemoryPolicyMismatch = 0, nil, false
+	policy := q.s.HostMaintenance[hostID(m)].MemoryBudget
+	if policy != nil {
+		budget, derivation := q.measuredHostMemoryBudget(m, *policy)
 		m.hostBudgetGB, m.HostMemoryDerivation = budget.GiB, derivation
-		for _, other := range q.s.Machines {
-			if policy.MemoryBudget.Measured && (other.Gone || other.Replacement != nil) {
-				continue
-			}
-			if hostID(other) == hostID(m) && (other.HostMemoryBudgetGB != m.hostBudgetGB || other.HostMemoryBudgetMeasured != policy.MemoryBudget.Measured) {
-				m.HostMemoryPolicyMismatch = true
-			}
+	}
+	for _, w := range q.s.Machines {
+		if hostID(w) != hostID(m) {
+			continue
+		}
+		live := !w.Gone && w.Replacement == nil
+		switch {
+		case policy == nil:
+			// Without a policy, sibling flags must agree with each other.
+			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || w.HostMemoryBudgetGB != m.HostMemoryBudgetGB
+		case policy.Measured:
+			// The measured value moves with history; the mode is the contract.
+			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || live && !w.HostMemoryBudgetMeasured
+		default:
+			m.HostMemoryPolicyMismatch = m.HostMemoryPolicyMismatch || w.HostMemoryBudgetGB != m.hostBudgetGB || w.HostMemoryBudgetMeasured
+		}
+		if live && (w.HostMemoryBudgetGB > 0 || w.HostMemoryBudgetMeasured) && (m.hostBudgetGB <= 0 && m.HostMemoryDerivation == nil || w.HostMemoryBudgetGB < m.hostBudgetGB) {
+			m.hostBudgetGB = w.HostMemoryBudgetGB
 		}
 	}
 	allowance, _ := hostMemoryAllowance(m.hostBudgetGB)

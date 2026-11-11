@@ -188,6 +188,9 @@ func (q *Queue) maintainStartDeadlines() {
 		if !pending && !disabled && !executionExpired {
 			continue
 		}
+		if pending && !disabled && !executionExpired && j.State == "running" && absoluteStartBy(j) && recordedStartRefusal(j) != "" {
+			continue // The refusal report requeues it and restores the caller's remainder.
+		}
 		if !expired(j.Spec.StartBy, now) && !disabled && !executionExpired {
 			continue
 		}

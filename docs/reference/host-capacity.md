@@ -294,9 +294,14 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   active; learning never requires stopping admission to force an idle window.
   `host_memory_derivation` in machine JSON names `authored_fallback` and its
   reason, or `quiescent_v1` with baseline, reserve, allowance and coverage.
-  A genuinely derived zero means exhausted capacity, never uncapped. Queue and
-  worker must acknowledge the effective allowance before new starts. Existing
-  work retains custody if a new observation tightens the allowance.
+  A genuinely derived zero means exhausted capacity, never uncapped. Each
+  worker enforces the allowance it last acknowledged, so until every worker
+  acknowledges a change the queue admits within the lower of the new allowance
+  and the acknowledged ones: a rise applies after acknowledgement, a fall at
+  once, and admission never pauses. `host_memory_policy_mismatch` reports a
+  pending acknowledgement of an authored value or of the measured mode (not of
+  each measured value) for host readiness and health. Existing work retains
+  custody if a new observation tightens the allowance.
 
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
   `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified

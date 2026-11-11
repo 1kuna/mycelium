@@ -196,6 +196,10 @@ type Queue struct {
 	submitVerificationSlot     chan struct{}
 	nasProbe                   checkpointAvailability
 	nasProgress                checkpointIO[int64]
+	shards                     checkpointShards
+	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
+	checkpointGrace            time.Duration
+	checkpointExpiryStatus     *atomic.Pointer[CheckpointExpiryStatus] // Shared by detached views; counts are published at commit, after read capture.
 	nasAvailable               bool
 
 	nextApprovalWarning time.Time
@@ -436,6 +440,10 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	success = true
+	if q.checkpointExpiryStatus == nil {
+		q.checkpointExpiryStatus = &atomic.Pointer[CheckpointExpiryStatus]{}
+	}
+	q.kickCheckpointShards()
 	return q, nil
 }
 
@@ -1030,7 +1038,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		} else {
 			id = ID()
 		}
-		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -1496,7 +1504,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	c.Machine.ToolInventory, c.Machine.toolInventory = nil, nil
 	c = receivedDeviceTelemetry(c, q.clock.Now())
 	preparedMachine := cloneMachine(&c.Machine)
-	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	reply := Reply{WorkerDiskBudgetProtocol: workerDiskBudgetProtocol, WorkerDiskHeadroomProtocol: workerDiskHeadroomProtocol, DeviceHealthProtocol: deviceHealthProtocol, DeviceRecoveryProtocol: deviceRecoveryProtocol, HostMountProgressProtocol: hostMountProgressProtocol, DeviceTelemetryProtocol: deviceTelemetryProtocol, HostProbeProtocol: hostProbeProtocol, ProbeMemoryProtocol: probeMemoryProtocol, HostMemorySampleProtocol: hostMemorySampleProtocol, UnifiedMemoryProtocol: unifiedMemoryProtocol, HostCollectionProtocol: hostCollectionProtocol, HostHygieneProtocol: hostHygieneProtocol, ToolInventoryProtocol: toolInventoryProtocol, CheckpointExpiryProtocol: checkpointExpiryProtocol, FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
+	q.kickCheckpointShards()
 	reports := c.Attempts
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {
@@ -1731,6 +1740,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
+		q.checkinCheckpointExpiry(c, &m, &reply)
 		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		for _, d := range m.Devices {
@@ -2287,6 +2297,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.
 		q.requeueStartRefusal(j)
+		if j.State == "queued" {
+			admissionRequeueOutcome(&outcome)
+		}
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -2397,7 +2410,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
 	compact := q.observationSelection != nil && q.observationSelection.compact
-	out := Snapshot{EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
 	if compact {
 		out.FleetUpgrade = q.observationSelection.upgrade
@@ -2968,7 +2981,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
 		predicate := "host_launch"
-		if q.hostSessionLaunchAllowed(m, r.Session) {
+		if q.assignedLaunchAllowed(m, r.Session, j) {
 			predicate = q.startPlacementRejection(j)
 		}
 		if predicate != "" {
@@ -3205,8 +3218,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		q.touchMachine(m.ID)
 	}
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
-	j.Starts = max(j.Starts, j.Attempt) + 1
-	j.Attempt = j.Starts
+	// Starts plus admission requeues is the issued-attempt high-water mark, so
+	// an uncounted refusal or a recovered older copy never reissues a number.
+	j.Attempt = max(j.Starts+j.AdmissionRequeues, j.Attempt) + 1
+	j.Starts = j.Attempt - j.AdmissionRequeues
 	if j.storedFileResults() {
 		j.OutputRefs = nil
 		j.PendingOutputRefs = nil

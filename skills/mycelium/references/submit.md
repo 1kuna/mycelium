@@ -194,8 +194,9 @@ read-only shared inputs with relative NAS source, SHA-256 and size, then read
 Resolve alone does not verify worker NAS bytes. For submitter-local bytes, use
 the upload/local-input contract. Keep integrity and capacity refusals:
 re-uploading identical oversized inputs cannot make them fit. Mutable
-`MYCE_CHECKPOINT_DIR` state is not an input-media cache. See
-[files/checkpoints](../../../docs/files.md).
+`MYCE_CHECKPOINT_DIR` state is not an input-media cache, and it is not a result:
+a NAS checkpoint is kept for 72 h after the job ends; declare outputs for
+anything needed longer (#894). See [files/checkpoints](../../../docs/files.md#resumable-jobs).
 
 Claim `resumable: true` only after implementing atomic checkpoints and a real
 restore. Safe movement needs a compatible qualified resume/result contract,

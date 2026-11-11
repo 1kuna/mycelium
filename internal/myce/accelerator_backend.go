@@ -14,11 +14,14 @@ type acceleratorBackend struct {
 	// Memory accounting policy is separate from the device's observed topology.
 	unifiedMemory, autoUnifiedMemory, fixedMemoryDefault bool
 	deviceHostMemory, unifiedProcessAdmission            bool
-	memoryCommand, memorySelectorFlag                    string
-	liveFreeMemory                                       func(context.Context, func(context.Context, string, ...string) ([]byte, error)) (float64, error)
-	attemptMemory                                        func(Worker, context.Context, map[int]bool, memoryFS, *float64, ...map[int]bool) (float64, bool, error)
-	measureMemory                                        func(context.Context, string, float64, func(context.Context, string, ...string) ([]byte, error)) (MemoryReading, error)
-	resolveDevice                                        func(context.Context, string) (string, error)
+	// Device allocations are charged to the owning task's phys_footprint
+	// (Metal), so a per-process footprint sample measures device and host use.
+	processFootprint                  bool
+	memoryCommand, memorySelectorFlag string
+	liveFreeMemory                    func(context.Context, func(context.Context, string, ...string) ([]byte, error)) (float64, error)
+	attemptMemory                     func(Worker, context.Context, map[int]bool, memoryFS, *float64, ...map[int]bool) (float64, bool, error)
+	measureMemory                     func(context.Context, string, float64, func(context.Context, string, ...string) ([]byte, error)) (MemoryReading, error)
+	resolveDevice                     func(context.Context, string) (string, error)
 
 	hostOS, hostArch          string
 	telemetryPendingSource    string
@@ -78,7 +81,7 @@ func init() {
 		},
 		{
 			platform: "metal", extensionDevice: "mps", resourceName: "Apple Metal",
-			unifiedMemory: true, onlyDevice: "0", onlyDeviceError: "Metal supports only device 0", cooperativeCPUIsolation: true, applicationDevice: "mps (queue backend metal)", variantDevice: "mps or MLX (queue backend metal)", inventory: metalAccelerators, hostOS: "darwin", hostArch: "arm64",
+			unifiedMemory: true, processFootprint: true, onlyDevice: "0", onlyDeviceError: "Metal supports only device 0", cooperativeCPUIsolation: true, applicationDevice: "mps (queue backend metal)", variantDevice: "mps or MLX (queue backend metal)", inventory: metalAccelerators, hostOS: "darwin", hostArch: "arm64",
 			verifyCPUIsolation: verifyMetalSelectNone, fingerprint: metalFingerprint,
 		},
 		{

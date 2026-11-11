@@ -741,6 +741,9 @@
     },
     "AttemptOutcome": {
       "properties": {
+        "admission_requeue": {
+          "type": "boolean"
+        },
         "attempt": {
           "type": "integer"
         },
@@ -2975,6 +2978,10 @@
     },
     "Job": {
       "properties": {
+        "admission_requeues": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "admission_wait": {
           "$ref": "#/$defs/AdmissionWaitEvidence",
           "x-contract": "diagnostic"
@@ -3038,6 +3045,11 @@
           "x-contract": "stable"
         },
         "checkpoint": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_expired": {
+          "format": "date-time",
           "type": "string",
           "x-contract": "diagnostic"
         },

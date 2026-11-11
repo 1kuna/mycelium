@@ -583,6 +583,7 @@ type Job struct {
 	StartedAt             *time.Time                   `json:"started_at,omitempty"`
 	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
 	Starts                int                          `json:"starts"`
+	AdmissionRequeues     int                          `json:"admission_requeues,omitempty"`
 	InfrastructureRetries int                          `json:"infrastructure_retries,omitempty"`
 	Losses                int                          `json:"losses"`
 	Progress              int64                        `json:"progress"`
@@ -597,6 +598,7 @@ type Job struct {
 	StopAt                *time.Time                   `json:"stop_at,omitempty"`
 	Reason                string                       `json:"reason,omitempty"`
 	Checkpoint            string                       `json:"checkpoint"`
+	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
 }
 type Machine struct {
 	Suspect           bool                     `json:"suspect,omitempty"` // Status-only; uncertainty never proves loss.
@@ -719,22 +721,25 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	contact              *checkinContact   // Queue-local request fence, never serialized.
-	period               time.Duration     // Transport header; not part of strict legacy JSON.
-	ToolInventoryHash    string            `json:"tool_inventory_hash,omitempty"`
-	ToolInventoryVersion uint64            `json:"tool_inventory_version,omitempty"`
-	NASPathReports       []NASPathReport   `json:"nas_path_reports,omitempty"`
-	AttemptProtocol      string            `json:"attempt_protocol,omitempty"`
-	Attempts             []AttemptReport   `json:"attempts,omitempty"`
-	Recovering           bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
-	CurveReports         []WorkObservation `json:"curve_reports,omitempty"`
-	BenchmarkDone        string            `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
-	Started              bool              `json:"started,omitempty"`
-	ModelReports         []ModelReport     `json:"model_reports,omitempty"`
-	PreviousSession      string            `json:"previous_session,omitempty"`
-	Fresh                bool              `json:"fresh,omitempty"`
-	Machine              Machine           `json:"machine"`
-	Running              *Execution        `json:"running,omitempty"`
+	contact              *checkinContact // Queue-local request fence, never serialized.
+	period               time.Duration   // Transport header; not part of strict legacy JSON.
+	ToolInventoryHash    string          `json:"tool_inventory_hash,omitempty"`
+	ToolInventoryVersion uint64          `json:"tool_inventory_version,omitempty"`
+	NASPathReports       []NASPathReport `json:"nas_path_reports,omitempty"`
+	// Sent only after the queue advertises checkpointExpiryProtocol (#894).
+	CheckpointExpiryProtocol string                   `json:"checkpoint_expiry_protocol,omitempty"`
+	CheckpointExpiryReports  []CheckpointExpiryReport `json:"checkpoint_expiry_reports,omitempty"`
+	AttemptProtocol          string                   `json:"attempt_protocol,omitempty"`
+	Attempts                 []AttemptReport          `json:"attempts,omitempty"`
+	Recovering               bool                     `json:"recovering,omitempty"` // Reconcile custody without offering new work.
+	CurveReports             []WorkObservation        `json:"curve_reports,omitempty"`
+	BenchmarkDone            string                   `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Started                  bool                     `json:"started,omitempty"`
+	ModelReports             []ModelReport            `json:"model_reports,omitempty"`
+	PreviousSession          string                   `json:"previous_session,omitempty"`
+	Fresh                    bool                     `json:"fresh,omitempty"`
+	Machine                  Machine                  `json:"machine"`
+	Running                  *Execution               `json:"running,omitempty"`
 }
 type Reply struct {
 	DeviceRecoveryProtocol     string                       `json:"device_recovery_protocol,omitempty"`
@@ -754,6 +759,8 @@ type Reply struct {
 	ToolInventoryHash          string                       `json:"tool_inventory_hash,omitempty"`
 	ToolInventoryVersion       uint64                       `json:"tool_inventory_version,omitempty"`
 	NASPathChecks              []NASPathCheck               `json:"nas_path_checks,omitempty"`
+	CheckpointExpiryProtocol   string                       `json:"checkpoint_expiry_protocol,omitempty"`
+	CheckpointExpiries         []CheckpointExpiry           `json:"checkpoint_expiries,omitempty"`
 	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
 
@@ -871,24 +878,26 @@ type Snapshot struct {
 
 	HealthAlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
 
-	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
-	QueueRelease   RunningRelease       `json:"queue_release"`
-	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
-	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`
-	HostStates     map[string]string    `json:"host_states,omitempty"`
-	Admissions     []HostAdmissions     `json:"admissions,omitempty"`
-	WorkCurves     []WorkObservation    `json:"work_curves"`
-	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
-	HoldsDetail    []HoldDetail         `json:"holds_detail"`
-	HostHolds      []string             `json:"host_holds,omitempty"`
-	Now            time.Time            `json:"now"`
-	Usage          UsageReport          `json:"usage"`
-	SyncRequests   []SyncRequest        `json:"sync_requests"`
-	Pins           []ModelPin           `json:"pins"`
-	LoadedModels   []ModelSlot          `json:"loaded_models"`
-	Warning        string               `json:"warning,omitempty"`
-	Jobs           []*Job               `json:"jobs"`
-	Machines       []*Machine           `json:"machines"`
+	HealthAlerts []HealthAlert       `json:"health_alerts,omitempty"`
+	QueueRelease RunningRelease      `json:"queue_release"`
+	FleetUpgrade *FleetUpgradeStatus `json:"fleet_upgrade,omitempty"`
+	FileStore    *FileStoreStatus    `json:"file_store,omitempty"`
+	// Settled NAS checkpoint folders still held (#894); storage section.
+	CheckpointExpiry *CheckpointExpiryStatus `json:"checkpoint_expiry,omitempty"`
+	HostStates       map[string]string       `json:"host_states,omitempty"`
+	Admissions       []HostAdmissions        `json:"admissions,omitempty"`
+	WorkCurves       []WorkObservation       `json:"work_curves"`
+	PriorityPolicy   PriorityPolicyRecord    `json:"priority_policy"`
+	HoldsDetail      []HoldDetail            `json:"holds_detail"`
+	HostHolds        []string                `json:"host_holds,omitempty"`
+	Now              time.Time               `json:"now"`
+	Usage            UsageReport             `json:"usage"`
+	SyncRequests     []SyncRequest           `json:"sync_requests"`
+	Pins             []ModelPin              `json:"pins"`
+	LoadedModels     []ModelSlot             `json:"loaded_models"`
+	Warning          string                  `json:"warning,omitempty"`
+	Jobs             []*Job                  `json:"jobs"`
+	Machines         []*Machine              `json:"machines"`
 
 	// Operator-retired fleet operations, oldest first (audit record, #588).
 	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`

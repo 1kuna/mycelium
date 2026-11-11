@@ -44,7 +44,7 @@ func curveFits(m *Machine, needs ResourceNeeds, count int) bool {
 		return false
 	}
 	n := s.Needs
-	if max(1, n.CPUCores)*count > m.EffectiveCPUCores || !m.HostMemoryMeasured || m.HostMemoryError != "" || m.HostMemoryPolicyMismatch {
+	if max(1, n.CPUCores)*count > m.EffectiveCPUCores || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return false
 	}
 	gpu, host := n.MemoryGB*float64(count), n.HostMemoryGB*float64(count)

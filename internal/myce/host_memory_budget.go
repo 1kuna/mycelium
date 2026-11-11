@@ -51,9 +51,6 @@ func (w Worker) checkHostMemoryBudget(gpu, host float64) error {
 }
 
 func (m Machine) HostMemoryBudgetStatus() string {
-	if m.HostMemoryPolicyMismatch {
-		return "host allowance policy mismatch"
-	}
 	if (m.EffectiveHostMemoryBudgetGB > 0 || m.HostMemoryDerivation != nil) && m.HostMemoryInUseGB > m.EffectiveHostMemoryBudgetGB {
 		return fmt.Sprintf("over budget: %g GiB in use > %g GiB", m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB)
 	}

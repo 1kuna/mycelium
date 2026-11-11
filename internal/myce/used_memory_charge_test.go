@@ -301,7 +301,11 @@ func TestUsedMemoryOvercommitProductionRules(t *testing.T) {
 func unifiedUsedChargeMachine() Machine {
 	m := unifiedCUDAAdmissionMachine()
 	m.MemoryEnforcement, m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = cgroupEnforced, 100.06, 100
+	m.ReservedMemoryGB = 16 // The measured unified host's explicit reserve: its physical floor.
 	m.FreeMemoryGB, m.TotalMemoryGB = 100, 100
+	// This audit uses the measured host's 16 GiB reserve (#1044), not the
+	// admission fixture's 25 GiB floor, which leaves only 81 GiB here.
+	m.ReservedMemoryGB = 16
 	return m
 }
 
@@ -335,10 +339,10 @@ func TestUnifiedUsedMemoryChargeAuditFixture(t *testing.T) {
 			m := unifiedUsedChargeMachine()
 			s := spec("experiment")
 			s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, host
-			submit(t, q, s)
+			pending := submit(t, q, s)
 			a := assignedJob(check(t, q, m, nil))
 			if a == nil {
-				t.Fatal("naming-sized job not assigned")
+				t.Fatal("naming-sized job not assigned:", job(t, q, pending.ID).Reason)
 			}
 			if err := q.Started(result(a, false)); err != nil {
 				t.Fatal(err)

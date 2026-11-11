@@ -319,7 +319,7 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	} else {
 		copy.ID = ID()
 	}
-	copy.Checkpoint = filepath.Join(q.root, copy.ID)
+	copy.Checkpoint = q.checkpointPath(copy.ID)
 	copy.Queued = q.clock.Now()
 	copy.WaitingSince = parent.WaitingSince
 	if copy.Spec.Priority == "production" {

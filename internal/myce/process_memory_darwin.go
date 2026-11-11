@@ -23,6 +23,7 @@ func localProcessMemory() *processMemoryProbe {
 			}
 			return darwinOwnedResident(roots)
 		},
+		OwnedFootprint: darwinOwnedFootprintProbe(),
 		Pressure: func(ctx context.Context) (*gpuHostState, error) {
 			probeguard.Check()
 			if state, err, ok := darwinFastPressure(); ok {
@@ -154,6 +155,21 @@ type darwinProcRow struct {
 // that exited, is skipped rather than charged. Roots stay strictly fenced.
 // ok=false asks for the ps fallback (an owned process could not be inspected).
 func ownedResidentFromTable(roots map[int]string, rows []darwinProcRow, sid func(int) (int, error), resident func(int) (uint64, string, error), birthOf func(int) (string, error)) (uint64, int, error, bool) {
+	var read func(int) ([2]uint64, string, error)
+	if resident != nil {
+		read = func(pid int) ([2]uint64, string, error) {
+			rss, birth, err := resident(pid)
+			return [2]uint64{rss}, birth, err
+		}
+	}
+	total, members, err, ok := ownedPairFromTable(roots, rows, sid, read, birthOf)
+	return total[0], members, err, ok
+}
+
+// ownedPairFromTable sums two counters read together per owned process (the
+// footprint probe reads phys_footprint and RSS in one call).
+func ownedPairFromTable(roots map[int]string, rows []darwinProcRow, sid func(int) (int, error), read func(int) ([2]uint64, string, error), birthOf func(int) (string, error)) ([2]uint64, int, error, bool) {
+	var total [2]uint64
 	byPID := make(map[int]darwinProcRow, len(rows))
 	for _, r := range rows {
 		byPID[r.pid] = r
@@ -161,7 +177,7 @@ func ownedResidentFromTable(roots map[int]string, rows []darwinProcRow, sid func
 	for root, saved := range roots {
 		r, ok := byPID[root]
 		if !ok || saved == "" || r.zombie || r.birth != saved {
-			return 0, 0, errors.New("RSS ownership unavailable"), true
+			return total, 0, errors.New("RSS ownership unavailable"), true
 		}
 	}
 	owned := map[int]string{}
@@ -190,25 +206,25 @@ func ownedResidentFromTable(roots map[int]string, rows []darwinProcRow, sid func
 			}
 		}
 	}
-	var total uint64
 	members := 0
 	for pid, birth := range owned {
-		rss, current, err := resident(pid)
+		value, current, err := read(pid)
 		if errors.Is(err, syscall.ESRCH) {
 			continue
 		}
 		if err != nil {
-			return 0, 0, nil, false
+			return [2]uint64{}, 0, nil, false
 		}
 		if current != birth {
 			continue
 		}
-		total += rss
+		total[0] += value[0]
+		total[1] += value[1]
 		members++
 	}
 	for root, saved := range roots {
 		if birth, err := birthOf(root); err != nil || birth != saved {
-			return 0, 0, errors.New("RSS ownership changed"), true
+			return [2]uint64{}, 0, errors.New("RSS ownership changed"), true
 		}
 	}
 	return total, members, nil, true

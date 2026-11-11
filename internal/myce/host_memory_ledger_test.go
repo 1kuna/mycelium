@@ -21,7 +21,7 @@ func TestHostMemoryLedgerFleetShapes(t *testing.T) {
 		want                 float64
 	}
 	for _, s := range []shape{
-		{name: "unified-authored", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, want: 92},
+		{name: "unified-authored", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, want: 96},
 		{name: "unified-measured", total: 121.06, p50: 4, p95: 4.5, max: 5, reserve: 16, allowance: 96, unified: true, measured: true, want: 101.06},
 		{name: "services-authored", total: 31.21, p50: 8.2, p95: 12, max: 14.6, reserve: 4, allowance: 24, role: hostRoleServices, want: 19.01},
 		{name: "services-measured", total: 31.21, p50: 8.2, p95: 12, max: 14.6, reserve: 4, allowance: 24, role: hostRoleServices, measured: true, want: 16.61},
@@ -66,8 +66,8 @@ func TestHostMemoryLedgerFleetShapes(t *testing.T) {
 			if _, err := q.Checkin(Checkin{Machine: m, period: 12 * time.Second}); err != nil {
 				t.Fatal(err)
 			}
-			if s.measured {
-				q.s.Machines[m.ID].HostMemoryBudgetGB = q.s.Machines[m.ID].EffectiveHostMemoryBudgetGB
+			if d := q.s.Machines[m.ID].HostMemoryDerivation; s.measured && d != nil {
+				q.s.Machines[m.ID].HostMemoryBudgetGB = d.AllowanceGB // The worker acknowledges the reply.
 			}
 			q.refreshHostMemory()
 			got := q.s.Machines[m.ID].FreeHostMemoryGB
@@ -75,5 +75,68 @@ func TestHostMemoryLedgerFleetShapes(t *testing.T) {
 				t.Fatalf("idle room %.2f GiB, want %.2f", got, s.want)
 			}
 		})
+	}
+}
+
+// A measured allowance moves with idle history. Until the worker acknowledges
+// the new value, admission uses the lower of new and acknowledged: a rise
+// waits for the acknowledgement, a fall binds at once, and neither pauses the
+// host or drops its readiness.
+func TestHostMemoryLedgerMeasuredShiftNeverPauses(t *testing.T) {
+	q, clock := fixture(t)
+	m := measuredMemoryMachine() // 32 GiB, reserve 2, authored fallback 20.
+	m.CapabilityProfile.Availability = &Availability{Mode: "dedicated", Available: true}
+	m.MemoryObservation.Quiescent = true
+	idle := func(used float64, n int) {
+		for range n {
+			m.MemoryObservation.UsedGB, m.HostAvailableMemoryGB = used, 32-used-2
+			q.recordExternalMemory(&m)
+			clock.Advance(time.Minute)
+		}
+	}
+	idle(4, 10)
+	q.s.HostMaintenance = map[string]HostMaintenance{m.HostID: {MemoryBudget: &HostMemoryBudget{GiB: 20, Measured: true}}}
+	reply := check(t, q, m, nil)
+	ack := func(gib float64) {
+		m.HostMemoryBudgetGB = gib
+		check(t, q, m, nil)
+	}
+	ack(reply.HostMemoryBudget.GiB)
+	stored := func() *Machine { return q.s.Machines[m.ID] }
+	if got := stored().EffectiveHostMemoryBudgetGB; got != 26 || stored().HostMemoryPolicyMismatch {
+		t.Fatal("measured allowance not applied", got)
+	}
+	healthy, err := q.HostMaintenanceStatus(m.HostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Idle use falls: the derived allowance rises to 28 before acknowledgement.
+	idle(2, 40)
+	reply = check(t, q, m, nil)
+	if reply.AdmissionBlocked || reply.HostMemoryBudget.GiB != 28 {
+		t.Fatal("rising allowance paused admission", reply.AdmissionBlocked, reply.HostMemoryBudget)
+	}
+	if got := stored().EffectiveHostMemoryBudgetGB; got != 26 || stored().HostMemoryPolicyMismatch || stored().FreeHostMemoryGB != 26 {
+		t.Fatal("unacknowledged rise was spent or reported as pending", got, stored().FreeHostMemoryGB)
+	}
+	j := submit(t, q, cpuSpec(1, 1))
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
+		t.Fatal("pending acknowledgement held admission", job(t, q, j.ID).Reason)
+	}
+	if status, err := q.HostMaintenanceStatus(m.HostID); err != nil || status.Healthy != healthy.Healthy {
+		t.Fatal("a measured shift changed readiness", status.Healthy, healthy.Healthy, err)
+	}
+	ack(28)
+	if got := stored().EffectiveHostMemoryBudgetGB; got != 28 {
+		t.Fatal("acknowledged rise not applied", got)
+	}
+
+	// Idle use rises: the lower derived allowance binds before acknowledgement.
+	finish(t, q, q.s.Jobs[j.ID], true)
+	idle(10, 200)
+	check(t, q, m, nil)
+	if got := stored().EffectiveHostMemoryBudgetGB; got >= 28 || got != stored().HostMemoryDerivation.AllowanceGB {
+		t.Fatal("falling allowance waited for acknowledgement", got, stored().HostMemoryDerivation)
 	}
 }

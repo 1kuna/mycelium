@@ -253,18 +253,29 @@ func TestMultiCardDevLaunchSeesBothCards(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s := bigSpec("experiment", 12)
-	s.Run.Command = []string{"sh", "-c", `printf '%s %s' "$MYCE_GPU_COUNT" "$MYCE_DEVICES" > "$MYCE_CHECKPOINT_DIR/cards"`}
+	// Read while running: settled expiry removes the folder after success (#894).
+	s.Run.Command = []string{"sh", "-c", `printf '%s %s' "$MYCE_GPU_COUNT" "$MYCE_DEVICES" > "$MYCE_CHECKPOINT_DIR/cards"; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep .02; done`}
 	var j Job
 	if err := d.Client().Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
+	var seen []byte
 	await(t, func() bool {
 		if err := d.Client().Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
 			t.Fatal(err)
 		}
-		return terminal(j.State)
+		if terminal(j.State) {
+			return true
+		}
+		dir := filepath.Join(jobCheckpointDir(cfg.Checkpoints, j.ID), fmt.Sprintf("attempt-%d", j.Attempt))
+		if data, err := os.ReadFile(filepath.Join(dir, "cards")); err == nil && len(data) > 0 && len(seen) == 0 {
+			seen = data
+			if err := os.WriteFile(filepath.Join(dir, "finish"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false
 	})
-	seen, _ := os.ReadFile(filepath.Join(cfg.Checkpoints, j.ID, fmt.Sprintf("attempt-%d", j.Attempt), "cards"))
 	if j.State != "succeeded" || !slices.Equal(j.AllocatedDevices, []string{"0", "1"}) || string(seen) != "2 0,1" {
 		t.Fatalf("state=%s devices=%v saw=%q reason=%s", j.State, j.AllocatedDevices, seen, j.Reason)
 	}

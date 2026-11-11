@@ -52,6 +52,11 @@ func jobFinding(j *Job, rawReason string) *JobFinding {
 				fmt.Sprintf("Mycelium lost %s to a host or worker interruption, not to your command, and requeued the job automatically.", plural(j.Losses, "attempt")),
 				"none needed; Mycelium retries on its own (resumable jobs continue from saved progress)."}
 		}
+		if j.AdmissionRequeues > 0 {
+			return &JobFinding{"queue_admission", findingOwnerMycelium,
+				fmt.Sprintf("Mycelium's queue withdrew launch authorization before your command started and placed the job again (%s); this is a queue admission event, not an execution start or a lost attempt.", plural(j.AdmissionRequeues, "admission requeue")),
+				"none needed; Mycelium places the job again on its own."}
+		}
 	}
 	return nil
 }

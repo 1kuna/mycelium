@@ -37,7 +37,7 @@ func (q *Queue) hostValues() map[string]*hostValue {
 			hosts[id] = h
 		}
 		p := m.CapabilityProfile
-		if p == nil || p.SystemMemoryBytes == 0 || (p.MemoryLayout != "unified" && p.MemoryLayout != "separate") || m.HostMemoryPolicyMismatch {
+		if p == nil || p.SystemMemoryBytes == 0 || (p.MemoryLayout != "unified" && p.MemoryLayout != "separate") {
 			h.known = false
 			continue
 		}

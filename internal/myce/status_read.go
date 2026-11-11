@@ -302,7 +302,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	}
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
-		evidenceRetention: q.evidenceRetention, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
+		evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
 	q.freezeContactView(v)
