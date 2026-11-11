@@ -1,5 +1,6 @@
 import http.client
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import os
@@ -516,6 +517,10 @@ class DevTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
             self.assertRegex(result.stdout, r'"files":\{"pixi\.lock":"[^"]+","pixi\.toml":"[^"]+"\}')
+            lock = self.client.get(job)["environment_lock"]
+            self.assertEqual(lock["backend"], "pixi")
+            self.assertEqual(lock["sha256"]["pixi.lock"],
+                             hashlib.sha256((root / "env/pixi.lock").read_bytes()).hexdigest())
             self.client.cancel(job)
 
     def test_cancel_running_by_key(self):

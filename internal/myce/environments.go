@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -244,6 +245,24 @@ func snapshotEnvironmentFiles(r EnvironmentRecipe, platform, base, label string,
 	r.Key = hex.EncodeToString(h[:])
 	return r, nil
 }
+// environmentLock digests the frozen lock inputs of resolved recipes. Every
+// platform recipe of one lock_file environment freezes the same files.
+func environmentLock(recipes map[string]EnvironmentRecipe) *EnvironmentLock {
+	for _, platform := range slices.Sorted(maps.Keys(recipes)) {
+		r := recipes[platform]
+		if r.LockFile == "" || len(r.Files) == 0 {
+			continue
+		}
+		lock := &EnvironmentLock{Backend: r.Backend, SHA256: map[string]string{}}
+		for name, data := range r.Files {
+			sum := sha256.Sum256(data)
+			lock.SHA256[name] = hex.EncodeToString(sum[:])
+		}
+		return lock
+	}
+	return nil
+}
+
 func (q *Queue) ConfigureEnvironments(c EnvironmentCatalog) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -288,6 +307,13 @@ func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]Enviro
 			return nil, err
 		}
 		out[p] = r
+	}
+	// Every platform recipe freezes the same lock; check it once.
+	for _, r := range out {
+		if err := checkInlinePixiLock(context.Background(), r); err != nil {
+			return nil, rejectFieldRule("job_environment_invalid", err)
+		}
+		break
 	}
 	return out, nil
 }

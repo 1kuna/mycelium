@@ -330,6 +330,22 @@ and `inputs` still do not carry a dependency workspace; to share one recipe
 across projects, ask the queue operator to register a named catalog recipe and
 select it with `environment: NAME`.
 
+Workers install Pixi recipes with Pixi 0.81.0 (`pixi install --locked`).
+When the queue reads or receives a `pixi.lock`, it runs the same up-to-date
+check with that exact version (`pixi shell-hook --locked --no-install -v` on a
+private temporary copy; no install, solve or caches) and refuses a stale lock
+with `job_environment_invalid`, Pixi's per-platform mismatch and the fix: run
+`pixi lock` with Pixi >= 0.81.0. Resolve reports the same finding. Native
+extension registration checks bundled Pixi recipes the same way. The queue uses
+the managed tool the installer places in its user's tool tree, or a `pixi` on
+PATH reporting exactly 0.81.0; it never downloads one at submission. Without
+it, or on a timeout (30 s) or any other tool failure, the check is skipped and
+workers refuse at preparation as before. Results are cached by input digest.
+
+A single-job reply (`myce status JOB --json`, `GET /api/jobs/ID`) carries
+`environment_lock`: the backend and the sha256 of each frozen lock input, by
+basename, recorded at acceptance. Status lists omit it.
+
 A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
 rejected before acceptance: queue-side reads and malformed uploads with HTTP
 400 `job_environment_invalid`, and submitter-side reads by the CLI with

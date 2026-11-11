@@ -422,6 +422,15 @@ type Copy struct {
 	ReleaseReason    string `json:"release_reason,omitempty"`
 }
 
+// EnvironmentLock is the frozen lock identity of a lock_file environment:
+// each frozen input's sha256 by basename (pixi.lock and pixi.toml, uv.lock and
+// pyproject.toml, or requirements.txt). Recorded at acceptance; single-job
+// replies show it although spec.environment is projected away.
+type EnvironmentLock struct {
+	Backend string            `json:"backend,omitempty"`
+	SHA256  map[string]string `json:"sha256"`
+}
+
 // SpecProjection describes fields stripped by the observation privacy policy.
 // Omitted paths are relative to spec and do not disclose submitted presence.
 type SpecProjection struct {
@@ -468,6 +477,7 @@ type Job struct {
 	StorageAttemptsDropped int                          `json:"storage_attempts_dropped,omitempty"`
 	RequirementReasons     []RequirementReasonStatus    `json:"requirement_reasons,omitempty"`
 	SpecProjection         *SpecProjection              `json:"spec_projection,omitempty"`
+	EnvironmentLock        *EnvironmentLock             `json:"environment_lock,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`

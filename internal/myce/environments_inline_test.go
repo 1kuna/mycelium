@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -181,6 +183,28 @@ func TestEnvironmentInlineUploadedFiles(t *testing.T) {
 	}
 	if recipe.Key == "" || recipe.Key != q.s.Jobs[readJob.ID].EnvironmentRecipes["cpu"].Key || string(recipe.Files["pixi.toml"]) != string(files["pixi.toml"]) || stored.Spec.Environment.Files != nil {
 		t.Fatalf("uploaded recipe: %+v spec files=%d", recipe, len(stored.Spec.Environment.Files))
+	}
+	// Consumers read back the frozen lock identity on the single-job reply;
+	// list views stay compact.
+	view, err := c.GetJob(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockSum, manifestSum := sha256.Sum256(files["pixi.lock"]), sha256.Sum256(files["pixi.toml"])
+	if l := view.EnvironmentLock; l == nil || l.Backend != "pixi" || len(l.SHA256) != 2 || l.SHA256["pixi.lock"] != hex.EncodeToString(lockSum[:]) || l.SHA256["pixi.toml"] != hex.EncodeToString(manifestSum[:]) {
+		t.Fatalf("environment lock readback: %+v", view.EnvironmentLock)
+	}
+	var snapshot Snapshot
+	if err := c.Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) == 0 {
+		t.Fatal("status listed no jobs")
+	}
+	for _, listed := range snapshot.Jobs {
+		if listed.EnvironmentLock != nil {
+			t.Fatal("list view carries environment_lock")
+		}
 	}
 	for name, bad := range map[string]map[string][]byte{
 		"missing companion": {"pixi.lock": files["pixi.lock"]},

@@ -130,19 +130,24 @@ func TestProfileUploadsRelativePixiLock(t *testing.T) {
 	server := httptest.NewServer(myce.API{Queue: q, Token: "fixture"}.Handler())
 	defer server.Close()
 	profile := filepath.Join(project, ".mycelium", "profiles", "sample.yaml")
+	// The fixture queue has no workers. It resolves and freezes the uploaded
+	// environment, then refuses only at target qualification (a queue-side
+	// lock read would refuse first with job_environment_invalid). Accepted
+	// submissions start a receipt observer, which this test must not spawn.
 	var out bytes.Buffer
-	if err := runProfile(context.Background(), profile, nil, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard); err != nil {
+	if err := runProfile(context.Background(), profile, nil, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard); err == nil || !strings.Contains(err.Error(), "no_qualified_target") {
 		t.Fatal(err, out.String())
 	}
 	var receipt profileReceipt
 	if err := json.Unmarshal(out.Bytes(), &receipt); err != nil {
 		t.Fatal(err, out.String())
 	}
-	if receipt.JobID == "" || string(receipt.Spec.Environment.Files["pixi.toml"]) != "[workspace]\nname='example'\n" || len(receipt.Spec.Environment.Files) != 2 {
+	if receipt.RefusalCode != "no_qualified_target" || string(receipt.Spec.Environment.Files["pixi.toml"]) != "[workspace]\nname='example'\n" || len(receipt.Spec.Environment.Files) != 2 {
 		t.Fatal(out.String())
 	}
-	// Lock bytes are intent: reusing an explicit key after an edit conflicts.
-	if err := runProfile(context.Background(), profile, nil, nil, "fixed", "", "", "", server.URL, "fixture", io.Discard, io.Discard); err != nil {
+	// Lock bytes are intent: reusing an explicit key after an edit conflicts
+	// locally, before any request.
+	if err := runProfile(context.Background(), profile, nil, nil, "fixed", "", "", "", server.URL, "fixture", io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "no_qualified_target") {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(project, "env", "pixi.lock"), []byte("version: 6\nenvironments: {edited: {}}\n"), 0600); err != nil {

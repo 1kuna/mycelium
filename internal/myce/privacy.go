@@ -322,6 +322,8 @@ func statusJobInputs(job *Job) Job {
 	j.ModelEnvironmentNeedsSource = false
 	j.EnvironmentRecipes = nil
 	j.SidecarEnvironmentRecipes = nil
+	// Single-job replies restore this compact identity; lists stay small.
+	j.EnvironmentLock = nil
 	j.EnvironmentFailureLog = ""
 	j.Checkpoint = ""
 	return j
