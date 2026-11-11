@@ -757,19 +757,31 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				if err != nil {
 					return r, err
 				}
-				// Controls remain keyed even when cancellation has already made
-				// the queue's job terminal during input preparation.
-				if t := worker.task; t != nil {
-					for _, control := range reply.Attempts {
-						if control.ID == t.id && control.Attempt == t.attempt && control.Session == c.Machine.Session && control.Stop && math.IsInf(t.stopAt, 1) {
+				// Match the real worker's keyed cleanup: stop held executions and
+				// explicitly release own-session copies with no local execution.
+				for _, control := range reply.Attempts {
+					if !control.Stop || control.Session != c.Machine.Session {
+						continue
+					}
+					if t := worker.task; t != nil && control.ID == t.id && control.Attempt == t.attempt {
+						if math.IsInf(t.stopAt, 1) {
 							t.stopAt = now + min(1, max(0, control.GraceSeconds))
 							changed = true
 						}
+						continue
 					}
+					ack := Result{Execution: control.Execution, Machine: c.Machine.ID, Session: control.Session, ReleaseOnly: true}
+					if e = q.Complete(ack); e != nil && !errors.Is(e, ErrStale) {
+						return r, e
+					}
+					changed = true
 				}
 				var directive AttemptDirective
-				if len(reply.Attempts) > 0 {
-					directive = reply.Attempts[0]
+				for _, offered := range reply.Attempts {
+					if offered.Job != nil {
+						directive = offered
+						break
+					}
 				}
 				if worker.task == nil && directive.Job != nil {
 					var t *simTask
