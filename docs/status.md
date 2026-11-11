@@ -3060,3 +3060,21 @@ queues negotiate without the additive fields; the worker keeps local receipts.
 GPU-host/native capture qualification remains separate from synthetic laptop
 proof. A recorded event is never itself a causal finding: report `unknown` until
 the retained evidence establishes the actual chain.
+
+## Shared owner yield and measured CPU (#389, next release)
+
+`cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
+below declared cores. Job `cpu_observation` retains the exact sample identity,
+previous elapsed/usage counters and logical-job `peak_cores` lower bound. The
+first reading establishes a counter origin; subsequent adjacent readings raise
+the learned rate. The CPU `resources` entry exposes this learned need. It remains
+valid through checkpoint/requeue, including missing or quieter later telemetry;
+it does not predict a different submission.
+
+`shared_host_pressure` additionally reports `cpu_known` and `cpu_psi` on Linux.
+Memory/CPU PSI and owner latency use this host's learned healthy bands; macOS
+memory warnings and existing host-relative swap-growth/latency health also
+withhold admission. Every running job on the host, production included,
+receives `shared_host_pressure` stop/requeue provenance (MY-45); resumable jobs
+get checkpoint grace. Native containment and stress
+qualification remain separate from these diagnostics and synthetic tests.

@@ -129,6 +129,20 @@ environment sources and immutable masters keep their existing contracts. See
 and [local acquisition](../../../docs/reference/models.md#local-acquisition-root-1248-next-release).
 Host health, mounts and collection detail: [release behavior](release-behavior.md#automatic-host-hygiene-source-audited-verify-installed-support).
 
+## Shared interactive host
+
+The agents' host carries the shared/interactive profile
+([MY-45](../../../docs/DECISIONS.md#my-45)). There a job's CPU charge is the
+larger of its declared cores and its measured peak, carried across
+checkpoint/requeue and shown in the CPU entry of status `resources`. Owner
+pressure stops new admission and yields every running job on that host,
+production included: memory warnings or PSI, Linux CPU PSI, owner scheduling
+latency, or swap growth with latency. Resumable jobs checkpoint and requeue;
+non-resumable jobs stop and requeue; neither is charged an infrastructure retry.
+Keep waiting on the same job and key, with no manual resume and no pressure
+polling. Dedicated hosts are unaffected. See
+[shared hosts](../../../docs/shared-hosts.md#measured-cpu-and-owner-yield).
+
 ## Urgency, reservations and pausing
 
 Class expresses urgency: `production` only for work the project's rulings call

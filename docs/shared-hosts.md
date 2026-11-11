@@ -46,3 +46,37 @@ The implementation is queue-side and worker-side. Upgrading only the queue
 fixes health/contact interpretation but does not make older workers refresh
 pressure independently of slow requests. Native pressure calibration remains
 separate from the fake-clock incident regressions.
+
+## Measured CPU and owner yield
+
+Shared-host admission charges the larger of declared cores and the logical
+job's measured peak CPU need. The existing CPU-time telemetry supplies adjacent
+sample rates; macOS sampled process-tree readings remain lower bounds. Whole
+core accounting rounds up. Missing telemetry keeps the declaration, and later
+quiet samples never erase demonstrated overuse. The learned need survives
+checkpoint/requeue; it does not predict another submission's concurrency.
+
+Memory warning levels, host-relative Linux memory/CPU PSI and owner scheduling
+latency stop new admission and yield every running job on the host, as does
+existing host-health swap-growth/latency evidence. Under
+[MY-45](DECISIONS.md#my-45) the interactive host's owner outranks every
+Mycelium tier, production included: resumable jobs checkpoint through
+exact-attempt stop and release custody, and non-resumable jobs stop at once.
+Both requeue as the same logical job without infrastructure retry charges.
+Recovery permits them to run again, subject to the existing owner-latency
+recovery hold. Hosts without the shared profile (dedicated nodes) are unaffected.
+
+CPU PSI fields are additive on the existing `host-probe-v1` report. macOS still has no
+hard aggregate CPU-time or memory containment. This policy reduces new admission
+and cooperatively yields work; it cannot guarantee recovery from an OS freeze.
+
+The fake-clock fork-growth replay uses a retained incident's 16 GiB physical
+host, 2 GiB declaration (2.125 GiB resolved), 2,004 members, 64.07 GiB RSS-sum
+and 44.83 GiB swap-out activity. Intermediate values and timing are synthetic;
+the retained record does not establish that chronology. The first warning
+triggers checkpoint yield before the critical observation. Repeated pressure
+keeps the original stop deadline. An explicit RSS-guard failure before or racing
+that yield remains a resource failure, with one attempt/release accounting path;
+owner-pressure provenance cannot turn it into a successful checkpoint or an
+infrastructure retry. Summed RSS/compressed footprint is not exclusive physical
+RAM, and swap-out activity is not swap allocation.
