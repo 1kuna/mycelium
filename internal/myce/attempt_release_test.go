@@ -229,3 +229,85 @@ func TestAttemptProtocolDockerReportedRelease(t *testing.T) {
 	}
 	requireState(t, q, j.ID, "cancelled")
 }
+
+// #1021: the queue commits an assignment whose reply the worker never receives
+// (slow control plane), then the job fails before starting. Its custody must
+// release on the worker's next same-session contact, only through an exact
+// unheld acknowledgement, and the late release must not reopen the ledger.
+func TestAttemptProtocolNeverStartedTerminalCustody(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unheld-releases", true: "held-keeps-custody"}[held], func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("never-started", "fake")
+			acks := make(chan Result, 8)
+			api := API{q, "test"}.Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/workers/complete" {
+					var ack Result
+					if err := json.NewDecoder(r.Body).Decode(&ack); err != nil {
+						t.Error(err)
+					}
+					acks <- ack
+					respondOperation(rw, nil, q.Complete(ack), "worker_result_invalid")
+					return
+				}
+				api.ServeHTTP(rw, r)
+			}))
+			defer server.Close()
+			w := Worker{Clock: clock, Machine: m, Client: Client{URL: server.URL, Token: "test"}}
+			victim := submit(t, q, spec("production"))
+			wire := attemptWire(t, w.Client, Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, period: time.Second})
+			if len(wire.Attempts) != 1 || wire.Attempts[0].Job == nil || wire.Attempts[0].Job.ID != victim.ID {
+				t.Fatalf("missing initial assignment: %+v", wire)
+			}
+			lost := wire.Attempts[0].Job
+			clock.Advance(ProductionStartTimeout)
+			failed := job(t, q, victim.ID)
+			if failed.State != "failed" || failed.ReleaseConfirmed || failed.StartedAt != nil || !q.jobReleasePending(failed) {
+				t.Fatalf("precondition: want a failed never-started job holding custody: %+v", failed)
+			}
+			complete := failed.Ledger != nil && failed.Ledger.Complete
+			if !complete {
+				t.Fatalf("precondition: closed ledger already incomplete: %+v", failed.Ledger)
+			}
+			c := Checkin{Machine: m}
+			if held {
+				// A worker still holding the key gets an addressed stop, never a release.
+				c.Attempts = []AttemptReport{{Execution: Execution{ID: lost.ID, Attempt: lost.Attempt}, Session: m.Session}}
+			}
+			reply, err := w.fixtureCheckin(context.Background(), c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, victim.ID)
+			if held {
+				if len(acks) != 0 || got.ReleaseConfirmed || !q.jobReleasePending(got) || !reply.Stop || !reply.Kill {
+					t.Fatalf("held attempt released without cleanup: acks=%d reply=%+v job=%+v", len(acks), reply, got)
+				}
+				return
+			}
+			if len(acks) != 1 {
+				t.Fatalf("got %d release acknowledgements; want 1", len(acks))
+			}
+			ack := <-acks
+			if !ack.ReleaseOnly || ack.ReleasePending || ack.ID != lost.ID || ack.Attempt != lost.Attempt || ack.Session != m.Session || ack.Machine != m.ID {
+				t.Fatalf("not an exact release-only acknowledgement: %+v", ack)
+			}
+			if got.State != "failed" || !got.ReleaseConfirmed || q.jobReleasePending(got) || len(q.s.HostReleases) != 0 {
+				t.Fatalf("never-started custody still pending: job=%+v releases=%+v", got, q.s.HostReleases)
+			}
+			if got.Ledger == nil || !got.Ledger.Complete {
+				t.Fatalf("late release reopened a closed ledger: %+v", got.Ledger)
+			}
+			st, err := q.HostMaintenanceStatus(hostID(&m))
+			if err != nil || len(st.Attempts) != 0 || len(st.PendingReleases) != 0 {
+				t.Fatalf("host still holds custody: %+v %v", st, err)
+			}
+			// Confirmed custody receives no further controls.
+			again, err := w.fixtureCheckin(context.Background(), Checkin{Machine: m})
+			if err != nil || len(acks) != 0 || again.Stop {
+				t.Fatalf("released copy kept receiving stops: %+v %v acks=%d", again, err, len(acks))
+			}
+		})
+	}
+}
