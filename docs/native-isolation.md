@@ -126,6 +126,26 @@ growth rate × 0.2–0.8 s. Measured on one M-series Mac
 These are single-host measurements, not per-host qualification. A
 non-cgo Darwin build keeps the `ps` probe and a 1 s period.
 
+**Metal jobs (#1044).** Metal buffers are charged to the task's
+`phys_footprint`, not its RSS. For a Metal job with a declared size, the guard
+reads `proc_pid_rusage` (footprint and RSS in one call) for each owned process
+at the same 200 ms cadence and stops the attempt once the summed footprint
+stays above device plus host plus slack for the same three samples. A process
+it cannot inspect makes the sample unavailable rather than falling back to RSS.
+Non-cgo builds and auto-sized Metal work keep the old behaviour (no guard).
+Measured on an M4 Mac mini worker (16 GiB) through an experiment-tier job
+(`TestDarwinMetalFootprintGuardOvershoot`, 512 MiB limit; a Swift child
+allocates private `MTLBuffer`s, fills each with a GPU blit and logs its own
+footprint):
+
+| Synthetic Metal growth | Reaction (last write) | Footprint overshoot | RSS at stop |
+|---|---|---|---|
+| 256 MiB/s | 0.42 s | 141 MiB | 12 MiB |
+| 1 GiB/s | 0.75 s | 797 MiB | 12 MiB |
+
+The RSS guard would never have acted: RSS stayed at 12 MiB with 1.2 GiB of
+buffers held.
+
 ## Boundary and guarantees
 
 Sandboxed native batch commands and their sidecars, including queued extension run/check
@@ -139,6 +159,7 @@ but provides no boundary between jobs running as the same user.
 | Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
 | Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp` and shared `.scratch`; sibling contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
 | macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` and shared `.scratch` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
+| `isolation: ci` (#1298), either platform | Everything in that platform's sandboxed row, plus: HOME is the attempt-private `{work}/.home`; the worker's shared model cache, model root and operator roots on a network filesystem or below the NAS root aren't granted. macOS also denies reading the worker user's home, `/Users`, `/Volumes`, every non-local mount and the configured NAS root, except this attempt's own grants. | Same as sandboxed. | Same, with a worker-owned HOME that authored `run.env` can't override. | Same as sandboxed. | Same as sandboxed. |
 | Missing/unsupported confinement for a sandboxed stage | Required behavior: sandboxed native launch fails closed. | No implicit unconfined fallback. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
 
 Choose an exception at the extension top level or adapter entry with
@@ -158,6 +179,32 @@ job GET explain this default; workers warn once per attempt. Use the one-line
 `isolation: sandboxed` to opt in to the kernel boundary and offline default.
 New extension registrations still default sandboxed.
 The remaining kernel guarantees on this page apply to sandboxed stages.
+
+### CI mode (#1298)
+
+Use `isolation: ci` for a build or test of repository code, or for any job that
+mustn't see shared data. It needs no queue-owner approval (MY-44). The mode is
+`sandboxed` plus three things: an attempt-private HOME, no shared model library,
+and on macOS no worker home, `/Users`, `/Volumes`, network mounts or NAS root.
+The job still sees its declared inputs and model snapshots, its own checkpoint
+directory, prepared environments and extension caches, and system toolchains
+(`/usr`, `/opt`, `/Library`, `/Applications` on macOS). Tools that keep config or
+caches under HOME (git, Go, npm, pip, cargo) write to `{work}/.home`, which
+follows the attempt's retention and cleanup. Unless the job sets its own,
+`GIT_CEILING_DIRECTORIES` stops git's repository discovery at the attempt
+directory, so a hidden parent repository can't cause a fatal read. Toolchains installed under the
+worker user's home aren't visible: declare them through a prepared environment,
+or install them system-wide. Linux reads only granted files, so `/etc/gitconfig`
+and similar system files can be unreadable; set `GIT_CONFIG_NOSYSTEM=1` if git
+fails on them.
+
+Workers advertise `native_isolation_ci`. The queue places ci jobs only on workers
+that advertise it, so an older worker never runs one under the weaker sandboxed
+profile. Network access follows the ordinary declaration below: offline by
+default. Linux doesn't yet qualify native egress, so a Linux ci job that
+downloads dependencies needs them prepared or vendored. On macOS,
+`needs.network: true` grants outbound access. Metadata such as directory names
+can still be visible. Host `/tmp` stays shared on macOS, as for sandboxed.
 
 The boundary protects against confined jobs. Same-user **unsandboxed host
 processes** can still inspect or interfere with work and listeners and are

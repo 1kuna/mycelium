@@ -38,7 +38,9 @@ func (w Worker) nativeIsolationCapabilities() []string {
 	s := nativeLinuxDetection()
 	caps := []string{"native_isolation_" + s.mode}
 	if s.mode != "unavailable" {
-		caps = append(caps, "native_sidecars")
+		// Landlock already limits content reads to explicit grants; ci adds
+		// the private HOME and withholds shared data roots.
+		caps = append(caps, "native_sidecars", nativeCICapability)
 	}
 	if s.mode == "landlock" {
 		caps = append(caps, "native_network_partial")
@@ -176,13 +178,17 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		}
 	}
 	for _, path := range []string{modelCache, w.ModelRoot} {
-		if path != "" {
+		// A ci job reads only its own declared model snapshots (#1298).
+		if path != "" && !w.nativeCI {
 			p.ReadOnly = append(p.ReadOnly, path)
 		}
 	}
 	declaredRead, declaredExecute, err := w.nativeDeclaredRoots(spool)
 	if err != nil {
 		return p, err
+	}
+	if w.nativeCI {
+		declaredRead, declaredExecute = w.nativeLocalRoots(declaredRead), w.nativeLocalRoots(declaredExecute)
 	}
 	p.ReadOnly = append(p.ReadOnly, declaredRead...)
 	p.ReadOnly = append(p.ReadOnly, w.nativeModelInputs...)
@@ -195,7 +201,7 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	// Only operator runtime roots, never authored run.env library/PATH values.
 	for _, key := range []string{"LD_LIBRARY_PATH", "LIBRARY_PATH"} {
 		for _, path := range filepath.SplitList(os.Getenv(key)) {
-			if filepath.IsAbs(path) {
+			if filepath.IsAbs(path) && (!w.nativeCI || len(w.nativeLocalRoots([]string{path})) == 1) {
 				p.Read = append(p.Read, path)
 			}
 		}
@@ -414,4 +420,30 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	// must not execute code in the gate, bwrap, nsenter or helper before entry.
 	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
+}
+
+// Network filesystem types (statfs(2)); sshfs and other FUSE shares are
+// indistinguishable from local FUSE and rely on the NAS root and Landlock grants.
+var nativeNetworkFilesystems = []uint32{unix.NFS_SUPER_MAGIC, unix.SMB_SUPER_MAGIC, unix.SMB2_SUPER_MAGIC, unix.CIFS_SUPER_MAGIC, unix.NCP_SUPER_MAGIC, unix.CEPH_SUPER_MAGIC, unix.AFS_SUPER_MAGIC, unix.CODA_SUPER_MAGIC}
+
+// Operator roots on a network share or below the configured NAS root are
+// withheld from ci jobs; their own inputs and checkpoint keep exact grants.
+// An unreadable root is withheld rather than guessed local.
+func (w Worker) nativeLocalRoots(paths []string) []string {
+	var local []string
+	for _, path := range paths {
+		if w.ServiceConfig != nil && w.ServiceConfig.NAS != "" {
+			if nas, err := nativeResolvedPath(w.ServiceConfig.NAS); err == nil {
+				if resolved, err := nativeResolvedPath(path); err != nil || nativePathContains(nas, resolved) {
+					continue
+				}
+			}
+		}
+		var st unix.Statfs_t
+		if unix.Statfs(path, &st) != nil || slices.Contains(nativeNetworkFilesystems, uint32(st.Type)) {
+			continue
+		}
+		local = append(local, path)
+	}
+	return local
 }

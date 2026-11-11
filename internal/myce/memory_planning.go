@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Owned by one immutable planning pass, shared across its target machines.
 // Never retained across placements, inventory changes, or transaction boundaries.
@@ -105,9 +108,12 @@ const darwinGuardReaction = 4 * attemptMemorySamplePeriod
 //     host: Linux cgroup v2 ceilings, or the Darwin RSS guard. Interactive
 //     hosts keep their envelope (MY-45: harsher limits);
 //   - native GPU work on a unified CUDA host with cgroup v2 ceilings (see
-//     unifiedUsedMemoryCharge). Metal and discrete accelerators keep their
-//     envelope: the Darwin guard samples RSS, which never sees Metal buffers,
-//     and no per-process Metal sample exists yet;
+//     unifiedUsedMemoryCharge);
+//   - native Metal work with a declared size on a Darwin worker whose guard
+//     samples phys_footprint (metal_footprint_guard_v1). Metal buffers are
+//     invisible to RSS but counted 1:1 in phys_footprint (#1044), so the
+//     sample is the job's whole unified-memory use. Discrete accelerators keep
+//     their envelope;
 //   - learned evidence for this work on this target (MY-34): a first run with no
 //     accepted history keeps its envelope, and later runs never drop below
 //     what history says the job reaches;
@@ -130,6 +136,12 @@ func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySamp
 	resident := max(sample.gb, sample.footprintGB)
 	observed := max(sample.peakGB, resident)
 	learned := hostNeed(m, 0, j.MemoryEnvelope.Learned.HostGB)
+	if metalFootprintWork(j, m) {
+		// As for unified CUDA, the floor is the accepted peaks (RSS plus the
+		// footprint beyond it) without the envelope's uncertainty; the yield
+		// backstop covers growth past them.
+		learned = j.MemoryEnvelope.Learned.PeakHostGB + j.MemoryEnvelope.Learned.PeakDeviceGB
+	}
 	// hostForecast already carries the last measured increment and the rate
 	// through the sample's age; the drift margin covers snapshot-to-launch.
 	margin := exploratoryDriftMarginGB(m)
@@ -148,6 +160,10 @@ func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySamp
 		credit = sample.footprintGB
 	}
 	return charge, max(0, charge-credit, min(margin, charge)), true
+}
+
+func metalFootprintWork(j *Job, m *Machine) bool {
+	return m != nil && backendFor(m.GPU).processFootprint && !j.Spec.Needs.cpuOnly() && slices.Contains(m.Capabilities, metalFootprintGuardCapability)
 }
 
 func unifiedDeviceWork(j *Job, m *Machine) bool {
@@ -198,6 +214,9 @@ func usedMemoryChargeEligible(j *Job, m *Machine, sample hostMemorySample, now t
 	if unifiedDeviceWork(j, m) {
 		return unifiedUsedMemoryEligible(j, m, sample, now)
 	}
+	if metalFootprintWork(j, m) {
+		return metalUsedMemoryEligible(j, m, sample)
+	}
 	if !n.cpuOnly() || n.Memory == "auto" || n.HostMemoryGB <= 0 {
 		return false
 	}
@@ -226,4 +245,19 @@ func unifiedUsedMemoryEligible(j *Job, m *Machine, sample hostMemorySample, now 
 		return false
 	}
 	return validMemoryValue(sample.deviceGB) && validMemoryValue(sample.deviceGrowthGB) && validMemoryValue(sample.deviceRateGB)
+}
+
+// The worker guards the same envelope it reports: device plus host in unified
+// memory, so the queue must sum them too (a measured unified host). Peaks
+// come only from footprint samples: Metal attempts sampled by RSS alone never
+// carried a device share, so unified sizing never accepted them.
+func metalUsedMemoryEligible(j *Job, m *Machine, sample hostMemorySample) bool {
+	n, l := j.Spec.Needs, j.MemoryEnvelope.Learned
+	if m.MemoryEnforcement != darwinRSSGuardStatus || !m.UnifiedMemory || !m.HostMemoryMeasured || n.Memory == "auto" || n.HostMemoryGB <= 0 || len(j.AllocatedDevices) > 1 {
+		return false
+	}
+	if l.PeakDeviceGB <= 0 || !validMemoryValue(l.PeakDeviceGB) || !validMemoryValue(l.PeakHostGB) {
+		return false
+	}
+	return sample.footprintGB > 0
 }

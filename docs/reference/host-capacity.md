@@ -182,6 +182,13 @@ report can temporarily reduce admission until its next check-in. This is
 aggregate admission; external allocations can still race it. Workers repeat
 live refusal after preparation and before batch/model starts.
 
+Each host keeps one memory ledger. Capacity is the smallest live worker reading
+less one margin: the largest of the explicit host reserve, the measured idle
+burst, the unified CUDA physical floor and the interactive owner reserve,
+applied once, never stacked. Room is that capacity less the outstanding growth
+of every charge, within the host's one allowance less the charges, which workers
+enforce at launch.
+
 On dedicated GPUs the host pool charges only `host_memory_gb`. On unified-memory
 machines, GPU and CPU allocations share one host pool:
 charge `memory_gb + host_memory_gb` once per allocation, not two independent
@@ -287,9 +294,14 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   active; learning never requires stopping admission to force an idle window.
   `host_memory_derivation` in machine JSON names `authored_fallback` and its
   reason, or `quiescent_v1` with baseline, reserve, allowance and coverage.
-  A genuinely derived zero means exhausted capacity, never uncapped. Queue and
-  worker must acknowledge the effective allowance before new starts. Existing
-  work retains custody if a new observation tightens the allowance.
+  A genuinely derived zero means exhausted capacity, never uncapped. Each
+  worker enforces the allowance it last acknowledged, so until every worker
+  acknowledges a change the queue admits within the lower of the new allowance
+  and the acknowledged ones: a rise applies after acknowledgement, a fall at
+  once, and admission never pauses. `host_memory_policy_mismatch` reports a
+  pending acknowledgement of an authored value or of the measured mode (not of
+  each measured value) for host readiness and health. Existing work retains
+  custody if a new observation tightens the allowance.
 
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
   `0.125` GiB (128 MiB). Slack counts against the aggregate budget. Unified

@@ -69,7 +69,7 @@ func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
 }
 
 func (q *Queue) hostSessionOpen(m *Machine, session string) bool {
-	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
+	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m)
 }
 
 // #1299: placement refuses drained hosts, so a drain present when an assigned

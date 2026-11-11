@@ -834,6 +834,9 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 				// Preserve this candidate's frozen policy before suppressing extension
 				// qualification. Public isolation text and other alternatives grant nothing.
 				value.Spec.Isolation, value.Spec.Reason = "sandboxed", ""
+				if nativeCIRequired(candidate) {
+					value.Spec.Isolation = nativeIsolationCI
+				}
 				if reasons := nativeUnsandboxedReasons(candidate); len(reasons) > 0 {
 					value.Spec.Isolation, value.Spec.Reason = "unsandboxed", reasons[0]
 				}

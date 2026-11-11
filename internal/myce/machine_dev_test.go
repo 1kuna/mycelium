@@ -79,7 +79,7 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 		var data []byte
 		await(t, func() bool {
 			var err error
-			data, err = os.ReadFile(filepath.Join(cfg.Checkpoints, j.ID, fmt.Sprintf("attempt-%d", j.Attempt), "pid"))
+			data, err = os.ReadFile(filepath.Join(jobCheckpointDir(cfg.Checkpoints, j.ID), fmt.Sprintf("attempt-%d", j.Attempt), "pid"))
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				t.Fatal(err)
 			}

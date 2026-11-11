@@ -24,6 +24,8 @@ type HostHealthReading struct {
 	WakeSeconds float64 `json:"wake_seconds"`
 	// Local source semantics; persisted/wire pressure keeps its raw OS units.
 	pressurePSI bool
+	// Local MemAvailable bytes; zero is unknown. Not on the wire (strict peers).
+	availableBytes float64
 }
 
 type HostHealthSample struct {
@@ -93,6 +95,27 @@ func healthBand(samples []HostHealthSample, value func(HostHealthSample) float64
 }
 func absHealth(v float64) float64 { return max(v, -v) }
 
+// Swap growth below the baseline's measured swap-level jitter is counter noise,
+// even when every baseline growth sample is zero (#1299).
+func swapGrowthNoise(base []HostHealthSample) float64 {
+	noise := 0.0
+	for i := 1; i < len(base); i++ {
+		if dt := base[i].At.Sub(base[i-1].At).Seconds(); dt > 0 {
+			noise = max(noise, absHealth(base[i].SwapBytes-base[i-1].SwapBytes)/dt)
+		}
+	}
+	return noise
+}
+
+// Sustained over the confirmation horizon, swap growth is material only when
+// it would consume more than one percent of available memory: the same swap
+// budget attempt pressure evidence applies (hostPressureEvidence). Plentiful
+// headroom then excuses proactive reclaim, while a nearly full host still
+// drains on small growth. Unknown headroom keeps the band-only decision.
+func materialSwapGrowth(rate, interval, availableBytes float64) bool {
+	return availableBytes <= 0 || interval <= 0 || rate*interval*hostHealthConfirmation > availableBytes*.01
+}
+
 func (h *HostHealth) observe(s HostHealthSample) {
 	if len(h.History) > 0 {
 		previous := h.History[len(h.History)-1]
@@ -103,11 +126,16 @@ func (h *HostHealth) observe(s HostHealthSample) {
 			s.SwapGrowth = (s.SwapBytes - previous.SwapBytes) / s.At.Sub(previous.At).Seconds()
 		}
 	}
+	interval := 0.0
+	if len(h.History) > 0 {
+		interval = s.At.Sub(h.History[len(h.History)-1].At).Seconds()
+	}
 	reason := ""
 	if s.Error == "" && len(h.Baseline) >= hostHealthWarmup {
 		high := func(f func(HostHealthSample) float64) bool { _, hi := healthBand(h.Baseline, f); return f(s) > hi }
 		_, pressureLimit := healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.Pressure })
-		swap := high(func(s HostHealthSample) float64 { return s.SwapGrowth })
+		swap := high(func(s HostHealthSample) float64 { return s.SwapGrowth }) && s.SwapGrowth > swapGrowthNoise(h.Baseline) &&
+			materialSwapGrowth(s.SwapGrowth, interval, s.availableBytes)
 		latency := high(func(s HostHealthSample) float64 { return s.WakeSeconds })
 		heartbeat := s.HeartbeatSeconds > 0 && high(func(s HostHealthSample) float64 { return s.HeartbeatSeconds })
 		pressure := s.Pressure > pressureLimit

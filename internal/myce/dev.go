@@ -102,7 +102,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	if limit == 0 {
 		limit = 100 << 30
 	}
-	q, err := Open(c.Database, c.Checkpoints, clock, WithFileStoreProductionReserve(c.FileStoreProductionReserve), WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
+	q, err := Open(c.Database, c.Checkpoints, clock, WithCheckpointShards(), WithFileStoreProductionReserve(c.FileStoreProductionReserve), WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
 	if err != nil {
 		return nil, err
 	}

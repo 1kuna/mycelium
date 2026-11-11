@@ -51,10 +51,7 @@ func (q *Queue) recordProductionBackoff(j *Job, m *Machine, demand *Job) {
 	// Longer measured setup gets a full setup interval. Two preemptions within
 	// two such opportunities trigger one interval of back-off: enough to avoid
 	// another wasted bootstrap, without an all-day host reservation.
-	interval := ProductionStartTimeout
-	if seconds, known := measuredSetupSeconds(j, m, true); known {
-		interval = max(interval, time.Duration(seconds*float64(time.Second)))
-	}
+	interval := productionBackoffInterval(j, m)
 	if j.ProductionBackoff == nil {
 		j.ProductionBackoff = map[string]ProductionBackoff{}
 	}
@@ -65,6 +62,51 @@ func (q *Queue) recordProductionBackoff(j *Job, m *Machine, demand *Job) {
 	}
 	b.LastAt = now
 	j.ProductionBackoff[host] = b
+}
+
+func productionBackoffInterval(j *Job, m *Machine) time.Duration {
+	interval := ProductionStartTimeout
+	if seconds, known := measuredSetupSeconds(j, m, true); known {
+		interval = max(interval, time.Duration(seconds*float64(time.Second)))
+	}
+	return interval
+}
+
+// #1299: lower-tier jobs preempted for a production stage were re-placed on the
+// same host in the seconds before the pipeline's next stage was placed, then
+// evicted again, churning memory while that stage prepared. A queued job that
+// production preempted on this host stays off it while outranking production
+// work that could start here is pending: a ready queued stage (until it is
+// placed or its start deadline ends it) or an open production lease (only
+// within one back-off interval of the preemption, so a lease never reserves a
+// host indefinitely). Other hosts are unaffected, so the job places elsewhere.
+func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
+	b, preempted := j.ProductionBackoff[host]
+	if !preempted || b.LastAt.IsZero() || j.State != "queued" {
+		return ""
+	}
+	for _, d := range q.liveJobs() {
+		if d == j || d.State != "queued" || d.Spec.Priority != "production" || cancelled(d) || !dependencyReady(d) || q.comparePriority(j.Spec, d.Spec) <= 0 {
+			continue
+		}
+		if d.FanOut != nil && d.Spec.FanOut != nil && d.FanOut.Next >= len(d.Spec.FanOut.Pieces) {
+			continue // A fully launched parent has no new local demand.
+		}
+		if slices.Contains(q.startEligibleHosts(d), host) {
+			return fmt.Sprintf("host %s: production stage %s pending after preemption; placing elsewhere", host, d.ID)
+		}
+	}
+	if !q.clock.Now().Before(b.LastAt.Add(productionBackoffInterval(j, m))) {
+		return ""
+	}
+	for _, l := range q.openProductionLeases() {
+		for _, stage := range l.stageJobs() {
+			if q.comparePriority(j.Spec, stage.Spec) > 0 && slices.Contains(q.startEligibleHosts(stage), host) {
+				return fmt.Sprintf("host %s: production lease %s pending after preemption; placing elsewhere", host, l.Key)
+			}
+		}
+	}
+	return ""
 }
 
 func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
@@ -78,6 +120,9 @@ func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
 	host := hostID(m)
 	if b := j.ProductionBackoff[host]; q.clock.Now().Before(b.Until) {
 		return fmt.Sprintf("host %s: production preemption back-off; retry in %.0fs", host, b.Until.Sub(q.clock.Now()).Seconds())
+	}
+	if reason := q.productionGapReason(j, m, host); reason != "" {
+		return reason
 	}
 	if reason := q.unifiedCUDAProductionReason(j, m); reason != "" {
 		return reason

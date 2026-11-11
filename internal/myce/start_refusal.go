@@ -1,6 +1,9 @@
 package myce
 
-import "log"
+import (
+	"log"
+	"time"
+)
 
 // The ledger binds the refusal to exact attempt custody and persists it in the
 // same transaction as the fence decision. A later observation cannot erase it.
@@ -31,14 +34,30 @@ func startRefusalBeforeMain(j *Job, r Result) bool {
 
 func (q *Queue) requeueStartRefusal(j *Job) {
 	q.touchJob(j.ID)
-	deadline, caller := j.Spec.StartBy, absoluteStartBy(j)
+	deadline, caller, assigned := j.Spec.StartBy, absoluteStartBy(j), j.AssignedAt
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false
 	}
 	q.requeue(j, "requeued: start placement refused ("+recordedStartRefusal(j)+")", false)
 	if caller {
-		j.Spec.StartBy = deadline // A never-executed main cannot extend a caller cutoff.
+		j.Spec.StartBy = refusedStartBy(deadline, assigned, q.clock.Now())
 	}
+}
+
+// The queue's own admission refused this attempt before main ran, so its
+// assignment-to-refusal span must not spend a caller's cutoff. The remainder
+// the caller had at assignment becomes relative to the requeue, as a relative
+// window renews from requeue. Repeated exact refusals never exhaust it; time
+// spent queued afterwards still counts. Never shortens the cutoff.
+func refusedStartBy(deadline, assigned *time.Time, now time.Time) *time.Time {
+	if deadline == nil || assigned == nil || now.Before(*assigned) {
+		return deadline
+	}
+	restored := now.Add(deadline.Sub(*assigned))
+	if !restored.After(*deadline) {
+		return deadline
+	}
+	return &restored
 }
 
 func recordedStartRefusal(j *Job) string {

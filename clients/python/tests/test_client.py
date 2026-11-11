@@ -1,5 +1,6 @@
 import http.client
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import os
@@ -492,6 +493,35 @@ class DevTests(unittest.TestCase):
             self.assertTrue(job, "CLI journey must submit a job")
             self.assertEqual((root / "accepted/result.txt").read_bytes(),
                              b"mycelium-ease-audit-ok\n")
+
+    def test_consumer_skill_relative_pixi_lock(self):
+        # The submit reference's relative Pixi lock example: the CLI uploads the
+        # project's lock and manifest, so the queue never reads env/pixi.lock.
+        guide = ROOT / "skills/mycelium/references/submit.md"
+        blocks = [b for b in re.findall(r"^```sh\n(.*?)^```$", guide.read_text(), re.M | re.S)
+                  if "lock_file: env/pixi.lock" in b]
+        self.assertEqual(len(blocks), 1, "submit reference must keep its relative Pixi lock example")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, text in {"source/README.txt": "fixture\n",
+                               "env/pixi.lock": "version: 6\nenvironments: {}\n",
+                               "env/pixi.toml": "[workspace]\nname = 'example'\n"}.items():
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(text)
+            (root / ".mycelium").mkdir()
+            environment = {**os.environ, "HOME": str(root), "MYCE_QUEUE": self.client.url,
+                           "MYCE_TOKEN": "dev-token",
+                           "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
+            result = subprocess.run(["sh", "-ec", blocks[0]], cwd=root, env=environment,
+                                    capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
+            self.assertRegex(result.stdout, r'"files":\{"pixi\.lock":"[^"]+","pixi\.toml":"[^"]+"\}')
+            lock = self.client.get(job)["environment_lock"]
+            self.assertEqual(lock["backend"], "pixi")
+            self.assertEqual(lock["sha256"]["pixi.lock"],
+                             hashlib.sha256((root / "env/pixi.lock").read_bytes()).hexdigest())
+            self.client.cancel(job)
 
     def test_cancel_running_by_key(self):
         spec = self.spec([sys.executable, "-u", "-c",

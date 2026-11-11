@@ -769,6 +769,10 @@ class Client:
         spec is a privacy projection. spec_projection.omitted lists stripped
         paths relative to spec, regardless of submitted presence. In particular,
         absent spec.files does not mean that no files were submitted.
+        environment_lock, when present, identifies the frozen lock of a
+        lock_file environment: {"backend": ..., "sha256": {basename: hex}}
+        (for Pixi, pixi.lock and pixi.toml), although spec.environment is
+        projected away.
 
         Each entry contains attempt/machine/session, the observed memory_peak
         (including events and swap_gb when read), and memory_envelope. Missing

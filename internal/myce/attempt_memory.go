@@ -207,6 +207,10 @@ func (a *memoryAttempt) processIDs(ids map[int]bool) error {
 type processMemoryProbe struct {
 	// OwnedResident uses launch birth identities and the cleanup session boundary.
 	OwnedResident func(map[int]string) (uint64, int, error)
+	// OwnedFootprint sums phys_footprint and RSS over the same owned tree in
+	// one pass. Metal buffers appear in the footprint and not in RSS. Nil
+	// where it cannot be read.
+	OwnedFootprint func(map[int]string) (footprint, resident uint64, members int, err error)
 	// Resident bytes summed over live members of the process groups, and how
 	// many members were found.
 	Resident func(groups map[int]bool) (uint64, int, error)
@@ -249,10 +253,13 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 		clock = RealClock{}
 	}
 	guard := learnedMemoryGuard{}
+	probe := w.processMemory
+	footprint := false
 	if attempt != nil && attempt.job.Spec.Needs.cpuOnly() {
 		guard = w.learnedGuard(attempt.job)
+	} else if attempt != nil && w.footprintGuarded(attempt.job) {
+		footprint, guard = true, w.footprintGuard(attempt.job)
 	}
-	probe := w.processMemory
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
 	var growth processMemoryGrowth
@@ -287,15 +294,22 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 				ids[g] = true
 			}
 		}
-		var bytes uint64
+		var bytes, resident uint64
 		var members int
 		var sampleAt time.Time
-		if probe.OwnedResident != nil && attempt != nil {
+		if (probe.OwnedResident != nil || footprint) && attempt != nil {
 			roots := attempt.rssRoots()
-			bytes, members, err = probe.OwnedResident(roots)
+			quality := "owned_session_rss"
+			if footprint {
+				bytes, resident, members, err = probe.OwnedFootprint(roots)
+				quality = footprintGuardQuality
+			} else {
+				bytes, members, err = probe.OwnedResident(roots)
+			}
 			sampleAt = clock.Now()
 			if enforce {
 				if evidence := guard.observeMemory(clock.Now(), roots, bytes, members, err, host); evidence != nil {
+					evidence.Quality = quality
 					guard.exceeded = attempt.stopRSS(clock.Now(), roots, evidence)
 				}
 			}
@@ -316,6 +330,14 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 			attempt.rssMemory.Store(&processResidentSample{gb: gb, growth: margin, rate: growth.rate, at: sampleAt, observed: growth.horizon > 0})
 		}
 		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource, GrowthGB: &margin}
+		if footprint {
+			// Unified sizing sums a host and a device share. RSS is the host
+			// share; the footprint beyond it (Metal buffers, compressed pages)
+			// is the device share. Their sum is the measured footprint, or RSS
+			// when shared file pages make RSS the larger.
+			host, device := float64(resident)/(1<<30), max(0, gb-float64(resident)/(1<<30))
+			next.HostGB, next.DeviceGB, next.DeviceSource = &host, &device, deviceFootprintSource
+		}
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
 		peak.Source = processGroupMemorySource
@@ -357,9 +379,11 @@ func (w Worker) observeProcessMemory(groups func() []int, attempts ...*process) 
 }
 
 // Raise a process-group peak to the root's exit max RSS, which catches a
-// spike between samples in the main process.
+// spike between samples in the main process. A Metal footprint peak is left
+// alone: its RSS and beyond-RSS shares sum to the sampled footprint, and
+// raising one share alone would count the same pages twice.
 func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMemoryPeak {
-	if peak == nil || peak.Source != processGroupMemorySource || state == nil {
+	if peak == nil || peak.Source != processGroupMemorySource || peak.DeviceSource == deviceFootprintSource || state == nil {
 		return peak
 	}
 	ru, ok := state.SysUsage().(*syscall.Rusage)
@@ -649,6 +673,8 @@ const (
 	// outside every Mycelium cgroup. It also counts growth by non-Mycelium
 	// processes, and misses use that coincides with their frees.
 	deviceHostDeltaSource = "host memory drop outside Mycelium cgroups"
+	// DeviceSource for a Metal figure: phys_footprint beyond RSS (#1044).
+	deviceFootprintSource = "phys_footprint beyond RSS"
 )
 
 // The fallback for a unified CUDA attempt whose processes nvidia-smi listed

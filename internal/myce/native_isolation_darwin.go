@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // Seatbelt restrictions survive exec/fork and apply to same-UID jobs. The
@@ -79,7 +81,13 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if err := nativeReadOnlyOverlap(readOnly, append(slices.Clone(write), executableRead...)); err != nil {
 		return err
 	}
-	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot, modelCache, w.ModelRoot} {
+	shared := []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot}
+	if !w.nativeCI {
+		// A ci job reads only its own declared model snapshots, never the
+		// worker's shared model library.
+		shared = append(shared, modelCache, w.ModelRoot)
+	}
+	for _, path := range shared {
 		if path != "" {
 			read = append(read, canonical(path))
 		}
@@ -138,6 +146,28 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		path = canonical(path)
 		fmt.Fprintf(&profile, "(deny file-read-data (require-all (subpath %s) %s))\n", strconv.Quote(path), except(read))
 		fmt.Fprintf(&profile, "(deny file-write* (require-all (subpath %s) %s))\n", strconv.Quote(path), except(write))
+	}
+	if w.nativeCI {
+		// Seatbelt's base profile is targeted, leaving the worker user's home,
+		// other volumes and network shares readable. Hide them, keeping only
+		// this attempt's grants (#1298). Metadata stays visible, as for the spool.
+		hidden := []string{home, "/Users", "/Volumes", modelCache, w.ModelRoot}
+		if w.ServiceConfig != nil {
+			hidden = append(hidden, w.ServiceConfig.NAS)
+		}
+		mounts, err := nativeNonLocalMounts()
+		if err != nil {
+			return fmt.Errorf("native_isolation_unavailable: list mounts for isolation: ci: %w", err)
+		}
+		hidden = append(hidden, mounts...)
+		for _, path := range hidden {
+			if path == "" {
+				continue
+			}
+			path = canonical(path)
+			fmt.Fprintf(&profile, "(deny file-read-data (require-all (subpath %s) %s))\n", strconv.Quote(path), except(read))
+			fmt.Fprintf(&profile, "(deny file-write* (require-all (subpath %s) %s))\n", strconv.Quote(path), except(write))
+		}
 	}
 	// Prevent poisoning the worker's executables, startup files and shared tools.
 	for _, path := range append([]string{home, "/System", "/usr", "/bin", "/sbin", "/Library", "/opt", "/Applications"}, read...) {
@@ -209,9 +239,29 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	return nil
 }
 
+// Network shares and other non-local filesystems, wherever they are mounted.
+// An unknown mount table fails the launch rather than hiding nothing.
+func nativeNonLocalMounts() ([]string, error) {
+	n, err := unix.Getfsstat(nil, unix.MNT_NOWAIT)
+	if err != nil {
+		return nil, err
+	}
+	stats := make([]unix.Statfs_t, n+8) // Room for a mount added in between.
+	if n, err = unix.Getfsstat(stats, unix.MNT_NOWAIT); err != nil {
+		return nil, err
+	}
+	var mounts []string
+	for _, s := range stats[:n] {
+		if s.Flags&unix.MNT_LOCAL == 0 {
+			mounts = append(mounts, unix.ByteSliceToString(s.Mntonname[:]))
+		}
+	}
+	return mounts, nil
+}
+
 func (w Worker) nativeIsolationCapabilities() []string {
 	if info, err := os.Stat("/usr/bin/sandbox-exec"); err == nil && info.Mode()&0111 != 0 {
-		return []string{"native_isolation_seatbelt", "native_network", "native_sidecars"}
+		return []string{"native_isolation_seatbelt", nativeCICapability, "native_network", "native_sidecars"}
 	}
 	return []string{"native_isolation_unavailable"}
 }

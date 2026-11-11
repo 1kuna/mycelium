@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -142,5 +144,79 @@ func TestEnvironmentInlineOversizedInput(t *testing.T) {
 				t.Fatal("oversized input accepted")
 			}
 		})
+	}
+}
+
+// Submitter-uploaded lock bytes (relative lock_file from `myce run --profile`)
+// freeze to the same recipe identity as a queue-side read, without the queue
+// reading the path; names and the 1 MiB limit match the queue-side read.
+func TestEnvironmentInlineUploadedFiles(t *testing.T) {
+	q, _ := fixture(t)
+	c := Client{URL: testServerForEnvironments(t, q), Token: "test"}
+	files := map[string][]byte{"pixi.lock": []byte("version: 6\nenvironments: {}\n"), "pixi.toml": []byte("[workspace]\nname='example'\n")}
+	dir := t.TempDir()
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := cpuResolveSpec()
+	read.Environment = Environment{Backend: "pixi", LockFile: filepath.Join(dir, "pixi.lock"), Platforms: []string{"cpu"}}
+	readJob, err := c.Submit(context.Background(), read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploaded := cpuResolveSpec()
+	uploaded.Environment = Environment{Backend: "pixi", LockFile: "absent-on-queue/pixi.lock", Platforms: []string{"cpu"}, Files: files}
+	var report ResolveReport
+	if err := c.Call(context.Background(), "POST", "/api/resolve", ResolveRequest{Spec: uploaded}, &report); err != nil || resolveFinding(report, "environment") != nil || resolveFinding(report, "environment.lock_file") != nil {
+		t.Fatalf("resolve: %+v, %v", report.Findings, err)
+	}
+	j, err := c.Submit(context.Background(), uploaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := q.s.Jobs[j.ID]
+	recipe := stored.EnvironmentRecipes["cpu"]
+	if err := q.files.hydrateRecipe(&recipe); err != nil {
+		t.Fatal(err)
+	}
+	if recipe.Key == "" || recipe.Key != q.s.Jobs[readJob.ID].EnvironmentRecipes["cpu"].Key || string(recipe.Files["pixi.toml"]) != string(files["pixi.toml"]) || stored.Spec.Environment.Files != nil {
+		t.Fatalf("uploaded recipe: %+v spec files=%d", recipe, len(stored.Spec.Environment.Files))
+	}
+	// Consumers read back the frozen lock identity on the single-job reply;
+	// list views stay compact.
+	view, err := c.GetJob(context.Background(), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockSum, manifestSum := sha256.Sum256(files["pixi.lock"]), sha256.Sum256(files["pixi.toml"])
+	if l := view.EnvironmentLock; l == nil || l.Backend != "pixi" || len(l.SHA256) != 2 || l.SHA256["pixi.lock"] != hex.EncodeToString(lockSum[:]) || l.SHA256["pixi.toml"] != hex.EncodeToString(manifestSum[:]) {
+		t.Fatalf("environment lock readback: %+v", view.EnvironmentLock)
+	}
+	var snapshot Snapshot
+	if err := c.Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) == 0 {
+		t.Fatal("status listed no jobs")
+	}
+	for _, listed := range snapshot.Jobs {
+		if listed.EnvironmentLock != nil {
+			t.Fatal("list view carries environment_lock")
+		}
+	}
+	for name, bad := range map[string]map[string][]byte{
+		"missing companion": {"pixi.lock": files["pixi.lock"]},
+		"extra file":        {"pixi.lock": files["pixi.lock"], "pixi.toml": files["pixi.toml"], "other": nil},
+		"oversized":         {"pixi.lock": files["pixi.lock"], "pixi.toml": []byte(strings.Repeat("x", (1<<20)+1))},
+	} {
+		s := uploaded
+		s.Environment.Files = bad
+		_, err := c.Submit(context.Background(), s)
+		var apiErr *HTTPError
+		if !errors.As(err, &apiErr) || apiErr.Code != "job_environment_invalid" {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
 	}
 }

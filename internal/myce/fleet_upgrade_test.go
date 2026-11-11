@@ -825,7 +825,7 @@ func TestFleetUpgradeProductionIdleWaitsAcrossFleet(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
-	if q.fleetProductionIdle() {
+	if fleetProductionIdle(t, q) {
 		t.Fatal("completion mistaken for released remote custody")
 	}
 	release := result(r, true)

@@ -6,13 +6,17 @@ func nativeNetworkFits(j *Job, m *Machine) bool {
 	if j.Spec.Run.Docker || nativeUnsandboxed(j) {
 		return true
 	}
-	if !contains(m.Capabilities, "native_isolation_landlock") && !contains(m.Capabilities, "native_isolation_namespace") && !contains(m.Capabilities, "native_isolation_seatbelt") {
+	if !nativeBoundaryReported(m) {
 		return false
 	}
 	if j.Spec.Needs.Network && !contains(m.Capabilities, "native_network") {
 		return false
 	}
-	return true
+	return !nativeCIRequired(j) || contains(m.Capabilities, nativeCICapability)
+}
+
+func nativeBoundaryReported(m *Machine) bool {
+	return contains(m.Capabilities, "native_isolation_landlock") || contains(m.Capabilities, "native_isolation_namespace") || contains(m.Capabilities, "native_isolation_seatbelt")
 }
 
 func nativeNetworkRequired(j *Job) bool {

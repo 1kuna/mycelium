@@ -411,7 +411,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if p.docker == nil {
 				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
-				if memory == nil && adaptiveMemoryCeilingGB(&a.job, &w.Machine) > 0 {
+				if memory == nil && w.reportsProcessSample(a.job) {
 					report.CurrentHostMemory = p.currentProcessHostMemory()
 				}
 			}
@@ -1300,6 +1300,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
 				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 			}
+			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
+				m.Capabilities = append(m.Capabilities, metalFootprintGuardCapability)
+			}
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
@@ -1374,6 +1377,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
 				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
+				w.expireCheckpoints(reply.CheckpointExpiries, root.state.CheckpointRoot)
 				if reply.SharedHost != nil {
 					w.Machine.SharedHost = cloneSharedHost(reply.SharedHost)
 					if reply.SharedHost.InteractiveReserveGB == 0 {

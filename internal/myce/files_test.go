@@ -189,10 +189,22 @@ func TestFilesNASInputs(t *testing.T) {
 	if finished.FileTransport || len(finished.FileCheckpoints) != 0 || finished.ResumeFiles != nil {
 		t.Fatal("stored inputs changed NAS checkpoint transport", finished)
 	}
-	save := filepath.Join(checkpoints, accepted.ID, "attempt-1", "save.json")
-	if data, err := os.ReadFile(save); err != nil || !bytes.Contains(data, []byte(`"value":42`)) {
-		t.Fatalf("NAS checkpoint missing: %s %v", data, err)
-	}
+	// The NAS save is visible until settled expiry removes the folder (#894);
+	// only a NAS-transport job can record that removal.
+	await(t, func() bool {
+		save := filepath.Join(jobCheckpointDir(checkpoints, accepted.ID), "attempt-1", "save.json")
+		if data, err := os.ReadFile(save); err == nil {
+			if !bytes.Contains(data, []byte(`"value":42`)) {
+				t.Fatalf("NAS checkpoint content: %s", data)
+			}
+			return true
+		}
+		var current Job
+		if err := c.Call(ctx, "GET", "/api/jobs/"+accepted.ID, nil, &current); err != nil {
+			t.Fatal(err)
+		}
+		return current.CheckpointExpired != nil
+	})
 	dest := filepath.Join(root, "downloaded")
 	if err := c.DownloadResult(ctx, accepted.ID, "output", dest); err != nil {
 		t.Fatal(err)
@@ -316,8 +328,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 	if err = q.publishCheckpoint(context.Background(), save); err == nil {
 		t.Fatal("accepted failed durability barrier")
 	}
-	snap, _ := q.Snapshot()
-	if len(snap.Jobs[0].FileCheckpoints) > 0 {
+	if len(job(t, q, j.ID).FileCheckpoints) > 0 {
 		t.Fatal("failed checkpoint published")
 	}
 	q.files.syncDir = syncWorkerDir
@@ -334,9 +345,8 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, _ = q.Snapshot()
-	if snap.Jobs[0].Progress != 7 {
-		t.Fatal("local-only progress accepted", snap.Jobs[0].Progress)
+	if got := job(t, q, j.ID); got.Progress != 7 {
+		t.Fatal("local-only progress accepted", got.Progress)
 	}
 }
 
@@ -437,7 +447,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 			t.Log("resume worker A has no unread return")
 		}
 	}()
-	await(t, func() bool { snap, _ := q.Snapshot(); return len(snap.Jobs[0].FileCheckpoints) > 0 })
+	await(t, func() bool { return len(job(t, q, j.ID).FileCheckpoints) > 0 })
 	cancelB, doneB, rootB := start("b")
 	defer cancelB()
 	if err = q.Leave("a", false); err != nil {
@@ -452,11 +462,10 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		t.Fatal("hypha a did not leave")
 	}
 	await(t, func() bool {
-		snap, _ := q.Snapshot()
-		return snap.Jobs[0].State == "succeeded" || snap.Jobs[0].State == "failed"
+		got := job(t, q, j.ID)
+		return got.State == "succeeded" || got.State == "failed"
 	})
-	snap, _ := q.Snapshot()
-	got := snap.Jobs[0]
+	got := job(t, q, j.ID)
 	if got.State != "succeeded" || got.Machine != "b" || got.Attempt < 2 {
 		t.Fatalf("different-hypha resume: %+v", got)
 	}
@@ -647,11 +656,10 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	w := Worker{EnvironmentLimit: 1 << 30, Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
 	go func() { done <- w.Run(ctx) }()
 	await(t, func() bool {
-		snap, _ := q.Snapshot()
-		return snap.Jobs[0].State == "succeeded" || snap.Jobs[0].State == "failed"
+		got := job(t, q, j.ID)
+		return got.State == "succeeded" || got.State == "failed"
 	})
-	snap, _ := q.Snapshot()
-	got := snap.Jobs[0]
+	got := job(t, q, j.ID)
 	if got.ID != j.ID || got.State != "succeeded" || got.OutputRefs["output"] != ref {
 		t.Fatalf("extension file transport: %+v", got)
 	}

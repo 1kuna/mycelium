@@ -242,6 +242,9 @@ func (q *Queue) resolveRecipes(s Spec, r *ResolveReport) (map[string]Environment
 		} else {
 			f.Problem = err.Error()
 			f.Fix = "Correct the environment declaration to satisfy this validation error, then run `myce spec check --resolve` again."
+			if isPixiLockError(err) {
+				f.Fix = "Run `pixi lock` with Pixi >= " + workerPixiVersion() + " (the workers' version), then run `myce spec check --resolve` again."
+			}
 		}
 		r.Findings = append(r.Findings, f)
 		return nil, nil, false
@@ -251,7 +254,11 @@ func (q *Queue) resolveRecipes(s Spec, r *ResolveReport) (map[string]Environment
 	case s.Environment.Name != "" && len(recipes) > 0:
 		r.Resolved = append(r.Resolved, fmt.Sprintf("environment %s: queue library recipes for %s", s.Environment.Name, strings.Join(platforms, ", ")))
 	case s.Environment.Key() != "" && len(recipes) > 0:
-		r.Resolved = append(r.Resolved, "environment: inline lock read on the queue host, recipes for "+strings.Join(platforms, ", "))
+		source := "inline lock read on the queue host"
+		if len(s.Environment.Files) > 0 {
+			source = "inline lock uploaded by the submitter"
+		}
+		r.Resolved = append(r.Resolved, "environment: "+source+", recipes for "+strings.Join(platforms, ", "))
 	case s.Environment.Key() != "":
 		r.Resolved = append(r.Resolved, "environment "+s.Environment.Key()+": legacy worker-advertised name; readiness depends on each worker's --environments")
 	default:

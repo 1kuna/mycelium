@@ -25,6 +25,11 @@ func evaluateHostPressure(m *Machine) {
 	}
 	_, e.PressureLimit = healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.Pressure })
 	_, swapLimit := healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.SwapGrowth })
+	swapLimit = max(swapLimit, swapGrowthNoise(h.Baseline))
+	available := 0.0 // Older workers' reports carry no headroom; use the queue's measurement.
+	if m.HostMemoryMeasured && validMemoryValue(m.HostAvailableMemoryGB) {
+		available = m.HostAvailableMemoryGB * (1 << 30)
+	}
 	_, wakeLimit := healthBand(h.Baseline, func(s HostHealthSample) float64 { return s.WakeSeconds })
 	// Recheck the confirmation horizon from distinct sensor completions, not
 	// check-in count. Keep a reported drain if any corroborating harm remains;
@@ -35,7 +40,11 @@ func evaluateHostPressure(m *Machine) {
 		if s.Error != "" || s.At.IsZero() || i+1 < len(h.History) && !h.History[i+1].At.After(s.At) {
 			break
 		}
-		if s.SwapGrowth > swapLimit {
+		interval := 0.0
+		if i > 0 {
+			interval = s.At.Sub(h.History[i-1].At).Seconds()
+		}
+		if s.SwapGrowth > swapLimit && materialSwapGrowth(s.SwapGrowth, interval, available) {
 			e.Corroboration = append(e.Corroboration, "swap_growth")
 		}
 		if s.WakeSeconds > wakeLimit {

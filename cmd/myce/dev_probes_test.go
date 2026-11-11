@@ -150,7 +150,10 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	} else {
 		spec.Needs.Platform.Any = true
 	}
-	spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; printf done > effect`}
+	// Success/release permits immediate attempt-scratch collection. Keep
+	// the command-effect observation in this fixture's own durable root.
+	marker := filepath.Join(root, "command-effect")
+	spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; printf done > "$1"`, "sh", marker}
 	var job myce.Job
 	if err := client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {
 		t.Fatal(err)
@@ -174,7 +177,6 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		}
 		return false
 	})
-	marker := filepath.Join(root, "state", "workers", "fake-1", "job-files", job.ID, "1", "effect")
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "done" {
 		t.Fatal("short command effect missing", err)
 	}
