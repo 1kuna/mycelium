@@ -950,7 +950,8 @@ Linux `go vet ./...`. A conflict or a compile/vet failure means main would break
 as it did after #1359: rebase and rerun. It takes about 13 s warm and 35 s cold
 on the development host. Replaying today's 103 PR merges flagged only the holds
 PR and its intended repair; replaying #1359 onto its actual main fails to
-compile, as main did. The detector regression is `python3 scripts/test-gate-revert-check.py`.
+compile, as main did. The detector regression is
+`python3 scripts/test-gate-revert-check.py`.
 
 Gate tooling is development tooling: if its custody or guard state blocks work, reset it (stop the gate VM, clear the control-directory records) and fix the tool forward.
 
