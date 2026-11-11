@@ -60,9 +60,14 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 			}
 		}()
 	}
+	// The scheduler's wait, as its projection computed it when one did.
+	wait := j.wait
+	if wait == nil {
+		wait = q.waitHold(j)
+	}
 	if !dependencyReady(j) {
 		copy := *j
-		copy.Reason = q.waitReason(j)
+		copy.Reason = wait.Detail
 		return newHold("upstream", q.statusWaitingReasonDetail(&copy))
 	}
 	type observation struct {
@@ -141,7 +146,6 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 	}
 	// The scheduler's reason names its mechanism; target coverage below refines
 	// only the generic capacity kinds, never a specific hold.
-	wait := q.waitHold(j)
 	copy := *j
 	copy.Reason = wait.Detail
 	reason := q.statusWaitingReasonDetail(&copy)

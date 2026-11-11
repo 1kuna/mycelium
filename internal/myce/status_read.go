@@ -714,6 +714,7 @@ func (q *Queue) jobSnapshotCapture(id string, contexts ...context.Context) (*Job
 		return nil, time.Time{}, err
 	}
 	var reasons map[string]string
+	var wait *Hold
 	if j.State == "queued" {
 		// The detached generation's observations are immutable. Reuse one
 		// index across waiting, eligibility and deadline diagnostics rather
@@ -724,12 +725,14 @@ func (q *Queue) jobSnapshotCapture(id string, contexts ...context.Context) (*Job
 		v.observationScan.observationOwner = v
 		v.observationScan.memory = v.memoryPlanning
 		// A receipt explains this job; full fleet ordering belongs to status.
-		reasons = map[string]string{j.ID: v.waitReason(j)}
+		wait = v.waitHold(j)
+		reasons = map[string]string{j.ID: wait.Detail}
 	}
 	if c := v.calls[j.ID]; c != nil {
 		j = v.projectCall(c, nil, reasons)
 	} else {
 		j = v.projectJob(j, nil, reasons, true)
+		j.wait = wait
 	}
 	if j.Resources == nil {
 		j.Resources = jobResources(j)

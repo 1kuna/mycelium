@@ -278,7 +278,7 @@ func TestActionableBlockerResolveCurrentMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Hold == nil || got.Hold.Kind != "memory" || !reflect.DeepEqual(got.Hold, r.Hold) {
+	if got.Hold == nil || got.Hold.Kind != "host_memory_headroom" || !reflect.DeepEqual(got.Hold, r.Hold) {
 		t.Fatalf("GET=%+v resolve=%+v", got.Hold, r.Hold)
 	}
 }

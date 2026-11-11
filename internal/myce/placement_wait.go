@@ -9,9 +9,9 @@ import (
 // Explain admission on the job's own targets, using the same target checks and
 // resolved envelopes as placement. Network and preparation failures are useful
 // diagnostics; unrelated platforms, devices and qualifications are not.
-func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) (string, string) {
+func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 	if why := q.memoryEvidenceWaitingReason(j); why != "" {
-		return "memory", why
+		return newHold(memoryEvidenceRecovering, why)
 	}
 	var reasons []string
 	// One kind when every blocked target agrees; mixed causes are capacity.
@@ -107,13 +107,13 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) (string, st
 				block("memory", detail)
 			}
 			if len(blocked) == 0 {
-				return "", "" // Another target can serve it; retain ordinary queue ordering.
+				return nil // Another target can serve it; retain ordinary queue ordering.
 			}
 			reasons = append(reasons, m.ID+": "+strings.Join(blocked, "; "))
 		}
 	}
 	if !specific {
-		return "", ""
+		return nil
 	}
 	slices.Sort(reasons)
 	reason := strings.Join(slices.Compact(reasons), "; ")
@@ -128,7 +128,7 @@ func (q *Queue) targetWaitingReason(j *Job, scans ...*placementScan) (string, st
 			kind = k
 		}
 	}
-	return kind, reason
+	return newHold(kind, reason)
 }
 
 // Occupancy is not RAM pressure. Explain the same sharing/release gate used by

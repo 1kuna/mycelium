@@ -29,7 +29,7 @@ func BenchmarkQueueMutexProjection(b *testing.B) {
 			b.ResetTimer()
 			for range b.N {
 				q.mu.RLock()
-				order, _ := q.queueProjection()
+				order, _, _ := q.queueProjection()
 				q.mu.RUnlock()
 				if len(order) != count {
 					b.Fatalf("projected %d of %d jobs", len(order), count)
@@ -342,7 +342,7 @@ func TestProjectionUsesAffinityDeadlineAndDoesNotMutateJobs(t *testing.T) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.s.Machines[m.ID] = &m
-	order, _ := q.queueProjection()
+	order, _, _ := q.queueProjection()
 	if order[b.ID] != 1 || order[a.ID] != 2 || q.s.Jobs[b.ID].State != "queued" || q.pick(&m).ID != b.ID {
 		t.Fatal(order)
 	}
@@ -359,7 +359,7 @@ func TestProjectionIncludesEligibleModelCalls(t *testing.T) {
 	defer q.mu.Unlock()
 	call := &ModelCall{ID: "call", Model: "test", Project: "atlas", Priority: "production", Queued: c.Now()}
 	q.calls[call.ID] = call
-	order, reasons := q.queueProjection()
+	order, reasons, _ := q.queueProjection()
 	if order[call.ID] != 1 || order[batch.ID] != 2 || !strings.Contains(reasons[batch.ID], "production work goes first") {
 		t.Fatal(order, reasons)
 	}

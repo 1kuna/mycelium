@@ -271,7 +271,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionPass(j, m, q.variantParityReason(j, m) == "", predicateVariantParity) {
 		return false
 	}
-	if !q.admissionPass(j, m, !(j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction()), predicateProductionPaused) {
+	if !q.admissionPass(j, m, !q.fleetPausesJob(j), predicateProductionPaused) {
 		return false
 	}
 	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionPass(j, m, q.sharedHostBackoffReason(j, m) == "", predicateSharedHostBackoff) || !q.admissionPass(j, m, q.storageRootReason(j, m) == "", predicateStorageRoot)) {
@@ -397,31 +397,37 @@ func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
 	return scopedHold("unclassified", host, detail, true)
 }
 
-// Production, disk and Docker fences that hold this job, with their hold kind.
-func (q *Queue) holdWaitReason(j *Job) (string, string) {
+// A fleet upgrade holds new production starts until queue health is verified.
+// Placement refuses on this and the scheduler's wait names it.
+func (q *Queue) fleetPausesJob(j *Job) bool {
+	return j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction()
+}
+
+// Production, disk and Docker fences that hold this job.
+func (q *Queue) holdWait(j *Job) *Hold {
 	for _, m := range q.plannerMachines() {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if reason := q.productionAdmissionReason(j, m); reason != "" {
-				return "production_admission", reason
+				return newHold("production_admission", reason)
 			}
 		}
 	}
-	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
-		return "disk_headroom", reason
+	if h := q.diskWait(j, j.ProductionHost); h != nil {
+		return h
 	}
 	for _, m := range q.plannerMachines() {
 		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if h := q.dockerHold(hostID(m)); h.Reason != "" {
-				return h.Kind, h.Detail
+				return newHold(h.Kind, h.Detail)
 			}
 		}
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		if reason := q.productionOccupancyReason(j); reason != "" {
-			return "production_hold", reason + "; production hold bound to " + j.ProductionHost + "; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host"
+			return newHold("production_hold", reason+"; production hold bound to "+j.ProductionHost+"; spillover requires measured quality parity or production_parity_hosts approval and an immediately admissible qualified host")
 		}
 		h := q.productionHold(j.ProductionHost)
-		return h.Kind, h.Detail
+		return newHold(h.Kind, h.Detail)
 	}
 	if j.Spec.Priority == "production" && j.ProductionHost == "" {
 		for _, m := range q.plannerMachines() {
@@ -433,7 +439,7 @@ func (q *Queue) holdWaitReason(j *Job) (string, string) {
 				if slotOnTarget(slot, m) && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
 					model, _ := q.model(slot.Model)
 					if model.MemoryGB+j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
-						return "pinned_model", "pinned model " + slot.Model + " on " + m.ID + " prevents production placement"
+						return newHold("pinned_model", "pinned model "+slot.Model+" on "+m.ID+" prevents production placement")
 					}
 				}
 			}
@@ -442,11 +448,11 @@ func (q *Queue) holdWaitReason(j *Job) (string, string) {
 	if j.Spec.Priority != "production" {
 		for _, m := range q.plannerMachines() {
 			if q.held(hostID(m)) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-				return "production_reserved", "host " + hostID(m) + " reserved for production"
+				return newHold("production_reserved", "host "+hostID(m)+" reserved for production")
 			}
 		}
 	}
-	return "", ""
+	return nil
 }
 
 // A bound host stays authoritative unless equal-or-higher production prevents
@@ -642,7 +648,7 @@ func (q *Queue) maintainHolds() {
 			j.ProductionHost = target
 			j.RequireProductionParity = true
 		}
-		if j.State == "queued" && j.ProductionHost != "" && (q.dockerHold(j.ProductionHost).Kind != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
+		if j.State == "queued" && j.ProductionHost != "" && (q.dockerHold(j.ProductionHost).Kind != "" || q.diskWait(j, j.ProductionHost) != nil) {
 			if target := q.productionTarget(j, nil); target != "" {
 				if j.ProductionHost != target || j.RequireProductionParity != (j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil) {
 					q.touchJob(j.ID)

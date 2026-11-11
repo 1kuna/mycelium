@@ -94,8 +94,8 @@ func (q *Queue) startCapacityPaused(j *Job) bool {
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
-	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
-		return reason
+	if h := q.diskWait(j, j.ProductionHost); h != nil {
+		return h.Detail
 	}
 	machines := q.planningMachines(scans...)
 	for _, m := range machines {
