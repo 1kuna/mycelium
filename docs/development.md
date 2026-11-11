@@ -890,15 +890,16 @@ fan-out/control-path performance, and before a hotfix claims the burst target.
 For queue observation/check-in contention, also run:
 
 ```sh
-GOMAXPROCS=4 go test ./internal/myce -run '^TestStatusReadCheckinContention$' -count=1 -v
+GOMAXPROCS=4 go test ./internal/myce -run '^$' -bench '^BenchmarkStatusReadCheckinContention$' -benchtime=1x -v
 ```
 
 This separate `!race` regression measures 100 real SQLite check-ins alongside
 62 concurrent readers (queued receipts and uncached bounded status), 5,000
 retained jobs including 400 fan-out parents, 200 queued jobs and 1,000 curves.
 Nearest-rank p99 must remain below 500ms, half the default one-second heartbeat
-interval. A running production attempt must retain its original attempt with no
-losses. Queue decisions use a fixed injected clock; this is a laptop contention
+interval; the benchmark holds that bound, and `TestStatusReadCheckinContention`
+keeps the functional checks. A running production attempt must retain its
+original attempt with no losses. Queue decisions use a fixed injected clock; this is a laptop contention
 bound, while fake-clock contact/loss tests cover elapsed-time decisions under
 race. It does not establish fleet capacity or native release qualification.
 
@@ -1749,7 +1750,7 @@ matching aggregates. Observation writes invalidate that index; rollback and
 commit discard it. Retained terminal count alone was flat in the comparison.
 These laptop timings do not establish the full cause of a live queue stall.
 
-`GOMAXPROCS=4 go test ./internal/myce -run '^TestCheckinRetainedHistoryContention$' -count=1 -v`
+`GOMAXPROCS=4 go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinRetainedHistoryContention$' -benchtime=1x -v`
 replays six concurrent worker check-ins and 60 concurrent job GETs per round,
 with 6,500 retained constrained executions, 110 queued jobs and 1,400 curves.
 It reports nearest-rank hold p50/p99 (including the check-in's snapshot locks),

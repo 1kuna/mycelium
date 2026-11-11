@@ -35,7 +35,7 @@ const attemptHistoryLimit = 4
 const testFileRetention = 7 * 24 * time.Hour
 const testLogRetention = 7 * 24 * time.Hour
 
-func fixture(t *testing.T) (*Queue, *fakeClock) {
+func fixture(t testing.TB) (*Queue, *fakeClock) {
 	t.Helper()
 	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 	q, err := Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), c)
@@ -62,7 +62,7 @@ func marshalQueueState(t *testing.T, q *Queue) ([]byte, error) {
 }
 
 // Scheduling and recovery tests model availability without timing filesystem I/O.
-func fakeCheckpointAvailability(t *testing.T, q *Queue, available bool) {
+func fakeCheckpointAvailability(t testing.TB, q *Queue, available bool) {
 	t.Helper()
 	// Evidence publication also calls the probe, outside q.mu. Join it before
 	// replacing the callback; locking only the state write cannot protect it.
@@ -89,7 +89,7 @@ func spec(priority string) Spec {
 	}
 	return s
 }
-func submit(t *testing.T, q *Queue, s Spec) *Job {
+func submit(t testing.TB, q *Queue, s Spec) *Job {
 	t.Helper()
 	j, err := q.Submit(s)
 	if err != nil {
@@ -104,7 +104,7 @@ func machine(id, gpu string, host ...string) Machine {
 	}
 	return Machine{Capabilities: []string{"native_isolation_landlock"}, CPUIsolation: "select-none", HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
-func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
+func check(t testing.TB, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()
 	c := Checkin{Machine: m, period: time.Second} // Simulate the current worker timing header.
 	if r != nil {
