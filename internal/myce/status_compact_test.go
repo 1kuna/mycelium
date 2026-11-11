@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -159,12 +161,45 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 		t.Fatal("default materialized full retained generation")
 	}
 	q.statusCache.data = ""
-	q.s.Health.Conditions = map[string]healthCondition{"recipe/worker/private/path": {Active: true, Since: c.Now()}}
+	if err := q.update(func() error {
+		q.s.Machines["ghost"] = &Machine{ID: "ghost", Gone: true, Replacement: &MachineReplacement{Machine: "worker", Device: "0"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate conditions fold into one group per kind (live: 18 work profiles
+	// with one regression were 18 lines); recipe identities never leak.
+	since := c.Now()
+	q.s.Health.Conditions = map[string]healthCondition{
+		"recipe/worker/private/path":              {Active: true, Since: since},
+		"recipe/peer/" + strings.Repeat("ab", 16): {Active: true, Since: since},
+		"efficiency/work:profile:" + strings.Repeat("1", 64) + ":declared/memory_prediction_relative_error": {Active: true, Since: since.Add(time.Minute)},
+		"efficiency/work:profile:" + strings.Repeat("2", 64) + ":learned/memory_prediction_relative_error":  {Active: true, Since: since},
+		"efficiency/worker/wasted_attempts":       {Active: true, Since: since},
+		"efficiency/project:p/wait_holds_seconds": {Active: false, Since: since},
+	}
 	q.s.Jobs[j.ID].Attempt = 1
 	q.s.Jobs[j.ID].State = "failed" // Pending physical cleanup stays visible.
 	current := readStatusOptions(t, q, "")
-	if len(current.Jobs) != 1 || len(current.Summary.Alerts) != 1 || strings.Contains(current.Summary.Alerts[0].Condition, "private/path") {
-		t.Fatal("cleanup/alert projection", current.Summary)
+	data, _ := json.Marshal(current.Summary)
+	want := []StatusAlertGroup{
+		{Kind: "efficiency/memory_prediction_relative_error", Count: 2, Since: since},
+		{Kind: "recipe", Count: 2, Since: since, Scopes: map[string]int{"worker": 1, "peer": 1}},
+		{Kind: "efficiency/wasted_attempts", Count: 1, Since: since, Scopes: map[string]int{"worker": 1}},
+	}
+	if len(current.Jobs) != 1 || strings.Contains(string(data), "private") || strings.Contains(string(data), "profile") || len(current.Summary.Alerts) != len(want) {
+		t.Fatal("cleanup/alert projection", string(data))
+	}
+	for i, g := range current.Summary.Alerts {
+		if g.Kind != want[i].Kind || g.Count != want[i].Count || !g.Since.Equal(want[i].Since) || !maps.Equal(g.Scopes, want[i].Scopes) {
+			t.Fatalf("alert group %d: %+v want %+v", i, g, want[i])
+		}
+	}
+	if slices.ContainsFunc(current.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
+		t.Fatal("default listed a replaced worker identity")
+	}
+	if full := readStatusOptions(t, q, "?sections=machines"); !slices.ContainsFunc(full.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
+		t.Fatal("machines section hid replaced worker history")
 	}
 }
 
