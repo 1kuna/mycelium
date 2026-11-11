@@ -112,10 +112,11 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			clock.Advance(time.Second)
 			reply := machineCheck(t, q, m, runs...)
 			q.mu.Lock()
-			owner := cloneMachine(q.s.Machines[m.ID])
+			owner := q.s.Machines[m.ID]
+			charged, debt := owner.HostMemoryInUseGB, owner.hostReservationDebtGB
 			q.mu.Unlock()
-			if math.Abs(owner.HostMemoryInUseGB-17.2) > 1e-6 || math.Abs(owner.hostReservationDebtGB-.8) > 1e-6 {
-				t.Fatalf("wrong replay ledger: charged=%g debt=%g", owner.HostMemoryInUseGB, owner.hostReservationDebtGB)
+			if math.Abs(charged-17.2) > 1e-6 || math.Abs(debt-.8) > 1e-6 {
+				t.Fatalf("wrong replay ledger: charged=%g debt=%g", charged, debt)
 			}
 			for _, run := range runs {
 				current := job(t, q, run.ID)
