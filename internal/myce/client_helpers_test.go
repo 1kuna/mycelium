@@ -111,10 +111,13 @@ func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
 	check(t, q, m, nil)
 	server := httptest.NewServer(API{q, "fixture"}.Handler())
 	defer server.Close()
-	c := Client{URL: server.URL, Token: "fixture"}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err := c.Wait(ctx, j.ID)
+	// Expire at the first pause, after the real API has supplied its queued
+	// reason. A short wall deadline can expire before that observation under
+	// suite load; owner-deadline timing is covered with synctest below.
+	c := Client{URL: server.URL, Token: "fixture", Pause: func(context.Context, time.Duration) error {
+		return context.DeadlineExceeded
+	}}
+	_, err := c.Wait(context.Background(), j.ID)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
@@ -313,21 +316,24 @@ func TestClientJobReplyInvalid(t *testing.T) {
 		``,
 	} {
 		t.Run(body, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.WriteString(w, body)
-			}))
-			defer server.Close()
-			c := Client{URL: server.URL}
-			for _, read := range []func(context.Context, string) (*Job, error){c.GetJob, func(ctx context.Context, id string) (*Job, error) { return c.Wait(ctx, id) }} {
-				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-				job, err := read(ctx, "fixture")
-				contextErr := ctx.Err()
-				cancel()
-				var api *HTTPError
-				if job != nil || !errors.As(err, &api) || api.Code != "job_reply_invalid" || contextErr != nil || RetryStatusRead(err) {
-					t.Errorf("invalid reply must fail without polling: job=%v err=%v context=%v", job, err, contextErr)
+			synctest.Test(t, func(t *testing.T) {
+				reads := 0
+				c := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+					reads++
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}}
+				for _, read := range []func(context.Context, string) (*Job, error){c.GetJob, func(ctx context.Context, id string) (*Job, error) { return c.Wait(ctx, id) }} {
+					before := reads
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					job, err := read(ctx, "fixture")
+					contextErr := ctx.Err()
+					cancel()
+					var api *HTTPError
+					if job != nil || !errors.As(err, &api) || api.Code != "job_reply_invalid" || contextErr != nil || RetryStatusRead(err) || reads != before+1 {
+						t.Errorf("invalid reply must fail without polling: job=%v err=%v context=%v reads=%d", job, err, contextErr, reads-before)
+					}
 				}
-			}
+			})
 		})
 	}
 }
