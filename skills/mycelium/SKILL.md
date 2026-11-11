@@ -67,9 +67,8 @@ entries:
     outputs: {result.txt: results}
 ```
 
-Outputs may be files, folders (`plots/`) or globs (`"logs/*.txt"`); `--out`
-recreates the subfolders. `keep_on_failure: [logs/]` keeps files from a failed
-run for `myce result JOB_ID --attempt N --out DIR`.
+To get logs from a failed run without exiting 0, add `keep_on_failure: [logs/]`
+and fetch them with `myce result JOB_ID --attempt N --out DIR`.
 
 The entry sends your committed `HEAD`, so commit what it runs. Untracked files
 that aren't ignored make `HEAD` dirty, so ignore your `--out` folder:
@@ -229,7 +228,7 @@ In an existing project, Mycelium now does these; delete your own:
 
 - submit, wait, fetch and verify scripts: `myce run --entry NAME --wait --out DIR`;
 - marker files proving a job finished: the exit code and verified files;
-- tar steps: `inputs:`, `pieces:` and folder or glob outputs;
+- tar steps for inputs: `inputs:` and `pieces:`;
 - exit-0 wrappers that return logs from a failure: `keep_on_failure`;
 - thread-count variables and temp-dir setup: `MYCE_CPUS` and `TMPDIR`;
 - host pins and per-host entries: needs, with no target list off production;

@@ -1,6 +1,6 @@
 # Results
 
-Detail for steps 4–5 of [the guide](../SKILL.md).
+Detail for "Files back" in [the guide](../SKILL.md).
 
 ## Accepted output
 
@@ -20,8 +20,9 @@ An exit-zero command can still fail its declared output contract. Status/GET
 `summary.json` even without diagnostic capture. Optional logs and reports still
 need capture and storage.
 
-Declare outputs as files, folders (`plots/`) or globs (`"logs/*.txt"`); do not
-tar them. Results list individual files and `--out DIR` recreates subfolders. An
+In a job spec, declare outputs as files, folders (`plots/`) or globs
+(`"logs/*.txt"`); do not tar them. Adapter entries still take individual file
+names (#1378). Results list individual files and `--out DIR` recreates subfolders. An
 empty folder, an unmatched glob, or a symlink or special file inside one fails
 the output contract. A folder or glob the file store cannot admit fails once with
 finalization `limit_exceeded` before any upload: narrow it or release finished
@@ -57,8 +58,7 @@ return `result_expired`. Project attribution is not an authorization check. Keep
 plan/apply receipts and verified copies. By default a finished job's files are
 kept for 3 days (`72h`), then return `result_expired`: download what you need
 within that window. An operator can set the queue's `--file-retention`, and `0`
-keeps files until explicit release. On a supporting queue, a
-project policy `file_retention` (for example `72h`) expires its own finished jobs'
+keeps files until explicit release. A project policy `file_retention` (for example `72h`) expires its own finished jobs'
 files sooner, and a `file_store_capacity` refusal names the limiting bound, bytes
 held by finished jobs and the release or retention step to take. See
 [result retention and release](../../../docs/files.md),
