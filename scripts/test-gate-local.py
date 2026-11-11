@@ -250,14 +250,21 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
             (root / 'gate-capacity.json').write_text(json.dumps(config))
             (root / 'resource-measurements.jsonl').unlink()
             group = root / 'local-go-resource-group.custody'
-            group.write_text('live owner custody')
+            group.write_text(json.dumps(dict(resource_group='live owner custody')))
+            lane = root / 'local-go-slot-3'
+            lane.mkdir()
+            owner = lane / 'owner.json'
+            owner.write_text(json.dumps(dict(pid=os.getpid(), process_identity=capacity.process_identity(os.getpid()))))
             waits = []
 
             def cleanup(_):
                 tickets = capacity.full_waiters(root)
                 self.assertEqual(len(tickets), 1)
                 waits.append(tickets[0])
-                self.assertEqual(group.read_text(), 'live owner custody')
+                self.assertEqual(json.loads(group.read_text())['resource_group'], 'live owner custody')
+                self.assertTrue(owner.exists())
+                owner.unlink()
+                lane.rmdir()
                 group.unlink()  # Simulate its owner's confirmed cleanup.
 
             warning = io.StringIO()
@@ -272,6 +279,11 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     self.assertEqual(len(waits), 1)
                 finally:
                     run.release()
+                # A dead/empty former group must also self-reclaim on fallback.
+                group.write_text(json.dumps(dict(resource_group='empty former custody')))
+                run = capacity.acquire(root, mode='full')
+                run.release()
+                self.assertFalse(group.exists())
             self.assertIn('evidence is missing', warning.getvalue())
             self.assertEqual(json.loads((root / 'gate-capacity.json').read_text()), config)
 

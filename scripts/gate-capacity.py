@@ -481,6 +481,9 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 resources = resource_qualification(config)
                 slot_profile = full_slot_profile(config) if resources else None
                 checked_config = raw_config
+            if config != raw_config:
+                with admission_lock(directory):
+                    reclaim_dead(directory)
             if config != raw_config and (directory / 'local-go-resource-group.custody').exists():
                 # Existing owners keep their original envelope until cleanup.
                 # Retain this request's FIFO ticket while fallback becomes safe.
