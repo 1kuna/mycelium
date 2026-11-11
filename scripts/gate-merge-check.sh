@@ -8,10 +8,10 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 base=origin/main
-allow=()
+allow=
 for arg in "$@"; do
   case "$arg" in
-    --allow-reverts) allow=(--allow-reverts) ;;
+    --allow-reverts) allow=--allow-reverts ;;
     -*) echo "usage: scripts/gate-merge-check.sh [BASE] [--allow-reverts]" >&2; exit 2 ;;
     *) base=$arg ;;
   esac
@@ -23,7 +23,7 @@ fi
 if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
   echo 'merge-check: warning: uncommitted changes are not part of the checked merge' >&2
 fi
-python3 scripts/gate-revert-check.py "$base" "${allow[@]}"
+python3 scripts/gate-revert-check.py "$base" ${allow:+"$allow"}
 # Writes objects only; the working tree, index and refs are untouched.
 if ! tree=$(git merge-tree --write-tree --name-only "$base" HEAD); then
   printf 'merge-check: HEAD does not merge cleanly onto %s:\n%s\n' "$base" "$tree" >&2
@@ -35,6 +35,7 @@ mkdir -p .gate
 work=$(mktemp -d "$repo/.gate/merge-check.XXXXXX")
 cleanup() {
   status=$?
+  cd "$repo"
   git worktree remove --force "$work" >/dev/null 2>&1 || rm -rf "$work"
   git worktree prune
   echo "merge-check: exit=$status wall=$((SECONDS-started))s merge=${commit:0:12} base=$(git rev-parse --short=12 "$base")"
