@@ -249,6 +249,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if q.persisted == nil {
 		q.persisted = map[string][]byte{}
 	}
+	q.commitHistories()
 	changedJobs := false
 	for key, value := range next {
 		q.noteEvidenceRecord(key, q.persisted[key], value)

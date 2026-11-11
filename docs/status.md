@@ -2925,6 +2925,18 @@ They no longer require `MYCE_TOKEN`, which consumers must not export.
   boundary. `reserved_covered_memory_gb_seconds` supports like-for-like gap
   comparisons over measured coverage. Worst program comparisons rank measured
   gaps; unknown coverage cannot establish wasted memory.
+- Host integrals and the cold-probe launch headroom samples are kept in memory
+  and written to SQLite only when the stored copy would stop supporting a
+  restart (#1066). Host integrals are written when the host set, identity,
+  reservation rates or reported measurement dimensions change, and when the
+  stored reading passes its own freshness boundary (last contact plus the
+  measured worker-loss allowance). Launch samples are written when the reserve
+  they yield changes, and with any refusal or offer margin. A clean shutdown
+  writes both. After a crash, seconds, reservation integrals and measured
+  coverage up to the crash are exact. Readings since the last write count at
+  the stored, still-fresh reading. The cold-probe reserve equals the live one.
+  Coverage resumes at each host's first check-in, and a missing host identity
+  during restart grace is not treated as a hardware change.
 - Job `efficiency.wait_seconds` and report `jobs`/`projects` retain queue-clock
   time by sampled blocker: `memory_reservation`, `authored_platform_targets`,
   `environment`, `priority_fairness`, `preparation`, `capacity`, `holds`,

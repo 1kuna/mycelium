@@ -385,6 +385,11 @@ func (q *Queue) refreshEfficiency() {
 		seen[host] = true
 		identity := efficiencyHostIdentity(hostMachines[host])
 		h, ok := q.s.EfficiencyHosts[host]
+		if ok && q.hostUnreported(hostMachines[host]) {
+			// After a restart the effective cores and budget are rebuilt only by
+			// the next check-in. Absent telemetry is not a hardware change.
+			identity = h.Identity
+		}
 		old := h
 		if !ok || h.Identity != identity {
 			h = EfficiencyHost{Host: host, Since: now, At: now, Identity: identity}
@@ -439,6 +444,15 @@ func (q *Queue) refreshEfficiency() {
 			delete(q.s.EfficiencyHosts, host)
 		}
 	}
+}
+
+func (q *Queue) hostUnreported(machines []*Machine) bool {
+	for _, m := range machines {
+		if !q.unreported[m.ID] {
+			return false
+		}
+	}
+	return len(machines) > 0
 }
 
 func (q *Queue) refreshJobEfficiency(j *Job, releases []HostRelease, now time.Time) {
