@@ -32,7 +32,14 @@ fi
 tree=${tree%%$'\n'*}
 commit=$(git commit-tree "$tree" -p "$(git rev-parse "$base")" -p HEAD -m 'merge-check')
 mkdir -p .gate
-work=$(mktemp -d "$repo/.gate/merge-check.XXXXXX")
+# One fixed path per checkout keeps Go's directory-keyed build cache warm across
+# checks (-trimpath would too, but vet then reads stale cached cgo paths).
+work=$repo/.gate/merge-check
+if [[ -e $work ]]; then
+  echo "merge-check: removing leftover $work" >&2
+  git worktree remove --force "$work" 2>/dev/null || rm -rf "$work"
+  git worktree prune
+fi
 cleanup() {
   status=$?
   cd "$repo"
@@ -45,11 +52,9 @@ trap cleanup EXIT
 git worktree add -q --detach "$work" "$commit"
 cd "$work"
 export GOTOOLCHAIN=local GOTELEMETRY=off GOFLAGS=${GOFLAGS:--p=4}
-# -trimpath keeps cache keys independent of this temporary directory, so a
-# repeat check reuses the shared build cache instead of recompiling everything.
-go build -trimpath ./...
-go vet -trimpath ./...
+go build ./...
+go vet ./...
 # Linux-only files are invisible to a Darwin build; type-check them too.
 if [[ $(go env GOOS) != linux ]]; then
-  GOOS=linux CGO_ENABLED=0 go vet -trimpath ./...
+  GOOS=linux CGO_ENABLED=0 go vet ./...
 fi
