@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -164,6 +165,111 @@ func (c Client) apiContext(ctx context.Context) (context.Context, context.Cancel
 		return context.WithTimeout(ctx, c.HTTP.Timeout)
 	}
 	return context.WithCancel(ctx)
+}
+
+// WithProgressWatch bounds each call by queue progress instead of a fixed
+// timeout. A call that is still waiting after one transport recovery period
+// reads GET /api/ping; it keeps waiting while the queue releases its mutex or
+// nobody is blocked on it, and fails with QueueStalledError once the release
+// count has not moved, with callers waiting, for four of the queue's own p99
+// request periods (never less than four transport recovery periods). A queue
+// whose ping lacks progress evidence (an older release) leaves the call to the
+// owner's deadline. Opt-in: workers pace their own check-ins.
+func (c Client) WithProgressWatch() Client { c.watch = true; return c }
+
+// QueueStalledError reports a queue that stopped making progress while this
+// call waited. The request may still complete on the queue.
+type QueueStalledError struct {
+	Method, Path string
+	Waited       time.Duration
+	Window       time.Duration
+	Cause        error // the last probe failure, when the queue gave no answer
+}
+
+func (e *QueueStalledError) Error() string {
+	cause := "the queue held its lock with callers waiting"
+	if e.Cause != nil {
+		cause = fmt.Sprintf("the queue did not answer progress checks (%v)", e.Cause)
+	}
+	return fmt.Sprintf("queue_stalled: %s %s waited %s; %s for %s (four measured request periods); the request may still complete. Check the queue with `myce status` or its service log; read-only calls and keyed submissions are safe to repeat", e.Method, e.Path, e.Waited.Round(time.Millisecond), cause, e.Window.Round(time.Millisecond))
+}
+func (e *QueueStalledError) Unwrap() error { return e.Cause }
+
+func (c Client) callWatched(ctx context.Context, method, path string, in, out any) error {
+	// A batch wait is held on purpose and reads the wait index, never the lock.
+	if !c.watch || path == "/api/ping" || path == "/api/wait" {
+		return c.callOnce(ctx, method, path, in, out)
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		if err := c.watchProgress(ctx, method, path); err != nil {
+			cancel(err)
+		}
+	}()
+	err := c.callOnce(ctx, method, path, in, out)
+	cancel(nil)
+	<-stopped
+	var stall *QueueStalledError
+	if errors.As(context.Cause(ctx), &stall) {
+		return stall
+	}
+	return err
+}
+
+// watchProgress returns nil when ctx ends or the queue gives no progress
+// evidence, and a QueueStalledError when the queue stopped progressing.
+func (c Client) watchProgress(ctx context.Context, method, path string) error {
+	clock := c.clock()
+	started := clock.Now()
+	progressAt := started
+	window := 4 * clientRecoveryPeriod
+	wait := clientRecoveryPeriod // calls answered within one period never probe
+	var releases uint64
+	seen := false
+	var cause error
+	for {
+		if c.pause(ctx, wait) != nil {
+			return nil
+		}
+		probeStarted := clock.Now()
+		probeCtx, cancel := context.WithTimeout(ctx, window)
+		var ping struct {
+			Progress *QueueProgress `json:"queue_progress"`
+		}
+		err := c.callOnce(probeCtx, "GET", "/api/ping", nil, &ping)
+		cancel()
+		if ctx.Err() != nil {
+			return nil
+		}
+		now := clock.Now()
+		var api *HTTPError
+		var syntax *json.SyntaxError
+		var shape *json.UnmarshalTypeError
+		switch {
+		case err == nil && ping.Progress == nil, errors.As(err, &api) && api.Status == http.StatusNotFound, errors.As(err, &syntax), errors.As(err, &shape):
+			return nil // No evidence from this server: the owner's deadline applies.
+		case err != nil:
+			cause = err
+		default:
+			cause = nil
+			p := ping.Progress
+			rtt := now.Sub(probeStarted)
+			window = max(4*clientRecoveryPeriod, time.Duration(min(float64(math.MaxInt64), 4*(p.P99MS*float64(time.Millisecond)+float64(rtt)))))
+			if !seen || p.Releases != releases || p.Waiting == 0 {
+				progressAt = now
+			}
+			seen, releases = true, p.Releases
+		}
+		quiet := now.Sub(progressAt)
+		if quiet >= window {
+			return &QueueStalledError{Method: method, Path: path, Waited: now.Sub(started), Window: window, Cause: cause}
+		}
+		// Probe about four times per window, and again just as it would close.
+		wait = max(clientRecoveryPeriod, min(window/4, window-quiet))
+	}
 }
 
 // WithoutRetries lets an observation loop own pacing and overall timeouts,

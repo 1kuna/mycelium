@@ -79,7 +79,8 @@ func fleetClient(c ServiceConfig) (Client, error) {
 		if err != nil {
 			return Client{}, err
 		}
-		return i.Client(c.Queue)
+		client, err := i.Client(c.Queue)
+		return client.WithProgressWatch(), err
 	}
 	token, err := ReadServiceToken(c)
 	if err != nil || token == "" {
@@ -89,11 +90,12 @@ func fleetClient(c ServiceConfig) (Client, error) {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" || u.Scheme != "https" && u.Scheme != "http" {
 		return Client{}, errors.New("fleet_queue_invalid")
 	}
-	return Client{URL: c.Queue, Token: token, HTTP: &http.Client{Timeout: 10 * time.Second}}, nil
+	// Queue progress, not a fixed timeout, bounds control calls under load (#1016).
+	return Client{URL: c.Queue, Token: token, HTTP: &http.Client{}}.WithProgressWatch(), nil
 }
 
 func fleetNoRedirect(client Client) Client {
-	hc := http.Client{Timeout: 10 * time.Second}
+	hc := http.Client{}
 	if client.HTTP != nil {
 		hc = *client.HTTP
 	}
