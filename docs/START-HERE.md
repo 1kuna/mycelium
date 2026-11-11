@@ -133,48 +133,51 @@ what the job uses and learns from it. `run` passes arguments literally, so use
 `sh -c '...'` for pipes or `&&`. [Jobs](jobs.md#one-line-commands) lists every
 option, and [status](status.md) explains what the fields mean.
 
-A plain `run` gives you the command's output as logs. To get files back, declare
-them as outputs in a project instruction file (next section) or job YAML, then
-download them with `myce result JOB_ID --out DIR`, as the quick start did.
+To get files back, name them and give a folder:
+
+```sh
+./myce run --out results --output report.txt -- sh -c 'uname -a > report.txt'
+```
+
+`--out` waits, downloads each `--output` the command wrote into `results/` and
+checks its size and SHA-256. The command runs in an empty folder with the
+machine's installed tools; to send your own code, use an entry (next section).
 
 ## 4. Make work reusable
 
 For a project you'll run more than once, describe its work in one file,
-`.mycelium/adapter.yaml`. This minimal entry copies the committed README to a
-result file:
-
-```yaml
-schema: 1
-project: example
-default: readme
-entries:
-  readme:
-    source: {git: HEAD, paths: [README.md]}
-    run: {command: [sh, -c, 'cat README.md > result.txt']}
-    needs: {platform: cpu, cpu_cores: 1, host_memory_gb: 1}
-    targets: [{os: darwin, arch: arm64, platform: cpu}]
-    environment: {}
-    outputs: {result.txt: results}
-    checks:
-      result: [sh, -c, 'test -s result.txt']
-```
-
-`targets` lists the machine types the entry may run on. Run `myce portability`
-to see the types in your cluster and replace the example (`darwin/arm64` is an
-Apple Silicon Mac). `source` sends the committed `README.md`, so commit it
-first. Add `.mycelium/receipts/` to `.gitignore`, then:
+`.mycelium/adapter.yaml`. From the project's root (a Git repository):
 
 ```sh
-./myce run --entry readme --key readme-1
-./myce wait JOB_ID
-./myce result JOB_ID --out accepted-results
+myce init -- python3 scripts/report.py
 ```
 
-The first command prints a JSON receipt and returns before the job finishes;
-use its `job_id` in the next commands. Running it again with the same `--key`
-returns the same job instead of starting a duplicate; use a new key to run it
-again. [The adapter reference](adapter.md) covers sources, environments, checks
-and profiles.
+This writes one entry named `test` that runs your command. If the project has a
+`pixi.lock` or `uv.lock`, the entry uses it as its environment. Add the files
+you want back under the entry:
+
+```yaml
+project: example
+entries:
+  test:
+    run: {command: [python3, scripts/report.py]}
+    outputs: {report.json: results}
+```
+
+The entry sends your committed `HEAD`, so commit the code it runs and add
+`.mycelium/receipts/` and your results folder to `.gitignore`. Then:
+
+```sh
+myce run --entry test --wait --out results
+```
+
+This submits, waits, downloads `results/report.json` and exits with the
+command's exit code. Running it again with the same code and arguments returns
+the same job instead of starting a duplicate; pass `--key NAME` to run it again
+on purpose. The entry needs no list of machine types unless it is production
+work. [The adapter reference](adapter.md) covers sources, environments, inputs,
+many pieces, checks and profiles, and the [agent skill](../skills/mycelium/SKILL.md)
+walks the same ladder further.
 
 ## What happens after you submit
 
@@ -190,7 +193,10 @@ and profiles.
    whether the content is right is still yours to judge.
 
 A job can run more than once: when a machine disappears, or when more important
-work needs its machine. Set `resumable: true` only for commands that save
+work needs its machine. Its class decides how often: `production` work is
+never stopped for a lower class and can stop `experiment` work (the default).
+Choose the class before you submit; see
+[classes and preemption](../skills/mycelium/references/waiting.md#classes-and-preemption). Set `resumable: true` only for commands that save
 [checkpoints](files.md#resumable-jobs) and can pick up from them. Cancelling
 asks the job to stop. `cancelled` means it won't run again, but it doesn't mean
 the machine has confirmed its processes are gone; if a machine dropped out, it

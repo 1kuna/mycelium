@@ -1,7 +1,7 @@
 # Waiting
 
-Detail for "When a job waits" in [the guide](../SKILL.md). Read the waiting
-reason once, then fix your authored needs, input or recipe, or name the next
+Detail for "Classes and tiers" and "When a job fails or waits" in
+[the guide](../SKILL.md). Read the waiting reason once, then fix your authored needs, input or recipe, or name the next
 owner and action on the existing work record. Unknown telemetry, unconfirmed
 cleanup, build offers and prepared environments are different states; only fresh
 reports prove progress. Don't erase custody, raise shared budgets, repeat
@@ -59,13 +59,11 @@ envelope, drift, signed headroom and charge/growth owners. It survives startup
 failure and restart. Its timestamp is historical evidence, not live usage or the
 job's only blocker; a retry starts a new episode.
 
-On matching queue/worker builds, launch, resource-limit and memory-capacity
-refusals keep safe numeric evidence and wait on the same logical job without
+Launch, resource-limit and memory-capacity refusals keep safe numeric evidence and wait on the same logical job without
 spending infrastructure retries. A helper that ran does not prove main ran.
 `execution_cause.admission` includes aggregate `live_host_growth` contributors and
 sample ages; compare those terms before attributing the total to the launching
-job. Positive `main: not_started` capacity evidence also protects an older
-worker's `launch/io_error` refusal from loss charges. Exact cleanup, release and
+job. Exact cleanup, release and
 absolute deadlines still bind. See [launch capacity waits](../../../docs/status.md).
 
 ## Device faults
@@ -131,7 +129,17 @@ deleted. Installation owners can select verified local snapshot acquisition with
 environment sources and immutable masters keep their existing contracts. See
 [worker budgets](../../../docs/reference/worker-caches.md#shared-filesystem-budget-811-next-release)
 and [local acquisition](../../../docs/reference/models.md#local-acquisition-root-1248-next-release).
-Host health, mounts and collection detail: [release behavior](release-behavior.md#automatic-host-hygiene-source-audited-verify-installed-support).
+Host health drains (memory pressure, mounts, disk) name a typed cause in
+machine `host_health` and clear after measured recovery. `myce host status HOST`
+lists what outside Mycelium holds a host's memory: each foreign process's
+`user`, `age_seconds` and `gpu_bytes`, and `host_health.foreign_services` totals
+per service or container. They are context for the host's owner, never yours to
+stop. `host_disk_exhaustion_forecast` wakes the owner when something outside
+Mycelium has filled a volume for as long as its remaining space would last; it
+is context, not a drain. A normal fleet
+update keeps busy hosts available until a natural idle moment, so keep using the
+queue; don't cancel experiments to finish a drain. See
+[host health](../../../docs/status.md) and [operations](../../../docs/operations.md).
 
 ## Shared interactive host
 
@@ -147,13 +155,41 @@ Keep waiting on the same job and key, with no manual resume and no pressure
 polling. Dedicated hosts are unaffected. See
 [shared hosts](../../../docs/shared-hosts.md#measured-cpu-and-owner-yield).
 
-## Urgency, reservations and pausing
+## Classes and preemption
 
-Class expresses urgency: `production` only for work the project's rulings call
-production, `deadline` only with a real owner-set date, `experiment` otherwise.
-Production can preempt lower tiers; eligibility, qualification, capacity and
-exact release still apply. Equal-tier work normally waits, and messages asking
-other consumers to stop do not change queue order.
+Tiers run `production`, then `deadline`, then `experiment` (the default). A
+higher tier takes capacity from a lower one only when no idle worker fits;
+eligibility, qualification and exact release still apply. Equal tiers never
+preempt each other, and messages asking other consumers to stop don't change
+queue order.
+
+- **Production** is for work a person or customer is waiting on, as the
+  project defines it. When it preempts, resumable work gets 10 seconds to save
+  (queue setting `--preemption-stop-grace`) and non-resumable work stops at once
+  and requeues to start over, uncharged. A production job must start within its
+  start window (`start_window`, default 150 s, at most 1 h; `start_by` for an
+  absolute time). Waiting for capacity doesn't spend it; a stuck start fails
+  visibly. Infrastructure interruptions requeue it at most twice; its own
+  command failures and OOMs fail without retry. Production needs explicit
+  targets and any project parity host list.
+- **Deadline** needs a real owner-set date (`--class deadline --deadline
+  RFC3339`). It stops only resumable lower-tier work, with two minutes to save.
+  The date orders work; it is not a completion guarantee.
+- **Experiment** can be stopped by either tier and requeued. A stop is not
+  charged as a loss, but a non-resumable job restarts from scratch, so make long
+  experiments resumable. Experiments keep a three-loss limit for real losses.
+
+Within a tier, jobs order by readiness (environment and model), earliest
+deadline, then waiting age, and competing projects share by recent use. There
+is no in-tier ordering hint. To order your own work, use `after:` stages, and
+the class the work actually deserves; pauses, local locks and holding back
+submissions only hide work from the queue. A critical Mycelium update may
+checkpoint and requeue even production (MY-39), and owner pressure on a shared
+interactive host yields every tier (below). See
+[scheduling](../../../docs/scheduling.md) and
+[start deadlines](../../../docs/jobs.md#production-start-deadline).
+
+## Reservations and pausing
 
 Use job-bound validation reservations for isolated qualification, not an
 invented project hold or higher class. `myce extension check --reserve` binds
@@ -171,10 +207,13 @@ their place. Shared policy belongs to the queue owner.
 
 ## Production leases
 
-Before a multi-stage production pipeline, declare it so host drains and fleet
-upgrades never strand a stage you haven't submitted yet. While the lease is
-open, a planned drain keeps at least one enabled host able to start each
-declared stage; queued production jobs get the same protection without a lease.
+Submit later stages with `after:` first: the queue then sees them, starts each
+when its inputs are accepted and cancels them with their producer. Maintenance
+protection is narrower. A planned drain or fleet upgrade keeps at least one
+enabled host able to start each queued production job, but a stage still
+blocked on `after:` doesn't count until it is ready. Open a lease for a
+production pipeline whose later stages are blocked or not yet submitted, so a
+drain can't strand them:
 
 ```sh
 myce fleet lease open --project P --key RUN --for 4h --platform cuda --memory-gb 24
@@ -189,9 +228,7 @@ covers the pipeline, reopen the same key to renew, and close it when the last
 stage is submitted. It expires on its own, grants no priority and reserves no
 capacity. A critical Mycelium update may still checkpoint and requeue production
 work (MY-39); requeued or newly submitted stages wait for the host to return.
-`myce fleet lease` needs a queue release containing #1009; on an older queue the
-request is refused and maintenance coordination stays manual. See
-[production leases](../../../docs/operations.md#production-leases).
+See [production leases](../../../docs/operations.md#production-leases).
 
 Estimates need comparable complete work and stay uncertain; they are not
 deadlines. Distinguish queue wait, preparation, execution, output acceptance and

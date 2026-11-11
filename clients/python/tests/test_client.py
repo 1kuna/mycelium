@@ -461,50 +461,49 @@ class DevTests(unittest.TestCase):
         return {"name": "python-test", "project": "test", "priority": "experiment", "run": {"command": command}, "needs": {"memory_gb": 1, "platform": ["fake"]}, "resumable": False, **extra}
 
     def test_consumer_skill_examples(self):
-        guide = ROOT / "skills/mycelium/SKILL.md"
-        examples = re.findall(r"^```python\n(.*?)^```$", guide.read_text(), re.M | re.S)
-        self.assertTrue(examples, "consumer guide must retain runnable Python examples")
+        # The guide's ladder, executed as written in one Git project against the
+        # real dev API: one command, files back, myce init, then the entry's whole
+        # trip. The YAML block is the entry after adding outputs; the Python
+        # example then reruns that entry and adopts the same job.
+        guide = (ROOT / "skills/mycelium/SKILL.md").read_text()
+        blocks = re.findall(r"^```sh\n(.*?)^```$", guide, re.M | re.S)
+        self.assertEqual(len(blocks), 4, "consumer guide CLI ladder changed shape")
+        entry = re.findall(r"^```yaml\n(project: .*?)^```$", guide, re.M | re.S)
+        self.assertEqual(len(entry), 1, "consumer guide must show the edited entry once")
+        examples = re.findall(r"^```python\n(.*?)^```$", guide, re.M | re.S)
+        self.assertEqual(len(examples), 1, "consumer guide must keep one runnable Python example")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = root / ".local/share/mycelium/worker"
-            config.mkdir(parents=True)
-            credentials = config / "fixture.env"
-            credentials.write_text("MYCE_TOKEN=dev-token\n")
-            credentials.chmod(0o600)
-            (config / "config.json").write_text(json.dumps({
-                "queue": self.client.url, "credentials": str(credentials)}))
-            environment = {**os.environ, "HOME": str(root),
-                           "PYTHONPATH": str(ROOT / "clients/python/src")}
-            for example in examples:
-                # Execute the published construction, submit/wait, fetch and
-                # application assertions unchanged against the real dev API.
-                result = subprocess.run([sys.executable, "-c", example], cwd=root,
-                                        env=environment, capture_output=True, text=True, timeout=90)
-                self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / "accepted/result.txt").read_bytes(),
-                             b"mycelium-ease-audit-ok\n")
-        # The guide's CLI journey: declare, resolve and submit, one wait, fetch
-        # and verify, executed block by block with the receipt's job ID.
-        blocks = re.findall(r"^```sh\n(.*?)^```$", guide.read_text(), re.M | re.S)
-        self.assertEqual(len(blocks), 4, "consumer guide CLI journey changed shape")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            environment = {**os.environ, "HOME": str(root), "XDG_CACHE_HOME": str(root / ".cache"),
-                           "MYCE_QUEUE": self.client.url,
-                           "MYCE_TOKEN": "dev-token",
+            project = root / "project"
+            project.mkdir()
+            git = {"GIT_AUTHOR_NAME": "guide", "GIT_AUTHOR_EMAIL": "guide@example.invalid",
+                   "GIT_COMMITTER_NAME": "guide", "GIT_COMMITTER_EMAIL": "guide@example.invalid"}
+            environment = {**os.environ, **git, "HOME": str(root), "XDG_CACHE_HOME": str(root / ".cache"),
+                           "MYCE_QUEUE": self.client.url, "MYCE_TOKEN": "dev-token",
                            "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}"}
-            job = None
-            for block in blocks:
-                if job:
-                    block = block.replace("JOB_ID", job)
-                result = subprocess.run(["sh", "-ec", block], cwd=root, env=environment,
+            # The guide assumes an existing project repository.
+            subprocess.run(["sh", "-ec", "git init -q && git commit -q --allow-empty -m start"],
+                           cwd=project, env=environment, check=True)
+            for index, block in enumerate(blocks):
+                result = subprocess.run(["sh", "-ec", block], cwd=project, env=environment,
                                         capture_output=True, text=True, timeout=90)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                if job is None and "--key" in block:
-                    job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
-            self.assertTrue(job, "CLI journey must submit a job")
-            self.assertEqual((root / "accepted/result.txt").read_bytes(),
+                self.assertEqual(result.returncode, 0, block + result.stdout + result.stderr)
+                if index == 1:
+                    self.assertEqual(result.stdout.splitlines()[-1], "mycelium-ease-audit-ok")
+                if index == 2:
+                    (project / ".mycelium/adapter.yaml").write_text(entry[0])
+            self.assertEqual((project / "accepted/result.txt").read_bytes(),
                              b"mycelium-ease-audit-ok\n")
+            (project / "accepted/result.txt").unlink()
+            # run_entry drives the real CLI, which can't read this Python-only
+            # installed-config fixture, so the example uses environment authority
+            # here; installed authority has its own tests above.
+            self.assertIn("Client.from_installed()", examples[0])
+            example = examples[0].replace("Client.from_installed()", "Client(os.environ['MYCE_QUEUE'])")
+            result = subprocess.run([sys.executable, "-c", "import os\n" + example], cwd=project,
+                                    env={**environment, "PYTHONPATH": str(ROOT / "clients/python/src")},
+                                    capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.wait_observers(root)
 
     def test_consumer_skill_relative_pixi_lock(self):
