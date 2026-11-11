@@ -57,6 +57,8 @@ type CompactJob struct {
 	Since    *time.Time `json:"since,omitempty"`
 	Reason   string     `json:"reason,omitempty"`
 	Delivery string     `json:"delivery,omitempty"`
+	// Finding is the failed or requeued job's plain-language cause and action.
+	Finding *JobFinding `json:"finding,omitempty"`
 }
 type CompactPaused struct {
 	Project string   `json:"project"`
@@ -153,7 +155,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		c.Models = append(c.Models, strings.TrimSpace(fmt.Sprintf("model %s on %s: %s, calls in flight %d %s", m.Model, m.Machine, m.State, m.InFlight, m.Error)))
 	}
 	for _, j := range s.Jobs {
-		reason := JobReason(j)
+		reason := jobReasonText(j)
 		if compactJobGroup(j) == "paused" {
 			i := slices.IndexFunc(c.Paused, func(p CompactPaused) bool { return p.Project == j.Spec.Project && p.Reason == reason })
 			if i < 0 {
@@ -167,7 +169,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		if reason == "running now" {
 			reason = ""
 		}
-		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Finding: j.Finding}
 		if j.State == "queued" {
 			since := j.WaitingSince
 			if since.IsZero() {
@@ -308,6 +310,10 @@ func (c CompactStatus) Lines(full bool) []string {
 			line += "; " + compactLine(j.Reason)
 		}
 		out = append(out, line)
+		if j.Finding != nil {
+			// Never clipped: the action is the part an agent needs.
+			out = append(out, "  "+j.Finding.Text())
+		}
 		if j.Delivery != "" {
 			out = append(out, "  delivery "+j.Delivery)
 		}

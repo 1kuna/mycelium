@@ -184,7 +184,22 @@ func ExtensionStatus(r ExtensionReport) string {
 	}
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
+
+// JobReason is the one-line reason, ending with the job's finding when it has one.
 func JobReason(j *Job) string {
+	reason := jobReasonText(j)
+	if j.Finding != nil {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += j.Finding.Text()
+	}
+	return reason
+}
+
+// jobReasonText is the lifecycle/scheduler reason without the finding, for
+// views that carry the finding as its own field.
+func jobReasonText(j *Job) string {
 	reason := j.Reason
 	if j.Blocker != nil {
 		reason = j.Blocker.Text()
@@ -219,12 +234,6 @@ func JobReason(j *Job) string {
 			reason += "; "
 		}
 		reason += isolation
-	}
-	if j.Finding != nil {
-		if reason != "" {
-			reason += "; "
-		}
-		reason += j.Finding.Text()
 	}
 	return reason
 }

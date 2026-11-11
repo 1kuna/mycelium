@@ -97,6 +97,11 @@ comes from that wait or one status read, never from polling loops, per-job
 background waiters or repeat submissions. For completion while you're away,
 bind a notifier to your own thread with [T3 binding](t3-binding.md).
 
+When a job fails, read its `finding` first: `myce wait` prints it, and status
+and `myce result` show it. `owner` says whose problem it is (`job`, `mycelium`
+or `unknown`) and `action` is the one thing to do; `mycelium` means not your
+fault, and `cause_unknown` means read `myce logs JOB_ID`.
+
 ## 4. Fetch, 5. verify
 
 ```sh
