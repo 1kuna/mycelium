@@ -169,7 +169,7 @@ MY-36, 2026-11-08 (#1061): “i think any files should transfer to the machines 
 
 </details>
 
-- <a id="my-47"></a>Finished jobs' files (queue-retained inputs and results, and worker scratch held for them) are kept for 3 days after the job ends, then reclaimed; anything needed longer is a declared output the project fetches. Stale files past that window are cleared now rather than waiting. (MY-47)
+- <a id="my-47"></a>Finished jobs' files are kept for 3 days, then reclaimed, and files already past that window are cleared now to make space. (MY-47) Agent note: applied as the queue's file retention, which also governs worker scratch held for finished jobs.
 
 <details><summary>Sources</summary>
 
