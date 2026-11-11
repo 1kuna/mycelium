@@ -1502,8 +1502,14 @@ workers fresh with consistent budget and usable memory and inventory reports.
 work/cleanup count zero. Degraded inventory or memory probes can leave `healthy`
 false while `quiescent` is true, allowing `disable --stop --wait` to complete.
 Sidecars are conservatively counted until their exact attempt is released.
-Plain status exits nonzero when worker health is incomplete; mutations exit
-zero on durable acceptance. Queue maintenance status has no privileged
+Plain status prints the JSON on stdout in every case and exits by `state`
+(#1187): 0 `healthy`; 3 `degraded` (all known workers fresh with consistent
+memory and inventory evidence, while a device reason, unavailable root or host
+hygiene reason withholds capacity), with a stderr line naming each worker,
+component, reason and what clears it, such as `myce device clear-quarantine`
+for a `device_fault_*` quarantine; 1 `unhealthy` (`host health incomplete:
+missing, stale or inconsistent worker evidence`). Mutations exit zero on
+durable acceptance. Queue maintenance status has no privileged
 local-exclusion verdict.
 
 The optional wait reads this status until quiescent or the injected deadline.

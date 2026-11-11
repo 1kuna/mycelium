@@ -529,3 +529,33 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	q.s.HostMaintenance[host] = policy
 	return nil
 }
+
+// DegradedReasons explains a degraded host (#1187): fresh, consistent workers
+// whose devices, roots or host hygiene withhold capacity. Each entry names the
+// worker, the component, its reason and what clears it.
+func (s HostMaintenanceStatus) DegradedReasons() []string {
+	var out []string
+	for _, w := range s.Workers {
+		m := w.Machine
+		for _, d := range m.Devices {
+			if d.Reason == "" {
+				continue
+			}
+			clear := "clears when the worker's next device probe reports it healthy"
+			if deviceFaultReason(d.Reason) || d.RepeatedTeardownFault {
+				clear = "quarantined; after repair clear it on the host with `myce device clear-quarantine --state-dir DIR --device " + d.ID + "`, or reboot (a new boot clears it)"
+			}
+			out = append(out, "worker "+m.ID+" fresh; device "+d.ID+" ("+d.Platform+" "+d.Identity+"): "+d.Reason+"; "+clear)
+		}
+		for _, r := range m.UnavailableRoots {
+			out = append(out, "worker "+m.ID+" fresh; root "+r.Root+" unavailable: "+r.Reason+"; clears when the worker's next root probe succeeds")
+		}
+		if m.HostHealth != nil && m.HostHealth.DrainReason != "" {
+			out = append(out, "worker "+m.ID+" fresh; host hygiene: "+m.HostHealth.DrainReason+"; clears when the host health probe recovers")
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, "workers fresh; host health probe evidence unknown or expired; clears with the next valid host health report")
+	}
+	return out
+}
