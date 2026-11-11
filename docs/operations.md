@@ -859,8 +859,13 @@ myce host status HOST
 myce host budget HOST --memory-budget-gb GiB
 myce host placement HOST --last-resort=true
 myce host placement HOST --last-resort=false
+myce host role HOST --role node|services|interactive
 myce host resume HOST
 ```
+
+The role (MY-45) selects how host RAM capacity is measured; see
+[host roles](reference/host-capacity.md#host-ram-admission-and-ceilings). It
+defaults to `node`, applies while the host stays enabled, and keeps any drain.
 
 ### Exclude components with a selector
 

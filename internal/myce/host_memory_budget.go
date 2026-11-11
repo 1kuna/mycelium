@@ -17,14 +17,18 @@ type HostMemoryBudget struct {
 
 // HostMemoryDerivation exposes the authority and its evidence, including fallback.
 type HostMemoryDerivation struct {
-	Source        string               `json:"source"`
-	Reason        string               `json:"reason,omitempty"`
-	FallbackGB    float64              `json:"fallback_gb"`
-	TotalGB       float64              `json:"total_gb,omitempty"`
-	BaselineMaxGB float64              `json:"baseline_max_gb,omitempty"`
-	ReserveGB     float64              `json:"reserve_gb,omitempty"`
-	AllowanceGB   float64              `json:"allowance_gb"`
-	History       ExternalMemoryWindow `json:"history_7d"`
+	Source             string               `json:"source"`
+	Reason             string               `json:"reason,omitempty"`
+	FallbackGB         float64              `json:"fallback_gb"`
+	TotalGB            float64              `json:"total_gb,omitempty"`
+	BaselineMaxGB      float64              `json:"baseline_max_gb,omitempty"`
+	Dedicated          bool                 `json:"dedicated,omitempty"`
+	Role               string               `json:"role,omitempty"`
+	BaselineQuantileGB float64              `json:"baseline_quantile_gb,omitempty"`
+	ReserveSource      string               `json:"reserve_source,omitempty"`
+	ReserveGB          float64              `json:"reserve_gb,omitempty"`
+	AllowanceGB        float64              `json:"allowance_gb"`
+	History            ExternalMemoryWindow `json:"history_7d"`
 }
 
 func hostMemoryAllowance(gib float64) (HostMemoryBudget, error) {

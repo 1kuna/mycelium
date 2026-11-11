@@ -19,7 +19,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		return hostDeviceCommand(ctx, args[1:], out)
 	}
 	if len(args) == 0 {
-		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement|profile HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement|profile|role HOST [--config PATH] [--last-resort=true|false] [--role node|services|interactive] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)
@@ -36,13 +36,14 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	shared := f.Bool("shared", false, "use shared interactive host profile (profile action)")
 	reserve := f.Float64("interactive-reserve-gb", 0, "measured additional interactive RAM reserve; required with --shared=true")
 	lastResort := f.Bool("last-resort", false, "prefer ordinary admissible hosts before this host; use --last-resort=false to clear")
+	role := f.String("role", "", "host role (role action): node (on-demand, default), services (always-on services host) or interactive")
 	var flags, hosts []string
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "interactive-reserve-gb" || key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
+			if (key == "interactive-reserve-gb" || key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores" || key == "role") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -56,7 +57,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if len(hosts) != 1 || f.NArg() != 0 {
 		return errors.New("exactly one physical HOST is required")
 	}
-	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" && action != "placement" && action != "profile" {
+	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" && action != "placement" && action != "profile" && action != "role" {
 		return errors.New("unknown queue host action")
 	}
 	if *stop && action != "disable" {
@@ -65,7 +66,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
-	if *wait && (action == "resume" || action == "budget" || action == "placement" || action == "profile") {
+	if *wait && (action == "resume" || action == "budget" || action == "placement" || action == "profile" || action == "role") {
 		return errors.New("--wait requires drain, disable or status")
 	}
 	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop}
@@ -89,7 +90,13 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if v.Name == "memory-budget-measured" {
 			request.MemoryBudgetMeasured = measured
 		}
+		if v.Name == "role" {
+			request.Role = role
+		}
 	})
+	if (action == "role") != (request.Role != nil) {
+		return errors.New("role requires --role node|services|interactive, and --role requires role")
+	}
 	if action == "profile" {
 		if !sharedSet || *shared && (!reserveSet || *reserve <= 0) || !*shared && reserveSet {
 			return errors.New("profile requires --shared=true --interactive-reserve-gb GiB, or --shared=false")
