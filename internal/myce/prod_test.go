@@ -501,6 +501,7 @@ func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
 	if check(t, q, a, nil).Job != nil {
 		t.Fatal("release credit cannot admit work")
 	}
+	drainAdmissionWait(t, q)
 	if q.roomPlan(job(t, q, prod.ID), q.s.Machines[a.ID], true) != nil {
 		t.Fatal("full memory report retained speculative release credit")
 	}

@@ -193,6 +193,7 @@ func TestAdaptiveFairnessAccountingCadenceInvariant(t *testing.T) {
 				submit(t, q, projectSpec("a"))
 				run := check(t, q, m, nil).Job
 				b := submit(t, q, projectSpec("b"))
+				// Admission capture can still account usage after check-in returns.
 				q.mu.Lock()
 				q.s.FairUsage[q.fairKey(b.Spec)] = FairUsage{Seconds: 100, At: clock.Now(), HorizonSeconds: quantum, QuantumSeconds: quantum}
 				q.mu.Unlock()

@@ -14,7 +14,8 @@ of this cleanup.
 | Contract | Why the supported pair still needs it |
 | --- | --- |
 | `keyed-attempt-v1`, exact job/attempt/session fences, explicit release acknowledgements | Both releases use these for rolling updates, process recovery and custody. Omission never releases an attempt. |
-| Reply protocol advertisements and HTTP capability headers | r6.7 negotiates its first send. It initially omits additive health, probe, collection, memory and resource fields, then sends them after the current queue advertises support. New workers send the complete current shape directly. |
+| Reply protocol advertisements and HTTP capability headers | r6.7 negotiates its first send. It initially omits additive health, probe, collection, memory and resource fields, then sends them after the current queue advertises support. New workers send the shared r6.7 shape directly. |
+| `worker-disk-budget-v1` advertisement and narrow projection/retry | Disk-budget telemetry was added after r6.7. New workers omit only these fields until advertised and retry once without them after a strict downgrade refusal; baseline collection and local evidence stay intact. |
 | Receive-side missing-probe timing behavior | r6.7's first check-in deliberately strips probe validity. Removing this bootstrap receive behavior would break the adjacent pair even though both binaries implement adaptive probes. |
 | Full tool-inventory bootstrap, hash/version/session acknowledgement | An r6.7 worker and a restarted same-session worker must learn the queue's durable inventory fence. This is an ongoing synchronization protocol. |
 | `myce-normalized-state-v2`, per-machine `myce-normalized-state-v3`, compact records, field rows and pages | r6.7 persists v2. Current persistence work writes machines individually in v3, so its atomic v2-to-v3 transition remains within the supported floor. Monolithic and normalized-v1 input is refused. |
@@ -27,8 +28,8 @@ of this cleanup.
 
 ## Removed runtime paths
 
-The pre-keyed attempt protocol, omission-as-release behavior, request-shape
-stripping retries, old queue capability negotiation, normalized-v1 and
+The pre-keyed attempt protocol, omission-as-release behavior, below-floor request-shape
+stripping retries and queue capability negotiation, normalized-v1 and
 monolithic persistence readers, startup fair-usage/cancellation/bundle importers,
 split-worker conversion and rollback, retired service-config overlays/default
 rewrites, and root single-attempt spool adoption are removed with their migration

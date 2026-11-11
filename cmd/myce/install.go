@@ -339,6 +339,11 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 	}
 	d := c.Detection
+	if role == "worker" {
+		if err := myce.ValidateOnboardingModelSelection(ctx, c, probe.Command); err != nil {
+			return err
+		}
+	}
 	if installed != nil {
 		if err := myce.ValidateInstallIdentity(*installed, c); err != nil {
 			return err

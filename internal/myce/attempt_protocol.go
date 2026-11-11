@@ -44,8 +44,17 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	if w.toolReport != nil {
 		c = w.toolReport.checkin(c)
 	}
+	c = w.diskBudgetCheckin(c)
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	var refusal *HTTPError
+	if hasDiskBudgetWireFields(c) && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		c = withoutDiskBudgetFields(c)
+		if w.diskBudgetWire != nil {
+			w.diskBudgetWire.supported = false
+		}
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
 	if err != nil {
 		var he *HTTPError
 		if errors.As(err, &he) && (he.Status == 400 && he.Code == "request_invalid" || he.Status == 426) {
@@ -56,6 +65,9 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	validated, err := workerAttemptReply(c, reply)
 	if err != nil {
 		return Reply{}, err
+	}
+	if w.diskBudgetWire != nil {
+		w.diskBudgetWire.supported = reply.WorkerDiskBudgetProtocol == workerDiskBudgetProtocol
 	}
 	if w.toolReport != nil {
 		w.toolReport.accept(c, reply)

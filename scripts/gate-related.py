@@ -28,6 +28,14 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/device_use.go'] = (
 for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
 
+# Local-volume platform probes are exercised through real installer preflight.
+for source in ('model_root_local_darwin', 'model_root_local_linux', 'model_root_local_other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('onboarding_storage_test.go',)
+
+# The shared ledger's pressure tests exercise these private cache adapters.
+for source in ('cache_references', 'worker_compiler_cache', 'worker_disk_candidates'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('worker_disk_budget_test.go',)
+
 # The monitor's tests predate the source split; it has no matching test filename.
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')

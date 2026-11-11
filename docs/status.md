@@ -2453,6 +2453,26 @@ release verification; submit revalidates and results still need acceptance check
 
 ## Worker cleanup (#834, next release)
 
+The #811 worker/queue release adds `hygiene_collection.disk_budget`: per-volume
+owned allocated bytes, free/floor/reserved bytes, measured control-file growth,
+last-pass reclaimed free blocks and pressure. `foreign_disk_growth` means a
+free-space loss unexplained by Mycelium's own allocation delta; it is not proof
+of a particular foreign writer. A falling free-space trend adds
+`exhaustion_seconds`; recovery clears the warning/forecast. These observations
+can include concurrent writes and filesystem allocation changes.
+`compiler_warning: external_compiler_cache_unmanaged` and
+`unmanaged_compiler_bytes` identify known external Go cache storage without
+publishing its path. `scratch` contains allocated retained/reclaimed bytes and
+`retained_bytes_by_reason` from #1230's exact-attempt collector. Protected unique
+data needs its owner's release/recovery; a capacity warning never authorizes
+foreign deletion. See [filesystem budgets](reference/worker-caches.md#shared-filesystem-budget-811-next-release).
+
+These additions require `worker_disk_budget_protocol: worker-disk-budget-v1`.
+Workers omit them for an older queue while preserving its supported collection
+fields, including after a strict downgrade. Public output sanitizes roles,
+reasons and warnings. The private worker-state `disk-inventory.json` retains
+local role/path mappings for owner inspection.
+
 Machine `hygiene_collection` reports the last automatic collection time, next
 eligible sweep, file/environment cache bytes and effective limits, reclaimed
 bytes, busy locks, protected entries and fixed diagnostic codes. File-cache

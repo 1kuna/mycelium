@@ -81,7 +81,7 @@ func TestResourceBasisDeclaredBesideLearned(t *testing.T) {
 		t.Fatalf("admissions summary for %s: %+v", host, snap.Admissions)
 	}
 	// A one-job status page still counts every retained admission.
-	paged, err := q.statusSnapshotOptions(&statusOptions{full: true, jobs: "recent", limit: 1})
+	paged, err := q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 1, full: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -293,18 +293,19 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 			return fail(err)
 		}
 		need := input.bytes()
+		input.model = &m
 		if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
 			return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", nil))
 		}
 		// Zero uses the cache's volume-derived disk floor during admission,
 		// after inactive entries have had a chance to be evicted.
-		if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 {
+		if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 && w.modelSnapshots.budget == nil {
 			disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
 			if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
 				return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", e))
 			}
 		}
-		path, done, err := w.modelSnapshots.Acquire(ctx, input, repo)
+		path, done, err := w.modelSnapshots.Acquire(context.WithValue(ctx, diskBudgetFloorKey{}, uint64(max(0, j.ModelLimits.FreeFloorBytes))), input, repo)
 		if err != nil {
 			if errors.Is(err, errCheckpointIOPending) || ctx.Err() != nil {
 				return fail(err)

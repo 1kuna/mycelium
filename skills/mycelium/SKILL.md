@@ -211,6 +211,21 @@ available within its configured budget.
 
 The current/previous release pair uses batch-v1 waits. An older queue without
 that endpoint requires an upgrade; clients no longer fall back to per-job polling.
+
+From the worker/queue release containing #811, filesystem pressure reclaims
+inactive rebuildable caches automatically across cache classes. Keep the same
+job while pending demand triggers cleanup; active readers, queued references,
+exact-attempt custody and last unique sources stay protected. Machine
+`hygiene_collection.disk_budget` reports physical headroom/reservations and
+`foreign_disk_growth`; `scratch.retained_bytes_by_reason` explains preserved
+attempt storage. Foreign or explicit external compiler caches are warned about
+and never deleted. Installation owners can select verified local snapshot
+acquisition with supported `myce install worker --config CONFIG --model-root PATH`
+on the #1248 worker release. This leaves NAS checkpoints, environment sources
+and immutable masters under their existing contracts. See
+[worker budgets](../../docs/reference/worker-caches.md#shared-filesystem-budget-811-next-release)
+and [local acquisition](../../docs/reference/models.md#local-acquisition-root-1248-next-release).
+
 Keep owned waits in the foreground. Supporting clients accept one batch of up
 to 256 distinct IDs: `myce wait JOB_A JOB_B`. A wait timeout or interruption leaves
 the jobs alive; retain the IDs. Never build per-job background wait processes,
@@ -338,6 +353,15 @@ again and re-latch it. Operator exclusions remain independent. This is automatic
 after the worker release; it does not observe arbitrary consumer syscalls.
 Keep the same job while the root recovers;
 do not work around the hold by pinning a host or changing mounts.
+
+From the worker/queue release containing #1227, accepted exact-attempt scratch
+is reclaimed automatically; terminal failed/cancelled scratch follows the queue's
+positive file-retention policy or explicit owner file release. The former fixed
+24-hour scratch promise is retired under MY-34. Unknown data and pending
+upload/replay/custody remain protected. Recover required partial files before
+the configured deadline or release; use the existing reviewed file-release
+plan/apply flow only after preserving them. See
+[worker scratch retention](../../docs/reference/worker-caches.md#worker-scratch-retention).
 
 ## Read for the relevant branch
 

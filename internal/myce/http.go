@@ -49,6 +49,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux.HandleFunc("GET /api/environments", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, a.Queue.EnvironmentEntries(), nil)
 	})
+	a.registerCacheReferences(mux)
 	mux.HandleFunc("GET /api/environments/{name}", func(w http.ResponseWriter, r *http.Request) {
 		for _, entry := range a.Queue.EnvironmentEntries() {
 			if entry.Name == r.PathValue("name") {
@@ -104,6 +105,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
 	a.registerFileRelease(mux)
+	a.registerAttemptFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
 		if !decode(w, r, &e) {

@@ -117,8 +117,21 @@ func TestOnboardingNASDiscoveryAndBoundaries(t *testing.T) {
 	got.Checkpoints = filepath.Join(old, "mycelium", "checkpoints")
 	got.EnvironmentRoot = filepath.Join(old, "mycelium", "environments")
 	got.ModelRoot = filepath.Join(c.WorkerHome, "local-models")
+	before := stateTree(t, c.WorkerHome)
+	if err := ValidateOnboardingModelSelection(context.Background(), got, command); err != nil {
+		t.Fatal("dry-run refused local model root", err)
+	}
+	if !reflect.DeepEqual(before, stateTree(t, c.WorkerHome)) {
+		t.Fatal("dry-run local model selection changed files")
+	}
+	local, err := PrepareOnboardingStorage(context.Background(), got, false, command)
+	if err != nil || local.ModelRoot != got.ModelRoot || local.Checkpoints != got.Checkpoints || local.EnvironmentRoot != got.EnvironmentRoot || !local.RequireMountedNAS {
+		t.Fatal("explicit local model root changed other storage or failed validation", err)
+	}
+	got.EnvironmentRoot = filepath.Join(c.WorkerHome, "local-environments")
 	_, err = PrepareOnboardingStorage(context.Background(), got, false, command)
 	requirePreflightCode(t, err, "nas_root_outside_mount")
+	got.EnvironmentRoot = local.EnvironmentRoot
 	if err = os.Symlink(c.WorkerHome, filepath.Join(old, "escape")); err != nil {
 		t.Fatal(err)
 	}
