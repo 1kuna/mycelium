@@ -63,24 +63,27 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			q.mu.RLock()
+			charge := q.hostJobCharge(q.s.Jobs[probe.ID])
+			q.mu.RUnlock()
 			got := assignedJob(reply)
 			if evidence == "fresh" {
 				if got == nil || got.ID != pending.ID {
 					t.Fatalf("fresh small footprint kept large ceiling charged: %s", job(t, q, pending.ID).Reason)
 				}
-				if charge := q.hostJobCharge(q.s.Jobs[probe.ID]); charge >= 2 {
+				if charge >= 2 {
 					t.Fatalf("small probe charged %g GiB", charge)
 				}
 			} else {
-				if got != nil || q.hostJobCharge(q.s.Jobs[probe.ID]) != probe.MemoryEnvelope.HostGB {
+				if got != nil || charge != probe.MemoryEnvelope.HostGB {
 					t.Fatal("unavailable evidence reduced the containment charge", fmt.Sprint(got))
 				}
 			}
-			if q.s.Jobs[probe.ID].Spec.Needs.HostMemoryGB != ceiling {
+			if storedTestJob(t, q, probe.ID).Spec.Needs.HostMemoryGB != ceiling {
 				t.Fatal("changed execution containment ceiling")
 			}
 			w.Machine, w.hostMemorySamples = m, currentHostMemorySamples(reports, clock.Now())
-			if err := localAttemptAdmission(w, []Job{*q.s.Jobs[probe.ID]}, *q.s.Jobs[pending.ID], nil); (err == nil) != (evidence == "fresh") {
+			if err := localAttemptAdmission(w, []Job{storedTestJob(t, q, probe.ID)}, storedTestJob(t, q, pending.ID), nil); (err == nil) != (evidence == "fresh") {
 				t.Fatalf("worker admission disagrees with queue: %v", err)
 			}
 		})
@@ -116,7 +119,7 @@ func TestHeartbeatMemoryGrowthRefreshesPhysicalHeadroom(t *testing.T) {
 		t.Fatal("new resident usage spent old physical headroom")
 	}
 	w.Machine, w.hostMemorySamples = m, currentHostMemorySamples(reports, clock.Now())
-	if err := localAttemptAdmission(w, []Job{*q.s.Jobs[holder.ID]}, *q.s.Jobs[pending.ID], nil); err == nil {
+	if err := localAttemptAdmission(w, []Job{storedTestJob(t, q, holder.ID)}, storedTestJob(t, q, pending.ID), nil); err == nil {
 		t.Fatal("worker admitted without physical growth room")
 	}
 }

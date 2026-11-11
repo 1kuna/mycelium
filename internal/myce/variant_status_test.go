@@ -67,7 +67,7 @@ func TestVariantStatusPlacementAndAPI(t *testing.T) {
 	check(t, q, a, nil)
 	check(t, q, b, nil)
 	j := submit(t, q, variantSpec(e, "experiment"))
-	stored := cloneJob(q.s.Jobs[j.ID])
+	stored := storedTestJob(t, q, j.ID)
 	server := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
 	defer server.Close()
 	c := Client{URL: server.URL, Token: "fixture"}
@@ -108,7 +108,7 @@ func TestVariantStatusPlacementAndAPI(t *testing.T) {
 			t.Fatal("status page omitted variants", err)
 		}
 	}
-	if !reflect.DeepEqual(stored, cloneJob(q.s.Jobs[j.ID])) {
+	if !reflect.DeepEqual(stored, storedTestJob(t, q, j.ID)) {
 		t.Fatal("read mutated frozen job")
 	}
 	if got := check(t, q, a, nil).Job; got != nil {

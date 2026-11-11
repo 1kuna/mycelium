@@ -132,7 +132,7 @@ func TestBlobDeliveryReadOutsideQueueAndReplacementFence(t *testing.T) {
 	m.Environments = []string{r.Key}
 	reply := check(t, q, m, nil)
 	// Read the durable reference rather than the already hydrated transport.
-	offer := cloneJob(q.s.Jobs[j.ID])
+	offer := storedTestJob(t, q, j.ID)
 	reply.Job = &offer
 	path := q.files.blob(*offer.EnvironmentRecipes["fake"].FilesRef)
 	if err := os.Remove(path); err != nil {

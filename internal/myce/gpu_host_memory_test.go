@@ -805,6 +805,8 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
+			q.mu.Lock()
+			defer q.mu.Unlock()
 			for id, p := range q.s.WorkObservations {
 				p.GPUHostRange = &MemoryPeakRange{Samples: 2, MinGB: 7.8, MaxGB: 7.9}
 				// These cases rewrite a raw run's counters; discard its derived

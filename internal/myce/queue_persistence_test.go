@@ -223,13 +223,13 @@ func TestQueuePersistenceDiagnosticAnchorRestart(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("idle waiting job was rewritten")
 	}
-	view := cloneJob(q.s.Jobs[j.ID])
+	view := storedTestJob(t, q, j.ID)
 	q.projectEfficiency(&view)
 	if view.Efficiency.WaitSeconds["unknown"] != 3 {
 		t.Fatal("missing read-time wait")
 	}
 	q = reopenQueue(t, q, clock)
-	view = cloneJob(q.s.Jobs[j.ID])
+	view = storedTestJob(t, q, j.ID)
 	q.projectEfficiency(&view)
 	if view.Efficiency.WaitSeconds["unknown"] != 3 {
 		t.Fatal("restart lost anchored wait")

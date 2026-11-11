@@ -32,7 +32,7 @@ func TestQueueShutdownPreservesRunningAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, q, peer, nil)
-	before := cloneJob(q.s.Jobs[j.ID])
+	before := storedTestJob(t, q, j.ID)
 
 	entered, release := make(chan struct{}), make(chan struct{})
 	api := API{Queue: q, Token: "test"}.Handler()

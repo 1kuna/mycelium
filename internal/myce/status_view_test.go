@@ -255,6 +255,8 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 	j = submit(t, q, s)
 	clock.Advance(time.Second)
 	// Exercise the generic no-fit diagnostic with insufficient live host RAM.
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	target := q.s.Machines[m.ID]
 	target.FreeHostMemoryGB = 1
 	probe := *q.s.Jobs[j.ID]

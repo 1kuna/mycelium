@@ -168,6 +168,8 @@ func TestColdProbeAdmissionLearnsExactRefusalAcrossRestart(t *testing.T) {
 		t.Fatal("retry chased headroom instead of reserving measured launch drift", err)
 	}
 	// Known containment and OOM lower bounds cannot be shrunk by the reserve.
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	queued := *q.s.Jobs[probe.ID]
 	queued.State = "queued"
 	queued.MemoryOOMFloor = &SizeHint{HostMemoryGB: 20}

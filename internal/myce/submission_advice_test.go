@@ -18,15 +18,19 @@ import (
 func submissionAdviceFixture(t testing.TB) *Queue {
 	t.Helper()
 	q, _ := candidateCostFixture(t)
-	for i := 160; i < 6500; i++ {
-		source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
-		j := *source
-		j.ID = fmt.Sprintf("retained-%04d", i)
-		timing := *source.Timing
-		timing.Execution.ID = j.ID
-		j.Timing = &timing
-		q.s.Jobs[j.ID] = &j
-	}
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for i := 160; i < 6500; i++ {
+			source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
+			j := *source
+			j.ID = fmt.Sprintf("retained-%04d", i)
+			timing := *source.Timing
+			timing.Execution.ID = j.ID
+			j.Timing = &timing
+			q.s.Jobs[j.ID] = &j
+		}
+	}()
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +41,7 @@ func BenchmarkSubmissionAdvice(b *testing.B) {
 	q := submissionAdviceFixture(b)
 	budgetHost(q, 8<<30, 1) // Synthetic headroom keeps the measured copy admitted.
 	run := func() (submissionAdviceTiming, time.Duration) {
-		j := cloneJob(q.s.Jobs["queued-081"])
+		j := storedTestJob(b, q, "queued-081")
 		span := &requestSpan{}
 		timing := newSubmissionAdviceTiming()
 		unlock := requestLock(context.WithValue(context.Background(), requestSpanKey{}, span), &q.mu)
@@ -242,21 +246,25 @@ func TestSubmissionAdvicePreservesFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"queued-000", "queued-081", "running-0", "retained-000"} {
-		before := cloneJob(q.s.Jobs[id])
+		before := storedTestJob(t, q, id)
 		want := cloneJob(&before)
 		copy := want
-		if copy.State == "queued" {
-			copy.Reason = q.waitReason(&copy)
-			copy.Reason = q.statusWaitingReason(&copy)
-		}
-		want.PriorityPolicy, want.DeadlineGuidance = q.priorityMatch(want.Spec), q.deadlineGuidance(&copy)
+		func() {
+			q.mu.Lock()
+			defer q.mu.Unlock()
+			if copy.State == "queued" {
+				copy.Reason = q.waitReason(&copy)
+				copy.Reason = q.statusWaitingReason(&copy)
+			}
+			want.PriorityPolicy, want.DeadlineGuidance = q.priorityMatch(want.Spec), q.deadlineGuidance(&copy)
+		}()
 		got := cloneJob(&before)
 		timing := newSubmissionAdviceTiming()
 		v.submissionDeadlineGuidance(&got, &timing)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s advice changed: got %+v want %+v", id, got.DeadlineGuidance, want.DeadlineGuidance)
 		}
-		if !reflect.DeepEqual(before, cloneJob(q.s.Jobs[id])) {
+		if !reflect.DeepEqual(before, storedTestJob(t, q, id)) {
 			t.Fatal("advice changed durable receipt")
 		}
 	}

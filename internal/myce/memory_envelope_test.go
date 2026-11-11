@@ -427,6 +427,8 @@ func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 		t.Fatalf("uncalibrated same-family transfer must remain physical exploration: %s", data)
 	}
 	// A different family also needs measured transfer error.
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "arm64"
 		q.s.WorkObservations[id] = point
@@ -1399,6 +1401,8 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	probe := *q.s.Jobs[running[0].ID]
 	probe.State = "queued"
 	estimate := q.memoryEstimate(&probe, q.s.Machines[m.ID])

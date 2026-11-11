@@ -29,7 +29,7 @@ func TestPlacementStatusAuthoredAndScheduler(t *testing.T) {
 			if assigned == nil || assigned.ID != submitted.ID {
 				t.Fatal("no assignment")
 			}
-			frozen := cloneJob(q.s.Jobs[submitted.ID])
+			frozen := storedTestJob(t, q, submitted.ID)
 			if err := q.Started(result(assigned, true)); err != nil {
 				t.Fatal(err)
 			}

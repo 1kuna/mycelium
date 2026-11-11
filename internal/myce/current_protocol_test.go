@@ -66,13 +66,13 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	if a == nil || a.ID != s.ID {
 		t.Fatal("assignment")
 	}
-	before := cloneJob(q.s.Jobs[a.ID])
+	before := storedTestJob(t, q, a.ID)
 	bad := result(a, true)
 	bad.Session = ""
 	if err := q.Complete(bad); err == nil {
 		t.Fatal("empty session discharged custody")
 	}
-	if q.s.Jobs[a.ID].ReleaseConfirmed != before.ReleaseConfirmed {
+	if storedTestJob(t, q, a.ID).ReleaseConfirmed != before.ReleaseConfirmed {
 		t.Fatal("custody changed")
 	}
 }

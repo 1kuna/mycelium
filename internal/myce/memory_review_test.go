@@ -193,16 +193,20 @@ func TestMemoryReviewResumedEstimateAndOOMFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A retry may use complete-input history even though it cannot record it.
-	probe := *q.s.Jobs[first.ID]
-	probe.State, probe.Attempt, probe.Spec.Resumable, probe.Spec.Needs.Memory = "queued", 2, true, "auto"
-	for id, point := range q.s.WorkObservations {
-		point.Forbidden = true
-		q.s.WorkObservations[id] = point
-	}
-	estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
-	if estimate.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatal("resumed or Forbidden performance point lost its accepted memory peak")
-	}
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		probe := *q.s.Jobs[first.ID]
+		probe.State, probe.Attempt, probe.Spec.Resumable, probe.Spec.Needs.Memory = "queued", 2, true, "auto"
+		for id, point := range q.s.WorkObservations {
+			point.Forbidden = true
+			q.s.WorkObservations[id] = point
+		}
+		estimate := q.memoryCandidate(&probe, q.s.Machines[m.ID])
+		if estimate.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
+			t.Fatal("resumed or Forbidden performance point lost its accepted memory peak")
+		}
+	}()
 	s.Needs.Memory, s.Resumable = "auto", true
 	second := startObservation(t, q, m, s)
 	clock.Advance(time.Second)

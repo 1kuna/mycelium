@@ -12,7 +12,7 @@ import (
 // can invalidate retained evidence. New passes retain no admission answers.
 func TestRetainedMemoryMutationEquivalence(t *testing.T) {
 	q, _ := candidateCostFixture(t)
-	source := q.s.Jobs["retained-001"]
+	source := storedTestJob(t, q, "retained-001")
 	key := *source.Timing.Key
 	configuration := memoryConfiguration(source.Spec.Needs, source.Spec.Args, source.Spec.Program)
 	compare := func(stage string) memoryConstraintEvidence {
@@ -110,7 +110,7 @@ func TestRetainedMemoryLiveEvidenceAndTime(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	source := cloneJob(q.s.Jobs["retained-001"])
+	source := storedTestJob(t, q, "retained-001")
 	source.ID = "live-evidence"
 	source.State = "running"
 	source.Timing.Execution.ID = source.ID

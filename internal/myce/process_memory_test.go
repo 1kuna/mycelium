@@ -156,14 +156,18 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	if next.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatalf("uncalibrated same-family transfer must probe measured headroom: %+v", next.MemoryEnvelope)
 	}
+	q.mu.Lock()
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "arm64"
 		q.s.WorkObservations[id] = point
 	}
+	q.mu.Unlock()
 	if err := q.Complete(result(next, true)); err != nil {
 		t.Fatal(err)
 	}
 	check(t, q, m, nil)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	probe := *q.s.Jobs[next.ID]
 	probe.State = "queued"
 	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || other.MemoryEnvelope.Basis != "exploratory" {
