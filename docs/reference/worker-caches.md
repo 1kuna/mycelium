@@ -135,7 +135,18 @@ queue locks and heartbeat work. Hardlinks across attempt folders can overstate
 physical savings; a partially failed deletion is conservatively counted as
 retained until the next pass. Measurement errors accompany the sweep error.
 The pass refuses a symlinked `job-files` root and never follows attempt symlinks.
-A failed removal is retried on the next pass without blocking other folders.
+After collection authority and custody checks pass, the collector restores owner
+write permission on directories inside the disposable attempt tree. It leaves
+file permissions and external symlink targets unchanged, including hardlinked
+input files. A failed removal is retried on the next pass without blocking other
+folders.
+
+Accepted scratch does not wait for the configured terminal-file retention
+window: the next retention pass can collect it even under disk pressure. The
+shared disk-budget pressure evictor introduced in #1250 accounts for scratch
+but does not select it as an eviction candidate; crossing the disk floor does
+not synchronously trigger scratch collection or override retention/custody.
+The existing startup, minute and attempt-release sweeps own that collection.
 
 This bounds disposable scratch by acceptance or the installation's authored
 retention policy, not by a universal byte cap. Protected unique data can exceed
