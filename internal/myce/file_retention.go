@@ -528,18 +528,26 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 	return err
 }
 
-// With need zero, an ordinary pass yields to measured control pressure. A
-// capacity-refused write passes its need instead: collection of already
-// authorized bytes continues for that writer until it has freed that many.
+// Each pass snapshots candidates under a short read lock, then works in
+// batches: one publication-fence hold and one short q.mu recheck of current
+// custody per batch, unlinks outside q.mu, and one commit transaction at the
+// end. Measured control pressure ends the pass after its first batch rather
+// than before it, so collection always progresses (#1375). With need zero an
+// idle queue keeps draining; a capacity-refused write passes its need instead,
+// and collection of already authorized bytes continues until it frees that many.
 func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint64) (freed uint64, _ error) {
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	expired, keep, referenced := q.fileReferences(true)
-	candidates := make([]string, 0, len(expired))
+	type candidate struct {
+		hash           string
+		orphan, bundle bool
+	}
+	items := make([]candidate, 0, len(expired))
 	for hash := range expired {
 		if (FileRef{SHA256: hash}).validate() == nil && !keep[hash] {
-			candidates = append(candidates, hash)
+			items = append(items, candidate{hash: hash})
 		}
 	}
 	revision := q.fileReferenceRevision
@@ -547,30 +555,40 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
 	bundles := map[string]time.Time{}
+	markers := q.jobUploadMarkers()
+	for hash, published := range markers {
+		if q.fileRetention > 0 && !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
+			orphans[hash] = published
+			items = append(items, candidate{hash: hash, orphan: true})
+		}
+	}
 	for hash, published := range q.s.BundleUploads {
 		if q.fileRetention > 0 && !published.After(orphanCutoff) && !referenced[hash] {
 			bundles[hash] = published
+			items = append(items, candidate{hash: hash, bundle: true})
 		}
 	}
-	for hash, published := range q.jobUploadMarkers() {
-		if q.fileRetention > 0 && !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
-			orphans[hash] = published
-		}
-	}
+	batch := fileCollectionBatch(len(referenced) + len(markers) + len(q.s.BundleUploads))
 	requestUnlock1()
 	if store == nil {
 		return 0, nil
 	}
 	gone := map[string]bool{}
-	deferred := false
-	reclaim := func(hash string, orphan, bundle bool) {
+	deferred, yielded := false, false
+	var reclaimedBlobs uint64
+	// Reports false when the fence is busy and the batch was not attempted.
+	reclaimBatch := func(batch []candidate) bool {
 		// The same fence covers tus publication and verify-then-commit callers.
 		// Do not queue a writer behind slow hashing/uploads: RWMutex writer
 		// preference would then stall unrelated publications. Tick retries later.
 		if !q.fileLifecycle.TryLock() {
-			deferred = true
-			return
+			return false
 		}
+		defer q.fileLifecycle.Unlock()
+		type decision struct {
+			remove, marked bool
+		}
+		decisions := make([]decision, len(batch))
 		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
 		// Every queue transaction and catalog change advances this fence. Reuse
 		// the reference snapshot only while it still describes current custody.
@@ -578,62 +596,75 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			expired, keep, referenced = q.fileReferences(true)
 			revision = q.fileReferenceRevision
 		}
-		remove := q.files == store && expired[hash] && !keep[hash]
-		if orphan {
-			published, marked := q.jobUploadMarker(hash)
-			remove = q.files == store && marked && published.Equal(orphans[hash]) && !referenced[hash]
+		for i, c := range batch {
+			remove := q.files == store && expired[c.hash] && !keep[c.hash]
+			if c.orphan {
+				published, marked := q.jobUploadMarker(c.hash)
+				remove = q.files == store && marked && published.Equal(orphans[c.hash]) && !referenced[c.hash]
+			}
+			if c.bundle {
+				published, marked := q.s.BundleUploads[c.hash]
+				remove = q.files == store && marked && published.Equal(bundles[c.hash]) && !referenced[c.hash]
+			}
+			bundleTime, trackedBundle := q.s.BundleUploads[c.hash]
+			// An expired input can share bytes with a newly created, rejected
+			// recipe. Its older job window cannot shorten the recipe's retention.
+			remove = remove && (!trackedBundle || !bundleTime.After(orphanCutoff))
+			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle}
 		}
-		if bundle {
-			published, marked := q.s.BundleUploads[hash]
-			remove = q.files == store && marked && published.Equal(bundles[hash]) && !referenced[hash]
-		}
-		bundleTime, trackedBundle := q.s.BundleUploads[hash]
-		// An expired input can share bytes with a newly created, rejected
-		// recipe. Its older job window cannot shorten the recipe's retention.
-		remove = remove && (!trackedBundle || !bundleTime.After(orphanCutoff))
 		requestUnlock2()
-		var err error
-		if remove {
-			path := filepath.Join(store.root, "blobs", hash)
-			var st os.FileInfo
-			st, err = os.Lstat(path)
+		// The fence stays held from the recheck through every unlink below, so
+		// no publication can commit a new reference to a hash in this batch.
+		for i, c := range batch {
+			if need > 0 && freed >= need {
+				break
+			}
+			if !decisions[i].remove || gone[c.hash] {
+				continue
+			}
+			path := filepath.Join(store.root, "blobs", c.hash)
+			st, err := os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && filePayloadAgeEligible(st, cutoff, orphanCutoff, orphan || trackedBundle) {
+			if err == nil && filePayloadAgeEligible(st, cutoff, orphanCutoff, decisions[i].marked) {
 				err = os.Remove(path)
 				if err == nil {
-					gone[hash] = true
+					gone[c.hash] = true
+					reclaimedBlobs++
 					freed = addDiskBytes(freed, uint64(st.Size()))
 				}
 			}
 			if errors.Is(err, os.ErrNotExist) {
-				gone[hash] = true
+				gone[c.hash] = true
 				err = nil
 			}
+			if err != nil {
+				log.Printf("file retention deferred hash=%s error=%q; retrying next tick", c.hash, err)
+			}
 		}
-		q.fileLifecycle.Unlock()
-		if err != nil {
-			log.Printf("file retention deferred hash=%s error=%q; retrying next tick", hash, err)
-		}
+		return true
 	}
-	for _, hash := range candidates {
-		if q.stopReclaim(requestCtx, deferred, need, freed) {
+	for start := 0; start < len(items); start += batch {
+		if requestCtx.Err() != nil || need > 0 && freed >= need {
 			break
 		}
-		reclaim(hash, false, false)
-	}
-	for hash := range orphans {
-		if q.stopReclaim(requestCtx, deferred, need, freed) {
+		if start > 0 && need == 0 && q.fileReclaimUnderPressure() {
+			yielded = true
 			break
 		}
-		reclaim(hash, true, false)
-	}
-	for hash := range bundles {
-		if q.stopReclaim(requestCtx, deferred, need, freed) {
+		if !reclaimBatch(items[start:min(start+batch, len(items))]) {
+			deferred = true
 			break
 		}
-		reclaim(hash, false, true)
 	}
+	left := map[string]bool{}
+	for _, c := range items {
+		if !gone[c.hash] {
+			left[c.hash] = true
+		}
+	}
+	remaining := len(left)
+	store.noteCollection(q.clock.Now(), reclaimedBlobs, freed, deferred, yielded, remaining)
 	requestUnlock3 := requestLock(requestCtx, &q.mu)
 	warn := deferred && !q.fileCollectionDeferred
 	q.fileCollectionDeferred = deferred
@@ -714,17 +745,13 @@ func hasJobFiles(j *Job) bool {
 	return false
 }
 
-// Per-object lifecycle and control fences release between I/O operations. A
-// measured waiting control request yields the rest; an idle queue drains its
-// backlog without an arbitrary producer-count limit.
+// Measured control pressure: a control request has waited on q.mu longer than
+// one mean uncontended hold. Collection yields after a batch, never before one.
 func (q *Queue) fileReclaimUnderPressure() bool { busy, _ := q.evidencePressure(); return busy }
 
-func (q *Queue) stopReclaim(ctx context.Context, deferred bool, need, freed uint64) bool {
-	if deferred || ctx.Err() != nil {
-		return true
-	}
-	if need > 0 {
-		return freed >= need
-	}
-	return q.fileReclaimUnderPressure()
-}
+// One batch costs one fence hold, one q.mu recheck and its share of the pass's
+// commit. The recheck already walks every reference, upload marker and bundle
+// record under q.mu (n of them), as does the snapshot; a batch of at most n
+// candidates therefore keeps the pass's locked work within a constant factor of
+// the zero-reclaim pass the queue already runs every tick, whatever the backlog.
+func fileCollectionBatch(n int) int { return max(1, n) }

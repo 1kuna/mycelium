@@ -876,6 +876,9 @@ func TestFileRetentionDeferredDiagnostic(t *testing.T) {
 	if got := strings.Count(logs.String(), "file retention deferred: publication"); got != 1 {
 		t.Fatal("expected one warning per deferred streak", got, logs.String())
 	}
+	if got := q.fileStoreStatus(context.Background()).Collection; got == nil || got.DeferredPasses != 2 || got.PendingCandidates == 0 {
+		t.Fatalf("status does not show the deferred collection: %+v", got)
+	}
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
