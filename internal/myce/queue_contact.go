@@ -174,10 +174,6 @@ func (q *Queue) discontinueContactCadence(id string) {
 // credit. Rejection removes its credit; cancellation grants only a measured
 // reconnect opportunity, never refreshing accepted LastSeen. An abandoned arrival
 // cannot hide silence after the queue has had enough service opportunities.
-func (q *Queue) beginCheckin(machine, session string, contexts ...context.Context) func(accepted bool) {
-	return q.beginWorkerCheckin(machine, session, 0, false, contexts...)
-}
-
 func (q *Queue) beginWorkerCheckin(machine, session string, period time.Duration, active bool, contexts ...context.Context) func(accepted bool) {
 	_, settle := q.trackWorkerCheckin(machine, session, period, active, contexts...)
 	return settle

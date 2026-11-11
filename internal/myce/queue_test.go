@@ -20,11 +20,9 @@ type fakeClock = workerFakeClock
 // Explicit policies and historical spans used by regression fixtures. These
 // are intentionally not production retention defaults.
 const AttemptFilesGrace = 24 * time.Hour
-const testContainerRetention = 24 * time.Hour
 const diagnosticTailBytes = 64 << 10
 
 const statusCacheLifetime = time.Second
-const jobSnapshotLifetime = 2 * time.Second
 
 const externalBucketWidth = 15 * time.Minute
 const externalBucketCount = 7*24*4 + 1

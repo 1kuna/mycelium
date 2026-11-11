@@ -42,13 +42,6 @@ type storedPayload struct {
 	upload       bool
 }
 
-// Callers hold lifecycle.RLock (or its exclusive side for collection). No q.mu.
-func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, error) {
-	s.uploadFilesMu.RLock()
-	defer s.uploadFilesMu.RUnlock()
-	return s.inventoryUnlocked(ctx)
-}
-
 // Caller fences file-pair creation and internal bundle writes.
 func (s *FileStore) inventoryUnlocked(ctx context.Context) (map[string]storedPayload, error) {
 	out := map[string]storedPayload{}

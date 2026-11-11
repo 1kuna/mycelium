@@ -2,6 +2,7 @@ package myce
 
 import (
 	"archive/tar"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func TestJobSourceExtractionAndInputCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if err = extractJobSource(archive, root); err != nil {
+	if err = extractJobSourceContext(context.Background(), archive, root); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(root, "run"))

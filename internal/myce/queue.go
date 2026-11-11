@@ -211,48 +211,46 @@ type Queue struct {
 	observationLive  map[string]*Job
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
-	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
-	simulation       bool
-	simID            int64
-	uploadSpool      uploadSpool
-	logRetention     time.Duration
-	environments     EnvironmentCatalog
-	productionGrace  time.Duration
-	wake             chan struct{}
-	models           ModelConfig
-	calls            map[string]*ModelCall
-	lock             *os.File
-	mu               queueMutex
-	stopping         atomic.Bool // Fence before waiting for a queue transaction or either listener.
-	shutdownOnce     sync.Once
-	shutdownContext  context.Context
-	shutdownCancel   context.CancelFunc
-	contactMu        sync.Mutex
-	contacts         map[string]*workerContact
-	healthPreparing  map[string]map[*hostHealthPreparation]struct{} // contactMu; request lifecycle, not transactional.
-	holdClock        Clock                                          // Optional observational clock; never used for queue decisions.
-	updateHolds      queueHoldSampler
-	statusHolds      queueHoldSampler
-	logCleanupHolds  queueHoldSampler
-	statusCache      statusCache
-	jobSnapshotsMu   sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
-	jobSnapshots     map[string]*jobSnapshotCache
-	observeRead      func(string, time.Duration, time.Duration)
-	observeRequest   func(string, time.Duration, time.Duration, time.Duration, time.Duration)
-	usageReader      *sql.DB
-	db               *sql.DB
-	persisted        map[string][]byte
-	records          *queueRecords
-	observeUpdate    func(time.Duration, time.Duration)
-	clock            Clock
-	root             string
-	restartUntil     time.Time
-	unreported       map[string]bool
-	networkQuiet     bool
-	lossTimeouts     [3]time.Duration
-	usageWrites      []usageSample
-	usageMaintenance bool
-	s                state
+	checkpointProbe func() bool // Availability seam; bounded real I/O is the default.
+	simulation      bool
+	simID           int64
+	uploadSpool     uploadSpool
+	logRetention    time.Duration
+	environments    EnvironmentCatalog
+	productionGrace time.Duration
+	wake            chan struct{}
+	models          ModelConfig
+	calls           map[string]*ModelCall
+	lock            *os.File
+	mu              queueMutex
+	stopping        atomic.Bool // Fence before waiting for a queue transaction or either listener.
+	shutdownOnce    sync.Once
+	shutdownContext context.Context
+	shutdownCancel  context.CancelFunc
+	contactMu       sync.Mutex
+	contacts        map[string]*workerContact
+	healthPreparing map[string]map[*hostHealthPreparation]struct{} // contactMu; request lifecycle, not transactional.
+	holdClock       Clock                                          // Optional observational clock; never used for queue decisions.
+	updateHolds     queueHoldSampler
+	statusHolds     queueHoldSampler
+	statusCache     statusCache
+	jobSnapshotsMu  sync.Mutex // Only cache metadata; never acquired across projection or q.mu acquisition.
+	jobSnapshots    map[string]*jobSnapshotCache
+	observeRead     func(string, time.Duration, time.Duration)
+	observeRequest  func(string, time.Duration, time.Duration, time.Duration, time.Duration)
+	usageReader     *sql.DB
+	db              *sql.DB
+	persisted       map[string][]byte
+	records         *queueRecords
+	observeUpdate   func(time.Duration, time.Duration)
+	clock           Clock
+	root            string
+	restartUntil    time.Time
+	unreported      map[string]bool
+	networkQuiet    bool
+	lossTimeouts    [3]time.Duration
+	usageWrites     []usageSample
+	s               state
 
 	restartControlUntil time.Duration       // Available startup service, not blocked wall time.
 	contactTransaction  *contactTransaction // Lazy, per-worker undo while q.mu owns a transaction.
@@ -1441,7 +1439,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		return err
 	}
 	q.publishEfficiencyDiagnostics(diagnostics)
-	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
+	return errors.Join(q.maintainEvidence(requestCtx), q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) CheckinKeyed(c Checkin) (Reply, error) {
 	return q.CheckinKeyedContext(context.Background(), c)

@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -23,19 +21,6 @@ type installFixtureExit int
 
 func (e installFixtureExit) Error() string { return "inactive synthetic unit" }
 func (e installFixtureExit) ExitCode() int { return int(e) }
-
-type installFixtureTransport struct {
-	target string
-	base   http.RoundTripper
-}
-
-func (x installFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	u, _ := url.Parse(x.target)
-	r.URL.Scheme = u.Scheme
-	r.URL.Host = u.Host
-	return x.base.RoundTrip(r)
-}
 
 func TestLegacyInstallArchiveFresh(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
