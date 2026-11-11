@@ -845,7 +845,7 @@ func (q *Queue) exploratoryMemoryStatusWithDrift(j *Job, m *Machine, drift float
 	if allowance <= 0 && m.CapabilityProfile != nil {
 		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
 	}
-	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" || m.HostMemoryPolicyMismatch {
+	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
 	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
@@ -928,9 +928,6 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			}
 			if unifiedCUDA(m) {
 				why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", q.hostMemoryMargin(m, m))
-			}
-			if m.HostMemoryPolicyMismatch {
-				why += "; host allowance policy mismatch"
 			}
 			if !m.HostMemoryMeasured || m.HostMemoryError != "" {
 				why += "; host telemetry unavailable"
