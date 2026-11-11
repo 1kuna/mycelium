@@ -7,6 +7,124 @@ import (
 	"time"
 )
 
+func TestActionableBlockerImplementationCoverage(t *testing.T) {
+	for _, scenario := range []string{"unqualified", "missing_variant", "command_target", "stale", "stale_alternative", "missing_registration", "parity"} {
+		t.Run(scenario, func(t *testing.T) {
+			q, clock := fixture(t)
+			e, a, _ := variantsFixture(t, false)
+			if scenario != "missing_registration" {
+				if err := q.AddExtension(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := "native_qualification"
+			s := variantSpec(e, "experiment")
+			switch scenario {
+			case "unqualified":
+				a.ExtensionReports = nil
+			case "missing_variant":
+				a.CapabilityProfile.Arch = "arm64"
+				want = "execution_coverage"
+			case "command_target":
+				s = cpuSpec(1, 1)
+				s.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
+				want = "execution_coverage"
+			case "stale", "stale_alternative":
+				a.ExtensionReports = nil
+				want = "unknown_observation"
+			case "missing_registration":
+				// A kind can wait for a registration to arrive later.
+				s.Extension, s.Kind = "", "not-registered"
+				want = "missing_extension"
+			case "parity":
+				s.Class = "production"
+				want = "production_parity"
+			}
+			check(t, q, a, nil)
+			j := submit(t, q, s)
+			if scenario == "parity" {
+				if err := q.update(func() error {
+					q.touchJob(j.ID)
+					q.s.Jobs[j.ID].RequireProductionParity = true
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "stale" || scenario == "stale_alternative" {
+				clock.Advance(24 * time.Hour)
+				if scenario == "stale_alternative" {
+					other := valueMachine("incompatible", "fake", 32)
+					other.CapabilityProfile.Arch = "arm64"
+					check(t, q, other, nil)
+				}
+			}
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil || got.Blocker == nil || got.Blocker.Code != want {
+				t.Fatalf("want %s: blocker=%+v error=%v", want, got.Blocker, err)
+			}
+			if scenario == "unqualified" || scenario == "missing_variant" {
+				if !strings.Contains(got.Blocker.Evidence, "linux/amd64/fake") || strings.Contains(got.Blocker.Action, a.ID) {
+					t.Fatal("coverage advice omitted declared target or selected a host", got.Blocker)
+				}
+			}
+			if strings.HasPrefix(scenario, "stale") && strings.Contains(got.Blocker.Evidence, "only one freshly") {
+				t.Fatal("stale inventory claimed unique hardware", got.Blocker)
+			}
+		})
+	}
+}
+
+func TestActionableBlockerSingleHostCoverage(t *testing.T) {
+	for _, restriction := range []string{"hardware", "authored", "parity"} {
+		t.Run(restriction, func(t *testing.T) {
+			q, _ := fixture(t)
+			e, a, b := variantsFixture(t, false)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			check(t, q, a, nil)
+			check(t, q, b, nil)
+			busy := spec("experiment")
+			busy.AllowedMachines = []string{a.ID}
+			submit(t, q, busy)
+			running := check(t, q, a, nil).Job
+			if running == nil {
+				t.Fatal("missing occupancy fixture")
+			}
+			s := variantSpec(e, "experiment")
+			if restriction == "authored" {
+				s.AllowedMachines = []string{a.ID}
+			}
+			if restriction == "parity" {
+				s.Class = "production"
+				policy := q.PriorityPolicy()
+				policy.Policy.Projects[s.Project] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{s.workType(): {hostID(&a)}}}
+				if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			j := submit(t, q, s)
+			before := cloneJob(q.s.Jobs[j.ID])
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil || got.Blocker == nil {
+				t.Fatal(got, err)
+			}
+			unique := strings.Contains(got.Blocker.Evidence, "only one freshly observed physical host")
+			if unique != (restriction != "authored") {
+				t.Fatal("confused authored pin with observed coverage", got.Blocker)
+			}
+			if restriction == "parity" && !strings.Contains(got.Blocker.Evidence, "policy approves 1 physical hosts") {
+				t.Fatal("owner's restriction not explained", got.Blocker)
+			}
+			after := cloneJob(q.s.Jobs[j.ID])
+			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {
+				t.Fatal("diagnostic read changed frozen spec or authored placement intent")
+			}
+		})
+	}
+}
+
 // Replays the no-builder observations in #710/#727 and retained failure in
 // #717 without changing the already-fixed scheduling/admission contracts.
 func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
