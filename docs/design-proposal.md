@@ -1971,6 +1971,18 @@ wait, never permission from a deadline or empty local inventory. At queue cutove
 pause model-call admission and wait for calls/streams; preserve running batch
 attempts and buffered results through existing restart reconciliation.
 
+`--urgency normal|critical` is explicit durable intent (MY-35). Omitted urgency
+means normal, including retained operations from older releases. Critical retains
+sequential host cutover but requests the existing maintenance stop immediately
+when each host is selected. It uses the existing per-work-kind checkpoint/signal
+grace and planned requeue, without a second lifecycle classifier. The selected
+queue also stops its model streams; queue-only critical leaves remote batch work
+running. Exact release is still required after the deadline. Record exact stop
+requests and pre-stop accepted progress, distinguishing requested interruption
+from signal, final-checkpoint and release evidence in the existing job history.
+Preserve urgency on resume/fix-forward and in supersession audit records. Existing
+operator maintenance stays authoritative and is never resumed by the rollout.
+
 Each host follows drain/wait, verify, install in place, restart, health and
 running-hash verification, then conditional resume. Workers fetch and verify
 approved bytes themselves through the authenticated control path, using
@@ -1990,7 +2002,7 @@ operation's own drain via owner/timestamp CAS; preserve prior operator maintenan
 and stop on conflicting edits. Interruption/rerun rechecks the same postconditions
 rather than blindly restarting. Stop on the first download, verification, install,
 restart or health failure, leaving that host maintained and later hosts untouched.
-Fix forward; never invoke installer restore/rollback, force stop, bypass storage
+Fix forward; never invoke installer restore/rollback, bypass storage
 preflight or automatically retry. Status shows target, order, host phase, wait
 reason, last verified progress and failure. Decisions use the injected Clock;
 network, hashing and service probes run outside the queue lock. Retain compact

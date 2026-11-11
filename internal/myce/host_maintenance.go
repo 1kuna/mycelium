@@ -389,9 +389,10 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	}
 	switch request.Action {
 	case "drain":
-		// A planned drain never strands open production work; disable remains
-		// the explicit out-of-service action.
-		if policy.Mode == "enabled" {
+		// A planned operator drain never strands open production work; disable
+		// remains the explicit out-of-service action. A fleet upgrade (drain
+		// owner) applies the same predicate itself, waiting unless critical.
+		if policy.Mode == "enabled" && request.DrainOwner == "" {
 			if reason := q.productionDrainBlocker(host); reason != "" {
 				return &HTTPError{Status: http.StatusConflict, Code: "production_work_open", Message: "drain would strand open production work: " + reason + "; wait for it to close or expire, or use host disable to take the host out of service now"}
 			}

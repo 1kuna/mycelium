@@ -45,6 +45,11 @@ of failing with `no eligible host is enabled`: the host returns when its step
 verifies. A stopped operation's retained drain is not temporary, so the ordinary
 fail-fast applies again.
 
+A `--urgency critical` operation skips the open-production wait and the
+idle-moment wait: it selects the next host in order and requests the planned
+maintenance stop immediately (see the
+[procedure](../operations.md#rolling-fleet-upgrades)).
+
 ## Helper verification
 
 Each enrolled service fetches approved bytes through the authenticated queue,

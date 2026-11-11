@@ -655,6 +655,19 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+For a critical update (MY-39), add `--urgency critical`. Each host is still
+updated one at a time, but when it is selected the queue requests the existing
+planned-maintenance stop at once instead of waiting for an idle moment:
+resumable work checkpoints within the usual stop grace and is requeued, and
+the selected queue also stops its model streams. Open production leases do not
+hold a critical update; production requeued or submitted during the upgrade's
+drain waits for the host to return. Exact release is still required before
+restart, and an elapsed grace never proves it. Status lists each host's
+`stop_requests` (the attempt, whether it was resumable, its accepted progress
+before the stop). Resume and fix-forward must repeat the same urgency; a
+replaced critical operation keeps its stop records in `fleet_superseded`.
+Without the flag, urgency is normal.
+
 For a queue hotfix that should wait for production to finish, use
 `myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
 `--queue-only` selects only the queue service, including when workers share its
