@@ -119,7 +119,7 @@ func TestStorageCompatRejectsNewProtectedTasks(t *testing.T) {
 
 }
 
-// Keep the historical custody document while using the supported r6.7 format.
+// Keep the historical custody document while using the supported r6.8 format.
 func seedParkedStorageState(t *testing.T, database string, wire []byte) {
 	t.Helper()
 	var base map[string]json.RawMessage

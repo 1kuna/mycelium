@@ -707,7 +707,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 	if s.state.Job != nil {
 		return nil, errors.New("retired single-attempt root spool; archive it and install a current worker")
 	}
-	// r6.7 may retain a child already adopted before the release floor. Its
+	// r6.8 may retain a child already adopted before the release floor. Its
 	// exact process/result custody must still be recovered, never imported anew.
 	data, err := os.ReadFile(filepath.Join(s.dir, "legacy-state.json"))
 	if err == nil {

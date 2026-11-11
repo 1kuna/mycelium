@@ -262,7 +262,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	// r6.7 uses the field layout. Publish its per-machine successor and the
+	// r6.8 uses the field layout. Publish its per-machine successor and the
 	// marker atomically; below-floor monolithic/v1 conversion is removed.
 	if !q.machineRecords {
 		if _, err := exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {

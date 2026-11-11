@@ -2,7 +2,7 @@ package myce
 
 const workerDiskBudgetProtocol = "worker-disk-budget-v1"
 
-// r6.7 strictly decodes check-ins and predates disk-budget telemetry. Only
+// r6.8 strictly decodes check-ins and predates disk-budget telemetry. Only
 // these new fields wait for an advertisement on the serialized check-in lane.
 type workerDiskBudgetWire struct {
 	machine, session string
