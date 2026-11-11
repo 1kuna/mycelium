@@ -1300,7 +1300,10 @@ room for driver allocations, fragmentation and outside growth. For example,
 (9.064556 GiB beyond the existing reserve). This is a conservative admission
 policy, not a measured guarantee against driver allocation failures. It costs
 co-tenancy capacity when unmanaged memory uses that remainder. Native
-coexistence/fragmentation qualification remains separate.
+coexistence/fragmentation qualification remains separate. A measured allowance
+on a host without a shared-interactive profile already excludes the idle
+footprint that live used RAM contains, so its floor is the reserve alone; the
+allowance still caps reservations.
 
 The queue checks raw physical availability from the existing host-memory
 observation, subtracting this floor and outstanding reservation growth; the
