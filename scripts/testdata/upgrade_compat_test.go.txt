@@ -205,8 +205,9 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 			errorBody = string(capture.body)
 		}
 		// Fingerprint the complete request after projecting only post-r6.8
-		// disk-budget fields. A strict-decoder refusal must be followed by this
-		// exact request, preserving inventory, attempts and baseline collection.
+		// disk-budget and checkpoint-expiry fields. The worker removes both
+		// negotiated additions on a strict rollback refusal; inventory, attempts
+		// and every baseline collection field must remain byte-for-byte equal.
 		diskFields := false
 		if collection, ok := machine["hygiene_collection"].(map[string]any); ok {
 			for _, field := range []string{"disk_budget", "scratch", "compiler_warning", "unmanaged_compiler_bytes"} {
@@ -216,13 +217,20 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 				delete(collection, field)
 			}
 		}
+		expiryFields := false
+		for _, field := range []string{"checkpoint_expiry_protocol", "checkpoint_expiry_reports"} {
+			if _, ok := request[field]; ok {
+				expiryFields = true
+			}
+			delete(request, field)
+		}
 		baseline, err := json.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		receipts = append(receipts, map[string]any{
 			"error": errorBody,
-			"disk_budget_fields": diskFields, "disk_budget_baseline_sha256": fmt.Sprintf("%x", sha256.Sum256(baseline)),
+			"disk_budget_fields": diskFields, "checkpoint_expiry_fields": expiryFields, "rollback_baseline_sha256": fmt.Sprintf("%x", sha256.Sum256(baseline)),
 			"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory),
 			"hash": request["tool_inventory_hash"], "version": request["tool_inventory_version"],
 			"session": machine["session"], "attempt_protocol": request["attempt_protocol"],
