@@ -11,6 +11,23 @@ import (
 
 // Replay the saved 2026-11-06 times and ratios on a sub-GiB pair and a large
 // installation. A much larger incompatible target must not set the bound.
+// Internal sizing diagnostics borrow queue records and populate planning caches.
+// Unlike the public job snapshot, they require the transaction mutex even when
+// the fixture itself has no workers: admission evidence commits asynchronously.
+func memoryEvidenceReason(t *testing.T, q *Queue, j *Job) string {
+	t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.memoryEvidenceWaitingReason(j)
+}
+
+func memoryCandidateForMachine(t *testing.T, q *Queue, j *Job, machineID string) *Job {
+	t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.memoryCandidate(j, q.s.Machines[machineID])
+}
+
 func TestMemoryRecoveryIncident(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -78,10 +95,10 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 			if got := job(t, q, pending.ID); got.DiagnosticCode != memoryEvidenceRecovering {
 				t.Fatal("missing typed diagnostic", got.DiagnosticCode, got.Reason)
 			}
-			if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
-				t.Fatalf("why=%q failed=%+v facts=%+v sized=%+v", why, failed, failed.MemoryAttempts, q.memoryCandidate(pending, q.s.Machines[machines[0].ID]).MemoryEnvelope)
+			if why := memoryEvidenceReason(t, q, pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+				t.Fatalf("why=%q failed=%+v facts=%+v sized=%+v", why, failed, failed.MemoryAttempts, memoryCandidateForMachine(t, q, pending, machines[0].ID).MemoryEnvelope)
 			}
-			candidate := q.memoryCandidate(pending, q.s.Machines[machines[0].ID])
+			candidate := memoryCandidateForMachine(t, q, pending, machines[0].ID)
 			if candidate.Spec.Needs.HostMemoryGB < peak || candidate.Spec.Needs.HostMemoryGB > peak+minimumHostMemoryGB {
 				t.Fatal("cap lowered physical evidence or used incompatible host", candidate.MemoryEnvelope)
 			}
@@ -97,7 +114,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 				check(t, q, m, live)
 			}
 			pending = submit(t, q, s)
-			if pending.ID == "" || !strings.HasPrefix(q.memoryEvidenceWaitingReason(pending), memoryEvidenceRecovering+":") {
+			if pending.ID == "" || !strings.HasPrefix(memoryEvidenceReason(t, q, pending), memoryEvidenceRecovering+":") {
 				t.Fatal("wait not durable")
 			}
 			clock.now = time.Date(2026, 11, 6, 6, 38, 48, 0, time.UTC)
@@ -107,7 +124,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if why := q.memoryEvidenceWaitingReason(pending); why != "" {
+			if why := memoryEvidenceReason(t, q, pending); why != "" {
 				t.Fatal("clean evidence did not recover", why)
 			}
 			if run := check(t, q, machines[1], nil).Job; run == nil || run.ID != pending.ID {
@@ -157,11 +174,11 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 	probe := *queued
 	probe.State = "queued"
 	wantRecovery := peak + (peak - 3.9251251220703125) + .125
-	ownRetry := q.memoryCandidate(job(t, q, run.ID), q.s.Machines[m.ID]).MemoryEnvelope
+	ownRetry := memoryCandidateForMachine(t, q, job(t, q, run.ID), m.ID).MemoryEnvelope
 	if math.Abs(ownRetry.HostGB-wantRecovery) > 1e-9 || !strings.HasPrefix(ownRetry.Source, acceptedMemoryEscalation) {
 		t.Fatal("accepted prior recovery expanded to host capacity", ownRetry)
 	}
-	if e := q.memoryCandidate(&probe, q.s.Machines[m.ID]).MemoryEnvelope; math.Abs(e.HostGB-wantRecovery) > 1e-9 {
+	if e := memoryCandidateForMachine(t, q, &probe, m.ID).MemoryEnvelope; math.Abs(e.HostGB-wantRecovery) > 1e-9 {
 		t.Fatal("queued retry lost class evidence", e)
 	}
 	if err := q.Cancel(run.ID); err != nil {
@@ -174,7 +191,7 @@ func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 		t.Fatalf("overshoot margin: %+v want %g", recovery.MemoryEnvelope, want)
 	}
 	queued = submit(t, q, s)
-	learned := q.memoryCandidate(queued, q.s.Machines[m.ID])
+	learned := memoryCandidateForMachine(t, q, queued, m.ID)
 	if math.Abs(learned.MemoryEnvelope.HostGB-want) > 1e-9 || learned.MemoryEnvelope.Basis != "learned" {
 		t.Fatal("clean evidence forgot observed variance", learned.MemoryEnvelope)
 	}
@@ -201,13 +218,13 @@ func TestMemoryRecoveryNewEligibleCapacity(t *testing.T) {
 	s.RequireTarget = true
 	runMemory(t, q, clock, m, s, 40, nil)
 	pending := submit(t, q, s)
-	if !strings.HasPrefix(q.memoryEvidenceWaitingReason(pending), memoryEvidenceRecovering+":") {
+	if !strings.HasPrefix(memoryEvidenceReason(t, q, pending), memoryEvidenceRecovering+":") {
 		t.Fatal("not waiting")
 	}
 	larger := cpuMachine("additional", "additional-host", "cpu", 8, 64)
 	larger.HostMemoryBudgetGB, larger.ExtensionFingerprint = 64, "cpu-v1"
 	check(t, q, larger, nil)
-	if why := q.memoryEvidenceWaitingReason(pending); why != "" {
+	if why := memoryEvidenceReason(t, q, pending); why != "" {
 		t.Fatal("capacity change did not recover", why)
 	}
 	if run := check(t, q, larger, nil).Job; run == nil || run.ID != pending.ID {
@@ -270,7 +287,7 @@ func TestMemoryRecoveryVariantAutoSizingWaits(t *testing.T) {
 	if pending.Spec.Needs.Memory != "" {
 		t.Fatal("test no longer exercises variant-owned mode")
 	}
-	if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+	if why := memoryEvidenceReason(t, q, pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 		t.Fatal("variant-owned auto missed typed wait", why)
 	}
 	if run := check(t, q, m, nil).Job; run != nil {
@@ -302,10 +319,10 @@ func TestMemoryRecoveryCapRetainsAcceptedMeasurement(t *testing.T) {
 	m.HostMemoryBudgetGB = budget
 	check(t, q, m, nil)
 	pending := submit(t, q, s)
-	if e := q.memoryCandidate(pending, q.s.Machines[m.ID]).MemoryEnvelope; e.HostGB < 12 {
+	if e := memoryCandidateForMachine(t, q, pending, m.ID).MemoryEnvelope; e.HostGB < 12 {
 		t.Fatal("uncertainty cap discarded the accepted measurement", e)
 	}
-	if why := q.memoryEvidenceWaitingReason(pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
+	if why := memoryEvidenceReason(t, q, pending); !strings.HasPrefix(why, memoryEvidenceRecovering+":") {
 		t.Fatal("unrecovered measurement must wait", why)
 	}
 	if run := check(t, q, m, nil).Job; run != nil {
