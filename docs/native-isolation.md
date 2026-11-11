@@ -126,6 +126,26 @@ growth rate × 0.2–0.8 s. Measured on one M-series Mac
 These are single-host measurements, not per-host qualification. A
 non-cgo Darwin build keeps the `ps` probe and a 1 s period.
 
+**Metal jobs (#1044).** Metal buffers are charged to the task's
+`phys_footprint`, not its RSS. For a Metal job with a declared size, the guard
+reads `proc_pid_rusage` (footprint and RSS in one call) for each owned process
+at the same 200 ms cadence and stops the attempt once the summed footprint
+stays above device plus host plus slack for the same three samples. A process
+it cannot inspect makes the sample unavailable rather than falling back to RSS.
+Non-cgo builds and auto-sized Metal work keep the old behaviour (no guard).
+Measured on an M4 Mac mini worker (16 GiB) through an experiment-tier job
+(`TestDarwinMetalFootprintGuardOvershoot`, 512 MiB limit; a Swift child
+allocates private `MTLBuffer`s, fills each with a GPU blit and logs its own
+footprint):
+
+| Synthetic Metal growth | Reaction (last write) | Footprint overshoot | RSS at stop |
+|---|---|---|---|
+| 256 MiB/s | 0.42 s | 141 MiB | 12 MiB |
+| 1 GiB/s | 0.75 s | 797 MiB | 12 MiB |
+
+The RSS guard would never have acted: RSS stayed at 12 MiB with 1.2 GiB of
+buffers held.
+
 ## Boundary and guarantees
 
 Sandboxed native batch commands and their sidecars, including queued extension run/check
