@@ -88,3 +88,78 @@ func constrainedMemoryIdentity(j *Job, estimate memoryEstimate) constrainedMemor
 	}
 	return key
 }
+
+// The Darwin RSS guard stops a job after three over-limit samples across two
+// sampler periods; a late sample extends that by up to one more period. The
+// measured reaction was 0.2–0.8 s at the 200 ms cadence (native-isolation.md),
+// so a job can overshoot its last sample by its growth rate times this window.
+// attemptMemorySamplePeriod is platform independent, so the queue and the
+// Darwin worker compute the same charge.
+const darwinGuardReaction = 4 * attemptMemorySamplePeriod
+
+// usedMemoryCharge charges a running job the memory it uses, not its whole
+// declared envelope, where a guard contains its growth (#1044, audit item 3):
+//
+//   - native CPU-only work with a positive declaration: accelerator memory
+//     (Metal, unified CUDA, driver-pinned host pages) is outside the cgroup and
+//     the RSS guard, so those jobs keep their envelope;
+//   - a guarded dedicated host: Linux cgroup v2 ceilings, or the Darwin RSS
+//     guard. Interactive hosts keep their envelope (MY-45: harsher limits);
+//   - learned evidence for this work on this target (MY-34): a first run with no
+//     accepted history keeps its envelope, and later runs never drop below
+//     what history says the job reaches;
+//   - a fresh exact-attempt sample. Missing or stale data grants nothing.
+//
+// The charge is max(learned need, attempt high water, live forecast) plus the
+// measured overshoot before containment acts, bounded by the enforced ceiling.
+// Actual observation above that bound is kept: it is real occupancy.
+// Remaining growth credits current resident memory once, because live host
+// availability already excludes it. When lenders outgrow what they were
+// charged, yieldMemoryOvercommit stops the lowest-tier work before the kernel.
+func usedMemoryCharge(j *Job, m *Machine, ceiling float64, sample hostMemorySample, now time.Time) (charge, growth float64, ok bool) {
+	if !usedMemoryChargeEligible(j, m, sample, now) {
+		return 0, 0, false
+	}
+	resident := max(sample.gb, sample.footprintGB)
+	observed := max(sample.peakGB, resident)
+	learned := hostNeed(m, 0, j.MemoryEnvelope.Learned.HostGB)
+	// hostForecast already carries the last measured increment and the rate
+	// through the sample's age; the drift margin covers snapshot-to-launch.
+	margin := exploratoryDriftMarginGB(m)
+	bound := ceiling
+	if m.MemoryEnforcement == darwinRSSGuardStatus {
+		overshoot := sample.rateGB * darwinGuardReaction.Seconds()
+		margin += overshoot
+		bound += overshoot // RSS can pass the limit before the guard stops it.
+	}
+	charge = max(min(max(learned, observed, sample.hostForecast(now))+margin, bound), observed)
+	credit := sample.gb
+	if m.MemoryEnforcement == darwinRSSGuardStatus {
+		// Darwin availability excludes the job's resident pages, but RSS gets
+		// no resident field. The charge is built from the same RSS, so credit
+		// it once while always protecting the measured margin.
+		credit = sample.footprintGB
+	}
+	return charge, max(0, charge-credit, min(margin, charge)), true
+}
+
+func usedMemoryChargeEligible(j *Job, m *Machine, sample hostMemorySample, now time.Time) bool {
+	if j == nil || m == nil || j.StartedAt == nil || (j.State != "running" && j.State != "stopping") {
+		return false
+	}
+	n := j.Spec.Needs
+	if j.Spec.Run.Docker || !n.cpuOnly() || n.Memory == "auto" || n.HostMemoryGB <= 0 || m.SharedHost != nil {
+		return false
+	}
+	if m.MemoryEnforcement != "memory ceilings enforced (cgroup v2)" && m.MemoryEnforcement != darwinRSSGuardStatus {
+		return false
+	}
+	e := j.MemoryEnvelope
+	if e == nil || e.Learned == nil || e.Learned.Evidence < 1 || !validMemoryValue(e.Learned.HostGB) || e.Learned.HostGB <= 0 {
+		return false
+	}
+	if _, fresh := sample.hostGrowth(now); !fresh || !validMemoryValue(sample.footprintGB) || !validMemoryValue(sample.rateGB) {
+		return false
+	}
+	return max(sample.gb, sample.footprintGB) > 0
+}

@@ -228,6 +228,23 @@ attempt's ceiling or release resources. Qualification remains `UNQUALIFIED`
 until separately authorized native measurement. Docker main/sidecar ceilings
 and total per-attempt charges are unchanged.
 
+A running attempt is charged the memory it uses, not its declared envelope,
+only where a guard contains its growth (#1044): started native CPU-only work
+with a declared size, on a dedicated host with Linux cgroup v2 ceilings or the
+Darwin RSS guard, with learned evidence for that work on that target and a fresh
+exact-attempt sample. The charge is the larger of the learned need, the
+attempt's high water and its live forecast, plus the measured overshoot before
+containment acts (on Darwin, growth rate times the guard's reaction window),
+bounded by the enforced ceiling. First runs, accelerator work (Metal, unified
+CUDA, driver-pinned host memory: outside the cgroup and RSS guard), Docker,
+interactive hosts and missing or stale samples keep the envelope. When by-use
+jobs grow back into memory lent to their neighbours and live free memory can
+no longer absorb the growth expected before a stop completes, one job yields
+through the planned-stop path: the lowest tier first, then by-use work, then
+the most recently started. It checkpoints if resumable, then requeues with no
+retry charge (`memory_overcommit_yield`). Production yields only to protect
+other running production work on the host, and only if resumable.
+
 Status reports policy, known worker freshness/device identities,
 allowance/mismatch, aggregate RAM/debt, attempt identities, preparations,
 sidecars/engines and pending releases/daemon cleanup. All previously known
