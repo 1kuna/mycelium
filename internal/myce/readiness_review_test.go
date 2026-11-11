@@ -122,12 +122,16 @@ func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
 			probes.Add(1)
 		}))
 		defer server.Close()
-		l := &LlamaEngine{Clock: RealClock{}, exited: make(chan struct{}), probeLatency: readinessLatency{Mean: 100 * time.Millisecond}}
-		l.startHealthMonitor(server.URL)
-		defer func() { l.monitorCancel(); <-l.monitorDone }()
-		await(t, func() bool { return probes.Load() >= 3 })
-		l.monitorCancel()
-		<-l.monitorDone
+		client := server.Client()
+		defer client.CloseIdleConnections()
+		// Exercise the monitor's real response drain without adaptive deadlines:
+		// cancelling a slow request legitimately discards its TCP connection.
+		// The recovery case below covers that cancellation/retry behavior.
+		for range 3 {
+			if healthy, err := probeServerHealth(t.Context(), client, server.URL); err != nil || !healthy {
+				t.Fatalf("healthy response: healthy=%v err=%v", healthy, err)
+			}
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if len(connections) != 1 {

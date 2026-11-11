@@ -46,7 +46,9 @@ func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
 	q, _ := fixture(t)
 	w := memoryRefusalReviewWorker(t)
 	runInventoryReviewWorker(t, q, w)
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
+	awaitInventoryReviewMachine(t, q, w.Machine.ID, func(m *Machine) bool {
+		return len(m.Devices) == 3 && m.Devices[0].Reason == "device_memory_unavailable"
+	})
 	status, err := q.HostMaintenanceStatus("host")
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +132,9 @@ func TestCurrentCapacityFailureKeepsSiblingAndCustodyQuiescence(t *testing.T) {
 		}
 	}
 	runInventoryReviewWorker(t, q, w)
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
+	awaitInventoryReviewMachine(t, q, w.Machine.ID, func(m *Machine) bool {
+		return len(m.Devices) == 3 && m.Devices[0].Reason == "device_memory_unavailable"
+	})
 	status, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "disable", Stop: true})
 	if err != nil || status.Healthy || !status.Quiescent || len(status.Workers) != 1 || !status.Workers[0].Fresh {
 		t.Fatalf("capacity health must remain separate from custody: %+v %v", status, err)

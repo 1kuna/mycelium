@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 )
@@ -99,14 +101,33 @@ func TestAcceleratorPartialInventoryWorker(t *testing.T) {
 	p := familyProbe(t, "0x030000")
 	w := Worker{Machine: machine("mixed", "xpu", "mixed-host"), FixedAcceleratorMemory: true}
 	configuration := w
+	var calls atomic.Int32
+	scan := make(chan struct{})
+	release := sync.OnceFunc(func() { close(scan) })
+	defer release()
 	w.InventoryProbe = func(ctx context.Context) ([]MachineDevice, error) {
+		if calls.Add(1) > 1 {
+			select {
+			case <-scan:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		return configuration.localInventoryWithProbe(ctx, p)
 	}
 	runInventoryReviewWorker(t, q, w)
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
-	s, err := q.publicSnapshot()
-	if err != nil || len(s.Machines[0].Devices) != 2 || !strings.Contains(s.Machines[0].InventoryReason, "cuda") || s.Machines[0].MemoryError != "" {
-		t.Fatalf("partial inventory lost at worker API: %+v %v", s.Machines, err)
+	// Hold the asynchronous scan after the synchronous startup probe. A first
+	// check-in is registration, not proof that current inventory is available.
+	initial := awaitInventoryReviewMachine(t, q, w.Machine.ID, nil)
+	if initial.MemoryError != "device_probe_unavailable" {
+		t.Fatalf("pending scan advertised current capacity: %+v", *initial)
+	}
+	release()
+	observed := awaitInventoryReviewMachine(t, q, w.Machine.ID, func(m *Machine) bool {
+		return strings.Contains(m.InventoryReason, "cuda") && m.MemoryError == ""
+	})
+	if len(observed.Devices) != 2 || !strings.Contains(observed.InventoryReason, "cuda") || observed.MemoryError != "" {
+		t.Fatalf("partial inventory lost at worker API: %+v", *observed)
 	}
 	devices, probeErr := w.InventoryProbe(context.Background())
 	if len(devices) != 2 {

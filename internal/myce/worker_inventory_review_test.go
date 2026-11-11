@@ -33,6 +33,33 @@ func awaitInventoryReview(t *testing.T, ready func() bool) {
 	}
 }
 
+// Registration can precede the first asynchronous inventory/fingerprint scan.
+// Return the observation that satisfied the condition, rather than rereading
+// after another check-in may have changed it.
+func awaitInventoryReviewMachine(t *testing.T, q *Queue, id string, ready func(*Machine) bool) *Machine {
+	t.Helper()
+	var got *Machine
+	defer func() {
+		if t.Failed() && got != nil {
+			t.Logf("last inventory observation: %+v", *got)
+		}
+	}()
+	awaitInventoryReview(t, func() bool {
+		s, err := q.publicSnapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range s.Machines {
+			if m.ID == id {
+				got = m
+				return ready == nil || ready(m)
+			}
+		}
+		return false
+	})
+	return got
+}
+
 func inventoryReviewDevices() []MachineDevice {
 	d := fakeMachineDevices()
 	for i := range d {
@@ -87,14 +114,13 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 				devices[0].Selector, devices[1].Selector = "1", "0"
 				return devices, nil
 			}})
-			awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
-			s, _ := q.Snapshot()
+			observed := awaitInventoryReviewMachine(t, q, m.ID, func(m *Machine) bool { return m.MemoryError == "" && m.InventoryReason == "" })
 			wantIDs := []string{"0", "1"}
 			if selection == "1" {
 				wantIDs = []string{"1"}
 			}
 			ids := []string{}
-			for _, d := range s.Machines[0].Devices {
+			for _, d := range observed.Devices {
 				ids = append(ids, d.ID)
 			}
 			if !slices.Equal(ids, wantIDs) {
@@ -343,9 +369,8 @@ func TestInventoryReviewCPUHasNoProbeError(t *testing.T) {
 	m := machine("cpu-only", "cpu", "cpu-only-host")
 	m.Device = "0" // Dev's diagnostic selector does not offer an accelerator.
 	runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return []MachineDevice{}, nil }})
-	awaitInventoryReview(t, func() bool { s, _ := q.Snapshot(); return len(s.Machines) == 1 })
-	s, _ := q.Snapshot()
-	if s.Machines[0].MemoryError != "" {
+	observed := awaitInventoryReviewMachine(t, q, m.ID, func(m *Machine) bool { return m.MemoryError == "" })
+	if observed.MemoryError != "" {
 		t.Fatal("CPU-only inventory reported an accelerator probe error")
 	}
 }
