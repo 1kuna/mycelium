@@ -28,6 +28,7 @@ type workerDiskBudget struct {
 	floors          map[string]map[*byte]uint64
 	controlGrowth   map[string]uint64
 	controlPrevious map[string]uint64
+	declines        map[string]diskDecline
 	inventoryDir    string
 	// Read by cache sizing under cache locks, so it has its own short lock
 	// rather than waiting behind a reclaim that holds mu.
@@ -45,6 +46,16 @@ type workerDiskBudget struct {
 // zero. A large permanent deletion by another user reserves at most the space it
 // freed, so it never shrinks Mycelium below where it was before.
 type foreignDiskUse struct{ current, peak, peakGrowth uint64 }
+
+// diskDecline is one continuous free-space decline on a volume: it starts at
+// the first collection whose free space falls below the previous one and
+// ends at any collection back at or above its starting free space. It is
+// in memory only; a restart begins a new episode.
+type diskDecline struct {
+	since     time.Time
+	free      uint64
+	ownedFrom int64
+}
 
 func (f foreignDiskUse) headroom() uint64 {
 	return max(f.peak-min(f.peak, f.current), f.peakGrowth)
@@ -93,9 +104,14 @@ type DiskBudgetVolume struct {
 	ReclaimedBytes         uint64    `json:"reclaimed_bytes"`
 	UnexplainedGrowthBytes uint64    `json:"unexplained_growth_bytes"`
 	ExhaustionSeconds      *float64  `json:"exhaustion_seconds,omitempty"`
-	Pressure               bool      `json:"pressure,omitempty"`
-	Warning                string    `json:"warning,omitempty"`
-	ControlGrowthBytes     uint64    `json:"control_growth_bytes"`
+	// The current continuous decline's age and whether bytes outside
+	// Mycelium's own allocation explain most of it. Sent only to queues
+	// advertising workerDiskTrendProtocol.
+	DecliningSeconds   float64 `json:"declining_seconds,omitempty"`
+	DeclineCause       string  `json:"decline_cause,omitempty"`
+	Pressure           bool    `json:"pressure,omitempty"`
+	Warning            string  `json:"warning,omitempty"`
+	ControlGrowthBytes uint64  `json:"control_growth_bytes"`
 	// Headroom kept free for other users, and its basis (foreignDiskUse).
 	// Sent only to queues advertising workerDiskHeadroomProtocol.
 	ForeignBytes           uint64 `json:"foreign_bytes,omitempty"`
@@ -290,10 +306,6 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 				v.UnexplainedGrowthBytes = uint64(min(float64(math.MaxInt64), growth))
 				v.Warning = "foreign_disk_growth"
 			}
-			if old.FreeBytes > v.FreeBytes {
-				seconds := float64(v.FreeBytes-min(v.FreeBytes, v.FloorBytes)) / (float64(old.FreeBytes-v.FreeBytes) / v.At.Sub(old.At).Seconds())
-				v.ExhaustionSeconds = &seconds
-			}
 		}
 		foreign := b.observeForeign(volume, r.TotalBytes-min(r.TotalBytes, addDiskBytes(r.FreeBytes, uint64(max(0, v.OwnedBytes)))), v.UnexplainedGrowthBytes)
 		v.ForeignBytes, v.ForeignPeakBytes, v.ForeignPeakGrowthBytes, v.ForeignHeadroomBytes = foreign.current, foreign.peak, foreign.peakGrowth, foreign.headroom()
@@ -303,6 +315,9 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 			// the next growth comparison stays consistent.
 			_ = b.reclaim(ctx, volume, roots[0].path, 0, next)
 			v.FloorBytes = next
+		}
+		if old, ok := b.previous[volume]; ok && v.At.After(old.At) {
+			b.observeDecline(volume, &v, old) // Against the final floor.
 		}
 		v.Pressure = r.FreeBytes < addDiskBytes(v.FloorBytes, v.ReservedBytes)
 		b.previous[volume] = v
@@ -343,4 +358,33 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 		_ = saveWorkerJSON(b.inventoryDir, "disk-inventory.json", inventory)
 	}
 	return out
+}
+
+// observeDecline measures the episode's average consumption rate, not one
+// collection step, so a brief stall or burst does not swing the forecast.
+// exhaustion_seconds is the time to the free floor at that rate.
+func (b *workerDiskBudget) observeDecline(volume string, v *DiskBudgetVolume, old DiskBudgetVolume) {
+	if b.declines == nil {
+		b.declines = map[string]diskDecline{}
+	}
+	d, ok := b.declines[volume]
+	if !ok || v.FreeBytes >= d.free {
+		delete(b.declines, volume)
+		if old.FreeBytes <= v.FreeBytes {
+			return
+		}
+		d = diskDecline{since: old.At, free: old.FreeBytes, ownedFrom: old.OwnedBytes}
+		b.declines[volume] = d
+	}
+	elapsed := v.At.Sub(d.since).Seconds()
+	if elapsed <= 0 {
+		return
+	}
+	consumed := float64(d.free - v.FreeBytes)
+	seconds := float64(v.FreeBytes-min(v.FreeBytes, v.FloorBytes)) / (consumed / elapsed)
+	v.ExhaustionSeconds, v.DecliningSeconds = &seconds, elapsed
+	v.DeclineCause = "owned_disk_growth"
+	if owned := float64(v.OwnedBytes - d.ownedFrom); consumed-owned > owned {
+		v.DeclineCause = "foreign_disk_growth"
+	}
 }

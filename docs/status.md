@@ -2640,7 +2640,22 @@ owned allocated bytes, free/floor/reserved bytes, measured control-file growth,
 last-pass reclaimed free blocks and pressure. `foreign_disk_growth` means a
 free-space loss unexplained by Mycelium's own allocation delta; it is not proof
 of a particular foreign writer. A falling free-space trend adds
-`exhaustion_seconds`; recovery clears the warning/forecast. These observations
+`exhaustion_seconds`; recovery clears the warning/forecast.
+With `worker_disk_trend_protocol: worker-disk-trend-v1` (#834), the forecast uses
+the current continuous decline's average rate instead of one collection step.
+The decline starts when free space first falls and ends when free space returns
+to where it started. `declining_seconds` is its age, and `decline_cause` is
+`foreign_disk_growth` when bytes outside Mycelium's own allocation explain most
+of the decline, otherwise `owned_disk_growth`. A foreign decline that has lasted
+at least as long as its `exhaustion_seconds` raises one
+`host_disk_exhaustion_forecast` health alert per volume (`store` is the opaque
+volume ID). At a constant rate, that is when the decline has used half the space
+above the floor that was free when it began, so the threshold depends on this
+host's own measurements, not a fixed size. The alert clears when the decline
+ends or the volume is no longer reported. Owned growth stays bounded by the
+filesystem budget and never raises it. The alert is context for the host owner:
+it causes no drain and no cleanup of foreign data. A worker restart starts a new
+decline. Imminent exhaustion still drains through `host_disk_pressure`. These observations
 can include concurrent writes and filesystem allocation changes.
 `compiler_warning: external_compiler_cache_unmanaged` and
 `unmanaged_compiler_bytes` identify known external Go cache storage without

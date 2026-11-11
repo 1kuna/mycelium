@@ -757,6 +757,7 @@ type Reply struct {
 	HostCollectionProtocol     string                       `json:"hygiene_collection_protocol,omitempty"`
 	WorkerDiskBudgetProtocol   string                       `json:"worker_disk_budget_protocol,omitempty"`
 	WorkerDiskHeadroomProtocol string                       `json:"worker_disk_headroom_protocol,omitempty"`
+	WorkerDiskTrendProtocol    string                       `json:"worker_disk_trend_protocol,omitempty"`
 	HostProbeProtocol          string                       `json:"host_probe_protocol,omitempty"`
 	HostHygieneProtocol        string                       `json:"host_hygiene_protocol,omitempty"`
 	HostForeignProtocol        string                       `json:"host_foreign_protocol,omitempty"`

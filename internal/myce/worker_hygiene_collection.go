@@ -544,6 +544,7 @@ func publicWorkerCollection(m *Machine) {
 			v.Roots[j] = code(v.Roots[j], "unknown", "attempts", "files", "shared_inputs", "model_snapshots", "environments", "models", "compiler")
 		}
 		v.Warning = code(v.Warning, "disk_inventory_unavailable", "foreign_disk_growth", "disk_inventory_unavailable")
+		v.DeclineCause = code(v.DeclineCause, "", "owned_disk_growth", "foreign_disk_growth")
 	}
 	if r.Scratch != nil {
 		s := *r.Scratch

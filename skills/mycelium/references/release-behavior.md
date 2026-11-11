@@ -157,7 +157,10 @@ no agent polling or drain/resume loop is needed. Foreign CPU/RSS leaders are
 context for the host owner: never stop their processes or services. Newer
 queues add each process's `user`, `age_seconds` and `gpu_bytes`, plus
 `host_health.foreign_services` totals per service or container, so `myce host
-status HOST` shows what outside Mycelium holds a host's memory. See
+status HOST` shows what outside Mycelium holds a host's memory.
+`host_disk_exhaustion_forecast` wakes the owner when something outside Mycelium
+has filled a volume for as long as its remaining space would last; it is
+context, not a drain. See
 [host-health fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#automatic-host-health-834-next-release).
 Older queues omit the new status fields; workers retain local history and use
 reversible availability withholding for unknown health or a confirmed local drain

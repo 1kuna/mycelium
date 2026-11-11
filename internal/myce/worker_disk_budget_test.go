@@ -516,3 +516,64 @@ func TestWorkerDiskBudgetForeignHeadroom(t *testing.T) {
 		t.Fatalf("cleanup basis: %+v", v)
 	}
 }
+
+// A sustained decline forecasts exhaustion from its average rate and names
+// whether Mycelium's own allocation explains it; recovery ends the episode.
+func TestWorkerDiskBudgetDeclineEpisode(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprint("owned=", owned), func(t *testing.T) {
+			_, clock := fixture(t)
+			root := t.TempDir()
+			const total = uint64(1000 << 30)
+			start := diskFreeFloor(total) + 100<<30
+			free := start
+			b := newWorkerDiskBudget(clock, func(string) (DiskReading, error) {
+				return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
+			})
+			b.add(diskBudgetRoot{name: "files", path: root})
+			b.collect(context.Background())
+			consume := func(bytes uint64) []DiskBudgetVolume {
+				t.Helper()
+				if owned {
+					if err := os.WriteFile(filepath.Join(root, fmt.Sprint(clock.Now().UnixNano())), make([]byte, bytes), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				free -= bytes
+				clock.Advance(time.Minute)
+				return b.collect(context.Background())
+			}
+			step := uint64(1 << 20) // Small enough for real owned files.
+			if !owned {
+				step = 10 << 30
+			}
+			var v []DiskBudgetVolume
+			for range 3 {
+				v = consume(step)
+			}
+			free += step / 2 // A brief rise below the start continues the episode.
+			clock.Advance(time.Minute)
+			v = b.collect(context.Background())
+			if v[0].DecliningSeconds != 240 || v[0].ExhaustionSeconds == nil {
+				t.Fatal("episode did not continue through a partial rise", v[0])
+			}
+			wantRate := float64(start-free) / 240
+			if got := float64(free-min(free, v[0].FloorBytes)) / wantRate; *v[0].ExhaustionSeconds != got {
+				t.Fatalf("forecast used a step, not the episode average: %v want %v", *v[0].ExhaustionSeconds, got)
+			}
+			want := "foreign_disk_growth"
+			if owned {
+				want = "owned_disk_growth"
+			}
+			if v[0].DeclineCause != want {
+				t.Fatalf("cause %q, want %q", v[0].DeclineCause, want)
+			}
+			free = start
+			clock.Advance(time.Minute)
+			v = b.collect(context.Background())
+			if v[0].DecliningSeconds != 0 || v[0].ExhaustionSeconds != nil || v[0].DeclineCause != "" {
+				t.Fatal("recovery kept the episode", v[0])
+			}
+		})
+	}
+}

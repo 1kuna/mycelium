@@ -325,3 +325,67 @@ func TestHostHygieneBlockedPersistenceDoesNotBlockHeartbeat(t *testing.T) {
 		t.Fatal("lost previously persisted history", err)
 	}
 }
+
+// Every latency-corroborated detector drains on its own measured band and
+// resumes after confirmed healthy evidence, at small and large host scales.
+func TestHostHygieneLatencyDetectorsDrainAndRecover(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		degrade      func(m *hostHealthMonitor, scale float64, swap *float64) HostHealthReading
+	}{
+		{"swap", "host_swap_growth", func(_ *hostHealthMonitor, scale float64, swap *float64) HostHealthReading {
+			*swap += scale * 1e6
+			return HostHealthReading{Load: scale, Pressure: 1, SwapBytes: *swap, WakeSeconds: .01}
+		}},
+		{"load", "host_load_latency", func(_ *hostHealthMonitor, scale float64, swap *float64) HostHealthReading {
+			return HostHealthReading{Load: 2 * scale, Pressure: 1, SwapBytes: *swap, WakeSeconds: .01}
+		}},
+		{"heartbeat", "host_heartbeat_latency", func(m *hostHealthMonitor, scale float64, swap *float64) HostHealthReading {
+			m.heartbeat = 1
+			return HostHealthReading{Load: scale, Pressure: 1, SwapBytes: *swap, WakeSeconds: .01}
+		}},
+	} {
+		for _, scale := range []float64{1, 128} {
+			t.Run(fmt.Sprint(tc.name, "/", scale), func(t *testing.T) {
+				m, c := healthFixture(t, scale)
+				swap := 0.0
+				step := func(r func() HostHealthReading) {
+					t.Helper()
+					m.source = func(context.Context) (HostHealthReading, error) { return r(), nil }
+					c.Advance(signalRefresh)
+					if err := m.sample(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for i := 0; i < hostHealthConfirmation-1; i++ {
+					step(func() HostHealthReading { return tc.degrade(m, scale, &swap) })
+				}
+				if m.health.DrainReason != "" {
+					t.Fatal("drained before confirmation", m.health.DrainReason)
+				}
+				step(func() HostHealthReading { return tc.degrade(m, scale, &swap) })
+				if m.health.DrainReason != tc.reason {
+					t.Fatalf("got %q, want %q", m.health.DrainReason, tc.reason)
+				}
+				m.heartbeat = 0
+				for i := 0; i < hostHealthConfirmation-1; i++ {
+					step(func() HostHealthReading {
+						return HostHealthReading{Load: scale, Pressure: 1, SwapBytes: swap, WakeSeconds: .001}
+					})
+				}
+				if m.health.DrainReason != tc.reason {
+					t.Fatal("recovered before confirmation")
+				}
+				step(func() HostHealthReading {
+					return HostHealthReading{Load: scale, Pressure: 1, SwapBytes: swap, WakeSeconds: .001}
+				})
+				if m.health.DrainReason != "" {
+					t.Fatal("did not recover", m.health.DrainReason)
+				}
+				if len(m.health.Baseline) != hostHealthWarmup+1 {
+					t.Fatal("degradation entered the healthy baseline", len(m.health.Baseline))
+				}
+			})
+		}
+	}
+}

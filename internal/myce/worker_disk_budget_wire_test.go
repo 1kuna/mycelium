@@ -31,11 +31,14 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 		if version.Load() > 1 {
 			reply.WorkerDiskHeadroomProtocol = workerDiskHeadroomProtocol
 		}
+		if version.Load() > 2 {
+			reply.WorkerDiskTrendProtocol = workerDiskTrendProtocol
+		}
 		_ = json.NewEncoder(rw).Encode(reply)
 	}))
 	defer server.Close()
 	m := machine("disk-wire", "fake")
-	m.HygieneCollection = &WorkerHygieneCollection{FileCache: CacheCollection{Bytes: 99}, DiskBudget: []DiskBudgetVolume{{ID: identityHash("local"), ForeignHeadroomBytes: 5}}, Scratch: &AttemptFilesCollection{RetainedBytes: 10}}
+	m.HygieneCollection = &WorkerHygieneCollection{FileCache: CacheCollection{Bytes: 99}, DiskBudget: []DiskBudgetVolume{{ID: identityHash("local"), ForeignHeadroomBytes: 5, DecliningSeconds: 7, DeclineCause: "foreign_disk_growth"}}, Scratch: &AttemptFilesCollection{RetainedBytes: 10}}
 	w := Worker{Client: Client{URL: server.URL}, diskBudgetWire: &workerDiskBudgetWire{}}
 	send := func() Checkin {
 		t.Helper()
@@ -57,8 +60,13 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 	}
 	version.Store(2)
 	send()
-	if c := send(); c.Machine.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 {
-		t.Fatal("headroom queue lost headroom", c)
+	if c := send(); c.Machine.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 || c.Machine.HygieneCollection.DiskBudget[0].DecliningSeconds != 0 || c.Machine.HygieneCollection.DiskBudget[0].DeclineCause != "" {
+		t.Fatal("headroom queue lost headroom or received decline fields", c)
+	}
+	version.Store(3)
+	send()
+	if c := send(); c.Machine.HygieneCollection.DiskBudget[0].DecliningSeconds != 7 || c.Machine.HygieneCollection.DiskBudget[0].DeclineCause != "foreign_disk_growth" {
+		t.Fatal("trend queue lost decline fields", c)
 	}
 	version.Store(0)
 	send() // Strict rejection; checkin retries with just the old collection fields.
@@ -66,7 +74,7 @@ func TestWorkerDiskBudgetWireStrictDowngrade(t *testing.T) {
 	if fallback.Machine.HygieneCollection == nil || fallback.Machine.HygieneCollection.FileCache.Bytes != 99 || hasDiskBudgetWireFields(fallback) {
 		t.Fatal("downgrade lost compatible report", fallback)
 	}
-	if len(m.HygieneCollection.DiskBudget) != 1 || m.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 || m.HygieneCollection.Scratch == nil {
+	if len(m.HygieneCollection.DiskBudget) != 1 || m.HygieneCollection.DiskBudget[0].ForeignHeadroomBytes != 5 || m.HygieneCollection.DiskBudget[0].DecliningSeconds != 7 || m.HygieneCollection.Scratch == nil {
 		t.Fatal("negotiation mutated local retention evidence")
 	}
 }
