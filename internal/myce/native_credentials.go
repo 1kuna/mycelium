@@ -9,10 +9,26 @@ import (
 	"slices"
 )
 
+// The worker user's common credential stores, relative to home. Each grants
+// the holder the user's identity elsewhere (GitHub, registries, clouds,
+// clusters, SSH). Keep this list small; docs/native-isolation.md mirrors it.
+var nativeCredentialStores = []string{
+	".ssh",
+	".config/gh",
+	".git-credentials",
+	".netrc",
+	".docker/config.json",
+	".aws",
+	".config/gcloud",
+	".kube",
+	"Library/Keychains/login.keychain-db",
+	"Library/Keychains/login.keychain",
+}
+
 // #1309: plain and declared-unsandboxed native jobs keep the worker user's
 // ordinary file access (MY-25), except for the fleet credential, installed
-// authority and SSH keys. deny lists those paths (existing, resolved, none
-// inside another). allow lists the descendants of a denied path that jobs
+// authority and the user's credential stores. deny lists those paths
+// (existing, resolved, none inside another). allow lists the descendants of a denied path that jobs
 // still use: this worker's state (their own attempt files), caches, tools and
 // executables. Every co-installed role (a queue beside this worker) is denied.
 func (w Worker) nativeCredentialPaths(spool string, attempt []string) (deny, allow []string, err error) {
@@ -21,7 +37,10 @@ func (w Worker) nativeCredentialPaths(spool string, attempt []string) (deny, all
 		return nil, nil, err
 	}
 	roots := []string{filepath.Join(home, ".local", "share", "mycelium")}
-	files := []string{filepath.Join(home, ".ssh"), w.SecretRoot}
+	files := []string{w.SecretRoot}
+	for _, path := range nativeCredentialStores {
+		files = append(files, filepath.Join(home, path))
+	}
 	addConfig := func(c ServiceConfig, path string) {
 		files = append(files, path, c.Credentials, c.EnvironmentFile, c.JoiningFile)
 	}

@@ -28,7 +28,7 @@ A CLI version does not establish queue, worker or long-running observer image.
 | Corroborated Linux pressure and measured host allowances | #1110 / #1059; matching queue/worker source, including #1059 at the source pin above | Observed pressure_evaluation/host_memory_derivation plus qualification; source fields do not authorize a shared-budget change |
 | Cold CPU probe admission versus execution containment | #1116 / #1117; matching queue/worker source at the pin above | Fresh Started/host-memory evidence and retained exact-attempt measured peaks; no stale resident credit; see process growth |
 | Established-response TLS shutdown recovery | #1074 / #1135; running queue plus compatible observer/client | Queue socket interruption fix and a real permitted cutover preserving original watches; retain all certificate/pin/integrity refusals; source regression is not deployed proof |
-| Plain native jobs can't read worker credentials or `~/.ssh` | #1309; workers | Worker release containing #1309; a Linux worker without Landlock ABI 2 logs that it can't withhold them |
+| Plain native jobs can't read worker credentials or the user's credential stores | #1309; workers | Worker release containing #1309; a Linux worker without Landlock ABI 2 logs that it can't withhold them |
 | `isolation: ci` for CI builds/tests | #1298; queue and workers | Worker capability `native_isolation_ci` in status; a queue without the mode refuses the value at submission |
 | Progress/runtime, diagnostics, telemetry and early result release | Corresponding source/docs at the pin above; required CLI/client/queue/worker depends on branch | Installed option/field support, exact-attempt coverage and project acceptance; missing fields are unknown |
 
