@@ -86,9 +86,21 @@ their typed stop.
 
 ## Isolation and dependencies
 
-Plain native commands are unsandboxed by default under MY-25. Declare
-`isolation: sandboxed`, or use managed Docker, for an enforced boundary; new
-native extension registrations have their own sandbox policy. Read
+Plain native commands are unsandboxed by default under MY-25: they read
+whatever the worker user can, including NAS shares and other jobs' files.
+Declare `isolation: sandboxed`, or use managed Docker, for an enforced boundary;
+new native extension registrations have their own sandbox policy.
+
+For CI, meaning builds and tests of your repository's code, declare
+`isolation: ci`. It needs no owner approval. The job then can't list or read the
+NAS, the worker user's home, the shared model library or other jobs' files on
+Linux or macOS workers. HOME is a private directory in attempt scratch, so git
+and Go/npm/pip/cargo caches work there. It still sees its declared inputs, model
+snapshots, prepared environments and system toolchains. It runs offline unless
+you declare `needs.network: true`, and Linux workers can't run networked native
+jobs yet, so prepare or vendor dependencies there. Toolchains installed in the
+worker user's home aren't visible; declare an environment instead. Only workers
+advertising `native_isolation_ci` run these jobs. Read
 [native isolation](../../../docs/native-isolation.md) for platform limits.
 Declare tool, environment, network and model dependencies through their
 [adapter fields](../../../docs/adapter.md); Mycelium cannot infer hidden shell

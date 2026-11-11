@@ -140,6 +140,7 @@ type Worker struct {
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
 	nativeSharedInputs          []string // Verified executable shared inputs, never authored paths.
 	nativeModelInputs           []string // Verified model data: reads only, including custom-code sources.
+	nativeCI                    bool     // Current attempt declared isolation: ci (#1298).
 	modelMounts                 []dockerFileMount
 	CacheLimit                  int64
 	SecretRoot                  string
@@ -805,6 +806,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
+	if nativeCIRequired(&j) {
+		// The worker user's home is hidden from ci jobs; tools that write
+		// config and caches under HOME (git, Go, npm, pip) use attempt scratch.
+		home := filepath.Join(executionWork, ".home")
+		if err := os.MkdirAll(home, 0700); err != nil {
+			return nil, err
+		}
+		env["HOME"] = home
+	}
 	w.storageObserver = w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
 	s.storageObserver = w.storageObserver
 	defer func() {

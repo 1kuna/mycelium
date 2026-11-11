@@ -85,6 +85,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		return variantParityAction
 	case "native network isolation":
+		if nativeCIRequired(j) && nativeBoundaryReported(m) && !contains(m.Capabilities, nativeCICapability) {
+			return "isolation: ci requires native_isolation_ci; upgrade this worker to a release supporting the ci mode"
+		}
 		if !j.Spec.Needs.Network {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
 		}

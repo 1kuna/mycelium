@@ -49,7 +49,9 @@ evidence and bytes as unverified. This requires upgraded queue and workers.
 ## Project instruction file
 
 Plain native command entries default to **unsandboxed** under MY-25;
-`isolation: sandboxed` explicitly opts in. New native variant/extension
+`isolation: sandboxed` explicitly opts in. `isolation: ci` is sandboxed plus a
+private HOME and no view of the worker's home, NAS or shared model library. Use
+it for builds and tests of repository code ([CI mode](native-isolation.md#ci-mode-1298)). New native variant/extension
 registrations default to sandboxing. An explicit top-level
 `isolation: unsandboxed` requires a nonempty `reason` and covers main,
 result checks, queued qualification payloads and sidecars. Pre-policy registered
