@@ -234,6 +234,7 @@ func (q *Queue) SetPreemptionGrace(d time.Duration) error {
 	}
 	q.mu.Lock()
 	q.productionGrace = d
+	q.republishReads()
 	q.mu.Unlock()
 	return nil
 }

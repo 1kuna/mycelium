@@ -181,10 +181,17 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 	rateClock.Advance(2 * time.Millisecond)
 	defer func() { pressure.acquired(waiting); pressure.release() }()
 
+	// Job receipts and default status project the committed publication
+	// without q.mu, so control pressure does not shed them (#1052).
+	if code := request("GET", "/api/jobs/private-job?secret=private-query", "myce/s073", "fixture"); code != 404 {
+		t.Fatal("published job read", code)
+	}
+	if code := request("GET", "/api/status", "mycelium-python/development", "fixture"); code != 200 {
+		t.Fatal("published status read", code)
+	}
 	for _, tc := range []struct{ method, path, agent string }{
-		{"GET", "/api/jobs/private-job?secret=private-query", "myce/s073"},
 		{"HEAD", "/api/jobs/private-job?view=wait", "myce/s073"},
-		{"GET", "/api/status", "mycelium-python/development"},
+		{"GET", "/api/status?detail=full", "mycelium-python/development"},
 		{"GET", "/api/inspection", "myce/private/path"},
 		{"GET", "/api/usage", "Go-http-client/1.1"},
 		{"GET", "/api/portability", "myce/s073"},
@@ -201,7 +208,7 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 		t.Fatal("summary emitted before one minute")
 	}
 	clock.Advance(time.Minute)
-	if code := request("GET", "/api/status", "myce/s073", "fixture"); code != 429 {
+	if code := request("GET", "/api/status?detail=full", "myce/s073", "fixture"); code != 429 {
 		t.Fatal(code)
 	}
 	_, data, ok := strings.Cut(output.String(), "event=job_get_totals totals=")
@@ -213,7 +220,7 @@ func TestJobGetVolumeRejectedObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []jobGetTotal{
-		{Kind: "cli", Version: "s073", Full: 100, Wait: 1, RateLimited: map[string]uint64{"job_full": 1, "job_wait": 1, "portability": 1, "page": 1, "status": 1}},
+		{Kind: "cli", Version: "s073", Full: 101, Wait: 1, RateLimited: map[string]uint64{"job_wait": 1, "portability": 1, "page": 1, "status": 1}},
 		{Kind: "python", Version: "development", RateLimited: map[string]uint64{"status": 1}},
 		{Kind: "unknown", Version: "unknown", RateLimited: map[string]uint64{"inspection": 1, "usage": 1}},
 	}

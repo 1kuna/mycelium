@@ -192,7 +192,8 @@ explains each hold kind, admission evidence, reservations and pausing.
 
 Default `myce status` is a compact view of current work, not proof that a job
 finished or was lost; details, history and paging are opt-in through
-[wait and status](references/wait-and-status.md). `myce host status HOST`
+[wait and status](references/wait-and-status.md). Status and job reads show the
+last committed state; `freshness.age_seconds` says how old it is. `myce host status HOST`
 exits 0 healthy, 3 degraded (fresh workers, faults named) or 1 for missing or
 stale worker evidence ([host status](references/wait-and-status.md#host-status)).
 

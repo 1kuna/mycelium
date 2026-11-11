@@ -268,6 +268,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	}
 	q.files = s
 	q.fileCheckpoints = checkpoints
+	q.republishReads()
 	return nil
 }
 func (s *FileStore) blob(ref FileRef) string { return filepath.Join(s.root, "blobs", ref.SHA256) }

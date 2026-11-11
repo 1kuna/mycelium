@@ -253,6 +253,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Myce-Wait", "batch-v1")
 		var j *Job
+		var freshness *SnapshotFreshness
 		var err error
 		if r.URL.Query().Get("view") == "wait" {
 			jobGets.record(r.UserAgent(), true)
@@ -262,7 +263,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				state := publicWaitReply(states).Jobs[0]
 				j = &Job{ID: state.ID, State: state.State, Reason: state.Reason}
 				if terminal(j.State) {
-					j, err = a.Queue.jobSnapshot(j.ID, r.Context())
+					j, freshness, err = a.Queue.jobSnapshotRead(j.ID, r.Context())
 				}
 			}
 			if err == nil && !terminal(j.State) {
@@ -274,7 +275,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				return
 			}
 		} else {
-			j, err = a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
+			j, freshness, err = a.Queue.jobSnapshotRead(r.PathValue("id"), r.Context())
 			var refusal *HTTPError
 			if !errors.As(err, &refusal) || refusal.Code != "client_rate_limited" {
 				jobGets.record(r.UserAgent(), false)
@@ -286,10 +287,12 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			Spec
 			Run struct{} `json:"run"`
 		}
+		// Freshness is the age of the committed state this receipt projects.
 		reply := struct {
 			*Job
-			Spec replySpec `json:"spec"`
-		}{Job: j}
+			Spec      replySpec          `json:"spec"`
+			Freshness *SnapshotFreshness `json:"freshness,omitempty"`
+		}{Job: j, Freshness: freshness}
 		if j != nil {
 			reply.Spec.Spec = j.Spec
 		}
@@ -642,6 +645,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func (q *Queue) Run(ctx context.Context) error {
+	q.readWarm.enable(&q.publishedReads)
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	runtimeDone := make(chan struct{})
 	go func() { defer close(runtimeDone); q.runFleetQueueRuntime(runtimeCtx) }()

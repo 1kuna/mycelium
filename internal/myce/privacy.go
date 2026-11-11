@@ -278,7 +278,8 @@ func extensionCheckAdmissionReason(reason string) string {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
-	if j.SpecProjection == nil {
+	// A compact capture omits the frozen maps but carries their markers.
+	if j.SpecProjection == nil && j.RequirementReasons == nil {
 		j.RequirementReasons = requirementReasonStatus(job)
 	}
 	placementStatus(&j)

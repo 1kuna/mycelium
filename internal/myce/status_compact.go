@@ -37,7 +37,7 @@ type StatusHolder struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-// notQuiescentHosts runs under q.mu with the compact capture: only hosts a
+// notQuiescentHosts runs on the compact capture's source: only hosts a
 // drain, disable or the active fleet step is waiting on, so its cost is bounded
 // by in-progress maintenance, not fleet size.
 func (q *Queue) notQuiescentHosts() []StatusQuiescence {
@@ -206,7 +206,17 @@ func compactStatusJob(j *Job) Job {
 		ReleaseConfirmed: j.ReleaseConfirmed, LastStopOutcome: j.LastStopOutcome, StopAt: j.StopAt,
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
 		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause, ProductionHost: j.ProductionHost,
-		Timing: j.Timing, Liveness: j.Liveness, WallTime: j.WallTime, Progress: j.Progress}
+		Timing: j.Timing, Liveness: j.Liveness, WallTime: j.WallTime, Progress: j.Progress,
+		// The whitelist drops the frozen reason maps (raw text). Carry their
+		// sanitized markers so the summary matches the per-job read (#748).
+		RequirementReasons: compactRequirementReasons(j)}
+}
+
+func compactRequirementReasons(j *Job) []RequirementReasonStatus {
+	if j.RequirementReasons != nil {
+		return j.RequirementReasons
+	}
+	return requirementReasonStatus(j)
 }
 
 // Unconfirmed executions are current custody, even when a later attempt runs.
@@ -298,12 +308,24 @@ func compactStatusProfile(profile *CapabilityProfile) *CapabilityProfile {
 	return &p
 }
 
-// A summary reads the maintained live index, not the immutable full-history
-// materialization or diagnostic planner. Only this small copy holds q.mu;
-// runtime projection and encoding happen after unlocking. Retained file-store
-// accounting is available through the storage section.
+// A summary reads live work, not the full-history materialization or
+// diagnostic planner. It is projected from the last committed publication
+// without q.mu: only current work, machines and the reservations' own job
+// records are decoded. Retained file-store accounting is available through
+// the storage section.
 func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) (*Queue, *StatusSummary, *HealthAlertDelivery, error) {
 	started := readWallStart(q.observeRead)
+	if index := q.readIndex(ctx); index != nil && index.capture != nil && index.capture.generation != nil && !q.simulation && !q.unpublishedRecords() {
+		source, err := index.capture.statusQueue(ctx, q.clock.Now(), q)
+		observeRead(q.observeRead, "", started, started)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		delivery := index.capture.delivery
+		return source.compactStatusView(o, ctx, index.capture.retained, &delivery)
+	}
+	// Before the first commit (or with unpublished imported records) copy
+	// the same small inputs from the live queue under q.mu.
 	unlock, err := requestObservationLock(ctx, &q.mu)
 	if err != nil {
 		return nil, nil, nil, err
@@ -316,7 +338,13 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		observeRead(q.observeRead, "", started, locked)
 		logQueueHold(duration, "compactStatusObservation", nil)
 	}()
-	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, simulation: q.simulation,
+	return q.compactStatusView(o, ctx, len(q.s.Jobs)+len(q.calls), q.healthAlertDelivery())
+}
+
+// compactStatusView copies the summary inputs from q: either the live queue
+// under q.mu or a private detached source built from a publication.
+func (q *Queue) compactStatusView(o *statusOptions, ctx context.Context, retained int, delivery *HealthAlertDelivery) (*Queue, *StatusSummary, *HealthAlertDelivery, error) {
+	v := &Queue{clock: q.detachedClock(q.clock.Now()), nasAvailable: q.nasAvailable, simulation: q.simulation,
 		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, detachedRead: true}
 	q.captureContactInputs(v.clock).freezeContactView(v)
 	s := state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}, Hosts: q.s.Hosts,
@@ -361,7 +389,7 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		copy := compactStatusMachine(m)
 		s.Machines[id] = &copy
 	}
-	summary := &StatusSummary{RetainedJobs: len(q.s.Jobs) + len(q.calls), Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
+	summary := &StatusSummary{RetainedJobs: retained, Alerts: statusAlertGroups(q.s.Health.Conditions), Diagnostics: "summary; use sections or detail=full; job reasons are last committed, not a new placement plan"}
 	for _, l := range q.openProductionLeases() {
 		summary.Leases = append(summary.Leases, StatusLease{Project: l.Project, Key: l.Key, ExpiresAt: l.ExpiresAt, Hosts: q.productionLeaseHosts(l)})
 	}
@@ -391,7 +419,7 @@ func (q *Queue) compactStatusObservation(o *statusOptions, ctx context.Context) 
 		return nil, nil, nil, err
 	}
 	selection.upgrade = copyObservationValue(reflect.ValueOf(upgrade)).Interface().(*FleetUpgradeStatus)
-	return v, summary, q.healthAlertDelivery(), nil
+	return v, summary, delivery, nil
 }
 
 func trimStatusSections(s *Snapshot, o *statusOptions) {

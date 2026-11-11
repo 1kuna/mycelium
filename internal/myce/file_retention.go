@@ -145,6 +145,7 @@ func (q *Queue) ConfigureFileRetention(age time.Duration) error {
 	if q.records != nil {
 		q.rebuildRecords()
 	}
+	q.republishReads()
 	return nil
 }
 

@@ -19,6 +19,7 @@ type jobSnapshotCache struct {
 	mu            sync.Mutex // Completed response metadata only; never held during projection.
 	refresh       sync.Mutex // Never acquired by a queue writer or a cache hit.
 	data          string     // Immutable public JSON; each caller decodes its own copy.
+	captured      time.Time  // When the committed inputs behind data were published.
 	expires       time.Time
 	dependsOnJobs bool // jobSnapshotsMu; queued guidance and descendant custody use other jobs.
 }
@@ -132,13 +133,14 @@ func (q *Queue) cachedStatus(compact bool, contexts ...context.Context) (string,
 		return "", budgetErr
 	}
 	defer finishBudget()
-	contexts = []context.Context{ctx}
 	c := &q.statusCache
 	// The shared default contains all current work and no retained history
 	// page. Response allocation/transport budgets still apply to its actual size.
+	// An entry is valid for the terminal fence of the publication it was built
+	// from; a later terminal commit publishes a new fence and misses.
 	cached := func() (string, bool, error) {
+		revision := q.statusRevision(ctx)
 		c.mu.Lock()
-		revision := c.terminalRevision.Load()
 		data, captured := c.data, c.capturedAt
 		if compact {
 			data = c.compact
@@ -149,16 +151,11 @@ func (q *Queue) cachedStatus(compact bool, contexts ...context.Context) (string,
 			return "", false, nil
 		}
 		allocation := projectionAllocation(ctx)
-		mark := allocation.markProjection()
 		if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
 			return "", true, projectionRefusal(allocation.limit - allocation.held)
 		}
 		started := q.clock.Now()
 		out, err := q.statusJSONFreshness(data, captured, true)
-		if c.terminalRevision.Load() != revision {
-			allocation.rewindProjection(mark)
-			return "", false, nil
-		}
 		c.mu.Lock()
 		c.hitCost = q.clock.Now().Sub(started)
 		c.mu.Unlock()
@@ -167,8 +164,13 @@ func (q *Queue) cachedStatus(compact bool, contexts ...context.Context) (string,
 	if data, hit, err := cached(); hit || err != nil {
 		return data, err
 	}
-	if err := admitObservationProjection(ctx); err != nil {
-		return "", err
+	// A build from the committed publication owns no live queue work, so
+	// control pressure has nothing to protect from it. Only the pre-publication
+	// fallback, which captures under q.mu, uses projection admission.
+	if q.publishedReads.Load() == nil {
+		if err := admitObservationProjection(ctx); err != nil {
+			return "", err
+		}
 	}
 	unlock, err := requestObservationLock(ctx, &c.refresh)
 	if err != nil {
@@ -180,37 +182,47 @@ func (q *Queue) cachedStatus(compact bool, contexts ...context.Context) (string,
 	}
 	allocation := projectionAllocation(ctx)
 	mark := allocation.markProjection()
+	var s Snapshot
+	var revision uint64
 	for {
-		revision := c.terminalRevision.Load()
-		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "active"}, contexts...)
+		index := q.publishedReads.Load()
+		pinned := pinRead(ctx, index)
+		revision = q.statusRevision(pinned)
+		s, err = q.publicStatusSnapshot(&statusOptions{jobs: "active"}, pinned)
 		if err != nil {
 			return "", err
 		}
-		s.Freshness = nil // Age/served time belong to each response, not the cache.
-		data, err := json.Marshal(s)
-		if err != nil {
+		// A terminal commit published during the projection must not be
+		// answered or cached with the older generation.
+		if q.statusRevision(ctx) == revision {
+			break
+		}
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		view, err := json.Marshal(NewCompactStatus(s))
-		if err != nil {
-			return "", err
-		}
-		if c.terminalRevision.Load() != revision {
-			allocation.rewindProjection(mark)
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			continue
-		}
-		c.mu.Lock()
-		c.data, c.compact, c.expires, c.generation = string(data), string(view), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
-		c.capturedAt = s.Now
-		c.mu.Unlock()
-		if compact {
-			return q.statusJSONFreshness(string(view), s.Now, false)
-		}
-		return q.statusJSONFreshness(string(data), s.Now, false)
+		allocation.rewindProjection(mark)
 	}
+	captured := s.Now
+	if s.Freshness != nil {
+		captured = s.Freshness.CapturedAt
+	}
+	s.Freshness = nil // Age/served time belong to each response, not the cache.
+	data, err := json.Marshal(s)
+	if err != nil {
+		return "", err
+	}
+	view, err := json.Marshal(NewCompactStatus(s))
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.data, c.compact, c.expires, c.generation = string(data), string(view), q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(s.Now), c.hitCost)), revision
+	c.capturedAt = captured
+	c.mu.Unlock()
+	if compact {
+		return q.statusJSONFreshness(string(view), captured, false)
+	}
+	return q.statusJSONFreshness(string(data), captured, false)
 }
 
 func (q *Queue) snapshotFreshness(captured time.Time, cached bool) *SnapshotFreshness {
@@ -301,7 +313,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		hold = q.statusHolds.start()
 	}
 	var files fileStoreObservation
-	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
+	v := &Queue{clock: q.detachedClock(q.clock.Now()), nasAvailable: q.nasAvailable,
 		evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
@@ -502,6 +514,15 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		detached.State.ExternalMemory[key] = ring
 	}
 	for key, input := range frozen {
+		// History outside the returned page contributes only its immutable
+		// dependency summary (order and references); nothing projects or
+		// mutates it. Share it rather than copying and charging all retained
+		// work to every paged read, which refused pages with
+		// projection_capacity_exceeded once history outgrew a request's share.
+		if v.observationSelection != nil && !v.observationSelection.ids[key] {
+			detached.State.Jobs[key] = input
+			continue
+		}
 		if err = chargeProjectionValue(requestContext(contexts), input); err != nil {
 			return nil, files, err
 		}
@@ -574,15 +595,29 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 }
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
+	j, _, _, err := q.jobSnapshotReceipt(id, contexts...)
+	return j, err
+}
+
+// jobSnapshotRead also reports the freshness of the committed inputs it read.
+func (q *Queue) jobSnapshotRead(id string, contexts ...context.Context) (*Job, *SnapshotFreshness, error) {
+	j, captured, hit, err := q.jobSnapshotReceipt(id, contexts...)
+	if err != nil || captured.IsZero() {
+		return j, nil, err
+	}
+	return j, q.snapshotFreshness(captured, hit), nil
+}
+
+func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job, time.Time, bool, error) {
 	ctx := requestContext(contexts)
 	resolved, err := q.resolveReadJobID(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, false, err
 	}
 	id = resolved
 	allocation := projectionAllocation(ctx)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, time.Time{}, false, err
 	}
 	q.jobSnapshotsMu.Lock()
 	if q.jobSnapshots == nil {
@@ -595,26 +630,26 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 	}
 	q.jobSnapshotsMu.Unlock()
 	entry.mu.Lock()
-	data, hit := entry.data, entry.data != "" && q.clock.Now().Before(entry.expires)
+	data, captured, hit := entry.data, entry.captured, entry.data != "" && q.clock.Now().Before(entry.expires)
 	entry.mu.Unlock()
 	if !hit {
 		// Published job captures own no live queue work. Physical allocation
 		// accounting still bounds both cold projection and response decoding.
 		if published := q.publishedReads.Load(); published == nil || published.capture == nil {
 			if err := admitObservationProjection(ctx); err != nil {
-				return nil, err
+				return nil, time.Time{}, false, err
 			}
 		}
 		unlock, lockErr := requestObservationLock(ctx, &entry.refresh)
 		if lockErr != nil {
-			return nil, lockErr
+			return nil, time.Time{}, false, lockErr
 		}
 		entry.mu.Lock()
-		data, hit = entry.data, entry.data != "" && q.clock.Now().Before(entry.expires)
+		data, captured, hit = entry.data, entry.captured, entry.data != "" && q.clock.Now().Before(entry.expires)
 		entry.mu.Unlock()
 		if !hit {
 			now := q.clock.Now()
-			out, captureErr := q.jobSnapshotGeneration(id, contexts...)
+			out, at, captureErr := q.jobSnapshotCapture(id, contexts...)
 			var encoded []byte
 			if captureErr == nil {
 				encoded, captureErr = json.Marshal(out)
@@ -622,19 +657,19 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 			q.jobSnapshotsMu.Lock()
 			valid := q.jobSnapshots[id] == entry
 			if captureErr == nil {
-				data = string(encoded)
+				data, captured = string(encoded), at
 			}
 			if valid && captureErr == nil {
 				entry.dependsOnJobs = out.State == "queued" || out.FanOut != nil || out.CancelledAt != nil
 				entry.mu.Lock()
 				data = string(encoded)
-				entry.data, entry.expires = data, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
+				entry.data, entry.captured, entry.expires = data, captured, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
 				entry.mu.Unlock()
 			}
 			q.jobSnapshotsMu.Unlock()
 			unlock()
 			if captureErr != nil {
-				return nil, captureErr
+				return nil, time.Time{}, false, captureErr
 			}
 		} else {
 			unlock()
@@ -644,11 +679,11 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 		// Charge only this response's decode/encoding, never another
 		// request's completed projection or resident source generation.
 		if int64(len(data)) > (allocation.limit-allocation.held)/6 || !allocation.charge(6*int64(len(data))) {
-			return nil, projectionRefusal(allocation.limit - allocation.held)
+			return nil, time.Time{}, false, projectionRefusal(allocation.limit - allocation.held)
 		}
 		cost, costErr := jsonAllocationCost([]byte(data), reflect.TypeFor[*Job](), allocation.limit-allocation.held)
 		if costErr != nil || !allocation.charge(cost) {
-			return nil, projectionRefusal(allocation.limit - allocation.held)
+			return nil, time.Time{}, false, projectionRefusal(allocation.limit - allocation.held)
 		}
 	}
 	started := q.clock.Now()
@@ -661,17 +696,23 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 		entry.hitCost = q.clock.Now().Sub(started)
 		entry.mu.Unlock()
 	}
-	return &out, err
+	return &out, captured, hit, err
 }
 
 func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
+	j, _, err := q.jobSnapshotCapture(id, contexts...)
+	return j, err
+}
+
+// jobSnapshotCapture also reports when its committed inputs were published.
+func (q *Queue) jobSnapshotCapture(id string, contexts ...context.Context) (*Job, time.Time, error) {
 	v, _, err := q.captureReadObservation(id, nil, contexts...)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	j, err := v.findObservationJob(id)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	var reasons map[string]string
 	if j.State == "queued" {
@@ -696,7 +737,7 @@ func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*
 	}
 	v.projectJobDiagnostics(j, true, true)
 	j.DeadlineGuidance = v.deadlineGuidance(j)
-	return j, nil
+	return j, readCommitted(v.clock), nil
 }
 
 func (q *Queue) statusSnapshot(contexts ...context.Context) (Snapshot, error) {
@@ -711,10 +752,17 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 	defer finishBudget()
 	allocation := projectionAllocation(ctx)
 	mark := allocation.markProjection()
+	if _, pinned := ctx.Value(pinnedReadKey{}).(*publishedReadIndex); pinned {
+		return q.statusSnapshotGeneration(options, ctx)
+	}
 	for {
-		revision := q.statusCache.terminalRevision.Load()
-		out, err := q.statusSnapshotGeneration(options, ctx)
-		if err != nil || q.statusCache.terminalRevision.Load() == revision {
+		index := q.publishedReads.Load()
+		revision := q.statusRevision(pinRead(ctx, index))
+		out, err := q.statusSnapshotGeneration(options, pinRead(ctx, index))
+		// Rebuild only when a newer publication carries a terminal commit
+		// this response missed. Between a terminal fence and its publication
+		// the commit is still in flight; the older generation answers.
+		if err != nil || q.statusRevision(ctx) == revision {
 			return out, err
 		}
 		if err := requestContext(contexts).Err(); err != nil {
@@ -741,7 +789,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		out := v.projectSnapshot(true)
 		out.Machines = dropReplacedStatusMachines(out.Machines)
 		out.Summary, out.HealthAlertDelivery = summary, delivery
-		out.Freshness = q.snapshotFreshness(out.Now, false)
+		out.Freshness = q.snapshotFreshness(readCommitted(v.clock), false)
 		return out, ctx.Err()
 	}
 	if options != nil {
@@ -782,7 +830,7 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		}
 		err = ctx.Err()
 	}
-	out.Freshness = q.snapshotFreshness(out.Now, false)
+	out.Freshness = q.snapshotFreshness(readCommitted(v.clock), false)
 	return out, err
 }
 

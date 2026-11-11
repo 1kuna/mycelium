@@ -111,7 +111,18 @@ func TestWaitReadConcurrentPolling(t *testing.T) {
 	}
 	full := waitReadRequest(handler, ids[0], "")
 	fast := waitReadRequest(handler, ids[0][:8], "?view=wait")
-	if full.Code != 200 || fast.Code != 200 || full.Body.String() != fast.Body.String() {
+	// Per-response freshness (age, cache reuse) is additive metadata; the
+	// receipt itself must be identical.
+	receipt := func(body []byte) string {
+		var reply map[string]json.RawMessage
+		if err := json.Unmarshal(body, &reply); err != nil || reply["freshness"] == nil {
+			t.Fatal("receipt without freshness", string(body), err)
+		}
+		delete(reply, "freshness")
+		data, _ := json.Marshal(reply)
+		return string(data)
+	}
+	if full.Code != 200 || fast.Code != 200 || receipt(full.Body.Bytes()) != receipt(fast.Body.Bytes()) {
 		t.Fatal("terminal wait reply differs from ordinary GET")
 	}
 	for _, query := range []string{"", "?view=wait"} {

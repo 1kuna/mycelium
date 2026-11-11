@@ -180,6 +180,18 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	// Duplicate conditions fold into one group per kind (live: 18 work profiles
 	// with one regression were 18 lines); recipe identities never leak.
 	since := c.Now()
+	// Status reads committed state; commit the job mutation.
+	if err := q.update(func() error {
+		q.touchJob(j.ID)
+		q.s.Jobs[j.ID].Attempt = 1
+		q.s.Jobs[j.ID].State = "failed" // Pending physical cleanup stays visible.
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Commit maintenance clears managed conditions that have no live source,
+	// so publish these grouping inputs directly as committed base state.
+	q.mu.Lock()
 	q.s.Health.Conditions = map[string]healthCondition{
 		"recipe/worker/private/path":              {Active: true, Since: since},
 		"recipe/peer/" + strings.Repeat("ab", 16): {Active: true, Since: since},
@@ -188,8 +200,9 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 		"efficiency/worker/wasted_attempts":       {Active: true, Since: since},
 		"efficiency/project:p/wait_holds_seconds": {Active: false, Since: since},
 	}
-	q.s.Jobs[j.ID].Attempt = 1
-	q.s.Jobs[j.ID].State = "failed" // Pending physical cleanup stays visible.
+	q.publishReadRecords(map[string][]byte{"state": nil})
+	q.publishReadRuntime()
+	q.mu.Unlock()
 	current := readStatusOptions(t, q, "")
 	data, _ := json.Marshal(current.Summary)
 	want := []StatusAlertGroup{
