@@ -66,6 +66,31 @@ def full_waiters(directory):
     return [path for _, path in sorted(rows)]
 
 
+def memory_backfill_head(queue, ticket, available, reserved_memory, config_digest):
+    """Permit one fitting admission past a memory-blocked head, under the lock.
+
+    One overtaking admission per head bounds starvation without a wall timer:
+    once consumed, the head gets the next opportunity even after that run exits.
+    Unknown envelopes and exclusive drains retain strict FIFO.
+    """
+    if not queue or queue[0] == ticket:
+        return None
+    head = json.loads(queue[0].read_text())
+    if head.get('memory_backfill_used'):
+        return None
+    for path in queue[:queue.index(ticket)]:
+        row = json.loads(path.read_text())
+        required = row.get('minimum_memory_bytes')
+        if (row.get('requested_exclusive', True) or
+                row.get('memory_config_sha256') != config_digest or
+                type(required) is not int or required <= 0):
+            return None
+        required += reserved_memory if row['mode'] == 'full' else 0
+        if available >= required:
+            return None  # An earlier request could fit; let it try first.
+    return queue[0]
+
+
 def root(repo):
     # Caches, VM capacity and full concurrency are host-wide, including clones.
     return Path.home() / '.cache/mycelium-gates/control'
@@ -452,8 +477,8 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
     try:
         with admission_lock(directory):
             # Every request joins the same FIFO, including quick and command
-            # runs. Zero overtaking prevents an endless release stream from
-            # starving ordinary work, without a timer or an arbitrary wait cap.
+            # runs. A memory-blocked head permits one fitting admission, then
+            # retains precedence against every later request until it leaves.
             sequence_path = directory / 'queue-sequence'
             previous = [json.loads(path.read_text())['sequence'] for path in full_waiters(directory)]
             previous.append(int(sequence_path.read_text()) if sequence_path.exists() else 0)
@@ -600,6 +625,20 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                 # shared host headroom covers its growth without recharging other runs.
                 admission_memory = needed_memory + (reserved_memory if resources and mode == 'full' else 0)
                 memory_ok = available >= admission_memory
+                # Publish the smallest eligible envelope, not an opportunistic
+                # eight-slot choice. Later requests recheck live memory and full
+                # reservations, so a released owner cannot leave a stale blocker.
+                ticket_row = json.loads(queue_ticket.read_text())
+                minimum = memory_requirement(config, platform, mode,
+                    4 if automatic else cores, slot_profile)
+                ticket_update = dict(minimum_memory_bytes=minimum,
+                                     memory_config_sha256=config_digest)
+                if any(ticket_row.get(k) != v for k, v in ticket_update.items()):
+                    ticket_row.update(ticket_update)
+                    publish_waiting(queue_ticket, json.dumps(ticket_row) + '\n')
+                backfill = (memory_backfill_head(queue, queue_ticket, available,
+                            reserved_memory, config_digest)
+                            if resources and not exclusive else None)
                 if resources:
                     headroom = config['memory_measurement']['headroom_bytes']
                     peak = gate_memory - headroom
@@ -624,7 +663,7 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                     if platform != 'native':
                         resource_ok = (resource_ok and vm_cores + cores <= resources['vm_cores']
                                        and vm_memory + vm_peak <= resources['vm_memory_bytes'])
-                ready = (queue_first and batch_done and occupied < slots
+                ready = ((queue_first or backfill is not None) and batch_done and occupied < slots
                         and cpu_ok and memory_ok and resource_ok
                         and (resources or mode != 'full' or full_marker))
                 if ready:
@@ -673,9 +712,19 @@ def acquire(repo, *, mode='quick', priority='normal', cores=4, wait=False, platf
                         pending = directory / ('.slot-pending-' + owner['run_id'])
                         pending.mkdir(mode=0o700)
                         (pending / 'owner.json').write_text(json.dumps(owner) + '\n')
+                        if backfill is not None:
+                            # Consume the head's one bypass before publishing
+                            # execution custody. A crash may waste that turn,
+                            # but can never grant an unbounded bypass stream.
+                            head = json.loads(backfill.read_text())
+                            head['memory_backfill_used'] = owner['run_id']
+                            publish_waiting(backfill, json.dumps(head) + '\n')
                         pending.rename(slot)
                         if full_marker:
                             publish_waiting(full_marker, json.dumps(owner) + '\n')
+                        if backfill is not None:
+                            print('gate: one fitting run admitted past memory-blocked FIFO head; '
+                                  'head protected from further overtaking', flush=True)
                         if automatic:
                             print(f'gate: full selected {cores} slots per leg; CPU share {cpu_share} per leg; '
                                   f'{admission_memory / GIB:.2f} GiB measured memory required, '

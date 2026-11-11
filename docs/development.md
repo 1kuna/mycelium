@@ -258,6 +258,19 @@ evidence falls back to the full envelope. This optional quick envelope may be
 refreshed while runs are active: existing reservations keep their original
 charges and only new requests use the new measurement.
 
+All requests keep their FIFO tickets. When the head lacks live available memory,
+the first later request whose measured memory envelope fits may take one admission,
+subject to every existing CPU, RAM, VM, custody and disk guard. That one bypass is
+recorded durably on the head's ticket before the new owner is published. No further
+request may overtake that head, even after the fitting run exits, so a continuous
+stream of smaller work cannot starve it. The cost is waiting behind the head again
+after one useful run if external memory remains unavailable. A head that fits,
+unknown or changed calibration, and exclusive timing drains retain strict FIFO.
+Automatic fulls advertise their smallest eligible slot envelope; later callers
+recheck current full reservations rather than trusting an earlier available-RAM
+sample. This addresses measured head-of-line stalls with no active local gates,
+without lowering an envelope or changing a resource guard.
+
 Local admission automatically archives a slot or custody record when its holder
 PID is absent (including a zombie), or its recorded start identity differs from
 the live process. The host admission lock serializes reclamation and new

@@ -513,7 +513,7 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
                     capacity.acquire(root, mode='full', platform='both', cores=4)
 
-    def test_normal_pressure_memory_wait_keeps_fifo_then_starts_after_quick_releases(self):
+    def test_memory_wait_allows_one_fitting_backfill_then_protects_head(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             config = qualified_config(root)
@@ -531,12 +531,18 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                 self.assertEqual(tickets[0].read_bytes(), ticket_bytes)
                 self.assertEqual(len(capacity.execution_lanes(root)), 1)
                 if waits == 1:
-                    # Neither a smaller full nor a fitting quick may overtake
-                    # the FIFO head and keep it waiting indefinitely.
-                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                        capacity.acquire(root, mode='full', platform='native')
-                    with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
-                        capacity.acquire(root, mode='quick', platform='native', cores=1)
+                    # The paired head is memory-blocked, but native fits.
+                    fitting = capacity.acquire(root, mode='full', platform='native')
+                    try:
+                        self.assertEqual(json.loads(tickets[0].read_text())['memory_backfill_used'],
+                                         fitting.owner['run_id'])
+                    finally: fitting.release()
+                    # Even after that run exits, a stream of fitting arrivals
+                    # cannot prevent memory accumulating for the older head.
+                    for mode in ('quick', 'full', 'quick'):
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode=mode, platform='native', cores=1)
+                    ticket_bytes = tickets[0].read_bytes()
                     available = 21 * capacity.GIB
                 if waits == 2:
                     reviewer.release()
@@ -557,6 +563,37 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     self.assertEqual(full.owner['available_memory_at_entry_bytes'], available)
                     self.assertEqual(capacity.full_waiters(root), [])
                 finally: full.release()
+
+    def test_memory_backfill_preserves_fitting_unknown_and_exclusive_predecessors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = qualified_config(root)
+            digest = capacity.admission_config_digest(config)
+            row = dict(pid=os.getpid(), process_identity=capacity.process_identity(os.getpid()),
+                admission_protocol=3, priority='calibration', exclusive=True,
+                requested_priority='normal', requested_exclusive=False, mode='quick',
+                sequence=0, minimum_memory_bytes=24 * capacity.GIB,
+                memory_config_sha256=digest)
+            head = root / 'local-go-wait-head.json'
+            with (patch.object(capacity, 'root', return_value=root),
+                  patch.object(capacity, 'available_memory', return_value=20 * capacity.GIB)):
+                for update in (dict(minimum_memory_bytes=12 * capacity.GIB),
+                               dict(minimum_memory_bytes=None),
+                               dict(memory_config_sha256='old-config'),
+                               dict(requested_exclusive=True)):
+                    with self.subTest(update=update):
+                        head.write_text(json.dumps(dict(row, **update)))
+                        with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                            capacity.acquire(root, mode='quick', platform='native')
+                        self.assertNotIn('memory_backfill_used', json.loads(head.read_text()))
+                # An exclusive drain behind the blocked head also keeps its
+                # place; a later native request must not jump over it.
+                head.write_text(json.dumps(row))
+                drain = root / 'local-go-wait-drain.json'
+                drain.write_text(json.dumps(dict(row, sequence=1, requested_exclusive=True)))
+                with self.assertRaisesRegex(RuntimeError, 'capacity busy'):
+                    capacity.acquire(root, mode='quick', platform='native')
+                self.assertNotIn('memory_backfill_used', json.loads(head.read_text()))
 
     def test_impossible_single_run_memory_requirement_refuses_without_waiting(self):
         with tempfile.TemporaryDirectory() as folder:
