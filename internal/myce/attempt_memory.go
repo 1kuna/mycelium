@@ -704,10 +704,6 @@ func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
 }
 
 // The bool reports another process on the attempt's CUDA device.
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS, known ...map[int]bool) (float64, bool, error) {
-	return w.attemptDeviceMemoryReading(ctx, ids, fs, nil, known...)
-}
-
 func (w Worker) attemptDeviceMemoryReading(ctx context.Context, ids map[int]bool, fs memoryFS, resident *float64, known ...map[int]bool) (float64, bool, error) {
 	if len(w.selectedDevices) > 1 {
 		return 0, false, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
@@ -720,10 +716,6 @@ func (w Worker) attemptDeviceMemoryReading(ctx context.Context, ids map[int]bool
 
 // N/A rows for the attempt's own processes mean "listed, not reported" (some
 // unified-memory drivers); a partial sum would undercount, so none is used.
-func cudaAttemptMemory(b []byte, selector string, ids map[int]bool, known ...map[int]bool) (float64, bool, error) {
-	return cudaAttemptMemoryReading(b, selector, ids, nil, known...)
-}
-
 func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resident *float64, known ...map[int]bool) (float64, bool, error) {
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
 	if err != nil {

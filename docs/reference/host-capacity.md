@@ -173,8 +173,8 @@ All per-card workers on one physical machine must share a stable `join
 Linux uses `MemAvailable`; macOS uses free plus inactive pages from `vm_stat`.
 `--reserve-host-memory-gb` (default 0) withholds extra OS/other-workload headroom;
 on unified memory the larger of it and `--reserve-memory-gb` applies once.
-The queue uses its durable host memory policy, refuses inconsistent device reports,
-and subtracts all outstanding declared allocations, including loading models
+The queue uses its durable host memory policy, within every worker's acknowledged
+allowance, and subtracts all outstanding declared allocations, including loading models
 and stopping/draining work. This is intentionally conservative: resident memory
 already reduces the live OS allowance, and its declared reservation is retained
 to cover growth rather than guessing process usage. A slower/stale sibling
@@ -219,7 +219,8 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   uncapped admission-only operation. The first report bootstraps queue policy;
   subsequent worker reports cannot change it. Configure a positive allowance
   with `host budget HOST --memory-budget-gb GiB` while drained/disabled.
-  Both cards receive it through checkin and must agree before new starts.
+  Both cards receive it through checkin; until both acknowledge it, admission
+  stays within the lower of the policy and their acknowledged values.
   Retain all attempt/model charges, slack and unconfirmed releases.
 
 - `--host-memory-budget-measured`: opt in to a measured allowance (next
@@ -300,7 +301,8 @@ including child cgroups; an elapsed stop deadline cannot release memory.
   and the acknowledged ones: a rise applies after acknowledgement, a fall at
   once, and admission never pauses. `host_memory_policy_mismatch` reports a
   pending acknowledgement of an authored value or of the measured mode (not of
-  each measured value) for host readiness and health. Existing work retains
+  each measured value) by a live worker, for host readiness (`myce host status`
+  and `--wait`); it is not an admission gate. Existing work retains
   custody if a new observation tightens the allowance.
 
 - `--memory-ceiling-slack-gb`: extra memory per declared allocation; default
@@ -401,8 +403,8 @@ myce host budget HOST --cpu-budget-cores 4 --memory-budget-gb 8
 myce host resume HOST
 ```
 
-Allow each worker view to acknowledge the policy; a mismatch withholds new
-admission. Status shows free/admitted logical cores and unavailable-capacity
+Allow each worker view to acknowledge the policy; until then admission stays
+within the lower acknowledged value and host readiness reports the mismatch. Status shows free/admitted logical cores and unavailable-capacity
 reasons. CPU/GPU views sharing `host_id` share both ledgers. Pending releases
 retain cores/RAM until exact cleanup is acknowledged. One attempt per worker
 remains the R1 execution limit. Core counts reserve capacity, with no CPU-time
