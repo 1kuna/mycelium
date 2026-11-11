@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -326,6 +327,7 @@ func TestRepeatedWorkRealCommandProof(t *testing.T) {
 	c := Client{URL: server.URL, Token: "fixture-only"}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	measured := map[string][]float64{}
 	for range 2 {
 		for _, m := range []Machine{slow, fast} {
 			s.AllowedMachines = []string{m.ID}
@@ -350,6 +352,7 @@ func TestRepeatedWorkRealCommandProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			duration := time.Since(started)
+			measured[m.ID] = append(measured[m.ID], duration.Seconds())
 			if out.String() != "repeat-proof-ok\n" {
 				t.Fatalf("output mismatch: %q", out.String())
 			}
@@ -365,12 +368,24 @@ func TestRepeatedWorkRealCommandProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if check(t, q, slow, nil).Job != nil {
-		t.Fatal("slower machine selected")
+	// Loaded process startup can reverse these fixture names' nominal speeds.
+	// The deterministic placement/fallback test above proves faster selection;
+	// this real-command proof checks the measurements actually taught here.
+	run := check(t, q, slow, nil).Job
+	if run == nil {
+		run = check(t, q, fast, nil).Job
 	}
-	run := check(t, q, fast, nil).Job
 	if run == nil || run.ID != next.ID {
-		t.Fatal("faster machine not selected", run)
+		t.Fatal("learned command not assigned", run)
 	}
-	t.Log("four supervised commands returned identical output; two measured samples per machine; next selected fast; contention counters synthetic")
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, run.ID)
+	samples := measured[run.Machine]
+	want := (samples[0] + samples[1]) / 2
+	if got.Timing == nil || got.Timing.Samples != 2 || got.Timing.PredictedSeconds == nil || math.Abs(*got.Timing.PredictedSeconds-want) > 1e-9 {
+		t.Fatalf("supervised measurements did not teach the next command: timing=%+v samples=%v", got.Timing, samples)
+	}
+	t.Logf("four supervised commands returned identical output; two measured samples per machine; next selected %s with measured prediction %.4fs; contention counters synthetic", run.Machine, want)
 }
