@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// The production reader borrows the live transaction view. Async admission
+// evidence commits even in synthetic fleet fixtures without running workers.
+func fleetProductionIdle(t *testing.T, q *Queue) bool {
+	t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.fleetProductionIdle()
+}
+
 func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	q, c, workers := fleetFixture(t, "queue", "remote")
 	s := spec("production")
@@ -31,7 +40,7 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 	if got.State != "queued" || got.Machine != "" || got.Session != "" || got.ReleaseConfirmed {
 		t.Fatalf("retry did not clear current identity with custody retained: %+v", got)
 	}
-	if q.fleetProductionIdle() {
+	if fleetProductionIdle(t, q) {
 		t.Fatal("queued retry lost unreleased production custody")
 	}
 	c.Advance(ProductionStartTimeout + time.Second)
@@ -41,7 +50,7 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
-	if q.fleetProductionIdle() || job(t, q, run.ID).State != "failed" {
+	if fleetProductionIdle(t, q) || job(t, q, run.ID).State != "failed" {
 		t.Fatal("failed attempt without release did not block")
 	}
 	r.ReleaseOnly, r.ReleasePending = true, false
@@ -49,7 +58,7 @@ func TestFleetProductionIdleLastCopyReleaseAfterRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = job(t, q, run.ID)
-	if !got.Copies[0].ReleaseConfirmed || !got.ReleaseConfirmed || !q.fleetProductionIdle() {
+	if !got.Copies[0].ReleaseConfirmed || !got.ReleaseConfirmed || !fleetProductionIdle(t, q) {
 		t.Fatalf("last exact release did not settle retried job: %+v", got)
 	}
 }
@@ -122,7 +131,7 @@ func TestFleetProductionIdlePersistsCopyCustody(t *testing.T) {
 				}
 				q.fleetQueue = &fleetQueueRuntime{Session: proof.Session, Host: "queue", OS: "linux", Arch: "amd64", Proof: proof, ObservedAt: c.Now()}
 				fleetTick(t, q)
-				if q.s.FleetUpgrade.Operation != operation || q.fleetProductionIdle() == pending {
+				if q.s.FleetUpgrade.Operation != operation || fleetProductionIdle(t, q) == pending {
 					t.Fatal("restart lost operation or misclassified copy custody", q.fleetUpgradeStatus())
 				}
 				if pending {
@@ -178,12 +187,12 @@ func TestFleetProductionIdleRetainsUnconfirmedCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Advance(24 * time.Hour)
-	if q.fleetProductionIdle() || !mutableJob(j) {
+	if fleetProductionIdle(t, q) || !mutableJob(j) {
 		t.Fatal("current release, failure or age masked an unconfirmed older copy")
 	}
 	// Legacy records have no copy evidence and must retain the job-level fence.
 	j.Copies, j.ReleaseConfirmed = nil, false
-	if q.fleetProductionIdle() || !mutableJob(j) {
+	if fleetProductionIdle(t, q) || !mutableJob(j) {
 		t.Fatal("legacy attempt without release did not block")
 	}
 }
