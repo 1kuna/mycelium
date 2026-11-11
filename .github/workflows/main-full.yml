@@ -41,13 +41,17 @@ jobs:
         run: |
           echo "Main full source: $GITHUB_SHA (github.sha)" | tee -a "$GITHUB_STEP_SUMMARY"
           platforms=(darwin linux) entries=(mycelium-gate-full-darwin mycelium-gate-full) pids=()
-          for i in 0 1; do
-            env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" myce run --entry "${entries[i]}" \
-              --key "$KEY:${platforms[i]}:$OWNER" --out "$RUNNER_TEMP/${platforms[i]}" >"$RUNNER_TEMP/${platforms[i]}.log" 2>&1 &
-            pids[i]=$!
-          done
           # Forward the runner's stop signal; myce cancels by key and exits 130 once confirmed.
           trap 'kill -TERM "${pids[@]}" 2>/dev/null' INT TERM
+          for i in 0 1; do
+            log=$RUNNER_TEMP/${platforms[i]}.log
+            env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" myce run --entry "${entries[i]}" \
+              --key "$KEY:${platforms[i]}:$OWNER" --out "$RUNNER_TEMP/${platforms[i]}" >"$log" 2>&1 &
+            pids[i]=$!
+            # One checkout prepares one submission at a time (submission_busy);
+            # start the next once this one has its receipt or has exited.
+            until grep -q '^[A-Za-z0-9_-]* submitted' "$log" || ! kill -0 "${pids[i]}" 2>/dev/null; do sleep 1; done
+          done
           failed=0
           printf '| Platform | Result | Mycelium job |\n| --- | --- | --- |\n' >>"$GITHUB_STEP_SUMMARY"
           for i in 0 1; do

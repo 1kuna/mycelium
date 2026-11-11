@@ -944,8 +944,9 @@ Linux full profile and converted adapter already included both architectures.
 Their measured 6 GiB declaration and Darwin's `memory: auto` remain as documented
 above; #767 did not establish an unconstrained Linux auto envelope.
 There are no host pins; Mycelium chooses each worker and
-provides the existing `mycelium-gate` environment. Both runs start together and
-CI waits for both, even if one fails. The entry's result check runs inside the
+provides the existing `mycelium-gate` environment. The Linux run starts once
+the Darwin run has its receipt, because one checkout prepares one profile
+submission at a time (`submission_busy`); CI then waits for both, even if one fails. The entry's result check runs inside the
 job, so success means `gate-result.txt` reads `gate full: exit=0`; `--out` then
 downloads the accepted, size- and SHA-256-verified outputs.
 The event checkout supplies its profiles, relative inputs and helpers together.
