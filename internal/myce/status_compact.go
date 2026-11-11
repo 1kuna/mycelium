@@ -400,6 +400,7 @@ func trimStatusSections(s *Snapshot, o *statusOptions) {
 	if !o.includes("storage") {
 		s.StorageObservations = nil
 		s.FileStore = nil
+		s.CheckpointExpiry = nil
 	}
 	if !o.includes("work") {
 		s.WorkCurves = nil

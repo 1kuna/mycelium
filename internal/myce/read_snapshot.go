@@ -590,7 +590,7 @@ type committedReadCapture struct {
 
 func (q *Queue) freezeReadCapture() *committedReadCapture {
 	generation, models, environments, runtime := q.readGeneration, q.readModels, q.readEnvironments, q.readRuntime
-	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, efficiencyView: q.efficiencyView,
+	source := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, evidenceRetention: q.evidenceRetention, checkpointExpiryStatus: q.checkpointExpiryStatus, efficiencyView: q.efficiencyView,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts, productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil: q.restartUntil, networkQuiet: q.networkQuiet, root: q.root, files: q.files, fileRetention: q.fileRetention, hostMemorySamples: q.readSamples, detachedRead: true}
 	ledgers := make(map[string]observationMachineLedger, len(q.s.Machines))
@@ -661,7 +661,7 @@ func (capture *committedReadCapture) observationQueue(ctx context.Context, id st
 	// contact. A later read clock may age suspicion, but cannot renew its grace.
 	contact := &Queue{clock: base.clock, restartUntil: base.restartUntil}
 	capture.contactInputs.freezeContactView(contact)
-	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, efficiencyView: base.efficiencyView,
+	source := &Queue{clock: observationClock{readAt}, nasAvailable: base.nasAvailable, evidenceRetention: base.evidenceRetention, checkpointExpiryStatus: base.checkpointExpiryStatus, efficiencyView: base.efficiencyView,
 		simulation: base.simulation, productionGrace: base.productionGrace, lossTimeouts: base.lossTimeouts, productionInfrastructureRetries: base.productionInfrastructureRetries,
 		restartUntil: contact.restartUntil, networkQuiet: base.networkQuiet, root: base.root, files: base.files, fileRetention: base.fileRetention, hostMemorySamples: base.hostMemorySamples,
 		contacts: contact.contacts, detachedRead: true}

@@ -877,24 +877,26 @@ type Snapshot struct {
 
 	HealthAlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
 
-	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
-	QueueRelease   RunningRelease       `json:"queue_release"`
-	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
-	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`
-	HostStates     map[string]string    `json:"host_states,omitempty"`
-	Admissions     []HostAdmissions     `json:"admissions,omitempty"`
-	WorkCurves     []WorkObservation    `json:"work_curves"`
-	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
-	HoldsDetail    []HoldDetail         `json:"holds_detail"`
-	HostHolds      []string             `json:"host_holds,omitempty"`
-	Now            time.Time            `json:"now"`
-	Usage          UsageReport          `json:"usage"`
-	SyncRequests   []SyncRequest        `json:"sync_requests"`
-	Pins           []ModelPin           `json:"pins"`
-	LoadedModels   []ModelSlot          `json:"loaded_models"`
-	Warning        string               `json:"warning,omitempty"`
-	Jobs           []*Job               `json:"jobs"`
-	Machines       []*Machine           `json:"machines"`
+	HealthAlerts []HealthAlert       `json:"health_alerts,omitempty"`
+	QueueRelease RunningRelease      `json:"queue_release"`
+	FleetUpgrade *FleetUpgradeStatus `json:"fleet_upgrade,omitempty"`
+	FileStore    *FileStoreStatus    `json:"file_store,omitempty"`
+	// Settled NAS checkpoint folders still held (#894); storage section.
+	CheckpointExpiry *CheckpointExpiryStatus `json:"checkpoint_expiry,omitempty"`
+	HostStates       map[string]string       `json:"host_states,omitempty"`
+	Admissions       []HostAdmissions        `json:"admissions,omitempty"`
+	WorkCurves       []WorkObservation       `json:"work_curves"`
+	PriorityPolicy   PriorityPolicyRecord    `json:"priority_policy"`
+	HoldsDetail      []HoldDetail            `json:"holds_detail"`
+	HostHolds        []string                `json:"host_holds,omitempty"`
+	Now              time.Time               `json:"now"`
+	Usage            UsageReport             `json:"usage"`
+	SyncRequests     []SyncRequest           `json:"sync_requests"`
+	Pins             []ModelPin              `json:"pins"`
+	LoadedModels     []ModelSlot             `json:"loaded_models"`
+	Warning          string                  `json:"warning,omitempty"`
+	Jobs             []*Job                  `json:"jobs"`
+	Machines         []*Machine              `json:"machines"`
 
 	// Operator-retired fleet operations, oldest first (audit record, #588).
 	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`

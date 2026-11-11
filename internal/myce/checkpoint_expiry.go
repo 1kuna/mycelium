@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -82,15 +83,13 @@ func validCheckpointExpiryPath(id, path string) bool {
 }
 
 // checkpointExpirable reports the root-relative folder of a settled job.
-// Terminal records without a recorded terminal time never expire: there is no
-// basis for the grace period.
 // Terminal alone is not enough: undelivered outputs, unreleased attempts and
 // parked storage custody keep the job mutable, and an unreleased attempt could
 // still write its folder. Terminal jobs never resume (reconcileAttemptReport
 // only recovers queued, running or stopping jobs), and retries, fan-out waves
 // and resubmissions use new job IDs and folders.
 func checkpointExpirable(root string, j *Job) (string, bool) {
-	if j == nil || j.FileTransport || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || j.FinishedAt == nil || mutableJob(j) {
+	if j == nil || j.FileTransport || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || mutableJob(j) {
 		return "", false
 	}
 	rel, err := filepath.Rel(root, j.Checkpoint)
@@ -101,16 +100,84 @@ func checkpointExpirable(root string, j *Job) (string, bool) {
 	return rel, validCheckpointExpiryPath(j.ID, rel)
 }
 
+// checkpointEndTime is the time the grace period counts from. It is the
+// recorded terminal time when present. Some historical terminal paths never
+// stamped finished_at; for those it is the latest timestamp anywhere in the
+// job's own record: attempt ends, stops and releases, cancellation and ledger
+// events, then starts, assignment, waiting and submission. Taking the latest
+// of all of them never places the end before any recorded activity. A record
+// with no timestamp at all has no basis and is kept.
+func checkpointEndTime(j *Job) (time.Time, bool) {
+	if j.FinishedAt != nil {
+		return *j.FinishedAt, true
+	}
+	var end time.Time
+	at := func(t *time.Time) {
+		if t != nil && t.After(end) {
+			end = *t
+		}
+	}
+	for i := range j.AttemptHistory {
+		at(&j.AttemptHistory[i].EndedAt)
+	}
+	for i := range j.Copies {
+		at(j.Copies[i].StoppedAt)
+		at(j.Copies[i].ReleasedAt)
+		at(j.Copies[i].StartedAt)
+	}
+	at(j.CancelledAt)
+	if j.Cancellation != nil {
+		at(j.Cancellation.AcknowledgedAt)
+	}
+	for i := range j.LedgerEntries {
+		at(&j.LedgerEntries[i].At)
+	}
+	at(j.StartedAt)
+	at(j.AssignedAt)
+	at(&j.WaitingSince)
+	at(&j.Queued)
+	return end, !end.IsZero()
+}
+
+// CheckpointExpiryStatus counts settled checkpoint folders the queue still
+// holds: Waiting have a basis and wait for their grace period or a worker;
+// Undated have no timestamp at all in their record and are kept indefinitely.
+type CheckpointExpiryStatus struct {
+	Waiting int `json:"waiting"`
+	Undated int `json:"undated"`
+}
+
 // indexCheckpointExpiry runs with the other record indexes at commit.
 func (q *Queue) indexCheckpointExpiry(id string, j *Job) {
 	if q.records.checkpointExpiry == nil {
 		q.records.checkpointExpiry = map[string]checkpointExpiryEntry{}
+		q.records.checkpointUndated = map[string]bool{}
 	}
+	delete(q.records.checkpointExpiry, id)
+	delete(q.records.checkpointUndated, id)
 	if rel, ok := checkpointExpirable(q.root, j); ok {
-		q.records.checkpointExpiry[id] = checkpointExpiryEntry{path: rel, due: j.FinishedAt.Add(q.expiryGrace())}
-	} else {
-		delete(q.records.checkpointExpiry, id)
+		if end, dated := checkpointEndTime(j); dated {
+			q.records.checkpointExpiry[id] = checkpointExpiryEntry{path: rel, due: end.Add(q.expiryGrace())}
+		} else {
+			q.records.checkpointUndated[id] = true
+		}
 	}
+	// Replaced, never mutated. Read captures freeze before commit indexes jobs,
+	// so views share this atomic rather than copying a stale value.
+	if q.checkpointExpiryStatus == nil {
+		q.checkpointExpiryStatus = &atomic.Pointer[CheckpointExpiryStatus]{}
+	}
+	next := CheckpointExpiryStatus{Waiting: len(q.records.checkpointExpiry), Undated: len(q.records.checkpointUndated)}
+	if old := q.checkpointExpiryStatus.Load(); old == nil || *old != next {
+		q.checkpointExpiryStatus.Store(&next)
+	}
+}
+
+func (q *Queue) checkpointExpiryCounts() *CheckpointExpiryStatus {
+	if q.checkpointExpiryStatus == nil {
+		return nil
+	}
+	return q.checkpointExpiryStatus.Load()
 }
 
 func (q *Queue) expiryGrace() time.Duration {
