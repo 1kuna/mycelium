@@ -282,6 +282,12 @@ func (q *Queue) maintainEvidence(ctx context.Context) error {
 			}
 		case strings.HasPrefix(key, "jobs/") && err == nil && report.RetainedBytes > report.BudgetBytes:
 			var job Job
+			// Compare and report logical bytes; shared values expand first.
+			full, e := expandJobRecord(data)
+			if e != nil {
+				return e
+			}
+			data = full
 			if e := json.Unmarshal(data, &job); e != nil {
 				return e
 			}

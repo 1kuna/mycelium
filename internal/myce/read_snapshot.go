@@ -135,11 +135,15 @@ func (*discardReadJSON) UnmarshalJSON([]byte) error { return nil }
 func decodeReadJob(data []byte) (*Job, error) {
 	type job Job
 	out := &Job{}
+	data, err := expandJobRecord(data)
+	if err != nil {
+		return out, err
+	}
 	wire := struct {
 		*job
 		LedgerEntries discardReadJSON `json:"ledger_entries"`
 	}{job: (*job)(out)}
-	err := json.Unmarshal(data, &wire)
+	err = json.Unmarshal(data, &wire)
 	return out, err
 }
 
@@ -1138,6 +1142,12 @@ func chargeReadRecord(allocation *requestAllocation, group string, r *readRecord
 	data := r.data
 	start, end := 0, 0
 	if group == "jobs" {
+		// Charge the decoded size: shared values decode once per occurrence.
+		expanded, err := expandJobRecord(data)
+		if err != nil {
+			return projectionRefusal(fitting)
+		}
+		data = expanded
 		start, end = readJobLedgerSpan(data, 1)
 	} else if group == "submissions" {
 		start, end = readJobLedgerSpan(data, 2)

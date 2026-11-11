@@ -247,6 +247,7 @@ type Queue struct {
 	usageReader     *sql.DB
 	db              *sql.DB
 	persisted       map[string][]byte
+	slimJobRecords  bool // Write settled job rows with shared values; see job_record_codec.go.
 	records         *queueRecords
 	observeUpdate   func(time.Duration, time.Duration)
 	clock           Clock
@@ -334,7 +335,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{slimJobRecords: slimJobRecordsDefault, fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, FairUsageVersion: 1, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.mu.control = &controlClock{clock: func() time.Time { return q.clock.Now() }, at: clock.Now()}
 	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
@@ -420,6 +421,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if err = q.update(func() error {
 		q.migrateProjectParity()
 		q.mirrorProjectParity()
+		q.convertJobRecords()
 		for _, j := range q.liveJobs() {
 			if j.Timing != nil && !terminal(j.State) && j.Timing.Reason != "queue restarted; occupancy unknown" {
 				q.touchJob(j.ID)
