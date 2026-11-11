@@ -211,7 +211,7 @@ Submit later stages with `after:` first: the queue then sees them, starts each
 when its inputs are accepted and cancels them with their producer. Maintenance
 protection is narrower. A planned drain or fleet upgrade keeps at least one
 enabled host able to start each queued production job, but a stage still
-blocked on `after:` doesn't count until it is ready. Open a lease for a
+blocked on `after:` doesn't count until it is ready (#1374). Open a lease for a
 production pipeline whose later stages are blocked or not yet submitted, so a
 drain can't strand them:
 
