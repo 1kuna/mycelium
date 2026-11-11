@@ -47,6 +47,10 @@ func nativeCredentialProfileArgs(deny, allow []string, cmd *exec.Cmd) []string {
 			fmt.Fprintf(&profile, "(deny %s (require-all (subpath %s) %s))\n", operation, strconv.Quote(path), except.String())
 		}
 	}
+	// Seatbelt refuses to exec setuid programs. Read-only process and network
+	// diagnostics run outside the profile as before; crontab, at, authopen and
+	// the like stay refused, since they could read or replay withheld files.
+	profile.WriteString(`(allow process-exec (require-any (literal "/bin/ps") (literal "/usr/bin/top") (literal "/usr/sbin/traceroute") (literal "/usr/sbin/traceroute6")) (with no-sandbox))` + "\n")
 	// sandbox-exec execs its target in place, so process custody is unchanged.
 	// The environment passes through: plain jobs keep their loader variables.
 	path := cmd.Path

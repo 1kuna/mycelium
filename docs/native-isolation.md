@@ -160,6 +160,9 @@ installed executables. Everything else is unchanged.
 
 - **macOS:** an allow-default Seatbelt profile denies reads and writes of those
   paths. Nested `sandbox-exec` (SwiftPM manifests, for example) still works.
+  Seatbelt refuses setuid programs; `ps`, `top` and `traceroute` run outside
+  the profile as before, while `crontab`, `at`, `sudo`, `su`, `authopen` and the
+  other setuid tools are refused.
 - **Linux:** the `_native-exec` helper applies a Landlock ruleset handling only
   file reads and cross-directory renames (ABI 2+), granting both on every entry
   beside the path to each denied one. No seccomp or network rule applies.
