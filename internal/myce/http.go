@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -490,6 +491,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(executionEvidenceProtocolHeader, executionEvidenceProtocol)
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
 			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
+			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
 		}
 		var finishBudget func()
 		var budgetErr error
@@ -650,9 +652,10 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	URL   string
-	Token string
-	HTTP  *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	faultWire *atomic.Bool
+	URL       string
+	Token     string
+	HTTP      *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
 	uploadTiming  *uploadTiming
@@ -670,7 +673,16 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	var last error
 	for {
 		started := clock.Now()
-		err := c.callOnce(ctx, method, path, in, out)
+		wireIn, faultFields := faultWireInput(in, c.faultWire != nil && c.faultWire.Load())
+		err := c.callOnce(ctx, method, path, wireIn, out)
+		var rejected *HTTPError
+		if faultFields && errors.As(err, &rejected) && rejected.Status == 400 && rejected.Code == "request_invalid" {
+			if c.faultWire != nil {
+				c.faultWire.Store(false)
+			}
+			legacy, _ := faultWireInput(in, false)
+			err = c.callOnce(ctx, method, path, legacy, out)
+		}
 		var api *HTTPError
 		safe := method == "GET" || method == "HEAD"
 		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
@@ -719,6 +731,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
+	if c.faultWire != nil && workerProtocolEndpoint(path) {
+		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
+	}
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}
 		var body struct {

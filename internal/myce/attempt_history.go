@@ -11,6 +11,8 @@ import (
 // DeviceFault is queue-owned retry eligibility evidence. Other fields remain
 // diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	FaultEvidence     []*FaultEvidence        `json:"fault_evidence,omitempty"`
+	SignalEvidence    *SignalEvidence         `json:"signal_evidence,omitempty"`
 	DeviceFault       *DeviceFaultLoss        `json:"device_fault,omitempty"`
 	ExecutionEvidence *ExecutionEvidence      `json:"execution_evidence,omitempty"`
 	StopObservation   *AttemptStopObservation `json:"stop_observation,omitempty"`
@@ -42,6 +44,7 @@ func historyPlannedStop(j *Job) bool {
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
+		FaultEvidence: j.FaultEvidence, SignalEvidence: r.SignalEvidence,
 		ExecutionEvidence: safeExecutionEvidence(r.ExecutionEvidence, j.Attempt),
 		inputsStaged:      r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
 		Placement:         j.Placement,

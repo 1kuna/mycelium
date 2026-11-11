@@ -34,3 +34,7 @@ func (*nativeNamespace) probe(context.Context, string, int, string, bool) (bool,
 func (g *nativeGroup) verifyIsolationListener(ctx context.Context, port string, group int) error {
 	return g.worker.verifyNativeListener(ctx, port, group)
 }
+
+func (g *nativeGroup) memberSignalCapture(m *nativeMember) SignalCapture {
+	return SignalCapture{PID: m.PID, Birth: m.Birth, StartedAt: m.PayloadStartedAt, Directory: m.cmd.Dir}
+}

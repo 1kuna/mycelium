@@ -91,6 +91,7 @@ func compactStatusMachine(m *Machine) Machine {
 	c.Devices = slices.Clone(c.Devices)
 	for i := range c.Devices {
 		d := &c.Devices[i]
+		d.FaultEvidence = nil
 		d.ExtensionReports, d.Models, d.Releases, d.Attempts = nil, nil, nil, nil
 		d.CapabilityProfile = compactStatusProfile(d.CapabilityProfile)
 	}

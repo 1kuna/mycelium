@@ -91,6 +91,10 @@ func TestAcceleratorBackendDescriptors(t *testing.T) {
 			if (backend.faultMatcher != nil) != tc.fault || (backend.health != nil) != tc.fault || (backend.telemetry != nil) != tc.telemetry {
 				t.Fatal("recovery/telemetry support changed")
 			}
+			kind, _ := allocationKernelFault(MachineDevice{Platform: tc.platform}, "NVRM: NV_ERR_NO_MEMORY")
+			if (kind == "nvrm_allocation") != (tc.platform == "cuda") {
+				t.Fatal("allocation evidence backend contract", kind)
+			}
 			if tc.fault {
 				line := "xe 0000:03:00.0: GPU hang"
 				if tc.platform == "cuda" {

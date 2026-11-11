@@ -22,6 +22,7 @@ import (
 type KernelLogLine struct {
 	ID, Message string
 	At          time.Time
+	evidence    map[string]*FaultEvidence
 }
 type KernelLogSnapshot struct {
 	BootID             string
@@ -38,10 +39,12 @@ const deviceFaultFile = "device-quarantine.json"
 var workerDeviceFaultSource = localDeviceFaultSource
 
 type deviceQuarantine struct {
-	Unsupported map[string][]string    `json:"unsupported_on_device,omitempty"`
-	BootID      string                 `json:"boot_id"`
-	Seen        map[string]bool        `json:"seen"`
-	Devices     map[string]deviceFault `json:"devices"`
+	AllocationThrough map[string]uint64           `json:"allocation_through,omitempty"`
+	Evidence          map[string][]*FaultEvidence `json:"evidence,omitempty"`
+	Unsupported       map[string][]string         `json:"unsupported_on_device,omitempty"`
+	BootID            string                      `json:"boot_id"`
+	Seen              map[string]bool             `json:"seen"`
+	Devices           map[string]deviceFault      `json:"devices"`
 	// Last fault per device attributed to teardown rather than quarantined.
 	Teardowns       map[string]deviceFault    `json:"teardowns,omitempty"`
 	Cleared         map[string]DeviceRecovery `json:"cleared,omitempty"`
@@ -128,6 +131,7 @@ func (w *Worker) applyDeviceQuarantine() {
 	}
 	for i := range w.Machine.Devices {
 		d := &w.Machine.Devices[i]
+		d.FaultEvidence = w.faults.Evidence[deviceFaultKey(*d)]
 		d.Recovery = nil
 		d.RecoveryBlocked = nil
 		d.UnsupportedOnDevice = nil
@@ -204,9 +208,11 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		log.Print("accelerator fault monitor recovered")
 	}
 	w.Machine.FaultMonitorError = ""
-	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}, Unsupported: map[string][]string{}}
+	next := deviceQuarantine{Evidence: map[string][]*FaultEvidence{}, AllocationThrough: map[string]uint64{}, BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}, Cleared: map[string]DeviceRecovery{}, RecoveryWindows: map[string]float64{}, Unsupported: map[string][]string{}}
 	lines := snapshot.Lines
 	if w.faults.BootID == snapshot.BootID {
+		maps.Copy(next.AllocationThrough, w.faults.AllocationThrough)
+		maps.Copy(next.Evidence, w.faults.Evidence)
 		maps.Copy(next.Seen, w.faults.Seen)
 		maps.Copy(next.Devices, w.faults.Devices)
 		maps.Copy(next.Teardowns, w.faults.Teardowns)
@@ -225,6 +231,7 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 	w.faultPending = nil
 	changed := next.BootID != w.faults.BootID
 	now := w.Clock.Now()
+	observations := map[string]*FaultEvidence{}
 	for _, line := range lines {
 		sum := sha256.Sum256([]byte(line.ID + "\x00" + line.Message))
 		key := hex.EncodeToString(sum[:])
@@ -237,13 +244,44 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 				continue
 			}
 			reason := match(d, line.Message)
-			if reason == "" {
+			kind, attribution := allocationKernelFault(d, line.Message)
+			if kind == "" && reason != "" {
+				kind, attribution = reason, "pci"
+			}
+			if kind == "" {
 				continue
+			}
+			monotonic, _ := strconv.ParseUint(line.ID, 10, 64)
+			if reason == "" && monotonic > 0 && monotonic <= next.AllocationThrough[deviceFaultKey(d)] {
+				continue
+			}
+			if line.evidence == nil {
+				line.evidence = map[string]*FaultEvidence{}
+			}
+			e := line.evidence[deviceFaultKey(d)]
+			if e == nil {
+				base := observations[deviceFaultKey(d)]
+				if base == nil {
+					base = w.captureFault(d, line, key, kind, attribution)
+					observations[deviceFaultKey(d)] = base
+				}
+				e = faultAtLine(base, line, key, kind, attribution)
+				line.evidence[deviceFaultKey(d)] = e
+			}
+			next.Evidence[deviceFaultKey(d)] = retainFaultEvidence(next.Evidence[deviceFaultKey(d)], e)
+			changed = true
+			if reason == "" {
+				if monotonic > 0 {
+					next.AllocationThrough[deviceFaultKey(d)] = monotonic
+				} else {
+					next.Seen[key] = true
+				}
+				continue // Allocation evidence never quarantines.
 			}
 			// An exit just after the fault may not be recorded yet; decide next scan.
 			if !line.At.IsZero() && now.Sub(line.At) < teardownFaultWindow {
 				w.faultPending = append(w.faultPending, line)
-				break
+				continue
 			}
 			fault := deviceFault{Reason: reason, Event: key, At: line.At}
 			if fault.At.IsZero() || fault.At.After(now) {

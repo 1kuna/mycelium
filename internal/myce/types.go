@@ -443,6 +443,7 @@ type Job struct {
 	YieldPlan               *ScarceYieldProjection `json:"yield_plan,omitempty"`
 	ScarceHostYield         *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
 	YieldGeneration         int64                  `json:"yield_generation,omitempty"`
+	FaultEvidence           []*FaultEvidence       `json:"fault_evidence,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
@@ -794,6 +795,7 @@ type AttemptDirective struct {
 type Result struct {
 	ExecutionEvidence         *ExecutionEvidence  `json:"execution_evidence,omitempty"`
 	Resources                 *AttemptResources   `json:"resources,omitempty"`
+	SignalEvidence            *SignalEvidence     `json:"signal_evidence,omitempty"`
 	FinalCheckpointGeneration *int64              `json:"final_checkpoint_generation,omitempty"`
 	StoragePeak               *AttemptStoragePeak `json:"storage_peak,omitempty"`
 	InputsStagedAt            *time.Time          `json:"inputs_staged_at,omitempty"`
