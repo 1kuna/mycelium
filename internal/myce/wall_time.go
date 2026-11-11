@@ -117,7 +117,7 @@ func wallTimeDiagnosticsAllowed(j *Job, r Result) bool {
 		j.ID == r.ID && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session &&
 		j.ExecutionCause != nil && j.ExecutionCause.Class == wallTimeLimit &&
 		!r.Success && !r.ReleaseOnly && r.ExecutionCause != nil && r.ExecutionCause.Class == wallTimeLimit &&
-		j.Spec.Diagnostics != nil && r.Diagnostics != nil
+		j.Spec.capturesFailure() && r.Diagnostics != nil
 }
 func (q *Queue) wallTimeVerificationJob(r Result) (*Job, error) {
 	j, err := q.current(r)

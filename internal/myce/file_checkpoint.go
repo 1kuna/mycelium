@@ -359,6 +359,13 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 			if err = w.Client.PreflightFileStore(ctx, files); err != nil {
 				return result, err
 			}
+		} else if outputPatterns(j.Spec.Outputs) {
+			step = "output_preflight"
+			if err = w.Client.PreflightFileStore(ctx, files); fileStoreLimitRefusal(err) {
+				return finalizationResult(result, step, "", outputLimitError{err}, true), nil
+			} else if err != nil {
+				return result, err
+			}
 		}
 		for name, ref := range files {
 			step, outputName = "output_upload", name
@@ -369,26 +376,15 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 		result.OutputRefs = files
 		return result, nil
 	}
-	output := FileManifest{}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ctx = withFileStoreAttempt(ctx, j)
-	for name := range j.Spec.Outputs {
-		step, outputName = "output_path", name
-		src, err := confinedPath(j.Spec.Run.Workdir, name)
-		if err != nil {
-			return finalizationResult(result, step, name, err, true), nil
-		}
-		step = "output_validation"
-		ref, err := IdentifyFile(src)
-		if err != nil {
-			return finalizationResult(result, step, name, err, true), nil
-		}
-		step = "output_upload"
-		if err = w.Client.UploadFile(ctx, src, ref); err != nil {
-			return result, err
-		}
-		output[name] = ref
+	output, terminal, err := w.publishOutputFiles(ctx, j, &step, &outputName)
+	if terminal {
+		return finalizationResult(result, step, outputName, err, true), nil
+	}
+	if err != nil {
+		return result, err
 	}
 	result.OutputRefs = output
 	return result, nil

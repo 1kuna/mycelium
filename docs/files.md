@@ -94,6 +94,62 @@ job's `output_refs` maps output names to identities; retrieve an output with:
 myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 ```
 
+### Folder and glob outputs (#1341)
+
+An output name may be a file, a folder or a glob, so a job never needs to tar
+its results:
+
+```yaml
+outputs:
+  report.json: results   # one file
+  plots/: results        # every regular file beneath plots/
+  "logs/*.txt": results  # a path.Match glob; a matched folder contributes its files
+```
+
+`output_refs` stays a flat list of individual files named relative to the work
+folder (`plots/a.png`, `logs/run.txt`), and each one is size- and SHA-256-checked
+exactly like a single declared file; `myce result JOB_ID --out DIR` recreates the
+subfolders. A folder must exist and a glob must match, each with at least one
+regular file; a symlink or special file inside one fails the job rather than
+being skipped. `*` stays within one path segment (there is no `**`). Patterns
+skip declared input `files` and worker-owned `.myce-*` entries. The queue accepts
+only files covered by a declaration, from the current attempt.
+
+Before uploading, the worker preflights the whole expanded manifest against the
+file store. If the store cannot admit it (byte allowance or project quota after
+reclaiming released files, or a file list larger than the queue's measured
+request capacity), the attempt fails once with `execution_cause.finalization`
+`{step: output_preflight, error: limit_exceeded}` and nothing is uploaded. Narrow
+the declaration or release finished results; the files stay in the attempt's
+scratch for [recovery](#recover-outputs-from-a-failed-terminal-attempt). With
+`output_delivery: async_nas` the existing output reservation decides admission
+instead. Folder and glob outputs apply to plain commands that return results through the file
+store, including `output_delivery: async_nas` (whose NAS copy keeps each file
+under its declaration's prefix); `fan_out`, `after` stages, `output_destination`,
+`storage_protocol` and extension jobs still name individual files.
+
+### Keep files from a failed attempt (#1341)
+
+`keep_on_failure` publishes named files for a failed attempt, so a command never
+has to exit 0 just to return its logs:
+
+```yaml
+keep_on_failure:
+  - logs/                                  # file, folder or glob, as for outputs
+  - {path: junit.xml, format: pytest-junit} # or vitest-junit
+```
+
+A failed attempt (non-zero exit, or an output-contract failure after exit 0)
+publishes each match as `kept/NAME` beside `summary.json` and `log-tail.txt` in
+its diagnostics; the job stays failed and has no accepted outputs. An optional
+`format` parses that JUnit report's failed test identifiers into
+`summary.json`, as `diagnostics.reports` does. A missing or unreadable entry is
+noted in `summary.json` `report_errors` without dropping the others. The kept set
+is preflighted like outputs: if the store cannot admit it, none is kept and
+`report_errors` says so. Retrieve with `myce result JOB_ID --attempt N --out DIR`.
+`keep_on_failure` needs a plain command with stored input `files`, like
+`diagnostics`.
+
 ### Managed Docker files
 
 A plain `run.docker: true` batch with `files` or `outputs` requires a Linux

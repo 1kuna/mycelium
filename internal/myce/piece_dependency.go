@@ -92,6 +92,9 @@ func (q *Queue) validatePieceSource(s Spec) error {
 			}
 			name = output
 		}
+		if kind, _ := outputKind(name); kind != outputFile {
+			return errors.New("after outputs name individual parent files, not folders or globs")
+		}
 		if _, ok := p.Spec.Outputs[name]; !ok {
 			return errors.New("after output is not declared by the parent")
 		}

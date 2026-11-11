@@ -75,6 +75,10 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	// Lost completion acknowledgements replay acceptance rather than treating
 	// the already accepted current attempt as a stale reservation.
 	accepted := q.s.Jobs[r.ID]
+	var outputs map[string]string
+	if accepted != nil {
+		outputs = maps.Clone(accepted.Spec.Outputs)
+	}
 	replayed := accepted != nil && accepted.State == "succeeded" && accepted.ID == r.ID && accepted.Attempt == r.Attempt && accepted.Machine == r.Machine && accepted.Session == r.Session && accepted.Spec.OutputDelivery == asyncNAS && maps.Equal(accepted.OutputRefs, r.OutputRefs)
 	q.mu.RUnlock()
 	if replayed {
@@ -82,6 +86,11 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	}
 	if store == nil {
 		return errors.New("file store unavailable")
+	}
+	if accepted != nil {
+		if err := validateOutputManifest(outputs, r.OutputRefs); err != nil {
+			return err
+		}
 	}
 	view := store.snapshotCapacity(ctx)
 	defer view.release()
@@ -97,13 +106,8 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 		if parkedStorage(j) {
 			return errors.New(parkedStorageReason)
 		}
-		if len(r.OutputRefs) != len(j.Spec.Outputs) {
-			return errors.New("complete output manifest required")
-		}
-		for name := range j.Spec.Outputs {
-			if _, ok := r.OutputRefs[name]; !ok {
-				return errors.New("missing output")
-			}
+		if !maps.Equal(j.Spec.Outputs, outputs) {
+			return ErrStale
 		}
 		if j.PendingOutputRefs != nil {
 			if !maps.Equal(j.PendingOutputRefs, r.OutputRefs) {

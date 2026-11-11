@@ -46,6 +46,8 @@ var finalizationErrors = map[string]string{
 	"connection_refused":       "connection refused",
 	"http_error":               "publication request rejected",
 	"io_error":                 "I/O failed; exact underlying cause unknown",
+	"no_match":                 "output folder or glob matched no files",
+	"limit_exceeded":           "outputs exceed file-store byte or file-count limits",
 }
 
 func safeFinalization(d *FinalizationDetail) *FinalizationDetail {
@@ -53,7 +55,7 @@ func safeFinalization(d *FinalizationDetail) *FinalizationDetail {
 		return nil
 	}
 	out := *d
-	if !safeRelative(out.Output) {
+	if !validOutputDeclaration(out.Output) {
 		out.Output = ""
 	}
 	if !safeRelative(out.Destination) {
@@ -125,6 +127,12 @@ func finalizationErrorFor(step, output string, err error) error {
 		d.Error = "check_target_unavailable"
 	case "frozen check extension missing":
 		d.Error = "check_extension_missing"
+	case "output folder or glob matched no files":
+		d.Error = "no_match"
+	case "outputs exceed file-store limits":
+		d.Error = "limit_exceeded"
+	case "output folder must be a directory":
+		d.Error = "wrong_type"
 	}
 	if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) {
 		d.Error = "wrong_type"

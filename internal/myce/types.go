@@ -169,6 +169,7 @@ type Spec struct {
 	// Per-item arguments and files remain in the submitted execution spec.
 	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
 	Diagnostics   *DiagnosticSpec   `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
+	KeepOnFailure []KeepFile        `json:"keep_on_failure,omitempty" yaml:"keep_on_failure,omitempty"`
 	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
 	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`

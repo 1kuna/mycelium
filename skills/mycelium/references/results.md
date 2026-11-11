@@ -20,10 +20,24 @@ An exit-zero command can still fail its declared output contract. Status/GET
 `summary.json` even without diagnostic capture. Optional logs and reports still
 need capture and storage.
 
-Queue-backed outputs must be regular files: declare individual files or an
-archive, not a directory. A pending upload or reservation keeps local results and
-retries; a publication-pending job is not accepted success. Keep its identity and
-resolve the reported storage or permission problem.
+Declare outputs as files, folders (`plots/`) or globs (`"logs/*.txt"`); do not
+tar them. Results list individual files and `--out DIR` recreates subfolders. An
+empty folder, an unmatched glob, or a symlink or special file inside one fails
+the output contract. A folder or glob the file store cannot admit fails once with
+finalization `limit_exceeded` before any upload: narrow it or release finished
+results. A pending upload or reservation keeps local results and retries; a
+publication-pending job is not accepted success. Keep its identity and resolve
+the reported storage or permission problem. Details:
+[folder and glob outputs](../../../docs/files.md#folder-and-glob-outputs-1341).
+
+## Keep files on failure
+
+Do not exit 0 just to return logs. Declare `keep_on_failure: [logs/, {path:
+junit.xml, format: pytest-junit}]` (files, folders or globs; `format` is optional
+`pytest-junit` or `vitest-junit`). A failed attempt publishes them as `kept/NAME`
+in its diagnostics, retrieved with `myce result JOB_ID --attempt N --out DIR`;
+the job stays failed. See
+[keep files from a failed attempt](../../../docs/files.md#keep-files-from-a-failed-attempt-1341).
 
 ## Large outputs and release
 
