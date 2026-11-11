@@ -36,16 +36,24 @@ func (w Worker) withholdNativeCredentials(cmd *exec.Cmd, spool, work string, env
 
 func nativeCredentialProfileArgs(deny, allow []string, cmd *exec.Cmd) []string {
 	var except strings.Builder
-	except.WriteString("(require-not (require-any")
-	for _, path := range allow {
-		fmt.Fprintf(&except, " (subpath %s)", strconv.Quote(path))
+	if len(allow) > 0 {
+		except.WriteString(" (require-not (require-any")
+		for _, path := range allow {
+			fmt.Fprintf(&except, " (subpath %s)", strconv.Quote(path))
+		}
+		except.WriteString("))")
 	}
-	except.WriteString("))")
 	var profile strings.Builder
 	profile.WriteString("(version 1)\n(allow default)\n")
 	for _, path := range deny {
 		for _, operation := range []string{"file-read-data", "file-write*"} {
-			fmt.Fprintf(&profile, "(deny %s (require-all (subpath %s) %s))\n", operation, strconv.Quote(path), except.String())
+			// An empty require-any is invalid Seatbelt syntax. With no
+			// exceptions, deny the whole credential subtree directly.
+			if len(allow) == 0 {
+				fmt.Fprintf(&profile, "(deny %s (subpath %s))\n", operation, strconv.Quote(path))
+			} else {
+				fmt.Fprintf(&profile, "(deny %s (require-all (subpath %s)%s))\n", operation, strconv.Quote(path), except.String())
+			}
 		}
 	}
 	// Seatbelt refuses to exec setuid programs, and any non-trivial profile

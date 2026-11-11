@@ -100,11 +100,22 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 	if err := os.WriteFile(raw, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var report bytes.Buffer
-	if err := specCommand([]string{"check", "--resolve", "--json", "--queue", d.URL, "--token", "reasons-fixture", raw}, &report, &report); err != nil {
-		t.Fatal("raw-job resolve", err, &report)
-	}
-	if strings.Contains(report.String(), "Host pin has no declared") || strings.Contains(report.String(), "private raw-job") {
-		t.Fatal("raw-job explanation ignored or leaked", &report)
-	}
+	// Eligibility is an observation, and a loaded reader may run between fresh
+	// worker check-ins. Wait for fresh inventory; every other resolve error and
+	// every explanation/privacy assertion still fails immediately.
+	wait(t, ctx, func() bool {
+		var report bytes.Buffer
+		err := specCommand([]string{"check", "--resolve", "--json", "--queue", d.URL, "--token", "reasons-fixture", raw}, &report, &report)
+		if strings.Contains(report.String(), "Host pin has no declared") || strings.Contains(report.String(), "private raw-job") {
+			t.Fatal("raw-job explanation ignored or leaked", &report)
+		}
+		if err == nil {
+			return true
+		}
+		var observation myce.ResolveReport
+		if json.Unmarshal(report.Bytes(), &observation) != nil || len(observation.Targets) != 1 || observation.Targets[0].Machine != host || observation.Targets[0].Freshness != "stale" || observation.Blocker == nil || observation.Blocker.Code != "unknown_observation" || observation.Blocker.Dependency != "worker inventory" || len(observation.Findings) != 0 {
+			t.Fatal("raw-job resolve", err, &report)
+		}
+		return false
+	})
 }
