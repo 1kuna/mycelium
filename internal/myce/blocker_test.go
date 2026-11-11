@@ -105,7 +105,7 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 				}
 			}
 			j := submit(t, q, s)
-			before := cloneJob(q.s.Jobs[j.ID])
+			before := storedTestJob(t, q, j.ID)
 			got, err := q.jobSnapshot(j.ID)
 			if err != nil || got.Blocker == nil {
 				t.Fatal(got, err)
@@ -117,7 +117,7 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			if restriction == "parity" && !strings.Contains(got.Blocker.Evidence, "policy approves 1 physical hosts") {
 				t.Fatal("owner's restriction not explained", got.Blocker)
 			}
-			after := cloneJob(q.s.Jobs[j.ID])
+			after := storedTestJob(t, q, j.ID)
 			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {
 				t.Fatal("diagnostic read changed frozen spec or authored placement intent")
 			}
@@ -141,9 +141,9 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 			s := cpuSpec(1, 1)
 			s.Environment.Name = "tools"
 			j := submit(t, q, s)
-			live := q.s.Machines[m.ID]
 			want := "unprepared"
 			if err := q.update(func() error {
+				live := q.s.Machines[m.ID]
 				switch state {
 				case "offered":
 					q.s.PreparationPlans = map[string]HostLaunch{"offer": {Machine: m.ID, Session: live.Session, Key: r.Key, Kind: "environment"}}

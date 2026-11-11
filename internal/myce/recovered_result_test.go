@@ -58,7 +58,7 @@ func recoveryFixture(t *testing.T) (*Queue, *fakeClock, Client, RecoveryRequest)
 
 func TestRecoveredResultFailedAttempt(t *testing.T) {
 	q, clock, c, p := recoveryFixture(t)
-	before := cloneJob(q.s.Jobs[p.ID])
+	before := storedTestJob(t, q, p.ID)
 	r, err := c.RecoverResult(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestRecoveredResultFailedAttempt(t *testing.T) {
 	if r.Kind != "recovered" || r.RecoveredBy != "operator" || r.RequestedBy != p.RequestedBy || r.Source != p.Source || r.Reason != p.Reason || r.RecoveredAt != clock.Now() || r.ExpiresAt != clock.Now().Add(testFileRetention) || len(r.ResultID) != 64 || len(r.ManifestSHA256) != 64 || !maps.Equal(r.Files, p.Files) {
 		t.Fatalf("recovery provenance: %+v", r)
 	}
-	after := cloneJob(q.s.Jobs[p.ID])
+	after := storedTestJob(t, q, p.ID)
 	if len(after.RecoveredResults) != 1 {
 		t.Fatal("recovery was not linked")
 	}

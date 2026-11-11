@@ -17,25 +17,29 @@ import (
 func hostBackfillLoadFixture(t testing.TB) (*Queue, []Machine) {
 	t.Helper()
 	q, workers := candidateCostFixture(t)
-	for i := 160; i < 5665; i++ {
-		j := cloneJob(q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)])
-		j.ID = fmt.Sprintf("retained-%04d", i)
-		j.Timing.Execution.ID = j.ID
-		q.s.Jobs[j.ID] = &j
-	}
-	for i := 110; i < 141; i++ {
-		j := cloneJob(q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)])
-		j.ID = fmt.Sprintf("queued-%03d", i)
-		q.s.Jobs[j.ID] = &j
-	}
-	for i := 0; i < 91; i++ {
-		j := cloneJob(q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)])
-		j.ID, j.State = fmt.Sprintf("paused-%03d", i), "paused"
-		q.s.Jobs[j.ID] = &j
-	}
-	for i := 1400; i < 1908; i++ {
-		q.s.WorkObservations[fmt.Sprint(i)] = q.s.WorkObservations[fmt.Sprint(i%1400)]
-	}
+	func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for i := 160; i < 5665; i++ {
+			j := cloneJob(q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)])
+			j.ID = fmt.Sprintf("retained-%04d", i)
+			j.Timing.Execution.ID = j.ID
+			q.s.Jobs[j.ID] = &j
+		}
+		for i := 110; i < 141; i++ {
+			j := cloneJob(q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)])
+			j.ID = fmt.Sprintf("queued-%03d", i)
+			q.s.Jobs[j.ID] = &j
+		}
+		for i := 0; i < 91; i++ {
+			j := cloneJob(q.s.Jobs[fmt.Sprintf("queued-%03d", i%110)])
+			j.ID, j.State = fmt.Sprintf("paused-%03d", i), "paused"
+			q.s.Jobs[j.ID] = &j
+		}
+		for i := 1400; i < 1908; i++ {
+			q.s.WorkObservations[fmt.Sprint(i)] = q.s.WorkObservations[fmt.Sprint(i%1400)]
+		}
+	}()
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}

@@ -190,19 +190,19 @@ func TestExtensionBundleStoreFrozenRecipes(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(want, got) {
 		t.Fatal("frozen bundle/recipe roundtrip", err)
 	}
-	out := cloneJob(reopened.s.Jobs[j.ID])
+	out := storedTestJob(t, reopened, j.ID)
 	if err := reopened.files.hydrateJob(&out); err != nil || !reflect.DeepEqual(jobWant.EnvironmentRecipes, out.EnvironmentRecipes) || !reflect.DeepEqual(jobWant.SidecarEnvironmentRecipes, out.SidecarEnvironmentRecipes) {
 		t.Fatal("job recipe roundtrip", err)
 	}
 	if stored := reopened.s.Extensions[extensionKey(e)]; len(stored.Files) != 0 || len(stored.Variants[0].Environments["main"].Files) != 0 {
 		t.Fatal("hydration put bytes back into queue state")
 	}
-	expected := cloneJob(reopened.s.Jobs[j.ID])
+	expected := storedTestJob(t, reopened, j.ID)
 	sentinel := errors.New("abort")
 	if err := reopened.update(func() error { reopened.deleteJob(j.ID); return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(expected, cloneJob(reopened.s.Jobs[j.ID])) {
+	if !reflect.DeepEqual(expected, storedTestJob(t, reopened, j.ID)) {
 		t.Fatal("rollback lost bundle refs")
 	}
 	// Retained answers protect blobs even after registry and job removal, and

@@ -154,6 +154,20 @@ func job(t *testing.T, q *Queue, id string) *Job {
 	t.Fatal("missing job")
 	return nil
 }
+
+// Inspect raw stored state without Snapshot's maintenance/projections. Async
+// admission evidence can update a live job after its submitting call returns.
+func storedTestJob(t testing.TB, q *Queue, id string) Job {
+	t.Helper()
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	j := q.s.Jobs[id]
+	if j == nil {
+		t.Fatalf("missing stored job %q", id)
+	}
+	return cloneJob(j)
+}
+
 func requireState(t *testing.T, q *Queue, id, state string) {
 	t.Helper()
 	if j := job(t, q, id); j.State != state {

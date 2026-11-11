@@ -133,6 +133,8 @@ func TestStorageEnvelopeColdPriorIdentityAndAge(t *testing.T) {
 	if err := q.Complete(storageResult(&first, out, 4)); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	base := q.storageEnvelope(q.s.Jobs[first.ID], &m)
 	if base.OutputBytes == nil || *base.OutputBytes != 8 {
 		t.Fatal("prior survived accepted output", base)

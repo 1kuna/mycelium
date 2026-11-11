@@ -187,6 +187,8 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 		retained := fixture.retained
 		t.Run(fmt.Sprintf("retained=%v/grouped=%v", retained, fixture.grouped), func(t *testing.T) {
 			q, _ := candidateCostFixture(t)
+			q.mu.Lock()
+			defer q.mu.Unlock()
 			if fixture.grouped {
 				owner := q.s.Machines["worker-0"]
 				for i := 1; i < 3; i++ {

@@ -234,14 +234,17 @@ func TestRetainedAnswerTransactionRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	finish(t, q, assigned, true)
-	before := cloneJob(q.s.Jobs[j.ID])
+	before := storedTestJob(t, q, j.ID)
 	if _, err := q.db.Exec(`CREATE TRIGGER reject_retained BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'write failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := q.CancelJob(j.ID); err == nil {
 		t.Fatal("failed write acknowledged cancellation")
 	}
-	if q.s.Jobs[j.ID].CancelledAt != nil || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.CancelledAt != nil {
+	q.mu.RLock()
+	cancelled := q.s.Jobs[j.ID].CancelledAt != nil || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.CancelledAt != nil
+	q.mu.RUnlock()
+	if cancelled {
 		t.Fatal("failed cold cancellation escaped rollback")
 	}
 	if _, err := q.db.Exec(`DROP TRIGGER reject_retained`); err != nil {

@@ -58,7 +58,7 @@ func TestCancellationStates(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before := cloneJob(q.s.Jobs[j.ID])
+			before := storedTestJob(t, q, j.ID)
 			a := cancelAck(t, q, j.ID)
 			wantState, release := state, "pending"
 			if state == "queued" {
@@ -76,15 +76,15 @@ func TestCancellationStates(t *testing.T) {
 			if a.State != wantState || ackRelease(a) != release || a.Project != s.Project || a.SubmissionKey == nil || *a.SubmissionKey != s.SubmissionKey || !a.AcknowledgedAt.Equal(c.Now()) {
 				t.Fatalf("ack: %+v", a)
 			}
-			after := cloneJob(q.s.Jobs[j.ID])
+			after := storedTestJob(t, q, j.ID)
 			after.CancelledAt = before.CancelledAt // Exclusion metadata may be added; state/results stay unchanged.
 			if terminal(before.State) && !reflect.DeepEqual(before, after) {
 				t.Fatal("terminal job changed")
 			}
-			stopAt := q.s.Jobs[j.ID].StopAt
+			stopAt := after.StopAt
 			c.Advance(time.Second)
 			repeat := cancelAck(t, q, j.ID)
-			if !reflect.DeepEqual(stopAt, q.s.Jobs[j.ID].StopAt) {
+			if !reflect.DeepEqual(stopAt, storedTestJob(t, q, j.ID).StopAt) {
 				t.Fatal("repeat renewed stop grace")
 			}
 			if repeat.State != a.State || ackRelease(repeat) != ackRelease(a) {

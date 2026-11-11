@@ -230,21 +230,21 @@ func TestEfficiencyRollbackAndRevisionFence(t *testing.T) {
 	if err := q.update(func() error { return context.Canceled }); err != context.Canceled {
 		t.Fatal(err)
 	}
-	if len(q.s.Jobs["wait"].Efficiency.WaitSeconds) != 0 {
+	if len(storedTestJob(t, q, "wait").Efficiency.WaitSeconds) != 0 {
 		t.Fatal("failed transaction advanced accounting")
 	}
 	c.Advance(time.Second)
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	view := cloneJob(q.s.Jobs["wait"])
+	view := storedTestJob(t, q, "wait")
 	q.projectEfficiency(&view)
 	if view.Efficiency.WaitSeconds["unknown"] != 2 {
 		t.Fatal("rollback lost or doubled elapsed time")
 	}
 	// Reopening at the same clock must reconstruct the unmaterialized span.
 	q = reopenQueue(t, q, c)
-	view = cloneJob(q.s.Jobs["wait"])
+	view = storedTestJob(t, q, "wait")
 	q.projectEfficiency(&view)
 	if view.Efficiency.WaitSeconds["unknown"] != 2 {
 		t.Fatal("restart lost accounting anchor")
