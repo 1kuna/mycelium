@@ -272,6 +272,38 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_skill_and_python_client_changes_select_the_skill_contract(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                for name in ('skills/mycelium/SKILL.md', 'clients/python/src/mycelium/client.py', 'docs/x.md'):
+                    pathlib.Path(name).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(name).write_text('base\n')
+                git('init', '-q')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
+                pathlib.Path('docs/x.md').write_text('edit\n')
+                self.assertEqual(related.select('HEAD'), [])
+                for name in ('skills/mycelium/SKILL.md', 'clients/python/src/mycelium/client.py'):
+                    pathlib.Path(name).write_text('edit\n')
+                    self.assertEqual(related.select('HEAD'), [related.PYTHON_CLIENT], name)
+                    git('checkout', '--', name)
+                # Canaries keep the Go smoke and pass the non-Go entry through.
+                os.makedirs('cmd/myce')
+                self.assertEqual(related.with_canaries([related.PYTHON_CLIENT], {}), [
+                    ('cmd/myce', '^(TestDevStandaloneSmoke)$'), related.PYTHON_CLIENT])
+            finally:
+                os.chdir(previous)
+
+    def test_python_client_contract_test_exists(self):
+        root = pathlib.Path(__file__).resolve().parent.parent
+        module, cls, test = related.PYTHON_CLIENT[1].split('.')
+        source = (root / 'clients/python/tests' / (module + '.py')).read_text()
+        self.assertRegex(source, rf'(?ms)^class {cls}\b.*^    def {test}\(self\)')
+
     def test_canaries_name_existing_tests(self):
         # A renamed or deleted canary would silently match nothing under -run.
         root = pathlib.Path(__file__).resolve().parent.parent

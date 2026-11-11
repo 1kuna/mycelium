@@ -155,6 +155,8 @@ if [[ $mode == full ]]; then
     printf '%s\t.*\n' "$package"
   done > "$scratch/selection"
   printf '@upgrade-compat\t\n' >> "$scratch/selection"
+  # The Python client suite, including the consumer skill's runnable examples (#1224).
+  printf '@python-client\t\n' >> "$scratch/selection"
 fi
 # One watchdog per package; release any completed slot, not the oldest PID.
 if [[ ! -s $scratch/selection ]]; then

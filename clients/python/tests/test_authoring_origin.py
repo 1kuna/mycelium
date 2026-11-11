@@ -8,6 +8,10 @@ from mycelium import APIError, Client
 
 class AuthoringOriginTests(unittest.TestCase):
     def test_yaml_and_extension_readers_label_submissions(self):
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("install yaml extra")  # Like the other YAML tests; the gate interpreter is offline.
         client = Client(token="fixture")
         with patch.object(client, "_call", return_value={"id": "job"}) as call:
             client.submit_yaml("name: example\nproject: example\n")
