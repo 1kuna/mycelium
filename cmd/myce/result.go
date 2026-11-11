@@ -97,7 +97,11 @@ func fetchResult(ctx context.Context, c myce.Client, id, out string, attempt int
 			return failure(err)
 		}
 	} else if j.State != "succeeded" || len(j.OutputRefs) == 0 {
-		return &ResultError{Code: "result_not_accepted", Err: errors.New("job has no accepted result")}
+		msg := "job has no accepted result (state " + j.State + ")"
+		if j.Finding != nil {
+			msg += "; " + j.Finding.Text()
+		}
+		return &ResultError{Code: "result_not_accepted", Err: errors.New(msg)}
 	}
 	// Validate every manifest key before using it as a local filename.
 	for name := range refs {

@@ -216,9 +216,15 @@ func JobReason(j *Job) string {
 	}
 	if isolation := jobNativeIsolationStatus(j); isolation != "" {
 		if reason != "" {
-			return reason + "; " + isolation
+			reason += "; "
 		}
-		return isolation
+		reason += isolation
+	}
+	if j.Finding != nil {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += j.Finding.Text()
 	}
 	return reason
 }

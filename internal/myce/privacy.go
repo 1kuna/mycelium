@@ -207,6 +207,7 @@ func statusJobValue(job *Job) Job {
 	j := &value
 	j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(j.CleanupCause)
+	j.Finding = jobFinding(j, j.Reason)
 	if strings.HasPrefix(j.Reason, "hypha waiting: ") {
 		j.Reason = "hypha waiting: " + availabilityWords(strings.TrimPrefix(j.Reason, "hypha waiting: "))
 	}

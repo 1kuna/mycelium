@@ -515,10 +515,24 @@ func TestThreeAttempts(t *testing.T) {
 		if err := q.Complete(released); err != nil {
 			t.Fatal(err)
 		}
+		if i == 1 {
+			// The owner sees a Mycelium-side requeue, not a command failure.
+			if public, err := q.jobSnapshot(j.ID); err != nil || public.Finding == nil || public.Finding.Code != "infrastructure_retry" {
+				t.Fatalf("requeue finding: %+v %v", public, err)
+			}
+		}
 	}
 	requireState(t, q, j.ID, "failed")
 	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
 		t.Fatal("missing plain failure reason")
+	}
+	public, err := q.jobSnapshot(j.ID)
+	if err != nil || public.Finding == nil || public.Finding.Owner != "mycelium" || !strings.Contains(public.Finding.What, "3 attempts") {
+		t.Fatalf("exhaustion finding: %+v %v", public, err)
+	}
+	waited, err := q.waitIndex().wait(t.Context(), WaitRequest{IDs: []string{j.ID}})
+	if err != nil || len(waited.Jobs) != 1 || waited.Jobs[0].Finding == nil || *waited.Jobs[0].Finding != *public.Finding {
+		t.Fatalf("wait finding differs from job GET: %+v %v", waited, err)
 	}
 	if check(t, q, m, nil).Job != nil {
 		t.Fatal("fourth attempt assigned")

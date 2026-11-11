@@ -3153,6 +3153,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "finding": {
+          "$ref": "#/$defs/JobFinding",
+          "x-contract": "diagnostic"
+        },
         "finished_at": {
           "description": "Recorded terminal time, when present. Historical terminal records may omit it.",
           "format": "date-time",
@@ -3682,6 +3686,29 @@
         "work",
         "wait_seconds",
         "rate"
+      ],
+      "type": "object"
+    },
+    "JobFinding": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "what": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "owner",
+        "what",
+        "action"
       ],
       "type": "object"
     },
