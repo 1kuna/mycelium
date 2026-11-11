@@ -148,6 +148,9 @@ your work record and keep other work moving. Keep the same job ID and key while
 capacity, preparation, a device or storage recovers. A hold is resolved by its
 owner; resubmitting, pinning a host, editing mounts, raising shared budgets,
 clearing devices or running locally only hides it.
+On the interactive host, owner pressure checkpoints or stops and requeues your
+job (same job and key, no retry charge); wait as normal. Mark long jobs
+resumable to keep progress.
 
 Class sets urgency: `production` only for work your project's rulings call
 production, `deadline` only with a real owner-set date, `experiment` otherwise.
