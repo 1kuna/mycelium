@@ -124,7 +124,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	}
 	waitFor(func() bool {
 		var s myce.Snapshot
-		if client.Call(ctx, "GET", "/api/status", nil, &s) != nil {
+		if client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &s) != nil {
 			return false
 		}
 		for _, m := range s.Machines {
@@ -217,7 +217,7 @@ cat expected > effect`}
 		// Status JSON and the job reply expose the same attempt's evidence.
 		waitFor(func() bool {
 			var snapshot myce.Snapshot
-			if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+			if err := client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &snapshot); err != nil {
 				t.Fatal(err)
 			}
 			for _, current := range snapshot.Jobs {

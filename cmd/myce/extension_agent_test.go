@@ -144,7 +144,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	}
 	for {
 		var snapshot myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+		if err := client.Call(ctx, "GET", "/api/status?view=snapshot", nil, &snapshot); err != nil {
 			t.Fatal(err)
 		}
 		ready := false

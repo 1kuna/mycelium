@@ -624,10 +624,14 @@ class Client:
     def status(self, *, full: bool = False, jobs: str | None = None,
                project: str | None = None, since: str | None = None,
                limit: int | None = None, before: str | None = None,
-               sections: str | None = None) -> dict[str, Any]:
-        """Return compact current work, machines, holds and active health conditions.
+               sections: str | None = None, snapshot: bool = False) -> dict[str, Any]:
+        """Return the compact status view: counts, alert_groups, hyphas, jobs, paused.
 
-        No retained diagnostics or terminal history by default. Job reasons are
+        The default is a few KB: running/waiting jobs with full IDs and reasons,
+        paused jobs grouped by project and reason with their ids, one row per
+        hypha. snapshot=True returns the summary snapshot shape (full current
+        job and machine objects) for callers that need it; any of full, jobs,
+        limit, before or sections also returns a snapshot. Job reasons are
         last committed facts; sections="jobs" opts into fresh diagnostic planning.
         sections accepts a comma-separated selection of jobs,machines,storage,
         work,health,efficiency,usage,diagnostics. full=True restores every existing
@@ -639,6 +643,7 @@ class Client:
         query = {key: value for key, value in {
             "detail": "full" if full else None, "jobs": jobs, "project": project,
             "since": since, "limit": limit, "before": before, "sections": sections,
+            "view": "snapshot" if snapshot else None,
         }.items() if value is not None}
         return self._call("GET", "/api/status" + ("?" + urlencode(query) if query else ""))
 

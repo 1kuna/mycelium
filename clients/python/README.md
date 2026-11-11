@@ -25,7 +25,7 @@ for chunk in client.logs(job["id"], follow=True):
     print(chunk["text"], end="", flush=True)
 result = client.wait(job["id"], timeout=600)
 assert result["state"] == "succeeded", result.get("reason")
-print(client.status())  # machines, jobs with waiting reasons, loaded models
+print(client.status())  # compact: counts, hyphas, jobs with reasons, paused groups
 print(client.list())
 print(client.get(job["id"]))
 client.cancel(job["id"])
@@ -257,8 +257,12 @@ custody generations and exact releases, without diagnostic row caps. See the
 [ledger contract](../../docs/jobs.md#retained-per-job-ledger) for fields,
 retention and explicit HTTP 410 expiration.
 
-Status defaults to compact active/cleanup-pending work, machines, holds and
-active health conditions. `client.status(sections="work,storage")` restores
+`client.status()` returns the compact view: `counts`, `alert_groups`, `hyphas`
+(one row per worker), running/waiting `jobs` with full IDs and reasons, and
+`paused` grouped by project and reason with their `ids`. On queues that predate
+it, the same call returns the snapshot. `client.status(snapshot=True)` returns
+the summary snapshot (full current job and machine objects) for callers that
+need it. `client.status(sections="work,storage")` restores
 selected retained diagnostics; supported sections are `jobs`, `machines`,
 `storage`, `work`, `health`, `efficiency`, `usage`, and `diagnostics`.
 `client.status(full=True)` restores every existing field and all history.

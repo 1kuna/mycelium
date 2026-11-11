@@ -904,8 +904,29 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if len(query) > 0 {
 			path += "?" + query.Encode()
 		}
-		err = client.Call(ctx, "GET", path, nil, &s)
-		if err != nil {
+		var raw json.RawMessage
+		if err = client.Call(ctx, "GET", path, nil, &raw); err != nil {
+			return err
+		}
+		// Current queues serve the default as CompactStatus; the previous
+		// release served the summary snapshot, projected here instead.
+		var shape struct {
+			Hyphas json.RawMessage `json:"hyphas"`
+		}
+		if len(query) == 0 && json.Unmarshal(raw, &shape) == nil && shape.Hyphas != nil {
+			var view myce.CompactStatus
+			if err = json.Unmarshal(raw, &view); err != nil {
+				return err
+			}
+			if *statusJSON {
+				return json.NewEncoder(os.Stdout).Encode(view)
+			}
+			for _, line := range view.Lines(*full) {
+				fmt.Println(line)
+			}
+			return nil
+		}
+		if err = json.Unmarshal(raw, &s); err != nil {
 			return err
 		}
 		if *statusJSON {
@@ -996,7 +1017,7 @@ func split(v string) []string {
 }
 func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	var s myce.Snapshot
-	err := c.Call(ctx, "GET", "/api/status", nil, &s)
+	err := c.Call(ctx, "GET", "/api/status?view=snapshot", nil, &s)
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {

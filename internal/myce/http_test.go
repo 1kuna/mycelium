@@ -176,8 +176,15 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if _, exposed := specView["files"]; exposed {
 		t.Error("GET exposed submitted file references")
 	}
+	var compact json.RawMessage
+	if err := c.Call(context.Background(), "GET", "/api/status", nil, &compact); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compact), `"hyphas"`) || strings.Contains(string(compact), "private-token") || strings.Contains(string(compact), "private-input") || strings.Contains(string(compact), "projection-test") {
+		t.Fatalf("default compact status leaked payload or changed shape: %s", compact)
+	}
 	var status Snapshot
-	if err := c.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+	if err := c.Call(context.Background(), "GET", "/api/status?view=snapshot", nil, &status); err != nil {
 		t.Fatal(err)
 	}
 	if len(status.Jobs) != 1 || status.Jobs[0].SpecProjection == nil {

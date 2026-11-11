@@ -184,17 +184,31 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respond(w, nil, err)
 			return
 		}
+		// The default is the CompactStatus view; view=snapshot is the
+		// compatibility path to the summary snapshot. Explicit sections, job
+		// pages and detail=full return snapshots as before.
+		query := r.URL.Query()
+		view := query.Get("view")
+		if view != "" && view != "snapshot" {
+			respond(w, nil, reject("status_query_invalid", nil))
+			return
+		}
+		query.Del("view")
 		var data string
-		if len(r.URL.Query()) == 0 {
+		if len(query) == 0 && view == "" {
+			data, err = a.Queue.cachedCompactStatusJSON(r.Context())
+		} else if len(query) == 0 {
 			data, err = a.Queue.cachedStatusJSON(r.Context())
 		} else {
 			var snapshot Snapshot
 			snapshot, err = a.Queue.publicStatusSnapshot(&options, r.Context())
-			if err == nil {
-				var encoded []byte
+			var encoded []byte
+			if err == nil && view == "" && options.compact() {
+				encoded, err = json.Marshal(NewCompactStatus(snapshot))
+			} else if err == nil {
 				encoded, err = json.Marshal(snapshot)
-				data = string(encoded)
 			}
+			data = string(encoded)
 		}
 		// Current work cannot be paged away to fit a smaller peer. Apply its
 		// negotiated allowance to the actual compact document, including cache hits.

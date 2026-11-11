@@ -255,8 +255,16 @@ KB. Replaying the 2026-11-11 live fleet snapshot (five hosts, 67 current jobs,
 bytes / 267 lines to 3,668 bytes / 31 lines. From the release containing the
 compact JSON change, default `myce status --json` encodes the same projection
 (below): replaying a 68-job snapshot of the same fleet took it from 156,292 to
-7,542 bytes. `GET /api/status` and Python `client.status()` still return the
-summary snapshot with full current job and machine objects.
+7,542 bytes. From the release containing the compact API change, plain
+`GET /api/status` and Python `client.status()` return the same compact view.
+The compatibility path `GET /api/status?view=snapshot` (Python
+`client.status(snapshot=True)`) returns the summary snapshot with full current
+job and machine objects; it shares the default's one-second cached capture.
+`myce view` and `myce leave` use it. Any of `sections`, `jobs`, `limit`,
+`before` or `detail=full` also returns a snapshot, as before. Other `view`
+values are refused with `status_query_invalid`. `project`/`since` filters alone
+keep the compact view. Previous-release queues ignore `view` and return the
+snapshot for every read; the CLI projects that snapshot itself.
 
 - `summary.alert_groups` folds active conditions into one row per kind:
   `kind`, `count`, earliest `since`, and `scopes` (members per host or
@@ -292,7 +300,7 @@ summary snapshot with full current job and machine objects.
   | `paused[]` | One row per project and reason: `project`, `reason`, `count`, `ids` |
   | `detail` | Where the full objects are |
 
-  Full job and machine objects need `status JOB_ID --json`,
+  Full job and machine objects need `view=snapshot`, `status JOB_ID --json`,
   `--sections jobs,machines --json`, `--jobs ...` or `--history`; those
   return the snapshot shape below.
 `health_alert_delivery` retains the notifier configuration and pending count.

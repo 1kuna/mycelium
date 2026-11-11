@@ -561,7 +561,8 @@ class DevTests(unittest.TestCase):
     def test_status_cancel_timeout_auth(self):
         job = self.client.submit(self.spec([sys.executable, "-c", "print('never')"], allowed_machines=["absent"]))
         self.assertIn(job["id"], [j["id"] for j in self.client.list()])
-        self.assertTrue(self.client.status()["machines"])
+        self.assertTrue(self.client.status()["hyphas"])
+        self.assertTrue(self.client.status(snapshot=True)["machines"])
         with self.assertRaises(TimeoutError):
             self.client.wait(job["id"], timeout=0.1)
         self.client.cancel(job["id"])
@@ -646,6 +647,8 @@ class StatusPagingTests(unittest.TestCase):
             call.assert_called_with("GET", "/api/status")
             client.status(full=True)
             call.assert_called_with("GET", "/api/status?detail=full")
+            client.status(snapshot=True)
+            call.assert_called_with("GET", "/api/status?view=snapshot")
         with patch.object(client, "_call", return_value={}) as call:
             client.status(sections="work,storage")
             call.assert_called_with("GET", "/api/status?sections=work%2Cstorage")

@@ -25,6 +25,9 @@ func setStatusTestCapacity(q *Queue) {
 
 func readStatusOptions(t *testing.T, q *Queue, query string) Snapshot {
 	t.Helper()
+	if query == "" {
+		query = "?view=snapshot" // the summary snapshot; the default is CompactStatus
+	}
 	r := httptest.NewRequest("GET", "/api/status"+query, nil)
 	r.Header.Set("Authorization", "Bearer test")
 	w := httptest.NewRecorder()
