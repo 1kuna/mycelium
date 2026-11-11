@@ -12,7 +12,7 @@ import (
 
 func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

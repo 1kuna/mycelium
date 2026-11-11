@@ -62,7 +62,7 @@ func TestClientJobIdentityEcho(t *testing.T) {
 
 func TestClientKeyedRetryAfterLostSubmitResponse(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

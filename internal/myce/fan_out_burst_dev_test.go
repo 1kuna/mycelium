@@ -43,7 +43,7 @@ func TestDevFanOutBurst62RealTime(t *testing.T) {
 	if err := InstallExtension(c.ExtensionRoot, e); err != nil {
 		t.Fatal(err)
 	}
-	d, err := startDev(c, func(q *Queue) {
+	d, err := startTestDev(t, c, func(q *Queue) {
 		// Match incident retained-history cardinality. These are cold fixture records;
 		// new parents and all running executions below use the ordinary API.
 		now := q.clock.Now()

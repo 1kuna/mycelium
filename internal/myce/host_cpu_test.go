@@ -237,7 +237,7 @@ func TestCPUDevGPUlessAndMixedWorkerRunRealCommand(t *testing.T) {
 	for _, backend := range []string{"cpu", "fake"} {
 		t.Run(backend, func(t *testing.T) {
 			dir := t.TempDir()
-			d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "q.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "cpu-fixture", Workers: 1, GPU: backend, MemoryGB: 8, Interval: 10 * time.Millisecond})
+			d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "q.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "cpu-fixture", Workers: 1, GPU: backend, MemoryGB: 8, Interval: 10 * time.Millisecond})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -287,7 +287,7 @@ func TestCPUQualificationNativeTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "q.db"), Checkpoints: filepath.Join(dir, "checkpoints"), ExtensionRoot: root, HostID: "cpu-host", Token: "fixture", Workers: 1, GPU: "cpu", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "q.db"), Checkpoints: filepath.Join(dir, "checkpoints"), ExtensionRoot: root, HostID: "cpu-host", Token: "fixture", Workers: 1, GPU: "cpu", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

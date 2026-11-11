@@ -152,7 +152,7 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 func TestFilesNASInputs(t *testing.T) {
 	root := t.TempDir()
 	checkpoints := filepath.Join(root, "checkpoints")
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: checkpoints, FileStore: filepath.Join(root, "files"), FileStoreLimit: 1 << 20, NASCheckpoints: true, Token: "nas-input-fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: checkpoints, FileStore: filepath.Join(root, "files"), FileStoreLimit: 1 << 20, NASCheckpoints: true, Token: "nas-input-fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

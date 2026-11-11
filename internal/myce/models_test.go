@@ -219,7 +219,7 @@ func TestDevModelHTTPFormats(t *testing.T) {
 	dir := t.TempDir()
 	// Exercise wire formats at the normal worker cadence. A 10 ms heartbeat
 	// makes ordinary scheduling delays look like a missing worker during load.
-	d, e := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: defaultWorkerInterval})
+	d, e := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: defaultWorkerInterval})
 	if e != nil {
 		t.Fatal(e)
 	}

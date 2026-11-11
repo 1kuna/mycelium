@@ -367,7 +367,7 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 		return os.WriteFile(dest, asset, 0600)
 	}}
 	devRoot := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), FileStore: filepath.Join(devRoot, "files"), ExtensionRoot: root, HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), FileStore: filepath.Join(devRoot, "files"), ExtensionRoot: root, HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

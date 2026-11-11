@@ -23,7 +23,7 @@ func devProbe(t *testing.T) (*Dev, DevConfig, context.Context) {
 	t.Setenv("MYCE_TOKEN", c.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	d, err := startDev(c, func(q *Queue) { fakeCheckpointAvailability(t, q, true) })
+	d, err := startTestDev(t, c, func(q *Queue) { fakeCheckpointAvailability(t, q, true) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestDevProbeRebootResume(t *testing.T) {
 	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "reboot-fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	d, err := StartDev(c)
+	d, err := startTestDev(t, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestDevProbeRebootResume(t *testing.T) {
 	if err != nil || closeErr != nil || saved.Policy.Mode != "disabled" || saved.Healthy || saved.Quiescent {
 		t.Fatal("restart inferred healthy release", saved, err, closeErr)
 	}
-	d, err = StartDev(c)
+	d, err = startTestDev(t, c)
 	if err != nil {
 		t.Fatal(err)
 	}

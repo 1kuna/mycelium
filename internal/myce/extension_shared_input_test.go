@@ -22,7 +22,7 @@ func TestExtensionSharedInputReuse(t *testing.T) {
 	installQualified(t, root, e, "0")
 	ref := sharedFixtureFile(t, nas, "data", "cached input")
 	dir := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: nas, NASCheckpoints: true, FileStore: filepath.Join(dir, "files"), Token: "throwaway", Workers: 1, MemoryGB: 8, ExtensionRoot: root, JobFileRoot: nas, Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(dir, "queue.db"), Checkpoints: nas, NASCheckpoints: true, FileStore: filepath.Join(dir, "files"), Token: "throwaway", Workers: 1, MemoryGB: 8, ExtensionRoot: root, JobFileRoot: nas, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

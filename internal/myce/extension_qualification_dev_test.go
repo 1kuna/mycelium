@@ -76,7 +76,7 @@ func extensionFrozenRecoveryDev(t *testing.T, legacy bool) {
 			t.Fatal("cold worker cache already exists", err)
 		}
 	}
-	d, err := StartDev(c)
+	d, err := startTestDev(t, c)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -332,7 +332,7 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	m := &Machine{GPU: "cpu", CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	recipe, _ := commandEnvironmentRecipe(&Job{CommandDiscovery: d}, map[string]EnvironmentRecipe{"cpu": r}, m)
 	cache := filepath.Join(root, "workers", "fake-1", "environment-cache", recipe.Key)
-	dev, err := startDev(DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}, Interval: 10 * time.Millisecond}, func(*Queue) {
+	dev, err := startTestDev(t, DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}, Interval: 10 * time.Millisecond}, func(*Queue) {
 		// Seed fixture readiness after the ordinary state-root safety gate,
 		// before the dev workers start; never disguise existing state as fresh.
 		if err := os.MkdirAll(cache, 0700); err != nil {

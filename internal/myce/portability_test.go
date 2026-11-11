@@ -242,7 +242,7 @@ func TestPortabilityAPIReadOnlyAndPrivate(t *testing.T) {
 // Recovering prevents these metadata-only fixtures from accepting payloads.
 func TestPortabilityDevMixedInventory(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-test-token", Interval: 10 * time.Millisecond})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-test-token", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

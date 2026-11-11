@@ -178,7 +178,7 @@ func TestAdaptiveReadinessIdleDemandIsLocal(t *testing.T) {
 
 func TestAdaptiveReadinessDevOmission(t *testing.T) {
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8})
+	d, err := startTestDev(t, DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8})
 	if err != nil {
 		t.Fatal(err)
 	}

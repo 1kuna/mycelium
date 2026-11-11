@@ -108,7 +108,7 @@ func testDevHostHealthReportCadence(t *testing.T, interval time.Duration, slow b
 	t.Cleanup(func() { workerHostHealthSource, workerForeignConsumers = previous, previousForeign })
 	root := newTestStateRoot(t)
 	c := DevConfig{EnvironmentCacheLimit: 1 << 30, Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "health-cadence-token", Workers: 1, MemoryGB: 8, Interval: interval}
-	d, err := startDev(c, func(q *Queue) { fakeCheckpointAvailability(t, q, true) })
+	d, err := startTestDev(t, c, func(q *Queue) { fakeCheckpointAvailability(t, q, true) })
 	if err != nil {
 		t.Fatal(err)
 	}
