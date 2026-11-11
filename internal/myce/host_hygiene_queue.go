@@ -32,8 +32,16 @@ func (q *Queue) detectHostHygiene() {
 		if m.Replacement != nil {
 			continue
 		}
-		reason := q.hostHygieneReasonAt(m, q.clock.Now())
-		q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
+		now := q.clock.Now()
+		reason := q.hostHygieneReasonAt(m, now)
+		// After a queue restart, persisted evidence falls back to wall age, so
+		// every host's probe looked expired until its first report: each
+		// restart alerted every host at once (live: eight 5-host bursts in two
+		// days). The age is the queue's outage, not host harm. Admission still
+		// refuses; the alert waits for the report or the end of restart grace.
+		if reason != "host_probe_unknown" || !q.unreported[m.ID] || !q.inRestartGrace(now) {
+			q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
+		}
 		if m.HostHealth == nil || len(m.HostHealth.History) == 0 {
 			continue
 		}
