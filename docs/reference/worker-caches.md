@@ -119,7 +119,9 @@ publication receipt, including after restart. Scratch goes automatically when:
 - The queue accepted that exact attempt's successful result and confirmed its
   release, or the worker saved that publication confirmation before clearing custody.
 - The queue authorized file expiry through `myce file release apply`, or the
-  terminal job passed the queue's positive `--file-retention` duration. Physical
+  terminal job passed the queue's positive `--file-retention` duration (default
+  `72h`, so scratch held for a finished job goes after 3 days; an explicit `0`
+  keeps it until release). Physical
   release must be confirmed, and pending delivery or protected-storage custody
   still prevents collection.
 - The queue confirmed release of that exact attempt and the job has since moved

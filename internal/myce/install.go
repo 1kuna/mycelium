@@ -874,9 +874,8 @@ func (c ServiceConfig) Args() []string {
 		args = append(args, "--log-retention", c.LogRetention.String())
 	}
 	if c.Role == "queue" {
-		if c.FileRetention > 0 {
-			args = append(args, "--file-retention", c.FileRetention.String())
-		}
+		// Always rendered: a saved zero means retain until release, not the default.
+		args = append(args, "--file-retention", c.FileRetention.String())
 		args = append(args, "--file-store-bytes", strconv.FormatInt(c.FileStoreBytes, 10), "--file-store-production-reserve", strconv.FormatInt(c.FileStoreProductionReserve, 10))
 		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
 			if v[1] != "" {

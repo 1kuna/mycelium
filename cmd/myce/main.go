@@ -282,7 +282,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
 	checkpointExpiryGrace := f.Duration("checkpoint-expiry-grace", myce.DefaultCheckpointExpiryGrace, "keep a settled job's NAS checkpoint folder this long after the job ends")
-	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (0 retains until explicit release)")
+	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention, default 72h (0 retains until explicit release)")
 	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")

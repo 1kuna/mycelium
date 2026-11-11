@@ -509,8 +509,8 @@ local file store in either checkpoint mode. A NAS fleet keeps its existing
 `--checkpoints` / worker `--checkpoint-root` configuration; input downloads and
 verified result uploads use the queue API without changing NAS checkpoint paths.
 
-Profile source/input and result blobs expire **7 days after the job becomes
-terminal**, configurable on the queue with `--file-retention` (default `168h`).
+Profile source/input and result blobs expire **3 days after the job becomes
+terminal**, configurable on the queue with `--file-retention` (default `72h`).
 Download results within that window. Job/key answers and hashes remain, with
 `files_expired: true`; a keyed resubmit adopts the same job and never reruns it.
 `Client.DownloadResult` / Python `download_result` fail with typed HTTP 410
@@ -622,7 +622,7 @@ each at most 1 MiB, bound parsing/transfer after a failure; unavailable, larger,
 or invalid reports are noted in the summary. The summary is at most 1 MiB; if
 structured identifiers exceed that limit, use the retained raw reports. These
 limits keep failure handling small for targeted runs. Existing authenticated
-file transport and terminal retention apply: **7 days after terminal completion**
+file transport and terminal retention apply: **3 days after terminal completion**
 by default, configurable with `--file-retention`. Expiry returns `result_expired`
 (HTTP 410), while job/attempt metadata and hashes remain. Diagnostic contents
 include raw job logs and reports; treat them like other private job artifacts.

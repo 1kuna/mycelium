@@ -415,7 +415,7 @@ myce result JOB_ID --recovered RESULT_ID --out ./recovered
 ```
 
 This labels the download as recovered. Unqualified `myce result JOB_ID` continues
-to refuse the failed job. Bytes have a fresh `--file-retention` window (protected until release unless explicitly configured) beginning at recovery, even if original job files expired. Each
+to refuse the failed job. Bytes have a fresh `--file-retention` window (the queue's file retention, `72h` by default; protected until release when it is `0`) beginning at recovery, even if original job files expired. Each
 `expires_at` is fixed at acceptance; changing retention does not revive expired
 bytes. Expired downloads return `410 result_expired`. Metadata and original job
 provenance remain indefinitely, exempt from history pruning. Keep unique source
@@ -539,9 +539,10 @@ loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loade
 protection. Stored model eviction verifies that authoritative files remain before
 removing disposable copies. The original NAS cache Trash behavior is unchanged.
 
-From the release containing #811, omitted `--file-retention` is zero: retain
+From the release containing #1365, omitted `--file-retention` is `72h`: finished
+jobs' files are kept for 3 days, then reclaimed (MY-47). An explicit zero retains
 unique bytes until explicit owner release or a verified authored delivery policy.
-Saved positive operator durations still expire their named payloads. An expired
+Saved operator durations, including a saved zero, still bind. An expired
 result still returns `result_expired`; increasing a window cannot restore already
 removed bytes. Logs follow the same omitted/explicit distinction. Neither policy
 deletes intent, custody ledgers, wait/error facts or keyed replay answers.

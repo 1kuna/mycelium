@@ -120,7 +120,8 @@ func TestFileRetention(t *testing.T) {
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureFileRetention(time.Hour); err != nil {
+	// MY-47: the default keeps finished jobs' files for 3 days, then reclaims them.
+	if err := q.ConfigureFileRetention(DefaultFileRetention); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.ConfigureFileRetention(-time.Nanosecond); err == nil {
@@ -164,7 +165,7 @@ func TestFileRetention(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(time.Hour - time.Nanosecond)
+	clock.Advance(DefaultFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +214,14 @@ func TestFileRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The HEAD above refreshes publication grace independently of the window.
-	clock.Advance(filePublicationGrace)
+	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(shared)); err != nil {
+		t.Fatal("cancelled job lost its own window", err)
+	}
+	clock.Advance(time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}

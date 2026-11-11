@@ -61,7 +61,8 @@ sample adds to their retained counts.
   protection. There is no universal six-hour promise. Unknown imports and
   unclaimed attempt directories have no age-based collection authority. From
   #1227, worker scratch checks exact-attempt acceptance/release with the queue;
-  terminal scratch follows an explicit positive file-retention policy or owner
+  terminal scratch follows the queue's positive file-retention policy (`72h` by
+  default, MY-47) or owner
   file release. Marker age alone never authorizes collection. See
   [worker scratch retention](reference/worker-caches.md#worker-scratch-retention).
 - External RAM telemetry's readers request 24-hour and seven-day windows. These
@@ -81,8 +82,9 @@ immutable generations and copies/projects their histories after unlocking.
 
 ## Retired numerical defaults and their replacements
 
-- Results/logs/history seven days: omitted file/log retention is zero, retaining
-  unique bytes until explicit release. Positive operator durations still expire
+- Results/logs/history seven days: omitted log retention is zero, retaining
+  unique bytes until explicit release. Omitted file retention is `72h` (MY-47,
+  #1365); an explicit zero retains until release. Positive operator durations still expire
   their named payloads. They never expire job history. Recovered results without
   an explicit deadline remain protected. Seven-day defaults on an existing
   installation remain its saved policy until its owner changes them.

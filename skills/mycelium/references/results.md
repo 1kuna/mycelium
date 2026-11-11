@@ -54,8 +54,10 @@ myce file release apply --accept-expiry release-plan.json
 `file_release_stale` calls for a new reviewed plan; protected, live or unresolved
 custody cannot be forced. Collection is asynchronous and released references
 return `result_expired`. Project attribution is not an authorization check. Keep
-plan/apply receipts and verified copies. Omitted retention protects until
-explicit release; saved positive windows still bind. On a supporting queue, a
+plan/apply receipts and verified copies. By default a finished job's files are
+kept for 3 days (`72h`), then return `result_expired`: download what you need
+within that window. An operator can set the queue's `--file-retention`, and `0`
+keeps files until explicit release. On a supporting queue, a
 project policy `file_retention` (for example `72h`) expires its own finished jobs'
 files sooner, and a `file_store_capacity` refusal names the limiting bound, bytes
 held by finished jobs and the release or retention step to take. See
