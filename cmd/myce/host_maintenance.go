@@ -165,7 +165,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		status, err = waitHostMaintenance(ctx, c, hosts[0], *timeout, myce.RealClock{}, waitPause)
 	}
 	if action == "status" && !*wait && !status.Healthy {
-		err = errors.New("host health incomplete: missing, stale or inconsistent worker evidence")
+		err = hostStatusError(status)
 	}
 	if encodeErr := json.NewEncoder(out).Encode(status); encodeErr != nil {
 		return encodeErr
@@ -199,4 +199,16 @@ func waitHostMaintenance(ctx context.Context, c myce.Client, host string, timeou
 			return status, err
 		}
 	}
+}
+
+// Exit contract (#1187, docs/status.md): 0 healthy; 3 degraded, meaning fresh,
+// consistent workers with explained faulty components; 1 missing, stale or
+// inconsistent worker evidence. Stdout JSON is printed in every case.
+const hostDegradedExit = 3
+
+func hostStatusError(status myce.HostMaintenanceStatus) error {
+	if status.State != "degraded" {
+		return errors.New("host health incomplete: missing, stale or inconsistent worker evidence")
+	}
+	return &exitError{hostDegradedExit, errors.New("host degraded: " + strings.Join(status.DegradedReasons(), "; "))}
 }
