@@ -169,6 +169,14 @@ MY-36, 2026-11-08 (#1061): “i think any files should transfer to the machines 
 
 </details>
 
+- <a id="my-47"></a>Finished jobs' files are kept for 3 days, then reclaimed, and files already past that window are cleared now to make space. (MY-47) Agent note: applied as the queue's file retention, which also governs worker scratch held for finished jobs.
+
+<details><summary>Sources</summary>
+
+MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the queue host reached 97% disk with job files kept until explicit release: “keep finished job files for 3 days but clear out whatever’s stale right now so we can make space”. Received by the Mycelium orchestrator.
+
+</details>
+
 ### 11. Compute and token efficient
 <a id="my-43"></a>
 
