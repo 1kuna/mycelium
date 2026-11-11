@@ -23,6 +23,9 @@ takes one path: **declare needs → submit once → one batched wait → fetch �
   visibility. Restrict hardware only for a real requirement, such as an exact
   device under qualification or an owner-dedicated or prohibited host; see
   [explicit restrictions](references/submit.md#explicit-placement-restrictions).
+- Don't hand-set thread counts or temp dirs: native jobs get `MYCE_CPUS`, thread
+  defaults (`OMP_NUM_THREADS` etc.), `TMPDIR` and `MYCE_SCRATCH_DIR`; see
+  [job environment](../../docs/reference/native-execution.md#job-environment).
 - Open a production lease before a multi-stage production pipeline and close it
   after, so maintenance keeps a host able to start your next stage; see
   [production leases](references/waiting.md#production-leases).
