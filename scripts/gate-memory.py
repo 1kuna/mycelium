@@ -139,7 +139,10 @@ def evidence_bytes(evidence: dict) -> bytes:
     # Pin immutable bytes in gate-owned state before admitting work. The source
     # worktree and its reports can then be removed without losing qualification.
     retained = evidence_directory() / digest
-    data = retained.read_bytes() if retained.exists() else Path(evidence['path']).read_bytes()
+    try:
+        data = Path(evidence['path']).read_bytes()
+    except FileNotFoundError:
+        data = retained.read_bytes()
     if hashlib.sha256(data).hexdigest() != evidence['sha256']:
         raise ValueError('swap qualification evidence digest changed')
     if not retained.exists():
