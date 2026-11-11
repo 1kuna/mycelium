@@ -20,6 +20,8 @@ import (
 func TestSubmitContentionIncidentBacklog(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		q, _ := fixture(t)
+		// This test proves production receipts stay independent of evidence builds.
+		asynchronousAdmissionWait(t, q)
 		budgetHost(q, 64<<20, 1)
 		handler := API{Queue: q, Token: "test"}.Handler()
 		q.mu.Lock()
@@ -68,6 +70,7 @@ func TestSubmitContentionIncidentBacklog(t *testing.T) {
 // arrive serially, as in a consumer batch. No fleet or private data is used.
 func BenchmarkSubmitContention(b *testing.B) {
 	q, workers := candidateCostFixture(b)
+	asynchronousAdmissionWait(b, q)
 	admissionWaitBenchmarkSettle(q)
 	q.mu.Lock()
 	for i := 160; i < 6500; i++ {
