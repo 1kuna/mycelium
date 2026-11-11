@@ -19,8 +19,8 @@ retrying an unchanged deterministic failure. See [diagnostics](../../../docs/sta
 
 Placement coverage reasons differ from occupied capacity or environment
 preparation: `missing_extension` needs a registered implementation;
-`execution_coverage` needs a compatible variant; `native_qualification` needs its
-exact native check; `production_parity` or `production_parity_hosts` needs
+`execution_coverage` needs a compatible variant; `native_qualification` waits
+while the queue runs the exact native check itself; `production_parity` or `production_parity_hosts` needs
 reference-output evidence and the stated owner. Detailed status also explains a
 single freshly observed compatible host and an owner's parity list size. These
 are coverage limits, not instructions to add a pin. Stale or missing inventory
