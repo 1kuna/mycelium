@@ -1,18 +1,15 @@
 package myce
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 	"time"
 )
 
 type SharedHostBackoff struct {
-	Stops           []time.Time `json:"stops,omitempty"`
-	Until           time.Time   `json:"until"`
-	RecoverySeconds float64     `json:"recovery_seconds,omitempty"`
-	QuietSince      time.Time   `json:"quiet_since,omitempty"`
-	LastObservation time.Time   `json:"last_observation,omitempty"`
+	RecoverySeconds float64   `json:"recovery_seconds,omitempty"`
+	QuietSince      time.Time `json:"quiet_since,omitempty"`
+	LastObservation time.Time `json:"last_observation,omitempty"`
 }
 
 func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
@@ -40,7 +37,7 @@ func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
 		span = max(span, m.SharedHostPressure.Probe.freshness())
 	}
 	b.RecoverySeconds = max(b.RecoverySeconds, max(time.Nanosecond, span).Seconds())
-	b.QuietSince, b.LastObservation, b.Until, b.Stops = time.Time{}, time.Time{}, time.Time{}, nil
+	b.QuietSince, b.LastObservation = time.Time{}, time.Time{}
 	if j.SharedHostBackoff == nil {
 		j.SharedHostBackoff = map[string]SharedHostBackoff{}
 	}
@@ -48,15 +45,8 @@ func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
 }
 
 func (q *Queue) sharedHostBackoffReason(j *Job, m *Machine) string {
-	if b, ok := j.SharedHostBackoff[hostID(m)]; ok {
-		if b.RecoverySeconds > 0 {
-			return "shared host owner scheduling latency backoff awaiting measured recovery"
-		}
-		// Read compatibility for an old persisted cooldown; no new fixed
-		// cooldown is created. An elapsed timer cannot clear new evidence.
-		if q.clock.Now().Before(b.Until) {
-			return fmt.Sprintf("shared host owner scheduling latency backoff until %s", b.Until.UTC().Format(time.RFC3339))
-		}
+	if b, ok := j.SharedHostBackoff[hostID(m)]; ok && b.RecoverySeconds > 0 {
+		return "shared host owner scheduling latency backoff awaiting measured recovery"
 	}
 	return ""
 }
@@ -87,7 +77,8 @@ func (q *Queue) recoverSharedHostBackoff(m *Machine) {
 	}
 }
 
-func (q *Queue) hostRetryStorageWaitingReason(j *Job) string {
+// Shared-host backoff and unreachable storage roots, with their hold kind.
+func (q *Queue) hostRetryStorageWaitingReason(j *Job) (string, string) {
 	blocked := false
 	for _, m := range q.s.Machines {
 		if len(m.UnavailableRoots) > 0 || q.sharedHostBackoffReason(j, m) != "" {
@@ -96,8 +87,9 @@ func (q *Queue) hostRetryStorageWaitingReason(j *Job) string {
 		}
 	}
 	if !blocked {
-		return ""
+		return "", ""
 	}
+	kind := "storage_root"
 	reasons := []string{}
 	for _, m := range q.plannerMachines() {
 		if m.Gone || !q.jobAllowsMachine(j, m.ID) {
@@ -112,14 +104,16 @@ func (q *Queue) hostRetryStorageWaitingReason(j *Job) string {
 			continue
 		}
 		reason := q.sharedHostBackoffReason(j, m)
-		if reason == "" {
+		if reason != "" {
+			kind = "shared_host_backoff"
+		} else {
 			reason = q.storageRootReason(j, m)
 		}
 		if reason == "" {
-			return ""
+			return "", ""
 		}
 		reasons = append(reasons, reason)
 	}
 	slices.Sort(reasons)
-	return strings.Join(slices.Compact(reasons), "; ")
+	return kind, strings.Join(slices.Compact(reasons), "; ")
 }

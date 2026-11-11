@@ -60,16 +60,16 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 				}
 			}
 			got, err := q.jobSnapshot(j.ID)
-			if err != nil || got.Blocker == nil || got.Blocker.Code != want {
-				t.Fatalf("want %s: blocker=%+v error=%v", want, got.Blocker, err)
+			if err != nil || got.Hold == nil || got.Hold.Kind != want {
+				t.Fatalf("want %s: blocker=%+v error=%v", want, got.Hold, err)
 			}
 			if scenario == "unqualified" || scenario == "missing_variant" {
-				if !strings.Contains(got.Blocker.Evidence, "linux/amd64/fake") || strings.Contains(got.Blocker.Action, a.ID) {
-					t.Fatal("coverage advice omitted declared target or selected a host", got.Blocker)
+				if !strings.Contains(got.Hold.Detail, "linux/amd64/fake") || strings.Contains(got.Hold.Next, a.ID) {
+					t.Fatal("coverage advice omitted declared target or selected a host", got.Hold)
 				}
 			}
-			if strings.HasPrefix(scenario, "stale") && strings.Contains(got.Blocker.Evidence, "only one freshly") {
-				t.Fatal("stale inventory claimed unique hardware", got.Blocker)
+			if strings.HasPrefix(scenario, "stale") && strings.Contains(got.Hold.Detail, "only one freshly") {
+				t.Fatal("stale inventory claimed unique hardware", got.Hold)
 			}
 		})
 	}
@@ -107,15 +107,15 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			j := submit(t, q, s)
 			before := storedTestJob(t, q, j.ID)
 			got, err := q.jobSnapshot(j.ID)
-			if err != nil || got.Blocker == nil {
+			if err != nil || got.Hold == nil {
 				t.Fatal(got, err)
 			}
-			unique := strings.Contains(got.Blocker.Evidence, "only one freshly observed physical host")
+			unique := strings.Contains(got.Hold.Detail, "only one freshly observed physical host")
 			if unique != (restriction != "authored") {
-				t.Fatal("confused authored pin with observed coverage", got.Blocker)
+				t.Fatal("confused authored pin with observed coverage", got.Hold)
 			}
-			if restriction == "parity" && !strings.Contains(got.Blocker.Evidence, "policy approves 1 physical hosts") {
-				t.Fatal("owner's restriction not explained", got.Blocker)
+			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "policy approves 1 physical hosts") {
+				t.Fatal("owner's restriction not explained", got.Hold)
 			}
 			after := storedTestJob(t, q, j.ID)
 			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {
@@ -176,24 +176,24 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var aggregate *Blocker
+			var aggregate *Hold
 			for _, row := range snapshot.Jobs {
 				if row.ID == j.ID {
-					aggregate = row.Blocker
+					aggregate = row.Hold
 				}
 			}
 			resolved, err := q.Resolve(ResolveRequest{Spec: s})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Blocker == nil || got.Blocker.Code != want || !reflect.DeepEqual(got.Blocker, aggregate) || !reflect.DeepEqual(got.Blocker, resolved.Blocker) {
-				t.Fatalf("%s: GET=%+v aggregate=%+v resolve=%+v", state, got.Blocker, aggregate, resolved.Blocker)
+			if got.Hold == nil || got.Hold.Kind != want || !reflect.DeepEqual(got.Hold, aggregate) || !reflect.DeepEqual(got.Hold, resolved.Hold) {
+				t.Fatalf("%s: GET=%+v aggregate=%+v resolve=%+v", state, got.Hold, aggregate, resolved.Hold)
 			}
-			if state == "failed" && !strings.Contains(got.Blocker.Evidence, "first index") {
-				t.Fatal(got.Blocker)
+			if state == "failed" && !strings.Contains(got.Hold.Detail, "first index") {
+				t.Fatal(got.Hold)
 			}
-			if state != "building" && strings.Contains(got.Blocker.Text(), "builder reports building") {
-				t.Fatal(got.Blocker)
+			if state != "building" && strings.Contains(got.Hold.Text(), "builder reports building") {
+				t.Fatal(got.Hold)
 			}
 		})
 	}
@@ -207,7 +207,7 @@ func TestActionableBlockerCPUResolveOmitsAcceleratorViews(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Targets) != 1 || !r.Targets[0].Eligible || r.Blocker != nil {
+	if len(r.Targets) != 1 || !r.Targets[0].Eligible || r.Hold != nil {
 		t.Fatalf("%+v", r)
 	}
 	var out strings.Builder
@@ -230,7 +230,7 @@ func TestActionableBlockerInlineValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Evidence, "lock_file must be") {
+	if r.Hold == nil || r.Hold.Owner != "consumer" || !strings.Contains(r.Hold.Detail, "lock_file must be") {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -240,8 +240,8 @@ func TestActionableBlockerProducerPrecedesPreparation(t *testing.T) {
 	j := &Job{State: "queued", Spec: cpuSpec(1, 1)}
 	j.Spec.After = &PieceDependency{Piece: "part"}
 	j.Spec.Environment.Name = "cold"
-	b := q.actionableBlocker(j)
-	if b == nil || b.Owner != "producer" || b.Dependency != "accepted upstream result" {
+	b := q.jobHold(j)
+	if b == nil || b.Owner != "producer" || b.Kind != "upstream" {
 		t.Fatalf("%+v", b)
 	}
 }
@@ -258,8 +258,8 @@ func TestActionableBlockerNativePreparationIdentity(t *testing.T) {
 	j := &Job{State: "queued", Spec: Spec{ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name}}, Extensions: []Extension{e}}
 	check(t, q, m, nil)
 	m = *q.s.Machines[m.ID]
-	b := q.environmentBlocker(j, &m)
-	if b == nil || b.Code != "deterministically_failed" || !strings.Contains(b.Evidence, "No solution found") {
+	b := q.environmentHold(j, &m)
+	if b == nil || b.Kind != "deterministically_failed" || !strings.Contains(b.Detail, "No solution found") {
 		t.Fatalf("%+v", b)
 	}
 }
@@ -278,8 +278,8 @@ func TestActionableBlockerResolveCurrentMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !reflect.DeepEqual(got.Blocker, r.Blocker) {
-		t.Fatalf("GET=%+v resolve=%+v", got.Blocker, r.Blocker)
+	if got.Hold == nil || got.Hold.Kind != "memory" || !reflect.DeepEqual(got.Hold, r.Hold) {
+		t.Fatalf("GET=%+v resolve=%+v", got.Hold, r.Hold)
 	}
 }
 
@@ -298,8 +298,9 @@ func TestActionableBlockerKnownSharedPressure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Blocker == nil || got.Blocker.Code != "resource_pressure" || !strings.Contains(got.Blocker.Evidence, "memory pressure") {
-		t.Fatalf("%+v", got.Blocker)
+	// Owner pressure and RAM together are mixed capacity causes; detail names both.
+	if got.Hold == nil || got.Hold.Kind != "capacity" || !strings.Contains(got.Hold.Detail, "memory pressure") {
+		t.Fatalf("%+v", got.Hold)
 	}
 }
 
@@ -310,7 +311,7 @@ func TestActionableBlockerNativeResolveQualification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Blocker == nil || r.Blocker.Owner != "consumer" || !strings.Contains(r.Blocker.Action, "qualify") {
-		t.Fatalf("%+v", r.Blocker)
+	if r.Hold == nil || r.Hold.Owner != "consumer" || !strings.Contains(r.Hold.Next, "qualify") {
+		t.Fatalf("%+v", r.Hold)
 	}
 }

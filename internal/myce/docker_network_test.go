@@ -850,7 +850,7 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required")
+		return strings.Contains(strings.Join(hostHoldTexts(snap.Holds), " "), "operator action required")
 	})
 	requireState(t, q, j.ID, "stopping")
 	_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)

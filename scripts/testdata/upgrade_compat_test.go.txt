@@ -204,7 +204,7 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 		if capture.status != http.StatusOK {
 			errorBody = string(capture.body)
 		}
-		// Fingerprint the complete request after projecting only the additive
+		// Fingerprint the complete request after projecting only post-r6.8
 		// disk-budget and checkpoint-expiry fields. The worker removes both
 		// negotiated additions on a strict rollback refusal; inventory, attempts
 		// and every baseline collection field must remain byte-for-byte equal.

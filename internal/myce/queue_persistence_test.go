@@ -172,7 +172,7 @@ func TestQueuePersistenceLargeFieldsRollbackRestart(t *testing.T) {
 }
 
 func TestQueuePersistenceRetiredFormatsRefused(t *testing.T) {
-	for _, marker := range []string{`"myce-normalized-state-v2"`, `"myce-normalized-state-v1"`, `{"schema":3,"jobs":{}}`} {
+	for _, marker := range []string{`"myce-normalized-state-v1"`, `{"schema":3,"jobs":{}}`} {
 		t.Run(marker, func(t *testing.T) {
 			q, clock := fixture(t)
 			submit(t, q, spec("experiment"))
@@ -250,6 +250,87 @@ func TestQueuePersistenceDiagnosticAnchorRestart(t *testing.T) {
 	cancelled := q.s.Jobs[j.ID]
 	if cancelled.CancelledAt == nil || cancelled.State != "cancelled" || cancelled.Efficiency.WaitSeconds["holds"] != 2 {
 		t.Fatal("restart lost cancellation or pause interval")
+	}
+}
+
+// The previous field layout is upgraded in one FULL transaction. A failed
+// marker write must leave its machine, job and catalog decisions recoverable.
+func TestQueuePersistenceMachineRecordsMigration(t *testing.T) {
+	q, clock := fixture(t)
+	check(t, q, machine("worker", "fake"), nil)
+	j := submit(t, q, spec("experiment"))
+	drainAdmissionWait(t, q)
+	legacy := map[string][]byte{}
+	for key, data := range q.persisted {
+		if !strings.HasPrefix(key, "machines/") {
+			legacy[key] = data
+		}
+	}
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(legacy["state"], &base); err != nil {
+		t.Fatal(err)
+	}
+	base["machines"], _ = json.Marshal(q.s.Machines)
+	legacy["state"], _ = json.Marshal(base)
+	tx, err := q.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM queue_state"); err != nil {
+		t.Fatal(err)
+	}
+	for key, data := range legacy {
+		if _, err = tx.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", key, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = tx.Exec("UPDATE queue SET data=? WHERE id=1", fieldQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	q.persisted, q.machineRecords = legacy, false
+	if _, err = q.db.Exec("CREATE TRIGGER reject_machine_migration BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'migration interrupted'); END"); err != nil {
+		t.Fatal(err)
+	}
+	change := func() error {
+		q.touchMachine("worker").Leaving = true
+		q.touchJob(j.ID).Reason = "accepted decision"
+		q.putWorkObservation("decision", WorkObservation{StaleReason: "component identity changed"})
+		return nil
+	}
+	if err = q.update(change); err == nil {
+		t.Fatal("interrupted migration committed")
+	}
+	if q.machineRecords || q.s.Machines["worker"].Leaving || q.s.Jobs[j.ID].Reason == "accepted decision" {
+		t.Fatal("failed transaction leaked a decision")
+	}
+	if _, ok := q.s.WorkObservations["decision"]; ok {
+		t.Fatal("catalog rollback leaked")
+	}
+	var marker []byte
+	if err = q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil || !bytes.Equal(marker, fieldQueueMarker) {
+		t.Fatal("marker changed", err)
+	}
+	data, err := readQueueState(q.db, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered state
+	if err = json.Unmarshal(data, &recovered); err != nil || recovered.Machines["worker"].Leaving {
+		t.Fatal("old layout not recoverable", err)
+	}
+	if _, err = q.db.Exec("DROP TRIGGER reject_machine_migration"); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.update(change); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenQueue(t, q, clock)
+	if !q.machineRecords || !q.s.Machines["worker"].Leaving || q.s.Jobs[j.ID].Reason != "accepted decision" || q.s.WorkObservations["decision"].StaleReason != "component identity changed" {
+		t.Fatal("restart lost committed machine, job or catalog decision")
 	}
 }
 

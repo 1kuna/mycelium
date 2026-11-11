@@ -1047,7 +1047,7 @@ func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
 	}
 	snap, _ := q.Snapshot()
 	found := false
-	for _, h := range snap.HostHolds {
+	for _, h := range hostHoldTexts(snap.Holds) {
 		if strings.Contains(h, "shared: Docker cleanup unconfirmed") {
 			found = true
 		}
@@ -1084,7 +1084,7 @@ func TestDockerFreshWorkerAndStaleAckCannotClearCustody(t *testing.T) {
 	}
 	snap, _ := q.Snapshot()
 	found := false
-	for _, h := range snap.HostHolds {
+	for _, h := range hostHoldTexts(snap.Holds) {
 		if strings.Contains(h, "Docker cleanup unconfirmed") {
 			found = true
 		}
@@ -1190,10 +1190,10 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(snap.HostHolds) == 0 || !strings.Contains(snap.HostHolds[0], "Docker cleanup unconfirmed") {
+	if len(hostHoldTexts(snap.Holds)) == 0 || !strings.Contains(hostHoldTexts(snap.Holds)[0], "Docker cleanup unconfirmed") {
 		t.Fatal("queue restart/fresh session freed Docker")
 	}
-	if !strings.Contains(strings.Join(snap.HostHolds, " "), "operator action required") {
+	if !strings.Contains(strings.Join(hostHoldTexts(snap.Holds), " "), "operator action required") {
 		t.Fatal("restart forgot escalation")
 	}
 	if snap.Machines[0].FreeHostMemoryGB != 18 {
@@ -1203,7 +1203,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 		t.Fatal(e)
 	}
 	snap, _ = q.Snapshot()
-	if len(snap.HostHolds) != 0 {
+	if len(hostHoldTexts(snap.Holds)) != 0 {
 		t.Fatal("exact old-attempt release did not settle custody")
 	}
 }
@@ -1224,7 +1224,7 @@ func TestDockerCleanupEscalatesDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(before.HostHolds, " "), "operator action required") {
+	if strings.Contains(strings.Join(hostHoldTexts(before.Holds), " "), "operator action required") {
 		t.Fatal("early escalation")
 	}
 	c.Advance(StopGrace + 2*time.Minute)
@@ -1232,7 +1232,7 @@ func TestDockerCleanupEscalatesDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(after.HostHolds, " "), "operator action required") {
+	if !strings.Contains(strings.Join(hostHoldTexts(after.Holds), " "), "operator action required") {
 		t.Fatal("stuck cleanup was not escalated")
 	}
 	for _, r := range q.s.HostReleases {

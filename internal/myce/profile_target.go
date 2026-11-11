@@ -92,11 +92,6 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
 		}
 		return "needs.network: true requires native_network for protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
-	case "entry coverage":
-		if c := j.EntryCoverage; c != nil && len(c.LockTargets) > 0 && !slices.Contains(c.LockTargets, ExecutionTarget{OS: target.OS, Arch: target.Arch}) {
-			return fmt.Sprintf("entry lock file does not cover %s", formatTarget(target))
-		}
-		return fmt.Sprintf("entry coverage: %s is skipped for this entry after it failed there and never succeeded; change the entry to retry it", formatTarget(target))
 	case "shared input cache":
 		return sharedInputCacheReason(j.Spec, m, false)
 	case "disk headroom":
@@ -296,8 +291,6 @@ func (q *Queue) evaluateTargetsMemory(j *Job, sizeMemory bool, visit func(fit ta
 			fit := targetFit{excluded: true, key: targetKey(m)}
 			if contains(j.Spec.ExcludedMachines, m.ID) {
 				fit.check(false, "excluded_machines")
-			} else if !q.entryCoverageAllows(j, m.ID) {
-				fit.check(false, "entry coverage")
 			} else {
 				fit.check(false, "allow-list")
 			}

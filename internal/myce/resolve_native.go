@@ -23,9 +23,9 @@ func (q *Queue) resolveNative(req ResolveRequest, ctx context.Context) (ResolveR
 			r.Targets = append(r.Targets, ResolveTarget{Machine: host.Host, Target: target.Target, Freshness: host.Freshness, Eligible: false, Reason: "unknown: frozen native registration and qualification required; " + host.Admission})
 		}
 	}
-	r.Blocker = ResolveFindingBlocker(r.Findings)
-	if r.Blocker == nil {
-		r.Blocker = &Blocker{"unprepared", "immutable native registration and qualification", "consumer", "register and qualify the selected adapter through myce run; verify output parity before production use", "authored metadata is not qualified execution evidence"}
+	r.Hold = ResolveFindingHold(r.Findings)
+	if r.Hold == nil {
+		r.Hold = withAction(newHold("unprepared", "authored metadata is not qualified execution evidence"), ownerConsumer, "register and qualify the selected adapter through myce run; verify output parity before production use")
 	}
 	return r, nil
 }

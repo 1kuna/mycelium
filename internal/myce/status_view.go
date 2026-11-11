@@ -185,9 +185,10 @@ func ExtensionStatus(r ExtensionReport) string {
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
 
-// JobReason is the one-line reason, ending with the job's finding when it has one.
+// JobReason is the one-line reason with the hold's next action and evidence,
+// ending with the job's finding when it has one.
 func JobReason(j *Job) string {
-	reason := jobReasonText(j)
+	reason := jobReasonWith(j, (*Hold).FullText)
 	if j.Finding != nil {
 		if reason != "" {
 			reason += "; "
@@ -197,18 +198,31 @@ func JobReason(j *Job) string {
 	return reason
 }
 
-// jobReasonText is the lifecycle/scheduler reason without the finding, for
-// views that carry the finding as its own field.
-func jobReasonText(j *Job) string {
-	reason := j.Reason
-	if j.Blocker != nil {
-		reason = j.Blocker.Text()
-	}
+// JobHold is the job's one hold record: the queue's wait for a queued job, or
+// its pause. Nil when nothing holds it.
+func JobHold(j *Job) *Hold {
 	if j.State == "paused" && j.Pause != nil {
-		reason = j.Pause.Reason
-		if j.Pause.Until != nil {
-			reason += "; until " + j.Pause.Until.Format(time.RFC3339)
+		if j.Hold != nil && j.Hold.Kind == "paused" {
+			return j.Hold
 		}
+		return pauseHold(j)
+	}
+	if j.State == "queued" {
+		return j.Hold
+	}
+	return nil
+}
+
+// jobReasonText is the lifecycle/scheduler reason without the finding or the
+// hold's next action, for views that carry those as their own fields.
+func jobReasonText(j *Job) string {
+	return jobReasonWith(j, func(h *Hold) string { return h.Reason })
+}
+
+func jobReasonWith(j *Job, holdText func(*Hold) string) string {
+	reason := j.Reason
+	if h := JobHold(j); h != nil {
+		reason = holdText(h)
 	}
 	if reason == "" {
 		switch j.State {
@@ -256,7 +270,7 @@ func JobWork(j *Job) string {
 // Called under the queue lock on a detached status copy. The scheduler's reason
 // remains authoritative; only its generic no-fit explanation needs more detail.
 func (q *Queue) statusWaitingReason(j *Job) string {
-	j.Blocker = q.actionableBlocker(j)
+	j.Hold = q.jobHold(j)
 	return q.statusWaitingReasonDetail(j)
 }
 

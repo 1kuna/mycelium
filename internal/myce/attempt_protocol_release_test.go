@@ -15,7 +15,7 @@ import (
 // Release installations with a few dozen environments exceed the ordinary
 // 1 MiB JSON budget; the old worker masks that 400 as a protocol-upgrade 426.
 func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
-	const queueVersion = "v3.1.0-rc.20261111.s076r6.11"
+	const queueVersion = "v3.1.0-rc.20261110.s076r6.9"
 	previousVersion := BuildVersion
 	BuildVersion = queueVersion
 	t.Cleanup(func() { BuildVersion = previousVersion })
@@ -36,7 +36,7 @@ func TestAttemptProtocolReleaseWorkerJoins(t *testing.T) {
 		cache[key] = tools
 	}
 	inventory := preparedToolInventory(cache, environments, "")
-	for _, version := range []string{queueVersion, "v3.1.0-rc.20261110.s076r6.10"} {
+	for _, version := range []string{queueVersion, "v3.1.0-rc.20261110.s076r6.8"} {
 		t.Run(version, func(t *testing.T) {
 			m := machine("release-worker", "fake")
 			m.Release = &RunningRelease{Version: version, Commit: "fixture"}

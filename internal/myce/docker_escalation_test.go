@@ -82,7 +82,7 @@ func TestDockerEscalationSlowCreate(t *testing.T) {
 					t.Fatalf("slow create escalated: %+v", r)
 				}
 			}
-			if q.dockerHoldDetail("host").OperatorActionRequired {
+			if q.dockerHold("host").operatorAction() {
 				t.Fatal("slow create operator hold")
 			}
 		})
@@ -107,7 +107,7 @@ func TestDockerEscalationLostOrFailedCleanup(t *testing.T) {
 			q.escalateDockerCleanup()
 			c.Advance(2 * time.Minute)
 			q.escalateDockerCleanup()
-			if !q.dockerHoldDetail("host").OperatorActionRequired || len(q.s.HostReleases) != 1 {
+			if !q.dockerHold("host").operatorAction() || len(q.s.HostReleases) != 1 {
 				t.Fatal("unconfirmed custody did not escalate or was released")
 			}
 		})
@@ -132,8 +132,8 @@ func TestDockerEscalationSurvivesStopRequest(t *testing.T) {
 	assert := func() {
 		t.Helper()
 		r := q.s.HostReleases[key]
-		d := q.dockerHoldDetail("host")
-		if len(q.s.HostReleases) != 1 || r.EscalatedAt == nil || !r.EscalatedAt.Equal(*escalated) || d.Kind != "docker_cleanup_operator_action" || !d.OperatorActionRequired || d.ClearsAt != nil {
+		d := q.dockerHold("host")
+		if len(q.s.HostReleases) != 1 || r.EscalatedAt == nil || !r.EscalatedAt.Equal(*escalated) || d.Kind != "docker_cleanup_operator_action" || !d.operatorAction() || d.Expires != nil {
 			t.Fatalf("escalation withdrawn: release=%+v detail=%+v", r, d)
 		}
 		if count := strings.Count(logs.String(), "event=docker_cleanup_escalated "); count != 1 {

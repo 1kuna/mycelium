@@ -123,21 +123,23 @@ func beforeWithinTier(a, b *Job, m *Machine) bool {
 	}
 	return a.ID < b.ID
 }
-func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+
+// The generic wait, with its hold kind.
+func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) (string, string) {
 	if reason := sharedInputWaitingReason(j, machines); reason != "" {
-		return reason
+		return "shared_input", reason
 	}
 	if reason := cpuWaitingReason(j, machines); reason != "" {
-		return reason
+		return "capacity", reason
 	}
 	if reason := dockerRuntimeWaitingReason(j, machines); reason != "" {
-		return reason
+		return "docker_runtime", reason
 	}
 	if reason := extensionWaitingReason(j, machines); reason != "" {
-		return reason
+		return "extension", reason
 	}
 	if reason := capabilityWaitingReason(j); reason != "" {
-		return reason
+		return "capability", reason
 	}
 	for _, m := range machines {
 		memory := m.FreeMemoryGB
@@ -149,11 +151,11 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		if fits(j, m, memory) {
 			if memory == m.FreeMemoryGB {
 				if !environmentReady(j, m) {
-					return environmentWaitingReason(j, m)
+					return "unprepared", environmentWaitingReason(j, m)
 				}
-				return "waiting for a worker to pull this job"
+				return "waiting_for_worker", "waiting for a worker to pull this job"
 			}
-			return reservationWaitReason(m, false, 0)
+			return "capacity", reservationWaitReason(m, false, 0)
 		}
 	}
 	diskReasons := []string{}
@@ -171,7 +173,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	}
 	if len(diskReasons) > 0 {
 		slices.Sort(diskReasons)
-		return strings.Join(slices.Compact(diskReasons), "; ")
+		return "disk_headroom", strings.Join(slices.Compact(diskReasons), "; ")
 	}
 	unknownCapacity := []string{}
 	knownCapacity := false
@@ -187,7 +189,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	}
 	if len(unknownCapacity) > 0 && !knownCapacity {
 		slices.Sort(unknownCapacity)
-		return "waiting for hardware capacity readings: " + strings.Join(unknownCapacity, "; ")
+		return "unknown_observation", "waiting for hardware capacity readings: " + strings.Join(unknownCapacity, "; ")
 	}
 	needs := []string{}
 	if j.Spec.Needs.HostMemoryGB > 0 {
@@ -217,7 +219,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 	if !j.Spec.Needs.cpuOnly() {
 		needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory on one host (one card, or several cards of one host)", j.Spec.Needs.MemoryGB))
 	}
-	return "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
+	return "no_eligible_host", "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
 }
 func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }
 

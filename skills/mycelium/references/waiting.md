@@ -8,11 +8,14 @@ reports prove progress. Don't erase custody, raise shared budgets, repeat
 submissions or run heavy work locally to bypass a hold. A field your queue
 doesn't return is unknown.
 
-## One blocker
+## One hold
 
-Resolve, status and wait responses name a blocking dependency, owner and action.
-An offer is not a started build; an unknown observation is not measured zero
-capacity. Keep typed reasons and original intent, and fix the cause rather than
+Resolve, status and wait responses carry one `hold` record: `kind` (stable
+code), `owner`, `reason` (one sentence), `clears`, optional `expires`, `next`
+(one action) and `detail` (evidence). Act on `kind` and `owner`, not the text.
+Host and device fences use the same record in status `holds`; `owner: operator`
+means only an operator clears it. An offer is not a started build; an unknown
+observation is not measured zero capacity. Keep typed reasons and original intent, and fix the cause rather than
 retrying an unchanged deterministic failure. See [diagnostics](../../../docs/status.md).
 
 ## Coverage versus capacity

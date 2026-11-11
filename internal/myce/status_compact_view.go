@@ -23,7 +23,7 @@ type CompactStatus struct {
 	AlertDelivery *HealthAlertDelivery `json:"health_alert_delivery,omitempty"`
 	FleetUpgrade  []string             `json:"fleet_upgrade,omitempty"`
 	HostStates    map[string]string    `json:"host_states,omitempty"`
-	Holds         []string             `json:"holds,omitempty"`
+	Holds         []Hold               `json:"holds,omitempty"`
 	Warning       string               `json:"warning,omitempty"`
 	Hyphas        []CompactHypha       `json:"hyphas"`
 	Models        []string             `json:"models,omitempty"`
@@ -47,16 +47,18 @@ type CompactHypha struct {
 	Copying   []string `json:"copying,omitempty"`
 }
 type CompactJob struct {
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
-	Project  string     `json:"project"`
-	Class    string     `json:"class,omitempty"`
-	State    string     `json:"state"`
-	Attempt  int        `json:"attempt,omitempty"`
-	Machine  string     `json:"machine,omitempty"`
-	Since    *time.Time `json:"since,omitempty"`
-	Reason   string     `json:"reason,omitempty"`
-	Delivery string     `json:"delivery,omitempty"`
+	ID      string     `json:"id"`
+	Name    string     `json:"name"`
+	Project string     `json:"project"`
+	Class   string     `json:"class,omitempty"`
+	State   string     `json:"state"`
+	Attempt int        `json:"attempt,omitempty"`
+	Machine string     `json:"machine,omitempty"`
+	Since   *time.Time `json:"since,omitempty"`
+	Reason  string     `json:"reason,omitempty"`
+	// Next is the waiting or paused job's one next action, from its hold.
+	Next     string `json:"next,omitempty"`
+	Delivery string `json:"delivery,omitempty"`
 	// CommandStarted is false only when no attempt's command began.
 	CommandStarted bool `json:"command_started"`
 	// Finding is the failed or requeued job's plain-language cause and action.
@@ -65,6 +67,7 @@ type CompactJob struct {
 type CompactPaused struct {
 	Project string   `json:"project"`
 	Reason  string   `json:"reason"`
+	Next    string   `json:"next,omitempty"`
 	Count   int      `json:"count"`
 	IDs     []string `json:"ids"`
 }
@@ -107,20 +110,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 			c.HostStates[host] = state
 		}
 	}
-	for _, r := range s.Reservations {
-		c.Holds = append(c.Holds, fmt.Sprintf("reservation %s %s: %s; state=%s job=%s expires=%s", r.ID, r.Selector, r.Text, r.State, r.Job, r.ExpiresAt.UTC().Format(time.RFC3339)))
-	}
-	for _, p := range s.ComponentExclusions {
-		if p.Active {
-			c.Holds = append(c.Holds, fmt.Sprintf("exclusion %s: set by %s since %s; reason=%q", p.Selector, p.SetBy, p.UpdatedAt.UTC().Format(time.RFC3339), p.Reason))
-		}
-	}
-	for _, d := range s.DeviceMaintenance {
-		if d.Disabled {
-			c.Holds = append(c.Holds, fmt.Sprintf("host %s device %s (%s): disabled by operator since %s; reason=%q", d.Host, d.Identity, d.Platform, d.UpdatedAt.UTC().Format(time.RFC3339), d.Reason))
-		}
-	}
-	c.Holds = append(c.Holds, s.HostHolds...)
+	c.Holds = s.Holds
 	c.Warning = s.Warning
 	running := map[string]int{}
 	for _, j := range s.Jobs {
@@ -157,11 +147,14 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		c.Models = append(c.Models, strings.TrimSpace(fmt.Sprintf("model %s on %s: %s, calls in flight %d %s", m.Model, m.Machine, m.State, m.InFlight, m.Error)))
 	}
 	for _, j := range s.Jobs {
-		reason := jobReasonText(j)
+		reason, next := jobReasonText(j), ""
+		if h := JobHold(j); h != nil {
+			next = h.Next
+		}
 		if compactJobGroup(j) == "paused" {
 			i := slices.IndexFunc(c.Paused, func(p CompactPaused) bool { return p.Project == j.Spec.Project && p.Reason == reason })
 			if i < 0 {
-				c.Paused = append(c.Paused, CompactPaused{Project: j.Spec.Project, Reason: reason})
+				c.Paused = append(c.Paused, CompactPaused{Project: j.Spec.Project, Reason: reason, Next: strings.ReplaceAll(next, j.ID, "JOB_ID")})
 				i = len(c.Paused) - 1
 			}
 			c.Paused[i].Count++
@@ -171,7 +164,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		if reason == "running now" {
 			reason = ""
 		}
-		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Finding: j.Finding, CommandStarted: commandStarted(j)}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Next: next, Finding: j.Finding, CommandStarted: commandStarted(j)}
 		if j.State == "queued" {
 			since := j.WaitingSince
 			if since.IsZero() {
@@ -262,7 +255,9 @@ func (c CompactStatus) Lines(full bool) []string {
 		parts = append(parts, h.Other...)
 		out = append(out, fmt.Sprintf("not quiescent %s (%s): %s", h.Host, h.Mode, strings.Join(parts, "; ")))
 	}
-	out = append(out, c.Holds...)
+	for _, h := range c.Holds {
+		out = append(out, h.Line())
+	}
 	if c.Warning != "" {
 		out = append(out, c.Warning)
 	}
@@ -312,6 +307,10 @@ func (c CompactStatus) Lines(full bool) []string {
 			line += "; " + compactLine(j.Reason)
 		}
 		out = append(out, line)
+		if j.Next != "" {
+			// Never clipped: the one action for this wait.
+			out = append(out, "  next: "+j.Next)
+		}
 		if j.Finding != nil {
 			// Never clipped: the action is the part an agent needs.
 			out = append(out, "  "+j.Finding.Text())
@@ -322,6 +321,9 @@ func (c CompactStatus) Lines(full bool) []string {
 	}
 	for _, p := range c.Paused {
 		out = append(out, fmt.Sprintf("paused %d %s: %s", p.Count, p.Project, compactLine(p.Reason)))
+		if p.Next != "" {
+			out = append(out, "  next: "+p.Next)
+		}
 	}
 	if len(c.Jobs) == 0 && len(c.Paused) == 0 {
 		out = append(out, "No jobs yet.")

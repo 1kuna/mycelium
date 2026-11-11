@@ -175,7 +175,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 				cpu, kind, transition := false, "", "other"
 				if m != nil {
-					cpu, kind = cpuFits(j, m), q.dockerHoldDetail(hostID(m)).Kind
+					cpu, kind = cpuFits(j, m), q.dockerHold(hostID(m)).Kind
 					if dockerStartingOrRunning(m.DockerCleanup) {
 						transition = m.DockerCleanup
 					}

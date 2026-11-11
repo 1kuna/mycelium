@@ -40,7 +40,7 @@ and queue time). A retry cannot consume that host's last healthy accelerator of
 the same backend. Occupied healthy cards still count; quarantined, unavailable
 or administratively excluded cards do not. Another host or a card with a healthy
 spare remains eligible. A group cannot consume all surviving cards. The queued
-job reports `blocker.code: device_fault_last_healthy` and waits on the same job ID
+job reports `hold.kind: device_fault_last_healthy` and waits on the same job ID
 and submission key. This protection is queue-side and works with older workers;
 it does not require new recovery fields. Existing pre-upgrade fault history is
 recognized when its retained copy identifies the backend on that worker.

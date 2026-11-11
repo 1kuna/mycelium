@@ -12,7 +12,7 @@ import (
 
 // A JSON string deliberately fails closed in older binaries expecting a state
 // object. All fragments and this marker commit in the same SQLite transaction.
-// r6.10 and later write this per-machine layout; MY-42 retired every older one.
+var fieldQueueMarker = []byte(`"myce-normalized-state-v2"`)
 var normalizedQueueMarker = []byte(`"myce-normalized-state-v3"`)
 
 type queueRecordReader interface {
@@ -20,8 +20,8 @@ type queueRecordReader interface {
 }
 
 func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
-	if !bytes.Equal(data, normalizedQueueMarker) {
-		return nil, fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v3")
+	if !bytes.Equal(data, normalizedQueueMarker) && !bytes.Equal(data, fieldQueueMarker) {
+		return nil, fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v2 or normalized-state-v3")
 	}
 	records, err := readQueueRecords(db)
 	if err != nil {
@@ -92,7 +92,7 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 	}
 	delete(groups, "health_events")
 	for key, group := range groups {
-		if len(group) == 0 && key != "jobs" && key != "machines" {
+		if len(group) == 0 && key != "jobs" && (key != "machines" || !bytes.Equal(data, normalizedQueueMarker)) {
 			continue
 		}
 		base[key], err = json.Marshal(group)
@@ -160,7 +160,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 		return nil, err
 	}
 	machines := q.s.Machines
-	if q.persisted != nil {
+	if q.machineRecords && q.persisted != nil {
 		machines = map[string]*Machine{}
 		for id := range q.records.machines {
 			machines[id] = q.s.Machines[id]
@@ -262,8 +262,9 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	// A fresh database publishes its first full state and marker atomically.
-	if q.persisted == nil {
+	// r6.8 uses the field layout. Publish its per-machine successor and the
+	// marker atomically; below-floor monolithic/v1 conversion is removed.
+	if !q.machineRecords {
 		if _, err := exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", normalizedQueueMarker); err != nil {
 			return nil, err
 		}
@@ -278,7 +279,7 @@ func (q *Queue) loadPersistedState() error {
 	} else if err != nil {
 		return err
 	}
-	if !bytes.Equal(marker, normalizedQueueMarker) {
+	if !bytes.Equal(marker, normalizedQueueMarker) && !bytes.Equal(marker, fieldQueueMarker) {
 		return fmt.Errorf("unsupported queue persistence format")
 	}
 	records, err := readQueueRecords(q.db)
@@ -286,6 +287,7 @@ func (q *Queue) loadPersistedState() error {
 		return err
 	}
 	q.persisted = records
+	q.machineRecords = bytes.Equal(marker, normalizedQueueMarker)
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)

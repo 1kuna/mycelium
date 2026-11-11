@@ -113,7 +113,7 @@ func TestRequirementReasonsAdapterAndProfileSubmission(t *testing.T) {
 			return true
 		}
 		var observation myce.ResolveReport
-		if json.Unmarshal(report.Bytes(), &observation) != nil || len(observation.Targets) != 1 || observation.Targets[0].Machine != host || observation.Targets[0].Freshness != "stale" || observation.Blocker == nil || observation.Blocker.Code != "unknown_observation" || observation.Blocker.Dependency != "worker inventory" || len(observation.Findings) != 0 {
+		if json.Unmarshal(report.Bytes(), &observation) != nil || len(observation.Targets) != 1 || observation.Targets[0].Machine != host || observation.Targets[0].Freshness != "stale" || observation.Hold == nil || observation.Hold.Kind != "unknown_observation" || observation.Hold.Reason != "worker inventory" || len(observation.Findings) != 0 {
 			t.Fatal("raw-job resolve", err, &report)
 		}
 		return false

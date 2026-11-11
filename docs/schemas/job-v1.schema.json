@@ -1089,32 +1089,6 @@
       ],
       "type": "object"
     },
-    "Blocker": {
-      "properties": {
-        "action": {
-          "type": "string"
-        },
-        "code": {
-          "type": "string"
-        },
-        "dependency": {
-          "type": "string"
-        },
-        "evidence": {
-          "type": "string"
-        },
-        "owner": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "code",
-        "dependency",
-        "owner",
-        "action"
-      ],
-      "type": "object"
-    },
     "Cancellation": {
       "properties": {
         "acknowledged_at": {
@@ -1352,34 +1326,6 @@
         "session",
         "attempt",
         "progress"
-      ],
-      "type": "object"
-    },
-    "CoverageFinding": {
-      "properties": {
-        "action": {
-          "type": "string"
-        },
-        "at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "attempt": {
-          "type": "integer"
-        },
-        "job": {
-          "type": "string"
-        },
-        "target": {
-          "$ref": "#/$defs/ExecutionTarget"
-        }
-      },
-      "required": [
-        "target",
-        "job",
-        "attempt",
-        "at",
-        "action"
       ],
       "type": "object"
     },
@@ -1704,39 +1650,6 @@
         "io_observed_attempts",
         "io_lower_bound",
         "seconds"
-      ],
-      "type": "object"
-    },
-    "EntryCoverage": {
-      "properties": {
-        "findings": {
-          "items": {
-            "$ref": "#/$defs/CoverageFinding"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "key": {
-          "type": "string"
-        },
-        "lock_targets": {
-          "items": {
-            "$ref": "#/$defs/ExecutionTarget"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "recipe": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "key",
-        "recipe"
       ],
       "type": "object"
     },
@@ -2818,6 +2731,43 @@
       },
       "type": "object"
     },
+    "Hold": {
+      "properties": {
+        "clears": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "expires": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "owner",
+        "reason",
+        "clears",
+        "next"
+      ],
+      "type": "object"
+    },
     "HostGrowthContributor": {
       "properties": {
         "attempt": {
@@ -3086,10 +3036,6 @@
           "$ref": "#/$defs/BatchWork",
           "x-contract": "diagnostic"
         },
-        "blocker": {
-          "$ref": "#/$defs/Blocker",
-          "x-contract": "diagnostic"
-        },
         "cancellation": {
           "$ref": "#/$defs/Cancellation",
           "description": "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence.",
@@ -3193,10 +3139,6 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
-        "entry_coverage": {
-          "$ref": "#/$defs/EntryCoverage",
-          "x-contract": "diagnostic"
-        },
         "environment_failure_log": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -3290,6 +3232,10 @@
         },
         "health_recovery": {
           "$ref": "#/$defs/AlertRecovery",
+          "x-contract": "diagnostic"
+        },
+        "hold": {
+          "$ref": "#/$defs/Hold",
           "x-contract": "diagnostic"
         },
         "host_memory_charge": {
@@ -5703,25 +5649,8 @@
         },
         "recovery_seconds": {
           "type": "number"
-        },
-        "stops": {
-          "items": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "until": {
-          "format": "date-time",
-          "type": "string"
         }
       },
-      "required": [
-        "until"
-      ],
       "type": "object"
     },
     "SharedInput": {

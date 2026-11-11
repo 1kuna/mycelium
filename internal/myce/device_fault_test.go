@@ -106,8 +106,8 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 		t.Fatal("fault cascaded onto last healthy device", resumed)
 	}
 	held := observe("queued")
-	if held.Blocker == nil || held.Blocker.Code != deviceFaultRetryHold || len(held.AttemptHistory) != 1 || held.AttemptHistory[0].DeviceFault == nil {
-		t.Fatal("typed fault/hold evidence missing", held.Blocker, held.AttemptHistory)
+	if held.Hold == nil || held.Hold.Kind != deviceFaultRetryHold || len(held.AttemptHistory) != 1 || held.AttemptHistory[0].DeviceFault == nil {
+		t.Fatal("typed fault/hold evidence missing", held.Hold, held.AttemptHistory)
 	}
 	t.Logf("job-v1 states: %v", clientStates)
 	// Quarantine survives refresh/restart; an explicit clear doesn't replay the old fault.

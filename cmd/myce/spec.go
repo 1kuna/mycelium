@@ -111,8 +111,8 @@ func specCommand(args []string, out, errOut io.Writer) error {
 	}
 	report.Resolved = append(findings.resolved, report.Resolved...)
 	report.Findings = append(findings.findings, report.Findings...)
-	if b := myce.ResolveFindingBlocker(report.Findings); b != nil {
-		report.Blocker = b
+	if h := myce.ResolveFindingHold(report.Findings); h != nil {
+		report.Hold = h
 	}
 	if !*asJSON {
 		fmt.Fprintf(out, "%s: valid (static checks); resolving against the queue\n", path)

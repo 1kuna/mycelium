@@ -28,7 +28,7 @@ func TestSharedHostBackoffMeasuredRecovery(t *testing.T) {
 			}
 			got := job(t, q, run.ID)
 			b := got.SharedHostBackoff[hostID(&m)]
-			if b.RecoverySeconds != 60 || len(b.Stops) != 0 {
+			if b.RecoverySeconds != 60 {
 				t.Fatal("measured recovery lost or replay counted", b)
 			}
 			m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
