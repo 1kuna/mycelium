@@ -1,8 +1,22 @@
 # Decisions
 
-Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41). Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
+Reviewed: 2026-11-09 (MY-37, MY-38, MY-39, MY-40, MY-41); MY-42 to MY-46 added 2026-11-10 to 11-11. Owner: project maintainer. This records sanitized rulings; [the approved design](design-proposal.md) remains the only product spec. Dates identify the original rulings, not new qualification. Exact source records and deployment facts remain in private local history.
 
 ## Current rulings
+
+- <a id="my-46"></a>**MY-46 — 2026-11-11 — A generalist; compatibility work sits with the user, made easy.**
+  Zach: “we should be figuring out how to get... the job queue or just mycelium in
+  general to be a... generalist. So we're not patching specifically for my use
+  case, but making [Mycelium] in a way that works for anyone's workflow anywhere,
+  and that the effort to get it compatible should be on the user end, not on our
+  end, but it should still be as easy as possible to do. So if that's currently
+  not the case, or if it could be better, then we should work on that”.
+  Mycelium provides general mechanisms that any workflow can adopt. The user does
+  the work of making their workflow compatible, and Mycelium keeps that work as
+  small and easy as it can. When a consumer hits friction, fix the general
+  mechanism or the guidance, never add a consumer-specific patch. Extends MY-11,
+  MY-17, MY-20 and MY-26. He asked for a Fable review of how to do this better.
+  Received by the Mycelium orchestrator.
 
 - <a id="my-45"></a>**MY-45 — 2026-11-11 — Fleet roles: one persistent host, the rest on-demand nodes.**
   Zach: “the only machine that should be running... work, 24/7, and in the
