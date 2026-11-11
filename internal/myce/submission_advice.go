@@ -154,3 +154,46 @@ func (s *submissionAdviceSnapshot) planner(ctx context.Context) (*Queue, error) 
 	v.observationScan.memory = v.memoryPlanning
 	return v, nil
 }
+
+// Resolve plans one hypothetical job, the same question submission advice
+// answers. The full status capture copied and charged every retained execution
+// into one request lane, so a read-only check could be refused with
+// projection_capacity_exceeded once history outgrew that lane. Share
+// the committed generation instead: retained records stay borrowed read-only
+// and only active jobs, machines and planner indexes are copied and charged.
+// Under q.mu this pins only scalar per-worker ledgers and contact evidence.
+func (q *Queue) captureResolveView(ctx context.Context) (*Queue, error) {
+	unlock, err := requestObservationLock(ctx, &q.mu)
+	if err != nil {
+		return nil, err
+	}
+	// Offline imports can install records the committed generation lacks.
+	imported := q.records != nil && (q.records.jobCount != len(q.s.Jobs) || q.records.submissionCount != len(q.s.Submissions))
+	if imported || q.readGeneration == nil && !q.simulation {
+		unlock()
+		v, _, err := q.captureObservation("", ctx)
+		return v, err
+	}
+	snapshot := q.captureSubmissionAdvice()
+	snapshot.view.evidenceRetention = q.evidenceRetention
+	fresh := make(map[string]readFreshness, len(q.s.Machines))
+	for key, m := range q.s.Machines {
+		fresh[key] = readFreshness{m.LastSeen, q.unreported[key]}
+	}
+	unlock()
+	v, err := snapshot.planner(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Uncommitted heartbeat contact is newer than the committed machine record.
+	v.unreported = make(map[string]bool, len(fresh))
+	for key, m := range v.s.Machines {
+		if f, ok := fresh[key]; ok {
+			m.LastSeen = f.lastSeen
+			if f.unreported {
+				v.unreported[key] = true
+			}
+		}
+	}
+	return v, nil
+}

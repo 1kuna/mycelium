@@ -236,3 +236,52 @@ func TestResolveRegisteredExtensionJob(t *testing.T) {
 		t.Fatalf("submit disagrees with resolve: %v", err)
 	}
 }
+
+// Live r6.10: consumer resolves drew 503 projection_capacity_exceeded under
+// normal load because resolve took the full status capture, copying and
+// charging every retained execution into one request lane. Resolve plans one
+// hypothetical job; retained history stays shared and is never copied.
+func TestResolveFitsRequestLaneWithLargeRetainedHistory(t *testing.T) {
+	q, clock, _ := learnedMemoryFixture(t)
+	retained := &Job{ID: "retained-0000", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: cpuResolveSpec()}
+	retained.Spec.Run.Command = []string{"echo", strings.Repeat("payload", 4096)}
+	for i := range 512 {
+		j := *retained
+		j.ID = fmt.Sprintf("retained-%04d", i)
+		q.s.Jobs[j.ID] = &j
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// Steady state: status/job reads have already decoded the committed records.
+	if _, _, err := q.readGeneration.inputs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// 16 MiB across two lanes: the history's projection (~512 x 28 KiB of
+	// command strings at the charged representation) exceeds the 8 MiB lane.
+	budgetHost(q, 16<<20, 1)
+	if _, err := q.cachedStatusJSON(context.Background()); !hasCode(err, "projection_capacity_exceeded") {
+		t.Fatal("fixture no longer exceeds the full-status lane", err)
+	}
+	data, err := json.Marshal(ResolveRequest{Spec: cpuResolveSpec()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/api/resolve", bytes.NewReader(data))
+	r.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+	API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatal("resolve refused under normal capacity", w.Code, w.Body.String())
+	}
+	var report ResolveReport
+	if err := json.Unmarshal(w.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 || !report.Targets[0].Eligible || report.Targets[0].Freshness != "fresh" {
+		t.Fatalf("resolve lost the live target: %+v", report.Targets)
+	}
+	if q.requestBudgets.held != 0 || len(q.s.Jobs) != 512 {
+		t.Fatal("resolve leaked capacity or changed jobs", q.requestBudgets.held, len(q.s.Jobs))
+	}
+}
