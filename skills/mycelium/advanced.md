@@ -90,6 +90,11 @@ Declare the environment and stage inputs instead of pinning to their location.
 Application backend flags are fine when they consume the worker's assigned
 visibility; do not set `MYCE_DEVICE` to choose a physical card before submission.
 
+Apply placement changes to future work. Preserve the frozen spec, original key
+and receipts of accepted or unconfirmed submissions. If a consumer includes a
+host list in its key/environment identity, removing it needs a deliberate
+future-operation migration; rewriting an accepted operation can duplicate work.
+
 A configured project/work `production_parity_hosts` list is an owner restriction
 on every production placement, including fan-out and recovery. Mycelium already
 enforces it; consumers need no matching job pin. Native qualification, measured

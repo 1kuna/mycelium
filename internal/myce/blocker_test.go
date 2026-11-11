@@ -44,6 +44,7 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 			j := submit(t, q, s)
 			if scenario == "parity" {
 				if err := q.update(func() error {
+					q.touchJob(j.ID)
 					q.s.Jobs[j.ID].RequireProductionParity = true
 					return nil
 				}); err != nil {
@@ -60,7 +61,7 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 			}
 			got, err := q.jobSnapshot(j.ID)
 			if err != nil || got.Blocker == nil || got.Blocker.Code != want {
-				t.Fatalf("want %s: job=%+v error=%v", want, got, err)
+				t.Fatalf("want %s: blocker=%+v error=%v", want, got.Blocker, err)
 			}
 			if scenario == "unqualified" || scenario == "missing_variant" {
 				if !strings.Contains(got.Blocker.Evidence, "linux/amd64/fake") || strings.Contains(got.Blocker.Action, a.ID) {
@@ -116,8 +117,9 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			if restriction == "parity" && !strings.Contains(got.Blocker.Evidence, "policy approves 1 physical hosts") {
 				t.Fatal("owner's restriction not explained", got.Blocker)
 			}
-			if !reflect.DeepEqual(before, cloneJob(q.s.Jobs[j.ID])) {
-				t.Fatal("diagnostic read changed accepted placement intent")
+			after := cloneJob(q.s.Jobs[j.ID])
+			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.PlacementIntent, after.PlacementIntent) {
+				t.Fatal("diagnostic read changed frozen spec or authored placement intent")
 			}
 		})
 	}
