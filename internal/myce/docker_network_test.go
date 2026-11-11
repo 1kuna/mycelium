@@ -300,6 +300,9 @@ func fakeDockerGroupCommand(root string) func(context.Context, ...string) ([]byt
 			return nil, err
 		}
 		mode, _ := os.ReadFile(filepath.Join(root, "mode"))
+		if string(mode) == "down" {
+			return nil, errors.New("daemon refuses")
+		}
 		var out bytes.Buffer
 		if handled, err := fakeDockerNetwork(root, args, string(mode), &out); handled {
 			return out.Bytes(), err
@@ -324,13 +327,17 @@ func fakeDockerGroupCommand(root string) func(context.Context, ...string) ([]byt
 			}
 			return nil, os.WriteFile(filepath.Join(root, file), nil, 0600)
 		case "kill":
-			if args[1] == "--signal=KILL" {
+			if args[1] == "--signal=KILL" || string(mode) == "term" {
 				file := "running-" + args[2]
 				target := "stopped-" + args[2]
 				if args[2] == "id1" {
 					file, target = "running", "stopped"
 				}
-				return nil, os.Rename(filepath.Join(root, file), filepath.Join(root, target))
+				err := os.Rename(filepath.Join(root, file), filepath.Join(root, target))
+				if os.IsNotExist(err) {
+					return nil, nil // The simulated container has already exited.
+				}
+				return nil, err
 			}
 		default:
 			return nil, fmt.Errorf("unexpected fake group command: %v", args)
