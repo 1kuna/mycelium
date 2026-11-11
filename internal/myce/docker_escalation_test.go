@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"log"
 	"strings"
 	"testing"
@@ -118,7 +117,7 @@ func TestDockerEscalationLostOrFailedCleanup(t *testing.T) {
 func TestDockerEscalationSurvivesStopRequest(t *testing.T) {
 	q, c, j, m := dockerEscalationFixture(t)
 	m.DockerCleanup = "cleanup unconfirmed: create"
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previous)

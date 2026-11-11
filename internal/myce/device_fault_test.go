@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +14,7 @@ import (
 
 // #149: a kernel fault must fence only its card before another job can hang there.
 func TestDeviceFaultQuarantine(t *testing.T) {
-	var journal bytes.Buffer
+	var journal testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&journal)
 	t.Cleanup(func() { log.SetOutput(previous) })
@@ -161,7 +160,7 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 // #595/#300: the 2026-11-02 sequence. A fault 273 ms after TERM and 1 ms before
 // exit on the stopped card is teardown; a fault on an idle card still quarantines.
 func TestDeviceFaultTeardownClassification(t *testing.T) {
-	var journal bytes.Buffer
+	var journal testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&journal)
 	t.Cleanup(func() { log.SetOutput(previous) })
@@ -232,7 +231,7 @@ func TestDeviceFaultTeardownClassification(t *testing.T) {
 
 // #595: a failed kernel-log read is visible in worker and queue status.
 func TestDeviceFaultReadFailureReported(t *testing.T) {
-	var journal bytes.Buffer
+	var journal testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&journal)
 	t.Cleanup(func() { log.SetOutput(previous) })

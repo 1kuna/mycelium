@@ -35,7 +35,7 @@ func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
 	deadline := clock.Now().Add(ProductionStartTimeout)
 	s.StartBy = &deadline
 	j := submit(t, q, s)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })

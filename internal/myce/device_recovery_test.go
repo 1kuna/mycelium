@@ -22,7 +22,7 @@ func TestDeviceFaultAutoClear(t *testing.T) {
 	for _, scenario := range []string{"healthy", "new fault", "monitor gap", "escalated", "unknown core", "unknown memory", "permission denied", "probe exit", "unsupported memory", "healthy sibling memory", "different model", "faulted sibling", "sibling new fault", "sibling missing", "sibling failed", "target failed"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock := fixture(t)
-			var journal bytes.Buffer
+			var journal testLogBuffer
 			previous := log.Writer()
 			log.SetOutput(&journal)
 			t.Cleanup(func() { log.SetOutput(previous) })

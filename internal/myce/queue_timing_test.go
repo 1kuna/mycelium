@@ -7,15 +7,48 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Logging may outlive the control call that triggered admission capture.
+// Readers and resets must share a lock with writes, not just log.Logger's
+// writer lock. Keep the buffer private so snapshots cannot alias live bytes.
+type testLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *testLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *testLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *testLogBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *testLogBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
 
 // The writer checks the production logging boundary, not just the log text.
 type launchLogWriter struct {
 	q *Queue
 	t *testing.T
-	bytes.Buffer
+	testLogBuffer
 }
 
 func (w *launchLogWriter) Write(b []byte) (int, error) {
@@ -26,7 +59,7 @@ func (w *launchLogWriter) Write(b []byte) (int, error) {
 			w.q.mu.Unlock()
 		}
 	}
-	return w.Buffer.Write(b)
+	return w.testLogBuffer.Write(b)
 }
 
 func TestQueueMutexHoldTelemetry(t *testing.T) {

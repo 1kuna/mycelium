@@ -275,7 +275,7 @@ func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := marshalQueueState(t, q)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previous)
@@ -339,7 +339,7 @@ func TestEnrollmentReleaseStartupPreservesAdvancedApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	var output bytes.Buffer
+	var output testLogBuffer
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)

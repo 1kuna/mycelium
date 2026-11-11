@@ -176,7 +176,7 @@ func TestJobEnvironmentProxyAndCAVariables(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	droppedCredentialLogged.Clear()
-	var logs strings.Builder
+	var logs testLogBuffer
 	log.SetOutput(&logs)
 	defer log.SetOutput(os.Stderr)
 	s := nativeSpec(t)

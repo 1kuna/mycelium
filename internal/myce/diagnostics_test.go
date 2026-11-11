@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,7 +18,7 @@ import (
 
 func TestAPIRejectionDiagnostics(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -45,7 +44,7 @@ func TestRequestTimingObservationRefresh(t *testing.T) {
 
 func TestRequestTimingSlowHandler(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
@@ -105,7 +104,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 
 func TestRequestTimingRollingStatusAndFastSilence(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
@@ -226,7 +225,7 @@ func (w delayedRequestResponse) WriteHeader(status int) {
 
 func TestRequestTimingConnectRedirectPrivacy(t *testing.T) {
 	q, _ := fixture(t)
-	var logs bytes.Buffer
+	var logs testLogBuffer
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
