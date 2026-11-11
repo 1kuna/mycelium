@@ -40,6 +40,15 @@ func BenchmarkQueueMutexProjection(b *testing.B) {
 }
 
 func projectSpec(project string) Spec { s := spec("experiment"); s.Project = project; return s }
+
+// Admission evidence commits also account fair usage after API calls return.
+// Copy the record while holding the queue mutex, including in fake-clock tests.
+func testFairUsage(q *Queue, key string) FairUsage {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.s.FairUsage[key]
+}
+
 func TestFairSharingUsesClockAndExplains(t *testing.T) {
 	q, c := fixture(t)
 	a := submit(t, q, projectSpec("verso"))

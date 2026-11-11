@@ -22,9 +22,11 @@ func TestTierFairnessModelDispatchIgnoresIncompatibleUsage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	q.mu.Lock()
 	for project, seconds := range map[string]float64{"a": 60, "b": 10, "c": 1000} {
 		q.s.FairUsage[fairUsageKey("shared", "gpu", project)] = FairUsage{Seconds: seconds, At: clock.Now()}
 	}
+	q.mu.Unlock()
 	snapshot, err := q.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +41,8 @@ func TestTierFairnessModelDispatchIgnoresIncompatibleUsage(t *testing.T) {
 		t.Fatalf("status selected %s, want b=%s", selected, b.ID)
 	}
 	reportModel(t, q, m, "ready")
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if b.Machine != m.ID || a.Machine != "" || incompatible.Machine != "" {
 		t.Fatalf("status selected b, dispatch: a=%q b=%q incompatible=%q", a.Machine, b.Machine, incompatible.Machine)
 	}

@@ -15,9 +15,13 @@ func TestCandidateSetExclusionsKeepFairCompetitors(t *testing.T) {
 			spec := projectSpec(project)
 			spec.Needs.CPUCores = 1 + i%2
 			j := submit(t, q, spec)
+			q.mu.Lock()
 			q.s.FairUsage[q.fairKey(j.Spec)] = FairUsage{Seconds: map[string]float64{"a": 100, "b": 10, "c": 30}[project], At: clock.Now()}
+			q.mu.Unlock()
 		}
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	set := q.candidates(&m)
 	excluded := map[string]bool{}
 	for range 9 {

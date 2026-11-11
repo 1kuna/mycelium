@@ -67,11 +67,13 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 			// Force each possible initial tie winner without changing policy or
 			// elapsed service. Subsequent comparisons must repay the authored 3:1 share.
 			drainAdmissionWait(t, q)
+			q.mu.Lock()
 			for _, j := range q.liveJobs() {
 				if j.Spec.Project == first {
 					j.Front = 1
 				}
 			}
+			q.mu.Unlock()
 			counts := map[string]int{}
 			m := machine("one", "fake")
 			for turn := range 24 {
@@ -178,6 +180,8 @@ func TestTierFairnessWarmthCannotStarveColdProject(t *testing.T) {
 	cold.Class = "preview"
 	a := submit(t, q, warm)
 	b := submit(t, q, cold)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	m := machine("one", "fake")
 	m.Models = []string{"warm"}
 	q.s.Machines[m.ID] = &m
@@ -223,8 +227,10 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 	run := check(t, q, m, nil).Job
 	c.Advance(time.Second)
 	finish(t, q, run, true)
+	q.mu.RLock()
 	key := q.fairKey(a.Spec)
 	before := q.s.FairUsage[key].Seconds
+	q.mu.RUnlock()
 	if math.Abs(before-1) > 1e-9 {
 		t.Fatal(before)
 	}
@@ -233,10 +239,13 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	q = reopenTierQueue(t, q, c)
-	if got := q.s.FairUsage[key].Seconds; math.Abs(got-before/2) > 1e-9 {
+	q.mu.RLock()
+	got, version := q.s.FairUsage[key].Seconds, q.s.FairUsageVersion
+	q.mu.RUnlock()
+	if math.Abs(got-before/2) > 1e-9 {
 		t.Fatal("decay/restart", got, before)
 	}
-	if q.s.FairUsageVersion != 1 {
+	if version != 1 {
 		t.Fatal("version not persisted")
 	}
 	p := examplePriorityPolicy()
@@ -244,7 +253,10 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 	if _, err := q.SetPriorityPolicy(1, p); err != nil {
 		t.Fatal(err)
 	}
-	if q.fairKey(a.Spec) != key {
+	q.mu.RLock()
+	currentKey := q.fairKey(a.Spec)
+	q.mu.RUnlock()
+	if currentKey != key {
 		t.Fatal("history moved with tier index")
 	}
 	// Removing a tier leaves its usage inactive; reintroducing the same name keeps it.
@@ -252,6 +264,8 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 	if _, err := q.SetPriorityPolicy(2, p); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if q.s.FairUsage[key].Seconds == 0 || q.s.FairUsage[q.fairKey(a.Spec)].Seconds != 0 {
 		t.Fatal("tier history renamed or lost")
 	}
@@ -314,11 +328,15 @@ func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
 func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
 	t.Parallel()
 	q, c, m := modelFixture(t)
+	q.mu.Lock()
 	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Project: "atlas", Priority: "experiment", Machine: m.ID, Session: m.Session, State: "loading"}
+	q.mu.Unlock()
 	c.Advance(time.Second)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	key := fairUsageKey("experiment", "gpu", "atlas")
 	if got := q.s.FairUsage[key].Seconds; math.Abs(got-1) > 1e-9 {
 		t.Fatal("load accounting", got)
@@ -366,9 +384,11 @@ func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.
 		t.Fatal(err)
 	}
 	slot := &ModelSlot{Model: "test", Project: "verso", Priority: "experiment", Machine: m.ID, Session: m.Session, State: "ready", LastUsed: c.Now()}
+	q.mu.Lock()
 	q.s.ModelSlots[slotKey(m.ID, "test")] = slot
 	q.s.Machines[m.ID].FreeMemoryGB = 0
 	q.s.FairUsage[fairUsageKey("shared", "gpu", "verso")] = FairUsage{Seconds: 100, At: c.Now()}
+	q.mu.Unlock()
 	a := spec("production")
 	a.Project = "atlas"
 	batch := submit(t, q, a)
@@ -376,6 +396,8 @@ func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.
 	if err := q.addCall(call); err != nil {
 		t.Fatal(err)
 	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if slot.State != "draining" || call.Machine != "" {
 		t.Fatalf("warmth bypassed %s fair turn: slot=%s call=%s", batch.ID, slot.State, call.Machine)
 	}
@@ -387,6 +409,8 @@ func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.
 func TestTierFairnessIdleReclamationProtectsActiveAndHigherTiers(t *testing.T) {
 	t.Parallel()
 	q, _, m := modelFixture(t)
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	demand := projectSpec("atlas")
 	for _, tc := range []struct {
 		state, priority string
@@ -435,6 +459,8 @@ func TestTierFairnessCappedDemandDoesNotStopBackfill(t *testing.T) {
 	if job(t, q, low.ID).State != "running" || job(t, q, a.ID).State != "running" {
 		t.Fatal("capped demand interrupted useful work")
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if reason := q.capReason(q.s.Jobs[waiting.ID]); !strings.Contains(reason, "concurrent work cap") {
 		t.Fatal(reason)
 	}
