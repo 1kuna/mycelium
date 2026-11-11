@@ -270,7 +270,7 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
             warning = io.StringIO()
             with (patch.object(capacity, 'root', return_value=root),
                   patch.object(capacity, 'available_memory', return_value=64 * capacity.GIB),
-                  patch.object(capacity.time, 'sleep', side_effect=cleanup),
+                  patch.object(capacity, 'time', Mock(sleep=cleanup)),
                   contextlib.redirect_stderr(warning)):
                 run = capacity.acquire(root, mode='full', wait=True)
                 try:
