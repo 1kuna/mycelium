@@ -26,6 +26,9 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/signal_evidence.go'] = (
 # child-process launch and synthetic-probe boundary, including in quick mode.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)
 
+# `result recover` is dispatched through resultCommand; its dev regressions live there.
+SUPPLEMENTAL_CONSUMERS['cmd/myce/result_recover.go'] = ('result_test.go',)
+
 # PCI facts feed onboarding, worker inventory and backend descriptor dispatch.
 SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
     'device_detection_test.go', 'device_inventory_family_test.go',

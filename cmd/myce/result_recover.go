@@ -18,7 +18,7 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 	f := flag.NewFlagSet("result recover", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
-	root := f.String("files-from", "", "directory containing declared output names (local or mounted NAS)")
+	root := f.String("files-from", "", "directory containing declared outputs, with folders and globs expanded as on the worker (local or mounted NAS)")
 	key := f.String("key", "", "idempotency key; reuse only for identical evidence")
 	by := f.String("by", "", "requester label (operator assertion, not authentication)")
 	reason := f.String("reason", "", "why these bytes are being recovered")
@@ -59,7 +59,11 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 			return fail(err)
 		}
 		defer sourceRoot.Close()
-		for _, name := range plan.Outputs {
+		names, err := myce.ExpandOutputs(*root, plan.Outputs)
+		if err != nil {
+			return fail(err)
+		}
+		for _, name := range names {
 			selected[name] = filepath.FromSlash(name)
 		}
 	} else {
@@ -80,13 +84,7 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		if name == "." || !fs.ValidPath(name) || strings.ContainsAny(name, "\\:") {
 			return fail(errors.New("output names must be clean relative paths"))
 		}
-		declared := false
-		for _, output := range plan.Outputs {
-			if name == output {
-				declared = true
-			}
-		}
-		if !declared {
+		if !myce.OutputDeclared(plan.Outputs, name) {
 			return fail(errors.New("--file must name a declared output"))
 		}
 		lstat, open := os.Lstat, os.Open

@@ -367,6 +367,34 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 		if err = resultCommand(ctx, []string{j.ID, "--queue", tls.URL, "--token", c.Token, "--out", filepath.Join(root, "normal")}, io.Discard); err == nil {
 			t.Fatal("CLI silently promoted recovery")
 		}
+		// Recovery accepts the files folder and glob outputs expand to (#1341).
+		pj, err := c.SubmitAndWait(ctx, myce.Spec{Name: "recovery-patterns", Project: "demo", SubmissionKey: "recovery-patterns", Files: myce.FileManifest{"input": ref}, Outputs: map[string]string{"tree/": "results", "*.log": "results"}, Run: myce.RunSpec{Command: []string{"sh", "-c", "exit 1"}}, Needs: myce.ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: myce.Platform{Required: []string{"cpu"}}}})
+		if err != nil || pj.State != "failed" {
+			t.Fatalf("failed pattern attempt: %+v %v", pj, err)
+		}
+		patterns := t.TempDir()
+		for name, body := range map[string]string{"tree/a": "a", "tree/sub/b": "b", "x.log": "x", "skip.txt": "skip"} {
+			path := filepath.Join(patterns, filepath.FromSlash(name))
+			if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out = captureJoiningOutput(t, func() error {
+			return resultCommand(ctx, []string{"recover", pj.ID, "--queue", tls.URL, "--token", c.Token, "--files-from", patterns, "--key", "patterns", "--by", "owner", "--reason", "recover pattern outputs"}, io.Discard)
+		})
+		var expanded myce.RecoveredResult
+		if err = json.Unmarshal([]byte(out), &expanded); err != nil || len(expanded.Files) != 3 || expanded.Files["tree/sub/b"].SHA256 == "" || expanded.Files["x.log"].SHA256 == "" {
+			t.Fatalf("pattern recovery: %s %v", out, err)
+		}
+		if err = resultCommand(ctx, []string{"recover", pj.ID, "--queue", tls.URL, "--token", c.Token, "--key", "pattern-file", "--by", "owner", "--reason", "one expanded file", "--file", "tree/a=" + filepath.Join(patterns, "tree", "a")}, io.Discard); err != nil {
+			t.Fatal("expanded --file name refused:", err)
+		}
+		if err = resultCommand(ctx, []string{"recover", pj.ID, "--queue", tls.URL, "--token", c.Token, "--key", "pattern-undeclared", "--by", "owner", "--reason", "undeclared", "--file", "skip.txt=" + filepath.Join(patterns, "skip.txt")}, io.Discard); err == nil || !strings.Contains(err.Error(), "declared output") {
+			t.Fatal("undeclared --file accepted:", err)
+		}
 		for _, kind := range []string{"symlink", "fifo"} {
 			path := filepath.Join(root, kind)
 			if kind == "symlink" {

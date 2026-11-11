@@ -58,6 +58,26 @@ func validOutputDeclaration(decl string) bool {
 // and glob declarations.
 func ValidOutputDeclaration(decl string) bool { return validOutputDeclaration(decl) }
 
+// OutputDeclared reports whether a result file name belongs to one of the
+// declarations, so result recovery accepts files a folder or glob expands to.
+func OutputDeclared(decls []string, name string) bool {
+	return slices.ContainsFunc(decls, func(decl string) bool { return outputCovers(decl, name) })
+}
+
+// ExpandOutputs resolves declarations against dir exactly as a worker resolves
+// them against its workdir and returns the sorted file names.
+func ExpandOutputs(dir string, decls []string) ([]string, error) {
+	outputs := map[string]string{}
+	for _, decl := range decls {
+		outputs[decl] = ""
+	}
+	files, err := collectOutputFiles(dir, outputs, nil)
+	if err != nil {
+		return nil, err
+	}
+	return slices.Sorted(maps.Keys(files)), nil
+}
+
 func outputPatterns(outputs map[string]string) bool {
 	for decl := range outputs {
 		if kind, _ := outputKind(decl); kind != outputFile {
