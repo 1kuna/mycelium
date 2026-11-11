@@ -1084,6 +1084,13 @@ diagnostics, not retry charges: two starts and zero losses can include a planned
 requeue followed by one command failure. A launch refusal without an availability
 flag is still charged a loss under the existing retry rules.
 
+When the queue's own start fence (launch authorization, start placement or
+hand-off) refuses an attempt before its main command starts, the attempt is an
+admission requeue: its history entry has `admission_requeue: true` and no
+`interrupted`, the job's `starts` does not count it, and `admission_requeues`
+does. The attempt number stays spent, so the retry gets the next number and
+reports from the refused attempt are rejected as stale.
+
 Queue-driven cancellation and an assigned attempt's start-deadline expiry also
 record exact-attempt endings, without inventing a worker execution cause or
 physical-release evidence. Never-assigned jobs have no attempt entry. Late exact
@@ -1102,7 +1109,13 @@ uses that cause in its reason, without implying a worker restart. Actual fresh
 worker-session recovery retains its separate restart diagnostic. Authorization
 failures still consume the existing infrastructure retry/loss budget, except
 when the queue's start fence refused placement: that attempt requeues without a
-loss or retry charge. The queue log line `event=launch_placement_rejected`
+loss or retry charge. After Started authorization, that exemption needs the
+worker's `execution_evidence` for that exact attempt with `main: not_started`.
+A refusal with missing, `unknown`, `may_have_run` or other-attempt evidence is
+charged as an ordinary loss and infrastructure retry: the queue's refusal record
+names the fence predicate, not whether it refused main's gate or a helper's
+custody, and a helper gate can be refused after main started. Current workers
+send that evidence; older workers' post-Started refusals are charged. The queue log line `event=launch_placement_rejected`
 names the failed `predicate` (`disk_floor`, `machine_unavailable`,
 `preparation_stopping`, `execution_target`, `cpu_fit` or `placement_policy`).
 
@@ -2518,7 +2531,7 @@ require the matching client and queue release; they are not rollout evidence.
 ## Job findings
 
 Failed jobs, and queued or running jobs that Mycelium requeued after an
-infrastructure loss, carry one additive `finding` with `code`, `owner`, `what`
+infrastructure loss or a queue admission refusal, carry one additive `finding` with `code`, `owner`, `what`
 and `action`. `owner` is `job` (the command or its declaration), `mycelium`
 (host or queue infrastructure, not the job's fault) or `unknown` (no typed
 cause was recorded). `what` is one sentence of measured evidence and what
@@ -2533,7 +2546,8 @@ queue-owned reasons; they are never persisted and never copy worker text.
 Covered classes include output-contract failures after exit 0 (`output_*`),
 publication failures (`output_publication`), resource stops (`memory_limit`,
 `out_of_memory`, `memory_exceeds_hosts`, `wall_time_limit`, `disk_limit`),
-infrastructure requeues and exhaustion, launch failures (`library_missing`,
+infrastructure requeues and exhaustion, queue admission requeues before the
+command started (`queue_admission`, owner `mycelium`), launch failures (`library_missing`,
 `tools_missing`, `input_unavailable`, `launch_*`), upstream dependencies,
 nonzero exits and payload signals. A failure with no typed cause reports
 `cause_unknown` rather than a guess. Succeeded and cancelled jobs carry none;

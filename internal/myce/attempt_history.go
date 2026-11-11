@@ -29,6 +29,7 @@ type AttemptOutcome struct {
 	CleanupCause      *RuntimeCause           `json:"cleanup_cause,omitempty"`
 	Forced            bool                    `json:"forced,omitempty"`
 	Interrupted       bool                    `json:"interrupted,omitempty"`
+	AdmissionRequeue  bool                    `json:"admission_requeue,omitempty"`
 	OutOfMemory       bool                    `json:"out_of_memory,omitempty"`
 	PoliteStop        bool                    `json:"polite_stop,omitempty"`
 	OperatorStop      bool                    `json:"operator_stop,omitempty"`
