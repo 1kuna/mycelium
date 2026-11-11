@@ -408,12 +408,10 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 	t.Cleanup(func() {
 		_ = child.Process.Kill()
 		_ = child.Wait()
-		store, err := (Worker{StateDir: stateDir}).openStore()
-		if err == nil {
-			defer store.close()
-			if err = store.cleanupOrphan(RealClock{}); err != nil {
-				t.Error(err)
-			}
+		store := awaitCrashedWorkerStore(t, Worker{StateDir: stateDir})
+		defer store.close()
+		if err := store.cleanupOrphan(RealClock{}); err != nil {
+			t.Error(err)
 		}
 	})
 	nativeFile(t, nativeWorkerWork(t, stateDir), "ready")
@@ -421,6 +419,8 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 		t.Fatal(err)
 	}
 	_ = child.Wait()
+	store := awaitCrashedWorkerStore(t, Worker{StateDir: stateDir})
+	store.close()
 	if err := q.Leave("review-worker", true); err != nil {
 		t.Fatal(err)
 	}

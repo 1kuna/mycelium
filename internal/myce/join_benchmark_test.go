@@ -25,17 +25,21 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			}
 			registered := make(chan struct{})
 			admitted := make(chan struct{})
+			benchmarkEntered := make(chan struct{})
+			benchmarkRelease := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseBenchmark := func() { releaseOnce.Do(func() { close(benchmarkRelease) }) }
 			var registerOnce sync.Once
 			var once sync.Once
 			handler := API{Queue: q, Token: "test"}.Handler()
 			server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/workers/checkin" {
-					registerOnce.Do(func() { close(registered) })
-				}
 				handler.ServeHTTP(w, r)
 				snap, err := q.Snapshot()
-				if err == nil && len(snap.Machines) > 0 && !snap.Machines[0].BenchmarkPending {
-					once.Do(func() { close(admitted) })
+				if err == nil && len(snap.Machines) > 0 {
+					registerOnce.Do(func() { close(registered) })
+					if !snap.Machines[0].BenchmarkPending {
+						once.Do(func() { close(admitted) })
+					}
 				}
 			}))
 			defer server.Close()
@@ -43,6 +47,7 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			done := make(chan error, 1)
 			defer func() {
 				cancel()
+				releaseBenchmark()
 				if err := <-done; err != nil {
 					t.Error(err)
 				}
@@ -50,11 +55,17 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			var calls atomic.Int32
 			w := Worker{EnvironmentLimit: 1 << 30, InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: mode == "enabled", StateDir: root, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("dedicated", "xpu"), Interval: time.Millisecond,
 				OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
-				Benchmark: func(_ context.Context, _ BenchmarkConfig, p *CapabilityProfile) error {
+				Benchmark: func(ctx context.Context, _ BenchmarkConfig, p *CapabilityProfile) error {
 					calls.Add(1)
 					snap, _ := q.Snapshot()
 					if len(snap.Machines) != 1 || !snap.Machines[0].BenchmarkPending {
 						t.Error("benchmark ran without queue registration")
+					}
+					close(benchmarkEntered)
+					select {
+					case <-benchmarkRelease:
+					case <-ctx.Done():
+						return ctx.Err()
 					}
 					p.Onboarding = "measured; qualified reference replay"
 					p.Benchmark = &BenchmarkResult{State: "partial", Measurements: []Throughput{{Resource: "cpu", Rate: 100, Unit: "bytes/s"}, {Resource: "accelerator", Reason: "no qualified reference work"}}}
@@ -62,21 +73,28 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 				},
 			}
 			go func() { done <- w.Run(ctx) }()
-			// Joining's admission assertion starts at queue registration, after local
-			// profile/store/model-server startup, which this test does not measure.
-			select {
-			case <-registered:
-			case err := <-done:
-				done <- err // Cleanup still owns the worker join.
-				t.Fatalf("worker stopped before registration: %v", err)
-			case <-time.After(testWaitTimeout):
-				t.Fatal("worker never registered")
+			wait := func(signal <-chan struct{}, phase string) {
+				t.Helper()
+				select {
+				case <-signal:
+				case err := <-done:
+					done <- err // Cleanup still owns the worker join.
+					t.Fatalf("worker stopped before %s: %v", phase, err)
+				case <-time.After(testWaitTimeout):
+					t.Fatalf("worker never reached %s", phase)
+				}
 			}
-			select {
-			case <-admitted:
-			case <-time.After(2 * time.Second):
-				t.Fatal("join did not admit within two seconds")
+			wait(registered, "queue registration")
+			if mode == "enabled" {
+				wait(benchmarkEntered, "benchmark entry")
+				select {
+				case <-admitted:
+					t.Fatal("join admitted while benchmark was held")
+				default:
+				}
+				releaseBenchmark()
 			}
+			wait(admitted, "admission after benchmark release")
 			want := int32(0)
 			if mode == "enabled" {
 				want = 1
