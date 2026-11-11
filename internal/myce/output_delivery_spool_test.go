@@ -107,11 +107,20 @@ func TestOutputDeliverySpoolUsesManagedRetention(t *testing.T) {
 	// the deleted directory. A partial delete cannot strand the completion actor.
 	dataDir := filepath.Join(spool, "data")
 	if os.Geteuid() != 0 {
-		if err := os.Chmod(dataDir, 0500); err != nil {
+		// Retention can now repair owner-read-only directories. Deny reads to
+		// reproduce a genuine removal failure, including a deleted manifest.
+		if err := os.Chmod(dataDir, 0000); err != nil {
 			t.Fatal(err)
 		}
-		if err := workerRetention(store.dir, clock.Now(), testLogRetention); err == nil {
-			t.Fatal("read-only data did not reproduce partial deletion")
+		t.Cleanup(func() { _ = os.Chmod(dataDir, 0700) })
+		if err := os.RemoveAll(spool); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("unreadable data did not refuse removal: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(spool, "manifest.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("partial deletion retained manifest", err)
+		}
+		if err := workerRetention(store.dir, clock.Now(), testLogRetention); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("unreadable data did not refuse retention: %v", err)
 		}
 		if err := os.Chmod(dataDir, 0700); err != nil {
 			t.Fatal(err)
