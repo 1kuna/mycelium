@@ -62,7 +62,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		"alerts: 38 active in 3 kinds",
 		"efficiency/memory_prediction_relative_error ×18 since",
 		"recipe ×17 (gpu-a 8, gpu-b 5, mac-a 3, mac-b) since",
-		"22415 retained alerts",
+		"health notifier is not configured; 22415 alert openings or closings have no delivery acknowledgement",
 		"host gpu-b: degraded",
 		`hold host=mac-c: components are excluded from placement (set by operator; reason="storage faults"); next: myce exclude remove host=mac-c when the components should run work`,
 		"hypha gpu-a: cuda, 30.0 GiB free, hardware capability profile unavailable; host RAM 8.0 GiB for admission; running 3",
