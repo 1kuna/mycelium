@@ -9,9 +9,11 @@ import (
 
 // A worker's local extension library only grows: every prepared registration
 // stays and is reported on each heartbeat. Registrations with no job within the
-// retained-file window are dropped; a job that needs one again reinstalls it
-// from the queue registry and re-qualifies.
-const DefaultExtensionRetention = DefaultFileRetention
+// retained-job window are dropped; a job that needs one again reinstalls it
+// from the queue registry and re-qualifies. The job-record window (14 days),
+// not the 3-day file window, so work that runs weekly never re-qualifies
+// right before it is needed.
+const DefaultExtensionRetention = jobRecordRetention
 
 const extensionUseMarker = "last_used"
 
@@ -32,10 +34,6 @@ func extensionLastUse(root string, e Extension) time.Time {
 	if st, err := os.Stat(filepath.Join(root, "cache", e.Name, e.Version, extensionUseMarker)); err == nil {
 		return st.ModTime()
 	}
-	// Registrations installed before use markers existed age from install.
-	if st, err := os.Stat(extensionFolder(root, e)); err == nil {
-		return st.ModTime()
-	}
 	return time.Time{}
 }
 
@@ -50,7 +48,14 @@ func pruneUnusedExtensions(root string, now time.Time, window time.Duration) (re
 		return nil
 	}
 	for _, e := range extensions {
-		if now.Sub(extensionLastUse(root, e)) < window {
+		last := extensionLastUse(root, e)
+		if last.IsZero() {
+			// Installed before use markers existed: its last use is unknown, so it
+			// gets a full window from the first time this worker sees it.
+			touchExtensionUse(root, e, now)
+			continue
+		}
+		if now.Sub(last) < window {
 			continue
 		}
 		cache := filepath.Join(root, "cache", e.Name, e.Version)

@@ -51,3 +51,30 @@ func TestUnusedExtensionRegistrationExpires(t *testing.T) {
 		t.Fatalf("reported versions %v; want 2 (recently used) and 3 (in use), not 1", seen)
 	}
 }
+
+// A registration installed before use markers existed has an unknown last use.
+// It must not be pruned on the upgraded worker's first pass, because weekly
+// production work would then re-qualify right before it runs.
+func TestUnmarkedExtensionRegistrationGetsFullWindow(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}
+	root := t.TempDir()
+	e, err := extensionFromFiles(fakeExtension(t).Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallExtension(root, e); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(60 * 24 * time.Hour)
+	if removed := pruneUnusedExtensions(root, clock.Now(), DefaultExtensionRetention); len(removed) != 0 {
+		t.Fatalf("unmarked registration pruned on first sight: %v", removed)
+	}
+	clock.Advance(DefaultExtensionRetention - time.Hour)
+	if removed := pruneUnusedExtensions(root, clock.Now(), DefaultExtensionRetention); len(removed) != 0 {
+		t.Fatalf("unmarked registration pruned inside its window: %v", removed)
+	}
+	clock.Advance(2 * time.Hour)
+	if removed := pruneUnusedExtensions(root, clock.Now(), DefaultExtensionRetention); len(removed) != 1 {
+		t.Fatalf("unmarked registration not pruned after a full unused window: %v", removed)
+	}
+}
