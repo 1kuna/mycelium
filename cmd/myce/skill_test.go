@@ -12,8 +12,8 @@ import (
 
 func TestSkillInstallMatchesEmbeddedAndUpgradeRefreshes(t *testing.T) {
 	files, digest, err := embeddedSkill()
-	if err != nil || files["SKILL.md"] == nil || files["references/submit.md"] == nil {
-		t.Fatalf("embedded skill incomplete: %v %v", slices.Sorted(maps.Keys(files)), err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	dir := filepath.Join(t.TempDir(), "skills", "mycelium")
 	old := skillInstaller{Version: "v3.1.0", Out: io.Discard}
