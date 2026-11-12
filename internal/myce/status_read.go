@@ -826,6 +826,9 @@ func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...con
 		out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour), ctx)
 	}
 	trimStatusSections(&out, options)
+	if options != nil && !options.full {
+		out.Machines = dropReplacedStatusMachines(out.Machines) // History only.
+	}
 	if err == nil {
 		if options.includes("storage") {
 			out.FileStore = files.status(ctx)

@@ -179,7 +179,7 @@ func statusAlertGroups(conditions map[string]healthCondition) []StatusAlertGroup
 	return out
 }
 
-// A replaced per-card identity is history, not a host; the default omits it.
+// A replaced per-card identity is history, not a host; only --history shows it.
 func dropReplacedStatusMachines(machines []*Machine) []*Machine {
 	return slices.DeleteFunc(machines, func(m *Machine) bool { return m.Replacement != nil })
 }

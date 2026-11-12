@@ -249,8 +249,9 @@ In an existing project, Mycelium now does these; delete your own:
   isolation, models, inputs, checkpoints, placement restrictions.
 - [Waiting](references/waiting.md): holds, classes and preemption, device and
   storage holds, pausing, production leases.
-- [Wait and status](references/wait-and-status.md): batch waits, status,
-  stalled queues, observers, progress.
+- [Wait and status](references/wait-and-status.md): batch waits, status
+  (host RAM is `host_memory`; older RAM fields are deprecated), stalled queues,
+  observers, progress.
 - [Results](references/results.md): output failures, diagnostics, large outputs.
 - [Setup](setup-project.md), [harness](harness-binding.md) and
   [T3 binding](t3-binding.md): adoption, skill install, notifiers.

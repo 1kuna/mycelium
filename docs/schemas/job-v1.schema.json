@@ -3766,8 +3766,7 @@
         "state",
         "attempt",
         "queued",
-        "front",
-        "checkpoint"
+        "front"
       ],
       "type": "object"
     },
@@ -4927,8 +4926,7 @@
         "host_constraint",
         "device_constraint",
         "environment",
-        "qualification",
-        "parity"
+        "qualification"
       ],
       "type": "object"
     },

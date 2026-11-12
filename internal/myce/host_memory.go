@@ -88,6 +88,7 @@ func (q *Queue) refreshHostMemory() {
 		ledger.ObservedAt, ledger.AvailableKnown = observedAt, availableKnown
 		ledger.SignedRoomGB, ledger.DebtGB, ledger.FreeGB = room, m.hostReservationDebtGB, m.FreeHostMemoryGB
 		q.hostMemoryLedgers[m.ID] = ledger
+		m.HostMemory = q.hostMemoryTerms(m)
 	}
 }
 

@@ -260,6 +260,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"list":               stringsList,
 	"lostMachines":       lostMachines,
 	"machineJobs":        machineJobs,
+	"deviceMemoryInUse":  deviceMemoryInUse,
 	"machineModels":      machineModels,
 	"machinePins":        machinePins,
 	"recentFinishedJobs": recentFinishedJobs,
@@ -314,12 +315,13 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
           <div class="metric"><span class="label">Admitted</span><strong>{{.EffectiveCPUCores}} cores</strong></div>
         </div>{{else}}
         <div class="metrics" aria-label="GPU memory">
-          <div class="metric"><span class="label">Unavailable for admission</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
+          <div class="metric"><span class="label">Unavailable for admission</span><strong>{{printf "%.1f" (deviceMemoryInUse .)}} GB</strong></div>
           <div class="metric"><span class="label">Free</span><strong>{{printf "%.1f" .FreeMemoryGB}} GB</strong></div>
 	          <div class="metric"><span class="label">Reserved</span><strong>{{printf "%.1f" .ReservedMemoryGB}} GB</strong></div>
         </div>
         {{end}}
-        {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host allowance (last reported): {{.HostMemoryAllowanceBytes}} bytes (UNQUALIFIED)</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget (last reported): {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
+        {{with .HostMemory}}<div class="detail"><div class="label">Host RAM</div><div class="value">capacity {{printf "%.1f" .CapacityGB}} · charged {{printf "%.1f" .ChargedGB}} · room {{printf "%.1f" .RoomGB}} GiB</div></div>{{end}}
+        {{if or .MemoryEnforcement .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if and .HostMemoryBudgetGB (not .EffectiveHostMemoryBudgetGB)}}<div>Host ceiling budget (last reported): {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
         <div class="detail"><div class="label">Capability profile</div><div class="value">{{range profileLines .}}<div>{{.}}</div>{{end}}</div></div>
         <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>
@@ -407,3 +409,6 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 </script>
 </body>
 </html>`))
+
+// deviceMemoryInUse is accelerator memory unavailable for admission.
+func deviceMemoryInUse(m *Machine) float64 { return max(0, m.TotalMemoryGB-m.FreeMemoryGB) }

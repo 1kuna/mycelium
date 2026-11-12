@@ -604,7 +604,7 @@ type Job struct {
 	Front                 int64                        `json:"front"`
 	StopAt                *time.Time                   `json:"stop_at,omitempty"`
 	Reason                string                       `json:"reason,omitempty"`
-	Checkpoint            string                       `json:"checkpoint"`
+	Checkpoint            string                       `json:"checkpoint,omitempty"`
 	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
 }
 type Machine struct {
@@ -662,13 +662,14 @@ type Machine struct {
 	CPUExtensionFingerprint     string                `json:"cpu_extension_fingerprint,omitempty"`
 	ExtensionFingerprint        string                `json:"extension_fingerprint,omitempty"`
 	ExtensionReports            []ExtensionReport     `json:"extension_reports,omitempty"`
-	HostMemoryAllowanceBytes    int64                 `json:"memory_allowance_bytes,omitempty"`
+	HostMemory                  *HostMemoryTerms      `json:"host_memory,omitempty"`            // Status-only: the one memory rule's terms.
+	HostMemoryAllowanceBytes    int64                 `json:"memory_allowance_bytes,omitempty"` // Deprecated in status (host_memory); see docs/status.md.
 	HostMemoryQualification     string                `json:"memory_allowance_qualification,omitempty"`
 	HostMemoryPolicyMismatch    bool                  `json:"host_memory_policy_mismatch,omitempty"`
 	HostMemoryBudgetMeasured    bool                  `json:"host_memory_budget_measured,omitempty"`
 	HostMemoryDerivation        *HostMemoryDerivation `json:"host_memory_derivation,omitempty"`
-	EffectiveHostMemoryBudgetGB float64               `json:"effective_host_memory_budget_gb,omitempty"`
-	HostMemoryInUseGB           float64               `json:"host_memory_in_use_gb,omitempty"`
+	EffectiveHostMemoryBudgetGB float64               `json:"effective_host_memory_budget_gb,omitempty"` // Deprecated in status (host_memory).
+	HostMemoryInUseGB           float64               `json:"host_memory_in_use_gb,omitempty"`           // Deprecated in status (host_memory.charged_gb).
 	modelReservationDebtGB      float64               // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
 	hostReservationDebtGB       float64               // Same deficit for the shared host allowance.
 	MemoryEnforcement           string                `json:"memory_enforcement,omitempty"`
@@ -678,14 +679,14 @@ type Machine struct {
 	Disabled                    string                `json:"disabled,omitempty"`    // Status-only queue maintenance projection.
 	LastResort                  bool                  `json:"last_resort,omitempty"` // Status-only queue placement policy.
 	HostID                      string                `json:"host_id,omitempty"`
-	HostAvailableMemoryGB       float64               `json:"host_available_memory_gb"`
-	FreeHostMemoryGB            float64               `json:"free_host_memory_gb"`
+	HostAvailableMemoryGB       float64               `json:"host_available_memory_gb"`      // Check-in reading; deprecated in status (host_memory).
+	FreeHostMemoryGB            float64               `json:"free_host_memory_gb,omitempty"` // Deprecated in status (host_memory.room_gb).
 	HostMemoryMeasured          bool                  `json:"host_memory_measured,omitempty"`
 	HostMemoryError             string                `json:"host_memory_error,omitempty"`
 	UnifiedMemory               bool                  `json:"unified_memory,omitempty"`
-	MemoryUsedGB                float64               `json:"memory_used_gb"`
+	MemoryUsedGB                float64               `json:"memory_used_gb,omitempty"` // Worker-reported accelerator use; status omits it (total − free).
 	TotalMemoryGB               float64               `json:"total_memory_gb"`
-	ReservedMemoryGB            float64               `json:"reserved_memory_gb"`
+	ReservedMemoryGB            float64               `json:"reserved_memory_gb,omitempty"`
 	Device                      string                `json:"device,omitempty"`
 	EnvironmentBuilder          bool                  `json:"environment_builder,omitempty"`
 	EnvironmentReports          []EnvironmentReport   `json:"environment_reports,omitempty"`
@@ -702,7 +703,7 @@ type Machine struct {
 	ModelConfigHash             string                `json:"model_config_hash,omitempty"`
 	ModelURL                    string                `json:"model_url,omitempty"`
 	UnavailableRoots            []UnavailableRoot     `json:"unavailable_roots,omitempty"`
-	CheckpointUnavailable       bool                  `json:"checkpoint_unavailable"`
+	CheckpointUnavailable       bool                  `json:"checkpoint_unavailable,omitempty"`
 	ID                          string                `json:"id"`
 	Session                     string                `json:"session"`
 	GPU                         string                `json:"gpu"`
@@ -710,8 +711,8 @@ type Machine struct {
 	Models                      []string              `json:"models,omitempty"`
 	Environments                []string              `json:"environments,omitempty"`
 	LastSeen                    time.Time             `json:"last_seen"`
-	Leaving                     bool                  `json:"leaving"`
-	Gone                        bool                  `json:"gone"`
+	Leaving                     bool                  `json:"leaving,omitempty"`
+	Gone                        bool                  `json:"gone,omitempty"`
 
 	// Explicit per-local_source tri-state; omission never authorizes use.
 	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`
@@ -723,6 +724,18 @@ type Machine struct {
 	groupFloorGB float64    // Work this size fits on fewer cards; never spread it.
 	batchTenants int        // Batch attempts holding this card view (#538).
 }
+
+// HostMemoryTerms is the one memory rule for a target (#990, #1366):
+// room = capacity − Σ charge. Capacity is the smaller arm the rule admits
+// within: the live reading less its margin plus Mycelium's own resident use
+// (which that reading already excludes), or the enforced allowance. Room is
+// signed; below zero is debt. Status-only and recomputed on every read.
+type HostMemoryTerms struct {
+	CapacityGB float64 `json:"capacity_gb"`
+	ChargedGB  float64 `json:"charged_gb"`
+	RoomGB     float64 `json:"room_gb"`
+}
+
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`
 	ID       string `json:"id"`

@@ -19,7 +19,8 @@ type PlacementIntent struct {
 	PreferredBackends   []string          `json:"preferred_backends,omitempty"`
 	Environment         PlacementCoverage `json:"environment"`
 	Qualification       string            `json:"qualification"`
-	Parity              string            `json:"parity"`
+	// Parity is set only where a path records it; absent means unknown.
+	Parity string `json:"parity,omitempty"`
 }
 
 type PlacementCoverage struct {
@@ -71,7 +72,7 @@ func placementTargets(values []ExecutionTarget) []ExecutionTarget {
 }
 
 func submissionPlacementIntent(s Spec, j *Job) *PlacementIntent {
-	p := &PlacementIntent{Origin: "authored", Scope: "work_resources", HostConstraint: "none", DeviceConstraint: "none", Targets: placementTargets(s.Targets), RequiredBackends: placementStrings(s.Needs.Platform.Required), PreferredBackends: placementStrings(s.Needs.Platform.Preferred), Qualification: "not_requested", Parity: "unknown"}
+	p := &PlacementIntent{Origin: "authored", Scope: "work_resources", HostConstraint: "none", DeviceConstraint: "none", Targets: placementTargets(s.Targets), RequiredBackends: placementStrings(s.Needs.Platform.Required), PreferredBackends: placementStrings(s.Needs.Platform.Preferred), Qualification: "not_requested"}
 	if len(p.Targets) > 0 || len(p.RequiredBackends) > 0 {
 		p.Scope = "platform_constraints"
 	}
@@ -210,7 +211,7 @@ func (q *Queue) recordPlacementDecision(j *Job, m *Machine) {
 
 func placementStatus(j *Job) {
 	if j.PlacementIntent == nil {
-		j.PlacementIntent = &PlacementIntent{Origin: "unknown", Scope: "unknown", HostConstraint: "unknown", DeviceConstraint: "unknown", Environment: PlacementCoverage{Origin: "unknown", State: "unknown"}, Qualification: "unknown", Parity: "unknown"}
+		j.PlacementIntent = &PlacementIntent{Origin: "unknown", Scope: "unknown", HostConstraint: "unknown", DeviceConstraint: "unknown", Environment: PlacementCoverage{Origin: "unknown", State: "unknown"}, Qualification: "unknown"}
 	}
 	j.ProductionBinding = nil
 	if j.ProductionHost != "" {

@@ -35,7 +35,13 @@ project and reason with their `ids`. Full job objects need
 
 - `myce status --sections jobs,machines` adds detailed diagnostics;
   `--sections work,storage,health,efficiency,usage,diagnostics` selects retained
-  collections. Python: `client.status(sections="work,storage")`.
+  collections. Python: `client.status(sections="work,storage")`. A machine's
+  host RAM is `host_memory`: `capacity_gb`, `charged_gb`, `room_gb` (room =
+  capacity − charged; negative is debt). `free_host_memory_gb`,
+  `host_memory_in_use_gb`, `host_available_memory_gb`,
+  `effective_host_memory_budget_gb` and `memory_allowance_bytes` are deprecated
+  and leave status next release. Replaced worker identities appear only in
+  `--history`.
 - `myce status --jobs all --limit N --before CURSOR --json` pages history;
   Python `client.list()` walks the pages.
 - `myce status --history`, `GET /api/status?detail=full` or

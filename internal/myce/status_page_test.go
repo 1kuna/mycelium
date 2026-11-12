@@ -20,7 +20,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		DockerCleanup:      "cleanup unconfirmed: start",
 		GPU:                "cuda",
 		Device:             "0",
-		MemoryUsedGB:       21.5,
+		TotalMemoryGB:      60, // 21.5 GiB in use.
 		FreeMemoryGB:       38.5,
 		ReservedMemoryGB:   4,
 		CachedModels:       []string{"qwen"},
@@ -213,8 +213,9 @@ func TestStatusPageStoppedWorkerBudgetIsLastReported(t *testing.T) {
 	for _, effective := range []bool{false, true} {
 		m := &Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
 		if effective {
+			// The queue's allowance is part of the rule's capacity term.
 			m.EffectiveHostMemoryBudgetGB = 22
-			m.HostMemoryAllowanceBytes = 22 << 30
+			m.HostMemory = &HostMemoryTerms{CapacityGB: 22, ChargedGB: 4, RoomGB: 18}
 		}
 		var b bytes.Buffer
 		if err := statusPage.Execute(&b, Snapshot{Machines: []*Machine{m}}); err != nil {
@@ -222,9 +223,9 @@ func TestStatusPageStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		}
 		want := "Host ceiling budget (last reported): 22 GiB"
 		if effective {
-			want = "Host allowance (last reported): 23622320128 bytes (UNQUALIFIED)"
+			want = "capacity 22.0 · charged 4.0 · room 18.0 GiB"
 		}
-		if !strings.Contains(b.String(), want) {
+		if !strings.Contains(b.String(), want) || effective && strings.Contains(b.String(), "ceiling budget") {
 			t.Fatal(b.String())
 		}
 	}

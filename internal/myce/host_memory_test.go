@@ -34,6 +34,16 @@ func TestHostMemorySharedWorkers(t *testing.T) {
 	if !strings.Contains(job(t, q, second.ID).Reason, "RAM") {
 		t.Fatal("missing RAM wait reason")
 	}
+	// Status reports the rule's three terms on each card of the shared host.
+	snapshot, err := q.snapshot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range snapshot.Machines {
+		if m.HostMemory == nil || *m.HostMemory != (HostMemoryTerms{CapacityGB: 12, ChargedGB: 10, RoomGB: 2}) {
+			t.Fatalf("%s host memory terms: %+v", m.ID, m.HostMemory)
+		}
+	}
 	finish(t, q, r.Job, true)
 	if r := check(t, q, b, nil); r.Job == nil {
 		t.Fatal("completed reservation not released")
@@ -436,7 +446,7 @@ func TestHostMemoryPressureStatusAdmissionAgreement(t *testing.T) {
 		t.Fatal(snapshot.Machines)
 	}
 	observed := snapshot.Machines[0]
-	if observed.HostAvailableMemoryGB != 3 || observed.HostMemoryInUseGB != 0 || observed.FreeHostMemoryGB != 3 {
+	if observed.HostAvailableMemoryGB != 3 || observed.HostMemory == nil || *observed.HostMemory != (HostMemoryTerms{CapacityGB: 3, RoomGB: 3}) {
 		t.Fatalf("live/reserved projection: %+v", observed)
 	}
 	var held *Job
