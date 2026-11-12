@@ -335,6 +335,21 @@ attempts and one batch attempt per GPU concurrently within the shared ledger. Sa
 to rebalance usage: a single indefinite allocation can occupy a scarce device
 indefinitely. Strict higher tiers can starve lower ones.
 
+**Maintenance resumes.** Work Mycelium stopped for its own maintenance (host or
+device maintenance with `--stop`, or a critical update) was running ahead of
+everything still queued, so it keeps that place. Until its resumed attempt
+starts it ranks ahead of its tier's other queued work, fair turn included;
+among such resumes, the earliest first submission goes first. Higher tiers still
+outrank it and production still preempts it. Its host drains toward it: the
+backfill fence projects the release of every finite batch attempt on the host,
+including accelerator work, and later work of its tier or lower may use only
+the host RAM and cores beyond its need, never its card. The exception is work
+expected to finish before the resume could start anyway: its `wall_time`, or
+else the last accepted duration of the same work, ends no later than the
+projected point at which enough running attempts have finished for the resume
+to fit. Running attempts are never stopped for it, and when an attempt it needs
+has no bound or measurement, nothing backfills past it.
+
 ## Sharing GPUs and measuring the pool
 
 Projects in the same owner-configured tier share available GPU time, including

@@ -560,7 +560,11 @@ type Job struct {
 	OutputFiles           map[string]string        `json:"output_files,omitempty"`
 	ReleaseConfirmed      bool                     `json:"release_confirmed,omitempty"`
 	RequeuedByOperator    bool                     `json:"requeued_by_operator,omitempty"`
-	LastStopOutcome       string                   `json:"last_stop_outcome,omitempty"`
+	// MaintenanceResume is when Mycelium's own maintenance (host or device
+	// maintenance, a rollout drain or a critical update) stopped the attempt
+	// this queued job resumes. Cleared when the resumed attempt starts.
+	MaintenanceResume *time.Time `json:"maintenance_resume,omitempty"`
+	LastStopOutcome   string     `json:"last_stop_outcome,omitempty"`
 
 	PreemptionPlacement   *PreemptionPlacement         `json:"preemption_placement,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
