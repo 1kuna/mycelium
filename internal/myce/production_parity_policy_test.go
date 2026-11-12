@@ -165,7 +165,7 @@ func TestProductionParityPolicyRejectsUnknownHosts(t *testing.T) {
 			record.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"unknown-host"}}}
 			var err error
 			if entry == "parity add" {
-				_, err = q.AddParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: "unknown-host", Evidence: "job"})
+				_, err = q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Host: "unknown-host", Evidence: "job"})
 			} else {
 				err = q.ConfigureProjects(record.Policy.Projects)
 			}

@@ -113,29 +113,7 @@ func validParityWork(work string) bool {
 	return (prefix == "kind" || prefix == "program" || prefix == "extension") && strings.TrimSpace(name) != "" && work == strings.TrimSpace(work)
 }
 
-// hostViews are the CPU and accelerator views of a physical host's live
-// machines, without reservations.
-func (q *Queue) hostViews(host string) []*Machine {
-	var views []*Machine
-	for _, id := range slices.Sorted(maps.Keys(q.s.Machines)) {
-		m := q.s.Machines[id]
-		if m.Replacement != nil || hostID(m) != host {
-			continue
-		}
-		if m.Devices == nil {
-			views = append(views, m)
-			continue
-		}
-		views = append(views, cpuMachineView(m))
-		for _, d := range m.Devices {
-			view := d.machine(*m)
-			views = append(views, &view)
-		}
-	}
-	return views
-}
-
-// workVariants reports whether registered extensions provide work through
+// workRunsAs reports whether registered extensions provide work through
 // declared variants, and whether any of them runs as target t. Unknown work
 // runs anywhere, so conversion keeps every kind for it.
 func (q *Queue) workRunsAs(work string, t ExecutionTarget) (variants, runs bool) {
@@ -350,15 +328,6 @@ func (q *Queue) parityApproved(j *Job, m *Machine) (approved, configured bool) {
 func (q *Queue) productionParityAllowed(j *Job, m *Machine) bool {
 	approved, configured := q.parityApproved(j, m)
 	return !configured || approved
-}
-
-// productionParityHostAllowed admits a physical host when any of its views
-// is an approved kind for this job.
-func (q *Queue) productionParityHostAllowed(j *Job, host string) bool {
-	if _, configured := q.parityApprovals(j.Spec.Project, j.Spec.workType()); !configured {
-		return true
-	}
-	return slices.ContainsFunc(q.hostViews(host), func(v *Machine) bool { return q.productionParityAllowed(j, v) })
 }
 
 // mirrorProjectParity writes the hosts the kind approvals currently admit into
