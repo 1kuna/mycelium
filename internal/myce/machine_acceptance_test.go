@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -177,64 +178,68 @@ func TestM3UnifiedMemoryDebtAndDeterminism(t *testing.T) {
 	q.mu.Unlock()
 }
 
+// The wrong-session read waits out the event long-poll; synctest makes that
+// five-second timer virtual. The handler runs in memory through a recorder.
 func TestM3StopEventsCoverMachineSession(t *testing.T) {
-	q, clock := fixture(t)
-	m := m3Machine()
-	submit(t, q, m3Spec("experiment", "0", 1, 1))
-	a := assignedJob(machineCheck(t, q, m))
-	submit(t, q, m3Spec("experiment", "1", 1, 1))
-	b := assignedJob(machineCheck(t, q, m, a))
-	if a == nil || b == nil {
-		t.Fatal("missing concurrent attempts")
-	}
-	demand := &Job{ID: "event-production", Spec: spec("production")}
-	q.stopBatchFor(q.s.Jobs[a.ID], demand)
-	if err := q.Cancel(b.ID); err != nil {
-		t.Fatal(err)
-	}
-	read := func(session string) WorkerEvent {
-		r := httptest.NewRequest("GET", "/api/workers/"+m.ID+"/events?session="+session, nil)
-		r.Header.Set("Authorization", "Bearer test")
-		r.Header.Set("X-Myce-Start-Gate", startGateProtocol)
-		w := httptest.NewRecorder()
-		API{q, "test"}.Handler().ServeHTTP(w, r)
-		var e WorkerEvent
-		if err := json.Unmarshal(w.Body.Bytes(), &e); err != nil {
+	synctest.Test(t, func(t *testing.T) {
+		q, clock := fixture(t)
+		m := m3Machine()
+		submit(t, q, m3Spec("experiment", "0", 1, 1))
+		a := assignedJob(machineCheck(t, q, m))
+		submit(t, q, m3Spec("experiment", "1", 1, 1))
+		b := assignedJob(machineCheck(t, q, m, a))
+		if a == nil || b == nil {
+			t.Fatal("missing concurrent attempts")
+		}
+		demand := &Job{ID: "event-production", Spec: spec("production")}
+		q.stopBatchFor(q.s.Jobs[a.ID], demand)
+		if err := q.Cancel(b.ID); err != nil {
 			t.Fatal(err)
 		}
-		return e
-	}
-	e := read(m.Session)
-	if len(e.Events) != 2 || e.Events[0].Session != m.Session || e.Events[1].Session != m.Session {
-		t.Fatal("stop starvation", e)
-	}
-	for _, event := range e.Events {
-		if event.ID == a.ID {
-			if event.PriorityStop == nil || event.PriorityStop.Demand != demand.ID {
-				t.Fatal("event omitted priority stop provenance", event)
+		read := func(session string) WorkerEvent {
+			r := httptest.NewRequest("GET", "/api/workers/"+m.ID+"/events?session="+session, nil)
+			r.Header.Set("Authorization", "Bearer test")
+			r.Header.Set("X-Myce-Start-Gate", startGateProtocol)
+			w := httptest.NewRecorder()
+			API{q, "test"}.Handler().ServeHTTP(w, r)
+			var e WorkerEvent
+			if err := json.Unmarshal(w.Body.Bytes(), &e); err != nil {
+				t.Fatal(err)
 			}
-			store := &workerStore{dir: t.TempDir(), state: workerState{Identity: a.ID}}
-			p := &process{job: *a, savePriorityStop: store.priorityStopRecorder()}
-			control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(*a): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(*a): event}}
-			control.apply()
-			if p.priorityStop == nil || p.priorityStop.Demand != demand.ID {
-				t.Fatal("event did not record intent before delivery")
-			}
-			if err := store.restorePriorityStop(); err != nil || store.state.PriorityStop == nil || store.state.PriorityStop.Demand != demand.ID {
-				t.Fatal("event did not retain durable exact-attempt intent", err)
+			return e
+		}
+		e := read(m.Session)
+		if len(e.Events) != 2 || e.Events[0].Session != m.Session || e.Events[1].Session != m.Session {
+			t.Fatal("stop starvation", e)
+		}
+		for _, event := range e.Events {
+			if event.ID == a.ID {
+				if event.PriorityStop == nil || event.PriorityStop.Demand != demand.ID {
+					t.Fatal("event omitted priority stop provenance", event)
+				}
+				store := &workerStore{dir: t.TempDir(), state: workerState{Identity: a.ID}}
+				p := &process{job: *a, savePriorityStop: store.priorityStopRecorder()}
+				control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(*a): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(*a): event}}
+				control.apply()
+				if p.priorityStop == nil || p.priorityStop.Demand != demand.ID {
+					t.Fatal("event did not record intent before delivery")
+				}
+				if err := store.restorePriorityStop(); err != nil || store.state.PriorityStop == nil || store.state.PriorityStop.Demand != demand.ID {
+					t.Fatal("event did not retain durable exact-attempt intent", err)
+				}
 			}
 		}
-	}
-	if again := read(m.Session); again.Cursor != e.Cursor {
-		t.Fatal("unstable cursor")
-	}
-	clock.Advance(StopGrace + time.Second)
-	if kill := read(m.Session); kill.Cursor == e.Cursor || !kill.Events[0].Kill || !kill.Events[1].Kill {
-		t.Fatal("kill transition", kill)
-	}
-	if wrong := read("other-session"); len(wrong.Events) != 0 || wrong.ID != "" {
-		t.Fatal("session fence", wrong)
-	}
+		if again := read(m.Session); again.Cursor != e.Cursor {
+			t.Fatal("unstable cursor")
+		}
+		clock.Advance(StopGrace + time.Second)
+		if kill := read(m.Session); kill.Cursor == e.Cursor || !kill.Events[0].Kill || !kill.Events[1].Kill {
+			t.Fatal("kill transition", kill)
+		}
+		if wrong := read("other-session"); len(wrong.Events) != 0 || wrong.ID != "" {
+			t.Fatal("session fence", wrong)
+		}
+	})
 }
 
 func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {

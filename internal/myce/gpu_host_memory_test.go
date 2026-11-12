@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -79,318 +81,321 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 	for _, mode := range []string{"complete", "b70 212 KiB", "b70 startup pages", "host PSI", "cgroup PSI", "host avg10 only", "cgroup avg10 only", "host PSI reset", "cgroup PSI reset", "invalid window", "low available", "missing host PSI", "missing cgroup PSI", "host PSI total", "cgroup PSI total", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
 		t.Run(mode, func(t *testing.T) {
-			clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
-			c := fakeCeilings(t)
-			c.clock = clock
-			if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 0\nkernel 0\nshmem 0\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			a, err := c.create("attempt-xe", 16<<30, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			a.pageSize = 4096 // Fixture kernel pages, independent of the test host.
-			proc := t.TempDir()
-			put := func(p, v string) {
-				t.Helper()
-				p = filepath.Join(proc, p)
-				if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			// Sampler tickers and finish bounds run on synctest time.
+			synctest.Test(t, func(t *testing.T) {
+				clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
+				c := fakeCeilings(t)
+				c.clock = clock
+				if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 0\nkernel 0\nshmem 0\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(p, []byte(v), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
-			if strings.HasPrefix(mode, "b70 ") || strings.HasSuffix(mode, "PSI total") {
-				// The issue's carried swap baseline is 2,069,843,968 bytes.
-				put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
-			}
-			put("vmstat", "oom_kill 3\npswpout 100\n")
-			put("pressure/memory", "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
-			a.fs = gpuHostFS{memoryFS: a.fs, proc: proc}
-			a.hostBaseline, err = readGPUHostState(a.fs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
-			if mode == "missing host field" {
-				put("meminfo", "MemAvailable: 15000000 kB\n")
-			}
-			if mode == "swap growth" {
-				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6257536 kB\n") // +128 MiB
-			}
-			if mode == "host OOM" {
-				put("vmstat", "oom_kill 4\npswpout 100\n")
-			}
-			if mode == "swap churn" {
-				put("vmstat", "oom_kill 3\npswpout 32868\n") // 128 MiB out, even with flat swap used.
-			}
-			if mode == "b70 212 KiB" || strings.HasSuffix(mode, "PSI total") {
-				// #303 incident: 212 KiB growth, 23 pages out, >=17.8 GiB
-				// MemAvailable, zero attempt swap/events. Carried swap is baseline.
-				put("meminfo", "MemAvailable: 18664653 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367064 kB\n")
-				put("vmstat", "oom_kill 3\npswpout 123\n")
-				for _, name := range []string{"memory.swap.current", "memory.swap.peak"} {
-					if err := os.WriteFile(filepath.Join(a.path, name), []byte("0\n"), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			if strings.HasSuffix(mode, "PSI total") {
-				// Review reproduction: 200 ms stalled while avg10 is still zero.
-				if mode == "host PSI total" {
-					put("pressure/memory", "some avg10=0.00 avg60=0.00 avg300=0.00 total=200000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=200000\n")
-				} else if err := os.WriteFile(filepath.Join(a.path, "memory.pressure"), []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=200000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=200000\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "b70 startup pages" {
-				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
-				put("vmstat", "oom_kill 3\npswpout 102\n")
-			}
-			if mode == "host PSI" {
-				put("pressure/memory", "some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n")
-			}
-			if mode == "cgroup PSI" {
-				if err := os.WriteFile(filepath.Join(a.path, "memory.pressure"), []byte("some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if strings.HasSuffix(mode, "avg10 only") {
-				// #487: avg10=1.44% but only 120 us / 200 ms = 0.06% stalls.
-				psi := "some avg10=1.44 avg60=0.00 avg300=0.00 total=120\nfull avg10=1.44 avg60=0.00 avg300=0.00 total=120\n"
-				if mode == "host avg10 only" {
-					put("pressure/memory", psi)
-				} else {
-					memoryFactsFile(t, a, "memory.pressure", psi)
-				}
-			}
-			if mode == "low available" {
-				put("meminfo", "MemAvailable: 131072 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
-			}
-			if mode == "missing host PSI" {
-				put("pressure/memory", "some avg10=unknown\n")
-			}
-			if mode == "missing cgroup PSI" {
-				if err := os.Remove(filepath.Join(a.path, "memory.pressure")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			raw := xeHostFD("7", "0000:03:00.0", 83176)
-			if mode == "missing driver field" {
-				raw = strings.ReplaceAll(raw, "drm-total-system: 0\n", "")
-			}
-			put("7/fdinfo/3", raw)
-			put("7/fdinfo/4", raw)
-			// A second process inherits that client. A client on the other card also
-			// consumes host RAM and must be included, even though not selected.
-			put("8/fdinfo/3", raw)
-			put("8/fdinfo/4", xeHostFD("8", "0000:07:00.0", 40))
-			if mode == "missing client identity" {
-				put("8/fdinfo/4", strings.ReplaceAll(xeHostFD("8", "0000:07:00.0", 40), "drm-client-id: 8\n", ""))
-			}
-			for _, pci := range []string{"0000:03:00.0", "0000:07:00.0"} {
-				put("debug/"+pci+"/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 28672\n")
-			}
-			if mode == "missing debugfs" {
-				if err := os.Remove(filepath.Join(proc, "debug/0000:03:00.0/gtt_mm")); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if mode == "malformed debugfs" {
-				put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: unknown\n")
-			}
-			if mode == "masked host drop" {
-				// Another workload releases 8 GiB while unreported driver
-				// storage grows by 8 GiB. A flat host delta must not hide it.
-				put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
-				put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 8589934592\n")
-			}
-			if err := os.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte("7\n8\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 8230000000\nkernel 30000000\nshmem 0\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("high 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if mode == "missing events" {
-				if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("oom 0\n"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 8230000000\nkernel 30000000\nshmem 0\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			f := &xpuAttributionFS{memoryFS: a.fs, attempt: a.path, sampled: make(chan struct{})}
-			a.fs = f
-			if mode == "host PSI reset" {
-				a.hostBaseline.psiTotalUS = 1000
-			}
-			if mode == "cgroup PSI reset" {
-				*a.pressureBaseline = 1000
-			}
-			a.pressureStart = clock.Now()
-			w := Worker{Clock: clock, Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
-			if strings.HasPrefix(mode, "helper") {
-				managers := map[string]string{"0000:03:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n", "0000:07:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n"}
-				if mode == "helper missing card" {
-					delete(managers, "0000:07:00.0")
-				}
-				if mode == "helper malformed manager" {
-					managers["0000:03:00.0"] = "use_type: 1\nuse_tt: 1\nusage: unknown\n"
-				}
-				at := clock.Now()
-				if mode == "helper stale" {
-					at = at.Add(-time.Second)
-				}
-				body, _ := json.Marshal(map[string]any{"sampled_at": at, "gtt_mm": managers})
-				script := "cat <<'SAMPLE'\n" + string(body) + "\nSAMPLE\n"
-				if mode == "helper failed" {
-					script += "exit 1\n"
-				}
-				w.GPUTelemetryHelper = gpuTelemetryTestHelper(t, script)
-				// A valid helper replaces unreadable debugfs, including for
-				// the client's second card. Invalid helper output must fail
-				// even when direct debugfs would have been readable.
-				if mode == "helper" {
-					if err := os.RemoveAll(filepath.Join(proc, "debug")); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			spec := cpuSpec(1, 0)
-			spec.Needs.Platform = Platform{Required: []string{"xpu"}}
-			finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
-			defer finish()
-			select {
-			case <-f.sampled:
-			case <-time.After(testWaitTimeout):
-				t.Fatal("no sample")
-			}
-			if strings.HasPrefix(mode, "helper") {
-				// Static helper timestamps still belong to every invocation;
-				// the empty-cgroup baseline precedes this 200 ms window.
-				a.pressureStart = clock.Now().Add(-200 * time.Millisecond)
-			} else if mode != "invalid window" {
-				clock.Advance(200 * time.Millisecond)
-			}
-			peak := finish()
-			if strings.HasSuffix(mode, "PSI reset") || mode == "invalid window" || strings.HasSuffix(mode, "avg10 only") || mode == "b70 212 KiB" || mode == "host PSI" || mode == "swap growth" || mode == "low available" || mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI total") {
-				// Send the actual sampler result through learning, rather than
-				// stopping at the diagnostic flag. Identity/timing use fake time.
-				q, clock, m, spec := observationFixture(t)
-				spec.Needs.Memory = "auto"
-				var before time.Time
-				missing := mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI reset") || mode == "invalid window"
-				if missing {
-					// Unknown telemetry must preserve an existing qualified peak.
-					seed := startObservation(t, q, m, spec)
-					clock.Advance(time.Second)
-					r := result(&seed, true)
-					two := 2.0
-					r.MemoryPeak = &AttemptMemoryPeak{HostGB: &two}
-					if err := q.Complete(r); err != nil {
-						t.Fatal(err)
-					}
-					before = clock.Now()
-				}
-				run := startObservation(t, q, m, spec)
-				clock.Advance(time.Second)
-				r := result(&run, true)
-				r.MemoryPeak = peak
-				// Exercise the real Result JSON boundary, not a private flag.
-				body, err := json.Marshal(r)
+				a, err := c.create("attempt-xe", 16<<30, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
-				var wire Result
-				if err := json.Unmarshal(body, &wire); err != nil {
+				a.pageSize = 4096 // Fixture kernel pages, independent of the test host.
+				proc := t.TempDir()
+				put := func(p, v string) {
+					t.Helper()
+					p = filepath.Join(proc, p)
+					if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, []byte(v), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+				if strings.HasPrefix(mode, "b70 ") || strings.HasSuffix(mode, "PSI total") {
+					// The issue's carried swap baseline is 2,069,843,968 bytes.
+					put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
+				}
+				put("vmstat", "oom_kill 3\npswpout 100\n")
+				put("pressure/memory", "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+				a.fs = gpuHostFS{memoryFS: a.fs, proc: proc}
+				a.hostBaseline, err = readGPUHostState(a.fs)
+				if err != nil {
 					t.Fatal(err)
 				}
-				if err := q.Complete(wire); err != nil {
-					t.Fatal(err)
+				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+				if mode == "missing host field" {
+					put("meminfo", "MemAvailable: 15000000 kB\n")
 				}
-				learned := false
-				for _, point := range q.s.WorkObservations {
-					learned = learned || point.MemoryRecordedAt.After(before)
-					if missing && (!point.MemoryRecordedAt.Equal(before) || point.MemoryPeak == nil || point.MemoryPeak.HostGB == nil || *point.MemoryPeak.HostGB != 2) {
-						t.Fatalf("missing pressure discarded qualified evidence: %+v", point)
-					}
+				if mode == "swap growth" {
+					put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6257536 kB\n") // +128 MiB
 				}
-				if learned != (mode == "b70 212 KiB" || strings.HasSuffix(mode, "avg10 only")) {
-					t.Fatalf("pressure eligibility %s: learned=%t", mode, learned)
+				if mode == "host OOM" {
+					put("vmstat", "oom_kill 4\npswpout 100\n")
 				}
-				expectedReason := map[string]string{
-					"b70 212 KiB": "eligible", "host avg10 only": "eligible", "cgroup avg10 only": "eligible",
-					"host PSI": "host_psi_total", "host PSI total": "host_psi_total", "cgroup PSI total": "cgroup_psi_total",
-					"swap growth": "host_swap_growth", "low available": "available_below_floor",
-					"missing host PSI": "host_pressure_unavailable_or_reset", "missing cgroup PSI": "cgroup_psi_unavailable_or_reset",
-					"host PSI reset": "host_pressure_unavailable_or_reset", "cgroup PSI reset": "cgroup_psi_unavailable_or_reset", "invalid window": "invalid_pressure_window",
-				}[mode]
-				expectedUS := float64(200000)
-				if mode == "invalid window" {
-					expectedUS = 0
+				if mode == "swap churn" {
+					put("vmstat", "oom_kill 3\npswpout 32868\n") // 128 MiB out, even with flat swap used.
 				}
-				if peak.Pressure == nil || peak.Pressure.Reason != expectedReason || peak.Pressure.ElapsedUS != expectedUS {
-					t.Fatalf("unexplained pressure decision: %+v want %s", peak.Pressure, expectedReason)
-				}
-				if strings.HasSuffix(mode, "avg10 only") {
-					e := peak.Pressure
-					if e.HostStallUS == nil || e.CgroupStallUS == nil || *e.HostStallUS+*e.CgroupStallUS != 120 || max(e.HostAvg10, e.CgroupAvg10) != 1.44 {
-						t.Fatalf("lost PSI operands: %+v", e)
-					}
-				}
-				if mode == "b70 212 KiB" {
-					e := peak.Pressure
-					if e.HostSwapGrowthBytes != 212*1024 || e.HostSwapOutBytes != 23*4096 || e.MinAvailableGB == nil || *e.MinAvailableGB != float64(18664653)/(1<<20) || e.SwapBudgetGB != min(e.ResidentGB, *e.MinAvailableGB)*.01 {
-						t.Fatalf("lost swap/headroom operands: %+v", e)
-					}
-				}
-				q = memoryFactsRestart(t, q, clock)
-				memoryFactsGET(t, q, run, wire.MemoryPeak, false)
-				if missing {
-					if !peak.PressureUnavailable || peak.HostGB == nil {
-						t.Fatalf("lost diagnostic peak or unknown pressure: %+v", peak)
-					}
-					for _, point := range q.s.WorkObservations {
-						if !point.MemoryRecordedAt.Equal(before) || *point.MemoryPeak.HostGB != 2 {
-							t.Fatal("restart changed prior memory evidence", point)
+				if mode == "b70 212 KiB" || strings.HasSuffix(mode, "PSI total") {
+					// #303 incident: 212 KiB growth, 23 pages out, >=17.8 GiB
+					// MemAvailable, zero attempt swap/events. Carried swap is baseline.
+					put("meminfo", "MemAvailable: 18664653 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367064 kB\n")
+					put("vmstat", "oom_kill 3\npswpout 123\n")
+					for _, name := range []string{"memory.swap.current", "memory.swap.peak"} {
+						if err := os.WriteFile(filepath.Join(a.path, name), []byte("0\n"), 0600); err != nil {
+							t.Fatal(err)
 						}
 					}
 				}
-			}
-			if peak.PressureUnavailable || strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing host PSI" || mode == "missing cgroup PSI" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
-				if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
-					t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
+				if strings.HasSuffix(mode, "PSI total") {
+					// Review reproduction: 200 ms stalled while avg10 is still zero.
+					if mode == "host PSI total" {
+						put("pressure/memory", "some avg10=0.00 avg60=0.00 avg300=0.00 total=200000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=200000\n")
+					} else if err := os.WriteFile(filepath.Join(a.path, "memory.pressure"), []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=200000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=200000\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
-				return
-			}
-			driver := float64(83176+40)/(1<<20) + float64(2*28672)/(1<<30)
-			drop := float64(9000000) / (1 << 20)
-			if mode == "b70 212 KiB" || strings.HasSuffix(mode, "PSI total") {
-				drop = float64(24000000-18664653) / (1 << 20)
-			}
-			if mode == "low available" {
-				drop = float64(24000000-131072) / (1 << 20)
-			}
-			if mode == "masked host drop" {
-				driver += 8 - float64(28672)/(1<<30)
-				drop = 0
-			}
-			if peak.GPUHost == nil || *peak.GPUHost.DriverGB != driver || *peak.GPUHost.HostDropGB != drop {
-				t.Fatalf("wrong attributed host memory: %+v", peak.GPUHost)
-			}
-			wantOutside := max(driver, drop-float64(8260000000)/(1<<30))
-			if peak.GPUHost.OutsideGB == nil || math.Abs(*peak.GPUHost.OutsideGB-wantOutside) > 1e-8 {
-				t.Fatalf("wrong synchronized outside peak %+v", peak.GPUHost)
-			}
-			if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM" || mode == "host PSI" || mode == "cgroup PSI" || mode == "low available" || strings.HasSuffix(mode, "PSI total")) {
-				t.Fatalf("host swap growth not retained: %+v", peak)
-			}
+				if mode == "b70 startup pages" {
+					put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
+					put("vmstat", "oom_kill 3\npswpout 102\n")
+				}
+				if mode == "host PSI" {
+					put("pressure/memory", "some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n")
+				}
+				if mode == "cgroup PSI" {
+					if err := os.WriteFile(filepath.Join(a.path, "memory.pressure"), []byte("some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if strings.HasSuffix(mode, "avg10 only") {
+					// #487: avg10=1.44% but only 120 us / 200 ms = 0.06% stalls.
+					psi := "some avg10=1.44 avg60=0.00 avg300=0.00 total=120\nfull avg10=1.44 avg60=0.00 avg300=0.00 total=120\n"
+					if mode == "host avg10 only" {
+						put("pressure/memory", psi)
+					} else {
+						memoryFactsFile(t, a, "memory.pressure", psi)
+					}
+				}
+				if mode == "low available" {
+					put("meminfo", "MemAvailable: 131072 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+				}
+				if mode == "missing host PSI" {
+					put("pressure/memory", "some avg10=unknown\n")
+				}
+				if mode == "missing cgroup PSI" {
+					if err := os.Remove(filepath.Join(a.path, "memory.pressure")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				raw := xeHostFD("7", "0000:03:00.0", 83176)
+				if mode == "missing driver field" {
+					raw = strings.ReplaceAll(raw, "drm-total-system: 0\n", "")
+				}
+				put("7/fdinfo/3", raw)
+				put("7/fdinfo/4", raw)
+				// A second process inherits that client. A client on the other card also
+				// consumes host RAM and must be included, even though not selected.
+				put("8/fdinfo/3", raw)
+				put("8/fdinfo/4", xeHostFD("8", "0000:07:00.0", 40))
+				if mode == "missing client identity" {
+					put("8/fdinfo/4", strings.ReplaceAll(xeHostFD("8", "0000:07:00.0", 40), "drm-client-id: 8\n", ""))
+				}
+				for _, pci := range []string{"0000:03:00.0", "0000:07:00.0"} {
+					put("debug/"+pci+"/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 28672\n")
+				}
+				if mode == "missing debugfs" {
+					if err := os.Remove(filepath.Join(proc, "debug/0000:03:00.0/gtt_mm")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "malformed debugfs" {
+					put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: unknown\n")
+				}
+				if mode == "masked host drop" {
+					// Another workload releases 8 GiB while unreported driver
+					// storage grows by 8 GiB. A flat host delta must not hide it.
+					put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+					put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 8589934592\n")
+				}
+				if err := os.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte("7\n8\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 8230000000\nkernel 30000000\nshmem 0\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("high 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "missing events" {
+					if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("oom 0\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 8230000000\nkernel 30000000\nshmem 0\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				f := &xpuAttributionFS{memoryFS: a.fs, attempt: a.path, sampled: make(chan struct{})}
+				a.fs = f
+				if mode == "host PSI reset" {
+					a.hostBaseline.psiTotalUS = 1000
+				}
+				if mode == "cgroup PSI reset" {
+					*a.pressureBaseline = 1000
+				}
+				a.pressureStart = clock.Now()
+				w := Worker{Clock: clock, Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
+				if strings.HasPrefix(mode, "helper") {
+					managers := map[string]string{"0000:03:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n", "0000:07:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n"}
+					if mode == "helper missing card" {
+						delete(managers, "0000:07:00.0")
+					}
+					if mode == "helper malformed manager" {
+						managers["0000:03:00.0"] = "use_type: 1\nuse_tt: 1\nusage: unknown\n"
+					}
+					at := clock.Now()
+					if mode == "helper stale" {
+						at = at.Add(-time.Second)
+					}
+					body, _ := json.Marshal(map[string]any{"sampled_at": at, "gtt_mm": managers})
+					script := "cat <<'SAMPLE'\n" + string(body) + "\nSAMPLE\n"
+					if mode == "helper failed" {
+						script += "exit 1\n"
+					}
+					w.GPUTelemetryHelper = gpuTelemetryTestHelper(t, script)
+					// A valid helper replaces unreadable debugfs, including for
+					// the client's second card. Invalid helper output must fail
+					// even when direct debugfs would have been readable.
+					if mode == "helper" {
+						if err := os.RemoveAll(filepath.Join(proc, "debug")); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				spec := cpuSpec(1, 0)
+				spec.Needs.Platform = Platform{Required: []string{"xpu"}}
+				finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
+				defer finish()
+				select {
+				case <-f.sampled:
+				case <-time.After(testWaitTimeout):
+					t.Fatal("no sample")
+				}
+				if strings.HasPrefix(mode, "helper") {
+					// Static helper timestamps still belong to every invocation;
+					// the empty-cgroup baseline precedes this 200 ms window.
+					a.pressureStart = clock.Now().Add(-200 * time.Millisecond)
+				} else if mode != "invalid window" {
+					clock.Advance(200 * time.Millisecond)
+				}
+				peak := finish()
+				if strings.HasSuffix(mode, "PSI reset") || mode == "invalid window" || strings.HasSuffix(mode, "avg10 only") || mode == "b70 212 KiB" || mode == "host PSI" || mode == "swap growth" || mode == "low available" || mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI total") {
+					// Send the actual sampler result through learning, rather than
+					// stopping at the diagnostic flag. Identity/timing use fake time.
+					q, clock, m, spec := observationFixture(t)
+					spec.Needs.Memory = "auto"
+					var before time.Time
+					missing := mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI reset") || mode == "invalid window"
+					if missing {
+						// Unknown telemetry must preserve an existing qualified peak.
+						seed := startObservation(t, q, m, spec)
+						clock.Advance(time.Second)
+						r := result(&seed, true)
+						two := 2.0
+						r.MemoryPeak = &AttemptMemoryPeak{HostGB: &two}
+						if err := q.Complete(r); err != nil {
+							t.Fatal(err)
+						}
+						before = clock.Now()
+					}
+					run := startObservation(t, q, m, spec)
+					clock.Advance(time.Second)
+					r := result(&run, true)
+					r.MemoryPeak = peak
+					// Exercise the real Result JSON boundary, not a private flag.
+					body, err := json.Marshal(r)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var wire Result
+					if err := json.Unmarshal(body, &wire); err != nil {
+						t.Fatal(err)
+					}
+					if err := q.Complete(wire); err != nil {
+						t.Fatal(err)
+					}
+					learned := false
+					for _, point := range q.s.WorkObservations {
+						learned = learned || point.MemoryRecordedAt.After(before)
+						if missing && (!point.MemoryRecordedAt.Equal(before) || point.MemoryPeak == nil || point.MemoryPeak.HostGB == nil || *point.MemoryPeak.HostGB != 2) {
+							t.Fatalf("missing pressure discarded qualified evidence: %+v", point)
+						}
+					}
+					if learned != (mode == "b70 212 KiB" || strings.HasSuffix(mode, "avg10 only")) {
+						t.Fatalf("pressure eligibility %s: learned=%t", mode, learned)
+					}
+					expectedReason := map[string]string{
+						"b70 212 KiB": "eligible", "host avg10 only": "eligible", "cgroup avg10 only": "eligible",
+						"host PSI": "host_psi_total", "host PSI total": "host_psi_total", "cgroup PSI total": "cgroup_psi_total",
+						"swap growth": "host_swap_growth", "low available": "available_below_floor",
+						"missing host PSI": "host_pressure_unavailable_or_reset", "missing cgroup PSI": "cgroup_psi_unavailable_or_reset",
+						"host PSI reset": "host_pressure_unavailable_or_reset", "cgroup PSI reset": "cgroup_psi_unavailable_or_reset", "invalid window": "invalid_pressure_window",
+					}[mode]
+					expectedUS := float64(200000)
+					if mode == "invalid window" {
+						expectedUS = 0
+					}
+					if peak.Pressure == nil || peak.Pressure.Reason != expectedReason || peak.Pressure.ElapsedUS != expectedUS {
+						t.Fatalf("unexplained pressure decision: %+v want %s", peak.Pressure, expectedReason)
+					}
+					if strings.HasSuffix(mode, "avg10 only") {
+						e := peak.Pressure
+						if e.HostStallUS == nil || e.CgroupStallUS == nil || *e.HostStallUS+*e.CgroupStallUS != 120 || max(e.HostAvg10, e.CgroupAvg10) != 1.44 {
+							t.Fatalf("lost PSI operands: %+v", e)
+						}
+					}
+					if mode == "b70 212 KiB" {
+						e := peak.Pressure
+						if e.HostSwapGrowthBytes != 212*1024 || e.HostSwapOutBytes != 23*4096 || e.MinAvailableGB == nil || *e.MinAvailableGB != float64(18664653)/(1<<20) || e.SwapBudgetGB != min(e.ResidentGB, *e.MinAvailableGB)*.01 {
+							t.Fatalf("lost swap/headroom operands: %+v", e)
+						}
+					}
+					q = memoryFactsRestart(t, q, clock)
+					memoryFactsGET(t, q, run, wire.MemoryPeak, false)
+					if missing {
+						if !peak.PressureUnavailable || peak.HostGB == nil {
+							t.Fatalf("lost diagnostic peak or unknown pressure: %+v", peak)
+						}
+						for _, point := range q.s.WorkObservations {
+							if !point.MemoryRecordedAt.Equal(before) || *point.MemoryPeak.HostGB != 2 {
+								t.Fatal("restart changed prior memory evidence", point)
+							}
+						}
+					}
+				}
+				if peak.PressureUnavailable || strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing host PSI" || mode == "missing cgroup PSI" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
+					if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
+						t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
+					}
+					return
+				}
+				driver := float64(83176+40)/(1<<20) + float64(2*28672)/(1<<30)
+				drop := float64(9000000) / (1 << 20)
+				if mode == "b70 212 KiB" || strings.HasSuffix(mode, "PSI total") {
+					drop = float64(24000000-18664653) / (1 << 20)
+				}
+				if mode == "low available" {
+					drop = float64(24000000-131072) / (1 << 20)
+				}
+				if mode == "masked host drop" {
+					driver += 8 - float64(28672)/(1<<30)
+					drop = 0
+				}
+				if peak.GPUHost == nil || *peak.GPUHost.DriverGB != driver || *peak.GPUHost.HostDropGB != drop {
+					t.Fatalf("wrong attributed host memory: %+v", peak.GPUHost)
+				}
+				wantOutside := max(driver, drop-float64(8260000000)/(1<<30))
+				if peak.GPUHost.OutsideGB == nil || math.Abs(*peak.GPUHost.OutsideGB-wantOutside) > 1e-8 {
+					t.Fatalf("wrong synchronized outside peak %+v", peak.GPUHost)
+				}
+				if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM" || mode == "host PSI" || mode == "cgroup PSI" || mode == "low available" || strings.HasSuffix(mode, "PSI total")) {
+					t.Fatalf("host swap growth not retained: %+v", peak)
+				}
 
+			})
 		})
 	}
 }
@@ -568,18 +573,22 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 	}
 }
 
+// Only the first fdinfo read blocks; later probes pass through.
 type blockedDeviceMemoryFS struct {
 	memoryFS
 	blocked chan struct{}
 	release chan struct{}
 	resumed chan struct{}
+	once    sync.Once
 }
 
 func (f *blockedDeviceMemoryFS) ReadFile(p string) ([]byte, error) {
 	if strings.Contains(p, "/fdinfo/") {
-		close(f.blocked)
-		<-f.release
-		defer close(f.resumed)
+		f.once.Do(func() {
+			close(f.blocked)
+			<-f.release
+			defer close(f.resumed)
+		})
 	}
 	return f.memoryFS.ReadFile(p)
 }
@@ -602,12 +611,14 @@ func TestGPUHostMemoryBlockedDeviceProbeFinishes(t *testing.T) {
 	}
 	f := &blockedDeviceMemoryFS{memoryFS: gpuHostFS{memoryFS: a.fs, proc: proc}, blocked: make(chan struct{}), release: make(chan struct{}), resumed: make(chan struct{})}
 	a.fs = f
-	a.hostBaseline = nil // Isolate the five-second device probe, without host collection.
+	a.hostBaseline = nil // Isolate the device probe, without host collection.
 	w := Worker{Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
 	spec := cpuSpec(1, 0)
 	spec.Needs.Platform = Platform{Required: []string{"xpu"}}
 	spec.Needs.Memory = "auto"
-	finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
+	// A short device period reaches the blocked probe without waiting out the
+	// production five-second cadence; the completion bound below is unchanged.
+	finish := w.observeAttemptMemoryEvery(a, Job{Spec: spec}, nil, 20*time.Millisecond)
 	defer finish()
 	defer func() {
 		close(f.release)
