@@ -433,6 +433,8 @@ func TestSharedHostPressureOwnerYieldDoesNotConsumeHealthAlert(t *testing.T) {
 	assertSharedPressureHealth(t, q, m.ID, "healthy")
 	m.SharedHostPressure = nil
 	check(t, q, m, run)
+	clock.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
+	check(t, q, m, run)
 	if firings(q, "host_unhealthy_or_stale") != before+1 {
 		t.Fatal("owner yield suppressed a subsequent real pressure-signal failure")
 	}
@@ -485,6 +487,11 @@ func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
 	// A silent worker's pressure expires once the next report is overdue.
 	clock.Advance(6500*time.Millisecond + 2200*time.Millisecond)
 	check(t, q, other, nil)
+	if !withheld() || firings(q, "host_unhealthy_or_stale") != before {
+		t.Fatal("overdue pressure report did not withhold at once, or alerted before its evidence window")
+	}
+	clock.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
+	check(t, q, other, nil)
 	if !withheld() || firings(q, "host_unhealthy_or_stale") != before+1 {
 		t.Fatal("overdue pressure report did not alert and withhold")
 	}
@@ -493,14 +500,23 @@ func TestSharedHostPressureNextReportDeliveryDoesNotAlert(t *testing.T) {
 	assertSharedPressureHealth(t, q, m.ID, "healthy")
 
 	// A stopped sensor fails at the report whose sample reached validity, and
-	// a failed probe sends none; both alert and withhold immediately.
+	// a failed probe sends none; both withhold immediately and alert once the
+	// fault outlasts the host's evidence window.
 	for i, age := range []float64{6.5, -1} {
-		if age < 0 {
-			m.SharedHostPressure = nil
-			check(t, q, m, run)
-		} else {
-			report(age)
+		fault := func() {
+			if age < 0 {
+				m.SharedHostPressure = nil
+				check(t, q, m, run)
+			} else {
+				report(age)
+			}
 		}
+		fault()
+		if !withheld() || firings(q, "host_unhealthy_or_stale") != before+1+i {
+			t.Fatalf("pressure fault %d did not withhold at once, or alerted early", i)
+		}
+		clock.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
+		fault()
 		if !withheld() || firings(q, "host_unhealthy_or_stale") != before+2+i {
 			t.Fatalf("pressure fault %d did not alert and withhold", i)
 		}

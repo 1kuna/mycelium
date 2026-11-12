@@ -75,12 +75,21 @@ func TestHealthAlertHostStaleAndUnhealthy(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
+	if firings(q, "host_unhealthy_or_stale") != 0 {
+		t.Fatal("stale host alerted before its evidence window")
+	}
+	c.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	if firings(q, "host_unhealthy_or_stale") != 1 {
 		t.Fatal("entire quiet fleet must alert even when loss decisions are paused")
 	}
 	check(t, q, m, nil)
 	c.Advance(healthAlertCooldown)
 	m.InventoryReason = "private worker error"
+	check(t, q, m, nil)
+	c.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
 	check(t, q, m, nil)
 	if firings(q, "host_unhealthy_or_stale") != 2 {
 		t.Fatal("unhealthy report did not alert")
@@ -182,6 +191,8 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	m := machine("host", "cuda")
 	m.InventoryReason = "private token and path"
 	c.Advance(time.Second)
+	check(t, q, m, nil)
+	c.Advance(hostDegradedSustain(q.s.Machines[m.ID]))
 	check(t, q, m, nil)
 	events := alertsOf(q, "host_unhealthy_or_stale")
 	if len(events) != 1 {

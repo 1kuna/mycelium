@@ -35,6 +35,11 @@ func TestHostHygieneQueueDrainPreservesRunningAndOperatorPolicy(t *testing.T) {
 			if q.machineLimitReason(q.s.Machines[m.ID]) != "host_memory_pressure" {
 				t.Fatal("missing typed reason")
 			}
+			if firings(q, "host_degraded") != 0 {
+				t.Fatal("one pressure sample alerted before its evidence window")
+			}
+			c.Advance(signalMaxAge) // legacy evidence: no measured probe window
+			reply = check(t, q, m, run)
 			if firings(q, "host_degraded") != 1 || alertsOf(q, "host_degraded")[0].Reason != "host_memory_pressure" {
 				t.Fatal("missing causal alert")
 			}
