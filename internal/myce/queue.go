@@ -2605,8 +2605,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		if a := machineAvailability(m); a != nil && !a.Available {
 			copy.AdmissionReason = a.Reason
 		}
-		copy.ReservedMemoryGB = 0
-		copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
+		copy.ReservedMemoryGB, copy.MemoryUsedGB = 0, 0 // Used is total − free.
 		for _, slot := range q.s.ModelSlots {
 			if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
 				model, _ := q.model(slot.Model)

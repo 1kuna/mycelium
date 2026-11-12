@@ -38,7 +38,7 @@ Cold CPU probes report their initial reservation
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
 complete cgroup footprint plus observed growth and launch drift instead of
-reserving all initial headroom. Machine `host_memory_in_use_gb` sums those
+reserving all initial headroom. Machine `host_memory.charged_gb` sums those
 charges; declared and learned allocations retain their full reservations.
 Two timed samples establish a growth horizon; the measured rate extends that
 forecast through the sample's age. Batch launches and model loads use the same
@@ -307,8 +307,8 @@ snapshot for every read; the CLI projects that snapshot itself.
   `--sections machines,jobs` (recipe, report and target conditions). This
   replaces the flat `summary.alerts` list: 18 work profiles with one prediction
   regression were 18 rows.
-- Replaced per-card worker identities (`replacement` set) are omitted from the
-  default `machines`; `--sections machines` and `--history` keep them.
+- Replaced per-card worker identities (`replacement` set) are history: only
+  `--history` (`detail=full`) lists them; the default and `--sections` omit them.
 - Plain `myce status` prints one line per hypha, one line per running, waiting
   or cleanup job with its committed reason (bounded to 160 characters), and
   one line per paused project and reason with a count. Host states print only
@@ -1479,8 +1479,10 @@ to clear and verify assignments, loaded models and attempt release evidence.
 Treat unreadable status, missing/invalid details, or unknown kinds as unresolved.
 An empty hold list alone does not prove a specific attempt has released custody.
 
-The CLI and page label the effective host allowance **last reported**, including
-stopped workers, with `memory_allowance_bytes` and UNQUALIFIED qualification.
+The effective host allowance is folded into `host_memory.capacity_gb`; the CLI
+and page no longer print it per machine (`memory_allowance_bytes` is deprecated).
+A worker's own ceiling budget still prints **last reported** when the queue has
+no effective allowance, including for stopped workers.
 The durable queue policy supplies it; worker reports must agree before admission.
 Worker memory availability and usage remain last-reported facts.
 Read the queue-owned allowance with `myce host status HOST`. Configure it while
@@ -1592,7 +1594,31 @@ not an event log. It complements #857/#859's integrated wait attribution; it
 does not change admission, containment, retry floors or the worker protocol.
 
 `myce status --json` returns the status snapshot as JSON; with a job ID it
-returns that job's status view. `host_available_memory_gb` is worker-observed
+returns that job's status view.
+
+A machine reports host RAM as the one memory rule's three terms (#990, #1366),
+`host_memory`: `capacity_gb`, `charged_gb` (Σ charge: Mycelium's reservation
+ledger, not measured process RSS) and `room_gb` = capacity − charged, signed
+(negative is debt). Capacity is the smaller arm the rule admits within: the
+live reading less its one margin plus Mycelium's own resident use, which that
+reading already excludes; or the queue's enforced allowance (read and set it
+with `myce host status HOST` / `myce host budget`). It is absent while the
+host's RAM reading is unknown. Text: `host H RAM capacity C, charged X, room R
+GiB`; the page shows a Host RAM row.
+
+Deprecated in status (still emitted this release; removed next release, MY-42):
+`free_host_memory_gb` (room, floored at zero), `host_memory_in_use_gb`
+(charged), `host_available_memory_gb` (the worker's live reading, which stays
+on check-in), `effective_host_memory_budget_gb` and `memory_allowance_bytes`
+(the allowance inside capacity). Accelerator `memory_used_gb` is no longer in
+status (it is `total_memory_gb` − `free_memory_gb`); `reserved_memory_gb` (pinned
+model memory), `leaving`, `gone` and `checkpoint_unavailable` are omitted when
+zero or false. A job's `checkpoint` (its NAS assignment, which status redacts)
+is omitted when empty. Text prints non-Mycelium RAM history once, as `24h=7d`,
+when both windows agree. The definitions below describe how the terms are
+computed.
+
+`host_available_memory_gb` is worker-observed
 available RAM after its configured host reserve. `host_memory_in_use_gb` is
 Mycelium's reservation ledger, not measured process RSS.
 `free_host_memory_gb` is admitted headroom: the smaller of live availability
@@ -1779,7 +1805,7 @@ continues to hold. See [parked native storage](reference/file-store.md#parked-na
 Host maintenance `policy.shared_host.interactive_reserve_gb` is the configured
 protected reserve. Machine `shared_host` is the worker's exact acknowledgement;
 `shared_host_reason` explains missing history/live observations or acknowledgement.
-Shared hosts retain `last_resort: true`. `free_host_memory_gb` additionally respects
+Shared hosts retain `last_resort: true`. `host_memory.room_gb` additionally respects
 the seven-day external peak and protected reserve, without increasing the static
 allowance. No samples means withheld admission. Missing `shared_host` normally
 means no profile; compare queue policy before interpreting an old worker's row.
@@ -1949,7 +1975,9 @@ before recipe defaults or scheduler assignment change the executable spec:
   Main/sidecar catalog coverage is their intersection. Extension coverage is its
   frozen variant target list, not proof that a worker is ready now.
 - `qualification` records whether qualified execution is required. Owner output
-  `parity` stays `unknown`: neither a pin nor registration proves MY-19 parity.
+  `parity` is omitted while unknown, which is every authored job: neither a pin
+  nor registration proves MY-19 parity. Only command discovery records
+  `not_accepted_for_automatic_production`.
 
 `placement` records the historical scheduler assignment: attempt, assignment
 queue time, host/devices, the existing scarcity/completion planner `reason`, and

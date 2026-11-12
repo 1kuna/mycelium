@@ -1132,13 +1132,15 @@ func printStatus(s myce.Snapshot, full bool) {
 		if m.SharedHostReason != "" {
 			state += "; " + m.SharedHostReason
 		}
-		if m.EffectiveHostMemoryBudgetGB > 0 {
-			state += fmt.Sprintf("; host allowance (last reported) %d bytes (UNQUALIFIED)", m.HostMemoryAllowanceBytes)
-		} else if m.HostMemoryBudgetGB > 0 {
+		if m.HostMemoryBudgetGB > 0 && m.EffectiveHostMemoryBudgetGB == 0 {
 			state += fmt.Sprintf("; host ceiling budget (last reported) %.3g GiB", m.HostMemoryBudgetGB)
 		}
 		if h := m.ExternalMemory; h != nil {
-			state += fmt.Sprintf("; non-Mycelium RAM 24h p50/p95/max %s; 7d %s", h.Day.Summary(), h.Week.Summary())
+			if day, week := h.Day.Summary(), h.Week.Summary(); day == week {
+				state += "; non-Mycelium RAM 24h=7d p50/p95/max " + day
+			} else {
+				state += fmt.Sprintf("; non-Mycelium RAM 24h p50/p95/max %s; 7d %s", day, week)
+			}
 		}
 		if over := m.HostMemoryBudgetStatus(); over != "" {
 			state += "; " + over
@@ -1149,7 +1151,10 @@ func printStatus(s myce.Snapshot, full bool) {
 		if m.CPUCapacityReason != "" {
 			state += "; " + m.CPUCapacityReason
 		}
-		if m.HostMemoryMeasured {
+		if t := m.HostMemory; t != nil {
+			state += fmt.Sprintf("; host %s RAM capacity %.1f, charged %.1f, room %.1f GiB", m.HostID, t.CapacityGB, t.ChargedGB, t.RoomGB)
+		} else if m.HostMemoryMeasured {
+			// A previous-release queue has no host_memory (MY-42); remove with free_host_memory_gb.
 			state += fmt.Sprintf("; host %s RAM %.1f GiB available for admission", m.HostID, m.FreeHostMemoryGB)
 		}
 		if m.InventoryReason != "" {

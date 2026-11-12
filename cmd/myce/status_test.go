@@ -111,8 +111,9 @@ func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
 	for _, effective := range []bool{false, true} {
 		m := &myce.Machine{ID: "stopped", Gone: true, HostMemoryBudgetGB: 22}
 		if effective {
+			// The queue's allowance is part of the rule's capacity term.
 			m.EffectiveHostMemoryBudgetGB = 22
-			m.HostMemoryAllowanceBytes = 22 << 30
+			m.HostMemory = &myce.HostMemoryTerms{CapacityGB: 22, ChargedGB: 4, RoomGB: 18}
 		}
 		f, err := os.CreateTemp(t.TempDir(), "status")
 		if err != nil {
@@ -131,9 +132,9 @@ func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		}
 		want := "host ceiling budget (last reported) 22 GiB"
 		if effective {
-			want = "host allowance (last reported) 23622320128 bytes (UNQUALIFIED)"
+			want = "RAM capacity 22.0, charged 4.0, room 18.0 GiB"
 		}
-		if !strings.Contains(string(data), want) {
+		if !strings.Contains(string(data), want) || effective && strings.Contains(string(data), "ceiling budget") {
 			t.Fatal(string(data))
 		}
 	}

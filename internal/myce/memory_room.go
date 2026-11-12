@@ -322,6 +322,17 @@ func (q *Queue) hostMemoryRoom(m *Machine, capacity, reserved, growth float64) (
 	return min(capacity-growth, enforced), enforced
 }
 
+// hostMemoryTerms is target m's rule as status reports it: capacity is room
+// plus charges, so the three terms always add up. Nil when the live reading
+// is unknown.
+func (q *Queue) hostMemoryTerms(m *Machine) *HostMemoryTerms {
+	l := q.hostMemoryLedgers[m.ID]
+	if l == nil || !m.HostMemoryMeasured || m.HostMemoryError != "" {
+		return nil
+	}
+	return &HostMemoryTerms{CapacityGB: l.SignedRoomGB + l.ReservedGB, ChargedGB: l.ReservedGB, RoomGB: l.SignedRoomGB}
+}
+
 // hostRoomAfter is target m's signed room once jobs and slots release.
 func (q *Queue) hostRoomAfter(m *Machine, jobs []*Job, slots []*ModelSlot) float64 {
 	room, released := q.hostRoomArms(m), map[any]bool{}

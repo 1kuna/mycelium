@@ -221,8 +221,11 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	if slices.ContainsFunc(current.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
 		t.Fatal("default listed a replaced worker identity")
 	}
-	if full := readStatusOptions(t, q, "?sections=machines"); !slices.ContainsFunc(full.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
-		t.Fatal("machines section hid replaced worker history")
+	if section := readStatusOptions(t, q, "?sections=machines"); slices.ContainsFunc(section.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
+		t.Fatal("machines section listed a replaced worker identity")
+	}
+	if full := readStatusOptions(t, q, "?detail=full"); !slices.ContainsFunc(full.Machines, func(m *Machine) bool { return m.ID == "ghost" }) {
+		t.Fatal("full status hid replaced worker history")
 	}
 }
 
