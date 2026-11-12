@@ -242,6 +242,7 @@ type fileStoreObservation struct {
 	now                       time.Time
 	retention                 time.Duration
 	publicationHorizon        time.Duration
+	expiredGrace              time.Duration
 	projects                  projectFileFacts
 }
 
@@ -273,7 +274,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, projects}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, q.expiredFilePublicationGrace(), projects}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -305,7 +306,15 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		return &status
 	}
 	for hash, p := range payloads {
-		if keep[hash] || p.modified.After(now.Add(-v.publicationHorizon)) {
+		// Mirror the collector: only marked orphans and bundles keep the full
+		// horizon; an expired job's files use the grace capped at retention.
+		_, bundle := v.bundles[hash]
+		_, marker := markers[hash]
+		grace := v.expiredGrace
+		if bundle || marker && !referenced[hash] {
+			grace = v.publicationHorizon
+		}
+		if keep[hash] || p.modified.After(now.Add(-grace)) {
 			continue
 		}
 		if at, tracked := v.bundles[hash]; tracked && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {

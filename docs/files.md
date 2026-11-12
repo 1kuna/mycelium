@@ -550,6 +550,9 @@ deletes intent, custody ledgers, wait/error facts or keyed replay answers.
 Unsettled input claims protect exact bytes across upload/HEAD/submission requests.
 Lifecycle locks and dependency revisions fence collection; measured claim-to-submit
 delays supply publication protection. There is no six-hour or one-day default.
+Only a claim's first settlement is measured; a reused claim's age is not a
+publication delay. For an expired job's files that protection never outlasts the
+file retention, so a recent HEAD cannot keep them past 3 days (#1375).
 Open work, checkpoints, catalogs, recovered results without a deadline and retained
 replay bundles keep their references.
 
