@@ -362,3 +362,26 @@ func TestTypedMemoryChargeFollowsUseToLimit(t *testing.T) {
 		})
 	}
 }
+
+// A job that grows past its learned charge, within its typed limit, and
+// succeeds is accepted evidence: the next run is charged its new peak plus
+// spread, still below the typed figure.
+func TestTypedMemoryChargeRelearnsFromGrowth(t *testing.T) {
+	q, clock, m := typedChargeFixture(t)
+	s := typedSpec("suite", 16)
+	learnTyped(t, q, clock, m, s, 3, 4)
+	grown := learnTyped(t, q, clock, m, s, 9)
+	if e := grown.MemoryEnvelope; e.ChargeHostGB != 5 || e.LimitHostGB != 16 {
+		t.Fatalf("grown run was not admitted on its learned charge: %+v", e)
+	}
+	if facts := job(t, q, grown.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "eligible" {
+		t.Fatalf("growth past the charge was not accepted evidence: %+v", facts)
+	}
+	queued := submit(t, q, s)
+	q.mu.Lock()
+	next := q.memoryCandidate(q.s.Jobs[queued.ID], q.s.Machines[m.ID])
+	q.mu.Unlock()
+	if e := next.MemoryEnvelope; e.Basis != "learned" || e.ChargeHostGB != 15 || e.LimitHostGB != 16 {
+		t.Fatalf("next run not charged the new 9 GiB peak plus its 6 GiB spread: %+v", e)
+	}
+}
