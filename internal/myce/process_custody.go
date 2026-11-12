@@ -29,6 +29,9 @@ func processPSWithin(timeout time.Duration, args ...string) ([]byte, error) {
 }
 
 func commandLock(dir, name string, wait bool) (func(), error) {
+	if dir == "" {
+		return nil, fmt.Errorf("%s: state directory is required", name)
+	}
 	if err := PrepareStateRoots(dir); err != nil {
 		return nil, err
 	}
