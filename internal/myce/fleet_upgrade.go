@@ -265,27 +265,26 @@ func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) strin
 func fleetProofReady(p *FleetRuntimeProof) bool {
 	return p != nil && p.PID > 0 && p.Session != "" && validPin(p.SHA256) && p.ServiceHealthy && p.RunnerSmoke && p.StartGate == startGateProtocol && p.AttemptProtocol == keyedAttemptProtocol
 }
-func (q *Queue) fleetProofFresh(p *FleetRuntimeProof) bool {
-	if !fleetProofReady(p) || p.ObservedAt.IsZero() {
-		return false
-	}
-	age := q.clock.Now().Sub(p.ObservedAt)
-	return age >= 0 && age < fleetRuntimeFreshFor
-}
-
 // fleetStable requires the same healthy process for fleetStableFor, the
 // enrollment stability window, so a service that crash-loops shortly after
-// start stops the rollout instead of passing it.
+// start stops the rollout instead of passing it. The window runs between the
+// process's own observations, so it passes only on a proof collected at least
+// fleetStableFor after its first: a process that stopped proving never passes,
+// however long its proofs stay fresh (#1450).
 func (q *Queue) fleetStable(h *fleetUpgradeHost, p *FleetRuntimeProof) bool {
-	identity := fmt.Sprintf("%s/%d/%s", p.Session, p.PID, p.SHA256)
+	identity := fleetHealthIdentity(p)
 	if h.HealthIdentity != identity || h.HealthSince.IsZero() {
-		h.HealthIdentity, h.HealthSince = identity, q.clock.Now()
+		h.HealthIdentity, h.HealthSince = identity, p.ObservedAt
 	}
-	if q.clock.Now().Sub(h.HealthSince) < fleetStableFor {
+	if p.ObservedAt.Sub(h.HealthSince) < fleetStableFor {
 		h.Wait = "waiting for stable service health"
 		return false
 	}
 	return true
+}
+
+func fleetHealthIdentity(p *FleetRuntimeProof) string {
+	return fmt.Sprintf("%s/%d/%s", p.Session, p.PID, p.SHA256)
 }
 
 func (q *Queue) fleetProduction(host string) bool {
@@ -470,6 +469,9 @@ func (q *Queue) maintainFleetUpgrade() {
 			q.fleetStop(h, "worker_unmanaged")
 			return
 		}
+		if h.Before == nil && h.Phase == "worker_update" && q.fleetProofFresh(m.Fleet) {
+			h.Before = cloneFleetProof(m.Fleet)
+		}
 		if !q.fleetVerify(h, m.Fleet, h.Before, m.CapabilityProfile.OS, m.CapabilityProfile.Arch, "worker") {
 			return
 		}
@@ -484,6 +486,9 @@ func (q *Queue) maintainFleetUpgrade() {
 		goos, arch := "", ""
 		if p != nil && p.Host == h.Host {
 			proof, goos, arch = p.Proof, p.OS, p.Arch
+		}
+		if h.QueueBefore == nil && h.Phase == "queue_update" && q.fleetProofFresh(proof) {
+			h.QueueBefore = cloneFleetProof(proof)
 		}
 		if !q.fleetVerify(h, proof, h.QueueBefore, goos, arch, "queue") {
 			return
@@ -538,12 +543,17 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 		return false
 	}
 	h.Wait, h.StepAt, h.HealthSince, h.HealthIdentity = "", q.clock.Now(), time.Time{}, ""
+	// The pre-update identity comes from a fresh proof only; a late one is
+	// captured once it arrives, before any instruction can be issued.
 	switch {
 	case h.Machine != "" && !h.WorkerDone:
-		h.Phase, h.Before = "worker_update", cloneFleetProof(q.s.Machines[h.Machine].Fleet)
+		h.Phase, h.Before = "worker_update", nil
+		if m := q.s.Machines[h.Machine]; m != nil && q.fleetProofFresh(m.Fleet) {
+			h.Before = cloneFleetProof(m.Fleet)
+		}
 	case h.Queue && !h.QueueDone:
 		var proof *FleetRuntimeProof
-		if q.fleetQueue != nil {
+		if q.fleetQueue != nil && q.fleetProofFresh(q.fleetQueue.Proof) {
 			proof = cloneFleetProof(q.fleetQueue.Proof)
 		}
 		h.Phase, h.QueueBefore = "queue_update", proof
@@ -556,16 +566,22 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 
 // fleetVerify reports a service healthy on the release: a fresh runtime proof
 // from a new process with the release's exact bytes, stable for
-// fleetStableFor. A different new process, or no verification within
-// fleetStepTimeout, stops the operation.
+// fleetStableFor. One late proof from that process keeps its window; a missing
+// or unhealthy proof restarts it. A different new process, or no verification
+// within fleetStepTimeout, stops the operation.
 func (q *Queue) fleetVerify(h *fleetUpgradeHost, p, before *FleetRuntimeProof, goos, arch, role string) bool {
 	fresh := q.fleetProofFresh(p)
-	restarted := fresh && before != nil && p.Session != before.Session && p.PID != before.PID
-	if fresh && restarted && q.fleetCurrent(p, goos, arch) {
+	restarted := fleetProofReady(p) && before != nil && p.Session != before.Session && p.PID != before.PID
+	current := restarted && q.fleetCurrent(p, goos, arch)
+	if fresh && current {
 		return q.fleetStable(h, p)
 	}
+	if current && q.fleetProofLate(h, p) {
+		h.Wait = "waiting for the " + role + "'s next runtime proof"
+		return false
+	}
 	h.HealthSince, h.HealthIdentity = time.Time{}, ""
-	if restarted {
+	if fresh && restarted {
 		q.fleetStop(h, role+"_running_hash_mismatch")
 		return false
 	}
@@ -689,7 +705,7 @@ func (q *Queue) fleetProofGap(p *FleetRuntimeProof) string {
 		}
 		return why + ")"
 	case !q.fleetProofFresh(p):
-		return "fleet runtime proof stale (observed " + q.clock.Now().Sub(p.ObservedAt).Round(time.Second).String() + " ago)"
+		return "fleet runtime proof stale (observed " + q.clock.Now().Sub(p.ObservedAt).Round(time.Second).String() + " ago, fresh for " + q.fleetProofBound(p).Round(time.Second).String() + ")"
 	}
 	return ""
 }

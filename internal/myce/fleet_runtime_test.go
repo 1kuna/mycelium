@@ -375,7 +375,7 @@ func TestFleetRuntimeCachedProofExpiresWithoutRenewingObservation(t *testing.T) 
 	if first == nil || r.generation != 1 || first.ObservedAt != clock.Now() {
 		t.Fatal("completed probe did not advance generation")
 	}
-	clock.Advance(fleetRuntimeFreshFor - time.Nanosecond)
+	clock.Advance(fleetProofMaxAge - time.Nanosecond)
 	if p := r.observe(ctx, m, false); p == nil || p.ObservedAt != first.ObservedAt || r.generation != 1 {
 		t.Fatal("cached heartbeat renewed manager observation")
 	}

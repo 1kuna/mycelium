@@ -270,9 +270,9 @@ func (w Worker) newFleetRuntime() *workerFleetRuntime {
 	}, launch: LaunchFleetUpdate}
 }
 
-// Reuse the shortest default worker-loss threshold rather than extending fleet
-// authority indefinitely while a manager/control request is stuck. Queues may
-// use their configured, shorter loss threshold when evaluating the timestamp.
+// The strictest proof freshness: the shortest default worker-loss threshold.
+// The queue extends it only by a process's measured proof cadence, up to
+// fleetProofMaxAge (#1450); a new process is judged against this.
 const fleetRuntimeFreshFor = min(ProductionLossAfter, DeadlineLossAfter, LossAfter)
 
 func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bool) *FleetRuntimeProof {
@@ -311,7 +311,10 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		clock = RealClock{}
 	}
 	now := clock.Now()
-	if r.proof.ObservedAt.IsZero() || now.Before(r.proof.ObservedAt) || now.Sub(r.proof.ObservedAt) >= fleetRuntimeFreshFor {
+	// Report the proof with its age and let the queue judge freshness against
+	// this process's cadence. Never extend it past the ceiling while a manager
+	// or control request is stuck.
+	if r.proof.ObservedAt.IsZero() || now.Before(r.proof.ObservedAt) || now.Sub(r.proof.ObservedAt) >= fleetProofMaxAge {
 		return nil
 	}
 	p := *r.proof
