@@ -136,9 +136,11 @@ done
 	}
 }
 
+// Launch plumbing is device-agnostic; device 1 also catches a hard-coded
+// first device. TestDeviceSelectionEnvironment covers every platform/device pair.
 func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1"} {
+		for _, device := range []string{"1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w := recoveryWorker(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
@@ -169,7 +171,7 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 
 func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1"} {
+		for _, device := range []string{"1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w, s, c, root := dockerFixture(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
@@ -214,7 +216,7 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 }
 
 func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
-	for _, device := range []string{"0", "1"} {
+	for _, device := range []string{"1"} {
 		t.Run(device, func(t *testing.T) {
 			w, s, c, root := dockerGroupFixture(t)
 			w.Machine.GPU, w.Machine.Device = "xpu", device
