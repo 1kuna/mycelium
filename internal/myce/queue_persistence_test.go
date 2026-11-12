@@ -108,6 +108,12 @@ func durableQueueRecord(t *testing.T, db *sql.DB, key string) []byte {
 	if !ok {
 		t.Fatalf("durable record %q missing", key)
 	}
+	if strings.HasPrefix(key, "jobs/") {
+		// Settled job rows store shared values; decode what every reader sees.
+		if data, err = expandJobRecord(data); err != nil {
+			t.Fatal(key, err)
+		}
+	}
 	return data
 }
 
