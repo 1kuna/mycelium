@@ -1198,7 +1198,10 @@ shows beside its evidence. Job GET `resources` lists each dimension
 `storage_bytes`) with `declared`, `learned`, `evidence`, `used` and `basis`;
 a missing value means none, not zero. `used` host memory is the charged
 figure, including ceiling slack and, on unified hosts, the device share. CPU
-is not learned yet, and learned storage stays observation only (#504). Status
+is not learned yet. Storage `basis` names what sized the job's work dir and
+`TMPDIR` scratch: `exact` (accepted runs of this exact work), `family`
+(accepted runs of the same entry, see below), `declared` (`disk.scratch_bytes`)
+or `manifest` (sizes only). Status
 `admissions` counts memory admissions per host by basis: `current` over
 running attempts, `recent` over every retained assigned job, and
 `declared_with_evidence` for explicit figures with a learned comparison.
@@ -2036,6 +2039,19 @@ and source, qualified OS/architecture/platform variant, hashed output-affecting
 configuration and input shape. There is no host in the comparison key; evidence
 does not qualify another variant or change placement. Plain commands need a
 frozen source manifest; unversioned external software stays unknown.
+
+An entry that runs once per item (new inputs, settings or source each time)
+never repeats its exact key. Its runs share a family: the same project, entry
+or profile name, program, workload shape, target and environment. When the
+exact key has no accepted peaks and the family has at least two accepted runs
+(the fewest that show spread between items), the family's peak plus that
+spread (peak minus smallest, or the largest measured underprediction if
+larger) sizes scratch and replaces `disk.scratch_bytes`. The envelope's
+`basis` is then `family`, and its source says so. Input size is not scaled.
+CPU memory does the same: with a stated hint (`memory: auto` plus a figure),
+two accepted runs of the same project and name on that host replace the host
+hint with the bounded family figure (`submitter hint superseded`, basis
+`exploratory`, normal OOM retry).
 
 Assigned jobs expose `storage_envelope`; job GET also retains `storage_attempts`
 (first and latest 31, with `storage_attempts_dropped`). These facts carry exact

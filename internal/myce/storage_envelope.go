@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"time"
@@ -85,6 +86,9 @@ type StorageObservation struct {
 	OutputExecution  Execution    `json:"output_execution"`
 	OutputRecordedAt time.Time    `json:"output_recorded_at"`
 	Execution        Execution    `json:"execution"`
+	// Family groups per-item runs of one entry (storageFamily); empty on rows
+	// recorded before it existed until their next accepted run.
+	Family string `json:"family,omitempty"`
 	// Negative evidence stays separate from the accepted ranges and their clock.
 	LowerBound          *AttemptStoragePeak `json:"lower_bound,omitempty"`
 	LowerBoundExecution Execution           `json:"lower_bound_execution,omitempty"`
@@ -93,22 +97,24 @@ type StorageObservation struct {
 }
 
 type JobStorageEnvelope struct {
-	Key             *StorageKey         `json:"key,omitempty"`
-	Evidence        *StorageObservation `json:"evidence,omitempty"`
-	Source          string              `json:"source"`
-	Samples         uint64              `json:"samples"`
-	OutputBytes     *uint64             `json:"output_bytes,omitempty"`
-	ScratchBytes    *uint64             `json:"scratch_bytes,omitempty"`
-	SpoolBytes      *uint64             `json:"spool_bytes,omitempty"`
-	CheckpointBytes *uint64             `json:"checkpoint_bytes,omitempty"`
-	MetadataBytes   *uint64             `json:"metadata_bytes,omitempty"`
-	ManagedBytes    *uint64             `json:"managed_bytes,omitempty"`
-	Files           *uint64             `json:"files,omitempty"`
-	InputBytes      uint64              `json:"input_bytes"`
-	PredictedNeed   *uint64             `json:"predicted_need,omitempty"`
-	Margin          uint64              `json:"margin"`
-	PositiveError   uint64              `json:"positive_error"`
-	Multiplier      float64             `json:"multiplier"`
+	Key      *StorageKey         `json:"key,omitempty"`
+	Evidence *StorageObservation `json:"evidence,omitempty"`
+	Source   string              `json:"source"`
+	// Basis of the scratch figure admission used: exact, family, declared or manifest.
+	Basis           string  `json:"basis,omitempty"`
+	Samples         uint64  `json:"samples"`
+	OutputBytes     *uint64 `json:"output_bytes,omitempty"`
+	ScratchBytes    *uint64 `json:"scratch_bytes,omitempty"`
+	SpoolBytes      *uint64 `json:"spool_bytes,omitempty"`
+	CheckpointBytes *uint64 `json:"checkpoint_bytes,omitempty"`
+	MetadataBytes   *uint64 `json:"metadata_bytes,omitempty"`
+	ManagedBytes    *uint64 `json:"managed_bytes,omitempty"`
+	Files           *uint64 `json:"files,omitempty"`
+	InputBytes      uint64  `json:"input_bytes"`
+	PredictedNeed   *uint64 `json:"predicted_need,omitempty"`
+	Margin          uint64  `json:"margin"`
+	PositiveError   uint64  `json:"positive_error"`
+	Multiplier      float64 `json:"multiplier"`
 	// #506/#507 install limits. A prediction is never an installed hard limit.
 	HardLimit   *uint64 `json:"hard_limit,omitempty"`
 	Enforcement string  `json:"enforcement"`
@@ -204,9 +210,12 @@ func (q *Queue) storageEnvelope(j *Job, m *Machine) *JobStorageEnvelope {
 	if j.Spec.Disk != nil {
 		e.InputBytes = max(e.InputBytes, j.Spec.Disk.InputBytes)
 	}
+	e.Basis = "manifest"
+	if j.Spec.Disk != nil && j.Spec.Disk.ScratchBytes > 0 {
+		e.Basis = "declared"
+	}
 	if e.Key != nil {
-		point, ok := q.s.StorageObservations[identityHash(e.Key)]
-		if ok {
+		if point, ok := q.s.StorageObservations[identityHash(e.Key)]; ok {
 			e.Evidence = &point
 			outputAge := q.clock.Now().Sub(point.OutputRecordedAt)
 			if point.Output.Samples > 0 && outputAge >= 0 {
@@ -214,26 +223,30 @@ func (q *Queue) storageEnvelope(j *Job, m *Machine) *JobStorageEnvelope {
 				e.Source = "accepted logical output; scratch unknown"
 				e.Samples = point.Output.Samples
 			}
-			age := q.clock.Now().Sub(point.RecordedAt)
-			if point.Managed.Samples > 0 && age >= 0 {
-				e.Source, e.Samples = "accepted managed storage peaks", point.Managed.Samples
+		}
+		if point, basis, ok := q.learnedStorage(j, e.Key); ok {
+			e.Source, e.Samples, e.Basis = "accepted managed storage peaks", point.Managed.Samples, basis
+			if basis == "family" {
+				// Other items' staged inputs say nothing about this item's.
+				e.Source = "accepted family storage peaks + measured spread"
+			} else {
 				e.InputBytes = max(e.InputBytes, point.Staging.need(point.AllocationUnit))
-				e.OutputBytes = storageValue(point.Output.need(1))
-				e.ScratchBytes, e.SpoolBytes = storageValue(point.Scratch.need(point.AllocationUnit)), storageValue(point.Spool.need(point.AllocationUnit))
-				e.CheckpointBytes, e.MetadataBytes = storageValue(point.Checkpoint.need(point.AllocationUnit)), storageValue(point.Metadata.need(point.AllocationUnit))
-				e.ManagedBytes, e.Files = storageValue(point.Managed.need(point.AllocationUnit)), storageValue(point.Files.need(1))
-				e.Margin, e.PositiveError = point.Managed.margin(), point.Managed.PositiveError
-				e.Multiplier = 1
-				if point.Managed.Peak > 0 {
-					e.Multiplier += float64(e.Margin) / float64(point.Managed.Peak)
-				}
-				e.PredictedNeed = storageValue(addDiskBytes(e.InputBytes, *e.ManagedBytes))
-				e.Exploration = ""
-				if point.LowerBound != nil && (point.LowerBound.ManagedBytes > *e.ManagedBytes || point.LowerBound.Constrained && point.LowerBound.ManagedBytes >= point.Managed.Peak) {
-					e.Exploration = "larger lower bound retained; fresh storage admission required"
-				}
-				return e
 			}
+			e.OutputBytes = storageValue(point.Output.need(1))
+			e.ScratchBytes, e.SpoolBytes = storageValue(point.Scratch.need(point.AllocationUnit)), storageValue(point.Spool.need(point.AllocationUnit))
+			e.CheckpointBytes, e.MetadataBytes = storageValue(point.Checkpoint.need(point.AllocationUnit)), storageValue(point.Metadata.need(point.AllocationUnit))
+			e.ManagedBytes, e.Files = storageValue(point.Managed.need(point.AllocationUnit)), storageValue(point.Files.need(1))
+			e.Margin, e.PositiveError = point.Managed.margin(), point.Managed.PositiveError
+			e.Multiplier = 1
+			if point.Managed.Peak > 0 {
+				e.Multiplier += float64(e.Margin) / float64(point.Managed.Peak)
+			}
+			e.PredictedNeed = storageValue(addDiskBytes(e.InputBytes, *e.ManagedBytes))
+			e.Exploration = ""
+			if point.LowerBound != nil && (point.LowerBound.ManagedBytes > *e.ManagedBytes || point.LowerBound.Constrained && point.LowerBound.ManagedBytes >= point.Managed.Peak) {
+				e.Exploration = "larger lower bound retained; fresh storage admission required"
+			}
+			return e
 		}
 	}
 	if e.OutputBytes == nil && j.Spec.Disk != nil && j.Spec.Disk.OutputBytes > 0 {
@@ -288,7 +301,7 @@ func (q *Queue) recordAttemptStorage(j *Job, r Result) {
 	}
 	key := *j.StorageEnvelope.Key
 	point := q.s.StorageObservations[identityHash(key)]
-	point.Key = key
+	point.Key, point.Family = key, storageFamily(j.Spec.Project, key)
 	peak := *r.StoragePeak
 	if point.LowerBound != nil && point.LowerBound.ManagedBytes > peak.ManagedBytes {
 		return
@@ -305,7 +318,7 @@ func (q *Queue) recordAttemptStorage(j *Job, r Result) {
 }
 
 func (e JobStorageEnvelope) Summary() string {
-	return fmt.Sprintf("storage %s; samples %d; logical output %s; predicted %s; error/margin %d/%d bytes; hard limit %s; %s", e.Source, e.Samples, storageBytesText(e.OutputBytes), storageBytesText(e.PredictedNeed), e.PositiveError, e.Margin, storageBytesText(e.HardLimit), e.Enforcement)
+	return fmt.Sprintf("storage %s (basis %s); samples %d; logical output %s; predicted %s; error/margin %d/%d bytes; hard limit %s; %s", e.Source, cmp.Or(e.Basis, "unknown"), e.Samples, storageBytesText(e.OutputBytes), storageBytesText(e.PredictedNeed), e.PositiveError, e.Margin, storageBytesText(e.HardLimit), e.Enforcement)
 }
 func storageBytesText(n *uint64) string {
 	if n == nil {

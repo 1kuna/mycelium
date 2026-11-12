@@ -13,6 +13,8 @@ type memoryPlanningCache struct {
 	constrained  map[constrainedMemoryKey]float64
 	components   map[memoryComponentKey]*Machine
 	allocations  map[allocationViewKey]*Machine
+	// Storage observations grouped by family for this pass.
+	storageFamilies map[string][]StorageObservation
 }
 
 type memoryComponentKey struct {

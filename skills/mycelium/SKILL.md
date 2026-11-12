@@ -105,7 +105,8 @@ submitting. Only production entries need a target list; every field is in
 - **Big scratch** (renders, builds, unpacked archives): add
   `disk: {scratch_bytes: N}` with the work dir plus `TMPDIR` peak, so the job
   waits for a host with room instead of failing inside a full disk. After one
-  accepted run Mycelium uses the measured peak instead
+  accepted run Mycelium uses the measured peak instead; per-item work (new
+  inputs each run) uses its entry's peaks after two accepted runs
   ([disk needs](references/submit.md#disk-needs)).
 - **Network** is off for the command unless you declare `needs: {network: true}`.
 

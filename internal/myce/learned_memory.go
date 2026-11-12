@@ -115,6 +115,30 @@ func (q *Queue) coldMemoryBoundOrProbe(j *Job, m *Machine, estimate memoryEstima
 	return host, source + " " + boundedFirstRun + "accepted family peaks + measured uncertainty)", evidence, 0, true
 }
 
+// Overriding a stated hint needs at least two accepted family runs: the
+// fewest that expose spread between items. With no figure at all, one run
+// already bounds a first run (coldMemoryBound). Host RAM only: the family
+// bound has no device vector, so GPU hints keep their device figure.
+const memoryFamilyHintRuns = 2
+
+type familyMemoryBound struct {
+	host     float64
+	source   string
+	evidence int
+}
+
+func (q *Queue) familyMemoryOverHint(j *Job, m *Machine, estimate memoryEstimate, floor float64, out *familyMemoryBound) bool {
+	if j.MemoryFallback == nil || !j.MemoryFallback.valid() || !j.Spec.Needs.cpuOnly() {
+		return false
+	}
+	host, source, evidence, ok := q.coldMemoryBound(j, m, estimate, floor)
+	if !ok || evidence < memoryFamilyHintRuns {
+		return false
+	}
+	*out = familyMemoryBound{host, source, evidence}
+	return true
+}
+
 // The host RAM this worker may ever give jobs: its allowance, else physical RAM.
 func hostMemoryAllowanceGB(m *Machine) float64 {
 	if m.EffectiveHostMemoryBudgetGB > 0 || m.CapabilityProfile == nil {

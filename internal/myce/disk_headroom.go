@@ -29,17 +29,16 @@ func declaredDiskWork(j *Job) diskWork {
 	return diskWork{scratch: j.Spec.Disk.ScratchBytes}
 }
 
-// A measured peak beats the hint (MY-34). Lookups read queue memory only.
+// A measured peak (this exact work's, else its family's) beats the hint
+// (MY-34). Lookups read queue memory only.
 func (q *Queue) diskWork(j *Job, m *Machine) diskWork {
 	w := declaredDiskWork(j)
 	if m == nil {
 		return w
 	}
 	if len(q.s.StorageObservations) > 0 {
-		if key := q.storageKey(j, m); key != nil {
-			if p, ok := q.s.StorageObservations[identityHash(key)]; ok && p.Scratch.Samples > 0 {
-				w.scratch = p.Scratch.need(p.AllocationUnit)
-			}
+		if p, _, ok := q.learnedStorage(j, q.storageKey(j, m)); ok {
+			w.scratch = p.Scratch.need(p.AllocationUnit)
 		}
 	}
 	if q.environmentSizesKnown() {

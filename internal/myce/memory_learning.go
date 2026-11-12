@@ -208,7 +208,7 @@ func (q *Queue) recordStorageNeeds(sample eligibleMemorySample) {
 	old := q.s.StorageObservations[id]
 	p := r.StoragePeak
 	e := j.StorageEnvelope
-	old.Key = key
+	old.Key, old.Family = key, storageFamily(j.Spec.Project, key)
 	old.Output = old.Output.add(manifestDiskBytes(r.OutputRefs), e.OutputBytes)
 	old.OutputRecordedAt = q.clock.Now()
 	old.OutputExecution = r.Execution

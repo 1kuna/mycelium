@@ -96,13 +96,16 @@ func jobResources(j *Job) []ResourceBasis {
 		cpu.Note = "observed logical-job peak CPU need; shared-host admission rounds up and never charges below declaration"
 		cpu.Evidence = 1
 	}
-	storage := ResourceBasis{Dimension: "storage_bytes", Used: value(float64(projectedDiskNeed(j))), Basis: "manifest", Note: "learned storage is observation only (#504)"}
+	storage := ResourceBasis{Dimension: "storage_bytes", Used: value(float64(projectedDiskNeed(j))), Basis: "manifest", Note: "scratch admission uses this work's accepted peaks, else its family's peaks plus spread, else the declared hint"}
 	if d := j.Spec.Disk; d != nil {
 		storage.Declared = value(float64(addDiskBytes(addDiskBytes(d.InputBytes, d.OutputBytes), d.CheckpointBytes)))
 		storage.Basis = "declared"
 	}
 	if s := j.StorageEnvelope; s != nil && s.PredictedNeed != nil {
 		storage.Learned, storage.Evidence = value(float64(*s.PredictedNeed)), int(min(s.Samples, 1<<31-1))
+	}
+	if s := j.StorageEnvelope; s != nil && s.Basis != "" {
+		storage.Basis = s.Basis // exact, family, declared or manifest
 	}
 	out := []ResourceBasis{host}
 	if !n.cpuOnly() {

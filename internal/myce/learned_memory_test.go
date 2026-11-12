@@ -411,3 +411,28 @@ func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
 		t.Fatalf("different arguments did not use only similar-family evidence: %+v", e)
 	}
 }
+
+// A per-item entry with a stated hint never repeats its exact work. After two
+// accepted family runs the family bound supersedes the hint; before, it stands.
+func TestLearnedMemoryFamilySupersedesHintForPerItemWork(t *testing.T) {
+	q, clock, m := learnedMemoryFixture(t)
+	item := func(n string) Spec {
+		s := cpuSpec(1, 20)
+		s.Name, s.Needs.Memory = "render", "auto"
+		s.Run.Command = []string{"render", n}
+		return s
+	}
+	first := runMemory(t, q, clock, m, item("a"), 2, nil)
+	if e := first.MemoryEnvelope; e.Basis != "hint" || first.Spec.Needs.HostMemoryGB != 20 {
+		t.Fatalf("cold hinted run not on its hint: %+v", e)
+	}
+	second := runMemory(t, q, clock, m, item("b"), 3, nil)
+	if e := second.MemoryEnvelope; e.Basis != "hint" || second.Spec.Needs.HostMemoryGB != 20 {
+		t.Fatalf("one family run superseded the hint: %+v", e)
+	}
+	runMemory(t, q, clock, m, item("c"), 4, nil)
+	fourth := runMemory(t, q, clock, m, item("d"), 4, nil)
+	if e := fourth.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 3 || fourth.Spec.Needs.HostMemoryGB != 6 || !strings.Contains(e.Source, "submitter hint superseded") || !strings.Contains(e.Source, boundedFirstRun) {
+		t.Fatalf("family did not supersede the hint: %+v needs=%+v", e, fourth.Spec.Needs)
+	}
+}
