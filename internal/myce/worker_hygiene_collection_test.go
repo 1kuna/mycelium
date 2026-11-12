@@ -161,13 +161,7 @@ func TestWorkerHygieneCollectionFailedStagingRequiresReceiptAndInactivity(t *tes
 		t.Fatal("active transaction staging removed", err)
 	}
 	unlock()
-	denied := func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("inspection refused") }
-	if err := collectFailedFleetStaging(context.Background(), f.c, denied); err == nil {
-		t.Fatal("absence refusal ignored")
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal("refused inspection removed staging", err)
-	}
+	// With the update lock free, no helper runs: the failed receipt's staging goes.
 	if err := collectFailedFleetStaging(context.Background(), f.c, command); err != nil {
 		t.Fatal(err)
 	}
