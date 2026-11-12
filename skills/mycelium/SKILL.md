@@ -31,6 +31,8 @@ myce run -- sh -c 'echo "hello from $(uname -sm)"'
 This submits the command, streams its logs and exits with its exit code. It runs
 with the worker's installed tools in an empty folder. `--cpu N`, `--mem 8G` and
 `--gpu cuda|xpu|metal` describe needs; leave memory out and Mycelium learns it.
+A typed memory figure is a limit, not a reservation: once the work has run,
+Mycelium charges what it measured and keeps your figure as the ceiling.
 
 ## 2. Files back
 

@@ -543,7 +543,7 @@ func retainedHostCharge(j *Job) float64 {
 func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	for _, j := range q.liveJobs() {
 		m := q.s.Machines[j.Machine]
-		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 {
+		if j.Machine != machine || j.ReleaseConfirmed || (j.State != "running" && j.State != "stopping") || adaptiveMemoryCeilingGB(j, m) <= 0 && !chargedBelowLimit(j) {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]

@@ -3137,6 +3137,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.PreemptionPlacement = nil
 	j.Spec.Needs = selected.Spec.Needs
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
+	if e := j.MemoryEnvelope; e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
+		// Admission used the learned charge; the typed figure stays the limit.
+		j.Spec.Needs.HostMemoryGB = e.LimitHostGB
+	}
 	q.recordLearnedMemory(j, m)
 	if selected.Batch != nil {
 		j.Batch = selected.Batch

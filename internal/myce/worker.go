@@ -451,7 +451,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
 		return nil, err
 	}
 	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
@@ -610,7 +610,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if j.Spec.Run.Workdir == "" {
 		j.Spec.Run.Workdir = executionWork
 	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
 		return nil, err
 	}
 	if err := w.checkAvailability(); err != nil {

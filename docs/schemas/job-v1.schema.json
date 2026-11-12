@@ -3816,6 +3816,9 @@
         "basis": {
           "type": "string"
         },
+        "charge_host_gb": {
+          "type": "number"
+        },
         "device": {
           "type": "string"
         },
@@ -3836,6 +3839,9 @@
         },
         "learned": {
           "$ref": "#/$defs/LearnedMemory"
+        },
+        "limit_host_gb": {
+          "type": "number"
         },
         "machine": {
           "type": "string"

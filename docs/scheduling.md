@@ -47,6 +47,22 @@ Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
 allowance. Workers must report the current protocol and a capability profile; unknown capacity withholds admission.
 
+### Typed memory is a limit, not a reservation
+
+A typed `host_memory_gb` (or CPU `memory_gb`) is the job's enforced limit and
+the cap on its charge. Once the work has accepted runs on the target, or its
+entry two runs in its family, admission charges what those runs reached: the
+accepted peak plus its measured spread and growth (MY-31). The worker still
+enforces the typed figure: a cgroup v2 ceiling on Linux, the sampled RSS guard
+on macOS. A job that grows past its charge is charged by use up to that limit,
+and if neighbours were admitted into the room it no longer leaves, the
+lowest-tier lender yields through the planned-stop path before the host runs
+out (`memory_overcommit_yield`). Production, GPU device memory, the shared
+interactive host, hosts without either guard, OOM retries and workers
+from the previous release keep the typed figure as the charge. With nothing
+learned the typed figure is the charge. The envelope shows `basis: learned`,
+`charge_host_gb` and `limit_host_gb` ([status](status.md)).
+
 Among admissible targets for the same work, preserve scarce machines first
 (MY-18). Measured accelerator backends and usable memory tiers, plus host RAM
 tiers above the fleet minimum, form capability bands. Each band counts physical
