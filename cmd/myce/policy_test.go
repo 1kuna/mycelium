@@ -266,15 +266,16 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 				t.Fatalf("export lost explicit project settings: %+v, %v", exported, err)
 			}
 
-			// Export, change hold scope, set and restart with unchanged host file.
+			// The previous release's whole-machine host file converts to device
+			// scope. Export, re-apply and restart with the unchanged host file.
 			if tc.name == "edit projects" {
 				out.Reset()
 				if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
 					t.Fatal(err)
 				}
-				exported := strings.Replace(out.String(), "production_hold: true", "production_hold: true\n        production_hold_scope: device", 1)
-				if exported == out.String() {
-					t.Fatalf("host hold missing from export:\n%s", out.String())
+				exported := out.String()
+				if !strings.Contains(exported, "production_hold_scope: device") {
+					t.Fatalf("converted host hold missing from export:\n%s", exported)
 				}
 				file = filepath.Join(dir, "policy.yaml")
 				if err := os.WriteFile(file, []byte(exported), 0600); err != nil {
