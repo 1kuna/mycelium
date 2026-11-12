@@ -263,6 +263,14 @@ In an existing project, Mycelium now does these; delete your own:
 `myce adapter convert` turns old profiles into minimal entries
 ([setup](setup-project.md)).
 
+## Check your project's efficiency
+
+After a batch, run `myce efficiency --project NAME` once. It shows what your
+own steering cost you: the share of jobs that name hosts or targets, the queue
+hours they waited while an excluded host had room, and how far typed
+`host_memory_gb` and `cpu_cores` sit from what Mycelium measured. Act on each
+`advice:` line in your entries, then drop the steering it names.
+
 ## References
 
 - [Submit](references/submit.md): needs, source and keys, environments,

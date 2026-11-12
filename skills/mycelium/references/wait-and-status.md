@@ -63,7 +63,10 @@ returns retryable 503 `status_unavailable`: back off and keep the same job and
 key.
 
 `myce efficiency` gives one read of reservation versus measured use, blocker
-wait totals and wasted attempts; missing samples are unknown, not zero. See
+wait totals and wasted attempts; missing samples are unknown, not zero.
+`myce efficiency --project NAME` shows only your project's waits, the queue
+hours your host lists and targets cost, typed sizing against learned peaks,
+and one advice line per item. See
 [queue efficiency](../../../docs/status.md).
 
 ## Host status

@@ -99,6 +99,11 @@ type JobEfficiency struct {
 	WaitSeconds   map[string]float64     `json:"wait_seconds"`
 	Allocations   []EfficiencyAllocation `json:"allocations,omitempty"`
 	Rate          efficiencyRate         `json:"rate"`
+	// Stranded is the last maintenance verdict that a host this job's own
+	// host lists or targets exclude had room for it; StrandedSeconds is the
+	// queue wait accumulated under that verdict.
+	Stranded        bool    `json:"stranded,omitempty"`
+	StrandedSeconds float64 `json:"stranded_seconds,omitempty"`
 }
 type EfficiencyHost struct {
 	Identity string    `json:"identity"`
@@ -123,6 +128,7 @@ type StrandedDemand struct {
 	JobID    string   `json:"job_id"`
 	Project  string   `json:"project"`
 	Host     string   `json:"host"`
+	Platform string   `json:"platform"`
 	Fields   []string `json:"excluding_fields"`
 	MemoryGB float64  `json:"memory_gb"`
 	CPUCores int      `json:"cpu_cores"`
@@ -225,6 +231,7 @@ type EfficiencyReport struct {
 	Jobs                    []EfficiencyWait       `json:"jobs"`
 	Projects                []EfficiencyWait       `json:"projects"`
 	Stranded                []StrandedDemand       `json:"stranded"`
+	Restrictions            []ProjectRestrictions  `json:"restrictions"`
 	Predictions             []PredictionError      `json:"predictions"`
 	Wasted                  []WastedAttempt        `json:"wasted_attempts"`
 	Signals                 []EfficiencySignal     `json:"signals"`
@@ -243,6 +250,9 @@ func (e *JobEfficiency) advance(now time.Time) {
 			e.WaitSeconds = map[string]float64{}
 		}
 		e.WaitSeconds[e.Blocker] += seconds
+	}
+	if e.Stranded {
+		e.StrandedSeconds += seconds
 	}
 	e.addRate(e.Rate, now, seconds)
 	for _, rate := range e.RetainedRates {
@@ -312,13 +322,13 @@ func (q *Queue) projectEfficiency(j *Job) {
 // so the durable anchor reconstructs elapsed time after a restart without a
 // write for every waiting job on every heartbeat.
 func (e *JobEfficiency) transition(old JobEfficiency, now time.Time) {
-	if old.Blocker == e.Blocker && reflect.DeepEqual(old.Rate, e.Rate) && reflect.DeepEqual(old.RetainedRates, e.RetainedRates) {
+	if old.Blocker == e.Blocker && old.Stranded == e.Stranded && reflect.DeepEqual(old.Rate, e.Rate) && reflect.DeepEqual(old.RetainedRates, e.RetainedRates) {
 		return
 	}
-	rate, retained, blocker := e.Rate, e.RetainedRates, e.Blocker
-	e.Rate, e.RetainedRates, e.Blocker = old.Rate, old.RetainedRates, old.Blocker
+	rate, retained, blocker, stranded := e.Rate, e.RetainedRates, e.Blocker, e.Stranded
+	e.Rate, e.RetainedRates, e.Blocker, e.Stranded = old.Rate, old.RetainedRates, old.Blocker, old.Stranded
 	e.advance(now)
-	e.Rate, e.RetainedRates, e.Blocker = rate, retained, blocker
+	e.Rate, e.RetainedRates, e.Blocker, e.Stranded = rate, retained, blocker, stranded
 }
 func efficiencyBasis(j *Job) string {
 	if j.MemoryEnvelope != nil && j.MemoryEnvelope.Basis != "" {
@@ -465,7 +475,7 @@ func (q *Queue) refreshJobEfficiency(j *Job, releases []HostRelease, now time.Ti
 	}
 	e := &next
 	defer func() {
-		if previous != nil && previous.Blocker == e.Blocker && reflect.DeepEqual(previous.Rate, e.Rate) && reflect.DeepEqual(previous.RetainedRates, e.RetainedRates) {
+		if previous != nil && previous.Blocker == e.Blocker && previous.Stranded == e.Stranded && reflect.DeepEqual(previous.Rate, e.Rate) && reflect.DeepEqual(previous.RetainedRates, e.RetainedRates) {
 			return
 		}
 		q.touchJob(j.ID)
@@ -482,9 +492,9 @@ func (q *Queue) refreshJobEfficiency(j *Job, releases []HostRelease, now time.Ti
 			e.Blocker = "unknown"
 		}
 	} else if j.State == "paused" {
-		e.Blocker = "holds"
+		e.Blocker, e.Stranded = "holds", false
 	} else {
-		e.Blocker = ""
+		e.Blocker, e.Stranded = "", false
 	}
 	oldRetained := e.RetainedRates
 	e.RetainedRates = nil
@@ -596,7 +606,7 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 			continue
 		}
 		seenHosts[hostID(m)] = true
-		rows = append(rows, StrandedDemand{JobID: j.ID, Project: j.Spec.Project, Host: hostID(m), Fields: fields, MemoryGB: hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), CPUCores: candidate.Spec.Needs.cores()})
+		rows = append(rows, StrandedDemand{JobID: j.ID, Project: j.Spec.Project, Host: hostID(m), Platform: machinePlatformLabel(m), Fields: fields, MemoryGB: hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), CPUCores: candidate.Spec.Needs.cores()})
 	}
 	slices.SortFunc(rows, func(a, b StrandedDemand) int { return strings.Compare(a.JobID+a.Host, b.JobID+b.Host) })
 	return rows
@@ -611,6 +621,7 @@ func (q *Queue) batchSlotFreeForEfficiency(j *Job, m *Machine) bool {
 // Ordinary heartbeats must not starve diagnostics by invalidating the whole fleet.
 type efficiencyBlockerObservation struct {
 	Category string
+	Stranded bool
 	Attempt  int
 	Session  string
 	Queued   time.Time
@@ -637,12 +648,13 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	v.memoryPlanning = newMemoryPlanningCache()
 	for _, j := range v.liveJobs() {
 		if j.State == "queued" && !cancelled(j) {
-			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j).efficiencyCategory(), Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
+			stranded := v.strandedDemand(j)
+			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j).efficiencyCategory(), Stranded: len(stranded) > 0, Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
 			if j.Efficiency != nil {
 				j.Efficiency.advance(v.clock.Now())
-				j.Efficiency.Blocker = d.blockers[j.ID].Category
+				j.Efficiency.Blocker, j.Efficiency.Stranded = d.blockers[j.ID].Category, len(stranded) > 0
 			}
-			d.stranded = append(d.stranded, v.strandedDemand(j)...)
+			d.stranded = append(d.stranded, stranded...)
 		}
 	}
 	v.s.StrandedDemand = d.stranded
@@ -658,10 +670,10 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	}
 	for id, blocker := range d.blockers {
 		if j := q.s.Jobs[id]; j != nil && j.State == "queued" && j.Attempt == blocker.Attempt && j.Session == blocker.Session && j.Queued.Equal(blocker.Queued) && j.Efficiency != nil {
-			if j.Efficiency.Blocker != blocker.Category {
+			if j.Efficiency.Blocker != blocker.Category || j.Efficiency.Stranded != blocker.Stranded {
 				q.touchJob(j.ID)
 				j.Efficiency.advance(q.clock.Now())
-				j.Efficiency.Blocker = blocker.Category
+				j.Efficiency.Blocker, j.Efficiency.Stranded = blocker.Category, blocker.Stranded
 			}
 		}
 	}
@@ -800,6 +812,7 @@ func (q *Queue) efficiencyReport() *EfficiencyReport {
 		r.Projects = append(r.Projects, EfficiencyWait{Project: project, Seconds: seconds})
 	}
 	r.Stranded = slices.Clone(q.s.StrandedDemand)
+	r.Restrictions = q.projectRestrictions(now, r.Stranded)
 	for key, b := range q.s.EfficiencyHealth {
 		r.Signals = append(r.Signals, b.signal(key))
 	}
@@ -1107,6 +1120,9 @@ func (r *EfficiencyReport) Lines() []string {
 		for _, category := range slices.Sorted(maps.Keys(p.Seconds)) {
 			lines = append(lines, fmt.Sprintf("  project %s: %s wait %.1f hours", p.Project, category, p.Seconds[category]/3600))
 		}
+	}
+	for _, p := range r.Restrictions {
+		lines = append(lines, p.lines("  ")...)
 	}
 	strandedGroups := map[string]int{}
 	for _, s := range r.Stranded {
