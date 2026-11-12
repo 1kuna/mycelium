@@ -6,7 +6,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -30,8 +32,9 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 			PublicKey []byte `json:"public_key"`
 		}{key}, nil)
 	})
-	// Polled by previous-release workers every heartbeat; current workers fetch
-	// only when their check-in reply says an instruction may be waiting.
+	// Current workers fetch only when their check-in reply says an instruction
+	// may be waiting (plus once at start); the queue's own runtime only in its
+	// queue_update phase. Previous-release workers poll every heartbeat.
 	mux.HandleFunc("GET /api/fleet/instruction", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var out FleetUpdateInstruction
@@ -40,6 +43,9 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		unlock()
 		w.Header().Set("Cache-Control", "no-store")
 		if inactive && v.Get("operation") == "" {
+			// Expected only once per worker start; anything more is a caller
+			// polling without the check-in gate (#1393).
+			log.Printf("event=fleet_instruction_idle_request caller=%s host=%q machine=%q", fleetInstructionCaller(v), v.Get("host"), v.Get("machine"))
 			respond(w, out, nil)
 			return
 		}
@@ -149,4 +155,23 @@ const fleetInstructionProtocol = "fleet-instruction-waiting-v1"
 func (q *Queue) fleetInstructionWaiting(host string) bool {
 	u, h := q.s.FleetUpgrade, q.fleetActiveHost()
 	return u != nil && u.State == "running" && h != nil && h.Host == host
+}
+
+// q.mu held. fleetInstruction issues the queue's own instruction only in its
+// host's queue_update phase.
+func (q *Queue) fleetQueueInstructionWaiting(host string) bool {
+	h := q.fleetActiveHost()
+	return q.fleetInstructionWaiting(host) && h.Phase == "queue_update"
+}
+
+// fleetInstructionCaller names who asked, for log attribution: the queue's
+// own runtime, an update helper checking its operation, or a worker.
+func fleetInstructionCaller(v url.Values) string {
+	switch {
+	case v.Get("machine") == "@queue":
+		return "queue"
+	case v.Get("operation") != "":
+		return "helper"
+	}
+	return "worker"
 }

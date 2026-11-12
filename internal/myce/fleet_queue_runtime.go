@@ -46,20 +46,30 @@ func (q *Queue) runFleetQueueRuntime(ctx context.Context) {
 	defer ticker.Stop()
 	var generation uint64
 	for {
-		proof := observer.observe(ctx, machine, true)
-		q.mu.Lock()
-		if q.fleetQueue != nil {
-			q.fleetQueue.Proof = cloneFleetProof(proof)
-			if generation != observer.generation {
-				generation = observer.generation
-				q.fleetQueue.ObservedAt = q.clock.Now()
-			}
-		}
-		q.mu.Unlock()
+		q.observeFleetQueue(ctx, observer, machine, &generation)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// observeFleetQueue is one pass of the queue's own runtime loop. The queue never
+// checks in, so it gates its instruction fetch on its own state instead of a
+// reply: it asks only while its own update is due (#1393).
+func (q *Queue) observeFleetQueue(ctx context.Context, observer *workerFleetRuntime, machine Machine, generation *uint64) {
+	q.mu.RLock()
+	observer.instructionGated, observer.instructionWaiting = true, q.fleetQueueInstructionWaiting(machine.HostID)
+	q.mu.RUnlock()
+	proof := observer.observe(ctx, machine, true)
+	q.mu.Lock()
+	if q.fleetQueue != nil {
+		q.fleetQueue.Proof = cloneFleetProof(proof)
+		if *generation != observer.generation {
+			*generation = observer.generation
+			q.fleetQueue.ObservedAt = q.clock.Now()
+		}
+	}
+	q.mu.Unlock()
 }
