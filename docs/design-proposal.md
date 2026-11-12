@@ -399,9 +399,13 @@ the process is alive (#1450). The worker's stop-event long poll runs beside
 that loop, so a current-session poll also counts as contact for confirmed loss:
 while it is open, and for the allowance after it ends normally. A dropped
 connection gives no credit after its start, so a dead process is fenced at once
-and a silently dead host after at most the server's existing poll window.
-Suspicion and cadence learning still use check-ins only, so a stalled loop is
-still suspect and receives no new work.
+and a silently dead host after at most the server's existing poll window. The
+poll proves the process, not its loop, so its credit is bounded: check-in
+silence beyond the measured filesystem-operation stall backstop (30 s, #289),
+or twice the session's longest completed check-in gap if that is longer, is
+still confirmed loss, so a wedged loop's attempts are retried. Suspicion and
+cadence learning still use check-ins only, so a stalled loop is still suspect
+and receives no new work.
 
 Continuous saturation or a wholly unreachable fleet has no finite trustworthy
 **confirmed-loss** bound: retain custody until control service or connectivity

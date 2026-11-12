@@ -235,7 +235,7 @@ type Queue struct {
 	shutdownCancel  context.CancelFunc
 	contactMu       sync.Mutex
 	contacts        map[string]*workerContact
-	workerPolls     map[string]map[string]*workerPoll // contactMu; machine -> session; request lifecycle, not transactional.
+	workerPolls     map[string]map[string]*workerPoll              // contactMu; machine -> session; request lifecycle, not transactional.
 	healthPreparing map[string]map[*hostHealthPreparation]struct{} // contactMu; request lifecycle, not transactional.
 	holdClock       Clock                                          // Optional observational clock; never used for queue decisions.
 	updateHolds     queueHoldSampler

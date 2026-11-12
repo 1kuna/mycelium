@@ -22,6 +22,7 @@ type workerContact struct {
 	cadence              probeEstimate // Wall-time send cadence, independent of service availability.
 	delivery             probeEstimate // Completed control response cost, including queue service.
 	gap                  probeEstimate
+	longestGap           time.Duration // Longest completed arrival gap, in opportunity time.
 	path                 probeEstimate
 	retry                workerRetry // Existing legacy worker reconnect schedule.
 	arrivalOpportunity   time.Duration
@@ -149,6 +150,7 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *c
 			}
 			if gap := pending.opportunity - c.arrivalOpportunity; gap > 0 {
 				c.gap.observe(gap.Seconds())
+				c.longestGap = max(c.longestGap, gap)
 			}
 		}
 		c.arrivalOpportunity, c.arrivalWall, c.seenArrival = pending.opportunity, pending.arrived, true
@@ -357,16 +359,40 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
 	opportunity := q.controlNow()
-	polled := m.LastSeen
-	if p := q.workerPolls[m.ID][m.Session]; includePending && p != nil {
-		if p.open > 0 {
-			return maxTime(now, m.LastSeen)
-		}
-		polled = maxTime(polled, now.Add(-max(0, opportunity-p.last)))
+	contact := q.checkinContact(m, now, includePending, allowance, opportunity)
+	p := q.workerPolls[m.ID][m.Session]
+	if !includePending || p == nil {
+		return contact
 	}
+	polled := now
+	if p.open == 0 {
+		polled = now.Add(-max(0, opportunity-p.last))
+	}
+	// A poll proves the process, not its check-in loop. It extends check-in
+	// contact by a bounded stall, so a wedged loop is still confirmed lost.
+	return maxTime(contact, minTime(polled, contact.Add(q.checkinStallBound(m))))
+}
+
+// checkinStallBound is how long a live poll can cover check-in silence. The
+// evidenced stall is the loop's own durable file writes, so the floor is the
+// measured filesystem-operation stall backstop (#289). A session whose loop
+// has already completed longer stalls gets twice its longest completed gap:
+// one interval waiting behind contended I/O and one completing it, the same
+// basis as that backstop. A wedged loop never completes a gap, so this stays
+// finite. Caller holds contactMu.
+func (q *Queue) checkinStallBound(m *Machine) time.Duration {
+	bound := onboardingFilesystemStallBudget
+	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
+		bound = max(bound, 2*c.longestGap)
+	}
+	return bound
+}
+
+// checkinContact is the contact time from check-ins alone. Caller holds contactMu.
+func (q *Queue) checkinContact(m *Machine, now time.Time, includePending bool, allowance, opportunity time.Duration) time.Time {
 	c := q.contacts[m.ID]
 	if c == nil || c.session != m.Session {
-		return polled
+		return m.LastSeen
 	}
 	contact := false
 	for pending := range c.pending {
@@ -383,7 +409,7 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 		return maxTime(now, m.LastSeen)
 	}
 	if c.measured {
-		return maxTime(polled, now.Add(-max(0, opportunity-c.processedOpportunity)))
+		return maxTime(m.LastSeen, now.Add(-max(0, opportunity-c.processedOpportunity)))
 	}
-	return maxTime(polled, c.processed)
+	return maxTime(m.LastSeen, c.processed)
 }
