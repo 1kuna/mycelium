@@ -70,6 +70,7 @@ type holdKind struct{ owner, reason, clears, next string }
 var holdKinds = map[string]holdKind{
 	// Job waits: the scheduler's current reason for a queued job.
 	"paused":                   {ownerConsumer, "paused", "resumed, or the pause's until time passes", "myce resume JOB_ID when it should run"},
+	"fan_out_cap":              {ownerConsumer, "at its declared max_concurrency", "a running piece of the same parent finishes", "wait, or resubmit with a higher max_concurrency"},
 	"upstream":                 {ownerProducer, "waiting for an upstream result", "the required upstream job succeeds and publishes its result", "complete and publish the required upstream result"},
 	deviceFaultRetryHold:       {ownerQueue, "waiting for healthy accelerator capacity after a driver fault", "another healthy device or host fits, or the quarantined device proves healthy", "wait; Mycelium retries on healthy capacity automatically"},
 	"launch_capacity":          {ownerQueue, "waiting for launch capacity or an exact release", "capacity evidence changes or the pending release is acknowledged", "wait; nothing to do"},

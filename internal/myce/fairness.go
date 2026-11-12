@@ -639,6 +639,9 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		}
 		return newHold("upstream", "waiting for accepted producer piece")
 	}
+	if h := q.fanOutCapHold(j); h != nil {
+		return h
+	}
 	if h := q.variantParityWait(j); h != nil {
 		return h
 	}

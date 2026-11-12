@@ -1404,7 +1404,7 @@ workload: {input_shape: fixed-v1, units: 100}
 files: {}                       # immutable common input manifest, or NAS inputs
 outputs: {metrics.json: results}
 fan_out:
-  max_concurrency: 8             # accepted; pieces run as ordinary serial jobs
+  max_concurrency: 8             # at most 8 pieces unfinished at once
   pieces:
     - {key: first, args: ["--seed", "1"]}
     - {key: second, args: ["--seed", "2"]}
@@ -1414,9 +1414,11 @@ Keys must be unique clean names; there are at most 256 pieces. `workload.units`
 describes **one** piece, using the matching variant reference's unit and shape.
 Each piece is an ordinary serial job: the variant's command with the piece's
 arguments appended, placed, retried and measured like any other job. Pieces run
-in parallel wherever ordinary admission finds capacity. There are no measured
-waves or batch plans (MY-49); `max_concurrency` is still validated but no longer
-groups pieces. The existing `resumable` contract applies to each piece.
+in parallel wherever ordinary admission finds capacity, up to `max_concurrency`
+(1..64) unfinished pieces at once, so a project can throttle an external
+resource. Pieces beyond it stay queued under the parent with a `fan_out_cap`
+hold naming the cap, and the next starts when one finishes; a requeued retry
+counts toward the cap. There are no measured waves or batch plans (MY-49). The existing `resumable` contract applies to each piece.
 Arbitrary programs, dynamic enumeration, general stage graphs and timed input
 accumulation are outside this slice. Whole-parent dependencies below are the
 bounded #180 extension. Common inputs are staged through the normal

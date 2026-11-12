@@ -2,6 +2,8 @@ package myce
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -133,5 +135,61 @@ func TestFanOutLossRetriesOnlyAffectedPiece(t *testing.T) {
 	}
 	if got := job(t, q, parent.ID); got.State != "succeeded" || len(got.FanOut.Results) != 2 {
 		t.Fatalf("state=%s results=%d children=%v", got.State, len(got.FanOut.Results), got.FanOut.Children)
+	}
+}
+
+// max_concurrency caps a parent's unfinished pieces; finishing one frees a slot.
+func TestFanOutMaxConcurrencyCapsRunningPieces(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 5)
+	s.FanOut.MaxConcurrency = 2
+	workers := []Machine{m}
+	e := q.s.Extensions[s.Extension]
+	for i := range 2 {
+		w := cloneMachine(&m)
+		w.ID, w.HostID, w.Session = fmt.Sprintf("w%d", i), fmt.Sprintf("host-%d", i), fmt.Sprintf("session-%d", i)
+		r := newExtensionReport(e, &w, s.workType())
+		r.Setup, r.Qualified, r.CheckID = true, true, fmt.Sprintf("check-%d", i)
+		w.ExtensionReports = []ExtensionReport{r}
+		check(t, q, w, nil)
+		workers = append(workers, w)
+	}
+	parent := submit(t, q, s)
+	on := map[string]*Job{} // worker ID -> running piece
+	start := func(w Machine) *Job {
+		run := check(t, q, w, nil).Job
+		if run != nil {
+			if err := q.Started(result(run, true)); err != nil {
+				t.Fatal(err)
+			}
+			on[w.ID] = run
+		}
+		return run
+	}
+	for done := 0; done < 5; done++ {
+		for _, w := range workers {
+			if on[w.ID] == nil {
+				start(w)
+			}
+		}
+		if len(on) > 2 {
+			t.Fatalf("%d pieces running beyond max_concurrency 2", len(on))
+		}
+		if want := min(2, 5-done); len(on) != want {
+			t.Fatalf("done=%d: %d pieces running, want %d", done, len(on), want)
+		}
+		if h := q.waitHold(q.s.Jobs[parent.ID]); done < 3 && (h == nil || h.Kind != "fan_out_cap" || !strings.Contains(h.Detail, "max_concurrency 2")) {
+			t.Fatalf("hold does not name the cap: %+v", h)
+		}
+		for id, run := range on {
+			clock.Advance(time.Second)
+			w := workers[slices.IndexFunc(workers, func(w Machine) bool { return w.ID == id })]
+			check(t, q, w, run)
+			finish(t, q, run, true)
+			delete(on, id)
+			break
+		}
+	}
+	if got := job(t, q, parent.ID); got.State != "succeeded" || len(got.FanOut.Results) != 5 {
+		t.Fatalf("incomplete gather: state=%s results=%d", got.State, len(got.FanOut.Results))
 	}
 }
