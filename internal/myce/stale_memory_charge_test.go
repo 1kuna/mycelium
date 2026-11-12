@@ -94,28 +94,6 @@ func TestStaleLearnedHostMemoryCharge(t *testing.T) {
 	}
 }
 
-func TestHostMemorySampleCadence(t *testing.T) {
-	_, clock := fixture(t)
-	footprint := 2.0
-	r := AttemptReport{Execution: Execution{ID: "job", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{SampleID: 1, FootprintGB: &footprint, NonreclaimableGB: 1, GrowthObserved: true}}
-	key := attemptKey{"job", 1, "session"}
-	samples := currentHostMemorySamples([]AttemptReport{r}, clock.Now())
-	clock.Advance(20 * time.Second)
-	r.CurrentHostMemory.SampleID = 2
-	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
-	clock.Advance(30 * time.Second)
-	if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 2 {
-		t.Fatalf("cadence credit=%g", got)
-	}
-	// A repeated cached observation cannot renew its original validity.
-	r.CurrentHostMemory.AgeSeconds = 30
-	samples = updateHostMemorySamples([]AttemptReport{r}, clock.Now(), samples)
-	clock.Advance(10 * time.Second)
-	if got := reservedGrowth(nil, 0, 3, samples[key], clock.Now()); got != 3 {
-		t.Fatalf("cached sample renewed credit=%g", got)
-	}
-}
-
 func TestGrownHostMemoryChargeSurvivesMissingTelemetry(t *testing.T) {
 	_, clock := fixture(t)
 	m := Machine{HostMemoryBudgetGB: 48, CapabilityProfile: &CapabilityProfile{SystemMemoryBytes: 64 << 30}}

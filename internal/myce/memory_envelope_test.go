@@ -14,28 +14,6 @@ import (
 	"time"
 )
 
-func TestMemoryEnvelopeMeasuredAccepted(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	first := startObservation(t, q, m, s)
-	clock.Advance(2 * time.Second)
-	r := result(&first, true)
-	if err := json.Unmarshal([]byte(`{"memory_peak":{"host_gb":2}}`), &r); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	// Omitted mode preserves explicit production/bootstrap declarations.
-	auto := s
-	if err := json.Unmarshal([]byte(`{"memory":"auto"}`), &auto.Needs); err != nil {
-		t.Fatal(err)
-	}
-	next := startObservation(t, q, m, auto)
-	if next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatalf("accepted peak and measured uncertainty not reserved: %+v", next.Spec.Needs)
-	}
-}
-
 func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode string

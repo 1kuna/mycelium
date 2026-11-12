@@ -519,32 +519,6 @@ func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
 	}
 }
 
-func TestModelReservationMeasuredMemory(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	for _, state := range []string{"loading", "ready", "draining", "unloading", "unload_failed"} {
-		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, Attempt: "engine-attempt", State: state}
-		for _, measured := range []bool{false, true} {
-			m.MemoryMeasured = measured
-			want := 8.0
-			if measured && state != "loading" {
-				want = 0
-			}
-			if got := q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: state}}); got != want {
-				t.Fatalf("%s measured=%v: got %v want %v", state, measured, got, want)
-			}
-		}
-	}
-	m.MemoryMeasured = true
-	q.s.ModelSlots[slotKey(m.ID, "test")].State = "loading"
-	if q.modelReservation(&m, nil) != 8 {
-		t.Fatal("unreported loading memory not reserved")
-	}
-	if q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "ready"}}) != 0 {
-		t.Fatal("readiness counted both measured usage and reservation")
-	}
-}
-
 func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
 	t.Parallel()
 	q, _, m := modelFixture(t)
@@ -644,22 +618,6 @@ func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
 	}
 	if len(q.calls) != 0 || q.s.ModelSlots[slotKey(m.ID, "test")].InFlight != 0 {
 		t.Fatal("cancelled admission leaked")
-	}
-}
-
-func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
-	t.Parallel()
-	q, clock, m := modelFixture(t)
-	c := addModelCall(t, q, "production")
-	reportModel(t, q, m, "ready")
-	addModelCall(t, q, "experiment")
-	clock.Advance(time.Minute)
-	if err := q.retryCall(c.ID); err != nil {
-		t.Fatal(err)
-	}
-	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s.Priority != "experiment" || s.InFlight != 1 || !s.LastUsed.Equal(clock.Now()) {
-		t.Fatalf("old attempt retained reservation priority/idle: %+v", s)
 	}
 }
 

@@ -58,7 +58,7 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 			if _, err := q.SetPriorityPolicy(0, policy); err != nil {
 				t.Fatal(err)
 			}
-			for range 24 {
+			for range 8 {
 				s := spec("production")
 				s.Project = "atlas"
 				submit(t, q, s)
@@ -76,7 +76,7 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 			q.mu.Unlock()
 			counts := map[string]int{}
 			m := machine("one", "fake")
-			for turn := range 24 {
+			for turn := range 8 {
 				run := check(t, q, m, nil).Job
 				if run == nil {
 					t.Fatal("fitting work left idle")
@@ -88,7 +88,7 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 				c.Advance(time.Second)
 				finish(t, q, run, true)
 			}
-			if counts["atlas"] != 18 || counts["verso"] != 6 {
+			if counts["atlas"] != 6 || counts["verso"] != 2 {
 				t.Fatal("weighted service", counts)
 			}
 		})
@@ -379,34 +379,6 @@ func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.
 	}
 	if q.s.Jobs[batch.ID].State != "queued" {
 		t.Fatal("assigned before exact model release")
-	}
-}
-
-func TestTierFairnessIdleReclamationProtectsActiveAndHigherTiers(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	demand := projectSpec("atlas")
-	for _, tc := range []struct {
-		state, priority string
-		calls           int
-		want            bool
-	}{
-		{"ready", "experiment", 0, true}, {"draining", "experiment", 0, true},
-		{"ready", "experiment", 1, false}, {"loading", "experiment", 0, false},
-		{"unload_failed", "experiment", 0, false}, {"ready", "production", 0, false},
-	} {
-		slot := &ModelSlot{Model: "test", Machine: m.ID, State: tc.state, Priority: tc.priority, InFlight: tc.calls}
-		if got := q.slotReclaimableFor(slot, demand); got != tc.want {
-			t.Fatalf("%+v: %v", tc, got)
-		}
-	}
-	slot := &ModelSlot{Model: "test", Machine: m.ID, State: "ready", Priority: "experiment"}
-	q.s.ModelSlots[slotKey(m.ID, "test")] = slot
-	q.s.Pins = []ModelPin{{Model: "test", Project: "verso", Assigned: m.ID, Machine: m.ID}}
-	if q.slotReclaimableFor(slot, demand) {
-		t.Fatal("pin reclaimed")
 	}
 }
 

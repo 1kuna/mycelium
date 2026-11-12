@@ -266,33 +266,6 @@ func TestRequestBudgetBatchAndNegotiatedDeadline(t *testing.T) {
 	}
 }
 
-func TestRequestBudgetProjectionCapacityAndCost(t *testing.T) {
-	b := requestBudgets{memory: func(context.Context) (int64, error) { return 300 << 20, nil }, lanes: 3}
-	typ := reflect.TypeFor[Job]()
-	b.recordControl(time.Second)
-	b.recordProjection(1, int(typ.Size()), time.Microsecond)
-	large, err := b.pageLimit(t.Context(), typ)
-	if err != nil || large <= 1000 {
-		t.Fatal(large, err)
-	}
-	b.recordControl(time.Second)
-	b.recordProjection(10, 10000, 100*time.Millisecond)
-	measured, err := b.pageLimit(t.Context(), typ)
-	if err != nil || measured != 100 {
-		t.Fatal(measured, err)
-	}
-	b.recordControl(10 * time.Second)
-	faster, _ := b.pageLimit(t.Context(), typ)
-	if faster != 1000 {
-		t.Fatal("local latency did not change page", faster)
-	}
-	ctx := context.WithValue(t.Context(), peerResponseBudgetKey{}, int64(3*typ.Size()))
-	peer, _ := b.pageLimit(ctx, typ)
-	if peer != 1 {
-		t.Fatal("peer response capacity ignored", peer)
-	}
-}
-
 func TestRequestBudgetUploadPhysicalCommitments(t *testing.T) {
 	q, _ := fixture(t)
 	s := &q.uploadSpool

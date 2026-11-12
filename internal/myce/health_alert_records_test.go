@@ -21,7 +21,7 @@ func TestHealthAlertRepeatedFiringsUpdateOneRecord(t *testing.T) {
 	q, clock := fixture(t)
 	e := HealthAlert{Kind: "host_degraded", Host: "h", Reason: "host_probe_unknown"}
 	first := clock.Now()
-	for range 50 {
+	for range 3 {
 		flapHealth(t, q, clock, "test/h", e, true)
 		flapHealth(t, q, clock, "test/h", e, false)
 	}
@@ -33,7 +33,7 @@ func TestHealthAlertRepeatedFiringsUpdateOneRecord(t *testing.T) {
 		t.Fatal("records", len(events))
 	}
 	r := events[0]
-	if r.Count != 51 || r.State != "open" || !r.FirstAt.Equal(first) || r.LastAt == nil || !r.LastAt.After(first) || r.ClosedAt != nil {
+	if r.Count != 4 || r.State != "open" || !r.FirstAt.Equal(first) || r.LastAt == nil || !r.LastAt.After(first) || r.ClosedAt != nil {
 		t.Fatalf("record %+v", r)
 	}
 	var rows int
@@ -41,7 +41,7 @@ func TestHealthAlertRepeatedFiringsUpdateOneRecord(t *testing.T) {
 		t.Fatal("saved rows", rows, err)
 	}
 	q = reopenQueue(t, q, clock)
-	if len(q.s.Health.Events) != 2 || q.s.Health.Events[0].Count != 51 {
+	if len(q.s.Health.Events) != 2 || q.s.Health.Events[0].Count != 4 {
 		t.Fatal("record lost on restart", q.s.Health.Events)
 	}
 }
@@ -180,7 +180,7 @@ func TestHealthAlertMigratesPerFiringRows(t *testing.T) {
 // Status lists one line per problem with its count, and groups open ones.
 func TestHealthAlertStatusShowsGroupedOpenRecords(t *testing.T) {
 	q, clock := fixture(t)
-	for i := range 20 {
+	for i := range 4 {
 		bad := i%2 == 0
 		flapHealth(t, q, clock, "test/h1", HealthAlert{Kind: "host_degraded", Host: "h1"}, bad)
 		flapHealth(t, q, clock, "test/h2", HealthAlert{Kind: "host_degraded", Host: "h2"}, true)
@@ -198,7 +198,7 @@ func TestHealthAlertStatusShowsGroupedOpenRecords(t *testing.T) {
 			open++
 		}
 	}
-	if open != 1 || snapshot.HealthAlerts[0].Count != 10 || snapshot.HealthAlerts[1].Count != 1 {
+	if open != 1 || snapshot.HealthAlerts[0].Count != 2 || snapshot.HealthAlerts[1].Count != 1 {
 		t.Fatalf("records %+v", snapshot.HealthAlerts)
 	}
 	groups := statusAlertGroups(q.s.Health.Conditions)

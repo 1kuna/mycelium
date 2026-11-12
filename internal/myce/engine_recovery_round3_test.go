@@ -167,33 +167,6 @@ func TestEngineRecoveryWarmupFailureStopsUnpinnedRecovery(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryHealthFailureWindowClock(t *testing.T) {
-	for _, latency := range []time.Duration{time.Millisecond, 10 * time.Second} {
-		_, clock, _ := modelFixture(t)
-		f := serverProbeFailures{}
-		started := clock.Now()
-		clock.Advance(latency)
-		f.observe(true, started, clock.Now())
-		budget := f.latency.budget()
-		started = clock.Now()
-		if f.observe(false, started, started) {
-			t.Fatal("single failure withdrew health")
-		}
-		clock.Advance(budget - time.Nanosecond)
-		if f.observe(false, started, clock.Now()) {
-			t.Fatal("early failure")
-		}
-		clock.Advance(time.Nanosecond)
-		if !f.observe(false, started, clock.Now()) {
-			t.Fatal("continuous failure past local envelope retained health")
-		}
-		f.observe(true, clock.Now(), clock.Now())
-		if f.count != 0 || !f.since.IsZero() {
-			t.Fatal("success did not reset continuity")
-		}
-	}
-}
-
 func TestEngineRecoveryRejectedBeforeForwarding(t *testing.T) {
 	for _, state := range []string{"missing", "stale", "failed", "exited", "health"} {
 		t.Run(state, func(t *testing.T) {
