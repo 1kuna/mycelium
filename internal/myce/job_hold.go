@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -100,7 +101,7 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				for _, a := range approvals {
 					labels = append(labels, a.label())
 				}
-				blocker.Detail += fmt.Sprintf("; the project approves %d machine kinds for this work's production (%s); Mycelium places it on any host of those kinds without a job host pin; the project approves another kind with myce parity add after a passing output comparison", len(approvals), strings.Join(labels, ", "))
+				blocker.Detail += fmt.Sprintf("; the project approves these machine kinds for this work's production: %s; Mycelium places it on any host of those kinds without a job host pin; the project approves another kind with myce parity add after a passing output comparison", cmp.Or(strings.Join(labels, ", "), "none"))
 			}
 		}
 		blocker.RunsNowOn = q.portableRoomNow(j, compatibleHosts, func(visit func(targetFit, *Job, *Machine)) {
