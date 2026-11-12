@@ -96,6 +96,16 @@ func affinity(j *Job, m *Machine) int {
 			n++
 		}
 	}
+	// Tie-break only: prefer work whose declared snapshots this host holds.
+	if len(j.Spec.ModelSnapshots) > 0 {
+		held := true
+		for _, s := range j.Spec.ModelSnapshots {
+			held = held && slices.Contains(m.ModelSnapshots, snapshotIdentity(s))
+		}
+		if held {
+			n++
+		}
+	}
 	return n
 }
 func beforeWithinTier(a, b *Job, m *Machine) bool {

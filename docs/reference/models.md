@@ -38,8 +38,9 @@ its filesystem budget with other caches. This distinction allows acquisition
 to avoid charged network-filesystem dirty writeback. Catalog masters on NAS
 remain untouched. Moving the setting does not copy or delete old masters,
 download weights, authorize deleting a last unique source, or migrate a live
-attempt. Populate the selected acquisition root through the normal download
-job before requesting a snapshot there.
+attempt. Populating this root is optional: a worker fetches a declared
+snapshot it lacks from the model hub into its own snapshot cache
+([model snapshots](../files.md#declared-model-snapshots-553)).
 
 ## General model servers and joint measurement
 

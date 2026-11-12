@@ -38,6 +38,8 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	if err := w.modelSnapshots.cache.init(); err != nil {
 		return err
 	}
+	w.modelIndex = &modelSnapshotIndex{}
+	w.modelIndex.load(w.modelSnapshots)
 	if w.diskBudget != nil {
 		w.diskBudget.add(diskBudgetRoot{name: "files", path: root, candidates: w.fileCache.budgetCandidates})
 		w.diskBudget.add(diskBudgetRoot{name: "shared_inputs", path: w.sharedInputs.cache.Root, candidates: w.sharedInputs.budgetCandidates})

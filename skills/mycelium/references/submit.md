@@ -207,6 +207,18 @@ Only workers advertising `native_isolation_ci` run these jobs. See
 
 ## Models
 
+Declare the snapshot (`repo` plus full 40-character `revision`) and submit.
+Never pre-download it, and never submit a download job aimed at the host you want
+the real job on. Wherever Mycelium places the job, the worker fetches the
+snapshot it lacks into its own cache before the command starts, verifies every
+file, and shares one download between jobs on that host. Hosts that already hold
+it skip the download and are preferred. A host without disk room isn't chosen;
+the job waits with `disk_headroom`. Gated or private repositories need the hub
+token provisioned once per worker as local secret `hf_token`; never put a token
+in a job. Refusals: `model_snapshot_revision` (no such revision),
+`model_snapshot_access` (gated, private or nonexistent repository),
+`model_snapshot_mismatch` (bytes failed verification).
+
 Declared `model_snapshots` need no queue-owner approval (MY-44). Optional
 `models.sources` patterns restrict repositories (`!OWNER/NAME` denies, deny
 first); empty sources restrict nothing. Snapshots need an exact commit and

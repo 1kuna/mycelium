@@ -929,7 +929,8 @@ queue-owner setup:
   (or the x86_64 equivalent). The project owns these versions (MY-12). PyPI
   publishes CUDA 13 aarch64 wheels for torch, vLLM and FlashInfer.
 - **Weights:** `model_snapshots` at an exact commit, read through
-  `MYCE_MODEL_<NAME>`. Download them first ([model snapshots](files.md#declared-model-snapshots-553)).
+  `MYCE_MODEL_<NAME>`. The worker fetches them during preparation; never
+  pre-download ([model snapshots](files.md#declared-model-snapshots-553)).
 - **Server:** `vllm serve` as a [native sidecar](#native-job-sidecars) that the
   main command calls through `MYCE_SIDECAR_<NAME>_URL`, or vLLM's offline `LLM`
   API inside the main command.

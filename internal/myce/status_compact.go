@@ -247,6 +247,7 @@ func compactStatusMachine(m *Machine) Machine {
 	c.ToolInventory, c.OutputDestinationIDs = nil, nil
 	c.HygieneCollection, c.ExternalMemory, c.MemoryObservation = nil, nil, nil
 	c.CachedSharedInputs, c.SharedInputEvidence, c.SharedInputCache = nil, nil, nil
+	c.ModelSnapshots, c.ModelSnapshotBytes = nil, nil
 	c.ExtensionReports, c.EnvironmentReports, c.CopyReports = nil, nil, nil
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {

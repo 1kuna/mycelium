@@ -23,6 +23,10 @@ type SharedInput struct {
 	// identity: the manifest still verifies every copied/cloned destination.
 	sources map[string]string
 	model   *ModelSnapshot
+	// Model hub snapshots: fetch writes a manifest file that has no local
+	// source, verified against its ref; the entry is re-fetchable when evicted.
+	hub   bool
+	fetch func(ctx context.Context, name, target string, ref FileRef) error
 }
 
 // SharedInputEvidence counts successful cache acquisitions during this worker

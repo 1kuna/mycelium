@@ -171,6 +171,9 @@ func TestModelSnapshotsPhysicalLimits(t *testing.T) {
 		{"explicit floor refuses", ModelLimits{FreeFloorBytes: 2 << 30}, 2 << 30, false},
 		{"size limit refuses", ModelLimits{MaxBytes: 1}, total, false},
 	} {
+		// The size limit is policy and fails the job; a disk shortage is this
+		// host's, so the attempt requeues and admission finds a host with room.
+		policy := tc.limits.MaxBytes > 0
 		t.Run(tc.name, func(t *testing.T) {
 			workerDiskProbe = func(string) (DiskReading, error) {
 				return DiskReading{TotalBytes: total, FreeBytes: tc.free}, nil
@@ -188,8 +191,8 @@ func TestModelSnapshotsPhysicalLimits(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			} else if err == nil || !strings.Contains(runtimeDiagnostic(err).String(), "model_snapshot_too_large") {
-				t.Fatalf("physical protection ignored: %v", err)
+			} else if err == nil || policy != strings.Contains(runtimeDiagnostic(err).String(), "model_snapshot_too_large") || runtimeDiagnostic(err).Class != "storage_full" || stagingRetryable(err) == policy {
+				t.Fatalf("physical protection ignored or misclassified: %v", err)
 			}
 		})
 	}
@@ -252,7 +255,9 @@ func TestModelSnapshotsNativeDevJourney(t *testing.T) {
 	if err := os.WriteFile(blob, []byte("tampered weights!"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ModelRoot: modelRoot, GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
+	hub := newFakeHub(t)
+	hub.add("org/fetched", tinyRevision, map[string]string{"model.safetensors": "hub weights", "config.json": tinyConfig})
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), ModelRoot: modelRoot, ModelHub: hub.URL, GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +310,23 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 			t.Fatal("shared hub changed", string(data))
 		}
 	})
+	// The consumer only declares the snapshot: the worker fetches it from the
+	// hub during preparation, once, and the command sees the verified copy.
+	t.Run("fetched from the model hub", func(t *testing.T) {
+		hubReads := strings.Replace(reads, tinyWeights, "hub weights", 1)
+		for range 2 {
+			j, err := c.Submit(ctx, declare("org/fetched", tinyRevision, hubReads))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := awaitTerminal(t, ctx, c, j.ID); got.State != "succeeded" {
+				t.Fatal(got.State, got.Reason)
+			}
+		}
+		if n := hub.count("/org/fetched/resolve/" + tinyRevision + "/model.safetensors"); n != 1 {
+			t.Fatalf("weights downloaded %d times", n)
+		}
+	})
 	t.Run("allow-listed files only", func(t *testing.T) {
 		j, err := c.Submit(ctx, declare("org/tiny", tinyRevision, `test -f "$MYCE_MODEL_BASE/config.json"; test ! -e "$MYCE_MODEL_BASE/model.safetensors"; : > result`, "config.json"))
 		if err != nil {
@@ -315,8 +337,8 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 		}
 	})
 	for _, refused := range []struct{ name, repo, revision, want string }{
-		{"wrong revision", "org/moved", tinyRevision, "has this repository but not the declared revision"},
-		{"missing repository", "org/absent", tinyRevision, "acquire it with a CPU download job"},
+		{"wrong revision", "org/moved", tinyRevision, "no such repository revision"},
+		{"missing repository", "org/absent", tinyRevision, "no such repository revision"},
 		{"symlink escape", "org/escape", tinyRevision, "links outside its repository blob store"},
 		{"changed blob", "org/changed", tinyRevision, "failed size or hash verification"},
 	} {

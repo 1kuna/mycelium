@@ -126,14 +126,20 @@ func TestWorkerRootsDependencyChecks(t *testing.T) {
 	input := SharedInput{NAS: "input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}
 	base := Job{Spec: cpuSpec(1, 1)}
 	base.Spec.Priority = "production"
+	// Declared snapshots fall back to the model hub, so a missing model root
+	// (the optional local hub cache) does not withhold them.
+	snapshots := cloneJob(&base)
+	snapshots.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
+	noRoot := cpuMachine("worker", "worker", "cpu", 4, 16)
+	noRoot.UnavailableRoots = []UnavailableRoot{{Root: "model", Reason: "configured NAS mount missing"}}
+	if reason := q.storageRootReason(&snapshots, &noRoot); reason != "" {
+		t.Fatal("model hub fallback withheld by the model root:", reason)
+	}
 	for _, tc := range []struct {
 		root string
 		edit func(*Job, *Machine)
 	}{
 		{"checkpoint", func(j *Job, m *Machine) { j.Spec.SharedInputs = map[string]SharedInput{"data": input} }},
-		{"model", func(j *Job, m *Machine) {
-			j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
-		}},
 		{"environment", func(j *Job, m *Machine) { j.Spec.Environment.Name = "runtime" }},
 		{"extension", func(j *Job, m *Machine) { j.Spec.Extension = "fixture@1" }},
 		{"file-cache", func(j *Job, m *Machine) {
