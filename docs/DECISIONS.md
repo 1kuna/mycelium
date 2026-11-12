@@ -74,16 +74,18 @@ MY-30, 2026-11-02: “i agree on the next stretch being adoption rather than new
 </details>
 
 ### 5. Fleet roles and the queue
-<a id="my-45"></a><a id="my-08"></a><a id="my-40"></a>
+<a id="my-45"></a><a id="my-08"></a><a id="my-40"></a><a id="my-48"></a>
 
 **One always-on host carries the persistent services and the queue; every other machine is an on-demand node. A shared queue is a direction, not yet a design.**
 
 - The queue/GPU host is the only machine running work 24/7: every project's always-on services, kept light so its GPUs stay schedulable in the fleet. Every other machine except the agents' host is a managed on-demand node with nothing persistent on it, so Mycelium sizes its capacity from measured OS needs alone. The agents' host stays a Mycelium node under stricter limits. (MY-45)
 - Adding a supported machine type takes one command, using per-platform environments and qualification, not per-machine images. (MY-08)
+- The dedicated CUDA node keeps a 4 GB owner memory reserve. (MY-48)
 - One SQLite queue, as the approved design says. Direction (not yet a design): the queue becomes shared and load-balanced across machines so nothing is lost when a machine goes down. This authorizes no peer network or replicated queue until Zach approves a design with laptop-testable migration steps (#1176). (MY-40)
 
 <details><summary>Sources</summary>
 
+MY-48, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's 16 GB owner reserve: “[the CUDA node] let’s do 4gb”. Received by the Mycelium orchestrator.
 MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and in the background, is the [dual-GPU queue host]. And then everything else should just be, like, an on demand node. I still want the 2 [queue-host] GPUs to be part of the Mycelium Fleet ... it should be reserved effectively just for... the persistent projects, so things that have to constantly be online. Best case scenario is that... it would run something lightweight on the [queue host], all of the projects would. so that they're not taking up as much RAM, so that we're still able to use the [queue-host] GPUs with no problem.” And: “The host is still part of Mycelium, but it's got... harsher limits set just because that's where everything with the agents is hosted from, and if that machine goes down, then nothing works. So that one's gotta be coveted. But the rest of them are effectively just managed nodes as part of the cluster.” At the time Zach was moving one project's persistent service off a node himself. MY-08 onboarding ruling, 2026-10-21 (#108). MY-40, 2026-11-09: “i want the queue to be something the machines share rather than just running on one machine. just like we load balance the jobs, i think we should load balance the queue as well. ... so mycelium truly works as a biological mycelium could. where information is part of the collective in a way. that way if a machine goes down, nothing is truly lost.”
 
 </details>
@@ -184,9 +186,20 @@ MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the q
 
 Mycelium's product keeps control-plane cost per check-in low, default status output small, and gives consumer agents one batched wait (#1120, #1053). Mycelium's agents report only on a state change, a fault or a needed decision, plus one final summary.
 
+<a id="my-49"></a>Zach left the five slimming choices from the 2026-11-11 audit to the orchestrator (MY-49). The orchestrator chose the following. They are agent decisions, not his words, and can be changed on evidence:
+- Delete the simulator, the fleet viewer and the Windows host bridge. Git history keeps them, and the bridge comes back when a Windows machine joins.
+- Retire managed Docker (MY-13's supported option) once the one project still using it runs its model jobs natively. Until then it stays.
+- Cut curves, benchmarks, time prediction and batch planning down to the last accepted duration and peak per kind of work. Placement keeps learning from its own measurements (MY-31).
+- Make `myce fleet upgrade` the one rollout path (MY-21, MY-35), reduced to what host-by-host rollouts have proven: drain the host, swap the verified binary, restart, check health. Private per-release rollout scripts go.
+- Keep finished job records for 14 days after de-duplication, plus a one-line summary and what was learned. Files stay at 3 days (MY-47).
+- Send health problems to the Mycelium inbox as one opening and one closing per host-level problem. Efficiency and recipe findings stay in status only.
+- Consolidate the approved design into its current form, without changing what it says.
+
 <details><summary>Sources</summary>
 
 MY-43, 2026-11-10: “i want our program to be both compute and token efficient”, approving the orchestrator's reporting proposal.
+
+MY-49, 2026-11-12, maintainer, answering the orchestrator's five slimming questions: “the 5 slimming decisions do whatever is best idk”. Received by the Mycelium orchestrator.
 
 </details>
 
@@ -266,5 +279,9 @@ Each old number, its original date and title, and where it lives now. All are cu
 | MY-43 | 2026-11-10 | compute and token efficient | §11 |
 | MY-44 | 2026-11-10 | run whatever can run, no approval gates | §4 |
 | MY-45 | 2026-11-11 | fleet roles | §5 |
+| MY-46 | 2026-11-11 | withdrawn (restated MY-11/MY-26) | §1 |
+| MY-47 | 2026-11-11 | finished-job files kept 3 days | §10 |
+| MY-48 | 2026-11-12 | CUDA node owner reserve 4 GB | §5 |
+| MY-49 | 2026-11-12 | slimming choices left to the orchestrator | §11 |
 
 Superseded agent defaults, both by MY-41: the 2026-11-07 orchestrator default that known, owned main failures do not block unrelated merges, and the 2026-11-08 weekly-review proposal on evidence for gate exceptions. Earlier version pins, private topology, temporary windows, routing recipes and receipts are in private local history and are not current fleet evidence.
