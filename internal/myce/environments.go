@@ -1079,6 +1079,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	// documented UV_LINK_MODE, but never uv credentials (buildUVVariables).
 	env := environmentList(buildEnvironmentFrom(os.Environ()))
 	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
+	// The environment carries its own interpreter, with headers, instead of a
+	// host Python that happens to match the version: Triton and other JIT
+	// compilers build C launchers against Python.h at run time, and a distro
+	// interpreter without its -dev package fails there (vLLM on Ubuntu).
+	env = append(env, "UV_PYTHON_PREFERENCE=only-managed")
 	env = append(env, "GOCACHE="+filepath.Join(partial, ".compiler-cache", "go-build"))
 	run := c.Run
 	if run == nil {

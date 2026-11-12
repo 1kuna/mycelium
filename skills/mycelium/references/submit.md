@@ -147,6 +147,13 @@ exact mismatch. A lock written by an older Pixi can fail here (for example
 `__unix=0` where 0.81 expects `__unix=0=0`): run `pixi lock` with Pixi 0.81.0
 or later, commit it and run again.
 
+To move a job off a container image (for example vLLM), pin the image's Python
+stack in a lock file for the target platform. Declare the weights as
+`model_snapshots`, and run the server as a native sidecar of a plain
+(unsandboxed) job. See [a model server in a native job](../../../docs/services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
+uv environments carry their own interpreter, so Triton's run-time C builds find
+`Python.h`. `TMPDIR` is short enough for servers that bind Unix sockets there.
+
 npm projects use `environment: {backend: npm, lock_file: package-lock.json}`.
 `node_modules` and post-install tool downloads such as headless browsers are
 prepared once per lock on each worker and reused read-only; see

@@ -765,8 +765,11 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	delete(env, "MYCE_TOKEN")
 	// Helpers and main cannot replace the attempt's temp path through authored env.
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
-	env["TMPDIR"] = filepath.Join(work, ".tmp")
-	env["TMP"], env["TEMP"] = env["TMPDIR"], env["TMPDIR"]
+	tmp, err := attemptTempDir(g.dir, work)
+	if err != nil {
+		return g.recordInfrastructure(launchRefused, m.Name, "", err)
+	}
+	env["TMPDIR"], env["TMP"], env["TEMP"] = tmp, tmp, tmp
 	env["MYCE_SCRATCH_DIR"] = filepath.Join(work, ".scratch")
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)

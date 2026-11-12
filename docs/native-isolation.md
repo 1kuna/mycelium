@@ -383,7 +383,8 @@ boundary; being offline does not authorize host Unix endpoints. No claim of
 LibreOffice or GPU compatibility follows solely from the filesystem grants.
 
 After `run.env` and environment activation, the worker sets `TMPDIR`, `TMP` and
-`TEMP` to `{work}/.tmp` and `MYCE_SCRATCH_DIR` to `{work}/.scratch` for main and
+`TEMP` to `{work}/.tmp` (through a short spool alias that resolves there, so
+socket paths fit) and `MYCE_SCRATCH_DIR` to `{work}/.scratch` for main and
 helpers. Both directories have identical absolute paths within an attempt, so a
 main process can pass a scratch filename to its own sidecar. Other attempts
 cannot read their contents. Authored values cannot redirect either directory to

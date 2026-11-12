@@ -76,7 +76,13 @@ Each entry is a map from platform (`cpu`, `cuda`, `xpu`, `metal`; `fake` for lap
 acceptance tests) to a build recipe. Python recipes require `python` and
 `lock_file`. Use `requirements.txt`, or `uv.lock` together with the adjacent
 `pyproject.toml` (either file may be named as `lock_file`). Pin requirements;
-uv's frozen sync consumes the snapshotted lock without updating it. Project installation is
+uv's frozen sync consumes the snapshotted lock without updating it. The builder
+installs a uv-managed CPython of the requested version under `ROOT/python`
+rather than a host interpreter of the same version, so every host runs the same
+interpreter and it ships `Python.h`. Triton, which vLLM and PyTorch use, compiles
+a C launcher against those headers at run time; a distribution Python without
+its `-dev` package fails there. Environments built by earlier releases keep
+their interpreter until they are rebuilt. Project installation is
 excluded: job source stays in `run.workdir`, while the environment installs the
 locked dependencies. Local path/workspace dependencies must be made available
 as installable packages; a lock snapshot does not copy a project tree.
