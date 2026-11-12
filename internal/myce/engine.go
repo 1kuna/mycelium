@@ -98,6 +98,8 @@ type LlamaEngine struct {
 	healthRevision uint64
 	healthDegraded bool
 	probeLatency   readinessLatency
+	// healthPause replaces the wall-clock wait between health probes; nil uses readinessPause.
+	healthPause func(context.Context, time.Duration) error
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {

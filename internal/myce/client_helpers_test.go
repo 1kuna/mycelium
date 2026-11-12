@@ -19,6 +19,24 @@ type clientTestTransport func(*http.Request) (*http.Response, error)
 
 func (f clientTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// handlerTestTransport serves each request in memory, on the caller's goroutine
+// and context, so a synctest bubble can own the whole exchange.
+func handlerTestTransport(h http.Handler) http.RoundTripper {
+	return clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		in := r.Clone(r.Context())
+		in.RequestURI, in.RemoteAddr = r.URL.RequestURI(), "127.0.0.1:1"
+		if in.Body == nil {
+			in.Body = http.NoBody
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, in)
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		return rec.Result(), nil
+	})
+}
+
 func TestClientJobIdentityEcho(t *testing.T) {
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())

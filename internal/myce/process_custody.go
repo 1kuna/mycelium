@@ -11,8 +11,13 @@ import (
 	"time"
 )
 
-func processPS(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// processPSTimeout bounds one OS process-table probe.
+const processPSTimeout = 5 * time.Second
+
+func processPS(args ...string) ([]byte, error) { return processPSWithin(processPSTimeout, args...) }
+
+func processPSWithin(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", args...)
 	// A 100ms drain allowance can expire solely because the reader goroutine

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -169,59 +170,63 @@ exec "$MYCE_TEST_REAL_PS" "$@"
 	}
 }
 
+// The product polls its injected clock on a 5ms ticker. synctest makes that
+// ticker virtual, so stepping the fake clock costs no wall time.
 func TestWorkerCleanupInspectionBackoff(t *testing.T) {
 	for _, recover := range []bool{false, true} {
 		t.Run(map[bool]string{false: "exhausted", true: "recovered"}[recover], func(t *testing.T) {
-			clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
-			calls := make(chan time.Time, 3)
-			result := make(chan error, 1)
-			go func() {
-				n := 0
-				_, err := inspectWorkerGroupUsing(42, clock, func(int) ([]int, error) {
-					n++
-					calls <- clock.Now()
-					if recover && n == 3 {
-						return nil, nil
+			synctest.Test(t, func(t *testing.T) {
+				clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
+				calls := make(chan time.Time, 3)
+				result := make(chan error, 1)
+				go func() {
+					n := 0
+					_, err := inspectWorkerGroupUsing(42, clock, func(int) ([]int, error) {
+						n++
+						calls <- clock.Now()
+						if recover && n == 3 {
+							return nil, nil
+						}
+						return nil, exec.ErrWaitDelay
+					})
+					result <- err
+				}()
+				first := <-calls
+				clock.Advance(99 * time.Millisecond)
+				select {
+				case <-calls:
+					t.Fatal("retried before backoff")
+				default:
+				}
+				// The first failure records its retry deadline after the callback returns.
+				// Advance until each observation, then check the measured clock spacing.
+				var second, third time.Time
+				await(t, func() bool {
+					clock.Advance(time.Millisecond)
+					select {
+					case second = <-calls:
+						return true
+					default:
+						return false
 					}
-					return nil, exec.ErrWaitDelay
 				})
-				result <- err
-			}()
-			first := <-calls
-			clock.Advance(99 * time.Millisecond)
-			select {
-			case <-calls:
-				t.Fatal("retried before backoff")
-			default:
-			}
-			// The first failure records its retry deadline after the callback returns.
-			// Advance until each observation, then check the measured clock spacing.
-			var second, third time.Time
-			await(t, func() bool {
-				clock.Advance(time.Millisecond)
-				select {
-				case second = <-calls:
-					return true
-				default:
-					return false
+				await(t, func() bool {
+					clock.Advance(time.Millisecond)
+					select {
+					case third = <-calls:
+						return true
+					default:
+						return false
+					}
+				})
+				if second.Sub(first) < 100*time.Millisecond || third.Sub(second) < 200*time.Millisecond {
+					t.Fatalf("backoff skipped: %v %v %v", first, second, third)
+				}
+				err := <-result
+				if recover && err != nil || !recover && !errors.Is(err, exec.ErrWaitDelay) {
+					t.Fatalf("inspection outcome: %v", err)
 				}
 			})
-			await(t, func() bool {
-				clock.Advance(time.Millisecond)
-				select {
-				case third = <-calls:
-					return true
-				default:
-					return false
-				}
-			})
-			if second.Sub(first) < 100*time.Millisecond || third.Sub(second) < 200*time.Millisecond {
-				t.Fatalf("backoff skipped: %v %v %v", first, second, third)
-			}
-			err := <-result
-			if recover && err != nil || !recover && !errors.Is(err, exec.ErrWaitDelay) {
-				t.Fatalf("inspection outcome: %v", err)
-			}
 		})
 	}
 }
