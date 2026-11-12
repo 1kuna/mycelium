@@ -349,3 +349,44 @@ func TestCheckpointRootHold(t *testing.T) {
 		t.Fatalf("restored root kept its hold: %+v", wait)
 	}
 }
+
+// A job authored for one platform waits on its busy host while a host of
+// another platform has room. The hold names that platform (never the host),
+// so the consumer widens targets instead of steering to a box. Platforms
+// without room now, and jobs without authored targets, get no advice.
+func TestHoldNamesPlatformWithRoomNow(t *testing.T) {
+	t.Parallel()
+	q, _ := fixture(t)
+	mac := cpuMachine("m-1", "h-1", "cpu", 4, 16)
+	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
+	roomy := cpuMachine("m-2", "h-2", "cpu", 4, 16)
+	roomy.CapabilityProfile.Arch = "arm64"
+	tight := cpuMachine("m-3", "h-3", "cpu", 4, 1) // linux/amd64 without memory for the job
+	darwinOnly := cpuSpec(4, 2)
+	darwinOnly.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
+	running := submit(t, q, darwinOnly)
+	if got := check(t, q, mac, nil).Job; got == nil || got.ID != running.ID {
+		t.Fatal("darwin job not placed on the darwin host", got)
+	}
+	check(t, q, mac, running)
+	check(t, q, roomy, nil)
+	check(t, q, tight, nil)
+	waiting := submit(t, q, darwinOnly)
+	got, err := q.jobSnapshot(waiting.ID)
+	if err != nil || got.State != "queued" || got.Hold == nil {
+		t.Fatalf("darwin job should wait with a hold: %+v %v", got.Hold, err)
+	}
+	if got.Hold.RunsNowOn != "linux/arm64/cpu" {
+		t.Fatalf("hold should name only the platform with room now: %+v", got.Hold)
+	}
+	// Default status prints reason and next only, so the advice rides in next.
+	if next := got.Hold.Next; !strings.Contains(next, "would run now on linux/arm64/cpu") || strings.Contains(next, "h-2") || strings.Contains(next, "m-2") {
+		t.Fatal("next must name the platform, not the host:", next)
+	}
+	free := cpuSpec(1, 1)
+	free.Project = "other"
+	unrestricted, err := q.jobSnapshot(submit(t, q, free).ID)
+	if err != nil || unrestricted.Hold != nil && unrestricted.Hold.RunsNowOn != "" {
+		t.Fatalf("a job without authored targets needs no platform advice: %+v %v", unrestricted.Hold, err)
+	}
+}

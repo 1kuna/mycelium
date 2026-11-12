@@ -29,6 +29,14 @@ single freshly observed compatible host and an owner's parity list size. These
 are coverage limits, not instructions to add a pin. Stale or missing inventory
 is unknown, not proof that hardware is unique.
 
+When your job's `targets` keep it waiting while another platform has room, its
+hold carries `runs_now_on` (for example `linux/arm64/cuda`) and `next` says the
+job would run now there. That is a portability gap: run `myce portability` (with
+`--adapter` for your entry), add that platform to the targets and give the
+environment a recipe or lock for it, then submit the widened work. Keep a
+target only for a genuine requirement, and record its reason. Never answer the
+advice by naming a host; the platform is the unit you change.
+
 ## Admission evidence
 
 Production job status includes `admission_wait`: first and latest blockers,

@@ -22,6 +22,10 @@ type Hold struct {
 	Expires *time.Time `json:"expires,omitempty"`
 	Next    string     `json:"next"`
 	Detail  string     `json:"detail,omitempty"`
+	// Platforms (os/arch/accelerator, never hosts) whose fresh hosts have room
+	// for this waiting job now and are refused only by its authored targets,
+	// comma-separated. A string keeps Hold comparable.
+	RunsNowOn string `json:"runs_now_on,omitempty"`
 }
 
 // One reason and one next action, as default status shows them.

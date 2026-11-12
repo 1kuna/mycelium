@@ -2661,6 +2661,16 @@ the next owner/action rather than presenting the missing software or approval as
 ordinary capacity pressure. Extension coverage advice includes declared targets,
 without recipes or private paths. Stale compatible inventory remains unknown.
 
+A queued job with authored `targets` that waits while a freshly observed host of
+another platform has room for it now gets `runs_now_on` on its hold: the
+platforms (`os/arch/accelerator`, never hosts) whose hosts pass every current
+check except the job's targets, and the same platforms in `next`. The check
+reuses the targets the hold already evaluated and re-reads only those hosts'
+current free memory, cores and host memory; a platform the job can already
+use is omitted. The consumer acts by adding that platform to the job's targets
+and environment (`myce portability` shows what each platform still needs), not
+by naming a host. The advice is a snapshot, not a reservation.
+
 Detailed queued observations also explain when only one freshly observed
 physical host passes permanent requirements, deduplicating devices on a host.
 This is current coverage, not proof of a permanent hardware monopoly or a reason

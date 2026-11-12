@@ -108,7 +108,11 @@ func (q *Queue) Portability(req PortabilityRequest, contexts ...context.Context)
 	if req.Extension != "" && (req.Recipe != nil || req.Spec != nil) || req.Recipe != nil && req.Spec != nil {
 		return PortabilityReport{}, errors.New("choose extension, recipe or spec")
 	}
-	view, _, err := q.captureObservation("", ctx)
+	// Same hypothetical-placement question as resolve: borrow retained history
+	// from the committed generation. The full status capture copied and charged
+	// every retained execution and was refused with projection_capacity_exceeded
+	// once history outgrew one request's memory share.
+	view, err := q.captureResolveView(ctx)
 	if err != nil {
 		return PortabilityReport{}, err
 	}
