@@ -73,8 +73,9 @@ func ReadHostPolicies(path string) (policies map[string]HostPolicy, err error) {
 	return v.Hosts, nil
 }
 
+// Install preflight checks a startup file the way queue start reads it.
 func validateHostPolicies(p map[string]HostPolicy) error {
-	_, err := normalizeHostPolicies(p, false)
+	_, err := normalizeHostPolicies(p, true)
 	return err
 }
 

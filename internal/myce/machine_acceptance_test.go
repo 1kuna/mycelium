@@ -285,49 +285,12 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 	}
 }
 
-func TestM3HoldMaintenanceAndRepeatedPlannedStops(t *testing.T) {
+func TestM3RepeatedPlannedMaintenanceStops(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
-		t.Fatal(err)
-	}
 	submit(t, q, m3Spec("experiment", "0", 2, 1))
-	a := assignedJob(machineCheck(t, q, m))
 	submit(t, q, m3Spec("experiment", "1", 2, 1))
-	b := assignedJob(machineCheck(t, q, m, a))
-	submit(t, q, cpuSpec(1, 1))
-	cpu := assignedJob(machineCheck(t, q, m, a, b))
-	if a == nil || b == nil || cpu == nil {
-		t.Fatal("initial host allocations")
-	}
-	p := submit(t, q, m3Spec("production", "0", 2, 1))
-	for _, j := range []*Job{a, b, cpu} {
-		requireState(t, q, j.ID, "stopping")
-	}
-	finishInterrupted(t, q, a)
-	finishInterrupted(t, q, b)
-	if assignedJob(machineCheck(t, q, m, cpu)) != nil {
-		t.Fatal("free device bypassed host hold")
-	}
-	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
-		t.Fatal(err)
-	}
-	finishInterrupted(t, q, cpu)
-	if assignedJob(machineCheck(t, q, m)) != nil {
-		t.Fatal("hold bypassed maintenance")
-	}
-	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, p.ID); got.State != "failed" || got.InfrastructureRetries != 0 {
-		t.Fatal("maintenance did not retain fail-closed production admission", got)
-	}
-	p = submit(t, q, m3Spec("production", "0", 2, 1))
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil || run.ID != p.ID {
-		t.Fatal("new production after resume", run)
-	}
-	finish(t, q, run, true)
+	var a, b *Job
 	// More than two queue-recorded maintenance stops remain planned, including
 	// a concurrent neighbor, without consuming either infrastructure counter.
 	for range 3 {

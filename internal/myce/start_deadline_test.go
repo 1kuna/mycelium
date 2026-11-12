@@ -154,7 +154,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 				check(t, q, m, experiment)
 			}
 			waiting := job(t, q, j.ID)
-			want := "stopping 1 attempts"
+			want := "waiting for GPU batch slot held by " + experiment.ID
 			if blocker == "disabled" {
 				want = "host b70 disabled by operator"
 			}

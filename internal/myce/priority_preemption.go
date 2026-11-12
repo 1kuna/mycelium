@@ -78,6 +78,11 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 	if owner == nil || owner.Gone || owner.Session != p.Session {
 		return true
 	}
+	// A target that no longer has the disk room this job needs cannot repay
+	// the teardown; any host with room may take the job instead.
+	if q.diskHeadroomReason(j, owner) != "" {
+		return true
+	}
 	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
 }
 

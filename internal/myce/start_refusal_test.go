@@ -62,10 +62,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 				if !errors.As(err, &refusal) || refusal.Status != 409 || refusal.Code != "request_stale" {
 					t.Fatalf("start fence did not refuse: %v", err)
 				}
-				predicate := "placement_policy"
-				if priority == "experiment" {
-					predicate = "host_launch"
-				}
+				predicate := "host_launch"
 				if !strings.Contains(logs.String(), "predicate="+predicate) {
 					t.Errorf("refusal omitted predicate: %s", logs.String())
 				}
