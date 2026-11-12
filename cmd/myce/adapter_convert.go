@@ -343,9 +343,6 @@ func convertAdapterExtension(root, folder string, targets []myce.ExecutionTarget
 	// ReadExtension validates the frozen schema/closure but normalizes and
 	// snapshots environments. Keep its returned values out of authored YAML.
 	problems = append(problems, missingConversionBytes(folder, e)...)
-	if len(e.Benchmark) > 0 {
-		problems = append(problems, errors.New("legacy benchmark has no adapter equivalent; author explicit references/sweeps rather than guessing"))
-	}
 	abs, err := filepath.Abs(folder)
 	if err != nil {
 		problems = append(problems, err)
@@ -460,7 +457,6 @@ func missingConversionBytes(folder string, e myce.Extension) []error {
 	command(e.Run)
 	command(e.Setup)
 	command(e.Check)
-	command(e.Benchmark)
 	baselines(e.Baselines)
 	for _, values := range e.PlatformBaselines {
 		baselines(values)
@@ -471,10 +467,6 @@ func missingConversionBytes(folder string, e myce.Extension) []error {
 		command(v.Execution.Main.Command)
 		for _, sidecar := range v.Execution.Sidecars {
 			command(sidecar.Command)
-		}
-		for _, sweep := range v.Sweeps {
-			command(sweep.Command)
-			command(sweep.Run)
 		}
 		baselines(v.Baselines)
 		for _, recipe := range v.Environments {

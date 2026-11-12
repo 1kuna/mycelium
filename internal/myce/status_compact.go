@@ -300,11 +300,6 @@ func compactStatusProfile(profile *CapabilityProfile) *CapabilityProfile {
 		return nil
 	}
 	p := *profile
-	if p.Benchmark != nil {
-		b := *p.Benchmark
-		b.Curves = nil
-		p.Benchmark = &b
-	}
 	return &p
 }
 

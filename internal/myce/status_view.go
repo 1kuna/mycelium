@@ -161,7 +161,6 @@ func CapabilityProfileLines(m *Machine) []string {
 			lines = append(lines, fmt.Sprintf("%s%.1f / %.1f GiB free; %s", label, float64(v.FreeBytes)/(1<<30), float64(v.TotalBytes)/(1<<30), rate)+fmt.Sprintf(" (age %.1fs)", v.AgeSeconds))
 		}
 	}
-	lines = append(lines, "onboarding benchmark: "+p.Benchmark.Summary())
 	return lines
 }
 func ExtensionStatus(r ExtensionReport) string {

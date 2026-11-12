@@ -116,7 +116,7 @@ func TestMaintenancePreparationExactCompletion(t *testing.T) {
 		}
 		m.EnvironmentReports = []EnvironmentReport{{Key: l.Key, Attempt: "wrong", State: "ready"}}
 		m.CopyReports = []CopyReport{{Model: l.Key, Attempt: "wrong", State: "ready"}}
-		if _, err := q.Checkin(Checkin{Machine: m, BenchmarkDone: "wrong"}); err != nil {
+		if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
 			t.Fatal(err)
 		}
 		st, _ = q.HostMaintenanceStatus("host")
@@ -125,7 +125,7 @@ func TestMaintenancePreparationExactCompletion(t *testing.T) {
 		}
 		m.EnvironmentReports[0].Attempt = l.Attempt
 		m.CopyReports[0].Attempt = l.Attempt
-		if _, err := q.Checkin(Checkin{Machine: m, BenchmarkDone: l.Attempt}); err != nil {
+		if _, err := q.Checkin(Checkin{Machine: m}); err != nil {
 			t.Fatal(err)
 		}
 		st, _ = q.HostMaintenanceStatus("host")

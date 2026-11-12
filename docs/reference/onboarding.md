@@ -168,8 +168,7 @@ login/reboot or app-launch behavior.
 WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or
 mirrored networking with appropriate private-network and Hyper-V firewall rules.
 Mycelium does not change WSL networking or firewall configuration. A WSL2
-worker reports Windows owner-presence, power and heat as unknown. Joining runs no throughput benchmark
-unless explicitly requested; see the benchmark section below.
+worker reports Windows owner-presence, power and heat as unknown. Joining runs no benchmark.
 
 Explicit `MYCE_QUEUE` plus `MYCE_TOKEN` joining continues to work as before,
 including the existing HTTP transport. The pinned transport applies to the
@@ -196,18 +195,14 @@ capacity. Fake resources remain explicitly fake. The queue
 stores the profile with the normal SQLite machine state. These facts are distinct
 from the live free-memory admission readings and operator caps.
 
-Without a benchmark, the profile reports `hardware-facts-only; throughput pending`.
-Facts refresh when the hypha starts again. Joining does not run or wait for
-throughput measurement by default; placement still uses declared resources and
-hardware profiles with the existing fallback rules.
-
-For throughput measurement before admission, pass `myce join --onboarding-benchmark`
-(or add it to the join argv after `service ... --`). Installed worker configs can
-set `"onboarding_benchmark": true`. For personal or polite hyphae, also pass
-`--daily-use` and the appropriate `--laptop` or `--desktop` declaration. Operators
-following an invitation can instead run `myce benchmark` explicitly with their
-private queue credentials and prepared extensions. See the
-[benchmark guide](../development.md) for its bounds and cache behavior.
+The profile reports `hardware-facts-only; throughput pending` (the wording is
+kept for the adjacent release). Facts refresh when the hypha starts again.
+Joining runs no benchmark: placement uses declared resources, hardware profiles
+and each kind of work's last accepted duration on each target (MY-49). The
+onboarding benchmark, `myce benchmark` and reference curves are retired;
+`--onboarding-benchmark`, `--curve-max-concurrency` and the installed
+`"onboarding_benchmark"` setting are accepted and ignored so existing service
+units keep starting.
 
 Discovery, pinned authority and profile checks are covered by laptop fixtures.
 Native cross-machine evidence and outstanding boundaries are owned by

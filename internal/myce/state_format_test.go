@@ -101,7 +101,7 @@ func TestStateRootInvalidMarker(t *testing.T) {
 }
 
 func TestStateStartupRefusalNoWrites(t *testing.T) {
-	for _, entry := range []string{"queue", "worker", "install", "benchmark", "docker-reconcile"} {
+	for _, entry := range []string{"queue", "worker", "install", "docker-reconcile"} {
 		for name, data := range refusedStateFiles() {
 			t.Run(entry+"/"+name, func(t *testing.T) {
 				parent := t.TempDir()
@@ -129,8 +129,6 @@ func TestStateStartupRefusalNoWrites(t *testing.T) {
 					}
 				case "docker-reconcile":
 					err = ReconcileDockerAttempt(context.Background(), root, "fixture-attempt")
-				case "benchmark":
-					err = RunOnboardingBenchmark(context.Background(), BenchmarkConfig{StateDir: root}, &CapabilityProfile{})
 				case "install":
 					c, e := PlanInstall("worker", parent, "", parent, "http://fixture.invalid", "fixture", Detection{OS: "linux", Platform: "fake"})
 					if e != nil {

@@ -72,10 +72,7 @@ engines and active calls. It withdraws unstarted batch offers and refuses new
 batch placements, calls, engine launches and device-specific preparation
 launches on that device. Model-cache copies use shared host storage and remain
 allowed. Healthy siblings retain their budgets and CPU work
-remains eligible. New whole-host onboarding benchmarks are deferred while any
-inventory device is disabled; ordinary worker startup continues. A later join
-after enabling the device can refresh whole-host throughput. Already authorized
-benchmarks continue as existing work. Existing work can still finish or stop under ordinary
+remains eligible. Existing work can still finish or stop under ordinary
 cancellation, failure and priority rules. This command does not edit the
 worker installation/configuration and needs no restart. Host drain/disable
 remains an independent fence; enabling a device does not resume its host.
@@ -118,15 +115,7 @@ acceptance. `--wait` requires drained/disabled state, fresh consistent known
 workers and zero work, preparations, engines or pending cleanup. Timeout and
 missing reports leave custody unresolved. Resume does not discharge old work.
 
-## Benchmarks, outages and control timing
-
-Opt-in onboarding benchmarks register before measuring and count as preparations
-until their exact attempt finishes and process cleanup is confirmed. They share
-the queue launch check with jobs, builds and engines, including the final shell
-gate for qualified reference commands. Heartbeats continue during measurement;
-drain/disable preserve a running command, and disable-stop cancels it. If
-maintenance or existing host work withholds onboarding, the worker continues
-checking in without benchmarking; a later join can retry it.
+## Outages and control timing
 
 During queue outage, no maintenance mutation or new Started authorization can
 succeed. Inspect owned work before using separately authorized service/container

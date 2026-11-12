@@ -117,7 +117,7 @@ func (q *Queue) workMemoryComparison(j *Job) string {
 	if t == nil || t.Key == nil {
 		return "timing_unavailable"
 	}
-	if j.Batch != nil && (j.Batch.Run || j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1) {
+	if j.Batch != nil && (j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1) {
 		return "batch_not_comparable"
 	}
 	current, _ := q.workObservationKey(j)
@@ -167,10 +167,6 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 	point.MemoryFamily, point.MemorySamples = memoryFamily(j), old.MemorySamples+1
 	point.MemoryLayout = memoryLayout(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
 	point.MemoryRecordedAt = q.clock.Now()
-	if r.Usage != nil && r.Usage.valid() {
-		point.HostMemoryGB = max(point.HostMemoryGB, r.Usage.HostMemoryGB)
-		point.DeviceMemoryGB = max(point.DeviceMemoryGB, r.Usage.MemoryGB)
-	}
 }
 
 func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {

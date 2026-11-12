@@ -117,8 +117,8 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 			finish(t, q, &work, true)
 			key := identityHash(q.s.Jobs[work.ID].Timing.Key)
 			before := q.s.WorkObservations[key]
-			if before.Units != 10 || before.Seconds != 2 || before.Rate != 5 || before.LatencySeconds != 2 {
-				t.Fatalf("missing throughput history: %+v", before)
+			if before.LastSeconds != 2 {
+				t.Fatalf("missing duration history: %+v", before)
 			}
 			clock.Advance(checkAge)
 			probe := s
@@ -143,7 +143,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 			}
 			checkKey := q.s.Jobs[job.ID].Timing.Key
 			own := q.s.WorkObservations[identityHash(checkKey)]
-			if len(q.s.WorkObservations) != 2 || !checkKey.Check || !own.MemoryRecordedAt.Equal(clock.Now()) || own.MemoryPeak == nil || own.MemoryPeak.HostGB == nil || *own.MemoryPeak.HostGB != host || own.Rate != 0 {
+			if len(q.s.WorkObservations) != 2 || !checkKey.Check || !own.MemoryRecordedAt.Equal(clock.Now()) || own.MemoryPeak == nil || own.MemoryPeak.HostGB == nil || *own.MemoryPeak.HostGB != host || own.LastSeconds != 0 {
 				t.Errorf("auto check did not record its own memory: %+v", q.s.WorkObservations)
 			}
 			timing := q.s.Jobs[job.ID].Timing
@@ -157,7 +157,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				clock.Advance(5 * 24 * time.Hour)
 				check(t, q, m, nil)
 				next := submit(t, q, s)
-				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); !ok || estimate.samples != 1 {
+				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); !ok || estimate.seconds != 2 {
 					t.Errorf("unchanged throughput lost on age: %+v", estimate)
 				}
 				reply := check(t, q, m, nil)
@@ -167,7 +167,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				if err := q.Started(result(reply.Job, true)); err != nil {
 					t.Fatal(err)
 				}
-				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds == nil {
+				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.LastAcceptedSeconds == nil {
 					t.Errorf("unchanged throughput lost for prediction: %+v", timing)
 				}
 				// The day-29 check memory is fresh on its own clock and seeds
@@ -193,12 +193,12 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
 	m.ExtensionReports = []ExtensionReport{report}
 	check(t, q, m, nil)
-	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
+	k, why := curveReferenceKey(e, q.s.Machines[m.ID], "extension:sample")
 	if k == nil {
 		t.Fatal(why)
 	}
 	k.Concurrency = 1
-	q.s.WorkObservations = map[string]WorkObservation{identityHash(k): {Key: *k, Source: "idle reference", SampleID: "benchmark", Samples: 1, Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now()}}
+	q.s.WorkObservations = map[string]WorkObservation{identityHash(k): {Key: *k, Source: "idle reference", SampleID: "benchmark", Samples: 1, LastSeconds: 2, RecordedAt: clock.Now()}}
 	s.Extension = extensionKey(e)
 	probe := s
 	probe.Workload = nil
@@ -224,57 +224,6 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	}
 	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
 		t.Fatalf("check peak beside a benchmark point not reused: %+v", next.MemoryEnvelope)
-	}
-}
-
-func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	e := registeredExtension(t, q, s.Extension)
-	e.Version = "auto"
-	e.Variants[0].Needs.Memory = "auto" // Keeps the host floor a reference point needs.
-	e.Variants[0].Sweeps = map[string]ReferenceSweep{"extension:sample": {Command: []string{"sh", "curve.sh"}, Counts: []int{1}, MaxConcurrency: 1}}
-	e.Files["curve.sh"] = []byte("exit 0\n")
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	s.Extension = extensionKey(e)
-	probe := s
-	probe.Workload = nil
-	probe.ExtensionDigest = e.Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.Needs.Memory = "auto"
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	job := startObservation(t, q, m, probe)
-	clock.Advance(time.Second)
-	host := 2.0
-	r := result(&job, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
-	if k == nil {
-		t.Fatal(why)
-	}
-	k.Concurrency = 1
-	// A distinct, otherwise valid benchmark report whose throughput is 31 days old.
-	old := WorkObservation{Key: *k, Source: "idle reference", SampleID: "old-benchmark", Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now().Add(-31 * 24 * time.Hour)}
-	publishCurves(t, q, m, []WorkObservation{old})
-	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.SampleID != "old-benchmark" {
-		t.Fatalf("old benchmark report not accepted beside the check's point: %+v", q.s.WorkObservations)
-	}
-	queued := submit(t, q, s)
-	next := check(t, q, m, nil).Job
-	if next == nil || next.ID != queued.ID {
-		t.Fatalf("comparable work not assigned: %+v", next)
-	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-		t.Fatalf("old benchmark report expired fresh memory: %+v", next.MemoryEnvelope)
 	}
 }
 
@@ -315,8 +264,8 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 				t.Fatalf("successful auto check did not learn memory: %+v", q.s.WorkObservations)
 			}
 			for _, point := range q.s.WorkObservations {
-				if point.Rate != 0 || point.LatencySeconds != 0 || point.Units != 0 || point.Seconds != 0 {
-					t.Fatalf("check learned throughput: %+v", point)
+				if point.LastSeconds != 0 {
+					t.Fatalf("check learned a duration: %+v", point)
 				}
 			}
 			if got := job(t, q, first.ID); got.Timing != nil && (got.Timing.ActualSeconds != nil || got.Timing.PredictedSeconds != nil) {

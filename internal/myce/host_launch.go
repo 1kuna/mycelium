@@ -221,10 +221,6 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				return nil
 			}
 		}
-		if !p.Started && p.Kind == "benchmark" && q.benchmarkDeviceAdmissionBlocked(m) {
-			reject("device_admission")
-			return nil
-		}
 		if !p.Started && !q.reservationAllows(q.s.Jobs[p.Demand], allocationMachine(m, []string{p.Device})) {
 			reject("reservation")
 			return nil
@@ -232,10 +228,6 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		// A model-cache copy writes shared host storage, not the selected GPU.
 		if !p.Started && p.Kind != "copy" && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
 			reject("device_admission")
-			return nil
-		}
-		if l.Kind == "benchmark" && !q.benchmarkIdle(m) {
-			reject("benchmark_busy")
 			return nil
 		}
 		if !p.Started && (p.CPUCores > 0 || !q.workerHasCPUReservation(m)) && !cpuAllocationFits(m, max(1, p.CPUCores)) {
@@ -283,7 +275,7 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 				}
 			}
 		} else if l.Kind == "benchmark" {
-			done = c.BenchmarkDone == l.Attempt
+			done = true // The onboarding benchmark is retired (MY-49).
 		}
 		if done {
 			delete(q.s.PreparationPlans, id)
@@ -345,9 +337,6 @@ func checkLaunchGate(ctx context.Context) error {
 
 func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {
 	offered := map[string]bool{}
-	if reply.BenchmarkPlan != nil {
-		offered[reply.BenchmarkPlan.Attempt] = true
-	}
 	for _, r := range reply.EnvironmentPlan {
 		offered[launchAttempt(r.Launch)] = true
 	}

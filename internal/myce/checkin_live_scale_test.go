@@ -77,7 +77,7 @@ func BenchmarkQueueCheckinLiveScale(b *testing.B) {
 				if key == nil {
 					b.Fatal(why)
 				}
-				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, Samples: 1 + i%139, MemorySamples: 1 + i%42, MemoryConfiguration: memoryConfiguration(provenance.Spec.Needs, nil, nil), MemoryLayout: "separate", MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &hostPeak}, Rate: 10, Units: 10, Seconds: 1, RecordedAt: clock.Now()}
+				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, Samples: 1 + i%139, MemorySamples: 1 + i%42, MemoryConfiguration: memoryConfiguration(provenance.Spec.Needs, nil, nil), MemoryLayout: "separate", MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &hostPeak}, LastSeconds: 1, RecordedAt: clock.Now()}
 			}
 
 			// Full CPU occupancy keeps the backlog stable across check-ins.

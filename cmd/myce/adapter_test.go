@@ -448,7 +448,7 @@ func TestAdapterComposedMemoryIdentity(t *testing.T) {
 }
 
 func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
-	e := adapterEntry{Spec: myce.Spec{Run: myce.RunSpec{Command: []string{"echo", "work"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Required: []string{"cuda"}}}, Targets: []myce.ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cuda"}}}, Checks: adapterChecks{Result: []string{"true"}, Qualification: []string{"echo", "qualification"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:work": {}}, Sweeps: map[string]myce.ReferenceSweep{"extension:work": {Command: []string{"echo", "measure"}}}}
+	e := adapterEntry{Spec: myce.Spec{Run: myce.RunSpec{Command: []string{"echo", "work"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Required: []string{"cuda"}}}, Targets: []myce.ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cuda"}}}, Checks: adapterChecks{Result: []string{"true"}, Qualification: []string{"echo", "qualification"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:work": {}}}
 	lower := func(entry adapterEntry) (executionProfile, error) {
 		p, _, err := adapterProfile(projectAdapter{Project: "fixture", Default: "work", Entries: map[string]adapterEntry{"work": entry}}, "")
 		return p, err
@@ -467,9 +467,6 @@ func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
 	p.RequirementReasons = map[string]string{"device": "hardware diagnostic"}
 	if advice := p.placementAdvisories(); len(advice) != 0 {
 		t.Fatal("native device exception ignored", advice)
-	}
-	if len(p.Native.Variants[0].Sweeps["extension:work"].Run) != 0 {
-		t.Fatal("result check manufactured an omitted wave command")
 	}
 	conflict := e
 	conflict.Targets = append(slices.Clone(e.Targets), myce.ExecutionTarget{OS: "darwin", Arch: "arm64", Platform: "metal"})

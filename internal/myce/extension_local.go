@@ -585,21 +585,6 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		j.EnvironmentRecipes = map[string]EnvironmentRecipe{w.Machine.GPU: r}
 	}
 	argv := slices.Clone(j.Spec.Run.Command)
-	if j.Batch != nil && j.Batch.Run {
-		v := e.variant(machineTarget(&w.Machine))
-		if v == nil {
-			unlock()
-			return nil, nil, errors.New("wave recipe unavailable")
-		}
-		sweep := v.Sweeps[j.Spec.workType()]
-		if len(sweep.Run) == 0 || !slices.Contains(sweep.Counts, j.Batch.Concurrency) || len(j.Batch.Pieces) != j.Batch.Concurrency {
-			unlock()
-			return nil, nil, errors.New("wave concurrency is not declared by recipe")
-		}
-		argv = slices.Clone(sweep.Run)
-		env["MYCE_BATCH_MANIFEST"] = ".myce-batch.json"
-		env["MYCE_BATCH_CONCURRENCY"] = fmt.Sprint(j.Batch.Concurrency)
-	}
 	for i, arg := range argv {
 		arg = strings.ReplaceAll(arg, "{extension}", env["MYCE_EXTENSION_DIR"])
 		arg = strings.ReplaceAll(arg, "{cache}", env["MYCE_EXTENSION_CACHE"])
@@ -608,7 +593,7 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 	if j.Spec.Program != nil {
 		argv = append(argv, j.Spec.Program.File)
 		argv = append(argv, j.Spec.Program.Args...)
-	} else if j.Batch == nil || !j.Batch.Run {
+	} else {
 		argv = append(argv, j.Spec.Args...)
 	}
 	if len(e.Variants) == 0 && !strings.Contains(argv[0], "/") {

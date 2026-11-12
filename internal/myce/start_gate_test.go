@@ -177,7 +177,7 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 	}
 	w := recoveryWorker(t)
 	w.Machine = machine("b70", "xpu")
-	w.InventoryProbe = benchmarkTestInventory
+	w.InventoryProbe = startGateTestInventory
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Clock = RealClock{}
 	store, e := w.openStore()
@@ -269,7 +269,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	w.Machine = machine("b70", "xpu", "test-host")
 	w.Machine.Device = "0"
 	w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: "xpu", Selector: "0"})
-	w.InventoryProbe = benchmarkTestInventory
+	w.InventoryProbe = startGateTestInventory
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Client = Client{URL: server.URL, Token: "test"}
 	store, e := w.openStore()
@@ -398,4 +398,9 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	if got := job(t, q, a.ID); got.StartedAt != nil {
 		t.Fatal("failed write retained start")
 	}
+}
+
+// Match the fixture's synthetic XPU and 8 GiB allowance, independently of the host.
+func startGateTestInventory(context.Context) ([]MachineDevice, error) {
+	return []MachineDevice{{ID: "0", Platform: "xpu", Identity: "benchmark-xpu", Selector: "0", Fingerprint: "fixture-driver", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 }

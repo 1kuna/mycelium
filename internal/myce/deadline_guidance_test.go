@@ -103,19 +103,20 @@ func TestDeadlineGuidanceNonResumableAndOverrun(t *testing.T) {
 			t.Fatal(blockers)
 		}
 	}
-	assertBlocker("ETA unknown")
+	assertBlocker("last accepted duration unknown")
 	// Synthetic comparable timing evidence; clocks advance without wall sleeps.
-	predicted := 10.0
+	last := 10.0
 	// Publish synthetic evidence through the commit boundary used by GET.
 	if err := q.update(func() error {
-		q.touchJob(running.ID).Timing = &WorkTiming{PredictedSeconds: &predicted}
+		q.touchJob(running.ID).Timing = &WorkTiming{LastAcceptedSeconds: &last}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	assertBlocker("10s remaining")
+	// The blocker shows history, never a remaining time.
+	assertBlocker("last accepted duration 10s; not assured")
 	clock.Advance(11 * time.Second)
-	assertBlocker("overrun")
+	assertBlocker("last accepted duration 10s; not assured")
 	if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
 		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
 	}

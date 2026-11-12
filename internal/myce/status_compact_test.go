@@ -36,7 +36,7 @@ func retainedStatusFixture(tb testing.TB, retained int) *Queue {
 	for i := 0; i < retained; i++ {
 		id := fmt.Sprintf("history-%05d", i)
 		q.s.Jobs[id] = &Job{ID: id, State: "succeeded", ReleaseConfirmed: true, Queued: c.Now().Add(-time.Duration(i+1) * time.Second), Spec: Spec{Project: "example", Name: id}, Attempt: 1}
-		q.s.WorkObservations[id] = WorkObservation{Job: id, Machine: "worker-00", Attempt: 1, Samples: 8, Units: 100, Seconds: 20, RecordedAt: c.Now(), Key: ObservationKey{Work: id, Hardware: strings.Repeat("h", 64), Fingerprint: strings.Repeat("f", 64), Environment: strings.Repeat("e", 64), Configuration: strings.Repeat("c", 64)}}
+		q.s.WorkObservations[id] = WorkObservation{Job: id, Machine: "worker-00", Attempt: 1, Samples: 8, LastSeconds: 20, RecordedAt: c.Now(), Key: ObservationKey{Work: id, Hardware: strings.Repeat("h", 64), Fingerprint: strings.Repeat("f", 64), Environment: strings.Repeat("e", 64), Configuration: strings.Repeat("c", 64)}}
 		q.s.StorageObservations[id] = StorageObservation{RecordedAt: c.Now(), Execution: Execution{ID: id, Attempt: 1}, LowerBoundReason: strings.Repeat("retained evidence ", 32)}
 		q.s.Health.Events = append(q.s.Health.Events, HealthAlert{DeliveryID: id, Kind: "production_attempt_lost", JobID: id, At: c.Now(), Delivered: true})
 		q.efficiencyView.Jobs = append(q.efficiencyView.Jobs, EfficiencyWait{JobID: id, Project: "example", Seconds: map[string]float64{"memory": 30}})

@@ -86,7 +86,7 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	send()
 	got := runtimeJob(t, q, j.ID)
 	text := JobTiming(got)
-	if got.State != "running" || got.Runtime.RemainingSeconds != nil || !got.Runtime.RemainingWorkUnknown || got.Progress != 0 || !strings.Contains(text, "stage 1/2") || !strings.Contains(text, "whole-job progress unknown") || strings.Contains(text, "remaining ~0") {
+	if got.State != "running" || got.Runtime.LastAcceptedSeconds != nil || got.Progress != 0 || !strings.Contains(text, "stage 1/2") || !strings.Contains(text, "whole-job progress unknown") || strings.Contains(text, "remaining ~0") {
 		t.Fatalf("stage completion claimed job completion: %s / %+v", text, got.Runtime)
 	}
 	clock.Advance(5 * time.Second)
@@ -97,7 +97,7 @@ func TestApplicationProgressTwoStagesUnknownRemaining(t *testing.T) {
 	report.ApplicationProgress = p
 	send()
 	got = runtimeJob(t, q, j.ID)
-	if *got.ApplicationProgress.StageIndex != 2 || got.Runtime.RemainingSeconds != nil || !got.Runtime.RemainingWorkUnknown || !strings.Contains(JobTiming(got), "stage 2/2") {
+	if *got.ApplicationProgress.StageIndex != 2 || got.Runtime.LastAcceptedSeconds != nil || !strings.Contains(JobTiming(got), "stage 2/2") {
 		t.Fatalf("invented stage-two timing: %+v", got)
 	}
 	// A delayed older heartbeat in this same execution cannot rewind stage two.

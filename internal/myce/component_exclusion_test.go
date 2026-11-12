@@ -300,9 +300,6 @@ func TestComponentExclusionUnstartedModelAndBenchmarkFences(t *testing.T) {
 	if err := q.Started(result(a, false)); !errors.Is(err, ErrStale) {
 		t.Fatal("late Started bypassed exclusion", err)
 	}
-	if !q.benchmarkDeviceAdmissionBlocked(&m) {
-		t.Fatal("benchmark missed selector")
-	}
 	q, _, legacy := modelFixture(t)
 	legacy.Leaving = true
 	check(t, q, legacy, nil)

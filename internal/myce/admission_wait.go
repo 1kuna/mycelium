@@ -683,9 +683,6 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 				resolution := "candidate_projection"
 				if candidate == nil {
 					resolution = "serial_diagnostic_projection"
-					if j.Batch != nil && j.Batch.Run {
-						resolution = "retained_wave_diagnostic_projection"
-					}
 					template := j
 					if j.Spec.FanOut != nil {
 						template = q.fanOutTemplate(j)

@@ -41,7 +41,6 @@ type adapterVariant struct {
 	Checks       adapterChecks                     `yaml:"checks,omitempty"`
 	Baselines    map[string]myce.ExtensionBaseline `yaml:"baselines,omitempty"`
 	References   map[string]myce.WorkReference     `yaml:"references,omitempty"`
-	Sweeps       map[string]myce.ReferenceSweep    `yaml:"sweeps,omitempty"`
 }
 type adapterEntry struct {
 	myce.Spec    `yaml:",inline"`
@@ -63,7 +62,6 @@ type adapterEntry struct {
 	Setup        []string                          `yaml:"setup,omitempty"`
 	Baselines    map[string]myce.ExtensionBaseline `yaml:"baselines,omitempty"`
 	References   map[string]myce.WorkReference     `yaml:"references,omitempty"`
-	Sweeps       map[string]myce.ReferenceSweep    `yaml:"sweeps,omitempty"`
 }
 
 var adapterName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -120,7 +118,7 @@ func decodeAdapter(data []byte) (projectAdapter, error) {
 				return a, errors.New("choose environment or environments")
 			}
 			if present["variants"] {
-				for _, key := range []string{"run", "execution", "needs", "targets", "environment", "environments", "setup", "checks", "baselines", "references", "sweeps"} {
+				for _, key := range []string{"run", "execution", "needs", "targets", "environment", "environments", "setup", "checks", "baselines", "references"} {
 					if present[key] {
 						return a, fmt.Errorf("variants cannot accompany flat %s", key)
 					}
@@ -159,7 +157,7 @@ func validateAdapterEntry(e adapterEntry) error {
 		return errors.New("source entries use an isolated attempt directory and native commands")
 	}
 	if len(e.Variants) > 0 {
-		if !reflect.ValueOf(s.Run).IsZero() || s.Execution != nil || !reflect.ValueOf(s.Needs).IsZero() || len(s.Targets) > 0 || !reflect.ValueOf(s.Environment).IsZero() || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Checks.Result)+len(e.Checks.Qualification)+len(e.Baselines)+len(e.References)+len(e.Sweeps) > 0 {
+		if !reflect.ValueOf(s.Run).IsZero() || s.Execution != nil || !reflect.ValueOf(s.Needs).IsZero() || len(s.Targets) > 0 || !reflect.ValueOf(s.Environment).IsZero() || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Checks.Result)+len(e.Checks.Qualification)+len(e.Baselines)+len(e.References) > 0 {
 			return errors.New("variants are complete recipes; flat recipe fields cannot accompany variants")
 		}
 	} else {
@@ -236,7 +234,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if reflect.ValueOf(p.Source).IsZero() {
 		p.Source.Git = "HEAD"
 	}
-	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References)+len(e.Sweeps) > 0
+	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References) > 0
 	if native {
 		x := myce.Extension{RequirementReasons: e.RequirementReasons, Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
 		for name := range e.Outputs {
@@ -270,7 +268,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 					return p, nil, errors.New("flat native targets conflict with needs.platform requirements")
 				}
 				needs.Platform = myce.Platform{}
-				variants = append(variants, adapterVariant{Target: target, Needs: needs, Execution: *execution, Environments: e.Environments, Setup: e.Setup, Checks: e.Checks, Baselines: e.Baselines, References: e.References, Sweeps: e.Sweeps})
+				variants = append(variants, adapterVariant{Target: target, Needs: needs, Execution: *execution, Environments: e.Environments, Setup: e.Setup, Checks: e.Checks, Baselines: e.Baselines, References: e.References})
 			}
 		}
 		for _, v := range variants {
@@ -282,14 +280,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 			}
 			execution := v.Execution
 			execution.Main.Command = checkedAdapterCommand(execution.Main.Command, v.Checks.Result)
-			sweeps := map[string]myce.ReferenceSweep{}
-			for work, sweep := range v.Sweeps {
-				if len(sweep.Run) > 0 {
-					sweep.Run = checkedAdapterCommand(sweep.Run, v.Checks.Result)
-				}
-				sweeps[work] = sweep
-			}
-			x.Variants = append(x.Variants, myce.ExtensionVariant{Quality: v.Quality, Target: v.Target, Needs: v.Needs, Environments: v.Environments, Execution: execution, Setup: v.Setup, Check: v.Checks.Qualification, Baselines: v.Baselines, References: v.References, Sweeps: sweeps})
+			x.Variants = append(x.Variants, myce.ExtensionVariant{Quality: v.Quality, Target: v.Target, Needs: v.Needs, Environments: v.Environments, Execution: execution, Setup: v.Setup, Check: v.Checks.Qualification, Baselines: v.Baselines, References: v.References})
 			p.Targets = append(p.Targets, v.Target)
 		}
 		p.Targets = slices.Compact(p.Targets)

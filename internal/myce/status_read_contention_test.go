@@ -75,7 +75,7 @@ func statusReadCheckinContention(t testing.TB) time.Duration {
 	}
 	q.s.WorkObservations = map[string]WorkObservation{}
 	for i := range 1000 {
-		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: ObservationKey{Work: "work", Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, Units: 100, Seconds: 20, RecordedAt: clock.Now()}
+		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: ObservationKey{Work: "work", Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, LastSeconds: 20, RecordedAt: clock.Now()}
 	}
 	q.mu.Unlock()
 	if err := q.update(func() error { return nil }); err != nil {

@@ -101,7 +101,6 @@ func TestAdapterWholeParentFanOutGraph(t *testing.T) {
 				Sidecars: []myce.NativeSidecar{{Name: "helper", Command: []string{"sh", "{extension}/helper.sh"}, MemoryGB: 0.05}}},
 			Check:     []string{"sh", "{extension}/check.sh"},
 			Baselines: map[string]myce.ExtensionBaseline{"extension:stage": {Input: "baseline", Output: "baseline", Measure: "exact", Native: "fixture", Variation: "exact"}},
-			Sweeps:    map[string]myce.ReferenceSweep{},
 		}}}
 	archive := filepath.Join(t.TempDir(), "source.tar")
 	ref, err := freezeProfileSource(ctx, root, profileSource{Directory: "source"}, archive)

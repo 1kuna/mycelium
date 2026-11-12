@@ -1393,9 +1393,7 @@ server-local named secrets and immutable model sources are in
 The [slice 4 amendment](design-proposal.md#declared-fan-out-and-batch-planning-slice-4-107-approved-2026-10-24)
 defines this contract. It uses ordinary extension jobs and existing artifact
 transport. Applications supply homogeneous independent pieces and own semantic
-splitting and reduction. Mycelium plans, retries and gathers them.
-
-Declared calls fall back to serial admission when undeclared calls share the slot.
+splitting and reduction. Mycelium runs, retries and gathers them.
 
 ```yaml
 name: parameter-sweep
@@ -1406,7 +1404,7 @@ workload: {input_shape: fixed-v1, units: 100}
 files: {}                       # immutable common input manifest, or NAS inputs
 outputs: {metrics.json: results}
 fan_out:
-  max_concurrency: 8             # ceiling, not a fixed batch size
+  max_concurrency: 8             # accepted; pieces run as ordinary serial jobs
   pieces:
     - {key: first, args: ["--seed", "1"]}
     - {key: second, args: ["--seed", "2"]}
@@ -1414,50 +1412,24 @@ fan_out:
 
 Keys must be unique clean names; there are at most 256 pieces. `workload.units`
 describes **one** piece, using the matching variant reference's unit and shape.
-The existing `resumable` contract applies to each fixed wave. Arbitrary programs,
-dynamic enumeration, general stage graphs and timed input accumulation are outside
-this slice. Whole-parent dependencies below are the bounded #180 extension. Common inputs are staged through the normal file-store/NAS path for each
-wave; arguments select the relevant data. No private input paths go in curves.
-
-A variant opts into measured wave execution by adding `run` to its reference
-sweep, alongside `command`, `counts` and `max_concurrency`:
-
-```yaml
-sweeps:
-  extension:simulator:
-    command: [python3, "{extension}/reference.py"]
-    run: [python3, "{extension}/pieces.py"]
-    counts: [1, 2, 4, 8]
-    max_concurrency: 8
-```
-
-The author promises that `run` uses the same concurrency mode and shape measured
-by the correctness-checked reference. No measured point grants resource capacity.
-The queue conservatively scales per-piece CPU/RAM/device floors, includes measured
-high-water memory and charges shared hosts once. Existing priority, fairness,
-placement and owner controls still apply. Short groups and tails use smaller
-measured counts. Without a safe matching wave recipe/curve, each piece uses the
-ordinary serial command and its own arguments.
-
-For a measured wave the worker sets `MYCE_BATCH_CONCURRENCY` and
-`MYCE_BATCH_MANIFEST=.myce-batch.json`. This small JSON file is in the attempt's
-working directory and contains `parent`, `pieces` (key and args), `concurrency`,
-common `args`, `inputs`/`files` names and keyed `outputs` names. Write each declared
-output under `KEY/OUTPUT_NAME`, e.g. `first/metrics.json`. The worker publishes
-these through the existing attempt-specific verified artifact path. The manifest
-name is reserved. A wave owns one command slot, including on GPUs.
+Each piece is an ordinary serial job: the variant's command with the piece's
+arguments appended, placed, retried and measured like any other job. Pieces run
+in parallel wherever ordinary admission finds capacity. There are no measured
+waves or batch plans (MY-49); `max_concurrency` is still validated but no longer
+groups pieces. The existing `resumable` contract applies to each piece.
+Arbitrary programs, dynamic enumeration, general stage graphs and timed input
+accumulation are outside this slice. Whole-parent dependencies below are the
+bounded #180 extension. Common inputs are staged through the normal
+file-store/NAS path for each piece; arguments select the relevant data.
 
 The returned parent job's `fan_out` has a dispatch cursor, child job IDs and
 `results` keyed by original piece key. Each result names the accepted execution
 and its output references. The parent succeeds only after every piece succeeds;
-its final `output_refs`/`output_files` use `KEY/OUTPUT_NAME`. A failed wave fails
-the parent. An OOM forbids its exact measured count and fails the wave; it does
-not qualify the same occupancy for another attempt. Infrastructure loss and planned interruption use existing retry
-policy on that wave alone. Membership and measured count stay fixed across
-retries, preserving the recipe's vector-batch semantics. A retry waits if no
-component can safely admit that count and its resource envelope. Late attempts
-cannot replace accepted results. Parent cancellation stops its children and
-reports outstanding cleanup. Persisted membership/results survive queue restart.
+its final `output_refs`/`output_files` use `KEY/OUTPUT_NAME`. A failed piece
+fails the parent. Infrastructure loss and planned interruption use existing
+retry policy on that piece alone, keeping its membership. Late attempts cannot
+replace accepted results. Parent cancellation stops its children and reports
+outstanding cleanup. Persisted membership/results survive queue restart.
 
 ### Plain-command pieces
 
@@ -1518,10 +1490,9 @@ Read the parent with authenticated `GET /api/jobs/{id}` (Go `GetJob`/`Wait`, Pyt
 `get`/`wait`). Its top-level `fan_out.children` lists the native child job IDs
 materialized so far; more can appear as dispatch proceeds. Fetch those jobs by ID.
 Each child's top-level `batch.parent` is the parent job ID, and `batch.pieces`
-identifies the original piece keys in that fixed wave. A child has its own job
-ID and no `spec.submission_key`; the parent's key is not copied to children.
-A measured extension wave may execute several pieces, so do not assume one
-child per piece; plain-command pieces always have one child each.
+identifies its original piece key. A child has its own job ID and no
+`spec.submission_key`; the parent's key is not copied to children. Each piece
+has one child, retried in place.
 
 An assigned child's top-level `extension` reports the selected `name`, `version`
 and frozen `digest`. This identifies the executable selection, not the parent:
@@ -1537,13 +1508,13 @@ redaction while echoing project/key identity. It omits `spec.extension`,
 arguments; observe top-level progress and child selection instead. Retain the
 submitted declaration if you need arguments before dispatch. Use
 `cancellation_scope.pieces` for every declared key, including undispatched keys;
-`fan_out.children` lists only materialized waves.
+`fan_out.children` lists only materialized pieces.
 
 ## Abort and wait for release
 
 Cancel the parent once with `myce cancel PARENT` or
 `myce cancel --project PROJECT --key KEY`. Both routes fence all declared pieces
-and registered dependents, including blocked/ready consumers and retried waves.
+and registered dependents, including blocked/ready consumers and retried pieces.
 Valid future consumers of the retained cancelled parent are cancelled on admission.
 Terminal results remain intact; cancellation adds durable exclusion metadata.
 
@@ -1557,8 +1528,9 @@ reports `confirmed` after attempted descendants settle even though its own
 report `not_applicable`, without manufacturing a physical release.
 
 `cancellation_scope.pieces` includes each `key`, `materialized`, `accepted`,
-optional `wave_id`, `will_not_run`, aggregate `release`, and registered dependent
-IDs in `dependents`. Its `members` lists all retained wave/dependent jobs with
+optional `wave_id` (the piece's child job), `will_not_run`, aggregate `release`,
+and registered dependent IDs in `dependents`. Its `members` lists all retained
+piece/dependent jobs with
 `job_id`, `state`, `will_not_run` and aggregate `release`. Empty lists are explicit.
 Before abort, release only describes attempts so far; inspect `will_not_run`
 for exclusion. No child cancellation loop is needed.
@@ -1570,32 +1542,15 @@ markers. Once the source is unavailable, GET cannot enumerate it and new
 dependencies are rejected. Artifact expiry does not erase retained scope or
 settle custody. Keep parent identity and acknowledgement locally across outages.
 
-## Binding model-call curves
+## Declared model-call groups
 
-An extension-command sweep alone does not qualify server calls. Compute the
-exact server configuration digest with the read-only command:
-
-```sh
-myce model measurement-digest MODEL --model-config models.yaml --environment-config environments.yaml
-```
-
-The reference sweep must declare that digest as `server_digest` and actually
-exercise that exact model/server, shape, environment and cache/context settings.
-The model catalog's `measurement` declares `extension_digest`, `work` (the exact
-reference work type) and the same `server_digest`. Changing the model bytes,
-command, settings, bounds or resolved environment invalidates the binding.
-Existing variant correctness qualification and exact component/fingerprint,
-allowance, freshness, OOM and measured-memory checks remain mandatory.
-
-Requests opt in with generic headers `X-Myce-Fan-Out` (group key),
-`X-Myce-Input-Shape` and `X-Myce-Work-Units`. Compatible pending calls in the same
-project, class/tier, model, shape and size can use measured engine occupancy,
-bounded by configured `max_in_flight`. A running wave's chosen occupancy is not
-increased by later arrivals; a tail can use fewer slots. Unknown binding means
-serial admission for declared calls. Requests without the declaration keep
-their existing routing/caps, including zero-as-unlimited. Model calls retain
-their existing ephemeral request/retry/streaming semantics; this is not a durable
-workflow API or a second batching timer.
+Requests may still send `X-Myce-Fan-Out` (group key), `X-Myce-Input-Shape` and
+`X-Myce-Work-Units`. A declared group runs one call per engine at a time; there
+are no measured call curves or batch plans (MY-49), and the model catalog's
+`measurement` field is accepted and ignored for the adjacent release. Requests
+without the declaration keep their existing routing/caps, including
+zero-as-unlimited. Model calls retain their existing ephemeral
+request/retry/streaming semantics; this is not a durable workflow API.
 
 ## Start a consumer when one piece is accepted
 
@@ -1622,8 +1577,8 @@ with other inputs or outputs, or mix stored-file and NAS input transports.
 The wire state stays `queued`. `dependency.state` is `blocked` until acceptance,
 then `ready`; `dependency` records the parent, piece, exact producing `execution`,
 `ready_at`, and immutable `files` or NAS `inputs`. The submitted `spec.after`
-remains unchanged. A measured wave accepts all its pieces together after its
-complete output manifest is verified. Availability means normal scheduling
+remains unchanged. A piece is accepted after its complete output manifest is
+verified. Availability means normal scheduling
 eligibility; it reserves no resources. Consumers stage and verify the bound input
 through the existing artifact transport before command execution.
 
@@ -1690,17 +1645,16 @@ fan_out:
     - {key: second, args: [--input, second/input]}
 ```
 
-Inputs are explicit immutable common inputs, staged for each wave. Piece args or
-the existing batch manifest select the keyed paths; there is no implicit key
-substitution or input filtering. A measured wave's manifest lists these bound
-inputs along with submitted common inputs. Register subsequent consumers against
+Inputs are explicit immutable common inputs, staged for each piece. Piece args
+select the keyed paths; there is no implicit key substitution or input
+filtering. Register subsequent consumers against
 this stage's parent ID, then wait only on the final job. No caller-side gather wait
 is needed. Membership and accepted bindings survive queue restart.
 
 The logical consumer's generated deadline is recorded at readiness but does not
-expire the parent while it waits for capacity, including before the first wave.
+expire the parent while it waits for capacity, including before the first piece.
 Each executing child inherits `start_window` and gets that full relative budget
-from its own assignment, including later waves. An explicit absolute `start_by` takes
+from its own assignment, including later pieces. An explicit absolute `start_by` takes
 precedence and is preserved by every child instead. If it expires before all
 pieces are assigned, the tail never dispatches. Materialized children keep their
 own startup/recovery windows and accepted commands may finish; the parent fails

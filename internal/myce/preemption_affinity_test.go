@@ -246,7 +246,7 @@ func TestPreemptionPlacementDoesNotReviveAfterLoss(t *testing.T) {
 }
 
 func TestFanOutPreemptionUsesCommittedComponents(t *testing.T) {
-	q, clock, a, s := fanOutFixture(t, 1)
+	q, _, a, s := fanOutFixture(t, 1)
 	b := cloneMachine(&a)
 	b.ID, b.HostID, b.Session = "faster", "faster-host", "faster-session"
 	b.ExtensionFingerprint = "faster-cpu"
@@ -255,15 +255,6 @@ func TestFanOutPreemptionUsesCommittedComponents(t *testing.T) {
 	report.Setup, report.Qualified, report.CheckID = true, true, "faster-check"
 	b.ExtensionReports = []ExtensionReport{report}
 	check(t, q, b, nil)
-	key, why := curveKey(e, q.s.Machines[b.ID], s.workType())
-	if key == nil {
-		t.Fatal(why)
-	}
-	for _, count := range []int{1, 2, 4, 8} {
-		k := *key
-		k.Concurrency = count
-		q.s.WorkObservations[identityHash(k)] = WorkObservation{Key: k, Rate: float64(count) * 10000, HostMemoryGB: float64(count), Samples: 1, RecordedAt: clock.Now()}
-	}
 	low := cpuSpec(8, 1)
 	low.AllowedMachines = []string{a.ID}
 	victim := submit(t, q, low)
@@ -294,6 +285,6 @@ func TestFanOutPreemptionUsesCommittedComponents(t *testing.T) {
 	finish(t, q, busy, true)
 	next := check(t, q, a, nil).Job
 	if next == nil || next.Batch == nil || next.Batch.Parent != demand.ID || next.Machine != a.ID {
-		t.Fatal("measured fan-out abandoned committed component", next, job(t, q, demand.ID).Reason)
+		t.Fatal("fan-out abandoned committed component", next, job(t, q, demand.ID).Reason)
 	}
 }

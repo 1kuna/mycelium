@@ -360,9 +360,9 @@ Opt into comma-separated sections with `?sections=work,storage` or
 | Section | Existing detail restored |
 |---|---|
 | `jobs` | Complete selected job status fields, attempts, admission/evidence, eligibility and fresh placement diagnostics |
-| `machines` | Complete machine status, health history/baselines, inventories, benchmark curves and preparation reports |
+| `machines` | Complete machine status, health history/baselines, inventories and preparation reports |
 | `storage` | `storage_observations`, `file_store` (including retained-file accounting) and `checkpoint_expiry` (settled NAS checkpoint folders `waiting` for their grace period or a worker, and `undated` ones kept for lack of any timestamp; see [files](files.md#resumable-jobs)) |
-| `work` | `work_curves` |
+| `work` | `work_curves`: one record per kind of work, with its last accepted duration and accepted peak |
 | `health` | `health_alerts`: one record per open or recently closed problem (kind and subject), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
 | `usage` | Complete `usage`, including daily rows, preemptions and production starts |
@@ -442,7 +442,7 @@ GOMAXPROCS=2 go test ./internal/myce -run '^$' \
 ```
 
 Memory-only accepted samples increment `samples` and `memory_samples` and advance
-`memory_recorded_at`; they leave the throughput clock and rate unchanged. A
+`memory_recorded_at`; they leave the last accepted duration unchanged. A
 failed ceiling-bound attempt can invalidate comparable memory on several hosts
 without adding a sample. Each rewritten key has its own `memory_invalidated`
 ledger link, including a replacement diagnostic peak with an already-zero memory
@@ -1226,11 +1226,11 @@ are never automatically treated as comparable (#631).
 New attempt rows include `learning_reason`: `eligible` means the queue's memory
 learning predicates passed; other values name the failed predicate (for example
 `constrained`, `pressure_unavailable`, `identity_changed`, or `attempt_failed`).
-The same gate authorizes accepted work peaks, resident/GPU host ranges, legacy
-Usage maxima and program needs/`measured_needs`. Each learner retains its own
-identity rules: programs can learn without reference timing, while work curves
-require a matching timing key. Missing peaks cannot authorize Usage learning.
-Throughput eligibility is independent. The optional `memory_peak.pressure`
+The same gate authorizes accepted work peaks, resident/GPU host ranges and
+program needs/`measured_needs`. Each learner retains its own identity rules:
+programs can learn without reference timing, while work records require a
+matching timing key. Missing peaks cannot authorize learning. Duration
+eligibility is independent. The optional `memory_peak.pressure`
 records the worker's first failing pressure predicate, or `eligible`, together
 with baselined host/cgroup `some` stall deltas and elapsed time in microseconds,
 diagnostic avg10 maxima in percent, host swap growth/out in bytes, and resident,
@@ -1407,16 +1407,17 @@ admission checks do not enable a disabled production hold or stop Started work.
 
 Unified CUDA admission also protects memory for queued production whose sole
 qualified physical destination is that host, including declared dependent stages
-with an existing production-arrival forecast. The co-tenant charge plus the
+whose running producer piece has a last accepted duration. The co-tenant charge plus the
 production envelope must fit the host ledger and live physical headroom. The
 envelope retains declared host/device floors and accepted measured peaks with
 the estimator's existing margins (at least 1.25), plus per-attempt slack. A bound
 production job recognizes alternatives only under the existing exact-work
 `production_parity_hosts` approval and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
 removes the demand. Envelopes that exceed the host's maximum physical admission
-capacity do not withhold co-tenants indefinitely. A dependent-stage forecast
-expires when the measured producer overruns. No prediction of future,
-unsubmitted jobs is made.
+capacity do not withhold co-tenants indefinitely. A dependent stage's expected
+arrival is the producer's last accepted duration less its elapsed time, and
+expires when the producer overruns it. No prediction of future, unsubmitted jobs
+is made.
 
 The physical free-RAM floor is the existing unified-CUDA reserve: the OS/driver
 reserve is at least 16 GiB, and a larger configured device reserve is retained.
@@ -1862,57 +1863,40 @@ See [pressure freshness](shared-hosts.md) and
 [shared-host thresholds and qualification](reference/shared-and-polite-hosts.md#pressure-response).
 
 
-## Execution elapsed time, remaining estimates, and application progress
+## Execution elapsed time, last accepted duration, and application progress
 
 Running jobs expose `runtime` in Job GET, status JSON, CLI and the read-only
 page. `elapsed_seconds` starts at the queue's Started acknowledgement, not
 assignment or input staging. It is absent before Started. Queue wait,
 preparation and delivery are separate lifecycle evidence, not predicted phases.
-Accepted-history timing includes result handoff; no separate delivery ETA is
-invented.
 
-For comparable extension work, declare a variant reference, for example
-`references: {"extension:example": {input_shape: small-v1, unit: frames, units: 10}}`,
-with the variant's check and baseline. Submit
-`workload: {input_shape: small-v1, units: 100}` in the same serial mode and unit.
-The existing qualified exact-key work curve supplies the frozen total prediction.
-`runtime.remaining_seconds` subtracts elapsed from that prediction, with
-`source`, `unit`, `samples`, `history_age_seconds`, and a `limitation`.
-`remaining_work_unknown` is true whenever remaining execution time cannot be
-estimated; it is never cleared by a stage reaching its reported total.
-It is an approximate runtime estimate, without a statistical confidence bound.
-After the prediction is reached, remaining becomes unknown with reason
-`historical estimate exceeded; remaining time unknown`; zero is never a promise
-of completion. Missing, invalidated, older-than-30-day and noncomparable history
-have explicit `runtime.reason` values. Plain commands still show elapsed time
-and explain their missing workload/reference metadata. These observations do not
-change placement or measurement qualification.
+Mycelium keeps one record per kind of work (MY-49): its last accepted duration
+(Started to accepted completion, including result handoff) and its accepted
+memory peak. The kind of work is the exact observation key: the work or
+command identity, extension digest and reference, host, component, runtime
+fingerprint, environment and resource configuration. A fan-out piece is its own
+kind of work, including its arguments. Qualification checks learn memory, not a
+duration. `runtime.last_accepted_seconds` and `timing.last_accepted_seconds`
+show that duration when the attempt began, or `runtime.reason` says why it is
+unknown: no accepted matching run, an invalidated or OOM-forbidden record, or a
+changed attempt or identity. It is history, never a forecast, remaining time or
+deadline, and it has no age limit; the next accepted run replaces it. Status
+shows `last accepted duration Ns` or `unknown`.
 
-Exact repeated-command and comparable extension
-forecasts correct service time using accepted raw prediction error (#879). Job timing
-`service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
-(the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
-an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
-placement reason and CLI/HTML explain the same calculation alongside unchanged
-setup and transfer costs. The correction is the mean actual-minus-raw seconds
-per work unit, scaled to the requested units (one job for repeated commands).
-Corrected predictions never train their own correction. The first accepted run
-has no prior prediction and cannot supply a pair.
+Retired with the curves (MY-49), for the adjacent release only (MY-42):
+`timing.predicted_seconds` mirrors `last_accepted_seconds` and is then removed.
+Gone now: `runtime.remaining_seconds`, `remaining_work_unknown`, `source`,
+`unit`, `samples`, `history_age_seconds`, and `timing.service_estimate`,
+`samples`, `comparability`, `uncertainty`, `history_source`,
+`history_recorded_at` and `repeated_key`. Consumers that read them see them
+absent.
 
-Evidence shares the exact work/target/component/runtime/configuration key and
-SQLite observation row. Failed, interrupted, stale, mixed, constrained and
-incompatible attempts cannot train it. Missing, invalidated or changed estimator
-evidence retains the raw estimate with an explicit reason; if raw evidence is
-unknown, calibration cannot make it known. Calibration shares the existing
-history-validity fence. One pair has unknown variability; multiple pairs show
-the observed raw error range, not a confidence bound. Nonpositive or nonfinite
-corrected durations retain raw service. No additional sample threshold, clipping
-constant, expiry window or fleet-tuned gain is introduced. Preparation and
-transfer remain uncalibrated because their separate paired outcomes are not
-available in Started-to-accepted timing. Status reads never train or persist.
-These forecasts rank only eligible, currently admissible alternatives after
-qualification, parity, tiers, fairness, disruption cost and scarcity. They grant
-no capacity, reserve no future slot and do not move running work.
+Placement uses the same record (MY-31): among already eligible targets, the one
+whose last accepted run of this kind of work was shorter goes first, and the
+placement reason says `last accepted duration Ns on this target`. It ranks only
+eligible, currently admissible alternatives after qualification, parity, tiers,
+fairness, disruption cost and scarcity. It grants no capacity, reserves no
+future slot and does not move running work.
 
 Native commands and extensions can atomically replace the local JSON file named
 by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
@@ -1940,10 +1924,8 @@ Only a fresh, explicitly single-stage report with `total_work_known: true` can
 also describe whole-job reported counts. Multi-stage counts never imply an
 overall percentage, and no report implies successful job completion.
 Missing later-stage timings stay unknown; stage counters are never extrapolated
-into an ETA. A comparable whole-job history estimate remains independent and
-includes all stages, with its own source/sample count/age. Declare reference
-and workload identities for the complete pipeline, changing them when the
-pipeline changes; first-stage-only measurements are not comparable history.
+into an ETA. The last accepted duration of the kind of work remains independent
+and covers all stages.
 Zero/zero is allowed. Unit is a single generic name of at most 64 characters
 using the extension-name syntax (lowercase letters, digits, `_`, `-`, `.`,
 starting with a letter or digit).
@@ -2143,9 +2125,8 @@ and choose a new `submission_key` for keyed work. An experiment carrying only a
 uses the same owner policy matcher as scheduling: a project selector or catchall
 can give deadline class equal or lower precedence. A deadline is an ordering
 hint, not a completion guarantee or production `start_by`. Deadline demand does
-not preempt non-resumable commands. Blocker duration estimates use comparable
-observations when available; missing estimates and overruns remain explicitly
-unknown. An estimated remaining duration does not assure a queue start time.
+not preempt non-resumable commands. Each blocker shows its kind of work's last
+accepted duration, or `unknown`; it does not assure a queue start time.
 
 ## Configured NAS mount availability
 
@@ -3123,8 +3104,7 @@ remains blocked on resources and retains its selected placement.
 and resource vector for this exact attempt/next piece/target, even when later
 passes only wait for releases. It never labels a new projection as a past
 planner decision. `resolution` separates `planner_candidate` from
-`candidate_projection`, `serial_diagnostic_projection`, and
-`retained_wave_diagnostic_projection`; `concurrency` identifies measured waves. `device_fault` distinguishes known driver
+`candidate_projection` and `serial_diagnostic_projection`. `device_fault` distinguishes known driver
 quarantine from host RAM pressure. Several predicates may apply together.
 
 `enforced_host_gb` with `enforcement_basis=started_worker_contract_not_direct_read`

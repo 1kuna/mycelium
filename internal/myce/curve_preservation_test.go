@@ -67,7 +67,7 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 	memory := preservationSnapshot(t, q)
 	addPage(third.ID)
 	a, b := measured.WorkCurves[0], memory.WorkCurves[0]
-	if a.Rate != b.Rate || a.Job != b.Job || !a.RecordedAt.Equal(b.RecordedAt) || b.Samples != a.Samples+1 || !b.MemoryRecordedAt.After(a.MemoryRecordedAt) {
+	if a.LastSeconds != b.LastSeconds || a.Job != b.Job || !a.RecordedAt.Equal(b.RecordedAt) || b.Samples != a.Samples+1 || !b.MemoryRecordedAt.After(a.MemoryRecordedAt) {
 		t.Fatal("not a memory-only update", a, b)
 	}
 	if _, err = VerifyCurvePreservation(measured, memory, pages); err != nil {
@@ -97,7 +97,7 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 		"removed":     func(s *Snapshot) { s.WorkCurves = nil },
 		"reset":       func(s *Snapshot) { s.WorkCurves[0].Samples = 0 },
 		"clock":       func(s *Snapshot) { s.WorkCurves[0].RecordedAt = a.RecordedAt.Add(-time.Second) },
-		"unexplained": func(s *Snapshot) { s.WorkCurves[0].Rate += 10 },
+		"unexplained": func(s *Snapshot) { s.WorkCurves[0].LastSeconds += 10 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := memory
@@ -156,7 +156,7 @@ func TestCurvePreservationFailureInvalidation(t *testing.T) {
 		"machine":                 func(s *Snapshot) { s.WorkCurves[0].Machine = "other" },
 		"session":                 func(s *Snapshot) { s.WorkCurves[0].Session = "other" },
 		"precutover":              func(s *Snapshot) { s.WorkCurves[0].RecordedAt = before.Now },
-		"unexplained measurement": func(s *Snapshot) { s.WorkCurves[0].Rate = 10 },
+		"unexplained measurement": func(s *Snapshot) { s.WorkCurves[0].LastSeconds = 10 },
 		"unexplained failure": func(s *Snapshot) {
 			s.Jobs[0].AttemptHistory[0].OutOfMemory = false
 			s.Jobs[0].AttemptHistory[0].ExecutionCause = nil

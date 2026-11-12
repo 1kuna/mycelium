@@ -142,7 +142,7 @@ including CI/tests and small builds. It withholds accelerator work through the
 existing `kind=gpu` exclusion matching path, including future devices, without
 creating or editing an operator's selector. Explicit selector exclusions remain
 independent. Docker, extension execution, new environment/extension preparation,
-model loading/copying and onboarding benchmarks are withheld on this profile
+and model loading/copying are withheld on this profile
 until their execution budgets and priority are covered. A job's own shell can
 still compile code: that work inherits its command's priority.
 

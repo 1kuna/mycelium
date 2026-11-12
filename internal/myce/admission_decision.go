@@ -253,12 +253,10 @@ func sameAdmissionDecisions(a, b map[string]map[string]AdmissionDecision) bool {
 
 const (
 	predicateExtensionCandidates  AdmissionPredicate = "extension_candidates"
-	predicateRetryWave            AdmissionPredicate = "retry_wave"
 	predicateAllowedMachine       AdmissionPredicate = "allowed_machine"
 	predicateAttemptReports       AdmissionPredicate = "attempt_reports"
 	predicateAvailability         AdmissionPredicate = "availability"
 	predicateBatchSlot            AdmissionPredicate = "batch_slot"
-	predicateBenchmark            AdmissionPredicate = "benchmark"
 	predicateCPUCeiling           AdmissionPredicate = "cpu_ceiling"
 	predicateCancelled            AdmissionPredicate = "cancelled"
 	predicateCandidateUnavailable AdmissionPredicate = "candidate_unavailable"

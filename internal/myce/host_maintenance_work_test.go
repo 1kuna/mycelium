@@ -10,7 +10,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release, including pending Docker creates.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "benchmark", "sidecar", "native-sidecar", "extension check", "extension-check-setup"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "sidecar", "native-sidecar", "extension check", "extension-check-setup"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -42,7 +42,6 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				var batch *Job
 				var call *ModelCall
 				var slot *ModelSlot
-				var benchmark *HostLaunch
 				var preparation *HostLaunch
 				switch kind {
 				case "extension check", "extension-check-setup":
@@ -78,15 +77,6 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 							t.Fatal(err)
 						}
 						preparation = nil
-					}
-				case "benchmark":
-					m.BenchmarkPending = true
-					benchmark = check(t, q, m, nil).BenchmarkPlan
-					if benchmark == nil {
-						t.Fatal("no benchmark plan")
-					}
-					if err := q.AuthorizeLaunch(*benchmark); err != nil {
-						t.Fatal(err)
 					}
 				case "batch-production", "batch-experiment", "sidecar", "native-sidecar":
 					priority := "experiment"
@@ -372,12 +362,6 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					check(t, q, m, nil)
 				}
 				m.EnvironmentReports, m.CopyReports = nil, nil
-				if benchmark != nil {
-					m.BenchmarkPending = false
-					if _, err := q.Checkin(Checkin{Machine: m, BenchmarkDone: benchmark.Attempt}); err != nil {
-						t.Fatal(err)
-					}
-				}
 				check(t, q, m, nil)
 				status, err = q.HostMaintenanceStatus("host")
 				if err != nil || !status.Quiescent || obligationCount() != 0 {

@@ -314,7 +314,7 @@ func BenchmarkToolInventoryFleet(b *testing.B) {
 			q.s.WorkObservations = map[string]WorkObservation{}
 			for i := range 1655 {
 				key := fmt.Sprintf("curve-%05d", i)
-				q.s.WorkObservations[key] = WorkObservation{Rate: 10, Samples: 5, RecordedAt: clock.Now()}
+				q.s.WorkObservations[key] = WorkObservation{LastSeconds: 10, Samples: 5, RecordedAt: clock.Now()}
 			}
 			q.s.StorageObservations = map[string]StorageObservation{}
 			for i := range 1384 {

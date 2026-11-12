@@ -127,10 +127,6 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := original.Variants[0]
-	// Lowering allocates an empty sweep map even when no sweep was authored.
-	if want.Sweeps == nil {
-		want.Sweeps = map[string]myce.ReferenceSweep{}
-	}
 	got := p.Native.Variants[0]
 	if p.Name != original.Name || p.Native.Name != original.Name || p.Class != original.DefaultClass || p.Source.Directory != "examples/extensions/http-stage" || p.Native.Version != original.Version || p.Outputs["result.json"] != "results" {
 		t.Fatalf("native identity/source/output changed: %+v", p)

@@ -648,7 +648,7 @@ type Machine struct {
 	FreeCPUCores           int           `json:"free_cpu_cores"`
 	CPUCapacityReason      string        `json:"cpu_capacity_reason,omitempty"`
 	DockerCause            *RuntimeCause `json:"docker_cause,omitempty"`
-	BenchmarkPending       bool          `json:"benchmark_pending,omitempty"`
+	BenchmarkPending       retiredField  `json:"benchmark_pending,omitzero"` // Previous release only (MY-49).
 
 	CachedSharedInputs  []string             `json:"cached_shared_inputs,omitempty"`
 	SharedInputEvidence *SharedInputEvidence `json:"shared_input_evidence,omitempty"`
@@ -755,9 +755,9 @@ type Checkin struct {
 	CheckpointExpiryReports  []CheckpointExpiryReport `json:"checkpoint_expiry_reports,omitempty"`
 	AttemptProtocol          string                   `json:"attempt_protocol,omitempty"`
 	Attempts                 []AttemptReport          `json:"attempts,omitempty"`
-	Recovering               bool                     `json:"recovering,omitempty"` // Reconcile custody without offering new work.
-	CurveReports             []WorkObservation        `json:"curve_reports,omitempty"`
-	BenchmarkDone            string                   `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Recovering               bool                     `json:"recovering,omitempty"`    // Reconcile custody without offering new work.
+	CurveReports             retiredField             `json:"curve_reports,omitzero"`  // Previous release only (MY-49).
+	BenchmarkDone            retiredField             `json:"benchmark_done,omitzero"` // Previous release only (MY-49).
 	Started                  bool                     `json:"started,omitempty"`
 	ModelReports             []ModelReport            `json:"model_reports,omitempty"`
 	PreviousSession          string                   `json:"previous_session,omitempty"`
@@ -794,9 +794,6 @@ type Reply struct {
 	Attempts          []AttemptDirective  `json:"attempts,omitempty"`
 	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
 	CPUBudgetCores    *int                `json:"cpu_budget_cores,omitempty"`
-	BenchmarkCurves   []WorkObservation   `json:"benchmark_curves,omitempty"`
-	BenchmarkMachine  *Machine            `json:"benchmark_machine,omitempty"`
-	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
 	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
 	HostMaintenance   string              `json:"host_maintenance,omitempty"`
 	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
