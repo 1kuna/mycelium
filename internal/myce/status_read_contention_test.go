@@ -8,14 +8,33 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // Replay the observed mix: retained history, queued receipts, uncached status,
-// and real SQLite check-ins. Wall time measures latency only; queue decisions
-// use a fixed injected clock. Run separately from race instrumentation.
+// and real SQLite check-ins. Queue decisions use a fixed injected clock, so the
+// test proves the mix completes without errors or interrupting production.
 func TestStatusReadCheckinContention(t *testing.T) {
+	statusReadCheckinContention(t)
+}
+
+// Latency acceptance for the same mix: -run '^$' -bench StatusReadCheckinContention
+// -benchtime 1x on an otherwise idle host. The bound lives here because shared
+// fleet load alone exceeded it in coverage runs on unchanged main.
+func BenchmarkStatusReadCheckinContention(b *testing.B) {
+	for range b.N {
+		p99 := statusReadCheckinContention(b)
+		b.ReportMetric(float64(p99.Microseconds())/1000, "checkin-p99-ms")
+		if p99 >= 500*time.Millisecond {
+			b.Errorf("check-in p99 %s exceeds half the 1s heartbeat interval", p99)
+		}
+	}
+}
+
+func statusReadCheckinContention(t testing.TB) time.Duration {
+	t.Helper()
 	q, clock := fixture(t)
 	m := machine("contact", "fake")
 	check(t, q, m, nil)
@@ -66,6 +85,7 @@ func TestStatusReadCheckinContention(t *testing.T) {
 	var wg sync.WaitGroup
 	const readers = 62
 	errors := make(chan error, readers+1)
+	var lockedReads atomic.Int64
 	ready := make(chan struct{}, readers)
 	for i := range readers {
 		wg.Add(1)
@@ -77,7 +97,13 @@ func TestStatusReadCheckinContention(t *testing.T) {
 				if i == 0 {
 					_, err = q.statusSnapshotOptions(&statusOptions{jobs: "recent", limit: 100})
 				} else {
-					_, err = q.jobSnapshot(fmt.Sprintf("queued-%04d", i))
+					span := &requestSpan{}
+					_, err = q.jobSnapshot(fmt.Sprintf("queued-%04d", i), context.WithValue(context.Background(), requestSpanKey{}, span))
+					span.mu.Lock()
+					if span.measured {
+						lockedReads.Add(1)
+					}
+					span.mu.Unlock()
 				}
 				if err != nil {
 					errors <- err
@@ -109,9 +135,12 @@ func TestStatusReadCheckinContention(t *testing.T) {
 	if got := q.s.Jobs[sentinel.ID]; got.State != "running" || got.Attempt != assignment.Attempt || got.Losses != 0 {
 		t.Error("observation load interrupted the production sentinel")
 	}
+	// Structural, load-independent: job reads use the published snapshot and
+	// never take a q.mu turn while check-ins commit (#80-class stalls).
+	if n := lockedReads.Load(); n != 0 {
+		t.Errorf("%d job reads took a queue-mutex turn during check-in contention", n)
+	}
 	p99 := latencies[98]
 	t.Logf("100 check-ins with 62 concurrent observation readers: p99=%s max=%s", p99, latencies[99])
-	if p99 >= 500*time.Millisecond {
-		t.Errorf("check-in p99 %s exceeds half the 1s heartbeat interval", p99)
-	}
+	return p99
 }

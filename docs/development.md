@@ -321,6 +321,27 @@ fixture fixes on main and cherry-pick them onto the candidate; each candidate
 change restarts the consecutive-green count. Other main merges do not change
 the candidate. The release is cut from the qualified candidate SHA.
 
+Run the release performance check once per release batch, on the candidate SHA,
+alongside the release full:
+
+```sh
+myce run --profile release-perf
+```
+
+It runs on a fleet Linux CPU worker without race instrumentation, with four cores
+reserved, and executes once each the benchmarks that hold the wall-clock bounds
+the race suite no longer asserts, because shared-host load alone decided them
+(#1224): `BenchmarkStatusReadCheckinContention` (check-in p99 < 500 ms),
+`BenchmarkCheckinRetainedHistoryContention` (all-hold p99 < 100 ms),
+`BenchmarkDevFanOutBurst62` (ack p99 < 500 ms, heartbeat age and no losses) and
+`BenchmarkDevProductionStart` (submit-to-start < 15 s). `release-perf.txt` lists
+PASS/FAIL per benchmark against those unchanged bounds and ends with the overall
+verdict; `release-perf.log` keeps the measurements. Fleet hosts are shared, so a
+FAIL needs a rerun on a quieter host or the same-host comparison against the
+previous release before it counts as a regression. The functional tests keep the
+load-independent checks: reads never take a queue-mutex turn during check-in
+contention, and no attempt is lost.
+
 On the local Darwin gate, declare a release full with
 `./scripts/gate.sh full --priority release`. It keeps its FIFO position, drains
 existing local gates, then holds admission until its cleanup completes. Later
@@ -890,15 +911,16 @@ fan-out/control-path performance, and before a hotfix claims the burst target.
 For queue observation/check-in contention, also run:
 
 ```sh
-GOMAXPROCS=4 go test ./internal/myce -run '^TestStatusReadCheckinContention$' -count=1 -v
+GOMAXPROCS=4 go test ./internal/myce -run '^$' -bench '^BenchmarkStatusReadCheckinContention$' -benchtime=1x -v
 ```
 
 This separate `!race` regression measures 100 real SQLite check-ins alongside
 62 concurrent readers (queued receipts and uncached bounded status), 5,000
 retained jobs including 400 fan-out parents, 200 queued jobs and 1,000 curves.
 Nearest-rank p99 must remain below 500ms, half the default one-second heartbeat
-interval. A running production attempt must retain its original attempt with no
-losses. Queue decisions use a fixed injected clock; this is a laptop contention
+interval; the benchmark holds that bound, and `TestStatusReadCheckinContention`
+keeps the functional checks. A running production attempt must retain its
+original attempt with no losses. Queue decisions use a fixed injected clock; this is a laptop contention
 bound, while fake-clock contact/loss tests cover elapsed-time decisions under
 race. It does not establish fleet capacity or native release qualification.
 
@@ -1749,7 +1771,7 @@ matching aggregates. Observation writes invalidate that index; rollback and
 commit discard it. Retained terminal count alone was flat in the comparison.
 These laptop timings do not establish the full cause of a live queue stall.
 
-`GOMAXPROCS=4 go test ./internal/myce -run '^TestCheckinRetainedHistoryContention$' -count=1 -v`
+`GOMAXPROCS=4 go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinRetainedHistoryContention$' -benchtime=1x -v`
 replays six concurrent worker check-ins and 60 concurrent job GETs per round,
 with 6,500 retained constrained executions, 110 queued jobs and 1,400 curves.
 It reports nearest-rank hold p50/p99 (including the check-in's snapshot locks),

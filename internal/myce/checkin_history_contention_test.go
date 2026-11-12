@@ -15,7 +15,27 @@ import (
 
 // Unlike empty terminal receipts, retained constrained executions participate in
 // cold-memory planning. Keep their real timing/configuration provenance.
+// The test proves concurrent check-ins and job reads over retained history
+// complete without errors or interrupting running attempts.
 func TestCheckinRetainedHistoryContention(t *testing.T) {
+	checkinRetainedHistoryContention(t)
+}
+
+// Hold-time acceptance: -run '^$' -bench CheckinRetainedHistoryContention
+// -benchtime 1x on an otherwise idle host. Shared fleet load alone pushed the
+// all-hold p99 to 835 ms on unchanged main, so the bound lives here.
+func BenchmarkCheckinRetainedHistoryContention(b *testing.B) {
+	for range b.N {
+		a99 := checkinRetainedHistoryContention(b)
+		b.ReportMetric(float64(a99.Microseconds())/1000, "all-hold-p99-ms")
+		if a99 >= 100*time.Millisecond {
+			b.Errorf("check-in all-hold p99 %s exceeds 100ms", a99)
+		}
+	}
+}
+
+func checkinRetainedHistoryContention(t testing.TB) time.Duration {
+	t.Helper()
 	q, workers := candidateCostFixture(t)
 	clock := &workerFakeClock{now: q.clock.Now()}
 	q.clock = clock
@@ -41,6 +61,7 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var holds, allHolds, getWaits []time.Duration
+	var lockedGets int
 	q.observeUpdate = func(_, hold time.Duration) {
 		mu.Lock()
 		holds = append(holds, hold)
@@ -82,8 +103,14 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 				if _, err := q.jobSnapshot(fmt.Sprintf("queued-%03d", i%30), ctx); err != nil {
 					t.Error(err)
 				}
+				span.mu.Lock()
+				locked := span.measured
+				span.mu.Unlock()
 				mu.Lock()
 				getWaits = append(getWaits, span.wait)
+				if locked {
+					lockedGets++
+				}
 				mu.Unlock()
 			}()
 		}
@@ -112,7 +139,10 @@ func TestCheckinRetainedHistoryContention(t *testing.T) {
 			t.Errorf("contention interrupted running attempt: %s %s attempt=%d losses=%d", j.ID, j.State, j.Attempt, j.Losses)
 		}
 	}
-	if a99 >= 100*time.Millisecond {
-		t.Errorf("check-in all-hold p99 %s exceeds 100ms", a99)
+	// Structural, load-independent: job GETs read the published snapshot and
+	// never take a q.mu turn behind concurrent check-ins (#80-class stalls).
+	if lockedGets != 0 {
+		t.Errorf("%d of %d job GETs took a queue-mutex turn during check-in contention", lockedGets, len(getWaits))
 	}
+	return a99
 }

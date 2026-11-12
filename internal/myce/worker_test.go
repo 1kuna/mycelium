@@ -97,7 +97,7 @@ func returnsWhileBlocked(t testing.TB, what string, call func()) {
 	}
 }
 
-func await(t *testing.T, f func() bool) {
+func await(t testing.TB, f func() bool) {
 	t.Helper()
 	timeout := time.After(testWaitTimeout)
 	for {
