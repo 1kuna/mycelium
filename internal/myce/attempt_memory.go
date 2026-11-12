@@ -850,12 +850,17 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if complete {
 		gb := bytes / (1 << 30)
 		footprint = &gb
-		margin = a.currentGrowth.observe(at, gb)
+		// Check-ins arrive irregularly. Report the largest growth measured
+		// between two of them and the current rate, never the fastest rate
+		// ever seen over the longest gap: a 3 GiB burst followed by one 30 s
+		// gap reported 90 GiB, and the queue projected the ended burst rate.
+		a.currentGrowth.observe(at, gb)
+		margin = a.currentGrowth.increment
 		observed = a.currentGrowth.horizon > 0
 	} else {
 		a.currentGrowth = memoryGrowth{} // Never bridge a missing interval.
 	}
-	rate := a.currentGrowth.rate
+	rate := a.currentGrowth.current
 	a.currentMu.Unlock()
 	sample := &CurrentHostMemory{GrowthObserved: observed, GrowthRateGB: rate, FootprintGB: footprint, GrowthGB: margin, NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {

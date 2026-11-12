@@ -444,7 +444,8 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 			if sample.FootprintGB != nil && validMemoryValue(*sample.FootprintGB) {
 				// Helper occupancy can reduce pending physical growth, but cannot
 				// release a CPU probe's whole future main-execution reservation.
-				s.growthObserved = r.Started && sample.GrowthObserved && (sample.GrowthGB == 0 || sample.GrowthRateGB > 0)
+				// Growth with no current rate is a job that grew and stopped.
+				s.growthObserved = r.Started && sample.GrowthObserved
 				s.footprintGB, s.rateGB = *sample.FootprintGB, sample.GrowthRateGB
 			}
 		}
