@@ -33,5 +33,6 @@
   "attempt": 0,
   "queued": "2026-10-17T12:00:00Z",
   "front": 0,
-  "reason": "cancelled before submission"
+  "reason": "cancelled before submission",
+  "checkpoint": ""
 }

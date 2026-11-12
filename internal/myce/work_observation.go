@@ -103,6 +103,10 @@ type WorkTiming struct {
 	PredictedSeconds *float64 `json:"predicted_seconds,omitempty"`
 	ActualSeconds    *float64 `json:"actual_seconds,omitempty"`
 	Reason           string   `json:"reason,omitempty"`
+	// Samples is the matching observation's accepted sample count when the
+	// attempt began (zero without history). Always emitted: consumers pin it
+	// as required in the v1 reply (MY-42).
+	Samples int `json:"samples"`
 }
 
 func validRate(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -259,6 +263,7 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	if seconds, ok := q.lastAcceptedSeconds(key); ok {
 		last, mirror := seconds, seconds
 		j.Timing.LastAcceptedSeconds, j.Timing.PredictedSeconds = &last, &mirror
+		j.Timing.Samples = q.s.WorkObservations[identityHash(key)].Samples
 		return
 	}
 	j.Timing.HistoryReason = "no accepted matching measurement"

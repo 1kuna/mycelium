@@ -48,5 +48,6 @@
   "attempt": 1,
   "machine": "example-machine",
   "queued": "0001-01-01T00:00:00Z",
-  "front": 0
+  "front": 0,
+  "checkpoint": ""
 }
