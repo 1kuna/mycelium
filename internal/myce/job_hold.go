@@ -199,7 +199,8 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 					staleCompatible = true
 					continue
 				}
-				b.retag("native_qualification", "queue", "wait; the queue prepares and runs the registered extension's native check on compatible hardware itself, and fails the job with its action if the check fails or is undeclared; keep the queued job identity")
+				b.retag("native_qualification", "queue", "wait; nothing to do")
+				b.Reason = q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
 				return b
 			}
 		}
@@ -261,6 +262,27 @@ func (q *Queue) portableRoomNow(j *Job, compatibleHosts map[string]bool, targets
 	}
 	slices.Sort(out)
 	return strings.Join(out, ", ")
+}
+
+// What the queue's own native check is doing now, in one clause. The hold once
+// promised the queue ran the check while no check existed for days (gap 3).
+func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) string {
+	host := hostID(m)
+	for _, j := range q.liveJobs() {
+		r := automaticExtensionCheck(j)
+		if r == nil || r.Digest != e.Digest || r.Work != work || terminal(j.State) || len(j.Spec.AllowedMachines) != 1 || j.Spec.AllowedMachines[0] != m.ID {
+			continue
+		}
+		switch {
+		case j.State == "running" || j.State == "stopping" || j.State == "assigned":
+			return "its native check " + ShortID(j.ID) + " is running on " + host
+		case j.Reason != "":
+			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(j.Reason)
+		default:
+			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State
+		}
+	}
+	return "the queue submits its native check on " + host + " at that host's next check-in"
 }
 
 // Kinds whose mechanism already says exactly why and who acts. Generic

@@ -100,7 +100,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 			if !slices.ContainsFunc(candidate.Extensions, eligible) {
 				continue
 			}
-			if q.diskHeadroomReason(candidate, m) != "" || !q.placementDemandPolicy(candidate, m, false) || !deviceAllowed(candidate, m) {
+			if q.diskHeadroomReason(candidate, m) != "" || !q.qualificationDemandPolicy(candidate, m) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
@@ -114,6 +114,21 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 		}
 	}
 	return demand
+}
+
+// Whether the useful job could use this host once it has room: the host-level
+// and job-level requirements of placementDemandPolicy without its momentary
+// capacity and production holds. Those holds kept the queue's own check from
+// ever being offered on a busy host, so the job waited for a check that never
+// ran. The check, once submitted, still passes every admission hold itself.
+func (q *Queue) qualificationDemandPolicy(j *Job, m *Machine) bool {
+	if q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
+		return false
+	}
+	if model, ok := q.model(j.Spec.Needs.Model); ok && (!logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
+		return false
+	}
+	return q.checkpointTargetAdmission(j, m) == nil
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
@@ -153,6 +168,14 @@ func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationP
 				r.CheckID = automaticExtensionCheckID(m.ID, r)
 				if retry {
 					r.CheckID = automaticExtensionRetryCheckID(m.ID, r, previous)
+				} else if current := r; strings.HasPrefix(previous, "auto-") && previous != r.CheckID {
+					// The worker holds a successor in this key's chain. Offer that
+					// key so its replay reports the outcome; the base key is one the
+					// worker ignores, which left a cancelled successor unretried.
+					current.CheckID = previous
+					if q.automaticCheckKeyValid(m.ID, current) {
+						r.CheckID = previous
+					}
 				}
 				plans = append(plans, ExtensionQualificationPlan{Machine: m.ID, Report: r})
 				break
@@ -232,9 +255,10 @@ func (q *Queue) maintainExtensionQualifications() {
 		if r == nil || terminal(j.State) || cancelled(j) {
 			continue
 		}
-		wanted, identityValid := false, false
+		wanted, identityValid, identityUnknown := false, false, true
 		if len(j.Spec.AllowedMachines) == 1 {
 			if owner := q.s.Machines[j.Spec.AllowedMachines[0]]; owner != nil {
+				identityUnknown = q.automaticCheckIdentityUnknown(owner, *r)
 				for _, m := range q.machineTargets(owner) {
 					for _, e := range j.Extensions {
 						if matchingExtensionReport(e, m, *r) {
@@ -246,10 +270,12 @@ func (q *Queue) maintainExtensionQualifications() {
 			}
 		}
 		// Any live owner retains the invocation while its demand is temporarily
-		// absent (paused, host drained, disk or policy hold). Cancelling it then
-		// left no verdict and no rerun. Identity changes still fence it.
+		// absent (paused, host drained, disk or policy hold), or while its host
+		// has not yet reported the identity again after a worker restart.
+		// Cancelling it then left no verdict and no rerun. Only an observed
+		// identity change fences it.
 		retained := false
-		if !wanted && identityValid {
+		if !wanted && (identityValid || identityUnknown) {
 			for _, owner := range q.liveJobs() {
 				retained = retained || !terminal(owner.State) && !cancelled(owner) && owner.Spec.ExtensionCheck == nil && slices.ContainsFunc(owner.Extensions, func(e Extension) bool { return e.Digest == r.Digest })
 			}
@@ -264,6 +290,24 @@ func (q *Queue) maintainExtensionQualifications() {
 			j.State, j.Reason = "queued", ""
 		}
 	}
+}
+
+// A restarted worker rejoins before it reports its native identity and device
+// inventory again. That gap is not evidence that the identity changed: the live
+// fleet lost a pending check this way and the job waited for days (gap 3).
+func (q *Queue) automaticCheckIdentityUnknown(owner *Machine, r ExtensionReport) bool {
+	if owner.Gone || owner.Replacement != nil {
+		return false
+	}
+	if q.unreported[owner.ID] || !q.inventoryFresh(owner) {
+		return true
+	}
+	for _, m := range q.machineTargets(owner) {
+		if extensionReportDevice(m.GPU, m.Device) == extensionReportDevice(r.Platform, r.Device) {
+			return m.ExtensionFingerprint == ""
+		}
+	}
+	return true // the check's device is not reported right now
 }
 
 // One short control-plane reconciliation per offer, never a second executor.
