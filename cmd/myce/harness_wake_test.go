@@ -96,7 +96,7 @@ env -u T3CODE_THREAD_ID "$2" run --profile "$profile" --key unbound-fixture > un
 		t.Fatal(err)
 	}
 	wake := string(data)
-	if strings.Count(wake, "argv:") != 1 || strings.Count(wake, "delivery_id") != 1 {
+	if strings.Count(wake, "argv:") != 1 || strings.Count(wake, `"delivery_id":`) != 1 {
 		t.Fatalf("want exactly one wake:\n%s", wake)
 	}
 	for _, want := range []string{"argv:thread send thread-under-test -", receipt.JobID, `"status":"succeeded"`, "--wait --out DIR"} {
