@@ -56,8 +56,8 @@ func TestStartWindowCapacityRecovery(t *testing.T) {
 	if reply.Code != http.StatusOK || json.Unmarshal(reply.Body.Bytes(), &observed) != nil {
 		t.Fatal("job observation failed", reply.Code)
 	}
-	if !strings.Contains(observed.Reason, "600s left to start (paused for capacity)") || !strings.Contains(JobReason(&observed), "600s left to start (paused for capacity)") {
-		t.Fatal("API/status display lost paused budget", observed.Reason, JobReason(&observed))
+	if !strings.Contains(observed.Reason, "600s left to start (paused for capacity)") || !strings.Contains(JobReasonDetail(&observed), "600s left to start (paused for capacity)") {
+		t.Fatal("API/status display lost paused budget", observed.Reason, JobReasonDetail(&observed))
 	}
 	release := result(recovery, false)
 	release.ReleaseOnly = true
@@ -182,8 +182,8 @@ func TestStartWindowCapacityPreparationDisplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Hold == nil || got.Hold.Kind != want || !strings.Contains(JobReason(got), "600s left to start (paused for capacity)") {
-				t.Fatalf("preparation observation hid paused budget: blocker=%+v display=%s", got.Hold, JobReason(got))
+			if got.Hold == nil || got.Hold.Kind != want || !strings.Contains(JobReasonDetail(got), "600s left to start (paused for capacity)") {
+				t.Fatalf("preparation observation hid paused budget: blocker=%+v display=%s", got.Hold, JobReasonDetail(got))
 			}
 		})
 	}
