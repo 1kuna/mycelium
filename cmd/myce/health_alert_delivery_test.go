@@ -12,7 +12,7 @@ func TestHealthAlertDeliveryStatusExplanation(t *testing.T) {
 		printStatus(myce.Snapshot{HealthAlertDelivery: &myce.HealthAlertDelivery{Pending: 3}}, false)
 		return nil
 	})
-	if !strings.Contains(output, "health notifier is not configured") || !strings.Contains(output, "3 retained alerts have no delivery acknowledgement") {
+	if !strings.Contains(output, "health notifier is not configured") || !strings.Contains(output, "3 alert openings or closings have no delivery acknowledgement") {
 		t.Fatal(output)
 	}
 	// A reply from an older queue has no configuration evidence.
