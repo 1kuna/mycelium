@@ -14,9 +14,10 @@ type memoryGrowth struct {
 	last         time.Time
 	lastGB, rate float64
 	horizon      time.Duration
-	// The largest growth measured within one interval. Unlike rate times
-	// horizon, it never multiplies a burst's rate by an unrelated long gap.
-	increment float64
+	// The largest growth measured within one interval and the latest
+	// interval's rate. Unlike the fastest rate times the longest interval,
+	// they never project an ended burst across an unrelated long gap.
+	increment, current float64
 }
 
 func (g *memoryGrowth) observe(now time.Time, gb float64) float64 {
@@ -28,6 +29,7 @@ func (g *memoryGrowth) observe(now time.Time, gb float64) float64 {
 		g.horizon = max(g.horizon, elapsed)
 		g.rate = max(g.rate, (gb-g.lastGB)/elapsed.Seconds())
 		g.increment = max(g.increment, gb-g.lastGB)
+		g.current = max(0, (gb-g.lastGB)/elapsed.Seconds())
 	}
 	g.last, g.lastGB = now, gb
 	return g.rate * g.horizon.Seconds()

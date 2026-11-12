@@ -43,9 +43,9 @@ func burstGapSample(t *testing.T, clock *fakeClock, job *Job) hostMemorySample {
 // 82.8 GiB live, and another project's job waited. One burst and one long
 // check-in gap reproduce both figures exactly. The worker reported growth as
 // the burst's rate times the gap (90 GiB), and the queue projected that rate
-// across a freshness window the gap had stretched to 60 s. Growth measured
-// within one interval (3 GiB) now bounds both, so each job is charged its
-// envelope.
+// across a freshness window the gap had stretched to 60 s. The sample now
+// carries the growth measured within one interval (3 GiB) and the current
+// rate (flat), so each job is charged its envelope.
 func TestForecastBurstGapKeepsEnvelopeCharge(t *testing.T) {
 	_, clock := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 20, 82.8)
@@ -56,8 +56,8 @@ func TestForecastBurstGapKeepsEnvelopeCharge(t *testing.T) {
 	j.Spec.Needs = ResourceNeeds{CPUCores: 2, Memory: "auto", HostMemoryGB: 9.371604919433594, Platform: Platform{Required: []string{"cpu"}}}
 	j.MemoryEnvelope = &JobMemoryEnvelope{Basis: "exploratory", Evidence: 212, HostGB: 9.496604919433594, Enforcement: learnedMemoryGuardEnforcement}
 	s := burstGapSample(t, clock, j)
-	if !near(s.growthGB, 3) || !near(s.rateGB, 3) {
-		t.Fatalf("reported growth %g GiB at %g GiB/s, want the 3 GiB measured within one interval", s.growthGB, s.rateGB)
+	if !near(s.growthGB, 3) || s.rateGB != 0 || !s.growthObserved {
+		t.Fatalf("reported growth %g GiB at %g GiB/s (observed %v), want the 3 GiB measured within one interval at the current 0 GiB/s", s.growthGB, s.rateGB, s.growthObserved)
 	}
 	unified := m
 	unified.UnifiedMemory = true
