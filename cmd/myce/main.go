@@ -230,12 +230,15 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
 	var clientConfig string
-	var cancelProject, cancelKey string
+	var projectFlag, cancelKey string
 	var cancelWait bool
 	if args[0] == "cancel" {
-		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
+		f.StringVar(&projectFlag, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
 		f.BoolVar(&cancelWait, "wait", false, "wait until release is confirmed (exit 0); otherwise exit 75 while unconfirmed")
+	}
+	if args[0] == "efficiency" {
+		f.StringVar(&projectFlag, "project", "", "show only this project's waits, steering cost and advice")
 	}
 	// Consumer commands resolve the installed authority; the consumer skill forbids
 	// exporting MYCE_TOKEN, so no read may require it.
@@ -833,7 +836,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return printUsage(os.Stdout, report, *by)
 	case "efficiency":
 		if f.NArg() != 0 {
-			return errors.New("usage: myce efficiency [--json]")
+			return errors.New("usage: myce efficiency [--project P] [--json]")
 		}
 		var report *myce.EfficiencyReport
 		if err := client.Call(ctx, "GET", "/api/efficiency", nil, &report); err != nil {
@@ -846,7 +849,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			fmt.Println("efficiency: unknown (awaiting maintenance observation)")
 			return nil
 		}
-		for _, line := range report.Lines() {
+		lines := report.Lines()
+		if projectFlag != "" {
+			lines = report.ProjectLines(projectFlag)
+		}
+		for _, line := range lines {
 			fmt.Println(line)
 		}
 		return nil
@@ -958,12 +965,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	case "cancel":
 		const usage = "usage: myce cancel <id> | --project PROJECT --key KEY [--wait]"
 		var send func(context.Context) (myce.Cancellation, error)
-		if cancelProject != "" || cancelKey != "" {
-			if cancelProject == "" || cancelKey == "" || f.NArg() != 0 {
+		if projectFlag != "" || cancelKey != "" {
+			if projectFlag == "" || cancelKey == "" || f.NArg() != 0 {
 				return &exitError{2, errors.New(usage)}
 			}
 			send = func(ctx context.Context) (myce.Cancellation, error) {
-				return client.CancelSubmission(ctx, cancelProject, cancelKey)
+				return client.CancelSubmission(ctx, projectFlag, cancelKey)
 			}
 		} else {
 			if f.NArg() != 1 {

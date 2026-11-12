@@ -3748,6 +3748,12 @@
           "format": "date-time",
           "type": "string"
         },
+        "stranded": {
+          "type": "boolean"
+        },
+        "stranded_seconds": {
+          "type": "number"
+        },
         "wait_seconds": {
           "additionalProperties": {
             "type": "number"

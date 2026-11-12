@@ -2962,6 +2962,16 @@ They no longer require `MYCE_TOKEN`, which consumers must not export.
   Capability, software/qualification, parity, preparation, resource, reservation
   and custody checks still apply. It names every excluding field. This is the
   shared definition for resolve advice; it grants no portability or parity.
+- `restrictions` has one row per project over retained jobs: jobs naming hosts
+  (`host_restricted`), jobs with `targets` and how many of those are below the
+  production tier, and `stranded_seconds`, the queue wait accrued while the
+  maintenance `stranded` verdict above held for the job (job
+  `efficiency.stranded_seconds`). `stranded_platforms` names the platforms
+  (OS/architecture and accelerator kind, never hosts) with room now. Typed
+  `host_memory_gb` and `cpu_cores` counts sit beside the mean typed-minus-learned
+  peak where a learned figure exists. `advice` gives one action per item.
+  `myce efficiency --project NAME` prints only that project's waits, steering
+  cost and advice, without host rows (MY-31).
 - `predictions` shows signed reservation-minus-accepted-peak and
   predicted-minus-actual-duration errors, with sizing basis and exact attempt.
   Memory comparisons require the existing accepted-learning classifier;

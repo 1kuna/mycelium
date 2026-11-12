@@ -15,7 +15,8 @@ import (
 )
 
 func TestEfficiencyCommand(t *testing.T) {
-	report := &myce.EfficiencyReport{CPUStatus: "unknown", Stranded: []myce.StrandedDemand{{JobID: "waiting", Host: "peer", Fields: []string{"targets"}}}}
+	report := &myce.EfficiencyReport{CPUStatus: "unknown", Stranded: []myce.StrandedDemand{{JobID: "waiting", Host: "peer", Fields: []string{"targets"}}},
+		Restrictions: []myce.ProjectRestrictions{{Project: "demo", Jobs: 2, HostRestricted: 1, StrandedSeconds: 3600, Advice: []string{"drop allowed_machines and excluded_machines"}}, {Project: "other", Jobs: 1}}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/efficiency" {
 			t.Errorf("broad read: %s", r.URL.Path)
@@ -41,6 +42,10 @@ func TestEfficiencyCommand(t *testing.T) {
 		} else if !strings.Contains(out, "excluded by targets") || !strings.Contains(out, "CPU use unknown") {
 			t.Fatal(out)
 		}
+	}
+	out, _, err := captureUsageOutput(t, []string{"efficiency", "--queue", server.URL, "--token", "test", "--project", "demo"})
+	if err != nil || !strings.Contains(out, "hosts named 1/2 (50%)") || !strings.Contains(out, "advice: drop allowed_machines") || strings.Contains(out, "peer") || strings.Contains(out, "other") {
+		t.Fatal(out, err)
 	}
 }
 
