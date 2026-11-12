@@ -160,10 +160,14 @@ or legacy `X-Myce-Priority`, with conflicting declarations rejected.
 
 **Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins in the same or a higher tier remain protected.
 
-> **Conflict (kept, not resolved).** MY-30 rules that production priority uses
-> the existing priority tiers and preemption, "not host-wide exclusion, blackout
-> holds or orchestrator-negotiated special cases". The opt-in whole-machine
-> takeover above remains in the approved text and in the code.
+> **Conflict (awaiting the maintainer's ruling on #1434).** MY-30 (2026-11-02)
+> rules that production priority uses the existing priority tiers and
+> preemption, "not host-wide exclusion, blackout holds or
+> orchestrator-negotiated special cases". The opt-in takeover above
+> (`production_hold`, 2026-10-11) predates it and remains in the code, with
+> `production_hold_scope: host` as the default scope once a host opts in. The
+> opt-in device scope (#577, 2026-11-01) keeps release custody and leaves
+> exclusivity to ordinary preemption.
 
 There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 
@@ -1171,9 +1175,9 @@ from start or post-exit readings alone.
 Empty process rows, uninitialised counters and transient query timeouts retry;
 missing tools or unparseable counters stop GPU sampling. A retained recipe GPU
 default is named as such beside a measured host source.
-Missing counters stay unknown. Until native qualification establishes whether
-CUDA allocations overlap memcg charges, add measured host and GPU peaks on
-unified hosts. An unknown device peak cannot supply an exact unified estimate.
+Missing counters stay unknown. Native measurement on a GB10 (#1044) found
+`cudaMalloc` allocations outside memcg charges, so unified hosts add measured
+host and GPU peaks. An unknown device peak cannot supply an exact unified estimate.
 Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
@@ -1220,27 +1224,21 @@ fences and its one retry. The cost is one ceiling hit or OOM per doubling for
 work larger than the bound. GPU work on a discrete card keeps its existing
 exploration, since the card is already exclusive.
 
-On a unified-memory host, a plain GPU job with no accepted estimate reserves
-the stated device figure or 1 GiB, the figure `myce run --gpu` previously
-declared. Its host side is the stated host figure, else the largest fresh
-accepted host peak of similar GPU work on unified hosts times 2.5, else 1 GiB.
-Constrained peaks raise it, and an OOM doubles it as for CPU work. There, CUDA
-allocations escape the job's cgroup, and no device sample or classified GPU
-allocation failure exists, so a device bound can be neither checked nor grown.
-Host-wide exploration would instead reserve most of the machine until an
-accepted run. The cost: device use above the figure is unreserved, though live
-host-memory admission still sees it. A measured `--mem` avoids that. Extension
-jobs keep their exploration, and at half the allowance the host-wide
-exploration applies.
-
-> **Conflict (kept, not resolved).** The paragraph above says that on a
-> unified-memory host "no device sample or classified GPU allocation failure
-> exists", and [job memory envelopes](#job-memory-envelopes)
-> add host and GPU peaks "until native qualification establishes whether CUDA
-> allocations overlap memcg charges". [Charging by use](#charging-running-attempts-by-use)
-> records the later measurement: device allocations escape the cgroup and do
-> appear in the per-process sample. All three stand in the approved text and
-> appear to disagree.
+On a unified-memory host, a plain `memory: auto` GPU job with no accepted estimate owns the
+card exclusively and reserves the host's whole shared physical headroom
+(`unifiedGPUFirstRun`, since e0202e34b): without a device sample, the shared
+pool cannot be split into two separate size guesses. With neither figure
+stated, the device side is a one-page marker of exclusivity, not a device-use
+estimate, and the enforced host member gets the rest of the pool. A hint
+figure keeps its value. GPU allocation failures are not classified, so the
+device side never doubles on failure. Learning needs a complete sample: where
+the driver reports per-process device memory (measured on a GB10, #1044; see
+[charging by use](#charging-running-attempts-by-use)), an accepted run's host
+and device peaks become the learned estimate, and later runs are sized and
+charged from it. A host-only sample never turns unknown device use into
+accepted sharing evidence, so such work keeps exploring. The cost is one
+exclusive host per cold run; a declared `--mem` is not `memory: auto` and skips
+it. Extension jobs keep their exploration.
 
 Job GET `memory_envelope.basis` is `declared`, `learned`, `hint` or
 `exploratory`. `evidence` counts the accepted attempts behind a learned figure
@@ -1804,13 +1802,19 @@ one binary, SQLite queue and scheduler.
 A project's uv or Pixi lock travels with the adapter, without operator
 registration or queue restart ([project lock files](environments.md#project-lock-files)).
 
-> **Conflict (kept, not resolved).** The approved text marked this option
-> "Pending the maintainer; do not implement this option before a ruling", and
-> [decisions](DECISIONS.md#my-22) still record removing operator environment
-> registration as an orchestrator recommendation, not a ruling. Recipe
-> submission has since shipped (#251), and worker-specific build eligibility
-> (items 5 and 6 below, #252) was closed as not planned. The contract below is
-> kept as written.
+> **Conflict (awaiting the maintainer's ruling on #1434).** The approved text
+> marked this option "Pending the maintainer; do not implement this option
+> before a ruling", and [decisions](DECISIONS.md#my-22) still record removing
+> operator environment registration as an orchestrator recommendation, not a
+> ruling. Since then, inline uv and Pixi locks (#1163) and relative lock files
+> uploaded with `myce run --entry`/`--profile` (#1297) carry a project's lock
+> to the queue with no operator registration or queue restart
+> ([project lock files](environments.md#project-lock-files)); the named
+> catalog remains. #251 was closed as completed on an agent's reading of MY-44,
+> which was ruled about the model-source allowlist. Items 5 and 6 below
+> (worker-specific build failure, #252) are not implemented: a real build
+> failure still terminally fails waiting jobs through `reconcileEnvironments`.
+> The contract below is kept as written.
 
 Reuse `EnvironmentRecipe`, composed extension bundles, the file store and the
 uv/Pixi builders. This adds client-carried finite-command recipes and
@@ -1872,9 +1876,14 @@ identity/authorization/cancellation rechecks before the small commit.
 
 ### One command, verified completion
 
-`myce run` freezes, submits, waits in the foreground and downloads declared
-accepted outputs with size/SHA-256 verification into private client result
-storage. Success requires command/check success, accepted-attempt publication
+`myce run --entry NAME --wait --out DIR` (or `--profile NAME`) freezes,
+submits, waits in the foreground and downloads declared accepted outputs into
+`DIR` with size/SHA-256 verification against `output_refs` (#1343; see the
+[adapter guide](adapter.md#run-wait-and-fetch-in-one-command)). `--out`
+implies `--wait`. Without either flag, an adapter or profile submission returns
+a receipt, and `myce wait` plus `myce result` finish the trip; plain
+`myce run -- CMD` waits and streams logs by default, and `--detach` returns the
+ID. Success requires command/check success, accepted-attempt publication
 and requested local verification. Explicit large-output remote references
 remain an option and are reported as remote. Dirty Git source refuses with an
 actionable message. The instruction file and explicitly referenced locks may be
@@ -1885,19 +1894,14 @@ promise.
 Persist keys, frozen intent and receipts before network I/O. A fresh invocation
 creates a new operation; resume uses that operation's saved key and explicit
 repeat intentionally creates another. Low-level keyed API replay, cancellation
-and expiry do not change. Keep receipt recovery during migration; new receipts
-live in private client state without requiring a project ignore rule. Optional
+and expiry do not change. Receipts are written privately under the project's `.mycelium/receipts/`
+before any upload, and projects ignore that folder. Optional
 async delivery retains the completion observer/notifier and private harness
 binding; without a working binding, wait in the foreground. Submission is never
 evidence of an armed wake or verified result. Plain `myce run -- CMD` without
 an adapter keeps its current installed-tool behavior/defaults; it does not
 promise portable source/dependencies or checked artifacts. Queue failures never
 fall back locally.
-
-> **Conflict (kept, not resolved).** The [adapter guide](adapter.md) documents
-> `myce run --entry NAME` as returning a receipt, with `--wait --out DIR` doing
-> the whole trip, and #156 was closed as not planned. The foreground-by-default
-> wording above is the approved text.
 
 ### Migration: one-shot converter, fix forward
 
