@@ -512,6 +512,15 @@ not preserve submitted values. Other retained fields still follow normal JSON
 `omitempty` rules. This metadata does not expose commands, environment values,
 file references or credentials. There is no full-spec read mode.
 
+Job `advanced` (MY-54) is the read-only view of the job's
+[advanced settings](jobs.md#advanced-settings): it holds only the scalar
+settings that differ from their defaults, such as `allow_cpu_fallback`,
+`resumable`, `isolation`, `wall_time` or `start_window`, and is absent when
+none do. Disk, size, resume-compatibility and failure-evidence payloads and raw
+`requirement_reasons` text stay out of it and keep the redaction above. While
+an opted-in GPU job's attempt runs on a CPU target, `spec.needs` shows the CPU
+reservation and `cpu_fallback_from` keeps the authored GPU needs.
+
 Native stage exceptions appear in job `isolation` as
 `unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
 same text through queued, running and terminal outcomes. Legacy registrations

@@ -33,8 +33,8 @@ the reported storage or permission problem. Details:
 
 ## Keep files on failure
 
-Do not exit 0 just to return logs. Declare `keep_on_failure: [logs/, {path:
-junit.xml, format: pytest-junit}]` (files, folders or globs; `format` is optional
+Do not exit 0 just to return logs. Declare `advanced: {keep_on_failure: [logs/, {path:
+junit.xml, format: pytest-junit}]}` (files, folders or globs; `format` is optional
 `pytest-junit` or `vitest-junit`). A failed attempt publishes them as `kept/NAME`
 in its diagnostics, retrieved with `myce result JOB_ID --attempt N --out DIR`;
 the job stays failed. See

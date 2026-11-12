@@ -180,13 +180,14 @@ until registration and qualification. Resolve never registers a recipe or runs
 a qualification payload. Use `myce portability --extension NAME@VERSION` for
 already registered evidence.
 
+The fields an agent states up front:
+
 | Field | Required / default | Meaning |
 |---|---|---|
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
 | `submission_key` | Optional | Project-scoped 1–128 ASCII `[A-Za-z0-9._:-]`; identical spec replays the same job; see [identity/cancellation](design-proposal.md#submission-identity-and-cancellation-80) |
 | `project` | Required, nonempty | Project label |
 | `priority` | Required | `production`, `deadline`, or `experiment`, in that order |
-| `logs` | Omitted / `keep` | `none` discards command stdout/stderr; no queue log rows or worker attempt `.log` file |
 | `deadline` | Required for `deadline`; optional otherwise | RFC3339 time; ordering hint, not an execution timeout |
 | `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
 | `run.workdir` | Absent: managed `{work}` | Native cwd must resolve within the private attempt directory; stage source/data as inputs or a profile |
@@ -200,19 +201,68 @@ already registered evidence.
 | `needs.network` | Omitted / `false` | Native payload outbound opt-in. `true` requires a host advertising protected egress or submission is refused; reserved sidecar loopback and preparation need no opt-in. [Platform limits](native-isolation.md) apply, including fallback's partial network isolation. |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `targets` | Empty: any OS/arch | Exact `{os, arch, platform}` alternatives, enforced at dispatch and launch |
-| `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
-| `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
-| `excluded_machines` | Empty: no exclusions | Machine-name exclusions, intersected with job and project allow-lists; never widens eligibility |
+
+Platforms are `cuda`, `xpu`, `metal`, `cpu`, and `fake` (laptop tests). A preference
+permits other platforms, so the command itself must support them. GPU work
+(any platform other than `cpu`, including `any` and a preference) never runs on a
+CPU target unless it sets `advanced.allow_cpu_fallback` (MY-54). An environment
+restricts eligibility to its supported platforms. Workers build
+immutable recipes on demand and report ready content hashes. See
+[environments](environments.md) for catalog and project-lock contracts.
+
+### Advanced settings
+
+Everything else sits under one `advanced:` mapping (MY-54). Each setting has a
+good default; set one only when the work needs it:
+
+```yaml
+name: train
+project: example
+priority: experiment
+run: {command: [python, train.py]}
+needs: {platform: cuda, memory_gb: 12}
+advanced:
+  resumable: true
+  wall_time: 6h
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `allow_cpu_fallback` | `false`: GPU work waits for a GPU | `true` lets GPU work run on a CPU target when no GPU target fits it at placement time. The attempt then reserves host RAM (its `memory_gb` becomes host memory), gets `MYCE_DEVICE=cpu` and `MYCE_GPU_COUNT=0`, and a requeue tries a GPU again. Plain commands only: extension work runs on CPU through a declared `cpu` variant; refused with `needs.model` or a `needs.gpu.devices` pin |
+| `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
 | `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; a started infrastructure interruption renews its original-length window, while waits and unstarted retries cannot extend it |
 | `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
-| `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
+| `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
+| `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
+| `excluded_machines` | Empty: no exclusions | Machine-name exclusions, intersected with job and project allow-lists; never widens eligibility |
+| `logs` | Omitted / `keep` | `none` discards command stdout/stderr; no queue log rows or worker attempt `.log` file |
+| `resume_compatibility` | Absent: resume stays on the target that wrote the newest checkpoint | Targets whose checkpoints are tested to resume on each other |
+| `preemptible` | `false` | A disposable non-resumable experiment that may be stopped and restarted from scratch to free a scarce host |
+| `isolation`, `reason` | Plain commands: unsandboxed | `sandboxed` or `ci` opt in; `unsandboxed` stated explicitly needs a nonempty `reason` ([native isolation](native-isolation.md)) |
+| `wall_time` | Absent: unlimited | Per-attempt Go duration from accepted Started ([wall time](#per-attempt-wall-time)) |
+| `disk` | Absent: manifest sizes and learned peaks | Byte hints for the first runs of large work |
+| `size_hint` | Absent | Memory hint for kind/program work before measurements exist |
+| `portable` | `false` | Asserts the whole payload runs on every target its locks cover ([portable entries](adapter.md)) |
+| `requirement_reasons` | Absent | Why a hard host or device requirement exists; frozen, redacted in status |
+| `output_delivery` | Absent: ordinary verified outputs | Asynchronous NAS output delivery |
+| `quality_tolerance` | Absent | Per-metric output-parity tolerances |
+| `keep_on_failure`, `diagnostics` | Absent | Failure evidence published from a failed attempt |
 
-Platforms are `cuda`, `xpu`, `metal`, `cpu`, and `fake` (laptop tests). A preference
-permits other platforms, so the command itself must support them. An environment restricts eligibility to its supported platforms. Workers build
-immutable recipes on demand and report ready content hashes. See
-[environments](environments.md) for catalog and project-lock contracts.
+Mycelium does no model conversion, so there is no lossy conversion to opt into;
+if conversion is ever added it stays off by default as an advanced opt-in.
+`fan_out` tuning (`max_concurrency`, `share_xpu`) stays inside `fan_out`.
+
+**Compatibility.** For one release these fields are still accepted at the top
+level, where older specs put them; `myce submit`, `myce spec check` and adapter
+and profile reads print a deprecation note naming them. A field set both at the
+top level and under `advanced` with different values is refused. Stored and
+replied specs keep the flat fields this release so older workers and clients
+read them unchanged. Status and job GET add a read-only `advanced` object
+holding only the settings that differ from their defaults; it is absent when
+none do. `allow_cpu_fallback` is new and exists only under `advanced` (its
+HTTP wire form is `spec.allow_cpu_fallback`).
 
 Attempts get `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`. The last
 points to an attempt-specific folder beneath the stable job folder on the NAS.
@@ -296,7 +346,7 @@ Logs and results are accepted only for the current execution identity.
 
 ### Per-attempt wall time
 
-Available from the next release: optional top-level `wall_time: 30m` (a positive
+Optional `advanced: {wall_time: 30m}` (a positive
 Go duration string) stops an attempt once its execution allowance is exhausted.
 Omit it for unlimited execution; there is no fleet-wide default because no
 measured duration fits all workloads. Choose a limit from measured runs or a
@@ -1421,7 +1471,7 @@ The consumer may itself declare `fan_out`:
 name: next-stage
 project: research
 class: production
-start_window: 600s
+advanced: {start_window: 600s}
 extension: summarizer@1
 workload: {input_shape: fixed-v1, units: 100}
 after:

@@ -54,10 +54,10 @@ evidence and bytes as unverified. This requires upgraded queue and workers.
 ## Project instruction file
 
 Plain native command entries default to **unsandboxed** under MY-25;
-`isolation: sandboxed` explicitly opts in. `isolation: ci` is sandboxed plus a
+`advanced: {isolation: sandboxed}` explicitly opts in. `isolation: ci` is sandboxed plus a
 private HOME and no view of the worker's home, NAS or shared model library. Use
 it for builds and tests of repository code ([CI mode](native-isolation.md#ci-mode-1298)). New native variant/extension
-registrations default to sandboxing. An explicit top-level
+registrations default to sandboxing. An explicit
 `isolation: unsandboxed` requires a nonempty `reason` and covers main,
 result checks, queued qualification payloads and sidecars. Pre-policy registered
 extensions retain their frozen policy; publish a new version with
@@ -94,6 +94,35 @@ Every other field is optional. The defaults are:
 | `checks` | none: the command's exit status and required outputs decide success |
 | `targets` | any machine type that fits (non-production only; see below) |
 | `disk` | none: disk admission uses manifest sizes and learned peaks; add `{scratch_bytes: N}` for a large work dir plus `TMPDIR` before the first accepted run ([disk needs](../skills/mycelium/references/submit.md#disk-needs)) |
+
+An entry states the few things an agent cares about up front: the command
+(`run` or `execution`), `inputs` and `outputs`, what it `needs`, its
+`environment`, its class, and `checks`. Everything else sits under `advanced:`,
+where Mycelium picks good defaults (MY-54):
+
+```yaml
+entries:
+  train:
+    run: {command: [python, train.py]}
+    needs: {platform: cuda, memory_gb: 12}
+    outputs: {model.pt: results}
+    advanced:
+      resumable: true
+      wall_time: 6h
+      allow_cpu_fallback: true   # off by default: GPU work otherwise waits for a GPU
+```
+
+`advanced` holds `allow_cpu_fallback`, `resumable`, `resume_compatibility`,
+`preemptible`, `isolation`, `reason`, `wall_time`, `give_up_at`,
+`expected_minutes`, `start_by`, `start_window`, `disk`, `size_hint`,
+`allowed_machines`, `excluded_machines`, `requirement_reasons`, `portable`,
+`require_target`, `output_delivery`, `quality_tolerance`, `logs`,
+`keep_on_failure` and `diagnostics`; [jobs](jobs.md#advanced-settings) gives
+each default. GPU work never runs on a CPU target unless `allow_cpu_fallback`
+is true. For one release an entry may still set these at the top level; `myce`
+prints a deprecation note naming them, and both placements freeze the same
+entry. Status and job GET show an `advanced` object only for settings that
+differ from their defaults.
 
 A fuller entry adds what it needs:
 
@@ -168,7 +197,7 @@ main command on each attempt or piece, before accepted output publication.
 Omitting it requires command success and required-output verification. An argv is
 never evaluated as shell text unless the author explicitly chooses a shell.
 
-A production entry may declare `class: production` and `start_window: 600s`.
+A production entry may declare `class: production` and `advanced: {start_window: 600s}`.
 This is the same [relative job start window](jobs.md#production-start-deadline):
 positive Go duration, at most `1h`, default `150s`, inherited by executing fan-out
 children from their assignment (dependent jobs start their budget at readiness).
@@ -587,13 +616,14 @@ name. Retrying an accepted intent clears the saved refusal.
 Profiles can opt into failure evidence independently of their successful outputs:
 
 ```yaml
-diagnostics:
-  reports:
-    - {path: junit.xml, format: pytest-junit}
+advanced:
+  diagnostics:
+    reports:
+      - {path: junit.xml, format: pytest-junit}
 # For Vitest: format: vitest-junit, generated with --reporter=junit --outputFile=junit.xml
 ```
 
-Use `diagnostics: {}` for startup/lint/build failures with no test report. This
+Use `advanced: {diagnostics: {}}` for startup/lint/build failures with no test report. This
 contract supports plain commands with stored inputs (including profile source
 archives). A failed terminal attempt publishes `summary.json`, `log-tail.txt`
 and available raw reports as `reports/0.xml`, etc. The summary includes job ID,
@@ -1129,8 +1159,9 @@ kind: example-work
 args: [--input, input.json, --output, output.json]
 inputs: {input.json: inputs/input.json}
 outputs: {output.json: results}
-size_hint: {memory_gb: 4, host_memory_gb: 2} # optional
-resumable: true
+advanced:
+  size_hint: {memory_gb: 4, host_memory_gb: 2} # optional
+  resumable: true
 ```
 
 Or replace `kind`/`args` with:
@@ -1171,7 +1202,7 @@ private machine paths need appear in a job.
 The existing scheduler keeps placement, priorities, project allow-lists and
 memory accounting. The existing command runner keeps start authorization,
 process-group stopping, memory ceilings where configured and checkpointing via
-`MYCE_CHECKPOINT_DIR`. Set `resumable: true` only when the program/extension
+`MYCE_CHECKPOINT_DIR`. Set `advanced.resumable: true` only when the program/extension
 implements the existing checkpoint contract; extensions declaring no resume
 support are ineligible. Non-resumable remains the default. Waiting jobs explain
 missing extensions/qualification. Setup/check failures stay not qualified;
@@ -1452,8 +1483,8 @@ remain supported.
 
 ### Execution wall-time allowance
 
-An entry or profile may declare top-level
-`wall_time: 30m`, a positive Go duration measured from accepted Started for each
+An entry or profile may declare
+`advanced: {wall_time: 30m}`, a positive Go duration measured from accepted Started for each
 attempt. Omission is unlimited. Use measured runtime or a real consumer bound;
 `expected_minutes` and priority `deadline` do not enforce execution duration.
 Expiry fails with typed `execution/wall_time_limit`, stops the exact whole tree,

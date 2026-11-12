@@ -58,15 +58,16 @@ check holds that extension. The
 A job placed on a host without room for its working files fails inside the job
 and wastes the placement. Disk admission charges each host volume for what the
 job writes there and holds the job until a host has that much free above its
-floor. Nothing has to be declared; these optional `disk:` hints help the first
-runs of large work:
+floor. Nothing has to be declared; these optional `advanced.disk` hints help the
+first runs of large work:
 
 ```yaml
-disk:
-  scratch_bytes: 64424509440   # peak work dir + TMPDIR, outputs written there included
-  input_bytes: 10737418240     # only when input manifests carry no sizes
-  output_bytes: 2147483648     # only when output sizes are unknown
-  checkpoint_bytes: 1073741824 # resumable work without a measured resume manifest
+advanced:
+  disk:
+    scratch_bytes: 64424509440   # peak work dir + TMPDIR, outputs written there included
+    input_bytes: 10737418240     # only when input manifests carry no sizes
+    output_bytes: 2147483648     # only when output sizes are unknown
+    checkpoint_bytes: 1073741824 # resumable work without a measured resume manifest
 ```
 
 After one accepted run, the measured work dir and `TMPDIR` peak for the same kind of
@@ -192,9 +193,9 @@ files, or the worker user's credential stores (`~/.ssh`, `~/.config/gh`,
 submit through the worker's authority or act as the worker user on GitHub,
 registries, clouds or SSH; pass such access as a declared input. A Linux worker
 without Landlock ABI 2 logs that it can't withhold them. Declare
-`isolation: sandboxed` for an enforced boundary.
+`advanced: {isolation: sandboxed}` for an enforced boundary.
 
-For builds and tests of your repository, declare `isolation: ci`. It needs no
+For builds and tests of your repository, declare `advanced: {isolation: ci}`. It needs no
 owner approval. The job then can't read the NAS, the worker user's home, the
 shared model library or other jobs' files. HOME is a private folder in attempt
 scratch, so git and Go/npm/pip/cargo caches work there. It sees its declared
@@ -257,7 +258,7 @@ byte) evidence. A missing NAS source fails before launch with
 identical oversized inputs can't make them fit. See
 [shared inputs](https://github.com/1kuna/mycelium/blob/main/docs/files.md).
 
-Claim `resumable: true` only after implementing atomic checkpoints and a real
+Claim `advanced.resumable: true` only after implementing atomic checkpoints and a real
 restore. Each save writes a temporary file in `$MYCE_CHECKPOINT_DIR`, fsyncs and
 renames it, carrying a rising `myce_checkpoint.generation`; Python's
 `Checkpoint` does this, and `StopSignal` sets a flag on SIGTERM so you save

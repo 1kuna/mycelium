@@ -71,7 +71,7 @@ entries:
 
 Outputs may be files, folders (`plots/`) or globs (`"logs/*.txt"`), and `--out`
 recreates the subfolders. To get logs from a failed run without exiting 0, add
-`keep_on_failure: [logs/]` and fetch them with `myce result JOB_ID --attempt N
+`advanced: {keep_on_failure: [logs/]}` and fetch them with `myce result JOB_ID --attempt N
 --out DIR`.
 
 The entry sends your committed `HEAD`, so commit what it runs. Untracked files
@@ -177,7 +177,7 @@ per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#pla
 
 A stopped job loses everything since its last checkpoint. For anything long,
 save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
-declare `resumable: true`; Python's `mycelium.Checkpoint` and `StopSignal` do
+declare `advanced: {resumable: true}`; Python's `mycelium.Checkpoint` and `StopSignal` do
 the saving and the signal. A stop sends SIGTERM to the process group with 10
 seconds (production preemption) or two minutes (deadline, planned leave) before
 SIGKILL, so also save periodically. Checkpoints are kept 72 hours after the job
@@ -188,9 +188,25 @@ A resume stays on the target (OS/arch/platform) that wrote the newest
 checkpoint, waiting for a host of that target even while it is busy or in
 maintenance; status shows the wait as `checkpoint_target`. It moves to another
 target only when no host of that target remains in the fleet, or when the job
-declares `resume_compatibility` listing both targets because its checkpoints
-are tested to resume there. `portable: true` covers the program, not its
-checkpoints.
+declares `advanced.resume_compatibility` listing both targets because its
+checkpoints are tested to resume there. `advanced.portable: true` covers the
+program, not its checkpoints.
+
+## Essentials first, the rest under `advanced`
+
+A job or entry states what you care about up front: the command, inputs and
+outputs, `needs`, environment and class. Everything else goes under
+`advanced:` and has a good default: resume and checkpoint settings, isolation,
+wall time and start windows, disk and memory hints, placement exceptions, log
+and failure-evidence settings. Set one only when the work needs it
+([advanced settings](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#advanced-settings)).
+Status shows an `advanced` object only for the settings you changed.
+
+GPU work never runs on CPU by default: with no GPU free it waits. If your
+command really works on CPU and a slow run beats waiting, set
+`advanced: {allow_cpu_fallback: true}`; it still takes a GPU when one fits.
+Older top-level placement of these settings works for one release and prints a
+deprecation note; move them under `advanced:` when you touch the file.
 
 ## 9. Classes and tiers
 
