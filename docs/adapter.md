@@ -177,7 +177,7 @@ alongside class and fan-out, rather than in hardware variants or extension recip
 Experiment entries omit it and retain no start deadline.
 
 On supporting queue, worker and CLI releases, an entry can explicitly set
-`fan_out: {share_xpu: true, max_concurrency: 1, pieces: [...]}` to request
+`fan_out: {share_xpu: true, max_concurrency: 2, pieces: [...]}` to request
 measured sharing among opted-in single-card discrete-XPU executions. Omission
 or `false` preserves existing fan-out admission and submission bytes. Every
 co-tenant must opt in; tier, qualification, fresh card/host/attempt headroom,

@@ -186,12 +186,31 @@ func (q *Queue) fanOutTemplate(j *Job) *Job {
 	return &copy
 }
 
+// fanOutCapHold reports when a parent already has max_concurrency unfinished
+// children; zero means no cap. Requeued retries count, so they cannot push the
+// parent over its cap when they start again.
+func (q *Queue) fanOutCapHold(j *Job) *Hold {
+	if j.Spec.FanOut == nil || j.FanOut == nil || j.Spec.FanOut.MaxConcurrency < 1 || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) {
+		return nil
+	}
+	active := 0
+	for _, id := range j.FanOut.Children {
+		if child := q.s.Jobs[id]; child != nil && !terminal(child.State) {
+			active++
+		}
+	}
+	if active < j.Spec.FanOut.MaxConcurrency {
+		return nil
+	}
+	return newHold("fan_out_cap", fmt.Sprintf("max_concurrency %d reached: %d pieces unfinished, %d not started", j.Spec.FanOut.MaxConcurrency, active, len(j.Spec.FanOut.Pieces)-j.FanOut.Next))
+}
+
 func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	return q.fanOutCandidateWithResources(j, m, nil)
 }
 
 func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, inventories ...[]*Machine) *Job {
-	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || q.fanOutCapHold(j) != nil || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	// Each piece is an ordinary serial job: reuse ordinary eligibility and
