@@ -158,7 +158,7 @@ func TestPlacementStatusSafeConstraintsAndLegacyUnknown(t *testing.T) {
 	s := Spec{Targets: []ExecutionTarget{{OS: "linux", Arch: "arm64", Platform: "cuda"}}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cuda"}, Preferred: []string{"metal"}}, GPU: &GPUSelection{Devices: []string{"device-secret-selector"}}}, Environment: Environment{Name: "private-environment"}, Reason: "/private/reason"}
 	j := &Job{Spec: s, EnvironmentRecipes: map[string]EnvironmentRecipe{"cuda": {Backend: "uv", LockFile: "/private/lock", Files: map[string][]byte{"private-input": []byte("secret")}}}}
 	p := submissionPlacementIntent(s, j)
-	if p.Scope != "host_device_restriction" || p.DeviceConstraint != "selector" || !reflect.DeepEqual(p.Targets, s.Targets) || !slices.Equal(p.RequiredBackends, []string{"cuda"}) || !slices.Equal(p.Environment.Platforms, []string{"cuda"}) || p.Parity != "" {
+	if p.Scope != "host_device_restriction" || p.DeviceConstraint != "selector" || !reflect.DeepEqual(p.Targets, s.Targets) || !slices.Equal(p.RequiredBackends, []string{"cuda"}) || !slices.Equal(p.Environment.Platforms, []string{"cuda"}) || p.Parity != "unknown" {
 		t.Fatal(p)
 	}
 	data, _ := json.Marshal(p)
