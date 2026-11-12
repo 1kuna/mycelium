@@ -185,7 +185,12 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.File == ref {
-				q.s.PublicationHorizon = max(q.s.PublicationHorizon, q.clock.Now().Sub(claim.At))
+				// A settled claim is reused by later submissions of the same bytes.
+				// Its age then measures reuse, not a publication delay: live, one
+				// reused claim lifted the horizon past file retention (#1375).
+				if claim.SettledAt.IsZero() {
+					q.s.PublicationHorizon = max(q.s.PublicationHorizon, q.clock.Now().Sub(claim.At))
+				}
 				claim.SettledAt = q.clock.Now()
 				q.s.FileInputClaims[id] = claim
 			}

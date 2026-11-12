@@ -64,10 +64,12 @@ func blobExists(t *testing.T, q *Queue, ref FileRef) bool {
 
 // Live r6.10: retention set, queue restarted, and 13 minutes of busy check-ins
 // later nothing had been reclaimed. Every pass must make progress anyway.
+// Live r6.11 also carried a publication horizon past the file retention (#1375).
 func TestFileReclaimDrainsUnderConstantControlPressure(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	jobs, refs := expiredRetentionInputs(t, q, clock, c, 6)
+	q.s.PublicationHorizon = 2 * testFileRetention
 	constantQueuePressure(t, q, clock)
 
 	if err := q.reclaimJobFiles(); err != nil {
@@ -206,5 +208,26 @@ func TestInterruptedUploadSweepProgressesUnderControlPressure(t *testing.T) {
 	}
 	if n := left(); n != 0 {
 		t.Fatalf("pressure left %d interrupted uploads", n)
+	}
+}
+
+// Live r6.11: a settled claim is reused by later submissions of the same bytes,
+// and each re-settlement lifted the publication horizon to the claim's age.
+func TestReusedInputClaimKeepsPublicationHorizon(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, ref := retentionUpload(t, c, "reused input")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": ref}
+	if _, err := q.claimFileInput(context.Background(), s, ref); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	submit(t, q, s)
+	horizon := q.s.PublicationHorizon
+	clock.Advance(4 * 24 * time.Hour)
+	submit(t, q, s)
+	if q.s.PublicationHorizon != horizon {
+		t.Fatalf("re-settling a reused claim moved the horizon from %v to %v", horizon, q.s.PublicationHorizon)
 	}
 }
