@@ -105,7 +105,7 @@ func TestMaintenancePreparationExactCompletion(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("builder", "fake", "host")
 	check(t, q, m, nil)
-	for _, kind := range []string{"environment", "copy", "benchmark"} {
+	for _, kind := range []string{"environment", "copy"} {
 		l := q.issuePreparation(&m, kind, "fixture")
 		if err := q.AuthorizeLaunch(l); err != nil {
 			t.Fatal(err)

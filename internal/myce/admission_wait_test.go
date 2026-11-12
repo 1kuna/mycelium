@@ -470,25 +470,25 @@ func TestAdmissionWaitRetentionUsesMeasuredBudget(t *testing.T) {
 	}
 }
 
-func TestAdmissionWaitMeasuredWaveAndRetry(t *testing.T) {
+func TestAdmissionWaitPieceAndRetry(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 2)
 	s.Priority = "production"
 	parent := submit(t, q, s)
 	observed := admissionWaitAPI(t, q, parent.ID)
 	target := observed.Latest.Targets[0]
-	if target.Concurrency != 2 || target.RequiredCores != 2 || target.RequiredHostGB < 2 || target.Resolution != "planner_candidate" || target.LastPlannerDecision == nil || target.LastPlannerDecision.Concurrency != 2 {
-		t.Fatalf("status lost selected multi-piece vector: %+v", target)
+	if target.Concurrency != 1 || target.RequiredCores != 1 || target.RequiredHostGB < 1 || target.Resolution != "planner_candidate" || target.LastPlannerDecision == nil || target.LastPlannerDecision.Concurrency != 1 {
+		t.Fatalf("status lost selected piece vector: %+v", target)
 	}
 	run := check(t, q, m, nil).Job
-	if run == nil || run.Batch == nil || run.Batch.Concurrency != 2 {
-		t.Fatal("missing measured wave")
+	if run == nil || run.Batch == nil || run.Batch.Concurrency != 1 {
+		t.Fatal("missing piece")
 	}
 	if err := q.Started(result(run, false)); err != nil {
 		t.Fatal(err)
 	}
 	clock.Advance(time.Second)
 	// A worker loss is retained as an exact old execution until release; the
-	// waiting retry must keep the whole wave rather than claim a serial demand.
+	// waiting retry keeps its piece and resource vector.
 	if err := q.update(func() error { q.retry(q.touchJob(run.ID), "worker lost"); q.maintain(); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -497,21 +497,21 @@ func TestAdmissionWaitMeasuredWaveAndRetry(t *testing.T) {
 		t.Fatal("retry evidence lost attempt identity")
 	}
 	if len(waiting.Latest.Targets) == 0 {
-		t.Fatal("missing retry wave target")
+		t.Fatal("missing retry piece target")
 	}
 	target = waiting.Latest.Targets[0]
-	if target.RequiredCores != 2 || target.RequiredHostGB < 2 {
-		t.Fatalf("retry projected only one piece: %+v", target)
+	if target.RequiredCores != 1 || target.RequiredHostGB < 1 {
+		t.Fatalf("retry lost its resource vector: %+v", target)
 	}
-	// Supported exact release retires old custody and permits the same wave.
+	// Supported exact release retires old custody and permits the same piece.
 	ack := result(run, false)
 	ack.ReleaseOnly = true
 	if err := q.Complete(ack); err != nil {
 		t.Fatal(err)
 	}
 	retry := check(t, q, m, nil).Job
-	if retry == nil || retry.ID != run.ID || retry.Attempt != run.Attempt+1 || retry.Batch.Concurrency != 2 {
-		t.Fatalf("wave retry did not resume: %+v", retry)
+	if retry == nil || retry.ID != run.ID || retry.Attempt != run.Attempt+1 || retry.Batch.Concurrency != 1 {
+		t.Fatalf("piece retry did not resume: %+v", retry)
 	}
 	if got := admissionWaitAPI(t, q, retry.ID); got.Latest.ClosedAt == nil {
 		t.Fatal("retry wait did not close")
