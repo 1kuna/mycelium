@@ -20,8 +20,9 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 	entered, canceled, inventoryCanceled := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	var probes atomic.Int32
-	w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Interval: time.Millisecond,
-		Machine: machine("service", "fake"), ServiceConfig: &ServiceConfig{Role: "worker"}}
+	state := t.TempDir()
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: state, Interval: time.Millisecond,
+		Machine: machine("service", "fake"), ServiceConfig: &ServiceConfig{Role: "worker", State: state}}
 	w.Client = Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/workers/checkin" {
 			once.Do(func() { close(entered) })

@@ -52,10 +52,31 @@ func coreTestMain(m *testing.M) int {
 	if err = os.Setenv("MYCE_TEST_ROOT", dir); err != nil {
 		panic(err)
 	}
+	before := packageDirEntries()
 	code := m.Run()
+	// A test must never write into the package directory (a stray lock there
+	// dirtied checkouts). Any entry the run added fails the binary.
+	for name := range packageDirEntries() {
+		if !before[name] {
+			fmt.Fprintf(os.Stderr, "test run left %s in the package directory\n", name)
+			code = 1
+		}
+	}
 
 	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
 		code = 1
 	}
 	return code
+}
+
+func packageDirEntries() map[string]bool {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		panic(err)
+	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	return names
 }

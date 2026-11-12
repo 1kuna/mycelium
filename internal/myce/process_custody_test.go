@@ -23,3 +23,10 @@ func TestProcessPSStalledInspector(t *testing.T) {
 		t.Fatalf("missing inspector cancellation evidence: %v", err)
 	}
 }
+
+func TestCommandLockRefusesEmptyStateDir(t *testing.T) {
+	if unlock, err := commandLock("", "fleet-update.lock", false); err == nil {
+		unlock()
+		t.Fatal("empty state dir must not lock in the working directory")
+	}
+}
