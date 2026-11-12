@@ -36,7 +36,7 @@ MY-06 terminology ruling, 2026-10-21. MY-11 scope ruling, 2026-10-19 (#16, #17, 
 
 <details><summary>Sources</summary>
 
-MY-17 vision statement, 2026-10-25 (#192). MY-22, 2026-10-27: “if you recommend merging them then i'm fine with it”. Removing operator environment registration is an orchestrator recommendation under #192, pending Zach; not a ruling. MY-12 extension ruling, 2026-10-19. MY-27, 2026-10-31: “yes i like the variants model. whatever can simplify mycelium to handle all the work so agents don’t necessarily need to. and so things can run on as many machines as possible.” MY-26, 2026-10-29; records intent, not implemented migration or new platforms ([implementation proposal](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/design-run-anywhere.md)). MY-20 vision ruling, 2026-10-25 (#194).
+MY-17 vision statement, 2026-10-25 (#192). MY-22, 2026-10-27: “if you recommend merging them then i'm fine with it”. Agent reading (orchestrator, 2026-11-12): MY-44 covers project-carried lock files (#1163, #1297); operator registration is not required. MY-12 extension ruling, 2026-10-19. MY-27, 2026-10-31: “yes i like the variants model. whatever can simplify mycelium to handle all the work so agents don’t necessarily need to. and so things can run on as many machines as possible.” MY-26, 2026-10-29; records intent, not implemented migration or new platforms ([implementation proposal](https://github.com/1kuna/mycelium/blob/12bb6b7826153c38d356555b711c9ba4a11f856a/docs/design-run-anywhere.md)). MY-20 vision ruling, 2026-10-25 (#194).
 
 </details>
 

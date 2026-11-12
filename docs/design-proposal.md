@@ -167,7 +167,10 @@ or legacy `X-Myce-Priority`, with conflicting declarations rejected.
 > (`production_hold`, 2026-10-11) predates it and remains in the code, with
 > `production_hold_scope: host` as the default scope once a host opts in. The
 > opt-in device scope (#577, 2026-11-01) keeps release custody and leaves
-> exclusivity to ordinary preemption.
+> exclusivity to ordinary preemption. Removal is decided (option A, agent
+> decision under MY-30 and MY-49), but a 2026-11-12 read-only check found one
+> fleet host opted in at host scope in live queue policy, so the code stays
+> until that host's opt-in is resolved.
 
 There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 
@@ -1802,19 +1805,12 @@ one binary, SQLite queue and scheduler.
 A project's uv or Pixi lock travels with the adapter, without operator
 registration or queue restart ([project lock files](environments.md#project-lock-files)).
 
-> **Conflict (awaiting the maintainer's ruling on #1434).** The approved text
-> marked this option "Pending the maintainer; do not implement this option
-> before a ruling", and [decisions](DECISIONS.md#my-22) still record removing
-> operator environment registration as an orchestrator recommendation, not a
-> ruling. Since then, inline uv and Pixi locks (#1163) and relative lock files
-> uploaded with `myce run --entry`/`--profile` (#1297) carry a project's lock
-> to the queue with no operator registration or queue restart
-> ([project lock files](environments.md#project-lock-files)); the named
-> catalog remains. #251 was closed as completed on an agent's reading of MY-44,
-> which was ruled about the model-source allowlist. Items 5 and 6 below
-> (worker-specific build failure, #252) are not implemented: a real build
-> failure still terminally fails waiting jobs through `reconcileEnvironments`.
-> The contract below is kept as written.
+Project locks shipped as inline uv and Pixi locks (#1163) and relative lock
+files uploaded by `myce run --entry`/`--profile` (#1297); the named catalog
+remains. [MY-44](DECISIONS.md#my-44) covers project-carried locks
+(agent reading, 2026-11-12, #1434). Items 5 and 6 (worker-specific build
+failure) are open in #1438: today a real build failure still terminally fails
+waiting jobs through `reconcileEnvironments`.
 
 Reuse `EnvironmentRecipe`, composed extension bundles, the file store and the
 uv/Pixi builders. This adds client-carried finite-command recipes and
