@@ -86,7 +86,8 @@ func TestQueuePersistenceOpensPreviousReleaseDatabase(t *testing.T) {
 	if err = q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err != nil || !bytes.Equal(marker, normalizedQueueMarker) {
 		t.Fatalf("main changed the persistence marker to %s; r6.10 rollback would need a conversion", marker)
 	}
-	// r6.10 decodes job rows directly, so main writes no shared-value rows yet.
+	// Every release since r6.11 reads shared-value rows, so main converted the
+	// settled rows of this database when it opened it.
 	shared := func(q *Queue) int {
 		t.Helper()
 		records, err := readQueueRecords(q.db)
@@ -101,18 +102,8 @@ func TestQueuePersistenceOpensPreviousReleaseDatabase(t *testing.T) {
 		}
 		return n
 	}
-	if n := shared(q); n != 0 {
-		t.Fatal("main wrote shared job rows that r6.10 cannot read:", n)
-	}
-	// The release that enables the writer converts this database on open; this
-	// release still reads it after rolling back.
-	path, root := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root
-	q.Close()
-	if q, err = Open(path, root, clock, func(q *Queue) { q.slimJobRecords = true }); err != nil {
-		t.Fatal(err)
-	}
 	if shared(q) == 0 {
-		t.Fatal("opening with the writer enabled converted no retained job")
+		t.Fatal("opening with the writer on converted no retained job")
 	}
 	check(q, "decided on main")
 	q = reopenQueue(t, q, clock)
