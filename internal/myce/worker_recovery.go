@@ -824,6 +824,10 @@ func prepareCheckpointCopy(j Job, copyFile func(io.Writer, io.Reader) (int64, er
 	return prepareCheckpointCopySync(j, copyFile, syncWorkerDir)
 }
 func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64, error), syncDir func(string) error) (string, error) {
+	// A relative path would resolve against the process working directory.
+	if !filepath.IsAbs(j.Checkpoint) {
+		return "", fmt.Errorf("checkpoint path %q is not absolute", j.Checkpoint)
+	}
 	if err := ensureCheckpointParent(j.Checkpoint); err != nil {
 		return "", fmt.Errorf("checkpoint root unavailable: %w", err)
 	}

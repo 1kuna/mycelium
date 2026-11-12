@@ -666,6 +666,8 @@ func TestMemoryEnvelopeUnifiedExploratoryGPUDrift(t *testing.T) {
 	payload := *j
 	payload.Spec = Spec{Run: RunSpec{Command: []string{"true"}}, Needs: j.Spec.Needs}
 	payload.Extensions, payload.Extension = nil, nil
+	// The queue reply carries a relative path; the worker loop joins its root.
+	payload.Checkpoint = filepath.Join(t.TempDir(), "job")
 	p, err := startAfterFixtureInputs(t, w, store, payload)
 	if err != nil {
 		t.Fatalf("small GPU drift refused exploratory launch: %v", err)
