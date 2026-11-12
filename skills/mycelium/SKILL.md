@@ -112,7 +112,39 @@ submitting. Only production entries need a target list; every field is in
   ([disk needs](references/submit.md#disk-needs)).
 - **Network** is off for the command unless you declare `needs: {network: true}`.
 
-## 5. Inputs
+## 5. GPU work on every accelerator
+
+One PyTorch entry can run on CUDA, Intel Arc (XPU) and Metal, wherever there is
+room ([example](https://github.com/1kuna/mycelium/tree/main/docs/examples/run-anywhere)):
+
+- **Entry:** `needs: {platform: any}` and a `uv.lock` environment. No target
+  list, host or memory figure.
+- **Lock:** one `pyproject.toml` lists the OS/architecture pairs in
+  `[tool.uv] environments` and takes Linux amd64's `torch` from PyTorch's XPU
+  index (`explicit = true`); other platforms use the PyPI wheel. List
+  `triton-xpu` as a direct dependency for Linux amd64, or uv looks for it on
+  PyPI and the lock fails. `uv lock` writes one lock for every platform.
+- **Device:** take it from `MYCE_DEVICE`, which Mycelium always sets, with
+  `torch.accelerator.current_accelerator()` as the fallback outside Mycelium.
+  Then call `torch.empty(1, device=device)` so a wrong torch build fails at
+  once instead of training on CPU.
+- **Calls:** device-neutral ones (`torch.accelerator.synchronize()`,
+  `torch.accelerator.max_memory_allocated()`), not `torch.cuda.*`, and float32,
+  since Metal has no float64.
+
+GPU work never falls back to CPU unless the job opts in under its entry's
+advanced settings (MY-54). `platform: any` never places on CPU; don't set
+`PYTORCH_ENABLE_MPS_FALLBACK`. To run on CPU on purpose, add an entry with
+`needs: {platform: cpu}`.
+
+For ordinary PyTorch this replaces per-backend entries or variants, a lock per
+accelerator family, target lists, and qualification runs before experiment
+work. Use [variants](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#write-an-extension)
+when the software differs per platform (MLX on Mac, vLLM on CUDA), when a
+service sidecar is part of the job, or for production, which still needs
+explicit targets and MY-19 output parity per kind of machine.
+
+## 6. Inputs
 
 Small files travel with the job: `inputs: {DEST: local/path}` in the entry, or
 `--input DEST=PATH` for one run. Declare NAS data instead of copying it; the
@@ -127,7 +159,7 @@ processing never runs at network speed (MY-36):
 The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
 relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
-## 6. Many pieces
+## 7. Many pieces
 
 To run one command over many inputs, add `pieces:` to the entry. One run and one
 wait cover them all, and results come back as `KEY/OUTPUT`:
@@ -141,7 +173,7 @@ wait cover them all, and results come back as `KEY/OUTPUT`:
 Each piece is its own job, placed, retried and recovered separately, up to 256
 per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#plain-command-pieces)).
 
-## 7. Checkpoints and resumable work
+## 8. Checkpoints and resumable work
 
 A stopped job loses everything since its last checkpoint. For anything long,
 save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
@@ -160,7 +192,7 @@ declares `resume_compatibility` listing both targets because its checkpoints
 are tested to resume there. `portable: true` covers the program, not its
 checkpoints.
 
-## 8. Classes and tiers
+## 9. Classes and tiers
 
 The class decides who waits and who gets stopped. Pick it before you submit;
 don't find out by losing work.
