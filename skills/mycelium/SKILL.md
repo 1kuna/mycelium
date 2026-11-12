@@ -132,10 +132,10 @@ room ([example](https://github.com/1kuna/mycelium/tree/main/docs/examples/run-an
   `torch.accelerator.max_memory_allocated()`), not `torch.cuda.*`, and float32,
   since Metal has no float64.
 
-GPU work never falls back to CPU unless the job opts in under its entry's
-advanced settings (MY-54). `platform: any` never places on CPU; don't set
-`PYTORCH_ENABLE_MPS_FALLBACK`. To run on CPU on purpose, add an entry with
-`needs: {platform: cpu}`.
+GPU work never falls back to CPU unless the entry sets
+`advanced: {allow_cpu_fallback: true}` (MY-54). Without it, `platform: any`
+never places on CPU. Don't set `PYTORCH_ENABLE_MPS_FALLBACK`. To run on CPU on
+purpose, add an entry with `needs: {platform: cpu}`.
 
 For ordinary PyTorch this replaces per-backend entries or variants, a lock per
 accelerator family, target lists, and qualification runs before experiment
