@@ -677,6 +677,9 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		copy.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 		j = &copy
 	}
+	if h := q.checkpointTargetWait(j, scans...); h != nil {
+		return h
+	}
 	if h := q.holdWait(j); h != nil {
 		return h
 	}

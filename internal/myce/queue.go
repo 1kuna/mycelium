@@ -3094,6 +3094,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		q.markStarted(j)
 	}
 	j.Progress = report.Progress
+	noteCheckpointTarget(j, allocationMachine(m, j.AllocatedDevices), j.Attempt, report.Progress)
 	q.retainApplicationProgress(j, report, m)
 	q.retainLiveness(j, report)
 	if j.State == "stopping" {

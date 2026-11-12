@@ -2555,7 +2555,8 @@ decision.
 Job kinds: `upstream`, `paused`, `checkpoint_root` (the queue's checkpoint
 root is unreachable), `device_fault_last_healthy`, `launch_capacity`,
 `helper_charge` (a launch refused with measured helper memory beyond the
-reservation), `scarce_host_yield`, `shared_host_backoff`, `storage_root`,
+reservation), `checkpoint_target` (a resume waits for a host of the target
+that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage_root`,
 `production_parity_hosts`, `production_parity`, `no_matching_device`,
 `log_policy`, `project_cap`, `production_admission`, `unified_cuda_headroom`
 (a unified-memory host's headroom kept for expected production),

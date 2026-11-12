@@ -264,6 +264,7 @@ const (
 	predicateCandidateUnavailable AdmissionPredicate = "candidate_unavailable"
 	predicateCardGroup            AdmissionPredicate = "card_group"
 	predicateCheckpoint           AdmissionPredicate = "checkpoint"
+	predicateCheckpointTarget     AdmissionPredicate = "checkpoint_target"
 	predicateCleanup              AdmissionPredicate = "cleanup"
 	predicateDependency           AdmissionPredicate = "dependency"
 	predicateDeviceAdmission      AdmissionPredicate = "device_admission"

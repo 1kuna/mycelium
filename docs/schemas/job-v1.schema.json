@@ -1243,6 +1243,25 @@
       ],
       "type": "object"
     },
+    "CheckpointOrigin": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "generation",
+        "attempt"
+      ],
+      "type": "object"
+    },
     "CommandDiscovery": {
       "properties": {
         "targets": {
@@ -3125,6 +3144,10 @@
         "checkpoint_expired": {
           "format": "date-time",
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_target": {
+          "$ref": "#/$defs/CheckpointOrigin",
           "x-contract": "diagnostic"
         },
         "cleanup_cause": {

@@ -144,6 +144,14 @@ SIGKILL, so also save periodically. Checkpoints are kept 72 hours after the job
 ends; declare outputs for anything you need
 ([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
 
+A resume stays on the target (OS/arch/platform) that wrote the newest
+checkpoint, waiting for a host of that target even while it is busy or in
+maintenance; status shows the wait as `checkpoint_target`. It moves to another
+target only when no host of that target remains in the fleet, or when the job
+declares `resume_compatibility` listing both targets because its checkpoints
+are tested to resume there. `portable: true` covers the program, not its
+checkpoints.
+
 ## 8. Classes and tiers
 
 The class decides who waits and who gets stopped. Pick it before you submit;
