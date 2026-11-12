@@ -84,7 +84,7 @@ var holdKinds = map[string]holdKind{
 	"scarce_host_yield":        {ownerQueue, "waiting for portable work to yield a scarce host", "the yielding attempt saves its checkpoint and releases the host", "wait; nothing to do"},
 	"shared_host_backoff":      {ownerQueue, "backing off a shared host whose owner needed it", "the host's owner pressure stays quiet for the measured recovery span", "wait; another eligible host can still take it"},
 	"storage_root":             {ownerStorage, "a worker's storage root is unreachable", "the storage root is reachable again", "restore the worker's storage mount"},
-	productionParityHostHold:   {ownerConsumer, "production work is held to its parity-approved hosts", "the project adds an eligible host to its production_parity_hosts list", "compare outputs with the reference on an eligible host, then myce parity add --evidence JOB_ID"},
+	productionParityHostHold:   {ownerConsumer, "production work is held to the machine kinds its project approved", "the project approves a machine kind that can run it", "compare outputs with the reference on a machine of a kind that can run it, then myce parity add --evidence JOB_ID"},
 	"no_matching_device":       {ownerConsumer, "no selected device is online and compatible", "a selected device is online and compatible", "check the device selector, or bring a selected device online"},
 	"log_policy":               {ownerConsumer, "no eligible host supports this log policy", "a host that supports logs: none is eligible", "use the default log policy, or add a host that supports logs: none"},
 	"project_cap":              {ownerQueue, "waiting under the project's concurrency limit", "the project's running work drops below its limit", "wait; nothing to do"},
@@ -126,7 +126,7 @@ var holdKinds = map[string]holdKind{
 	"missing_extension":    {ownerConsumer, "no implementation is registered for this work", "an implementation is registered", "register an implementation with its targets, environment and native check"},
 	"execution_coverage":   {ownerConsumer, "no registered implementation covers an eligible target", "an implementation covers a supported target", "run myce portability and add an implementation for a supported target"},
 	"native_qualification": {ownerQueue, "the queue is qualifying the implementation on compatible hardware", "the native check passes, or fails the job with its action", "wait; nothing to do"},
-	"production_parity":    {ownerConsumer, "production needs reference-output parity for this variant", "the project accepts parity for an eligible host", "compare outputs with the reference on an eligible host, then myce parity add --evidence JOB_ID"},
+	"production_parity":    {ownerConsumer, "production needs reference-output parity for this variant", "the project accepts parity for a machine kind that can run it", "compare outputs with the reference on an eligible host, then myce parity add --evidence JOB_ID"},
 }
 
 // reasonHold is a check's hold when it gives a reason, and nil when it passes.

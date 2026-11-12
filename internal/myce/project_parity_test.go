@@ -2,31 +2,56 @@ package myce
 
 import (
 	"errors"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// setParityHosts writes one work's project list directly, as a migrated entry,
-// for placement tests whose subject is not the evidence check. No hosts means
-// an explicit empty list.
+// setParityHosts approves the kinds of the named hosts for one work, as
+// migration converts a previous-release host approval, for placement tests
+// whose subject is not the evidence check. No hosts means an explicit empty
+// list.
 func setParityHosts(t *testing.T, q *Queue, project, work string, hosts ...string) {
 	t.Helper()
-	if hosts == nil {
-		hosts = []string{}
-	}
 	if err := q.update(func() error {
 		if err := q.validateProductionParityHosts(map[string][]string{work: hosts}); err != nil {
 			return err
 		}
-		q.migrateProjectParity()
-		store := q.s.ProjectParity.clone()
+		q.migrateParityKinds()
+		store := q.s.ParityKinds.clone()
 		if store.Projects[project] == nil {
-			store.Projects[project] = map[string][]ParityHost{}
+			store.Projects[project] = map[string][]ParityApproval{}
 		}
-		store.Projects[project][work] = migratedParityHosts(map[string][]string{work: hosts})[work]
-		q.s.ProjectParity = store
+		store.Projects[project][work] = q.convertHostApprovals(work, hostApprovals(hosts))
+		q.s.ParityKinds = store
+		q.mirrorProjectParity()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setParityKinds approves machine kinds for one work directly.
+func setParityKinds(t *testing.T, q *Queue, project, work string, kinds ...string) {
+	t.Helper()
+	if err := q.update(func() error {
+		q.migrateParityKinds()
+		store := q.s.ParityKinds.clone()
+		if store.Projects[project] == nil {
+			store.Projects[project] = map[string][]ParityApproval{}
+		}
+		list := []ParityApproval{}
+		for _, text := range kinds {
+			k, err := ParseMachineKind(text)
+			if err != nil {
+				return err
+			}
+			list = append(list, ParityApproval{Kind: k, Evidence: ParityEvidence{Migrated: true}})
+		}
+		store.Projects[project][work] = list
+		q.s.ParityKinds = store
 		q.mirrorProjectParity()
 		return nil
 	}); err != nil {
@@ -37,10 +62,10 @@ func setParityHosts(t *testing.T, q *Queue, project, work string, hosts ...strin
 func clearParityHosts(t *testing.T, q *Queue, project string) {
 	t.Helper()
 	if err := q.update(func() error {
-		q.migrateProjectParity()
-		store := q.s.ProjectParity.clone()
+		q.migrateParityKinds()
+		store := q.s.ParityKinds.clone()
 		delete(store.Projects, project)
-		q.s.ProjectParity = store
+		q.s.ParityKinds = store
 		q.mirrorProjectParity()
 		return nil
 	}); err != nil {
@@ -48,22 +73,25 @@ func clearParityHosts(t *testing.T, q *Queue, project string) {
 	}
 }
 
-// parityFixture: production of kind:sample may run on reference-host only;
-// candidate-host is qualified but not yet on the project's list.
-func parityFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machine) {
+// parityFixture: two hosts of one kind and a third of another kind (a
+// different CPU architecture), all qualified for kind:sample. The project has
+// no approvals yet.
+func parityFixture(t *testing.T) (q *Queue, clock *fakeClock, reference, sameKind, otherKind Machine) {
 	t.Helper()
-	q, clock := fixture(t)
+	q, clock = fixture(t)
 	e := fakeExtension(t)
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
-	reference := placementMachine("reference", "separate", 64, 8, e)
-	candidate := placementMachine("candidate", "separate", 64, 8, e)
-	reference.HostID, candidate.HostID = "reference-host", "candidate-host"
-	check(t, q, reference, nil)
-	check(t, q, candidate, nil)
-	setParityHosts(t, q, "test", "kind:sample", "reference-host")
-	return q, clock, reference, candidate
+	reference = placementMachine("reference", "separate", 64, 8, e)
+	sameKind = placementMachine("same-kind", "separate", 64, 8, e)
+	otherKind = placementMachine("other-kind", "separate", 64, 8, e)
+	otherKind.CapabilityProfile.Arch = otherArch()
+	reference.HostID, sameKind.HostID, otherKind.HostID = "reference-host", "same-kind-host", "other-kind-host"
+	for _, m := range []Machine{reference, sameKind, otherKind} {
+		check(t, q, m, nil)
+	}
+	return q, clock, reference, sameKind, otherKind
 }
 
 // runComparison runs project's kind:sample check on m to the given outcome.
@@ -89,107 +117,162 @@ func parityRefusal(t *testing.T, err error, want string) {
 	}
 }
 
-func TestProjectWidensOwnParityListWithEvidence(t *testing.T) {
-	q, clock, _, candidate := parityFixture(t)
-	revision := q.PriorityPolicy().Revision
-	evidence := runComparison(t, q, clock, "test", candidate, true)
-	production := placementSpec(false)
-	production.Priority = "production"
-	queued := submit(t, q, production)
-	if assigned := check(t, q, candidate, nil).Job; assigned != nil {
-		t.Fatal("production ran on a host outside the project's list", assigned.ID)
+// otherArch is a release architecture other than this test host's.
+func otherArch() string {
+	if runtime.GOARCH == "amd64" {
+		return "arm64"
 	}
+	return "amd64"
+}
+
+func kindLabels(approvals []ParityApproval) []string {
+	out := []string{}
+	for _, a := range approvals {
+		out = append(out, a.label())
+	}
+	return out
+}
+
+// MY-51: a comparison on one host approves its kind of machine, so production
+// runs on a second host of that kind that never ran a comparison; a host of
+// another kind is refused with a reason naming both kinds.
+func TestKindApprovalAdmitsEveryHostOfThatKind(t *testing.T) {
+	q, clock, reference, sameKind, otherKind := parityFixture(t)
+	revision := q.PriorityPolicy().Revision
+	evidence := runComparison(t, q, clock, "test", reference, true)
 	added := clock.Now()
-	got, err := q.AddParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: "candidate-host", Evidence: evidence.ID})
+	got, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Evidence: evidence.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	hosts := got.Hosts["kind:sample"]
-	if len(hosts) != 2 || hosts[1].Host != "candidate-host" || hosts[1].Evidence.Job != evidence.ID || hosts[1].Evidence.Attempt != 1 || !hosts[1].AddedAt.Equal(added) || !hosts[0].Evidence.Migrated {
-		t.Fatalf("addition not recorded with its evidence: %+v", got)
+	approved := runtime.GOOS + "/" + runtime.GOARCH + "/fake"
+	approvals := got.Kinds["kind:sample"]
+	if len(approvals) != 1 || approvals[0].Kind.String() != approved || approvals[0].Evidence.Job != evidence.ID || approvals[0].Evidence.Attempt != 1 || !approvals[0].AddedAt.Equal(added) || len(got.Warnings) != 0 {
+		t.Fatalf("the evidence run's kind was not approved with its evidence: %+v", got)
 	}
-	record := q.PriorityPolicy()
-	if record.Revision != revision || len(record.Policy.Projects) != 0 {
+	if record := q.PriorityPolicy(); record.Revision != revision || len(record.Policy.Projects) != 0 {
 		t.Fatalf("a project write must not edit queue policy: %+v", record)
 	}
-	if assigned := check(t, q, candidate, nil).Job; assigned == nil || assigned.ID != queued.ID {
-		t.Fatal("production did not place on the newly approved host", assigned)
+	production := placementSpec(false)
+	production.Priority = "production"
+	// Keep production off the comparison's own host, so it must run on a
+	// second host of the kind or on the other kind.
+	production.ExcludedMachines = []string{reference.ID}
+	// Only the other kind may take this one, so its wait names the refusal.
+	pinned := placementSpec(false)
+	pinned.Priority = "production"
+	pinned.AllowedMachines = []string{otherKind.ID}
+	queued := submit(t, q, production)
+	refused := submit(t, q, pinned)
+	if assigned := check(t, q, otherKind, nil).Job; assigned != nil {
+		t.Fatal("production ran on a machine kind the project did not approve", assigned.ID)
+	}
+	clock.Advance(time.Second)
+	held, err := q.jobSnapshot(refused.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Hold == nil || held.Hold.Kind != productionParityHostHold || held.Hold.Owner != "consumer" || !strings.Contains(held.Reason, targetLabel(machineTarget(&otherKind))+" is not a machine kind the project approved") {
+		t.Fatalf("refusal of the other kind is unclear: reason=%q hold=%+v", held.Reason, held.Hold)
+	}
+	if assigned := check(t, q, sameKind, nil).Job; assigned == nil || assigned.ID != queued.ID {
+		t.Fatal("production did not run on a second host of the approved kind", assigned)
+	}
+	// A broader kind the evidence ran as admits the other architecture too.
+	if _, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Kind: "fake", Evidence: evidence.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if assigned := check(t, q, otherKind, nil).Job; assigned == nil || assigned.ID != refused.ID {
+		t.Fatal("a platform-wide approval did not admit a host of another architecture", assigned)
 	}
 	// Narrowing needs no evidence; the last removal keeps an explicit empty list.
-	for _, host := range []string{"reference-host", "candidate-host"} {
-		if got, err = q.RemoveParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: host}); err != nil {
+	for _, kind := range []string{approved, "*/*/fake"} {
+		if got, err = q.RemoveParity(ParityRequest{Project: "test", Work: "kind:sample", Kind: kind}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if list, configured := got.Hosts["kind:sample"]; !configured || len(list) != 0 {
-		t.Fatalf("removing every host must leave an empty list that admits none: %+v", got)
+	if list, configured := got.Kinds["kind:sample"]; !configured || len(list) != 0 {
+		t.Fatalf("removing every kind must leave an empty list that admits none: %+v", got)
 	}
 }
 
-func TestParityAdditionWithoutPassingEvidenceIsRefused(t *testing.T) {
-	q, clock, reference, candidate := parityFixture(t)
-	failed := runComparison(t, q, clock, "test", candidate, false)
-	elsewhere := runComparison(t, q, clock, "test", reference, true)
+func TestParityApprovalWithoutPassingEvidenceIsRefused(t *testing.T) {
+	q, clock, reference, sameKind, otherKind := parityFixture(t)
+	failed := runComparison(t, q, clock, "test", sameKind, false)
+	passed := runComparison(t, q, clock, "test", reference, true)
 	production := placementSpec(false)
 	production.Priority = "production"
-	production.AllowedMachines = []string{candidate.ID}
+	production.AllowedMachines = []string{sameKind.ID}
 	prod := submit(t, q, production)
-	request := ParityHostRequest{Project: "test", Work: "kind:sample", Host: "candidate-host"}
+	request := ParityRequest{Project: "test", Work: "kind:sample"}
 	for _, tc := range []struct{ evidence, want string }{
 		{"", "no evidence job named"},
 		{"missing-job", "is unknown"},
 		{failed.ID, "only a succeeded comparison counts"},
-		{elsewhere.ID, "ran on host reference-host, not candidate-host"},
 		{prod.ID, "is production work"},
 	} {
 		request.Evidence = tc.evidence
-		_, err := q.AddParityHost(request)
+		_, err := q.AddParity(request)
 		parityRefusal(t, err, tc.want)
 	}
-	other := request
-	other.Work, other.Evidence = "program:sample-script", elsewhere.ID
-	_, err := q.AddParityHost(other)
+	// The comparison cannot approve a kind it did not run as.
+	other := targetLabel(machineTarget(&otherKind))
+	_, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Kind: other, Evidence: passed.ID})
+	parityRefusal(t, err, "which is not kind "+other)
+	_, err = q.AddParity(ParityRequest{Project: "test", Work: "program:sample-script", Evidence: passed.ID})
 	parityRefusal(t, err, "ran kind:sample, not program:sample-script")
-	if got, _ := q.ProjectParityHosts("test"); !slices.Equal(parityHostNames(got.Hosts["kind:sample"]), []string{"reference-host"}) {
-		t.Fatalf("refused additions changed the list: %+v", got)
+	for _, kind := range []string{"*/*/*", "linux,mac", "cuda/x86"} {
+		if _, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Kind: kind, Evidence: passed.ID}); err == nil {
+			t.Fatalf("kind %q accepted", kind)
+		}
+	}
+	if got, _ := q.ProjectParity("test"); len(got.Kinds) != 0 {
+		t.Fatalf("refused approvals changed the list: %+v", got)
 	}
 }
 
-func TestAnotherProjectCannotEditThisProjectsParityList(t *testing.T) {
-	q, clock, _, candidate := parityFixture(t)
-	theirs := runComparison(t, q, clock, "other", candidate, true)
-	// Another project's passing comparison cannot widen this project's list.
-	_, err := q.AddParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: "candidate-host", Evidence: theirs.ID})
+func TestAnotherProjectCannotEditThisProjectsApprovals(t *testing.T) {
+	q, clock, reference, sameKind, _ := parityFixture(t)
+	setParityKinds(t, q, "test", "kind:sample", "otheros/amd64/fake")
+	theirs := runComparison(t, q, clock, "other", reference, true)
+	_, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Evidence: theirs.ID})
 	parityRefusal(t, err, "belongs to another project")
-	// Its own addition changes only its own list.
-	if _, err := q.AddParityHost(ParityHostRequest{Project: "other", Work: "kind:sample", Host: "candidate-host", Evidence: theirs.ID}); err != nil {
+	// Its own approval changes only its own list.
+	if _, err := q.AddParity(ParityRequest{Project: "other", Work: "kind:sample", Evidence: theirs.ID}); err != nil {
 		t.Fatal(err)
 	}
-	mine, _ := q.ProjectParityHosts("test")
-	if !slices.Equal(parityHostNames(mine.Hosts["kind:sample"]), []string{"reference-host"}) {
+	mine, _ := q.ProjectParity("test")
+	if !slices.Equal(kindLabels(mine.Kinds["kind:sample"]), []string{"otheros/amd64/fake"}) {
 		t.Fatalf("another project's write changed this project's list: %+v", mine)
 	}
-	if _, err := q.RemoveParityHost(ParityHostRequest{Project: "other", Work: "kind:sample", Host: "reference-host"}); err == nil {
-		t.Fatal("another project removed a host from a list it does not own")
+	if _, err := q.RemoveParity(ParityRequest{Project: "other", Work: "kind:sample", Kind: "otheros/amd64/fake"}); err == nil {
+		t.Fatal("another project removed a kind from a list it does not own")
 	}
 	production := placementSpec(false)
 	production.Priority = "production"
 	submit(t, q, production)
-	if assigned := check(t, q, candidate, nil).Job; assigned != nil {
+	if assigned := check(t, q, sameKind, nil).Job; assigned != nil {
 		t.Fatal("this project's production followed another project's list", assigned.ID)
 	}
 }
 
-// Previous-release state keeps its policy lists; the first open copies them
-// to the project store, and the policy field becomes a read-only mirror.
-func TestProjectParityMigratesAndPolicyFieldIsReadOnly(t *testing.T) {
-	q, c := fixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{"approved-host": {}, "other-host": {}}); err != nil {
+// Previous-release state names hosts. The first open converts each to its
+// host's kinds without dropping one (a host that has not reported its kind
+// stays approved by name until it checks in), keeps the host-form store and
+// policy field as read-only rollback mirrors, and never converts again.
+func TestHostApprovalsMigrateToKindsWithoutLoss(t *testing.T) {
+	q, clock, reference, sameKind, otherKind := parityFixture(t)
+	if err := q.ConfigureHosts(map[string]HostPolicy{"reference-host": {}, "late-host": {}}); err != nil {
 		t.Fatal(err)
 	}
+	evidence := runComparison(t, q, clock, "test", reference, true)
 	if err := q.update(func() error {
-		q.s.ProjectParity = nil
-		q.s.Policies = map[string]ProjectPolicy{"test": {Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"approved-host"}}}}
+		q.s.ParityKinds = nil
+		q.s.ProjectParity = &projectParityStore{Projects: map[string]map[string][]ParityHost{"test": {
+			"kind:sample":           {{Host: "reference-host", Evidence: ParityEvidence{Job: evidence.ID, Attempt: 1}}, {Host: "late-host"}},
+			"program:sample-script": {},
+		}}}
+		q.s.Policies = map[string]ProjectPolicy{"test": {Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"reference-host", "late-host"}, "program:sample-script": {}}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -198,39 +281,63 @@ func TestProjectParityMigratesAndPolicyFieldIsReadOnly(t *testing.T) {
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
-	q, err := Open(path, root, c)
+	q, err := Open(path, root, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	got, _ := q.ProjectParityHosts("test")
-	if hosts := got.Hosts["kind:sample"]; len(hosts) != 1 || hosts[0].Host != "approved-host" || !hosts[0].Evidence.Migrated {
-		t.Fatalf("policy list not copied to the project store: %+v", got)
+	kind := targetLabel(machineTarget(&reference))
+	got, _ := q.ProjectParity("test")
+	approvals := got.Kinds["kind:sample"]
+	if !slices.Equal(kindLabels(approvals), []string{"pending conversion of a host approval", runtime.GOOS + "/" + runtime.GOARCH + "/cpu", kind}) && !slices.Equal(kindLabels(approvals), []string{runtime.GOOS + "/" + runtime.GOARCH + "/cpu", kind, "pending conversion of a host approval"}) {
+		t.Fatalf("host approvals not converted to kinds: %+v", approvals)
 	}
+	for _, a := range approvals {
+		if !a.Evidence.Migrated || a.PendingHost == "" && (a.MigratedFrom != "reference-host" || a.Evidence.Job != evidence.ID) || a.PendingHost != "" && a.PendingHost != "late-host" {
+			t.Fatalf("conversion lost its source or evidence: %+v", a)
+		}
+	}
+	if list, ok := got.Kinds["program:sample-script"]; !ok || len(list) != 0 || len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "waiting for its host to report its machine kind") {
+		t.Fatalf("explicit empty list or pending warning lost: %+v", got)
+	}
+	// The rollback mirrors now list every host the kinds admit.
+	mirror := []string{"late-host", "reference-host", "same-kind-host"}
+	if !slices.Equal(parityHostNames(q.s.ProjectParity.Projects["test"]["kind:sample"]), mirror) || !slices.Equal(q.PriorityPolicy().Policy.Projects["test"].ProductionParityHosts["kind:sample"], mirror) {
+		t.Fatalf("rollback mirrors: %+v %+v", q.s.ProjectParity.Projects["test"], q.PriorityPolicy().Policy.Projects["test"])
+	}
+	// Production runs on the converted kind's other host, not another kind.
+	production := placementSpec(false)
+	production.Priority = "production"
+	queued := submit(t, q, production)
+	if assigned := check(t, q, otherKind, nil).Job; assigned != nil {
+		t.Fatal("migration admitted another kind", assigned.ID)
+	}
+	if assigned := check(t, q, sameKind, nil).Job; assigned == nil || assigned.ID != queued.ID {
+		t.Fatal("migrated approval did not admit a host of the same kind", assigned)
+	}
+	// The late host keeps its approval by name until it reports its kind,
+	// then converts at check-in.
+	late := otherKind
+	late.ID, late.HostID = "late", "late-host"
+	check(t, q, late, nil)
+	got, _ = q.ProjectParity("test")
+	if labels := kindLabels(got.Kinds["kind:sample"]); slices.Contains(labels, "pending conversion of a host approval") || !slices.Contains(labels, targetLabel(machineTarget(&late))) || len(got.Warnings) != 0 {
+		t.Fatalf("pending host approval not converted at check-in: %+v", got)
+	}
+	// The policy field is read-only: the export is accepted, a change refused.
 	record := q.PriorityPolicy()
 	if _, err := q.SetPriorityPolicy(record.Revision, record.Policy); err != nil {
 		t.Fatal("unchanged export refused:", err)
 	}
 	record = q.PriorityPolicy()
-	record.Policy.Projects["test"] = ProjectPolicy{Weight: 2}
-	if record, err = q.SetPriorityPolicy(record.Revision, record.Policy); err != nil {
-		t.Fatal("omitted field refused:", err)
-	}
-	if !slices.Equal(record.Policy.Projects["test"].ProductionParityHosts["kind:sample"], []string{"approved-host"}) {
-		t.Fatalf("omitting the read-only field dropped the project list: %+v", record.Policy.Projects["test"])
-	}
-	record.Policy.Projects["test"].ProductionParityHosts["kind:sample"] = []string{"other-host"}
+	record.Policy.Projects["test"].ProductionParityHosts["kind:sample"] = []string{"reference-host"}
 	var refusal *HTTPError
-	if _, err := q.SetPriorityPolicy(record.Revision, record.Policy); !errors.As(err, &refusal) || refusal.Code != "parity_hosts_project_owned" || !strings.Contains(refusal.Message, "myce parity add --project test") {
-		t.Fatalf("policy edit of a project list accepted or unclear: %v", err)
+	if _, err := q.SetPriorityPolicy(record.Revision, record.Policy); !errors.As(err, &refusal) || refusal.Code != "parity_hosts_project_owned" || !strings.Contains(refusal.Message, "machine kinds") {
+		t.Fatalf("policy edit of project approvals accepted or unclear: %v", err)
 	}
-	if got, _ := q.ProjectParityHosts("test"); !slices.Equal(parityHostNames(got.Hosts["kind:sample"]), []string{"approved-host"}) {
-		t.Fatalf("exported slices or a refused set changed the live list: %+v", got)
-	}
-	// Reopening never re-copies the policy field over the project store.
+	// Reopening never converts the host form again over the kind store.
 	if err := q.update(func() error {
-		policies := map[string]ProjectPolicy{"test": {Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"other-host"}}}}
-		q.s.Policies = policies
+		q.s.ProjectParity = &projectParityStore{Projects: map[string]map[string][]ParityHost{"test": {"kind:sample": {}}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -238,11 +345,45 @@ func TestProjectParityMigratesAndPolicyFieldIsReadOnly(t *testing.T) {
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if q, err = Open(path, root, c); err != nil {
+	if q, err = Open(path, root, clock); err != nil {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if got, _ := q.ProjectParityHosts("test"); !slices.Equal(parityHostNames(got.Hosts["kind:sample"]), []string{"approved-host"}) {
-		t.Fatalf("reopen re-copied the policy field: %+v", got)
+	if got, _ := q.ProjectParity("test"); len(got.Kinds["kind:sample"]) != 4 {
+		t.Fatalf("reopen converted the host form again: %+v", got)
+	}
+}
+
+// A previous-release client names a host: the queue approves that host's
+// kind from the evidence and warns (MY-42).
+func TestHostNamedParityRequestIsConvertedWithWarning(t *testing.T) {
+	q, clock, reference, sameKind, _ := parityFixture(t)
+	evidence := runComparison(t, q, clock, "test", reference, true)
+	_, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Host: "same-kind-host", Evidence: evidence.ID})
+	parityRefusal(t, err, "ran on host reference-host, not same-kind-host")
+	got, err := q.AddParity(ParityRequest{Project: "test", Work: "kind:sample", Host: "reference-host", Evidence: evidence.ID})
+	kind := targetLabel(machineTarget(&reference))
+	if err != nil || !slices.Equal(kindLabels(got.Kinds["kind:sample"]), []string{kind}) || len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "converted to machine kind "+kind) {
+		t.Fatalf("host-named request not converted with a warning: %+v %v", got, err)
+	}
+	if got, err = q.RemoveParity(ParityRequest{Project: "test", Work: "kind:sample", Host: hostID(&sameKind)}); err != nil || len(got.Kinds["kind:sample"]) != 0 || len(got.Warnings) != 1 {
+		t.Fatalf("host-named removal: %+v %v", got, err)
+	}
+}
+
+func TestParseMachineKind(t *testing.T) {
+	for text, want := range map[string]string{
+		"cuda": "*/*/cuda", "mac": "darwin/*/*", "linux,x86": "linux/amd64/*", "arm,mlx": "*/arm64/metal",
+		"linux/amd64/cuda": "linux/amd64/cuda", "*/aarch64/*": "*/arm64/*", " Darwin/ARM64/Metal ": "darwin/arm64/metal",
+	} {
+		k, err := ParseMachineKind(text)
+		if err != nil || k.String() != want {
+			t.Errorf("%q: got %v %v, want %s", text, k, err, want)
+		}
+	}
+	for _, text := range []string{"", "*/*/*", "linux,mac", "a/b", "cu da"} {
+		if _, err := ParseMachineKind(text); err == nil {
+			t.Errorf("%q accepted", text)
+		}
 	}
 }

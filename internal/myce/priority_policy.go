@@ -251,6 +251,11 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 		p.Hosts = hosts
 	}
 	warnings, _ := p.validate()
+	for _, name := range slices.Sorted(maps.Keys(p.Projects)) {
+		if p.Projects[name].ProductionParityHosts != nil {
+			warnings = append(warnings, "projects."+name+".production_parity_hosts is a read-only host mirror of the project's machine-kind production approvals for rollback (MY-51, MY-42) and is removed next release; use myce parity list|add|remove")
+		}
+	}
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }
 func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestContexts ...context.Context) (PriorityPolicyRecord, error) {
@@ -309,7 +314,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		if expected != q.policyRevision() {
 			return ErrPolicyRevision
 		}
-		q.migrateProjectParity()
+		q.migrateParityKinds()
 		for name, v := range projects {
 			if err := q.checkPolicyParityUnchanged(name, v.ProductionParityHosts); err != nil {
 				return err

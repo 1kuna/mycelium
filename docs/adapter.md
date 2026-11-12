@@ -235,10 +235,11 @@ declared-but-unqualified targets and unknown inventory are separate. Re-run the
 live report after requirements or inventory change. Status and job GET expose
 `variant_eligibility` per host/device and conditional `variant_advice` for scarce
 capacity; [status](status.md#variant-eligibility-499) explains the fields.
-New multi-variant registrations require the candidate host on the project's own
-`production_parity_hosts` list for that work before production placement. First
-compare outputs with the reference within the project's accuracy criteria
-(MY-19), then `myce parity add ... --evidence JOB_ID`; native baselines alone are
+New multi-variant registrations require the candidate's kind of machine
+(OS/arch/platform) among the project's own approved kinds for that work before
+production placement (MY-51). First compare outputs with the reference within
+the project's accuracy criteria (MY-19) on a machine of that kind, then
+`myce parity add ... --evidence JOB_ID`; native baselines alone are
 insufficient. Checks/experiments and historical registrations
 retain their contracts. Per-metric parity design remains #145.
 
@@ -865,8 +866,8 @@ memory-admitted description bundle. A smoke check alone never supplies native qu
 
 Jobs declare software requirements; Mycelium selects the host and device.
 Author every feasible platform variant with its own locks and native checks.
-Reserve host/device pins for specific hardware, approved production parity or
-qualification; see the [placement contract](scheduling.md#declare-requirements-let-mycelium-place).
+Reserve host/device pins for specific hardware or qualification; production
+approval names kinds of machine and needs no pin; see the [placement contract](scheduling.md#declare-requirements-let-mycelium-place).
 
 New registrations default to the native sandbox. At the top level of
 `extension.yaml`, `isolation: unsandboxed` plus a required nonempty `reason`

@@ -109,7 +109,11 @@ type state struct {
 	UsageMaintenance time.Time                    `json:"usage_maintenance,omitempty"`
 	ProductionStarts []ProductionStart            `json:"production_starts,omitempty"`
 	Policies         map[string]ProjectPolicy     `json:"project_policies,omitempty"`
-	// Project-owned production parity hosts (#1341); nil until copied from Policies.
+	// Project-owned production approvals by machine kind (MY-51, #1503); nil
+	// until converted from the host form below.
+	ParityKinds *parityKindStore `json:"parity_kinds,omitempty"`
+	// Host-form mirror of ParityKinds for a rollback to the previous release
+	// (#1341, MY-42); removed next release.
 	ProjectParity    *projectParityStore  `json:"project_parity,omitempty"`
 	FairUsageVersion int                  `json:"fair_usage_version,omitempty"`
 	FairUsage        map[string]FairUsage `json:"fair_usage,omitempty"`
@@ -427,7 +431,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}
 	}
 	if err = q.update(func() error {
-		q.migrateProjectParity()
+		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
 		return nil
@@ -1746,6 +1750,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		q.touchMachine(m.ID)
 		q.s.Machines[m.ID] = &m
+		q.convertPendingParity()
 		if old != nil && (old.Gone || q.unreported[m.ID] || q.networkQuiet || !q.s.NetworkRecoveryAt.IsZero() && old.LastSeen.Before(q.s.NetworkRecoveryAt)) {
 			q.discontinueContactCadence(m.ID)
 		}

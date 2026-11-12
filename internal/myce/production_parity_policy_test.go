@@ -72,7 +72,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			for _, row := range got.VariantEligibility {
 				if row.Host == hostID(&b) && row.Variant == machineTarget(&b) {
 					found = true
-					if !row.Qualified || row.Eligible || !strings.Contains(strings.Join(row.Reasons, ";"), "held: host not in production parity list") {
+					if !row.Qualified || row.Eligible || !strings.Contains(strings.Join(row.Reasons, ";"), "is not a machine kind the project approved") {
 						t.Fatalf("unapproved variant status: %+v", row)
 					}
 				}
@@ -148,7 +148,7 @@ func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Reason, "held: host not in production parity list") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "consumer" {
+	if !strings.Contains(got.Reason, "is not a machine kind the project approved") || len(got.VariantEligibility) != 0 || got.Hold == nil || got.Hold.Kind != productionParityHostHold || got.Hold.Owner != "consumer" {
 		t.Fatalf("legacy parity-only hold is not actionable: reason=%q blocker=%+v", got.Reason, got.Hold)
 	}
 	setParityHosts(t, q, "test", spec.workType(), hostID(&m))

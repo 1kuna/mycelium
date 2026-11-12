@@ -95,8 +95,12 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 			return
 		}
 		if (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil {
-			if hosts, configured := q.parityHostList(j.Spec.Project, j.Spec.workType()); configured {
-				blocker.Detail += fmt.Sprintf("; the project's production_parity_hosts list approves %d physical hosts for this work; Mycelium selects within that list without a job host pin; the project widens it with myce parity add after a passing output comparison", len(placementStrings(hosts)))
+			if approvals, configured := q.parityApprovals(j.Spec.Project, j.Spec.workType()); configured {
+				labels := []string{}
+				for _, a := range approvals {
+					labels = append(labels, a.label())
+				}
+				blocker.Detail += fmt.Sprintf("; the project approves %d machine kinds for this work's production (%s); Mycelium places it on any host of those kinds without a job host pin; the project approves another kind with myce parity add after a passing output comparison", len(approvals), strings.Join(labels, ", "))
 			}
 		}
 		blocker.RunsNowOn = q.portableRoomNow(j, compatibleHosts, func(visit func(targetFit, *Job, *Machine)) {

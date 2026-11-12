@@ -171,7 +171,7 @@ don't find out by losing work.
 | `deadline` | Work with a real owner-set date (`--class deadline --deadline RFC3339`) | Ahead of experiments; stops only resumable experiment work |
 | `experiment` (default) | Everything else: CI, research, sweeps, previews | Production can stop it at any time and requeue it; non-resumable work restarts from scratch |
 
-To let production run on another host, your project adds it itself after a passing output-comparison check or experiment there: `myce parity add --project P --work WORK --host HOST --evidence JOB_ID` (no queue-owner edit; [details](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md)).
+Production approval names a kind of machine, never a host (MY-51). To let production run on another kind, your project approves it itself after a passing output-comparison check or experiment on a machine of that kind (declare its needs; don't pin a host): `myce parity add --project P --work WORK --evidence JOB_ID` approves the kind it ran as; add `--kind cuda` (or `mac`, `linux,x86`, `linux/amd64/cuda`) for a broader kind it ran as. Every host of an approved kind may then run that production. `myce parity list --project P` shows your kinds; `myce parity remove ... --kind KIND` withdraws one ([details](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md)).
 
 Equal tiers never preempt each other. Within a tier the queue goes by
 readiness, deadline and age, with no ordering hint, so order your own work with

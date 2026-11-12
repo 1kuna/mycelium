@@ -7,9 +7,11 @@ import (
 	"strings"
 )
 
-const variantParityAction = "MY-19 production parity approval required: compare this variant's outputs with the reference within the project's accuracy criteria in a check or experiment on this physical host, then add the host to the project's production_parity_hosts with myce parity add --project PROJECT --work WORK --host HOST --evidence JOB_ID; native qualification alone is not cross-variant parity"
+const variantParityAction = "MY-19 production parity approval required: compare this variant's outputs with the reference within the project's accuracy criteria in a check or experiment on a machine of this kind, then approve the kind with myce parity add --project PROJECT --work WORK --evidence JOB_ID; native qualification alone is not cross-variant parity"
 
-const productionParityHostHold = "production_parity_hosts"
+// The hold kind for production outside the project's approved machine kinds.
+// Previous releases called it production_parity_hosts.
+const productionParityHostHold = "production_parity_kind"
 
 // Existing portability projection supplies registration warnings; registering
 // an implementation neither executes it nor proves hard requirements/parity.
@@ -48,13 +50,6 @@ func (q *Queue) extensionRegistrationWarnings(e Extension, contexts ...context.C
 	return portabilityWarnings(report)
 }
 
-// An explicit owner list constrains every production placement, including
-// historical registrations and variants with measured quality evidence.
-func (q *Queue) productionParityHostAllowed(j *Job, host string) bool {
-	hosts, configured := q.parityHostList(j.Spec.Project, j.Spec.workType())
-	return !configured || slices.Contains(hosts, host)
-}
-
 // Registration metadata is server-owned and frozen with accepted jobs. Older
 // registrations retain their admission contract subject to live owner policy.
 func (q *Queue) variantParityReason(j *Job, m *Machine) string {
@@ -66,10 +61,9 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 	}
 	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
 	if q.parityHostListHolds(j, m) {
-		return productionParityHostHold + ": held: host not in production parity list; " + variantParityAction
+		return productionParityHostHold + ": held: " + targetLabel(jobTargetOn(j, m)) + " is not a machine kind the project approved for production; " + variantParityAction
 	}
-	hosts, _ := q.parityHostList(j.Spec.Project, j.Spec.workType())
-	approved := slices.Contains(hosts, hostID(m))
+	approved, _ := q.parityApproved(j, m)
 	reason := ""
 	for _, e := range j.Extensions {
 		if !e.matchesTarget(m) || (j.State == "running" || j.State == "stopping") && j.Extension != nil && j.Extension.Digest != e.Digest {
@@ -107,7 +101,7 @@ func jobHasVariants(j *Job) bool {
 // the wait both read this one decision.
 func (q *Queue) parityHostListHolds(j *Job, m *Machine) bool {
 	production := j.Spec.Priority == "production" || jobClass(j.Spec) == "production"
-	return !q.commandDiscoveryProduction(j) && j.Spec.ExtensionCheck == nil && production && !q.productionParityHostAllowed(j, hostID(m))
+	return !q.commandDiscoveryProduction(j) && j.Spec.ExtensionCheck == nil && production && !q.productionParityAllowed(j, m)
 }
 
 // Variant parity that holds this job on every qualified host, from the first
@@ -116,7 +110,7 @@ func (q *Queue) variantParityWait(j *Job) *Hold {
 	if q.commandDiscoveryProduction(j) {
 		return newHold("production_parity", commandDiscoveryParityAction)
 	}
-	_, hasPolicy := q.parityHostList(j.Spec.Project, j.Spec.workType())
+	_, hasPolicy := q.parityApprovals(j.Spec.Project, j.Spec.workType())
 	if !jobHasVariants(j) && !hasPolicy {
 		return nil
 	}

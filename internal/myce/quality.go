@@ -104,10 +104,10 @@ func (q *Queue) productionParityKnown(j *Job, m *Machine) bool {
 	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil {
 		return false
 	}
-	if !q.productionParityHostAllowed(j, hostID(m)) {
+	if !q.productionParityAllowed(j, m) {
 		return false
 	}
-	approved, _ := q.parityHostList(j.Spec.Project, j.Spec.workType())
+	approved, _ := q.parityApproved(j, m)
 	for _, e := range j.Extensions {
 		copy := *j
 		copy.Extensions = []Extension{e}
@@ -115,7 +115,7 @@ func (q *Queue) productionParityKnown(j *Job, m *Machine) bool {
 			continue
 		}
 		measured, reason := variantQuality(e, j.Spec, m)
-		if reason == "" && (measured || slices.Contains(approved, hostID(m))) {
+		if reason == "" && (measured || approved) {
 			return true
 		}
 	}

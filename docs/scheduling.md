@@ -170,72 +170,114 @@ removed whole-machine form is refused.
 `queue --host-config` seeds host policy once; see
 [changing host policy](operations.md#change-live-project-policy).
 
-**Production parity hosts (project-owned).** Each project keeps its own `production_parity_hosts` list: for an exact work
-identity, the physical host IDs whose outputs the project has shown match its
-reference for that work (MY-19). The project edits the list with the same
+**Production approval by kind of machine (project-owned, MY-51).** Each project
+approves, for an exact work identity, the kinds of machine whose outputs it has
+shown match its reference for that work (MY-19). A kind names what the work
+needs or is compatible with, never a host: an OS, a CPU architecture and/or an
+accelerator platform. Every host of an approved kind may run that production,
+including hosts that join later. The project edits its approvals with the same
 authority it uses to submit (the fleet token and its project name). No queue
 policy edit is needed (MY-44, #1341), and a project's write never changes
-another project's list or the policy revision.
+another project's approvals or the policy revision.
 
-Lists default to empty. When an exact work key is present, its host list is a
+A kind is written either as words or as `os/arch/platform`:
+
+| Kind | Matches |
+| --- | --- |
+| `cuda` | any OS and architecture with a CUDA accelerator (`*/*/cuda`) |
+| `mac` | macOS on any architecture and platform (`darwin/*/*`) |
+| `linux,x86` | Linux on amd64, any platform (`linux/amd64/*`) |
+| `arm,metal` | arm64 with Apple Metal (`*/arm64/metal`; `mlx` and `mps` mean `metal`) |
+| `linux/amd64/cuda` | exactly that kind; `*` or an empty part matches anything |
+
+OS words are `linux`, `mac` (`darwin`, `macos`) and `windows`; architecture
+words are `x86` (`amd64`, `x86_64`) and `arm` (`arm64`, `aarch64`); any other
+word is a platform as workers report it (`cuda`, `xpu`, `metal`, `cpu`). A kind
+that matches every machine is refused. CPU-only work runs as platform `cpu`.
+
+Approvals default to none. When an exact work key is present, its kinds are a
 hard boundary for production placement: initial assignments, fan-out children
-and retargeting must stay within it. This applies to historical registrations and
-measured variants too. An explicitly empty host list admits no production host
-for that work. Execution qualification alone does not grant parity.
+and retargeting must run as an approved kind. This applies to historical
+registrations and measured variants too. An explicitly empty list admits no
+machine for that work. Execution qualification alone does not grant parity.
 
-To widen placement, first run a check or experiment of that work on the new host
-(for example pinned with `allowed_machines`) that compares outputs with your
-reference under your own criteria and succeeds only when they match. Then name
-that job as evidence:
+To approve a kind, first run a check or experiment of that work that compares
+outputs with your reference under your own criteria and succeeds only when they
+match. Declare its needs (for example `needs.platform`) so Mycelium places it on
+a machine of the kind you want; do not pin a host. Then name that job as
+evidence:
 
 ```sh
-myce parity add --project transcribe --work kind:asr --host worker-b --evidence JOB_ID
+myce parity add --project transcribe --work kind:asr --evidence JOB_ID              # the kind it ran as
+myce parity add --project transcribe --work kind:asr --kind cuda --evidence JOB_ID  # a broader kind it ran as
 myce parity list --project transcribe
-myce parity remove --project transcribe --work kind:asr --host worker-b
+myce parity remove --project transcribe --work kind:asr --kind cuda
 ```
 
-The queue accepts the addition only when the evidence job belongs to the same
+The queue accepts the approval only when the evidence job belongs to the same
 project, ran the same exact work identity as a check or experiment (not
-production), succeeded, and its accepted attempt ran on that physical host. The
-entry records the job, its attempt and the queue time it was added. Any other
-evidence is refused with `parity_evidence_required` and one next action. Removing
-a host needs no evidence; removing the last one leaves an empty list that admits
-no host. The HTTP routes are `GET /api/parity-hosts?project=P`,
-`POST /api/parity-hosts` and `POST /api/parity-hosts/remove`, with the body
-`{project, work, host, evidence}`.
+production), succeeded, and its accepted attempt ran as the approved kind.
+Without `--kind`, the exact kind it ran as (`os/arch/platform`) is approved; a
+named kind must match that run. The entry records the job, its attempt and the
+queue time it was added. Any other evidence is refused with
+`parity_evidence_required` and one next action. Removing a kind needs no
+evidence; removing the last one leaves an empty list that admits no machine.
+The HTTP routes are `GET /api/parity?project=P`, `POST /api/parity` and
+`POST /api/parity/remove`, with the body `{project, work, kind, evidence}`.
 
 Keys match the job's work identity: `kind:<kind>` for kind jobs,
 `program:<type>` for programs, or `extension:<name>` for extension-only jobs.
 Approval for `kind:asr` never approves separation or another work identity.
-Use exact physical host IDs from status or the configured host policy, rather
-than device worker IDs or globs; unknown hosts are rejected.
 Projects own the parity criteria and must revisit approval when their work or
-platform changes (remove the host, compare again, add it back). Mycelium does
-not infer parity from timing, measured quality or native checks.
+platform changes (remove the kind, compare again, approve it again). Mycelium
+does not infer parity from timing, measured quality or native checks.
 With one fleet token, the project name is the authority, as for submit and
 cancel: the queue refuses another project's evidence, which guards against
 mistakes, not against a hostile token holder.
 
-**Migration (MY-42).** On first open, a queue copies each project's old
-`projects.P.production_parity_hosts` policy field into the project list, marked
-`evidence.migrated`. A `--project-config` or dev config with that field seeds the
-project list the same way. In queue policy the field is now a read-only mirror:
-`myce policy get` shows it, and `myce policy set` accepts it unchanged or
-omitted but refuses a change with `parity_hosts_project_owned` and the
-`myce parity` command to use instead. The mirror keeps a rollback to the previous
-release enforcing the same lists for projects that have a policy entry.
-Replacing or clearing `projects` in queue policy leaves project lists in place.
-The next release removes the policy field.
+**A new host of an approved kind.** Agent default, not a maintainer ruling
+(MY-51 leaves this open; #1503): Mycelium adds no output comparison of its own
+for a new host of an approved kind. The check that runs there is the project's
+own declared one: work with a production approval is extension work, and every
+host runs that extension's declared native `check` against its baseline
+automatically, once per extension version, platform and environment, before any
+of that work, production included, is admitted there
+([native qualification](adapter.md)). A host whose check fails or has not run
+takes none of that work. Nothing further gates the kind approval.
 
-The project list also permits **new occupancy spillover**: a queued production job
+**Migration (MY-42).** The previous release approved hosts by name. On first
+open, a queue converts each host-named approval into the kinds that work runs as
+on that host (its CPU and each accelerator), keeping the approval's evidence,
+marked `evidence.migrated` with `migrated_from` naming the host. Every host the
+old list admitted is still admitted. A host that has not yet reported its OS and
+architecture stays approved by name (`pending_host`, with a warning in `myce
+parity list`) and is converted when it checks in. A `--project-config` or dev
+config that still sets `production_parity_hosts` is accepted, converted the same
+way and logged as a warning; a previous-release client that sends `host` to
+`myce parity add` or `remove` (or to the old `/api/parity-hosts` routes) is
+converted with a warning in the reply. Conversion can widen production to
+other hosts of the same kind, which is the point of MY-51; a project that does
+not want one of its converted kinds removes it with `myce parity remove --kind`.
+
+For one release the queue also keeps two read-only host mirrors so a rollback to
+the previous release enforces the hosts the kinds admit at the last write: the
+host-form project store and the `projects.P.production_parity_hosts` policy
+field. `myce policy get` shows the field with a deprecation warning, and `myce
+policy set` accepts it unchanged or omitted but refuses a change with
+`parity_hosts_project_owned` and the `myce parity` command to use instead.
+Approvals written while rolled back are not carried forward on the next
+upgrade; repeat them. The next release removes the mirrors, the `host` request
+field and the `/api/parity-hosts` routes.
+
+The project's approvals also permit **new occupancy spillover**: a queued production job
 bound by a production hold can move when equal-or-higher production work blocks
 its RAM or device admission and an approved alternative can admit it immediately.
 The alternative must still pass placement, maintenance, freshness, memory,
 environment and exact frozen extension version/digest qualification checks.
 Running work keeps its attempt and host custody. Without an exact work entry,
 existing measured-parity and registration rules apply. Measurements never widen
-an explicit host list. Disk recovery obeys the same production boundary.
-Queued bindings to hosts removed from the list are cleared and placed again,
+an explicit approval list. Disk recovery obeys the same production boundary.
+Queued bindings to hosts no longer of an approved kind are cleared and placed again,
 including bindings saved by older releases or retained after holds are disabled.
 Preparation lookahead considers only parity-eligible production candidates on
 each host. Parity-held demand cannot withhold another project's preparation on

@@ -23,9 +23,10 @@ retrying an unchanged deterministic failure. See [diagnostics](https://github.co
 Placement coverage reasons differ from occupied capacity or environment
 preparation: `missing_extension` needs a registered implementation;
 `execution_coverage` needs a compatible variant; `native_qualification` waits
-while the queue runs the exact native check itself; `production_parity` or `production_parity_hosts` needs
-reference-output evidence and the stated owner. Detailed status also explains a
-single freshly observed compatible host and an owner's parity list size. These
+while the queue runs the exact native check itself; `production_parity` or `production_parity_kind` (formerly
+`production_parity_hosts`) needs reference-output evidence on a machine of a
+kind that can run it, then `myce parity add`. Detailed status also explains a
+single freshly observed compatible host and the project's approved kinds. These
 are coverage limits, not instructions to add a pin. Stale or missing inventory
 is unknown, not proof that hardware is unique.
 
@@ -186,7 +187,7 @@ queue order.
   absolute time). Waiting for capacity doesn't spend it; a stuck start fails
   visibly. Infrastructure interruptions requeue it at most twice; its own
   command failures and OOMs fail without retry. Production needs explicit
-  targets and any project parity host list.
+  targets and runs only on machine kinds the project approved for that work.
 - **Deadline** needs a real owner-set date (`--class deadline --deadline
   RFC3339`). It stops only resumable lower-tier work, with two minutes to save.
   The date orders work; it is not a completion guarantee.

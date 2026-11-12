@@ -1430,8 +1430,8 @@ whose running producer piece has a last accepted duration. The co-tenant charge 
 production envelope must fit the host ledger and live physical headroom. The
 envelope retains declared host/device floors and accepted measured peaks with
 the estimator's existing margins (at least 1.25), plus per-attempt slack. A bound
-production job recognizes alternatives only under the existing exact-work
-`production_parity_hosts` approval and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
+production job recognizes alternatives only under the project's exact-work
+machine-kind approval (MY-51) and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
 removes the demand. Envelopes that exceed the host's maximum physical admission
 capacity do not withhold co-tenants indefinitely. A dependent stage's expected
 arrival is the producer's last accepted duration less its elapsed time, and
@@ -2547,18 +2547,20 @@ Nonterminal native variant jobs expose
 - Assigned attempts say alternatives require requeue. Terminal jobs keep their
   historical placement receipt rather than projecting new alternatives.
 - A newly registered multi-variant production implementation requires the
-  candidate physical host on the project's own `production_parity_hosts` list
-  for that work. The reason explains reference-output comparison and
+  candidate's kind of machine among the project's own approved kinds for that
+  work (MY-51). The reason explains reference-output comparison and
   `myce parity add --evidence JOB_ID`. Checks/experiments can obtain evidence;
   historical registrations/replays and accepted jobs are kept.
 
-An explicit work parity list also constrains historical extensions without
-variants. When that list excludes every qualified candidate, status reports
-`production_parity_hosts: held: host not in production parity list` and the
-typed `hold.kind` is `production_parity_hosts`, owned by the consumer (the project).
-The action is reference-output comparison and explicit physical-host approval
-for that exact work. A queued binding to a removed host is cleared and placed
-again; running attempts retain their execution and release custody.
+An explicit work approval list also constrains historical extensions without
+variants. When it excludes every qualified candidate, status reports
+`production_parity_kind: held: OS/ARCH/PLATFORM is not a machine kind the project approved for production`
+and the typed `hold.kind` is `production_parity_kind` (called
+`production_parity_hosts` before MY-51), owned by the consumer (the project).
+The action is reference-output comparison on a machine of a kind that can run
+the work, then approving that kind for that exact work. A queued binding to a
+host no longer of an approved kind is cleared and placed again; running
+attempts retain their execution and release custody.
 
 `variant_advice` is conditional porting guidance when missing coverage could
 relieve current contention on a scarce host. It names the exact missing target,
@@ -2631,7 +2633,7 @@ root is unreachable), `device_fault_last_healthy`, `launch_capacity`,
 `helper_charge` (a launch refused with measured helper memory beyond the
 reservation), `checkpoint_target` (a resume waits for a host of the target
 that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage_root`,
-`production_parity_hosts`, `production_parity`, `no_matching_device`,
+`production_parity_kind`, `production_parity`, `no_matching_device`,
 `log_policy`, `project_cap`, `production_admission`, `unified_cuda_headroom`
 (a unified-memory host's headroom kept for expected production),
 `pinned_model`, `disk_headroom`,
@@ -2660,7 +2662,7 @@ Queue builds with placement coverage diagnostics distinguish `missing_extension`
 (register an implementation), `execution_coverage` (no compatible implementation
 on observed targets), `native_qualification` (a declared implementation needs its
 exact native check), and `production_parity` (reference-output parity required).
-An explicit owner host-list hold retains `production_parity_hosts`. Each names
+An explicit machine-kind approval hold is `production_parity_kind`. Each names
 the next owner/action rather than presenting the missing software or approval as
 ordinary capacity pressure. Extension coverage advice includes declared targets,
 without recipes or private paths. Stale compatible inventory remains unknown.
@@ -2679,8 +2681,9 @@ Detailed queued observations also explain when only one freshly observed
 physical host passes permanent requirements, deduplicating devices on a host.
 This is current coverage, not proof of a permanent hardware monopoly or a reason
 to pin a job. Authored host restrictions are not relabeled as observed uniqueness.
-Configured production parity lists report their distinct host count and that
-the project widens them with `myce parity add`, even while an approved target waits for capacity or preparation.
+Configured production approvals report their machine kinds and that the
+project approves another kind with `myce parity add`, even while an approved
+target waits for capacity or preparation.
 The existing small default status remains a lifecycle projection; use a job ID
 or explicit detailed sections for these diagnostics.
 
