@@ -21,6 +21,16 @@ idle retirement. Cooperative image handoff starts a replacement supervisor befor
 the previous supervisor retires. Dev/managed-attempt observers and supervisors
 remain in their owner's original cleanup group/session.
 
+From the release containing #919's handoff fix, a supervisor whose child is
+handing off to a newer image waits for that child to exit. It no longer treats
+the successor's status as its own child's silence. Through r6.14, every release
+handoff was misread as a stall. The old supervisor SIGKILLed the handing-off
+child, the successor's readiness write failed (`write ready: broken pipe`), and
+arms went unobserved until some keyed command started a new owner, from 5 s to
+9 min later. Unclassified read failures are now logged locally with the errno
+(`EHOSTUNREACH`, `ENETUNREACH`, `ETIMEDOUT`, and so on), `local_network_access`,
+`tls_identity`, or the Go error type, instead of a bare `io_error`.
+
 Each outstanding authority read is checked independently of peer progress.
 The initial read allowance is the batch protocol's 20-second maximum hold plus
 one second (RFC 6298 initial transport recovery period). Completed read cost

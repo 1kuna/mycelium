@@ -92,6 +92,14 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		if unsupported != "" {
 			return fmt.Errorf("--%s is not supported with a profile or adapter", unsupported)
 		}
+		notifyGiven := false
+		f.Visit(func(v *flag.Flag) { notifyGiven = notifyGiven || v.Name == "notify" })
+		// A submit that does not wait here wakes its submitter on completion by
+		// default (MY-52); `--notify=` opts out. A foreground --wait already
+		// returns the result, so it adds no second wake.
+		if !notifyGiven && *notify == "" && !waitMode {
+			*notify = harnessWakeDefault
+		}
 		submit := func(receipt io.Writer) error {
 			if *profile == "" {
 				return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, receipt, errOut, overrides)

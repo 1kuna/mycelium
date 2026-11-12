@@ -23,6 +23,9 @@ func profileNotifier(ctx context.Context, path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
+	if isHarnessWake(path) {
+		return path, checkHarnessWake(path, notifierEnvironment())
+	}
 	resolved, err := resolveProfileNotifier(path)
 	if err != nil {
 		return "", err
@@ -58,6 +61,12 @@ func notifierEnvironment() []string {
 }
 
 func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg profileObserver, token string, errOut io.Writer) error {
+	// An omitted notifier inherits a saved binding exactly as before; only an
+	// unbound arm takes the caller's own harness wake.
+	defaultWake := cfg.Notify == harnessWakeDefault
+	if defaultWake {
+		cfg.Notify = ""
+	}
 	lock, err := profileLock(filepath.Join(dir, "watch.lock"))
 	if err != nil {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
@@ -79,8 +88,11 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		// by the same executable resolution used when arming, without running
 		// --check on a hook this observer will never use.
 		if cfg.Notify != "" {
-			resolved, err := exec.LookPath(cfg.Notify)
-			if err == nil {
+			resolved, err := cfg.Notify, error(nil)
+			if !isHarnessWake(resolved) {
+				resolved, err = exec.LookPath(cfg.Notify)
+			}
+			if err == nil && !isHarnessWake(resolved) {
 				resolved, err = filepath.Abs(resolved)
 			}
 			if err != nil || resolved != saved.Notify {
@@ -112,6 +124,12 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	}
 	if cfg.Notify == "" && (r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled") {
 		return nil
+	}
+	if defaultWake && cfg.Notify == "" {
+		cfg.Notify = detectHarnessWake(notifierEnvironment())
+		if cfg.Notify == "" {
+			fmt.Fprintf(errOut, "wake: this shell exports no wake channel; to be woken when job %s finishes, run `myce wait %s` once as a background task (its exit wakes you)\n", r.JobID, r.JobID)
+		}
 	}
 	cfg.Notify, err = profileNotifier(ctx, cfg.Notify)
 	if err != nil {
@@ -247,13 +265,19 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 		// delivery deadlines/retries and gets no fleet token or diagnostic text.
 		deliveryCtx, cancel := context.WithTimeout(context.Background(), observerNotifierBudget)
 		defer cancel()
-		cmd := exec.CommandContext(deliveryCtx, cfg.Notify)
-		cmd.Stdin = strings.NewReader(string(b))
-		cmd.Env = notifierEnvironment()
+		env := notifierEnvironment()
 		if len(notifyEnv) > 0 && notifyEnv[0] != nil {
-			cmd.Env = notifyEnv[0]
+			env = notifyEnv[0]
 		}
-		deliveryErr := cmd.Run()
+		var deliveryErr error
+		if isHarnessWake(cfg.Notify) {
+			deliveryErr = deliverHarnessWake(deliveryCtx, cfg.Notify, env, notification)
+		} else {
+			cmd := exec.CommandContext(deliveryCtx, cfg.Notify)
+			cmd.Stdin = strings.NewReader(string(b))
+			cmd.Env = env
+			deliveryErr = cmd.Run()
+		}
 		r.PendingNotification = nil
 		r.DeliveryStatus = "delivered"
 		if deliveryErr != nil {

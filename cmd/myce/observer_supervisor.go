@@ -278,6 +278,18 @@ func runObserverSupervisor(ctx context.Context, root string, lifetime *os.File, 
 				}
 			}
 			_ = readProfileJSON(filepath.Join(root, "observer.status"), &diagnostic)
+			// A cooperative image handoff starts a successor, which writes this
+			// status before the handing-off child exits. The successor's status is
+			// not this child's silence. Killing the child mid-handoff broke the
+			// successor's readiness pipe, so it exited and left every arm
+			// unobserved until some keyed command restarted one (#919). The
+			// successor's own supervisor watches it; this child only has to exit.
+			if diagnostic.PID != state.ChildPID && diagnostic.StartedAt.After(started) {
+				if err := pause(ctx, observerRecoveryPeriod); err != nil {
+					return err
+				}
+				continue
+			}
 			// Completed operation cost includes protocol hold and transport/queue
 			// service. Two measured periods admit its repeat and one missed completion.
 			state.Window = max(state.Window, doubleObserverDuration(diagnostic.LastReadDuration))

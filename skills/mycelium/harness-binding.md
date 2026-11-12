@@ -17,7 +17,14 @@ exposes Claude's `PreToolUse` event or JSON response schema. If it does not, exp
 a wrapper/tool invoking this same CLI and record shell bypass as unsupported
 coverage. No global configuration is installed by this change.
 
-For T3, create/reuse an owning-thread webhook schedule and store its receiver
+Default wake: `myce run` without `--wait` and without a notifier wakes its
+submitter once on completion through the harness's own wake channel, when the
+shell exports one (T3: see [T3 binding](t3-binding.md)). A harness joins by
+exporting a channel Mycelium recognises (`harnessWakes` in `cmd/myce`). Without
+one, the agent holds a single background `myce wait JOB_ID`, whose exit is the
+wake that the harness already delivers. It never polls with repeated short waits.
+
+For a manual T3 receiver, create/reuse an owning-thread webhook schedule and store its receiver
 binding privately. Configure replay deduplication with `{{body.delivery_id}}`.
 A local notifier's `--check` validates that private binding; its normal invocation
 posts stdin JSON to it. The receiver wakes the owning task, deduplicates delivery

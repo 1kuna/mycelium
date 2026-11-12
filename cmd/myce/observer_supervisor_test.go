@@ -157,6 +157,71 @@ func TestObserverSupervisorRecovery(t *testing.T) {
 	}
 }
 
+// #919 on r6.10–r6.14: at every release handoff the old supervisor read the
+// successor's status, called it a stall and SIGKILLed the handing-off child.
+// The successor's readiness write then failed ("write ready: broken pipe"),
+// it exited, and arms went unobserved until a keyed command restarted one.
+func TestObserverSupervisorHandoffSuccessor(t *testing.T) {
+	root := t.TempDir()
+	clock := &waitClock{now: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}
+	lock, err := profileLock(filepath.Join(root, "observer.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err = os.WriteFile(filepath.Join(root, "arm.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	exit := make(chan error, 1)
+	launches, kills, pauses := 0, 0, 0
+	launch := func() (*supervisedObserverProcess, error) {
+		launches++
+		ready := make(chan error, 1)
+		ready <- nil
+		status := observerDiagnostic{PID: 101, StartedAt: clock.Now(), CapturedAt: clock.Now(), Phase: "observing", Registrations: 1}
+		if err := saveAtomicProfileJSON(filepath.Join(root, "observer.status"), status, false); err != nil {
+			t.Fatal(err)
+		}
+		return &supervisedObserverProcess{pid: 101, ready: ready, exited: exit, kill: func() error {
+			kills++
+			select {
+			case exit <- errors.New("signal: killed"):
+			default:
+			}
+			return nil
+		}}, nil
+	}
+	pause := func(ctx context.Context, d time.Duration) error {
+		pauses++
+		clock.advance(d)
+		switch pauses {
+		case 3:
+			// Hours later, the child starts a newer image. The successor's first
+			// status lands while the child waits for its readiness byte.
+			clock.advance(6 * time.Hour)
+			successor := observerDiagnostic{PID: 202, StartedAt: clock.Now(), CapturedAt: clock.Now(), Phase: "observing", Registrations: 1,
+				Readers: map[uint64]observerReadDiagnostic{1: {Phase: "batch_read", Jobs: 1, StartedAt: clock.Now(), CapturedAt: clock.Now()}}}
+			if err := saveAtomicProfileJSON(filepath.Join(root, "observer.status"), successor, false); err != nil {
+				t.Fatal(err)
+			}
+		case 8:
+			exit <- nil // Readiness acknowledged; the handing-off child exits.
+		case 1000:
+			return errors.New("supervisor never released a handed-off child")
+		}
+		return nil
+	}
+	if err = runObserverSupervisor(context.Background(), root, lock, clock, pause, func() error { return nil }, launch); err != nil {
+		t.Fatal(err)
+	}
+	if kills != 0 || launches != 1 {
+		t.Fatalf("handoff treated as a stall: kills=%d launches=%d", kills, launches)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "observer.log")); strings.Contains(string(data), `"reason":"stalled"`) {
+		t.Fatal("handoff recorded as a stalled recovery")
+	}
+}
+
 func TestObserverSupervisorAdaptiveWindow(t *testing.T) {
 	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	state := observerSupervision{ChildPID: 5, Window: 2 * time.Minute}
