@@ -228,11 +228,16 @@ func adapterDogfoodDev(t *testing.T, gpu string) (*myce.Dev, context.Context, st
 			t.Error(err)
 		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+	// One budget covers the whole journey: two real uv environments, their
+	// extension checks and the jobs. It ran 65-70 s alone on a loaded Mac and
+	// timed out under full-gate load (#1468); this bounds a hang, not speed (#1224).
+	ctx, cancel := context.WithTimeout(context.Background(), adapterDogfoodTimeout)
 	t.Cleanup(cancel)
 	wait(t, ctx, func() bool { s, err := status(ctx, d.Client()); return err == nil && len(s.Machines) == 1 })
 	return d, ctx, state
 }
+
+const adapterDogfoodTimeout = 3 * time.Minute
 
 func adapterDogfoodRun(t *testing.T, ctx context.Context, d *myce.Dev, binary, root string, args ...string) *myce.Job {
 	t.Helper()
