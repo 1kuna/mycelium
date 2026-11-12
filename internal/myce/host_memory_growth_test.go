@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -386,6 +387,64 @@ func TestHostMemoryDeclaredGrowthBoundedByHardContainment(t *testing.T) {
 			w.HostMemorySource = func(context.Context) (float64, error) { return .5, nil }
 			if err := localAttemptAdmission(w, []Job{*first, *second}, *job(t, q, next.ID), nil); err == nil {
 				t.Fatal("bound bypassed stale samples and physical pressure")
+			}
+		})
+	}
+}
+
+// #1487: on a cgroup v2 worker a GPU attempt runs under memory.max at its host
+// envelope, and its host forecast is read from that cgroup. A startup burst
+// forecast past the envelope was bounded only by physical RAM, so one card's
+// job was charged the whole host and the idle second card was withheld.
+func TestHostMemoryGPUGrowthBoundedByAttemptCeiling(t *testing.T) {
+	for _, enforced := range []bool{true, false} {
+		t.Run(fmt.Sprint(enforced), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := m3Machine()
+			m.GPU, m.CapabilityProfile.Accelerators[0].Type = "xpu", "xpu"
+			for i := range m.Devices {
+				m.Devices[i].Platform = "xpu"
+			}
+			m.CapabilityProfile.SystemMemoryBytes = 31 << 30
+			m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 18
+			if enforced {
+				m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+			}
+			s := spec("experiment")
+			s.Needs.MemoryGB, s.Needs.HostMemoryGB = 6, 7
+			submit(t, q, s)
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil || !slices.Equal(first.AllocatedDevices, []string{"0"}) {
+				t.Fatal("first card holder missing", first)
+			}
+			clock.Advance(time.Second)
+			busy := m
+			busy.Devices = slices.Clone(m.Devices)
+			busy.Devices[0].FreeMemoryGB -= 6
+			device := 6.0
+			// Loading: 3.3 GiB resident, and the sampled rate predicts 28 GiB more.
+			reports := []AttemptReport{{Execution: Execution{ID: first.ID, Attempt: first.Attempt}, Session: first.Session, Started: true,
+				CurrentHostMemory: &CurrentHostMemory{SampleID: 1, NonreclaimableGB: 3.3, GrowthGB: 28, GrowthObserved: true, DeviceGB: &device}}}
+			if _, err := q.Checkin(Checkin{Machine: busy, AttemptProtocol: keyedAttemptProtocol, Attempts: reports, period: time.Second}); err != nil {
+				t.Fatal(err)
+			}
+			if charge := q.hostJobCharge(job(t, q, first.ID)); enforced != (charge == 7) {
+				t.Fatalf("charge %g GiB, containment=%v", charge, enforced)
+			}
+			next := submit(t, q, s)
+			w := Worker{Machine: busy, Clock: clock, hostMemorySamples: currentHostMemorySamples(reports, clock.Now()), HostMemorySource: func(context.Context) (float64, error) { return busy.HostAvailableMemoryGB, nil }}
+			onCard1 := *job(t, q, next.ID)
+			onCard1.AllocatedDevices = []string{"1"}
+			if err := localAttemptAdmission(w, []Job{*job(t, q, first.ID)}, onCard1, nil); (err == nil) != enforced {
+				t.Fatalf("worker admission=%v, containment=%v", err, enforced)
+			}
+			reply, err := q.Checkin(Checkin{Machine: busy, AttemptProtocol: keyedAttemptProtocol, Attempts: reports, period: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			placed := assignedJob(reply)
+			if got := placed != nil && placed.ID == next.ID && slices.Equal(placed.AllocatedDevices, []string{"1"}); got != enforced {
+				t.Fatalf("second card placement=%v, containment=%v (%s)", placed, enforced, job(t, q, next.ID).Reason)
 			}
 		})
 	}

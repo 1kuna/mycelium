@@ -34,9 +34,11 @@ func TestHostMemoryAcceleratorForecastPhysicalBound(t *testing.T) {
 		t.Fatal("fixture no longer reproduces the reported forecast")
 	}
 	q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: {jobKey(j): sample}}
+	// The attempt's cgroup memory.max is its envelope, and the forecast is read
+	// from that cgroup, so the envelope bounds it (#1487), well below physical RAM.
 	charge, pending := memoryCharge(&j, &m, envelope, sample, clock.Now())
-	if math.Abs(charge-physical) > 1e-9 || math.Abs(pending-(physical-resident)) > 1e-9 {
-		t.Errorf("forecast invented physical RAM: charge=%g pending=%g physical=%g resident=%g", charge, pending, physical, resident)
+	if math.Abs(charge-envelope) > 1e-9 || math.Abs(pending-(envelope-resident)) > 1e-9 || charge >= physical {
+		t.Errorf("forecast passed its cgroup ceiling: charge=%g pending=%g envelope=%g resident=%g", charge, pending, envelope, resident)
 	}
 	q.retainRelease(&j)
 	ledger := q.hostMemoryLedger(&m)
@@ -44,7 +46,7 @@ func TestHostMemoryAcceleratorForecastPhysicalBound(t *testing.T) {
 		t.Fatal("live attempt and release receipt were counted more than once", ledger)
 	}
 	r := q.s.HostReleases[releaseKey(HostRelease{Job: j.ID, Machine: m.ID, Session: m.Session, Attempt: 1})]
-	if math.Abs(r.HostChargeGB-physical) > 1e-9 {
+	if math.Abs(r.HostChargeGB-envelope) > 1e-9 {
 		t.Errorf("release receipt retained impossible forecast: %g", r.HostChargeGB)
 	}
 	// A distinct flat sample corrects the live prediction. The old release
