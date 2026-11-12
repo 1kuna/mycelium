@@ -2759,6 +2759,9 @@
         "reason": {
           "type": "string"
         },
+        "runs_now_on": {
+          "type": "string"
+        },
         "scope": {
           "type": "string"
         }

@@ -364,9 +364,10 @@ func TestHoldNamesPlatformWithRoomNow(t *testing.T) {
 	tight := cpuMachine("m-3", "h-3", "cpu", 4, 1) // linux/amd64 without memory for the job
 	darwinOnly := cpuSpec(4, 2)
 	darwinOnly.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
-	running := submit(t, q, darwinOnly)
-	if got := check(t, q, mac, nil).Job; got == nil || got.ID != running.ID {
-		t.Fatal("darwin job not placed on the darwin host", got)
+	queued := submit(t, q, darwinOnly)
+	running := check(t, q, mac, nil).Job
+	if running == nil || running.ID != queued.ID {
+		t.Fatal("darwin job not placed on the darwin host", running)
 	}
 	check(t, q, mac, running)
 	check(t, q, roomy, nil)
