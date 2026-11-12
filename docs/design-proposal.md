@@ -393,6 +393,16 @@ never shown as healthy, receive no new attempts or preparation launches, and
 raise an owner-attention health alert. New arrival evidence clears suspicion.
 Suspicion never interrupts an existing attempt or charges loss/retry.
 
+A worker's check-in loop also does local durable work between check-ins, and
+under host load that work can delay its next check-in past the allowance while
+the process is alive (#1450). The worker's stop-event long poll runs beside
+that loop, so a current-session poll also counts as contact for confirmed loss:
+while it is open, and for the allowance after it ends normally. A dropped
+connection gives no credit after its start, so a dead process is fenced at once
+and a silently dead host after at most the server's existing poll window.
+Suspicion and cadence learning still use check-ins only, so a stalled loop is
+still suspect and receives no new work.
+
 Continuous saturation or a wholly unreachable fleet has no finite trustworthy
 **confirmed-loss** bound: retain custody until control service or connectivity
 supplies evidence. If even maintenance cannot execute, neither diagnostic
