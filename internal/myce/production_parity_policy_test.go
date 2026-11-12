@@ -50,7 +50,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 				check(t, q, *m, nil)
 			}
 			policy := q.PriorityPolicy()
-			policy.Policy.Hosts = map[string]HostPolicy{hostID(&a): {}, hostID(&b): {ProductionHold: true}}
+			policy.Policy.Hosts = map[string]HostPolicy{hostID(&a): {}, hostID(&b): {ProductionHold: true, ProductionHoldScope: "device"}}
 			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
 				t.Fatal(err)
 			}
@@ -80,9 +80,6 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 			if !found {
 				t.Fatal("missing candidate variant status")
 			}
-			if got.ProductionHost == hostID(&b) {
-				t.Fatal("production hold bound demand to an unapproved host")
-			}
 			q.mu.Lock()
 			known := q.productionParityKnown(q.s.Jobs[parent.ID], &b)
 			q.mu.Unlock()
@@ -97,7 +94,7 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 				t.Fatal("approved host did not receive the production child", assigned)
 			}
 			// A later owner change fences the already accepted child's next
-			// admission, even if a scheduler binding still names this host.
+			// admission.
 			setParityHosts(t, q, "test", spec.workType(), hostID(&b))
 			parityReason := func(id string, m *Machine) string {
 				q.mu.Lock()
@@ -131,75 +128,6 @@ func TestProductionParityPolicyConstrainsVariants(t *testing.T) {
 	}
 }
 
-func TestProductionParityPolicyRebindsQueuedAfterRestart(t *testing.T) {
-	for _, keepHolds := range []bool{true, false} {
-		name := "holds enabled"
-		if !keepHolds {
-			name = "holds removed"
-		}
-		t.Run(name, func(t *testing.T) {
-			q, clock := fixture(t)
-			// Inspect saved bindings without Snapshot's maintenance/rebinding.
-			savedJob := func(id string) Job {
-				q.mu.Lock()
-				defer q.mu.Unlock()
-				return cloneJob(q.s.Jobs[id])
-			}
-			e, a, b := variantsFixture(t, true)
-			if err := q.AddExtension(e); err != nil {
-				t.Fatal(err)
-			}
-			check(t, q, a, nil)
-			check(t, q, b, nil)
-			policy := q.PriorityPolicy()
-			policy.Policy.Hosts = map[string]HostPolicy{hostID(&a): {ProductionHold: true}, hostID(&b): {ProductionHold: true}}
-			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-				t.Fatal(err)
-			}
-			setParityHosts(t, q, "test", "extension:"+e.Name, hostID(&a))
-			first := submit(t, q, variantSpec(e, "production"))
-			running := check(t, q, a, nil).Job
-			if running == nil || running.ID != first.ID {
-				t.Fatal("reference production did not start")
-			}
-			if err := q.Started(result(running, true)); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(time.Millisecond)
-			queued := submit(t, q, variantSpec(e, "production"))
-			if savedJob(queued.ID).ProductionHost != hostID(&a) {
-				t.Fatal("queued production was not bound to the reference host")
-			}
-			policy = q.PriorityPolicy()
-			if !keepHolds {
-				policy.Policy.Hosts = map[string]HostPolicy{}
-			}
-			if _, err := q.SetPriorityPolicy(policy.Revision, policy.Policy); err != nil {
-				t.Fatal(err)
-			}
-			setParityHosts(t, q, "test", queued.Spec.workType(), hostID(&b))
-			// The policy write persists without scheduling. Reopen with the
-			// old binding still present, as it can be during an upgrade.
-			if savedJob(queued.ID).ProductionHost != hostID(&a) {
-				t.Fatal("fixture did not preserve the invalid saved binding")
-			}
-			clock.Advance(time.Second)
-			q = reopenVariants(t, q, clock)
-			assigned := check(t, q, b, nil).Job
-			if assigned == nil || assigned.ID != queued.ID {
-				t.Fatal("newly approved idle host could not take queued production", job(t, q, queued.ID))
-			}
-			if keepHolds && savedJob(queued.ID).ProductionHost != hostID(&b) {
-				t.Fatal("new hold binding was not committed")
-			}
-			original := savedJob(running.ID)
-			if original.State != "running" || original.ProductionHost != hostID(&a) || original.Machine != a.ID || original.Attempt != running.Attempt || original.Session != running.Session || original.StopAt != nil {
-				t.Fatal("policy change altered running execution custody", original)
-			}
-		})
-	}
-}
-
 func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	q, clock := fixture(t)
 	e := fakeExtension(t) // No variants or server-owned parity requirement.
@@ -226,5 +154,27 @@ func TestProductionParityPolicyLegacyWaitDiagnostic(t *testing.T) {
 	setParityHosts(t, q, "test", spec.workType(), hostID(&m))
 	if assigned := check(t, q, m, nil).Job; assigned == nil || assigned.ID != queued.ID {
 		t.Fatal("owner approval did not release the held legacy job", assigned)
+	}
+}
+
+func TestProductionParityPolicyRejectsUnknownHosts(t *testing.T) {
+	for _, entry := range []string{"parity add", "project config"} {
+		t.Run(entry, func(t *testing.T) {
+			q, _ := fixture(t)
+			record := q.PriorityPolicy()
+			record.Policy.Projects["test"] = ProjectPolicy{Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"unknown-host"}}}
+			var err error
+			if entry == "parity add" {
+				_, err = q.AddParityHost(ParityHostRequest{Project: "test", Work: "kind:sample", Host: "unknown-host", Evidence: "job"})
+			} else {
+				err = q.ConfigureProjects(record.Policy.Projects)
+			}
+			if err == nil || !strings.Contains(err.Error(), "unknown host") {
+				t.Fatalf("unknown parity host accepted: %v", err)
+			}
+			if got := q.PriorityPolicy(); got.Revision != record.Revision || len(got.Policy.Projects) != 0 {
+				t.Fatalf("rejected policy changed state: %+v", got)
+			}
+		})
 	}
 }

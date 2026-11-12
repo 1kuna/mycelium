@@ -284,7 +284,7 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 	hosts := p.Hosts
 	if hosts != nil {
 		var err error
-		if hosts, err = normalizeHostPolicies(hosts); err != nil {
+		if hosts, err = normalizeHostPolicies(hosts, false); err != nil {
 			return out, err
 		}
 	}
@@ -392,31 +392,6 @@ func (q *Queue) slotSpec(s *ModelSlot) Spec {
 	for _, p := range q.s.Pins {
 		if p.Model == s.Model && p.Assigned == s.Machine && p.AssignedDevice == s.Device && p.active(q.clock.Now()) {
 			candidate := Spec{Project: p.Project, Priority: "production"}
-			if !found || q.comparePriority(candidate, best) < 0 {
-				best = candidate
-				found = true
-			}
-		}
-	}
-	return best
-}
-
-// Whole-host takeover remains opt-in and production-only; victim ordering still
-// follows the same tier comparator as ordinary placement and reclamation.
-func (q *Queue) hostPrioritySpec(host string) Spec {
-	best := Spec{Priority: "production"}
-	found := false
-	for _, j := range q.liveJobs() {
-		if j.ProductionHost == host && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) {
-			if !found || q.comparePriority(j.Spec, best) < 0 {
-				best = j.Spec
-				found = true
-			}
-		}
-	}
-	for _, c := range q.calls {
-		if c.ProductionHost == host && c.Priority == "production" && c.Error == "" {
-			candidate := callJob(c).Spec
 			if !found || q.comparePriority(candidate, best) < 0 {
 				best = candidate
 				found = true

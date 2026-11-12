@@ -859,3 +859,13 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 
 // Operator-authored publication window used only by lifecycle fixtures.
 const filePublicationGrace = 6 * time.Hour
+
+func (q *Queue) dbPathForTest(t *testing.T) string {
+	t.Helper()
+	var seq int
+	var name, path string
+	if err := q.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

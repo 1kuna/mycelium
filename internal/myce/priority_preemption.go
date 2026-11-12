@@ -28,7 +28,7 @@ func (q *Queue) clearPreemptionPlacements(machine, session string) {
 // Reuse exact retained obligations; timers and projected headroom prove nothing.
 func (q *Queue) preemptionReleasesPending(j *Job) bool {
 	p := j.PreemptionPlacement
-	if p == nil || len(p.Releases) == 0 {
+	if p == nil || len(p.Releases) == 0 || q.preemptionTargetLostDisk(j) {
 		return false
 	}
 	for _, o := range q.hostObligations(q.executionHost(p.Machine)) {
@@ -37,6 +37,17 @@ func (q *Queue) preemptionReleasesPending(j *Job) bool {
 		}
 	}
 	return false
+}
+
+// A planned target that no longer has the disk room this job needs cannot
+// repay the teardown; any host with room may take the job instead.
+func (q *Queue) preemptionTargetLostDisk(j *Job) bool {
+	p := j.PreemptionPlacement
+	if p == nil {
+		return false
+	}
+	owner := q.s.Machines[p.Machine]
+	return owner != nil && q.diskHeadroomReason(j, owner) != ""
 }
 
 func (q *Queue) retainPlacementReleases(p *placementPlan, demand *Job) {
@@ -76,6 +87,9 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 	}
 	owner := q.s.Machines[p.Machine]
 	if owner == nil || owner.Gone || owner.Session != p.Session {
+		return true
+	}
+	if q.preemptionTargetLostDisk(j) {
 		return true
 	}
 	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
@@ -322,21 +336,6 @@ func (q *Queue) initEnginePreemption(s *ModelSlot) {
 			s.PreemptionCount = max(s.PreemptionCount, c.PreemptionCount)
 		}
 	}
-}
-
-func (q *Queue) hostPreemptionDemand(host string) *Job {
-	spec := q.hostPrioritySpec(host)
-	for _, j := range q.liveJobs() {
-		if j.ProductionHost == host && !terminal(j.State) && !cancelled(j) && q.comparePriority(j.Spec, spec) == 0 {
-			return j
-		}
-	}
-	for _, c := range q.calls {
-		if c.ProductionHost == host && c.Error == "" && q.comparePriority(callJob(c).Spec, spec) == 0 {
-			return callJob(c)
-		}
-	}
-	return &Job{ID: "host/" + host, Spec: spec}
 }
 
 func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {

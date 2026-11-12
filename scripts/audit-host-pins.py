@@ -51,7 +51,7 @@ def audit(client: Client, since: datetime, until: datetime) -> tuple[dict[str, A
         omitted = (job.get("spec_projection") or {}).get("omitted", [])
         if "allowed_machines" in omitted:
             raise ValueError("queue projection omits authored host pins; audit is unknown")
-        # Production bindings and device/target restrictions are scheduler state
+        # Device/target restrictions are scheduler state
         # or software requirements, not authored host pins. Never count them.
         pinned = bool(spec.get("allowed_machines")) or (job.get("placement_intent") or {}).get("host_constraint") == "pin"
         category = "production" if (spec.get("class") or spec.get("priority")) == "production" else "non-production"
@@ -65,7 +65,7 @@ def audit(client: Client, since: datetime, until: datetime) -> tuple[dict[str, A
     report = {
         "since": since.isoformat(), "until_exclusive": until.isoformat(),
         "method": "2026-10-30: explicit spec.allowed_machines or authored host_constraint=pin; jobs grouped by project and production/non-production",
-        "coverage": "Retained API job records by queued timestamp; collection may remove old records. Pages are read-only observations, not a transaction across pages. No inferred pins from targets, device selectors, policy or production bindings.",
+        "coverage": "Retained API job records by queued timestamp; collection may remove old records. Pages are read-only observations, not a transaction across pages. No inferred pins from targets, device selectors or policy.",
         "rows": rows,
     }
     return report, {label: project for project, label in labels.items()}

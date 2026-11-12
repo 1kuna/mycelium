@@ -59,7 +59,7 @@ func TestEntryUnknownApprovalKeepsReadySlots(t *testing.T) {
 			}
 			reportModel(t, q, m, "ready")
 			if pinned {
-				if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}

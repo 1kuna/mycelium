@@ -44,12 +44,6 @@ type PlacementDecision struct {
 	LimitedBy    []string  `json:"limited_by"`
 }
 
-type PlacementBinding struct {
-	Origin string `json:"origin"`
-	Host   string `json:"host"`
-	Reason string `json:"reason"`
-}
-
 func placementStrings(values []string) []string {
 	values = slices.Clone(values)
 	sort.Strings(values)
@@ -195,9 +189,6 @@ func (q *Queue) recordPlacementDecision(j *Job, m *Machine) {
 	if len(q.s.Policies[j.Spec.Project].AllowedMachines) > 0 {
 		limited = append(limited, "project_policy")
 	}
-	if j.ProductionHost != "" {
-		limited = append(limited, "scheduler_production_binding")
-	}
 	reason := "normal admission"
 	if j.Timing != nil && j.Timing.PlacementReason != "" {
 		reason = j.Timing.PlacementReason
@@ -212,9 +203,5 @@ func (q *Queue) recordPlacementDecision(j *Job, m *Machine) {
 func placementStatus(j *Job) {
 	if j.PlacementIntent == nil {
 		j.PlacementIntent = &PlacementIntent{Origin: "unknown", Scope: "unknown", HostConstraint: "unknown", DeviceConstraint: "unknown", Environment: PlacementCoverage{Origin: "unknown", State: "unknown"}, Qualification: "unknown"}
-	}
-	j.ProductionBinding = nil
-	if j.ProductionHost != "" {
-		j.ProductionBinding = &PlacementBinding{Origin: "scheduler", Host: j.ProductionHost, Reason: "production_hold"}
 	}
 }

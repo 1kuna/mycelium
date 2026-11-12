@@ -480,7 +480,6 @@ type Job struct {
 	VariantEligibility  []VariantEligibility `json:"variant_eligibility,omitempty"`
 	VariantAdvice       []string             `json:"variant_advice,omitempty"`
 	Placement           *PlacementDecision   `json:"placement,omitempty"`
-	ProductionBinding   *PlacementBinding    `json:"production_binding,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
 	Liveness            *AttemptLiveness     `json:"liveness,omitempty"`
@@ -562,11 +561,6 @@ type Job struct {
 	ReleaseConfirmed      bool                     `json:"release_confirmed,omitempty"`
 	RequeuedByOperator    bool                     `json:"requeued_by_operator,omitempty"`
 	LastStopOutcome       string                   `json:"last_stop_outcome,omitempty"`
-	ProductionHost        string                   `json:"production_host,omitempty"`
-
-	// Retargeted production must keep positive parity across candidate changes
-	// and restart, including historical recipes otherwise allowed at first bind.
-	RequireProductionParity bool `json:"require_production_parity,omitempty"`
 
 	PreemptionPlacement   *PreemptionPlacement         `json:"preemption_placement,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`

@@ -154,32 +154,6 @@ func TestPlacementStatusRetainsEachAttempt(t *testing.T) {
 	}
 }
 
-func TestPlacementStatusProductionBindingIsScheduler(t *testing.T) {
-	q, _, a, _, _ := holdFleet(t, true)
-	s := spec("production")
-	s.Needs.MemoryGB = 1
-	submitted := submit(t, q, s)
-	got := job(t, q, submitted.ID)
-	if got.ProductionHost == "" {
-		t.Fatal("fixture did not acquire production binding")
-	}
-	if got.PlacementIntent == nil || got.PlacementIntent.HostConstraint != "none" {
-		t.Fatal("binding counted as authored", got)
-	}
-	public, err := q.jobSnapshot(submitted.ID)
-	if err != nil || public.ProductionBinding == nil || public.ProductionBinding.Origin != "scheduler" || public.ProductionBinding.Host != got.ProductionHost {
-		t.Fatal(public, err)
-	}
-	assignment := check(t, q, a, nil).Job
-	if assignment == nil {
-		t.Fatal("bound production job not assigned")
-	}
-	public, err = q.jobSnapshot(submitted.ID)
-	if err != nil || public.Placement.HostChoice != "scheduler" || !slices.Contains(public.Placement.LimitedBy, "scheduler_production_binding") {
-		t.Fatal(public, err)
-	}
-}
-
 func TestPlacementStatusSafeConstraintsAndLegacyUnknown(t *testing.T) {
 	s := Spec{Targets: []ExecutionTarget{{OS: "linux", Arch: "arm64", Platform: "cuda"}}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cuda"}, Preferred: []string{"metal"}}, GPU: &GPUSelection{Devices: []string{"device-secret-selector"}}}, Environment: Environment{Name: "private-environment"}, Reason: "/private/reason"}
 	j := &Job{Spec: s, EnvironmentRecipes: map[string]EnvironmentRecipe{"cuda": {Backend: "uv", LockFile: "/private/lock", Files: map[string][]byte{"private-input": []byte("secret")}}}}
@@ -208,8 +182,8 @@ func TestPlacementStatusSafeConstraintsAndLegacyUnknown(t *testing.T) {
 	if p.Environment.State != "unknown" {
 		t.Fatal("missing coverage claimed", p)
 	}
-	legacy := statusJobCopy(&Job{ProductionHost: "bound-host", Spec: s})
-	if legacy.PlacementIntent.Origin != "unknown" || legacy.Placement != nil || legacy.ProductionBinding.Origin != "scheduler" {
+	legacy := statusJobCopy(&Job{Spec: s})
+	if legacy.PlacementIntent.Origin != "unknown" || legacy.Placement != nil {
 		t.Fatal("legacy provenance inferred", legacy)
 	}
 }

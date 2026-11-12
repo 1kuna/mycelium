@@ -153,7 +153,7 @@ func TestPolicyCLIRollingUpgradeKeepsHostHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"gpu-host": {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"gpu-host": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	upgraded := httptest.NewServer(myce.API{Queue: q, Token: "owner-test"}.Handler())
@@ -266,15 +266,16 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 				t.Fatalf("export lost explicit project settings: %+v, %v", exported, err)
 			}
 
-			// Export, change hold scope, set and restart with unchanged host file.
+			// The previous release's whole-machine host file converts to device
+			// scope. Export, re-apply and restart with the unchanged host file.
 			if tc.name == "edit projects" {
 				out.Reset()
 				if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
 					t.Fatal(err)
 				}
-				exported := strings.Replace(out.String(), "production_hold: true", "production_hold: true\n        production_hold_scope: device", 1)
-				if exported == out.String() {
-					t.Fatalf("host hold missing from export:\n%s", out.String())
+				exported := out.String()
+				if !strings.Contains(exported, "production_hold_scope: device") {
+					t.Fatalf("converted host hold missing from export:\n%s", exported)
 				}
 				file = filepath.Join(dir, "policy.yaml")
 				if err := os.WriteFile(file, []byte(exported), 0600); err != nil {

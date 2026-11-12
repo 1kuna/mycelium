@@ -852,38 +852,14 @@ adds tick/poll delivery latency. Queue downtime or local storage failure cannot
 promise timely durable failure; the caller still owns its outage watchdog and safe
 fallback. Do not downgrade to workers/queues that ignore `start_by`.
 
-## Physical-host production hold
+## Production hold on a GPU host
 
-Opt in with `queue --host-config hosts.yaml` (also accepted by `dev` and `sim`):
-
-```yaml
-hosts:
-  example-host:
-    production_hold: true
-```
-
-`production_hold` defaults false. Each per-card worker uses the same physical
-`--host-id` and a distinct `--name`. Production selects an eligible host and
-stops lower-priority commands, models and preparations across its cards.
-Resumable work receives the original production save grace; non-resumable work
-restarts from scratch without an infrastructure loss. All lower-priority release
-acknowledgements must settle before production starts. Unknown custody remains
-charged across stop expiry, worker loss and queue restart; elapsed grace never
-proves release. Pins remain protected and can prevent placement.
-
-There is **no idle production cooldown**. Once the final production demand and
-cleanup settle, ordinary admission resumes. Displaced experiments rejoin the
-shared queue and can run on any eligible machine; they do not inherit production's
-host pin. Queue host maintenance and consumer cancellation are separate
-contracts, described in [operations](operations.md#queue-maintenance).
-No CPU publication/session lock is implied by a GPU production hold.
-
-### Hold scope
-
-`production_hold_scope` is `host` (the default, described above) or `device`.
-Host scope is exclusive: while production needs the host, every lower tier on
-it stops and waits, even on a free sibling card or the CPU. Keep it where owner
-isolation, driver overlap or preparation interference justifies that.
+No machine is reserved for production (MY-50). Production priority on a host
+claims only what production needs: the GPU devices and their memory, plus its
+own declared CPU and RAM. The host's other cores and memory keep serving other
+work. Ordinary tier preemption does this on every host; a host hold adds exact
+release custody. Opt in with `queue --host-config hosts.yaml` (also accepted by
+`dev` and `sim`) or live with `myce policy set`:
 
 ```yaml
 hosts:
@@ -892,19 +868,30 @@ hosts:
     production_hold_scope: device
 ```
 
-Device scope keeps the hold's release custody (retained release obligations,
-model recovery after queue restart, prior-session cleanup) but drops the
-host-wide fence. Production then uses ordinary admission and priority
-preemption, as on a host without a hold. Lower tiers keep using the sibling
-cards and the CPU. When production needs more, it stops only the lower-tier
-work that holds the card, memory or preparation it needs. It starts after
-those exact attempts confirm release; elapsed grace still proves nothing.
-Device scope emits no `production_hold` status entry, binds no new
-production job to the host, and does not pause model copies. A queued
-production job that a host-scope hold already bound keeps that host while
-the current work's production parity policy allows it. A binding excluded
-by an explicit parity list is cleared and placed again; running execution
-and release custody remain with the current attempt.
+`production_hold` defaults false, and `production_hold_scope: device` is the
+only scope. Each per-card worker uses the same physical `--host-id` and a
+distinct `--name`. The hold keeps release custody (retained release
+obligations, model recovery after queue restart, prior-session cleanup).
+Production uses ordinary admission and priority preemption. Lower tiers keep
+using the sibling cards and the CPU. When production needs a card, memory or
+preparation that lower-tier work holds, it stops only that work. Resumable
+work receives the original production save grace, and non-resumable work
+restarts from scratch without an infrastructure loss. Production starts after
+those exact attempts confirm release. Unknown custody remains charged across
+stop expiry, worker loss and queue restart; elapsed grace never proves
+release. Pins remain protected and can prevent placement.
+
+There is **no idle production cooldown**. Once the final production demand and
+cleanup settle, ordinary admission resumes. Displaced experiments rejoin the
+shared queue and can run on any eligible machine. Queue host maintenance and
+consumer cancellation are separate contracts, described in
+[operations](operations.md#queue-maintenance). No CPU publication/session lock
+is implied by a GPU production hold.
+
+The whole-machine hold (an omitted or `host` scope) was removed. `myce policy
+set` refuses it with a message naming `production_hold_scope: device`. A
+startup file or saved queue state from the previous release that still sets it
+converts to device scope on start and logs `event=host_policy_converted`.
 
 The startup file only seeds host policy. Change a live host's scope with
 `myce policy` ([live policy](operations.md#change-live-project-policy)).

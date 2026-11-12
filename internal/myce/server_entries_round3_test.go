@@ -33,7 +33,7 @@ func entryHoldFixture(t *testing.T, fence string) (*Queue, *fakeClock, Machine, 
 		b.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalVerified}
 	}
 	a.ModelConfigHash, b.ModelConfigHash = modelConfigHash(q.models), modelConfigHash(q.models)
-	if err := q.ConfigureHosts(map[string]HostPolicy{"ha": {ProductionHold: true}, "hb": {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{"ha": {ProductionHold: true, ProductionHoldScope: "device"}, "hb": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	check(t, q, a, nil)
@@ -48,15 +48,9 @@ func TestEntryProductionBatchHoldRespectsModelFences(t *testing.T) {
 			s := spec("production")
 			s.Needs.Model = "test"
 			j := submit(t, q, s)
-			if got := job(t, q, j.ID).ProductionHost; got != b.HostID {
-				t.Fatalf("targeted %q, want %s", got, b.HostID)
-			}
 			clock.Advance(time.Second)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
-			}
-			if q.held(a.HostID) || !q.held(b.HostID) {
-				t.Fatal("hold escaped model fence")
 			}
 			if check(t, q, a, nil).Job != nil {
 				t.Fatal("excluded worker received model batch")
@@ -81,7 +75,7 @@ func TestEntryPinsAndProductionHoldRespectModelFences(t *testing.T) {
 			}
 			reportModel(t, q, b, "ready")
 			c := addModelCall(t, q, "production")
-			if c.ProductionHost != b.HostID || c.Machine != b.ID {
+			if c.Machine != b.ID {
 				t.Fatal("production call escaped fence or failed to reuse pin")
 			}
 			if err := q.finishCall(c.ID); err != nil {
@@ -94,9 +88,6 @@ func TestEntryPinsAndProductionHoldRespectModelFences(t *testing.T) {
 			slot := q.s.ModelSlots[slotKey(b.ID, "test")]
 			if slot == nil || slot.State != "ready" || q.modelMemory(b.ID) != 8 {
 				t.Fatal("hold released pinned custody")
-			}
-			if q.held(a.HostID) {
-				t.Fatal("excluded host held")
 			}
 		})
 	}

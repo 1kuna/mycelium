@@ -132,7 +132,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("one", "fake")
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = true, 16, 16
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	s := spec("production")
@@ -170,7 +170,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := releaseKey(HostRelease{Job: j.ID, Machine: first.Machine, Session: first.Session, Attempt: first.Attempt})
-	if _, retained := q.s.HostReleases[key]; !retained || !q.held(m.ID) || q.s.Machines[m.ID].HostMemoryInUseGB != 4 {
+	if _, retained := q.s.HostReleases[key]; !retained || q.s.Machines[m.ID].HostMemoryInUseGB != 4 {
 		t.Fatal("fresh S2 cleanup freed S1 production custody")
 	}
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed {
@@ -181,7 +181,7 @@ func TestCancellationFreshRejoinKeepsOlderProductionCustody(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" || q.held(m.ID) {
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
 		t.Fatal("exact S1 cleanup failed to settle custody", a)
 	}
 }
@@ -192,7 +192,7 @@ func TestCancellationLostAssignmentRequiresKeyedRelease(t *testing.T) {
 			q, _ := fixture(t)
 			m := machine("one", "fake")
 			if held {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -358,25 +358,6 @@ func TestCancellationPlacementPreemption(t *testing.T) {
 			}
 			assertNoCancellationAttempt(t, q, j)
 		})
-	}
-}
-
-func TestCancellationExcludedFromHoldDemand(t *testing.T) {
-	q, _, a, _, _ := holdFleet(t, true)
-	p := spec("production")
-	p.AllowedMachines = []string{a.ID}
-	j := submit(t, q, p)
-	j = check(t, q, a, nil).Job
-	cancelAck(t, q, j.ID)
-	// A release-only receipt proves resources gone while the cancelled job is
-	// still stopping. It must not continue to count as production demand.
-	r := result(j, false)
-	r.ReleaseOnly = true
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if q.held(hostID(&a)) {
-		t.Fatal("cancelled stopping job retained production demand")
 	}
 }
 

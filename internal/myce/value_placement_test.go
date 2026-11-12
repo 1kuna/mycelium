@@ -455,15 +455,12 @@ func TestValueDistinctDeviceTiers(t *testing.T) {
 
 func TestValueCPUProductionHold(t *testing.T) {
 	q, _, small, big := valueFleet(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true}, big.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true, ProductionHoldScope: "device"}, big.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	s := cpuSpec(1, 1)
 	s.Priority = "production"
 	wanted := submit(t, q, s)
-	if host := job(t, q, wanted.ID).ProductionHost; host != small.HostID {
-		t.Fatal("production hold bound CPU work before ranking free hosts", host)
-	}
 	if got := check(t, q, big, nil).Job; got != nil {
 		t.Fatal("scarce host took held work", got)
 	}
@@ -491,15 +488,12 @@ func TestValueProductionHoldFreeBeforeBusyPreparation(t *testing.T) {
 	}
 	small.EnvironmentReports = []EnvironmentReport{{Key: launch.Key, Attempt: launch.Attempt, State: "building"}}
 	check(t, q, small, nil)
-	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true}, big.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true, ProductionHoldScope: "device"}, big.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	high := cpuSpec(1, 1)
 	high.Priority = "production"
 	wanted := submit(t, q, high)
-	if host := job(t, q, wanted.ID).ProductionHost; host != big.HostID {
-		t.Fatal("value preempted a busy cheap builder despite free capacity", host)
-	}
 	if got := check(t, q, big, nil).Job; got == nil || got.ID != wanted.ID {
 		t.Fatal("free scarce host did not run higher-tier work", got)
 	}

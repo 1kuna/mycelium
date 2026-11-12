@@ -158,21 +158,9 @@ interruption (OpenAI SSE error, or `X-Myce-Error-Code` trailer on generic stream
 and are never replayed after output starts. Model routing accepts `X-Myce-Class`
 or legacy `X-Myce-Priority`, with conflicting declarations rejected.
 
-**Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins in the same or a higher tier remain protected.
+**No machine is reserved (MY-50).** Production priority on a GPU host claims only the GPU: the devices and the memory production needs, through the existing tiers and preemption (MY-30). The host's CPU cores and memory keep serving other work. A host policy may opt into a device-scoped production hold, default off. It keeps exact release custody: production waits for each displaced attempt's cleanup acknowledgement, unknown cleanup survives loss and restart, and elapsed stop grace never proves release. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Pins in the same or a higher tier remain protected. The earlier whole-machine takeover was removed; a policy that still requests it is refused by the policy API, and saved state or a startup file from the previous release converts to device scope with a warning.
 
-> **Conflict (awaiting the maintainer's ruling on #1434).** MY-30 (2026-11-02)
-> rules that production priority uses the existing priority tiers and
-> preemption, "not host-wide exclusion, blackout holds or
-> orchestrator-negotiated special cases". The opt-in takeover above
-> (`production_hold`, 2026-10-11) predates it and remains in the code, with
-> `production_hold_scope: host` as the default scope once a host opts in. The
-> opt-in device scope (#577, 2026-11-01) keeps release custody and leaves
-> exclusivity to ordinary preemption. Removal is decided (option A, agent
-> decision under MY-30 and MY-49), but a 2026-11-12 read-only check found one
-> fleet host opted in at host scope in live queue policy, so the code stays
-> until that host's opt-in is resolved.
-
-There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
+There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production priority covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 
 One measured physical-host memory allowance covers simultaneous production demand, other admitted work, sidecars, launch overhead and headroom. Its numeric value comes from component measurements, not this spec. Keep aggregate accounting and cgroup enforcement. Do not rewrite budgets on every ownership switch: queue maintenance excludes new work while another owner uses the host.
 

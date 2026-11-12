@@ -196,9 +196,6 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 		// mutex as asynchronous admission-evidence publication.
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		if q.held(m.HostID) {
-			t.Fatal("forecast changed production takeover")
-		}
 		if reason := holdDetail(q.productionAdmissionHold(&productionCandidate, q.s.Machines[m.ID])); reason != "" {
 			t.Fatal("co-tenant guard refused production itself", reason)
 		}
@@ -220,8 +217,7 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 		defer q.mu.Unlock()
 		return holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID]))
 	}
-	// Qualification elsewhere does not authorize bypassing a bound host's
-	// work-scoped production parity policy (#401).
+	// A qualified alternative host removes sole-host protection.
 	other := unifiedCUDAAdmissionMachine()
 	other.ID, other.HostID, other.Session = "other", "other-host", "other-session"
 	check(t, q, other, nil)
@@ -229,13 +225,8 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		q.s.Jobs[demand.ID].Spec.AllowedMachines = []string{m.ID, other.ID}
-		q.s.Jobs[demand.ID].ProductionHost = m.HostID
-		if reason := holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID])); reason == "" {
-			t.Fatal("unapproved alternative bypassed production binding")
-		}
-		q.s.Jobs[demand.ID].ProductionHost = ""
 		if reason := holdDetail(q.productionAdmissionHold(q.s.Jobs[j.ID], q.s.Machines[m.ID])); reason != "" {
-			t.Fatal("qualified unbound alternative did not remove sole-host protection", reason)
+			t.Fatal("qualified alternative did not remove sole-host protection", reason)
 		}
 	}()
 	if _, err := q.ChangeHostMaintenance(other.HostID, HostMaintenanceRequest{Action: "drain"}); err != nil {

@@ -25,7 +25,7 @@ func TestAttemptProtocolLostAssignmentStop(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("lost-assignment", "fake")
 			if planned {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}

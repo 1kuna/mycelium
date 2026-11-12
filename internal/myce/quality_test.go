@@ -147,13 +147,13 @@ func TestQualityValidation(t *testing.T) {
 	}
 }
 
-func TestQualityProductionSpillover(t *testing.T) {
+func TestQualityProductionUsesMeasuredParityHost(t *testing.T) {
 	q, clock := fixture(t)
 	e, a, b := qualityVariants(t, &QualityMeasurement{Reference: "frozen-reference", Value: qualityNumber(10.125), ReferenceValue: qualityNumber(10), MarginOfError: qualityNumber(0.125)})
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true}, hostID(&b): {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true, ProductionHoldScope: "device"}, hostID(&b): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	check(t, q, a, nil)
@@ -167,70 +167,8 @@ func TestQualityProductionSpillover(t *testing.T) {
 	}
 	clock.Advance(time.Millisecond)
 	queued := submit(t, q, variantSpec(e, "production"))
-	if got := job(t, q, queued.ID); got.ProductionHost != hostID(&a) {
-		t.Fatalf("missing initial binding: %+v", got)
-	}
 	assigned := check(t, q, b, nil).Job
 	if assigned == nil || assigned.ID != queued.ID {
-		t.Fatal("measured parity did not permit spillover", assigned)
-	}
-	if got := job(t, q, queued.ID); got.ProductionHost != hostID(&b) {
-		t.Fatal("spillover binding not committed")
-	}
-}
-
-func TestQualitySpilloverCannotBorrowAnotherRecipe(t *testing.T) {
-	q, clock := fixture(t)
-	measured, a, b := qualityVariants(t, &QualityMeasurement{Reference: "frozen-reference", Value: qualityNumber(10), ReferenceValue: qualityNumber(10), MarginOfError: qualityNumber(0.125)})
-	for i := range measured.Variants {
-		measured.Variants[i].Quality["kind:sample"] = measured.Variants[i].Quality["extension:"+measured.Name]
-	}
-	measured.Variants[1].Needs.MemoryGB = 100 // Measured implementation cannot fit the destination.
-	measured = freezeComposition(t, measured)
-	legacy := compositionExtension(t, false)
-	legacy.Name = "fallback"
-	legacy.Variants[0].Target = machineTarget(&b)
-	legacy.Variants[0].Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1}
-	legacy.Variants[0].Baselines = map[string]ExtensionBaseline{"kind:sample": legacy.Variants[0].Baselines["kind:sample"]}
-	legacy = freezeComposition(t, legacy)
-	for _, e := range []Extension{measured, legacy} {
-		if err := q.AddExtension(e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, m := range []*Machine{&a, &b} {
-		m.ExtensionReports = nil
-		for _, e := range []Extension{measured, legacy} {
-			if !e.matchesTarget(m) {
-				continue
-			}
-			r := newExtensionReport(e, m, "kind:sample")
-			r.Setup, r.Qualified, r.CheckID = true, true, "quality-check"
-			m.ExtensionReports = append(m.ExtensionReports, r)
-		}
-	}
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true}, hostID(&b): {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	check(t, q, a, nil)
-	spec := Spec{Name: "mixed recipes", Project: "test", Class: "production", Kind: "sample"}
-	first := submit(t, q, spec)
-	running := check(t, q, a, nil).Job
-	if running == nil || running.ID != first.ID {
-		t.Fatal("first production did not start")
-	}
-	if err := q.Started(result(running, true)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Millisecond)
-	queued := submit(t, q, spec)
-	if got := job(t, q, queued.ID); got.ProductionHost != hostID(&a) {
-		t.Fatal("missing initial binding")
-	}
-	if assigned := check(t, q, b, nil).Job; assigned != nil {
-		t.Fatalf("unmeasured recipe borrowed another digest's evidence: %+v", assigned.Extension)
-	}
-	if got := job(t, q, queued.ID); got.ProductionHost != hostID(&a) {
-		t.Fatal("borrowed evidence changed binding")
+		t.Fatal("measured parity did not permit the second host", assigned)
 	}
 }

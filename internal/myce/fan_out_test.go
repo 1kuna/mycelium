@@ -59,7 +59,7 @@ func TestFanOutGiveUpAfterDispatchStillGathers(t *testing.T) {
 	s.Outputs = map[string]string{"out": "results"}
 	deadline := clock.Now().Add(time.Second)
 	s.GiveUpAt = &deadline
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	parent := submit(t, q, s)

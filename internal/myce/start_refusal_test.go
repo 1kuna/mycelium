@@ -32,14 +32,15 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 					}
 					custody.Phase = "started"
 				}
-				// A retained copy is still stopping on the same host. Production
-				// waits for its release; the experiment's host withdraws admission.
+				// A retained copy is still stopping on the same host. Production's
+				// worker is recovering; the experiment's host withdraws admission.
 				release := HostRelease{Host: hostID(&m), Job: "victim", Machine: m.ID, Session: m.Session, Attempt: 1, Until: clock.Now().Add(10 * time.Second)}
 				if err := q.update(func() error {
-					q.s.Hosts = map[string]*HostState{hostID(&m): {Policy: HostPolicy{ProductionHold: priority == "production"}, Active: true}}
 					q.s.HostReleases = map[string]HostRelease{}
 					if priority == "experiment" {
 						q.touchMachine(m.ID).Leaving = true
+					} else {
+						q.touchMachine(m.ID).Recovering = true
 					}
 					q.s.HostReleases[releaseKey(release)] = release
 					return nil
@@ -61,10 +62,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 				if !errors.As(err, &refusal) || refusal.Status != 409 || refusal.Code != "request_stale" {
 					t.Fatalf("start fence did not refuse: %v", err)
 				}
-				predicate := "placement_policy"
-				if priority == "experiment" {
-					predicate = "host_launch"
-				}
+				predicate := "host_launch"
 				if !strings.Contains(logs.String(), "predicate="+predicate) {
 					t.Errorf("refusal omitted predicate: %s", logs.String())
 				}
@@ -73,8 +71,7 @@ func TestStartFenceRefusalSurvivesClearedFence(t *testing.T) {
 					if !q.settleRelease(Result{Execution: Execution{ID: release.Job, Attempt: release.Attempt}, Machine: release.Machine, Session: release.Session}, true) {
 						t.Fatal("blocking release was not retained")
 					}
-					q.s.Hosts[hostID(&m)].Active = false
-					q.touchMachine(m.ID).Leaving = false
+					q.touchMachine(m.ID).Leaving, q.touchMachine(m.ID).Recovering = false, false
 					return nil
 				}); err != nil {
 					t.Fatal(err)

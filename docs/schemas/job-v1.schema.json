@@ -3444,14 +3444,6 @@
           ],
           "x-contract": "diagnostic"
         },
-        "production_binding": {
-          "$ref": "#/$defs/PlacementBinding",
-          "x-contract": "diagnostic"
-        },
-        "production_host": {
-          "type": "string",
-          "x-contract": "diagnostic"
-        },
         "progress": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -3487,10 +3479,6 @@
           "x-contract": "stable"
         },
         "requeued_by_operator": {
-          "type": "boolean",
-          "x-contract": "diagnostic"
-        },
-        "require_production_parity": {
           "type": "boolean",
           "x-contract": "diagnostic"
         },
@@ -4695,25 +4683,6 @@
       },
       "required": [
         "execution"
-      ],
-      "type": "object"
-    },
-    "PlacementBinding": {
-      "properties": {
-        "host": {
-          "type": "string"
-        },
-        "origin": {
-          "type": "string"
-        },
-        "reason": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "origin",
-        "host",
-        "reason"
       ],
       "type": "object"
     },

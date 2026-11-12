@@ -529,7 +529,7 @@ func TestReservationBindingValidationAndPriority(t *testing.T) {
 		t.Fatal("mutually blocking reservation accepted")
 	}
 	// A validation hold never grants production priority or bypasses takeover.
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	production := exclusionSpec(m.ID, "1")
@@ -735,7 +735,7 @@ func TestReservationKeepsStartedQualification(t *testing.T) {
 func TestReservationDoesNotDisplaceProduction(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	machineCheck(t, q, m)
@@ -753,37 +753,19 @@ func TestReservationDoesNotDisplaceProduction(t *testing.T) {
 	if _, err := q.CreateReservation(reservationRequest("qualification", "host=machine;devices=0", bound.ID)); err != nil {
 		t.Fatal(err)
 	}
-	reservationState(t, q, "qualification", "draining")
-	for _, directive := range machineCheck(t, q, m, a).Attempts {
+	// MY-50: production holds only its own device, so the reserved sibling
+	// card is free for the bound check while production keeps running.
+	reservationState(t, q, "qualification", "ready")
+	r := machineCheck(t, q, m, a)
+	for _, directive := range r.Attempts {
 		if directive.ID == a.ID && (directive.Stop || directive.Kill) {
 			t.Fatal("validation displaced production")
 		}
-		if directive.ID == bound.ID {
-			t.Fatal("validation bypassed production hold")
-		}
 	}
-	finish(t, q, a, true)
-	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != bound.ID {
-		t.Fatal("bound check failed to follow production", next)
+	if next := assignedJob(r); next == nil || next.ID != bound.ID {
+		t.Fatal("bound check did not use the free device beside production", next)
 	}
-}
-
-func TestReservationRejectsWaitingProductionModelDemand(t *testing.T) {
-	q, _, m := modelFixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	demand := addModelCall(t, q, "production")
-	if demand.ProductionHost != hostID(&m) || demand.Machine != "" {
-		t.Fatal("fixture did not bind pending production model demand", demand.ProductionHost, demand.Machine)
-	}
-	bound := submit(t, q, spec("experiment"))
-	if _, err := q.CreateReservation(reservationRequest("validation", "host="+hostID(&m), bound.ID)); err == nil || !strings.Contains(err.Error(), "production model call") {
-		t.Fatal("reservation acquired a self-blocking production takeover target", err)
-	}
-	if len(q.s.Reservations) != 0 || !q.held(hostID(&m)) || demand.Error != "" || demand.StopAt != nil {
-		t.Fatal("rejected reservation mutated production demand")
-	}
+	requireState(t, q, a.ID, "running")
 }
 
 // Incident 2026-11-02: a card reservation on a two-card host withdrew every

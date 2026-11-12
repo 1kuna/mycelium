@@ -72,7 +72,6 @@ func (q *Queue) pauseJob(j *Job, pause JobPause) {
 	q.closeAdmissionWait(j, "paused")
 	j.State, j.Pause, j.Reason = "paused", &pause, pause.Reason
 	j.PauseRevision++
-	j.ProductionHost = "" // Derived placement demand is selected anew on resume.
 	// Offers are revocable authority, not work. Replan from queued demand on the
 	// next check-in, including cold extensions whose offers have no Demand ID.
 	for id, p := range q.s.PreparationPlans {

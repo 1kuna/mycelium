@@ -131,16 +131,6 @@ func (q *Queue) acquireReservation(request ReservationRequest) (Reservation, err
 			return out, reservationRefusal("job or target already has an active reservation")
 		}
 	}
-	for _, demand := range q.liveJobs() {
-		if demand.ID != j.ID && demand.State == "queued" && demand.ProductionHost == p.Host {
-			return out, reservationRefusal("production already waiting on this host; reserve after its demand settles")
-		}
-	}
-	for _, demand := range q.calls {
-		if demand.Error == "" && demand.Machine == "" && demand.ProductionHost == p.Host {
-			return out, reservationRefusal("production model call already waiting on this host; reserve after its demand settles")
-		}
-	}
 	// Reuse permanent target/qualification/capacity validation, scoped to the
 	// selected physical components. Temporary occupancy and maintenance can drain.
 	view := &Queue{clock: q.clock, s: q.s, models: q.models}
@@ -359,9 +349,6 @@ func (q *Queue) reservationPending(r Reservation) []string {
 		pending = append(pending, "independent host maintenance")
 	}
 	bound := q.retainedJob(r.Job)
-	if q.held(r.Target.Host) && (bound == nil || bound.Spec.Priority != "production") {
-		pending = append(pending, "production priority hold")
-	}
 	for _, p := range q.hostObligations(r.Target.Host) {
 		if p.Result.ID == r.Job || p.Launch != nil && p.Launch.Demand == r.Job {
 			continue

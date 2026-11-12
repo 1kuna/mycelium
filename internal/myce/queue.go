@@ -396,6 +396,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.retireWholeMachineHolds()
 	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
 	if q.startupFiles != nil {
 		fileRoot, fileLimit, fileCheckpoints = q.startupFiles.root, q.startupFiles.limit, q.startupFiles.checkpoints
@@ -682,7 +683,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
 		if err == nil {
 			q.settleMaintenance()
-			q.finalizeHolds()
 		}
 		if err == nil && committed != nil {
 			committed()
@@ -730,7 +730,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	if err == nil {
 		q.settleMaintenance()
-		q.finalizeHolds()
 		q.refreshEfficiency()
 	}
 	if err == nil {
@@ -1397,11 +1396,8 @@ func (q *Queue) maintain() {
 	q.maintainReservations()
 	q.settleMaintenance()
 	q.refreshHostMemory()
-	q.maintainHolds()
-	q.settleMaintenance()
 	q.maintainModels()
 	q.settleMaintenance()
-	q.finalizeHolds()
 	// Only display reasons change in this final read-only planning pass.
 	// Share memory evidence across the backlog, then discard it before the
 	// next mutation. Subsequent decisions settle only affected relations.
@@ -2435,11 +2431,6 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 		}
 	}
 	out.Warning = strings.Join(warnings, "; ")
-	for host := range q.s.Hosts {
-		if q.held(host) {
-			out.Holds = append(out.Holds, q.productionHold(host))
-		}
-	}
 	hosts := map[string]bool{}
 	for _, m := range q.s.Machines {
 		hosts[hostID(m)] = true

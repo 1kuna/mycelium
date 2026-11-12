@@ -3,31 +3,30 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"reflect"
 	"slices"
-	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Policies are keyed by physical host_id (worker name when host_id is unset).
-// The default host scope fences the whole host for production. Device scope
-// keeps the hold's release custody but leaves exclusivity to ordinary
-// per-resource priority preemption, so siblings and the CPU stay usable.
+// No machine is ever reserved (MY-50): a production hold is device-scoped. It
+// keeps exact release custody for the host's attempts and leaves exclusivity to
+// ordinary per-resource priority preemption, so production claims only the
+// devices and memory it needs while sibling cards and the CPU keep serving.
 type HostPolicy struct {
 	ProductionHold      bool   `json:"production_hold" yaml:"production_hold"`
 	ProductionHoldScope string `json:"production_hold_scope,omitempty" yaml:"production_hold_scope,omitempty"`
 }
 
-func (p HostPolicy) hostWide() bool { return p.ProductionHold && p.ProductionHoldScope == "" }
-
 type HostState struct {
 	Policy HostPolicy `json:"policy"`
-	Active bool       `json:"active,omitempty"`
 }
 
 // Release obligations survive requeue/loss; only an execution acknowledgement or
@@ -74,13 +73,17 @@ func ReadHostPolicies(path string) (policies map[string]HostPolicy, err error) {
 	return v.Hosts, nil
 }
 
+// Install preflight checks a startup file the way queue start reads it.
 func validateHostPolicies(p map[string]HostPolicy) error {
-	_, err := normalizeHostPolicies(p)
+	_, err := normalizeHostPolicies(p, true)
 	return err
 }
 
-// An explicit host scope is the default, so it compares equal to an omitted one.
-func normalizeHostPolicies(p map[string]HostPolicy) (map[string]HostPolicy, error) {
+// The whole-machine scope (an omitted or "host" scope with production_hold)
+// was removed (MY-50). The policy API refuses it. A startup file or saved
+// state from the previous release converts to device scope with a warning, so
+// an upgrade never fails to start; drop the conversion after one release (MY-42).
+func normalizeHostPolicies(p map[string]HostPolicy, convert bool) (map[string]HostPolicy, error) {
 	out := map[string]HostPolicy{}
 	for host, v := range p {
 		if strings.TrimSpace(host) == "" {
@@ -89,16 +92,38 @@ func normalizeHostPolicies(p map[string]HostPolicy) (map[string]HostPolicy, erro
 		switch v.ProductionHoldScope {
 		case "", "host":
 			v.ProductionHoldScope = ""
+			if v.ProductionHold {
+				if !convert {
+					return nil, fmt.Errorf("host %s: %s; set production_hold_scope: device, or production_hold: false", host, wholeMachineHoldRemoved)
+				}
+				log.Printf("event=host_policy_converted host=%s from=whole_machine to=device reason=%q", host, wholeMachineHoldRemoved)
+				v.ProductionHoldScope = "device"
+			}
 		case "device":
 			if !v.ProductionHold {
 				return nil, fmt.Errorf("host %s: production_hold_scope requires production_hold: true", host)
 			}
 		default:
-			return nil, fmt.Errorf("host %s: production_hold_scope must be host or device", host)
+			return nil, fmt.Errorf("host %s: production_hold_scope must be device", host)
 		}
 		out[host] = v
 	}
 	return out, nil
+}
+
+const wholeMachineHoldRemoved = "the whole-machine production hold was removed; production priority claims only the GPU devices and memory it needs"
+
+// Saved state from the previous release may still hold a whole-machine policy.
+func (q *Queue) retireWholeMachineHolds() {
+	for host, h := range q.s.Hosts {
+		if h != nil && h.Policy.ProductionHold && h.Policy.ProductionHoldScope != "device" {
+			converted, _ := normalizeHostPolicies(map[string]HostPolicy{host: h.Policy}, true)
+			h.Policy = converted[host]
+		}
+	}
+	if len(q.s.HostConfig) > 0 {
+		q.s.HostConfig, _ = normalizeHostPolicies(q.s.HostConfig, true)
+	}
 }
 
 func (q *Queue) hostPolicies() map[string]HostPolicy {
@@ -109,17 +134,11 @@ func (q *Queue) hostPolicies() map[string]HostPolicy {
 	return out
 }
 
-// Unchanged hosts keep their activation; a changed policy starts inactive and
-// the next maintenance pass re-derives it from live demand. Release custody is
-// keyed by attempt, so it survives the change.
+// Release custody is keyed by attempt, so it survives a policy change.
 func (q *Queue) replaceHostPolicies(p map[string]HostPolicy) {
 	next := map[string]*HostState{}
 	for h, v := range p {
-		if old := q.s.Hosts[h]; old != nil && old.Policy == v {
-			next[h] = old
-		} else {
-			next[h] = &HostState{Policy: v}
-		}
+		next[h] = &HostState{Policy: v}
 	}
 	q.s.Hosts = next
 }
@@ -128,7 +147,7 @@ func (q *Queue) replaceHostPolicies(p map[string]HostPolicy) {
 // Restarting with the last accepted file keeps the live policy. A different
 // file is still refused, so an edit can never silently relax a hold.
 func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
-	normalized, err := normalizeHostPolicies(p)
+	normalized, err := normalizeHostPolicies(p, true)
 	if err != nil {
 		return err
 	}
@@ -150,10 +169,6 @@ func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
 		q.replaceHostPolicies(normalized)
 		return nil
 	})
-}
-func (q *Queue) held(host string) bool {
-	s := q.s.Hosts[host]
-	return s != nil && s.Policy.hostWide() && s.Active
 }
 func releaseKey(r HostRelease) string {
 	return fmt.Sprintf("%s/%s/%s/%d", r.Job, r.Machine, r.Session, r.Attempt)
@@ -278,109 +293,10 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionHold(j, m, heldBy(q.startupReleaseHold(hostID(m))), predicateStartupRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
-	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) || !q.admissionHold(j, m, q.checkpointTargetAdmission(j, m), predicateCheckpointTarget) {
+	if !q.admissionHold(j, m, q.checkpointTargetAdmission(j, m), predicateCheckpointTarget) {
 		return false
 	}
-	if !q.admissionHold(j, m, q.productionAdmissionHold(j, m), predicateProductionAdmission) {
-		return false
-	}
-	if !q.held(hostID(m)) {
-		return true
-	}
-	if !q.admissionPass(j, m, j.Spec.Priority == "production", predicateProductionHold) {
-		return false
-	}
-	text, _ := q.hostBlockerState(hostID(m))
-	return q.admissionPass(j, m, text == "", predicateHostRelease)
-}
-
-// Unknown release gets attention only after ordinary kill/report latency.
-const releaseAttentionDelay = 2 * time.Minute
-
-type hostBlockerClass struct {
-	Kind                   string
-	OperatorActionRequired bool
-}
-
-func (q *Queue) releaseNeedsOperator(m *Machine, until *time.Time, failed bool) bool {
-	if m == nil || m.Gone || failed {
-		return true
-	}
-	now := q.clock.Now()
-	if q.unreported[m.ID] && now.Before(q.restartUntil) {
-		return false
-	}
-	return until != nil && !until.IsZero() && !now.Before(until.Add(releaseAttentionDelay))
-}
-
-func (q *Queue) hostBlockerState(host string) (string, hostBlockerClass) {
-	count := 0
-	remaining := 0.0
-	unknown := []string{}
-	needsOperator := false
-	for _, r := range q.s.HostReleases {
-		if r.Host != host {
-			continue
-		}
-		// Live production is demand, not a blocker for another production job.
-		j := q.s.Jobs[r.Job]
-		if j != nil && j.Spec.Priority == "production" && j.Machine == r.Machine && j.Attempt == r.Attempt && (j.State == "running" || j.State == "stopping") && !q.unreported[r.Machine] && q.s.Machines[r.Machine] != nil && !q.s.Machines[r.Machine].Gone {
-			continue
-		}
-		count++
-		remaining = max(remaining, r.Until.Sub(q.clock.Now()).Seconds())
-		if m := q.s.Machines[r.Machine]; m == nil || m.Gone || q.unreported[r.Machine] || r.CleanupFailed || r.Until.IsZero() || !q.clock.Now().Before(r.Until) {
-			unknown = append(unknown, r.Machine)
-			needsOperator = needsOperator || q.releaseNeedsOperator(m, &r.Until, r.CleanupFailed)
-		}
-	}
-	for _, c := range q.calls {
-		m := q.s.Machines[c.Machine]
-		if m != nil && hostID(m) == host && c.Priority != "production" {
-			count++
-			if c.StopAt != nil {
-				remaining = max(remaining, c.StopAt.Sub(q.clock.Now()).Seconds())
-				if expired(c.StopAt, q.clock.Now()) {
-					unknown = append(unknown, m.ID)
-					needsOperator = needsOperator || q.releaseNeedsOperator(m, c.StopAt, false)
-				}
-			}
-		}
-	}
-	for _, s := range q.s.ModelSlots {
-		m := q.s.Machines[s.Machine]
-		if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || !q.slotPinned(s) && s.State == "draining" || s.State == "unloading" || s.State == "unload_failed") {
-			count++
-			if s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "unload_failed" || expired(s.StopAt, q.clock.Now()) {
-				unknown = append(unknown, m.ID)
-				needsOperator = needsOperator || q.releaseNeedsOperator(m, s.StopAt, s.State == "unload_failed")
-			}
-		}
-	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return "release unknown: worker " + strings.Join(unknown, ", "), hostBlockerClass{Kind: "production_release_unknown", OperatorActionRequired: needsOperator}
-	}
-	if count > 0 {
-		return fmt.Sprintf("stopping %d attempts; grace remaining %.0fs", count, remaining), hostBlockerClass{Kind: "production_stopping"}
-	}
-	return "", hostBlockerClass{}
-}
-func (q *Queue) productionHold(host string) Hold {
-	if b, class := q.hostBlockerState(host); b != "" {
-		return productionBlockerHold(host, b, class)
-	}
-	return scopedHold("production_hold", host, host+": production hold", false)
-}
-
-// Classification is explicit: new blocker paths cannot silently become routine.
-func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
-	detail := host + ": production hold; " + text
-	switch class.Kind {
-	case "production_stopping", "production_release_unknown":
-		return scopedHold(class.Kind, host, detail, class.OperatorActionRequired)
-	}
-	return scopedHold("unclassified", host, detail, true)
+	return q.admissionHold(j, m, q.productionAdmissionHold(j, m), predicateProductionAdmission)
 }
 
 // Production and disk fences that hold this job.
@@ -392,17 +308,10 @@ func (q *Queue) holdWait(j *Job) *Hold {
 			}
 		}
 	}
-	if h := q.diskWait(j, j.ProductionHost); h != nil {
+	if h := q.diskWait(j, ""); h != nil {
 		return h
 	}
-	if j.ProductionHost != "" && q.held(j.ProductionHost) {
-		if reason := q.productionOccupancyReason(j); reason != "" {
-			return newHold("production_hold", reason+"; production hold bound to "+j.ProductionHost+"; spillover requires measured quality parity or the project's production_parity_hosts approval and an immediately admissible qualified host")
-		}
-		h := q.productionHold(j.ProductionHost)
-		return newHold(h.Kind, h.Detail)
-	}
-	if j.Spec.Priority == "production" && j.ProductionHost == "" {
+	if j.Spec.Priority == "production" {
 		for _, m := range q.plannerMachines() {
 			h := q.s.Hosts[hostID(m)]
 			if h == nil || !h.Policy.ProductionHold || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
@@ -418,344 +327,15 @@ func (q *Queue) holdWait(j *Job) *Hold {
 			}
 		}
 	}
-	if j.Spec.Priority != "production" {
-		for _, m := range q.plannerMachines() {
-			if q.held(hostID(m)) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-				return newHold("production_reserved", "host "+hostID(m)+" reserved for production")
-			}
-		}
-	}
 	return nil
 }
 
-// A bound host stays authoritative unless equal-or-higher production prevents
-// admission. Lower tiers, preparation and unresolved custody use the existing
-// release planner; they do not authorize occupancy spillover.
-func (q *Queue) productionOccupancyReason(j *Job) string {
-	if j.State != "queued" || j.Spec.Priority != "production" || j.ProductionHost == "" {
-		return ""
-	}
-	reason := ""
-	for _, m := range q.plannerMachines() {
-		if hostID(m) != j.ProductionHost || !q.placementAllowed(j, m) {
-			continue
-		}
-		for _, candidate := range q.memoryCandidates(j, m) {
-			if q.workerIdle(m, candidate) && !q.preparationActive(m) && !q.preparationStopping(m) && hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, m.FreeMemoryGB) && environmentReady(candidate, m) {
-				return "" // Another target on the bound host can admit it now.
-			}
-			if q.roomPlan(candidate, m, true) != nil {
-				continue // Ordinary lower-tier reclamation can make room.
-			}
-			deviceBusy, productionRAM := false, false
-			for _, r := range q.liveJobs() {
-				owner := allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices)
-				if owner == nil || hostID(owner) != j.ProductionHost || r.ReleaseConfirmed || r.Spec.Priority != "production" || q.comparePriority(r.Spec, j.Spec) > 0 || r.State != "running" && r.State != "stopping" {
-					continue
-				}
-				deviceBusy = deviceBusy || batchOnTarget(r, m)
-				productionRAM = productionRAM || hostNeed(owner, r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB) > 0
-			}
-			for _, s := range q.s.ModelSlots {
-				owner := slotMachine(q.s.Machines[s.Machine], s)
-				if owner == nil || hostID(owner) != j.ProductionHost || q.slotSpec(s).Priority != "production" || q.comparePriority(q.slotSpec(s), j.Spec) > 0 || !slotReservesMemory(s) || q.slotReclaimableFor(s, j.Spec) {
-					continue
-				}
-				model, _ := q.model(s.Model)
-				deviceBusy = deviceBusy || slotOnTarget(s, m) && m.FreeMemoryGB < candidate.Spec.Needs.MemoryGB
-				productionRAM = productionRAM || hostNeed(owner, model.MemoryGB, model.HostMemoryGB) > 0
-			}
-			if productionRAM && hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) == "host memory" {
-				reason = fmt.Sprintf("waiting for RAM on %s: %.1f GiB needed, %.1f GiB admission headroom; equal-or-higher production reserves host RAM", m.ID, hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), m.FreeHostMemoryGB)
-			} else if deviceBusy && !strings.HasPrefix(reason, "waiting for RAM") {
-				reason = "waiting for admission on " + m.ID + ": device occupied by equal-or-higher production"
-			}
-		}
-	}
-	return reason
-}
-
-// Reuse dispatch's qualified, frozen extension and admission checks on a copy.
-// This changes only queued host affinity; it creates no release or attempt.
-func (q *Queue) productionSpilloverTarget(j *Job) string {
-	if !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || q.productionOccupancyReason(j) == "" {
-		return ""
-	}
-	copy := *j
-	copy.ProductionHost = ""
-	copy.RequireProductionParity = true
-	scan := q.placementScan()
-	var best *Machine
-	now := q.clock.Now()
-	for _, m := range scan.machines {
-		if hostID(m) == j.ProductionHost || q.unreported[m.ID] || !q.workerFresh(m, now) {
-			continue
-		}
-		candidate := q.batchCandidateWithResources(&copy, m, nil)
-		if candidate == nil || !q.workerIdle(m, candidate) || q.immediateCandidate(candidate, m) == nil {
-			continue
-		}
-		if best == nil || q.targetPlacementBetter(j, m, best, scan) {
-			best = m
-		}
-	}
-	if best == nil {
-		return ""
-	}
-	return hostID(best)
-}
-
-// Select once, before stopping anything. Occupancy is reclaimable; immutable
-// capacity, environments, project/job restrictions and pins are not.
-func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
-	scan := q.placementScan()
-	machines := scan.machines
-	var best *Machine
-	bestStops := int(^uint(0) >> 1)
-	bestFree := false
-	for _, m := range machines {
-		capacity := *m
-		diskReason := ""
-		if call == nil {
-			diskReason = q.diskHeadroomReason(j, m)
-		} else {
-			// Calls reuse residency; only a new load can need cache writes.
-			capacity.DiskVolumes = nil
-			model, _ := q.model(call.Model)
-			diskReason = q.modelLoadDiskHeadroomReason(model, m)
-		}
-		if !q.reservationAllows(j, m) || diskReason != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
-			continue
-		}
-		for _, candidate := range q.memoryCandidates(j, m) {
-			if q.variantParityReason(candidate, m) != "" || call == nil && j.ProductionHost != "" && j.ProductionHost != hostID(m) && j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil && !q.productionParityKnown(candidate, m) {
-				continue
-			}
-			if !fitsResources(candidate, &capacity, m.TotalMemoryGB) {
-				continue
-			}
-			model, hasModel := q.model(candidate.Spec.Needs.Model)
-			if hasModel && call != nil {
-				model = q.residentModel(model, m)
-			}
-			if hasModel && !q.modelFitsMachine(model, m) {
-				continue
-			}
-			if call != nil && (m.ModelURL == "" || q.callExcludes(call, m.ID, targetDevice(m))) {
-				continue
-			}
-			pinned := 0.0
-			for _, s := range q.s.ModelSlots {
-				if slotOnTarget(s, m) && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), candidate.Spec) <= 0 || s.State == "unload_failed") {
-					model, _ := q.model(s.Model)
-					if call == nil || s.Model != call.Model {
-						pinned += model.MemoryGB
-					}
-				}
-			}
-			if m.TotalMemoryGB-pinned < candidate.Spec.Needs.MemoryGB {
-				continue
-			}
-			slot := q.s.ModelSlots[targetSlotKey(m, candidate.Spec.Needs.Model)]
-			// Calls reuse a ready/loading model's existing host-memory reservation.
-			if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
-				if _, _, ok := q.hostReleases(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB, "production", candidate.Spec); !ok {
-					continue
-				}
-			}
-			stops := 0
-			for _, r := range q.liveJobs() {
-				if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
-					stops++
-				}
-			}
-			// A hold is a custody commitment even when production is already busy.
-			// Value only ranks immediately free fitting alternatives; the common
-			// release planner still governs actual preemption after binding.
-			freeNow := q.workerIdle(m, candidate) && !q.preparationActive(m) && !q.preparationStopping(m) && hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, m.FreeMemoryGB)
-			preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best, scan))
-			if best == nil || stops < bestStops || preferFreeTarget {
-				best, bestStops, bestFree = m, stops, freeNow
-			}
-		}
-	}
-	if best == nil {
-		return ""
-	}
-	return hostID(best)
-}
-func (q *Queue) maintainHolds() {
-	enabled := false
-	for _, h := range q.s.Hosts {
-		enabled = enabled || h.Policy.hostWide()
-	}
-	now := q.clock.Now()
-	demand := map[string]bool{}
-	jobs := []*Job{}
-	for _, j := range q.liveJobs() {
-		// Live owner policy also fences bindings saved by older releases.
-		// Only queued demand moves; existing execution/release custody stays.
-		if j.State == "queued" && j.ProductionHost != "" && (j.Spec.Priority == "production" || jobClass(j.Spec) == "production") && j.Spec.ExtensionCheck == nil && !q.productionParityHostAllowed(j, j.ProductionHost) {
-			q.touchJob(j.ID)
-			j.ProductionHost = ""
-		}
-		if !enabled {
-			continue
-		}
-		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
-			continue
-		}
-		if dependencyReady(j) && j.Spec.Priority == "production" && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
-			jobs = append(jobs, j)
-		}
-	}
-	if !enabled {
-		return
-	}
-	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
-	for _, j := range jobs {
-		if target := q.productionSpilloverTarget(j); target != "" {
-			if j.ProductionHost != target || !j.RequireProductionParity {
-				q.touchJob(j.ID)
-			}
-			j.ProductionHost = target
-			j.RequireProductionParity = true
-		}
-		if j.State == "queued" && j.ProductionHost != "" && q.diskWait(j, j.ProductionHost) != nil {
-			if target := q.productionTarget(j, nil); target != "" {
-				if j.ProductionHost != target || j.RequireProductionParity != (j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil) {
-					q.touchJob(j.ID)
-				}
-				j.ProductionHost = target
-				j.RequireProductionParity = j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil
-			}
-		}
-		if j.ProductionHost == "" {
-			if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
-				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.hostWide() {
-					q.touchJob(j.ID)
-					j.ProductionHost = hostID(m)
-				}
-			} else {
-				target := q.productionTarget(j, nil)
-				if h := q.s.Hosts[target]; h != nil && h.Policy.hostWide() {
-					q.touchJob(j.ID)
-					j.ProductionHost = target
-				}
-			}
-		}
-		demand[j.ProductionHost] = true
-	}
-	for _, c := range q.calls {
-		if c.Priority == "production" && c.Error == "" {
-			if c.ProductionHost == "" {
-				j := callJob(c)
-				model, _ := q.model(c.Model)
-				j.Spec.Needs.MemoryGB = model.MemoryGB
-				j.Spec.Needs.HostMemoryGB = model.HostMemoryGB
-				j.Spec.Needs.Platform = Platform{Required: model.Platforms}
-				target := q.productionTarget(j, c)
-				if h := q.s.Hosts[target]; h != nil && h.Policy.hostWide() {
-					c.ProductionHost = target
-				}
-			}
-			demand[c.ProductionHost] = true
-		}
-	}
-	for host, h := range q.s.Hosts {
-		if !h.Policy.hostWide() {
-			continue
-		}
-		if demand[host] {
-			h.Active = true
-		}
-		if !h.Active {
-			continue
-		}
-		for _, m := range q.s.Machines {
-			if hostID(m) == host && q.backgroundPreparing(m) {
-				if q.s.HostReleases == nil {
-					q.s.HostReleases = map[string]HostRelease{}
-				}
-				r := HostRelease{Host: host, Job: "preparation", Machine: m.ID, Session: m.Session, Preparation: true, Until: now.Add(q.productionGrace)}
-				key := releaseKey(r)
-				if _, exists := q.s.HostReleases[key]; !exists {
-					q.s.HostReleases[key] = r
-				}
-			}
-		}
-		for _, j := range q.liveJobs() {
-			m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-			if m != nil && hostID(m) == host && (j.State == "running" || j.State == "stopping") {
-				if q.comparePriority(j.Spec, q.hostPrioritySpec(host)) > 0 {
-					q.stopBatchFor(j, q.hostPreemptionDemand(host))
-				}
-				q.retainRelease(j)
-			}
-		}
-		for _, c := range q.calls {
-			m := q.s.Machines[c.Machine]
-			if m != nil && hostID(m) == host && q.comparePriority(callJob(c).Spec, q.hostPrioritySpec(host)) > 0 && c.Error == "" {
-				if slot := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]; slot != nil {
-					if slot.PriorityStop == nil && q.preemptionProtected(slot.PreemptionCount, slot.RunSince) {
-						continue
-					}
-					slot.ReleasingCalls = true
-				}
-				if c.StopAt == nil {
-					c.PriorityStop = q.preemption(q.hostPreemptionDemand(host), c.ID)
-					t := now.Add(q.productionGrace)
-					c.StopAt = &t
-				}
-				if expired(c.StopAt, now) {
-					c.Error = "preempted by production host hold"
-				}
-			}
-		}
-		for _, s := range q.s.ModelSlots {
-			m := q.s.Machines[s.Machine]
-			if m == nil || hostID(m) != host || q.slotPinned(s) && q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) <= 0 || s.State == "failed" {
-				continue
-			}
-			if q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && !q.slotReclaimableFor(s, q.hostPrioritySpec(host)) {
-				continue
-			}
-			if s.State != "unload_failed" && s.State != "unloading" && (q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
-				s.State = "draining"
-			}
-			if s.State == "draining" {
-				if q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && s.PriorityStop == nil {
-					q.recordEnginePreemption(s, q.hostPreemptionDemand(host))
-				}
-				if s.StopAt == nil {
-					t := now.Add(q.productionGrace)
-					s.StopAt = &t
-				}
-				if expired(s.StopAt, now) {
-					for _, c := range q.calls {
-						if c.Machine == s.Machine && c.Model == s.Model && c.Priority != "production" {
-							c.Error = "preempted by production host hold"
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
+// Host maintenance settles a preparation release only once no background
+// build or non-production model copy remains on the worker.
 func (q *Queue) backgroundPreparing(m *Machine) bool {
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {
-			production := false
-			for _, j := range q.liveJobs() {
-				if j.State == "queued" && j.Spec.Priority == "production" && j.ProductionHost == hostID(m) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) && environmentKey(j, m) == r.Key {
-					production = true
-					break
-				}
-			}
-			if !production {
-				return true
-			}
+			return true
 		}
 	}
 	for _, r := range m.CopyReports {
@@ -772,54 +352,4 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 		}
 	}
 	return false
-}
-
-// Finalize release-only state after this transaction's decisions. This never
-// chooses a target or preempts more work.
-func (q *Queue) finalizeHolds() {
-	enabled := false
-	for _, h := range q.s.Hosts {
-		enabled = enabled || h.Active && h.Policy.hostWide()
-	}
-	if !enabled {
-		return
-	}
-	demand := map[string]bool{}
-	now := q.clock.Now()
-	for _, j := range q.liveJobs() {
-		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
-			continue
-		}
-		if dependencyReady(j) && j.Spec.Priority == "production" && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
-			demand[j.ProductionHost] = true
-		}
-	}
-	for _, c := range q.calls {
-		if c.Priority == "production" && c.Error == "" {
-			demand[c.ProductionHost] = true
-		}
-	}
-	for host, h := range q.s.Hosts {
-		if !h.Active || !h.Policy.hostWide() {
-			continue
-		}
-		unsettled := false
-		for _, r := range q.s.HostReleases {
-			if r.Host == host {
-				unsettled = true
-			}
-		}
-		for _, s := range q.s.ModelSlots {
-			m := q.s.Machines[s.Machine]
-			if m != nil && hostID(m) == host && (s.ReleasingCalls || s.Recovering || m.Gone || q.unreported[m.ID] || s.State == "loading" || s.State == "draining" || s.State == "unloading" || s.State == "unload_failed" || s.InFlight > 0) {
-				unsettled = true
-			}
-		}
-		if demand[host] || unsettled {
-			continue
-		}
-		// Ready idle residency remains available under the engine's own idle
-		// timer. Only actual demand or unresolved releases keep takeover.
-		h.Active = false
-	}
 }

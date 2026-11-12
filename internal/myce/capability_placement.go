@@ -223,7 +223,6 @@ func (q *Queue) retryOOM(j *Job) {
 	// Failed observations are lower bounds, never successful learned needs.
 	j.Spec.Needs.MemoryGB *= 2
 	j.Spec.Needs.HostMemoryGB *= 2
-	j.ProductionHost = ""
 	if why := q.oomCapacityDeadEnd(j); why != "" {
 		j.State, j.Reason = "failed", why
 		return

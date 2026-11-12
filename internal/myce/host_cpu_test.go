@@ -352,7 +352,7 @@ func TestCPUReclaimProductionAtCoreAllowance(t *testing.T) {
 			m := cpuMachine("gpu", "physical", "cuda", 8, 16)
 			m.CPUBudgetCores = 1
 			if tc.hold {
-				if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
