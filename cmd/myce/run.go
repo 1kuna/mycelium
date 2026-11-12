@@ -228,8 +228,43 @@ func runClient(config, joining, address, token string) (myce.Client, error) {
 type runAuthority struct{ Config, Joining string }
 
 func (authority *runAuthority) client(address, token string) (myce.Client, error) {
+	client, err := authority.resolve(address, token)
+	if err != nil {
+		return client, err
+	}
+	// A dev session's token reaches only its own queue, and its queue receives
+	// only that token (#1270). Neither fleet nor dev authority crosses over.
+	if queue, token, ok := devSessionQueue(); ok && queue != "" && token != "" && (client.Token == token) != (strings.TrimRight(client.URL, "/") == queue) {
+		if client.HTTP != nil {
+			client.HTTP.CloseIdleConnections()
+		}
+		return myce.Client{}, errors.New("inside myce dev, commands use only the dev session queue and its token")
+	}
+	return client, nil
+}
+
+// devSessionQueue reports a `myce dev -- COMMAND` session and the queue it
+// exported. Detached observers keep only the marker and carry their own
+// registered dev authority.
+func devSessionQueue() (queue, token string, ok bool) {
+	if os.Getenv("MYCE_DEV_SESSION_ROOT") == "" {
+		return "", "", false
+	}
+	return strings.TrimRight(os.Getenv("MYCE_QUEUE"), "/"), os.Getenv("MYCE_TOKEN"), true
+}
+
+func (authority *runAuthority) resolve(address, token string) (myce.Client, error) {
 	config, joining := authority.Config, authority.Joining
-	if config != "" || joining == "" {
+	if queue, sessionToken, ok := devSessionQueue(); ok && config == "" && joining == "" {
+		// The dev session outranks installed fleet authority: never read the
+		// installed config, joining file or fleet token here (#1270).
+		if address == "" {
+			address = queue
+		}
+		if token == "" {
+			token = sessionToken
+		}
+	} else if config != "" || joining == "" {
 		paths := []string{config}
 		if config == "" {
 			home, err := os.UserHomeDir()

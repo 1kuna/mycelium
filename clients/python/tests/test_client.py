@@ -211,6 +211,14 @@ class ClientTests(unittest.TestCase):
                     "https://queue.invalid", "fixture", object())):
                 self.assertEqual(Client.from_installed().url, "https://queue.invalid")
 
+    def test_installed_defers_to_dev_session(self):
+        session = {"MYCE_DEV_SESSION_ROOT": "/dev-session", "MYCE_QUEUE": "http://127.0.0.1:9/",
+                   "MYCE_TOKEN": "dev-session-token"}
+        with patch.dict(os.environ, session), patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"), patch(
+                "mycelium.installed.installed_authority", side_effect=AssertionError("installed authority read")):
+            client = Client.from_installed()
+        self.assertEqual((client.url, client.token, client._authority), ("http://127.0.0.1:9", "dev-session-token", "environment"))
+
     def test_job_reply_old_queue(self):
         client = Client(token="fixture")
         for body in (b"404 page not found", b'{"code":"job_unknown","error":"job is unknown"}'):

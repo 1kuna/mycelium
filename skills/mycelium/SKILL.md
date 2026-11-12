@@ -285,6 +285,8 @@ hours they waited while an excluded host had room, and how far typed
   [T3 binding](t3-binding.md): adoption, skill install, notifiers.
 - [Owner operations](references/owner-operations.md): queue-owner writes.
 - No fleet: `myce dev -- sh script.sh` runs your script against a temporary
-  queue with fake GPUs ([quick start](../../docs/START-HERE.md)).
+  queue with fake GPUs ([quick start](../../docs/START-HERE.md)). Inside it,
+  every `myce` command and `Client.from_installed()` use the dev queue, even on
+  a machine that has joined a fleet.
 - Problems: search the public issues, then file one with expected and observed
   behavior, version, job and attempt, and no credentials or private paths.

@@ -294,7 +294,12 @@ class Client:
         Reads worker config first, then queue config if no worker is installed.
         A joining authority retains its certificate pin and refuses redirects.
         Explicit Client(url, token) construction keeps its existing behavior.
+        Inside `myce dev -- COMMAND`, the dev session's queue outranks the
+        installed authority, and no installed file or fleet token is read.
         """
+        if (config is None and os.environ.get("MYCE_DEV_SESSION_ROOT")
+                and os.environ.get("MYCE_QUEUE") and os.environ.get("MYCE_TOKEN")):
+            return cls(timeout=timeout, poll_interval=poll_interval, transfer_timeout=transfer_timeout)
         if ssl.OPENSSL_VERSION.startswith("LibreSSL"):
             raise UnsupportedTLSRuntimeError(
                 "Client.from_installed() requires OpenSSL (3 recommended); "
