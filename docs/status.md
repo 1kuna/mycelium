@@ -1635,7 +1635,8 @@ on check-in), `effective_host_memory_budget_gb` and `memory_allowance_bytes`
 status (it is `total_memory_gb` − `free_memory_gb`); `reserved_memory_gb` (pinned
 model memory), `leaving`, `gone` and `checkpoint_unavailable` are omitted when
 zero or false. A job's `checkpoint` (its NAS assignment, which status redacts)
-is omitted when empty. Text prints non-Mycelium RAM history once, as `24h=7d`,
+is always present, as an empty string when unset: v1 reply consumers require
+it (MY-42). Text prints non-Mycelium RAM history once, as `24h=7d`,
 when both windows agree. The definitions below describe how the terms are
 computed.
 
@@ -1977,8 +1978,8 @@ before recipe defaults or scheduler assignment change the executable spec:
   Main/sidecar catalog coverage is their intersection. Extension coverage is its
   frozen variant target list, not proof that a worker is ready now.
 - `qualification` records whether qualified execution is required. Owner output
-  `parity` is omitted while unknown, which is every authored job: neither a pin
-  nor registration proves MY-19 parity. Only command discovery records
+  `parity` stays `unknown` (always present, required by the previous release's
+  v1 reply): neither a pin nor registration proves MY-19 parity. Only command discovery records
   `not_accepted_for_automatic_production`.
 
 `placement` records the historical scheduler assignment: attempt, assignment

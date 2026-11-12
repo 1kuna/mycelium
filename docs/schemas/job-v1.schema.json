@@ -3768,7 +3768,8 @@
         "state",
         "attempt",
         "queued",
-        "front"
+        "front",
+        "checkpoint"
       ],
       "type": "object"
     },
@@ -3948,10 +3949,18 @@
         },
         "reason": {
           "type": "string"
+        },
+        "remaining_work_unknown": {
+          "type": "boolean"
+        },
+        "samples": {
+          "type": "integer"
         }
       },
       "required": [
-        "limitation"
+        "limitation",
+        "remaining_work_unknown",
+        "samples"
       ],
       "type": "object"
     },
@@ -4914,7 +4923,8 @@
         "host_constraint",
         "device_constraint",
         "environment",
-        "qualification"
+        "qualification",
+        "parity"
       ],
       "type": "object"
     },
@@ -6526,6 +6536,9 @@
         "reason": {
           "type": "string"
         },
+        "samples": {
+          "type": "integer"
+        },
         "session": {
           "type": "string"
         }
@@ -6533,7 +6546,8 @@
       "required": [
         "execution",
         "machine",
-        "session"
+        "session",
+        "samples"
       ],
       "type": "object"
     },

@@ -606,7 +606,7 @@ type Job struct {
 	Front                 int64                        `json:"front"`
 	StopAt                *time.Time                   `json:"stop_at,omitempty"`
 	Reason                string                       `json:"reason,omitempty"`
-	Checkpoint            string                       `json:"checkpoint,omitempty"`
+	Checkpoint            string                       `json:"checkpoint"`                   // Always emitted, empty when unset: consumers pin it as required (#1439 regression).
 	CheckpointExpired     *time.Time                   `json:"checkpoint_expired,omitempty"` // Worker-confirmed removal of this settled job's NAS checkpoint folder (#894).
 }
 type Machine struct {
