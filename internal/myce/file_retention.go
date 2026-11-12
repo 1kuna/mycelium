@@ -552,6 +552,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 	}
 	revision := q.fileReferenceRevision
 	cutoff := q.clock.Now().Add(-q.s.PublicationHorizon)
+	expiredCutoff := q.clock.Now().Add(-q.expiredFilePublicationGrace())
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
 	bundles := map[string]time.Time{}
@@ -626,7 +627,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			st, err := os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && filePayloadAgeEligible(st, cutoff, orphanCutoff, decisions[i].marked) {
+			if err == nil && filePayloadAgeEligible(st, cutoff, expiredCutoff, orphanCutoff, decisions[i].marked) {
 				err = os.Remove(path)
 				if err == nil {
 					gone[c.hash] = true
@@ -728,9 +729,13 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 }
 
 // The planner and collector must agree on both publication grace and the
-// longer blob-age rule for positively marked orphan/bundle uploads.
-func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, orphanCutoff time.Time, marked bool) bool {
-	return !st.ModTime().After(publicationCutoff) && (!marked || st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff))
+// longer blob-age rule for positively marked orphan/bundle uploads. An expired
+// job's files use expiredCutoff, the grace capped at the file retention.
+func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, expiredCutoff, orphanCutoff time.Time, marked bool) bool {
+	if !marked {
+		return !st.ModTime().After(expiredCutoff)
+	}
+	return !st.ModTime().After(publicationCutoff) && st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff)
 }
 
 func hasJobFiles(j *Job) bool {
@@ -743,6 +748,20 @@ func hasJobFiles(j *Job) bool {
 		}
 	}
 	return false
+}
+
+// Caller holds q.mu. A publication or HEAD refreshes a blob's mtime, and the
+// publication horizon (the longest measured first settlement of an input claim)
+// keeps it until the submission that references it can commit. For an expired
+// finished job's files that grace never outlasts the file retention: they are
+// kept 3 days, then reclaimed (MY-47). Live, a horizon past the retention stopped
+// every unlink (#1375). An unsettled claim keeps its bytes as custody anyway.
+// Orphan and bundle uploads keep the full horizon. Zero retention keeps it too.
+func (q *Queue) expiredFilePublicationGrace() time.Duration {
+	if q.fileRetention > 0 {
+		return min(q.s.PublicationHorizon, q.fileRetention)
+	}
+	return q.s.PublicationHorizon
 }
 
 // Measured control pressure: a control request has waited on q.mu longer than
