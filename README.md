@@ -101,7 +101,8 @@ don't trust.
 - [Jobs](docs/jobs.md) and [files and checkpoints](docs/files.md)
 - [Operations](docs/operations.md): install, add machines, upgrade, recover
 - [Design](docs/design-proposal.md) and [decisions](docs/DECISIONS.md)
-- [Agent skill](skills/mycelium/SKILL.md): how a project's agents use Mycelium
+- [Agent skill](skills/mycelium/SKILL.md): how a project's agents use Mycelium;
+  `myce skill install` installs the copy matching your `myce` release
 
 [`examples/`](examples) has callers and scenarios, [`extensions/`](extensions)
 has starter integrations, and [`env/`](env) has environment recipes.

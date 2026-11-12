@@ -45,7 +45,7 @@ cat accepted/result.txt
 size and SHA-256. It exits `0` when every file is verified, with the command's
 own code when it failed, and `125` when the job was accepted but the trip didn't
 finish: rerun the same command to pick it back up
-([all exit codes](../../docs/adapter.md#run-wait-and-fetch-in-one-command)).
+([all exit codes](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#run-wait-and-fetch-in-one-command)).
 Then check the files yourself; exit zero doesn't prove they're right.
 
 ## 3. A reusable entry
@@ -88,7 +88,7 @@ lost reply adopts it and fetches again; pass a new `--key NAME` to run again on
 purpose. Arguments after `--` are appended to the command. `myce spec check
 --resolve --entry hello .mycelium/adapter.yaml` previews placement without
 submitting. Only production entries need a target list; every field is in
-[the adapter reference](../../docs/adapter.md).
+[the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
 
 ## 4. Environment
 
@@ -139,7 +139,7 @@ wait cover them all, and results come back as `KEY/OUTPUT`:
 ```
 
 Each piece is its own job, placed, retried and recovered separately, up to 256
-per entry ([pieces](../../docs/jobs.md#plain-command-pieces)).
+per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#plain-command-pieces)).
 
 ## 7. Checkpoints and resumable work
 
@@ -171,7 +171,7 @@ don't find out by losing work.
 | `deadline` | Work with a real owner-set date (`--class deadline --deadline RFC3339`) | Ahead of experiments; stops only resumable experiment work |
 | `experiment` (default) | Everything else: CI, research, sweeps, previews | Production can stop it at any time and requeue it; non-resumable work restarts from scratch |
 
-To let production run on another host, your project adds it itself after a passing output-comparison check or experiment there: `myce parity add --project P --work WORK --host HOST --evidence JOB_ID` (no queue-owner edit; [details](../../docs/scheduling.md)).
+To let production run on another host, your project adds it itself after a passing output-comparison check or experiment there: `myce parity add --project P --work WORK --host HOST --evidence JOB_ID` (no queue-owner edit; [details](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md)).
 
 Equal tiers never preempt each other. Within a tier the queue goes by
 readiness, deadline and age, with no ordering hint, so order your own work with
@@ -198,7 +198,7 @@ outputs: {combined.json: results}
 `myce run --entry NAME` without `--wait` prints the producer's receipt with
 its `job_id`; outputs of a pieces producer are named `KEY/OUTPUT`. Submit the
 stage with `myce submit FILE` or Python `client.submit(spec)`
-([stages](../../docs/jobs.md#start-a-consumer-after-every-producer-piece-succeeds)).
+([stages](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#start-a-consumer-after-every-producer-piece-succeeds)).
 A submitted production stage counts as open production work while it waits on
 `after:`, so drains and fleet upgrades keep a host able to start it; open a
 [production lease](references/waiting.md#production-leases) only for stages you
@@ -247,7 +247,7 @@ assert Path("accepted/result.txt").read_bytes() == b"mycelium-ease-audit-ok\n"
 `run_entry` is `myce run --entry ... --wait --out` (same key, same job) and
 raises `EntryFailedError` on failure. For specs built in code, use
 `client.submit`, `client.wait_many` and `client.download_results`
-([Python client](../../clients/python/README.md)).
+([Python client](https://github.com/1kuna/mycelium/blob/main/clients/python/README.md)).
 
 ## What you can now delete
 
@@ -283,11 +283,13 @@ hours they waited while an excluded host had room, and how far typed
   (host RAM is `host_memory`; older RAM fields are deprecated), stalled queues,
   observers, progress.
 - [Results](references/results.md): output failures, diagnostics, large outputs.
+- This guide ships with the `myce` binary: `myce skill install` installs it and
+  upgrades refresh it ([setup](setup-project.md#install-the-agent-skill)).
 - [Setup](setup-project.md), [harness](harness-binding.md) and
   [T3 binding](t3-binding.md): adoption, skill install, notifiers.
 - [Owner operations](references/owner-operations.md): queue-owner writes.
 - No fleet: `myce dev -- sh script.sh` runs your script against a temporary
-  queue with fake GPUs ([quick start](../../docs/START-HERE.md)). Inside it,
+  queue with fake GPUs ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
   every `myce` command and `Client.from_installed()` use the dev queue, even on
   a machine that has joined a fleet.
 - Problems: search the public issues, then file one with expected and observed

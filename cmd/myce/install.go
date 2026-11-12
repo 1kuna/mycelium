@@ -19,7 +19,19 @@ func setupCommand(args []string) error {
 	if e != nil {
 		return e
 	}
-	return setupCommandWithProbe(args, myce.LocalMachineProbe(), home)
+	if err := setupCommandWithProbe(args, myce.LocalMachineProbe(), home); err != nil {
+		return err
+	}
+	if len(args) > 0 && args[0] == "install" && !hasEnrollmentFlag(args[1:], "--dry-run") {
+		// An installed CLI carries this release's agent skill into each agent
+		// home on the machine; skill trouble never fails the installation.
+		if dirs := defaultSkillDirs(home, os.Getenv("CODEX_HOME")); len(dirs) > 0 {
+			if err := localSkillInstaller(os.Stdout).install(dirs, false, false); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
+		}
+	}
+	return nil
 }
 func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) error {
 	return setupCommandWithAccountLookup(args, probe, home, myce.LookupWorkerAccount)

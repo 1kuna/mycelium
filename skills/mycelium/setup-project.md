@@ -46,15 +46,25 @@ admission, preparation and exit-zero smoke checks do not establish parity.
 
 ## Install the agent skill
 
-From this repository, copy the skill directory, including its supporting files,
-into your coding agent's skill directory. For Codex:
+Every `myce` binary carries this skill for its own release. Install it from the
+CLI, not from a source checkout, so agents read the guide for the release they
+actually run:
 
 ```sh
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/mycelium"
-cp -R skills/mycelium/. "${CODEX_HOME:-$HOME/.codex}/skills/mycelium/"
+myce skill install
 ```
 
-For Claude Code, use `~/.claude/skills/mycelium/` as the destination. Reload
-skills or start a new session after installing. Other harnesses can load
-`skills/mycelium/SKILL.md` directly. This installs agent instructions; routing
-shell commands depends on the harness ([harness binding](harness-binding.md)).
+This writes `skills/mycelium/` under each agent home that exists: `~/.claude`
+(Claude Code), `~/.agents` and `$CODEX_HOME` (default `~/.codex`). Pass skill
+folders to choose others, e.g. `myce skill install ~/.claude/skills/mycelium`.
+`myce install` does the same for agent homes on that machine. After an upgrade,
+the next `myce` command refreshes every copy it wrote to the new release; a copy
+you edited is left alone. `myce skill status` shows each copy's state.
+
+A symlink, an edited copy or a copy `myce` didn't write (from an older manual
+`cp`) is kept and reported. `myce skill install --replace` replaces it: a symlink
+is removed without touching its target, and a directory is moved to the user
+cache's `mycelium/skill-backups/`. Reload skills or start a new session
+afterwards. Other harnesses can read the guide with `myce skill show`. This
+installs agent instructions; routing shell commands depends on the harness
+([harness binding](harness-binding.md)).

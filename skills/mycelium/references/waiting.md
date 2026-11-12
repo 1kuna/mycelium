@@ -16,7 +16,7 @@ code), `owner`, `reason` (one sentence), `clears`, optional `expires`, `next`
 Host and device fences use the same record in status `holds`; `owner: operator`
 means only an operator clears it. An offer is not a started build; an unknown
 observation is not measured zero capacity. Keep typed reasons and original intent, and fix the cause rather than
-retrying an unchanged deterministic failure. See [diagnostics](../../../docs/status.md).
+retrying an unchanged deterministic failure. See [diagnostics](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Coverage versus capacity
 
@@ -42,7 +42,7 @@ blocker remains. `last_planner_decision` keeps its original timestamp and wave
 vector. Read `latest.closed_at`/`latest.closed_reason` for ended waits and
 `capture_gaps`/`deferred_at` for capture deferred to protect control service.
 Missing values and dropped history stay unknown. See
-[wait evidence](../../../docs/status.md#retained-production-admission-waits-868).
+[wait evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#retained-production-admission-waits-868).
 
 Overdue waits in every tier can include
 `admission_wait.latest.targets[].admission_decision`. `outcome`, `stage` and
@@ -52,7 +52,7 @@ means selection was skipped, not a rejected candidate; `not_selected` means an
 eligible candidate lost selection order. The threshold is one advertised or
 measured check-in opportunity, not a start promise. Unchanged evidence keeps its
 timestamp; sibling `predicates` are diagnostic projections. See
-[actual decisions](../../../docs/status.md#actual-all-tier-admission-decisions-1158).
+[actual decisions](https://github.com/1kuna/mycelium/blob/main/docs/status.md#actual-all-tier-admission-decisions-1158).
 
 Per-job JSON keeps `last_memory_admission` for a blocked RAM comparison:
 envelope, drift, signed headroom and charge/growth owners. It survives startup
@@ -64,7 +64,7 @@ spending infrastructure retries. A helper that ran does not prove main ran.
 `execution_cause.admission` includes aggregate `live_host_growth` contributors and
 sample ages; compare those terms before attributing the total to the launching
 job. Exact cleanup, release and
-absolute deadlines still bind. See [launch capacity waits](../../../docs/status.md).
+absolute deadlines still bind. See [launch capacity waits](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Device faults
 
@@ -93,7 +93,7 @@ every other required component must be OK. Unknown without that comparison
 (including single-card hosts), stale comparison or a monitoring gap keeps
 quarantine; command exit alone is not proof. Repeated-fault escalation needs the
 maintenance owner. Consumers never clear real devices or resubmit to bypass the
-hold. See [device quarantine](../../../docs/reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
+hold. See [device quarantine](https://github.com/1kuna/mycelium/blob/main/docs/reference/accelerator-quarantine.md#accelerator-driver-fault-quarantine).
 
 When status includes device or job `fault_evidence`, or terminal
 `attempt_history`, it holds bounded attempt/PID/memory/page snapshots for observed
@@ -103,7 +103,7 @@ timestamps in one `myce status JOB_ID`; delayed samples, ambiguous CUDA
 attribution and missing cores do not establish a cause. Report `unknown` until
 the causal chain is proved. Enabling cores is a separately authorized operator
 task; agents never change limits, core patterns or drivers. See
-[fault evidence](../../../docs/status.md#fault-evidence).
+[fault evidence](https://github.com/1kuna/mycelium/blob/main/docs/status.md#fault-evidence).
 
 ## Storage and disk holds
 
@@ -134,8 +134,8 @@ attempt storage. Foreign or external compiler caches are warned about, never
 deleted. Installation owners can select verified local snapshot acquisition with
 `myce install worker --config CONFIG --model-root PATH`; NAS checkpoints,
 environment sources and immutable masters keep their existing contracts. See
-[worker budgets](../../../docs/reference/worker-caches.md#shared-filesystem-budget-811-next-release)
-and [local acquisition](../../../docs/reference/models.md#local-acquisition-root-1248-next-release).
+[worker budgets](https://github.com/1kuna/mycelium/blob/main/docs/reference/worker-caches.md#shared-filesystem-budget-811-next-release)
+and [local acquisition](https://github.com/1kuna/mycelium/blob/main/docs/reference/models.md#local-acquisition-root-1248-next-release).
 Host health drains (memory pressure, mounts, disk) name a typed cause in
 machine `host_health` and clear after measured recovery. `myce host status HOST`
 lists what outside Mycelium holds a host's memory: each foreign process's
@@ -146,12 +146,12 @@ Mycelium has filled a volume for as long as its remaining space would last; it
 is context, not a drain. A normal fleet
 update keeps busy hosts available until a natural idle moment, so keep using the
 queue; don't cancel experiments to finish a drain. See
-[host health](../../../docs/status.md) and [operations](../../../docs/operations.md).
+[host health](https://github.com/1kuna/mycelium/blob/main/docs/status.md) and [operations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md).
 
 ## Shared interactive host
 
 The agents' host carries the shared/interactive profile
-([MY-45](../../../docs/DECISIONS.md#my-45)). There a job's CPU charge is the
+([MY-45](https://github.com/1kuna/mycelium/blob/main/docs/DECISIONS.md#my-45)). There a job's CPU charge is the
 larger of its declared cores and its measured peak, carried across
 checkpoint/requeue and shown in the CPU entry of status `resources`. Owner
 pressure stops new admission and yields every running job on that host,
@@ -160,7 +160,7 @@ latency, or swap growth with latency. Resumable jobs checkpoint and requeue;
 non-resumable jobs stop and requeue; neither is charged an infrastructure retry.
 Keep waiting on the same job and key, with no manual resume and no pressure
 polling. Dedicated hosts are unaffected. See
-[shared hosts](../../../docs/shared-hosts.md#measured-cpu-and-owner-yield).
+[shared hosts](https://github.com/1kuna/mycelium/blob/main/docs/shared-hosts.md#measured-cpu-and-owner-yield).
 
 ## Classes and preemption
 
@@ -193,8 +193,8 @@ the class the work actually deserves; pauses, local locks and holding back
 submissions only hide work from the queue. A critical Mycelium update may
 checkpoint and requeue even production (MY-39), and owner pressure on a shared
 interactive host yields every tier (below). See
-[scheduling](../../../docs/scheduling.md) and
-[start deadlines](../../../docs/jobs.md#production-start-deadline).
+[scheduling](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md) and
+[start deadlines](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#production-start-deadline).
 
 ## Reservations and pausing
 
@@ -205,7 +205,7 @@ an existing validation job. Device checks default to their selected device;
 whole-host isolation needs its actual reason. After an unconfirmed write, inspect
 `myce reserve list` before retrying the same explicit `--id`; an empty response
 does not confirm a reservation. See
-[validation reservations](../../../docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job).
+[validation reservations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job).
 
 Pause only your own queued job: `myce pause JOB_ID --reason TEXT`, optionally
 `--until RFC3339`; `myce resume JOB_ID` keeps its key and queue age. Assigned or
@@ -236,8 +236,8 @@ covers the pipeline, reopen the same key to renew, and close it when the last
 undeclared stage is submitted. It expires on its own, grants no priority and reserves no
 capacity. A critical Mycelium update may still checkpoint and requeue production
 work (MY-39); requeued or newly submitted stages wait for the host to return.
-See [production leases](../../../docs/operations.md#production-leases).
+See [production leases](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#production-leases).
 
 Estimates need comparable complete work and stay uncertain; they are not
 deadlines. Distinguish queue wait, preparation, execution, output acceptance and
-release. See [status contracts](../../../docs/status.md).
+release. See [status contracts](https://github.com/1kuna/mycelium/blob/main/docs/status.md).

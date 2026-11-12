@@ -12,7 +12,7 @@ Batch waits carry revisions, and clients never fall back to per-job polling.
 
 Python callers use `client.wait(JOB_ID)` or `client.wait_many([JOB_A, JOB_B])`;
 a list returns terminal jobs in input order. Keep the installed pinned opener.
-See [Python client](../../../clients/python/README.md).
+See [Python client](https://github.com/1kuna/mycelium/blob/main/clients/python/README.md).
 
 `myce wait --timeout DURATION` and the Python timeout bound observation only;
 timeout or interruption leaves the job alive. Without an owner or job deadline
@@ -47,7 +47,7 @@ project and reason with their `ids`. Full job objects need
 - `myce status --history`, `GET /api/status?detail=full` or
   `client.status(full=True)` restores every field for full inspection.
 
-See [section coverage](../../../docs/status.md#reading-myce-status). Follow
+See [section coverage](https://github.com/1kuna/mycelium/blob/main/docs/status.md#reading-myce-status). Follow
 Retry-After and typed recovery diagnostics without changing identity or trust to
 evade them; permanent authority, TLS, integrity and configuration refusals go to
 their owner.
@@ -67,7 +67,7 @@ wait totals and wasted attempts; missing samples are unknown, not zero.
 `myce efficiency --project NAME` shows only your project's waits, the queue
 hours your host lists and targets cost, typed sizing against learned peaks,
 and one advice line per item. See
-[queue efficiency](../../../docs/status.md).
+[queue efficiency](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Host status
 
@@ -84,8 +84,8 @@ inconsistent worker evidence; do not act on device state from it.
 Clients recover interrupted transfers and queue restarts within the caller's
 bound. Keep integrity refusals permanent and report them to the authority owner;
 never broaden the client TLS classifier to recover a watch. See
-[transfer and recovery](../../../docs/files.md) and
-[request budgets](../../../docs/request-budgets.md).
+[transfer and recovery](https://github.com/1kuna/mycelium/blob/main/docs/files.md) and
+[request budgets](https://github.com/1kuna/mycelium/blob/main/docs/request-budgets.md).
 
 ## Slow or stalled queue
 
@@ -139,7 +139,7 @@ shared-observer recovery belongs to its operator, who preserves all durable arms
 proves exact owner exit, then replays the original key and binding. Consumers
 keep stable receipts and delivery IDs and never kill a shared observer or edit
 its registry. See
-[upgrade and recovery](../../../docs/reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
+[upgrade and recovery](https://github.com/1kuna/mycelium/blob/main/docs/reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 
 Local receipt `delivery_status: delivered` records notifier success; transport
 acceptance, receiving-thread arrival and owner disposition are separate evidence
@@ -187,7 +187,7 @@ duration of this kind of work, or a `reason` it is unknown. It is history, not
 a remaining time or deadline; Mycelium no longer predicts completion (MY-49).
 `remaining_seconds`, `samples`, `source` and `history_age_seconds` are gone, and
 `timing.predicted_seconds` is a deprecated mirror for one release. See the
-[report contract](../../../docs/status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
+[report contract](https://github.com/1kuna/mycelium/blob/main/docs/status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
 
 Checkpoint `progress` is a durable generation number, not a percentage or ETA.
 Neither stage completion nor a checkpoint means success or resource release:
@@ -198,7 +198,7 @@ keep the job ID, wait for success and verify results.
 `myce telemetry capture` runs a bounded local sampler with a declared run/host
 reference and issues no queue requests; keep its versioned JSONL beside exact
 attempt evidence. Replay permission and parity are separate. See
-[benchmark telemetry](../../../docs/benchmark-telemetry.md).
+[benchmark telemetry](https://github.com/1kuna/mycelium/blob/main/docs/benchmark-telemetry.md).
 
 ## Project doctor
 
