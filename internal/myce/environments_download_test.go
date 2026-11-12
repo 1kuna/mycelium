@@ -60,6 +60,10 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 					return err
 				}
 				if args[1] == "venv" {
+					// The interpreter, with its headers, belongs to the environment.
+					if vars["UV_PYTHON_PREFERENCE"] != "only-managed" || !strings.HasPrefix(vars["UV_PYTHON_INSTALL_DIR"], dir+string(os.PathSeparator)) {
+						return fmt.Errorf("host Python may be used: %q %q", vars["UV_PYTHON_PREFERENCE"], vars["UV_PYTHON_INSTALL_DIR"])
+					}
 					return nil
 				}
 				wheel := filepath.Join(cache, "shared-wheel")

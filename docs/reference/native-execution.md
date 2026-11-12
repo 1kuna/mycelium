@@ -59,8 +59,8 @@ Stage source/data into the managed `{work}` through inputs or a frozen
 extension. Native workdirs must resolve beneath `{work}`. Extension source gets
 a private copy; prepared environment/extension caches permit reads/execution,
 not content writes. The worker overrides `TMPDIR`, `TMP` and `TEMP` to
-`{work}/.tmp` and `MYCE_SCRATCH_DIR` to `{work}/.scratch` after authored
-env/activation. Main and its own sidecars share both paths. Repeatable
+`{work}/.tmp` (through a short alias, below) and `MYCE_SCRATCH_DIR` to
+`{work}/.scratch` after authored env/activation. Main and its own sidecars share both paths. Repeatable
 `--native-read-root` and `--native-exec-root` worker/install settings add narrow
 read-only model roots or read/execute runtime roots; filesystem, home, NAS and
 installed Mycelium roots and protected-content overlaps are refused. #219's environment allowlist and
@@ -85,6 +85,12 @@ jobs need not set these themselves:
 - `TMPDIR`, `TMP` and `TEMP`: the attempt's `{work}/.tmp`, and
   `MYCE_SCRATCH_DIR`: its `{work}/.scratch`. The worker owns both and they
   override authored values; retention and cleanup follow the attempt.
+  `TMPDIR` is a short alias, `STATE/t/<12 hex>`, a link that resolves to
+  `{work}/.tmp`. A Unix socket path must fit 108 bytes on Linux and 104 on
+  Darwin, and the attempt tree alone can use most of that: servers that bind
+  sockets in `TMPDIR`, such as vLLM's engine IPC, failed to start. With a
+  default install's state path the alias leaves room for a UUID-named socket.
+  Where links are unsupported the real path is used.
 
 Docker jobs get their own `MYCE_*` paths (see [files](../files.md)) and are not
 covered by the thread defaults above.

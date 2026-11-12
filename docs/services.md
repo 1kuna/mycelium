@@ -931,3 +931,47 @@ when that phase has not begun. No release is confirmed while any authenticated
 process or cgroup may remain populated. Missing saved
 Docker output finalization remains a recovery interruption; a known payload
 failure is retained.
+
+## A model server in a native job instead of a container image
+
+A project whose job runs a GPU stack from a container image, such as vLLM, can
+run the same stack natively. It needs no Docker and no queue-owner setup:
+
+- **Software:** a pinned `requirements.txt` (or `uv.lock`) for the target
+  platform, compiled once with
+  `uv pip compile --python-platform aarch64-manylinux_2_28 --python-version 3.12`
+  (or the x86_64 equivalent). The project owns these versions (MY-12). PyPI
+  publishes CUDA 13 aarch64 wheels for torch, vLLM and FlashInfer.
+- **Weights:** `model_snapshots` at an exact commit, read through
+  `MYCE_MODEL_<NAME>`. Download them first ([model snapshots](files.md#declared-model-snapshots-553)).
+- **Server:** `vllm serve` as a [native sidecar](#native-job-sidecars) that the
+  main command calls through `MYCE_SIDECAR_<NAME>_URL`, or vLLM's offline `LLM`
+  API inside the main command.
+- **Isolation:** leave the job a plain native job (unsandboxed by default,
+  MY-25). vLLM's engine talks over Unix stream sockets, which both sandboxes
+  deny ([native isolation](native-isolation.md)).
+
+```yaml
+entries:
+  serve:
+    source: {directory: src}
+    run:
+      command: [python, client.py]          # calls $MYCE_SIDECAR_VLLM_URL/v1/...
+      sidecars:
+        - name: vllm
+          command: [sh, -c, 'exec vllm serve "$MYCE_MODEL_LLM" --host 127.0.0.1 --port "$MYCE_SIDECAR_PORT" --served-model-name llm --max-model-len 8192 --gpu-memory-utilization 0.3 --no-enable-log-requests']
+          port: 0
+          readiness: {path: /health, timeout: 20m}
+          env: {HF_HUB_OFFLINE: '1', VLLM_NO_USAGE_STATS: '1', XDG_CACHE_HOME: .cache, VLLM_CACHE_ROOT: .cache/vllm}
+          memory_gb: 10
+    environment: {lock_file: env/requirements.txt, python: '3.12'}
+    model_snapshots:
+      llm: {repo: OWNER/NAME, revision: FULL_COMMIT}
+    needs: {platform: cuda, cpu_cores: 4, memory_gb: MEASURED_GPU_GIB, host_memory_gb: MEASURED_HOST_GIB}
+```
+
+`--gpu-memory-utilization` is a fraction of the device's total memory. On a
+unified-memory host that is the shared RAM pool, so keep it, plus the weights,
+within the declared memory. The readiness timeout covers weight loading and
+torch.compile on a cold start. Relative cache variables keep compile caches in
+the attempt folder rather than the worker user's home.

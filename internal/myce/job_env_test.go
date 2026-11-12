@@ -68,7 +68,7 @@ func TestJobEnvironmentAllowlistBatchCommand(t *testing.T) {
 	setWorkerSession(t)
 	s := nativeSpec(t)
 	s.Run.Sidecars = nil
-	s.Run.Command = []string{"sh", "-c", `env > "$NATIVE_TEST_DIR/plain.env"`}
+	s.Run.Command = []string{"sh", "-c", `env > "$NATIVE_TEST_DIR/plain.env" && cd "$TMPDIR" && pwd -P > "$NATIVE_TEST_DIR/tmp.real"`}
 	s.Run.Env["RUN_ENV"] = "kept"
 	// The job's own thread setting wins, even above its allotment off a shared host.
 	s.Run.Env["OMP_NUM_THREADS"] = "3"
@@ -81,8 +81,11 @@ func TestJobEnvironmentAllowlistBatchCommand(t *testing.T) {
 	env := parseEnvDump(t, filepath.Join(r.dir, "plain.env"))
 	requireJobEnv(t, "batch", env, map[string]string{"RUN_ENV": "kept", "MYCE_JOB_ID": r.j.ID, "MYCE_ATTEMPT": "1", "MYCE_CHECKPOINT_DIR": "*", "MYCE_PROCESS_ID": "*", "MYCE_PLATFORM": "cpu-fake", "MYCE_MACHINE": "native",
 		"MYCE_CPUS": "2", "OMP_NUM_THREADS": "3", "MKL_NUM_THREADS": "2", "GOMAXPROCS": "2", "MYCE_SCRATCH_DIR": "*"})
-	if !strings.HasPrefix(env["TMPDIR"], r.dir) && !strings.Contains(env["TMPDIR"], r.j.ID) {
-		t.Errorf("TMPDIR %q is not the attempt's", env["TMPDIR"])
+	// TMPDIR may be a short alias; it must resolve to the attempt's own folder.
+	real, err := os.ReadFile(filepath.Join(r.dir, "tmp.real"))
+	work, e := filepath.EvalSymlinks(r.dir)
+	if err != nil || e != nil || strings.TrimSpace(string(real)) != filepath.Join(work, ".tmp") {
+		t.Errorf("TMPDIR %q resolves to %q, not the attempt's %s/.tmp: %v %v", env["TMPDIR"], real, work, err, e)
 	}
 }
 

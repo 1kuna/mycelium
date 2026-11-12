@@ -817,8 +817,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	jobCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
 	// TMPDIR is worker-owned, even when run.env or activation supplied one.
 	// Keep it with the managed attempt files so existing custody/retention owns it.
-	tmp := filepath.Join(executionWork, ".tmp")
-	if err := os.MkdirAll(tmp, 0700); err != nil {
+	tmp, err := attemptTempDir(s.dir, executionWork)
+	if err != nil {
 		return nil, err
 	}
 	env["TMPDIR"], env["TMP"], env["TEMP"] = tmp, tmp, tmp
