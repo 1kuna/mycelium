@@ -26,6 +26,7 @@ type WorkerEvent struct {
 }
 
 func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
+	defer a.Queue.trackWorkerPoll(r.Context(), r.PathValue("id"), r.URL.Query().Get("session"))()
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {

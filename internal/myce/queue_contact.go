@@ -267,6 +267,70 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 	}
 }
 
+// workerPoll records one worker session's stop-event long polls. The worker
+// runs that poll beside its check-in loop, so an open poll shows the process is
+// alive and connected while local work (a slow fsync under host load) delays
+// its next check-in (#1450). It protects only against confirmed loss; suspicion
+// and cadence learning still come from check-ins alone.
+type workerPoll struct {
+	open int
+	last time.Duration // Control opportunity of the latest proof of life.
+}
+
+// trackWorkerPoll registers an events request for its lifetime. A poll that
+// ends normally is contact at its end; a dropped connection proves nothing
+// after its start. A silently dead host therefore keeps its credit for at most
+// the server's existing poll window.
+func (q *Queue) trackWorkerPoll(ctx context.Context, machine, session string) func() {
+	if machine == "" || session == "" {
+		return func() {}
+	}
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if q.workerPolls == nil {
+		q.workerPolls = map[string]map[string]*workerPoll{}
+	}
+	sessions := q.workerPolls[machine]
+	if sessions == nil {
+		sessions = map[string]*workerPoll{}
+		q.workerPolls[machine] = sessions
+	}
+	for s, p := range sessions {
+		if s != session && p.open == 0 {
+			delete(sessions, s) // A replaced session's settled record.
+		}
+	}
+	p := sessions[session]
+	if p == nil {
+		p = &workerPoll{}
+		sessions[session] = p
+	}
+	p.open++
+	p.last = q.controlNow()
+	return func() {
+		q.contactMu.Lock()
+		defer q.contactMu.Unlock()
+		p.open--
+		if ctx.Err() == nil {
+			p.last = q.controlNow()
+		}
+	}
+}
+
+// Detached views keep the same poll evidence as the live loss decision.
+// Caller holds contactMu.
+func (q *Queue) cloneWorkerPolls() map[string]map[string]*workerPoll {
+	out := make(map[string]map[string]*workerPoll, len(q.workerPolls))
+	for machine, sessions := range q.workerPolls {
+		out[machine] = make(map[string]*workerPoll, len(sessions))
+		for session, p := range sessions {
+			copy := *p
+			out[machine][session] = &copy
+		}
+	}
+	return out
+}
+
 // lastContact is the later of m.LastSeen and the queue's own contact record for
 // m's current session; active processing protects that worker from confirmed
 // loss, while wall-clock suspicion remains independent. Callers hold q.mu.
@@ -292,11 +356,18 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 	allowance := q.machineLossTimeout(m.ID)
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
+	opportunity := q.controlNow()
+	polled := m.LastSeen
+	if p := q.workerPolls[m.ID][m.Session]; includePending && p != nil {
+		if p.open > 0 {
+			return maxTime(now, m.LastSeen)
+		}
+		polled = maxTime(polled, now.Add(-max(0, opportunity-p.last)))
+	}
 	c := q.contacts[m.ID]
 	if c == nil || c.session != m.Session {
-		return m.LastSeen
+		return polled
 	}
-	opportunity := q.controlNow()
 	contact := false
 	for pending := range c.pending {
 		if !includePending {
@@ -312,10 +383,7 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 		return maxTime(now, m.LastSeen)
 	}
 	if c.measured {
-		return maxTime(m.LastSeen, now.Add(-max(0, opportunity-c.processedOpportunity)))
+		return maxTime(polled, now.Add(-max(0, opportunity-c.processedOpportunity)))
 	}
-	if c.processed.After(m.LastSeen) {
-		return c.processed
-	}
-	return m.LastSeen
+	return maxTime(polled, c.processed)
 }
