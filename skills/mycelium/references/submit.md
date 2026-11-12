@@ -36,7 +36,7 @@ lock and `needs.tools` fit. A first failure on a type the recipe never succeeded
 on is a coverage finding, not your job's failure: the queue skips that type for
 the entry and requeues elsewhere, and `entry_coverage.findings` names the type
 and its fix. Production keeps explicit targets so MY-19 output parity holds
-([entries without targets](../../../docs/adapter.md#entries-without-targets)).
+([entries without targets](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#entries-without-targets)).
 
 Register supported implementations as variants of one extension, each with its
 target, resources, environment and native check. Mycelium selects among
@@ -44,14 +44,14 @@ qualified variants and preserves scarce capacity. A single implementation for
 one OS/architecture/backend is a real coverage limit, which a pin doesn't fix.
 `myce portability --extension NAME@VERSION` shows gaps and preparation actions.
 Native variants need their own qualification and output criteria before
-production. See [adapters](../../../docs/adapter.md),
-[environments](../../../docs/environments.md) and
-[scheduling](../../../docs/scheduling.md).
+production. See [adapters](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md),
+[environments](https://github.com/1kuna/mycelium/blob/main/docs/environments.md) and
+[scheduling](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md).
 
 Extension registration freezes content; it is not an owner review. Native checks
 run automatically on first demand against the author's baseline, and a failed
 check holds that extension. The
-[execution gate audit](../../../docs/execution-gates.md) lists the protections.
+[execution gate audit](https://github.com/1kuna/mycelium/blob/main/docs/execution-gates.md) lists the protections.
 
 ### Disk needs
 
@@ -105,7 +105,7 @@ Go/CLI and Python uploads resume an interrupted session by checking the
 content-addressed blob, and success needs server SHA-256 verification plus
 matching size. Keep source files unchanged during upload. Typed integrity,
 authority and storage-policy refusals need their owner. See
-[file transfer recovery](../../../docs/files.md#transfer-behavior).
+[file transfer recovery](https://github.com/1kuna/mycelium/blob/main/docs/files.md#transfer-behavior).
 
 The Python client retries overload after the current Retry-After within your
 deadline, and keyed submissions and waits recover transient TLS record/EOF
@@ -156,7 +156,7 @@ a `run.docker*` field is refused at submission with `job_docker_retired`. To
 move a job off a container image (for example vLLM), pin the image's Python
 stack in a lock file for the target platform. Declare the weights as
 `model_snapshots`, and run the server as a native sidecar of a plain
-(unsandboxed) job. See [a model server in a native job](../../../docs/services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
+(unsandboxed) job. See [a model server in a native job](https://github.com/1kuna/mycelium/blob/main/docs/services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
 uv environments carry their own interpreter, so Triton's run-time C builds find
 `Python.h`. `TMPDIR` is short enough for servers that bind Unix sockets there.
 A first run on a host can JIT-compile GPU kernels for a long time (about
@@ -166,20 +166,20 @@ A first run on a host can JIT-compile GPU kernels for a long time (about
 npm projects use `environment: {backend: npm, lock_file: package-lock.json}`.
 `node_modules` and post-install tool downloads such as headless browsers are
 prepared once per lock on each worker and reused read-only; see
-[npm package locks](../../../docs/environments.md#npm-package-locks).
+[npm package locks](https://github.com/1kuna/mycelium/blob/main/docs/environments.md#npm-package-locks).
 
 `myce status JOB --json` and Python `client.get(job_id)` show the frozen lock as
 `environment_lock`, for example
 `{"backend": "pixi", "sha256": {"pixi.lock": "…", "pixi.toml": "…"}}`. Compare it
 with `shasum -a 256 env/pixi.lock env/pixi.toml`. See
-[project lock files](../../../docs/environments.md#project-lock-files).
+[project lock files](https://github.com/1kuna/mycelium/blob/main/docs/environments.md#project-lock-files).
 
 Every native job is told its share: `MYCE_CPUS`, thread defaults
 (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
 `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`, `RAYON_NUM_THREADS`,
 `GOMAXPROCS`), and `TMPDIR` plus `MYCE_SCRATCH_DIR` in attempt scratch. A value
 you set in `run.env` wins. See
-[job environment](../../../docs/reference/native-execution.md#job-environment).
+[job environment](https://github.com/1kuna/mycelium/blob/main/docs/reference/native-execution.md#job-environment).
 
 ## Isolation
 
@@ -203,7 +203,7 @@ offline unless you declare `needs.network: true`. Linux workers don't run
 networked native jobs yet, so prepare or vendor dependencies there. Toolchains
 installed in the worker user's home aren't visible; declare an environment.
 Only workers advertising `native_isolation_ci` run these jobs. See
-[native isolation](../../../docs/native-isolation.md).
+[native isolation](https://github.com/1kuna/mycelium/blob/main/docs/native-isolation.md).
 
 ## Models
 
@@ -214,20 +214,20 @@ verified bytes; loading a snapshot is not qualification or parity. SMB `XSym`
 emulated links resolve to verified blob bytes or refuse with
 `model_snapshot_mismatch`/`model_snapshot_escape`; keep the original hub cache
 intact rather than copying weights. See
-[model snapshots](../../../docs/files.md#declared-model-snapshots-553).
+[model snapshots](https://github.com/1kuna/mycelium/blob/main/docs/files.md#declared-model-snapshots-553).
 
 Fetch a model master file by file with
 `myce model fetch BUNDLE/FILE --model-root PARENT --url URL --size-bytes BYTES --sha256 HASH`.
 It stages beside the root, resumes interruptions and publishes only verified
 files; invalid bytes stay in the reported quarantine. Loading never downloads
-weights. See [master downloads](../../../docs/services.md#explicit-master-download-and-pins).
+weights. See [master downloads](https://github.com/1kuna/mycelium/blob/main/docs/services.md#explicit-master-download-and-pins).
 
 Model loads have no fixed total cutoff while copy, load or health signals
 advance; keep the same request while it progresses. Custom servers report
-`MYCE_LOAD_PROGRESS` records ([adaptive readiness](../../../docs/readiness.md)).
+`MYCE_LOAD_PROGRESS` records ([adaptive readiness](https://github.com/1kuna/mycelium/blob/main/docs/readiness.md)).
 For catalog image chat, use the Python client's openai extra:
 `Client.from_installed().openai(project=PROJECT, priority="experiment")`, with
-base64 `image_url` parts. See [image-chat example](../../../examples/image-chat.py).
+base64 `image_url` parts. See [image-chat example](https://github.com/1kuna/mycelium/blob/main/examples/image-chat.py).
 
 ## Inputs, checkpoints and pieces
 
@@ -243,7 +243,7 @@ verifies it and gives the command `$MYCE_INPUT_<NAME>`. Archives add
 byte) evidence. A missing NAS source fails before launch with
 `input_staging: not_found`. Keep integrity and capacity refusals: re-uploading
 identical oversized inputs can't make them fit. See
-[shared inputs](../../../docs/files.md).
+[shared inputs](https://github.com/1kuna/mycelium/blob/main/docs/files.md).
 
 Claim `resumable: true` only after implementing atomic checkpoints and a real
 restore. Each save writes a temporary file in `$MYCE_CHECKPOINT_DIR`, fsyncs and
@@ -253,7 +253,7 @@ between work units. Checkpoints are not results and not an input cache: a
 checkpoint is kept 72 hours after the job ends. A disposable non-resumable
 experiment may declare `preemptible: true` so it can leave a scarce host by
 restarting from scratch (MY-26); class alone never implies it. See
-[checkpoints](../../../docs/files.md#resumable-jobs).
+[checkpoints](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs).
 
 Resumes stay on the checkpoint's target. The queue records the OS/arch/platform
 of the attempt that wrote the newest accepted generation and places the resume
@@ -271,17 +271,17 @@ only that piece. A failed piece doesn't stop the others; the parent fails once
 all settle and names the failed keys, while accepted pieces keep their outputs.
 Cancelling or pausing the parent covers every unfinished piece. Pieces can't be
 combined with `after:`, `workdir`, kind/program, `workload` or
-`fan_out:`. See [pieces](../../../docs/jobs.md#plain-command-pieces).
+`fan_out:`. See [pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#plain-command-pieces).
 
 An `after:` stage binds retained accepted outputs of a succeeded parent, even if
 the parent later received a cancellation. A parent cancelled before success
 cancels its dependents with `upstream_cancelled`; expired outputs return
-`result_expired`. See [stages](../../../docs/jobs.md#start-a-consumer-when-one-piece-is-accepted).
+`result_expired`. See [stages](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#start-a-consumer-when-one-piece-is-accepted).
 
 Opt-in XPU fan-out sharing needs fresh VRAM counters from the separately
 administered telemetry broker; without them extra sharing is withheld while
 ordinary admission continues. Ask the installation owner to qualify the
-[broker](../../../deploy/gpu-telemetry/README.md) rather than starting samplers.
+[broker](https://github.com/1kuna/mycelium/blob/main/deploy/gpu-telemetry/README.md) rather than starting samplers.
 
 ## Explicit placement restrictions
 

@@ -29,7 +29,7 @@ finalization `limit_exceeded` before any upload: narrow it or release finished
 results. A pending upload or reservation keeps local results and retries; a
 publication-pending job is not accepted success. Keep its identity and resolve
 the reported storage or permission problem. Details:
-[folder and glob outputs](../../../docs/files.md#folder-and-glob-outputs-1341).
+[folder and glob outputs](https://github.com/1kuna/mycelium/blob/main/docs/files.md#folder-and-glob-outputs-1341).
 
 ## Keep files on failure
 
@@ -38,7 +38,7 @@ junit.xml, format: pytest-junit}]` (files, folders or globs; `format` is optiona
 `pytest-junit` or `vitest-junit`). A failed attempt publishes them as `kept/NAME`
 in its diagnostics, retrieved with `myce result JOB_ID --attempt N --out DIR`;
 the job stays failed. See
-[keep files from a failed attempt](../../../docs/files.md#keep-files-from-a-failed-attempt-1341).
+[keep files from a failed attempt](https://github.com/1kuna/mycelium/blob/main/docs/files.md#keep-files-from-a-failed-attempt-1341).
 
 ## Large outputs and release
 
@@ -61,9 +61,9 @@ within that window. An operator can set the queue's `--file-retention`, and `0`
 keeps files until explicit release. A project policy `file_retention` (for example `72h`) expires its own finished jobs'
 files sooner, and a `file_store_capacity` refusal names the limiting bound, bytes
 held by finished jobs and the release or retention step to take. See
-[result retention and release](../../../docs/files.md),
-[per-project retention](../../../docs/reference/file-store.md#per-project-file-retention-1214)
-and [operations](../../../docs/operations.md).
+[result retention and release](https://github.com/1kuna/mycelium/blob/main/docs/files.md),
+[per-project retention](https://github.com/1kuna/mycelium/blob/main/docs/reference/file-store.md#per-project-file-retention-1214)
+and [operations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md).
 
 ## Worker scratch
 
@@ -75,4 +75,4 @@ explicit owner file release; there is no fixed 24-hour promise (MY-34). Unknown
 data and pending upload, replay or custody stay protected. Recover needed partial
 files before the configured deadline or release, then use the file-release
 plan/apply flow above. See
-[worker scratch retention](../../../docs/reference/worker-caches.md#worker-scratch-retention).
+[worker scratch retention](https://github.com/1kuna/mycelium/blob/main/docs/reference/worker-caches.md#worker-scratch-retention).

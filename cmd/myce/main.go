@@ -37,6 +37,9 @@ func main() {
 		log.Print(err)
 		os.Exit(exitCode(err))
 	}
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" {
+		localSkillInstaller(os.Stderr).refresh(localSkillDirs())
+	}
 	if err := run(os.Args[1:]); err != nil {
 		var resultErr *ResultError
 		if errors.As(err, &resultErr) {
@@ -61,7 +64,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|dev|version|release|file|extension|env|portability|detect|service|measure|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|dev|version|release|skill|file|extension|env|portability|detect|service|measure|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -103,6 +106,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "fleet-apply" {
 		return runFleetApply(context.Background(), args[1:])
+	}
+	if args[0] == "skill" {
+		return skillCommand(args[1:], os.Stdout)
 	}
 	if args[0] == "release" {
 		return releaseCommand(args[1:])
