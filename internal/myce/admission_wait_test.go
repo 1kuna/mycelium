@@ -317,7 +317,7 @@ func admissionWaitAPI(t *testing.T, q *Queue, id string) *AdmissionWaitEvidence 
 // Evidence is asynchronous. Flush committed pending captures explicitly in
 // tests that inspect their contents; never advance scheduling time to wait for
 // a goroutine, and never make a status read perform capture in production.
-func drainAdmissionWait(t *testing.T, q *Queue) {
+func drainAdmissionWait(t testing.TB, q *Queue) {
 	t.Helper()
 	b := &q.admissionWaitBuild
 	for {

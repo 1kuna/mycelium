@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func compositionExtension(t *testing.T, withEnvironment bool) Extension {
+func compositionExtension(t testing.TB, withEnvironment bool) Extension {
 	t.Helper()
 	e := fakeExtension(t)
 	v := ExtensionVariant{Target: ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake"}, Needs: ResourceNeeds{MemoryGB: e.MemoryGB, HostMemoryGB: e.HostMemoryGB}, Execution: ExecutionSpec{Main: ExecutionMember{Command: e.Run}}, Check: e.Check, Baselines: map[string]ExtensionBaseline{"kind:sample": e.Baselines["kind:sample"], "extension:" + e.Name: e.Baselines["kind:sample"]}}
@@ -42,7 +42,7 @@ func compositionExtension(t *testing.T, withEnvironment bool) Extension {
 	e.Variants = []ExtensionVariant{v}
 	return freezeComposition(t, e)
 }
-func freezeComposition(t *testing.T, e Extension) Extension {
+func freezeComposition(t testing.TB, e Extension) Extension {
 	t.Helper()
 	b, err := yaml.Marshal(e)
 	if err != nil {

@@ -153,7 +153,7 @@ func TestStateStartupRefusalNoWrites(t *testing.T) {
 	}
 }
 
-func newTestStateRoot(t *testing.T) string {
+func newTestStateRoot(t testing.TB) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := PrepareStateRoots(root); err != nil {

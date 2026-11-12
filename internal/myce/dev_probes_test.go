@@ -35,7 +35,7 @@ func devProbe(t *testing.T) (*Dev, DevConfig, context.Context) {
 	return d, c, ctx
 }
 
-func probeWait(t *testing.T, ctx context.Context, condition func() bool) {
+func probeWait(t testing.TB, ctx context.Context, condition func() bool) {
 	t.Helper()
 	for !condition() {
 		select {

@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func fakeExtension(t *testing.T) Extension {
+func fakeExtension(t testing.TB) Extension {
 	t.Helper()
 	files := map[string][]byte{
 		"extension.yaml": []byte(`name: sample

@@ -79,7 +79,7 @@ func (run *workerTestRun) result(t *testing.T) Result {
 // Passing tests return as soon as their condition is true, even on a quiet laptop.
 const testWaitTimeout = 60 * time.Second
 
-func await(t *testing.T, f func() bool) {
+func await(t testing.TB, f func() bool) {
 	t.Helper()
 	timeout := time.After(testWaitTimeout)
 	for {
