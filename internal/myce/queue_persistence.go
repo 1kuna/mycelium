@@ -326,7 +326,16 @@ func durableMachine(m *Machine) *Machine {
 	d := *m
 	d.LastSeen = time.Time{} // Contact evidence keeps it (restoreLastSeen).
 	d.DiskReceivedAt, d.DiskVolumes = time.Time{}, nil
-	d.HostHealth, d.IOPressure, d.SharedHostPressure, d.MemoryObservation, d.Fleet = nil, nil, nil, nil, nil
+	if d.HostHealth != nil && d.HostHealth.Probe != nil {
+		// Keep only that this worker sends timed evidence. The empty probe
+		// is invalid, so a restored record reads as expired evidence (unknown
+		// until its report, alerting past restart grace), not as a legacy
+		// worker without probes. It is constant, so heartbeats leave it alone.
+		d.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
+	} else {
+		d.HostHealth = nil
+	}
+	d.IOPressure, d.SharedHostPressure, d.MemoryObservation, d.Fleet = nil, nil, nil, nil
 	d.HostAvailableMemoryGB, d.FreeMemoryGB, d.MemoryUsedGB, d.CacheFreeBytes = 0, 0, 0, 0
 	d.SharedInputEvidence, d.SharedInputCache, d.CopyBytesPerSecond = nil, nil, 0
 	if d.CopyReports != nil {

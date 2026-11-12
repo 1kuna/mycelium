@@ -191,6 +191,12 @@ func TestSharedHostPolicyPersistsAndExclusionsRemainIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	// The replaced worker never reports again. Its restored record holds no
+	// live RAM reading (#1399) and is lost when restart grace ends.
+	clock.Advance(RestartGrace + time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	// A new logical worker on this physical host receives the persisted policy.
 	m.ID = "replacement-worker"
 	m.MemoryObservation.UsedGB = 8
