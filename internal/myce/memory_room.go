@@ -290,11 +290,15 @@ func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64,
 // enforcedCeiling bounds a forecast: the ceiling that contains the attempt
 // where one does (adaptive guard, cgroup limit, or the by-use guard),
 // else inventoried physical RAM, never the operator's smaller allowance.
+// A cgroup v2 worker sets every attempt's memory.max to its envelope, GPU work
+// included, and the forecast is read from that cgroup, so it cannot pass it.
+// Memory outside the cgroup (unified device allocations) is charged through
+// the envelope and device growth, never through this forecast (#1487).
 func enforcedCeiling(j *Job, m *Machine, envelope, adaptive float64, guarded bool) float64 {
 	if adaptive > 0 {
 		return max(envelope, adaptive)
 	}
-	if guarded || envelope > 0 && j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == cgroupMemoryEnforcement {
+	if guarded || envelope > 0 && m.MemoryEnforcement == cgroupMemoryEnforcement {
 		return envelope
 	}
 	if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 {
