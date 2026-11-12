@@ -300,11 +300,15 @@ func TestPieceDependencyWholeParentAdmissionAndRestart(t *testing.T) {
 	}
 	q = reopenCancellationQueue(t, q, clock)
 	clock.Advance(time.Second)
-	tail := check(t, q, m, nil).Job
-	if tail == nil || tail.Batch.Parent != parent.ID {
-		t.Fatal("blocked dependent displaced producer tail", tail)
+	// Pieces are serial jobs (MY-49): drain the producer's remaining pieces.
+	var tail *Job
+	for job(t, q, parent.ID).State != "succeeded" {
+		tail = check(t, q, m, nil).Job
+		if tail == nil || tail.Batch == nil || tail.Batch.Parent != parent.ID {
+			t.Fatal("blocked dependent displaced producer tail", tail)
+		}
+		finish(t, q, tail, true)
 	}
-	finish(t, q, tail, true)
 	ready := job(t, q, consumer.ID)
 	if !dependencyReady(ready) || !ready.Dependency.ReadyAt.Equal(clock.Now()) || ready.Dependency.Executions["item-0"].ID != wave.ID {
 		t.Fatal("whole-parent binding missing accepted execution/readiness", ready.Dependency)
@@ -407,7 +411,9 @@ func TestPieceDependencySucceededParentLaterCancellation(t *testing.T) {
 	wave := check(t, q, m, nil).Job
 	ref := putPieceTestFile(t, q, "accepted output")
 	r := result(wave, true)
-	r.OutputRefs = FileManifest{"item-0/out": ref}
+	// A piece is an ordinary job reporting its own output names; the parent
+	// keys them by piece (KEY/OUTPUT_NAME).
+	r.OutputRefs = FileManifest{"out": ref}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}

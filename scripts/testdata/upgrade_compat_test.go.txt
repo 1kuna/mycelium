@@ -143,7 +143,7 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 	}
 	for i := 0; i < 1655; i++ {
 		id := fmt.Sprintf("curve-%04d", i)
-		q.s.WorkObservations[id] = WorkObservation{Key: ObservationKey{Work: id, Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, Units: 100, Seconds: 20, RecordedAt: now}
+		q.s.WorkObservations[id] = WorkObservation{Key: ObservationKey{Work: id, Hardware: strings.Repeat("hardware", 16), Configuration: strings.Repeat("config", 16)}, Samples: 10, RecordedAt: now}
 	}
 	for i := 0; i < 1384; i++ {
 		q.s.StorageObservations[fmt.Sprint(i)] = StorageObservation{}

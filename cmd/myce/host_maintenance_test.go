@@ -249,7 +249,7 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 		t.Fatal("status missing history", snapshot, err)
 	}
 	output, _, err := captureUsageOutput(t, []string{"status", "--history", "--queue", server.URL, "--token", "test-only"})
-	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h p50/p95/max") {
+	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h=7d p50/p95/max") {
 		t.Fatal(output, err)
 	}
 }

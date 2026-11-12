@@ -24,7 +24,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 	commands := []string{
 		"queue", "join", "leave", "submit", "run", "usage", "status", "logs", "cancel", "dev",
 		"disable", "enable", "resolve-docker", "detect", "service", "wait", "measure",
-		"invite", "benchmark", "install worker", "install queue", "uninstall", "doctor",
+		"invite", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",
 		"host drain", "host disable", "host resume", "host status", "host budget",
