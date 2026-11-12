@@ -61,7 +61,7 @@ func (q *Queue) workerDiskDemand(ctx context.Context, request workerDiskDemandRe
 			if j.State != "queued" || !q.jobAllowsMachine(j, m.ID) || !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) {
 				continue
 			}
-			need, relevant := diskVolumeNeed(j, volume, m)
+			need, relevant := q.diskVolumeNeed(j, volume, m)
 			if call := q.calls[j.ID]; call != nil {
 				if model, ok := q.model(call.Model); ok && !model.DirectNAS && model.LocalSource == "" {
 					for _, role := range volume.Roots {

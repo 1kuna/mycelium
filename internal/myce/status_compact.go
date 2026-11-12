@@ -259,7 +259,7 @@ func compactStatusMachine(m *Machine) Machine {
 			c.CopyReports = append(c.CopyReports, CopyReport{Model: r.Model, State: r.State, Attempt: r.Attempt, Bytes: r.Bytes, Total: r.Total})
 		}
 	}
-	c.EnvironmentBuildSeconds, c.ModelCopySeconds = nil, nil
+	c.EnvironmentBuildSeconds, c.EnvironmentBytes, c.ModelCopySeconds = nil, nil, nil
 	c.Environments, c.CachedModels, c.Models = nil, nil, nil
 	c.ModelApprovalStates = nil
 	c.CapabilityProfile = compactStatusProfile(c.CapabilityProfile)

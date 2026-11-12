@@ -68,7 +68,7 @@ func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
 	}
 	rt.sync(plan, false)
 	<-entered
-	m.Environments, m.EnvironmentReports, _ = rt.report()
+	m.Environments, m.EnvironmentReports, _, _ = rt.report()
 	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "building" {
 		t.Fatal("missing building snapshot", m.EnvironmentReports)
 	}
@@ -81,7 +81,7 @@ func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
 	<-completed
 	rt.sync(stale.EnvironmentPlan, false)
 	clock.Advance(time.Second)
-	m.Environments, m.EnvironmentReports, _ = rt.report()
+	m.Environments, m.EnvironmentReports, _, _ = rt.report()
 	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "ready" || m.EnvironmentReports[0].Attempt != attempt {
 		t.Fatal("replay overwrote exact ready completion", m.EnvironmentReports)
 	}
@@ -106,7 +106,7 @@ func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
 	replacement := r
 	replacement.Launch = &next
 	rt.sync([]EnvironmentRecipe{replacement}, false)
-	m.Environments, m.EnvironmentReports, _ = rt.report()
+	m.Environments, m.EnvironmentReports, _, _ = rt.report()
 	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "building" || m.EnvironmentReports[0].Attempt != next.Attempt {
 		t.Fatal("new attempt reused old completion", m.EnvironmentReports)
 	}

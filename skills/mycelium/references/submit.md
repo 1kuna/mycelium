@@ -49,6 +49,31 @@ run automatically on first demand against the author's baseline, and a failed
 check holds that extension. The
 [execution gate audit](../../../docs/execution-gates.md) lists the protections.
 
+### Disk needs
+
+A job placed on a host without room for its working files fails inside the job
+and wastes the placement. Disk admission charges each host volume for what the
+job writes there and holds the job until a host has that much free above its
+floor. Nothing has to be declared; these optional `disk:` hints help the first
+runs of large work:
+
+```yaml
+disk:
+  scratch_bytes: 64424509440   # peak work dir + TMPDIR, outputs written there included
+  input_bytes: 10737418240     # only when input manifests carry no sizes
+  output_bytes: 2147483648     # only when output sizes are unknown
+  checkpoint_bytes: 1073741824 # resumable work without a measured resume manifest
+```
+
+After one accepted run, the measured work dir and `TMPDIR` peak for the same kind of
+work (program, source, configuration, input shape and machine type), plus its
+measured margin, replaces `scratch_bytes`. A measured value always beats a hint.
+An environment that a host has not built yet is charged to that host's
+environment volume at the size another host reported for the same key. A job
+that fits nowhere right now waits with `disk_headroom` and a reason such as
+`disk: 60.0 GiB needed, 48.5 GiB free on HOST`. When no reporting host could
+hold it even with its disk empty, submission is refused with the same code.
+
 ## Source, keys and recovery
 
 An entry's source defaults to committed Git `HEAD`. Untracked files that aren't

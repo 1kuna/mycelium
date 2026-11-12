@@ -22,7 +22,7 @@ func TestExtensionPrepareCapacityChange(t *testing.T) {
 		if err := rt.restore(); err != nil {
 			t.Fatal(err)
 		}
-		_, w.Machine.EnvironmentReports, _ = rt.report()
+		_, w.Machine.EnvironmentReports, _, _ = rt.report()
 		plan := check(t, q, w.Machine, nil).EnvironmentPlan
 		if limit == 20<<30 {
 			if len(plan) != 0 {

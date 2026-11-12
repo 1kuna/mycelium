@@ -473,6 +473,7 @@ type EnvironmentReport struct {
 	Error          string          `json:"error,omitempty"`
 	Log            string          `json:"log,omitempty"`
 	BuildSeconds   float64         `json:"build_seconds,omitempty"`
+	Bytes          uint64          `json:"bytes,omitempty"`
 }
 
 // Environment preparation is single-flight per worker, with its own core.
@@ -1272,6 +1273,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		return fmt.Errorf("environment %s build failed: %w (log %s)", r.Key, e, output.Name())
 	}
 	report := EnvironmentReport{Key: r.Key, State: "ready", BuildSeconds: c.Clock.Now().Sub(start).Seconds()}
+	// Size before build cleanup: the closest observed peak this build needed.
+	// Worker-local metadata walk; the queue only receives the number.
+	if n, err := environmentDiskUsage(partial); err == nil && n > 0 {
+		report.Bytes = uint64(n)
+	}
 	if err := c.cleanupBuild(partial); err != nil {
 		return err
 	}
@@ -1474,12 +1480,13 @@ func (rt *environmentRuntime) stop() {
 		<-done
 	}
 }
-func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[string]float64) {
+func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[string]float64, map[string]uint64) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	ready := []string{}
 	reports := []EnvironmentReport{}
 	times := map[string]float64{}
+	sizes := map[string]uint64{}
 	entries, _ := os.ReadDir(rt.cache.Root)
 	for _, d := range entries {
 		if len(d.Name()) != 64 || !rt.cache.ready(d.Name()) {
@@ -1490,6 +1497,9 @@ func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[strin
 		b, _ := os.ReadFile(filepath.Join(rt.cache.Root, d.Name(), "ready.json"))
 		_ = json.Unmarshal(b, &r)
 		times[r.Key] = r.BuildSeconds
+		if r.Bytes > 0 {
+			sizes[r.Key] = r.Bytes
+		}
 	}
 	for _, r := range rt.reports {
 		if r.State == "failed" {
@@ -1504,7 +1514,7 @@ func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[strin
 		}
 		reports = append(reports, r)
 	}
-	return ready, reports, times
+	return ready, reports, times, sizes
 }
 
 func (q *Queue) reconcileEnvironments(m *Machine) error {

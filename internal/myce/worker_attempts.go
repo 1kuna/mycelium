@@ -1282,11 +1282,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			uploadMachine, uploadClient := m, w.Client
 			_, _ = root.environmentLogs.run("environment-logs", func() (bool, error) { return true, environments.upload(ctx, uploadClient, uploadMachine) })
-			ready, envReports, envTimes := environments.report()
+			ready, envReports, envTimes, envBytes := environments.report()
 			m.Environments = append(slices.Clone(w.Machine.Environments), ready...)
 			m.ToolInventory = preparedToolInventory(toolInventory, m.Environments, w.EnvironmentRoot)
 			m.EnvironmentBuilder = true
-			m.EnvironmentReports, m.EnvironmentBuildSeconds = envReports, envTimes
+			m.EnvironmentReports, m.EnvironmentBuildSeconds, m.EnvironmentBytes = envReports, envTimes, envBytes
 			if !recovering {
 				m.ModelURL = rt.url
 			}

@@ -107,6 +107,13 @@ task; agents never change limits, core patterns or drivers. See
 
 ## Storage and disk holds
 
+`disk_headroom` means no eligible host currently has the free space the job
+writes: inputs, outputs, work dir and `TMPDIR` scratch (learned or
+`disk.scratch_bytes`), checkpoints, and an environment build the host has not
+cached. The reason names the volume, `disk: N GiB needed, M GiB free on HOST`.
+Keep the same job; it starts when a host frees space or a larger one joins.
+Lowering the hint below a measured peak changes nothing, because the measured peak wins.
+
 Mycelium's own staging, hashing and checkpoint I/O failures withhold work that
 depends on the affected network root, through the host-health reason and alerts;
 independent local work stays eligible. Data faults clear only after three fresh

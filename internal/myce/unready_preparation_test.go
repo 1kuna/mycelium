@@ -112,7 +112,7 @@ func TestRepeatedCPUPreparationWithOldReadyReceipt(t *testing.T) {
 		t.Fatal("old ready receipt suppressed replacement build")
 	}
 	<-done
-	m.Environments, m.EnvironmentReports, _ = rt.report()
+	m.Environments, m.EnvironmentReports, _, _ = rt.report()
 	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "ready" || m.EnvironmentReports[0].Attempt != next {
 		t.Fatal("replacement preparation did not complete", m.EnvironmentReports)
 	}

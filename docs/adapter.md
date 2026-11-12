@@ -93,6 +93,7 @@ Every other field is optional. The defaults are:
 | `environment` | installed tools on the worker (the same as `environment: {}`) |
 | `checks` | none: the command's exit status and required outputs decide success |
 | `targets` | any machine type that fits (non-production only; see below) |
+| `disk` | none: disk admission uses manifest sizes and learned peaks; add `{scratch_bytes: N}` for a large work dir plus `TMPDIR` before the first accepted run ([disk needs](../skills/mycelium/references/submit.md#disk-needs)) |
 
 A fuller entry adds what it needs:
 
