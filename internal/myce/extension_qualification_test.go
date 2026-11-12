@@ -246,11 +246,16 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					if successor != nil {
 						t.Fatal("failed verdict was rerun automatically", successor.Report.CheckID)
 					}
+					// A fan-out parent with no piece started is the same wait.
+					parent := submit(t, q, Spec{Name: "fanned", Project: "test", Extension: extensionKey(e), Workload: &Workload{InputShape: "tiny", Units: 1},
+						FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first"}, {Key: "second"}}}})
 					if err := q.Tick(); err != nil {
 						t.Fatal(err)
 					}
-					if got := job(t, q, demand.ID); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
-						t.Fatal("failed check left its useful job waiting", got.State, got.Reason)
+					for _, id := range []string{demand.ID, parent.ID} {
+						if got := job(t, q, id); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
+							t.Fatal("failed check left its useful job waiting", got.Spec.Name, got.State, got.Reason)
+						}
 					}
 				} else {
 					// A cancelled check has no verdict. The queue reruns it under

@@ -346,7 +346,9 @@ func (q *Queue) maintainFanOutJob(parent *Job) {
 	if terminal(parent.State) {
 		now := q.clock.Now()
 		parent.FinishedAt = &now
-	} else {
+	} else if len(parent.FanOut.Children) > 0 {
+		// Before any piece exists the scheduler's wait is the parent's one
+		// reason; progress text then hid why it waited (gap 3).
 		reason := fmt.Sprintf("declared pieces: %d/%d accepted", len(parent.FanOut.Results), len(parent.Spec.FanOut.Pieces))
 		if parent.Reason != reason {
 			q.touchJob(parent.ID)
