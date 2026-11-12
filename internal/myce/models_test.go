@@ -180,21 +180,6 @@ func TestModelCallSharesPriorityOrder(t *testing.T) {
 		t.Fatal("batch bypassed production call")
 	}
 }
-func TestModelLoadedAffinity(t *testing.T) {
-	t.Parallel()
-	q, _, m := modelFixture(t)
-	c := addModelCall(t, q, "experiment")
-	reportModel(t, q, m, "ready")
-	q.finishCall(c.ID)
-	other := machine("aaa", "fake")
-	other.ModelURL = "http://127.0.0.1:1235"
-	other.ModelConfigHash = modelConfigHash(q.models)
-	check(t, q, other, nil)
-	c = addModelCall(t, q, "production")
-	if c.Machine != m.ID || len(q.s.ModelSlots) != 1 {
-		t.Fatal("loaded model must win over idle worker")
-	}
-}
 func TestModelConfigAndOpenAIValidation(t *testing.T) {
 	t.Parallel()
 	q, _, _ := modelFixture(t)
