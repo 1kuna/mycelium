@@ -1512,64 +1512,6 @@
       },
       "type": "object"
     },
-    "DockerReadiness": {
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "port": {
-          "type": "integer"
-        },
-        "timeout": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "port",
-        "path",
-        "timeout"
-      ],
-      "type": "object"
-    },
-    "DockerSidecar": {
-      "properties": {
-        "command": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "memory_gb": {
-          "type": "number"
-        },
-        "memory_swap": {
-          "type": "number"
-        },
-        "name": {
-          "type": "string"
-        },
-        "readiness": {
-          "$ref": "#/$defs/DockerReadiness"
-        }
-      },
-      "required": [
-        "name",
-        "command"
-      ],
-      "type": "object"
-    },
     "EfficiencyAllocation": {
       "properties": {
         "basis": {
@@ -5409,7 +5351,7 @@
           ]
         },
         "docker": {
-          "description": "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability.",
+          "description": "Retired with managed Docker (MY-49). Refused at submission, as are docker_network, docker_memory_gb, docker_memory_swap and docker_sidecars; run the work natively with an environment and native sidecars.",
           "type": "boolean"
         },
         "docker_memory_gb": {
@@ -5422,9 +5364,7 @@
           "type": "string"
         },
         "docker_sidecars": {
-          "items": {
-            "$ref": "#/$defs/DockerSidecar"
-          },
+          "items": true,
           "type": [
             "array",
             "null"
@@ -5850,7 +5790,7 @@
         },
         "files": {
           "$ref": "#/$defs/FileManifest",
-          "description": "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker.",
+          "description": "SHA-256/size-addressed inputs, staged into the attempt's work folder. Cannot mix NAS inputs or a caller workdir.",
           "x-contract": "diagnostic"
         },
         "give_up_at": {
@@ -5924,7 +5864,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle.",
+          "description": "Declared relative output names to relative publication prefixes. Only verified current-attempt outputs become output_refs after all writers settle.",
           "type": [
             "object",
             "null"
