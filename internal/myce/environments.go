@@ -480,16 +480,23 @@ type EnvironmentReport struct {
 // CPU-scoped builds may also run beside device commands. Device-scoped builds
 // and active model work retain their existing preparation exclusion.
 func (q *Queue) environmentPreparationAvailable(m *Machine) bool {
+	return q.preparationAvailable(m, true)
+}
+
+// A plain environment build installs packages with one core and disk; it never
+// touches the device, so deviceExclusive=false lets it run beside device work.
+// Extension setup may use the device and keeps the exclusion.
+func (q *Queue) preparationAvailable(m *Machine, deviceExclusive bool) bool {
 	if !q.hostLaunchAllowed(m, m.Session) || !m.EnvironmentBuilder || q.preparationStopping(m) || q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return false
 	}
 	for _, j := range q.liveJobs() {
-		if j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" {
+		if deviceExclusive && j.Machine == m.ID && batchReservesCapacity(j) && !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" {
 			return false
 		}
 	}
 	for _, r := range q.s.HostReleases {
-		if r.Machine == m.ID && !r.CPUOnly && m.GPU != "cpu" {
+		if deviceExclusive && r.Machine == m.ID && !r.CPUOnly && m.GPU != "cpu" {
 			return false
 		}
 	}
@@ -511,8 +518,12 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
 		return nil
 	}
-	if !q.environmentPreparationAvailable(m) {
+	if !q.preparationAvailable(m, false) {
 		return nil
+	}
+	if !q.environmentPreparationAvailable(m) {
+		// Device work holds this target; a plain build can still go ahead.
+		return q.aheadPreparationPlan(m)
 	}
 	// Preserve a started same-tier/protected build even if another queued job
 	// wins admission. Only a planned stop may interrupt its preparation.
@@ -548,7 +559,10 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 	}
 	if j == nil || environmentReady(j, m) {
-		return q.extensionPreparationPlan(m)
+		if plans := q.extensionPreparationPlan(m); len(plans) > 0 {
+			return plans
+		}
+		return q.aheadPreparationPlan(m)
 	}
 	for _, other := range q.plannerMachines() {
 		if sameTarget(other, m) || !q.environmentPreparationAvailable(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
@@ -568,6 +582,63 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	r.Launch = &l
 	return []EnvironmentRecipe{r}
 }
+
+// Builds the environment of queued work that could use this host once it has
+// room. Preparation used to be offered only for the job that would be admitted
+// right now, so on a host whose memory was charged to other work nothing was
+// ever built there, and the job could never become admissible there either:
+// CUDA-only work waited on "no builder has started" and any-accelerator pieces
+// ran on Metal while both Linux GPUs sat idle (#1486). Momentary capacity and
+// production holds do not apply to the build; launch authorization still
+// checks the job's production and reservation holds and the build's core.
+// Extension setup and command discovery keep their admission-bound offers.
+func (q *Queue) aheadPreparationPlan(m *Machine) []EnvironmentRecipe {
+	for _, l := range q.s.PreparationPlans {
+		if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || l.Device != targetDevice(m) || !l.Started {
+			continue
+		}
+		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {
+			if r, ok := j.EnvironmentRecipes[m.GPU]; ok && r.Key == l.Key && r.Preparation == nil {
+				copy := l
+				r.Launch = &copy
+				return []EnvironmentRecipe{r}
+			}
+		}
+		return nil // another started build keeps this worker's single slot
+	}
+	var best *Job
+	for _, j := range q.liveJobs() {
+		if !q.buildsAhead(j, m) || best != nil && !q.before(j, best, m) {
+			continue
+		}
+		best = j
+	}
+	if best == nil {
+		return nil
+	}
+	r := best.EnvironmentRecipes[m.GPU]
+	l := q.issuePreparationFor(m, "environment", r.Key, best)
+	r.Launch = &l
+	return []EnvironmentRecipe{r}
+}
+
+func (q *Queue) buildsAhead(j *Job, m *Machine) bool {
+	if j.State != "queued" || cancelled(j) || j.Pause != nil || j.CommandDiscovery != nil || j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || j.Spec.Needs.cpuOnly() != (m.GPU == "cpu") {
+		return false
+	}
+	r, ok := j.EnvironmentRecipes[m.GPU]
+	if !ok || r.Key == "" || r.Preparation != nil || environmentReady(j, m) || !environmentCanRun(j, m) {
+		return false
+	}
+	for _, report := range m.EnvironmentReports {
+		if report.Key == r.Key && (report.State == "building" || q.environmentReportBlocked(report)) {
+			return false
+		}
+	}
+	return executionTargetMatches(j.Spec, m) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) && deviceAllowed(j, m) &&
+		q.reservationAllows(j, m) && q.structuralDemandPolicy(j, m) && q.productionAdmissionHold(j, m) == nil
+}
+
 func environmentSeconds(j *Job, m *Machine) float64 {
 	if environmentReady(j, m) {
 		return 0

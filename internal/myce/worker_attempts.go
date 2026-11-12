@@ -1425,7 +1425,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				}
 				unavailable := leaving || recovering || reply.AdmissionBlocked || w.checkAvailability() != nil
 				busy := len(actors) > 0 || unavailable
-				cpuPreparation := len(reply.EnvironmentPlan) > 0 && reply.EnvironmentPlan[0].Platform == "cpu"
+				// A plain build (no extension setup) never touches the device,
+				// so it runs beside device work like a CPU-scoped build (#1486).
+				cpuPreparation := len(reply.EnvironmentPlan) > 0 && (reply.EnvironmentPlan[0].Platform == "cpu" || reply.EnvironmentPlan[0].Preparation == nil)
 				environmentBusy := unavailable || !localEnvironmentPreparationFits(w, activeJobs(), reply.ModelPlan, cpuPreparation)
 				for _, slot := range reply.ModelPlan {
 					if slot.State == "loading" || slot.InFlight > 0 {

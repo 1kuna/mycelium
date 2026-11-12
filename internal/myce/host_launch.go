@@ -38,6 +38,11 @@ func launchAttempt(l *HostLaunch) string {
 	return l.Attempt
 }
 func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
+	return q.issuePreparationFor(m, kind, key, nil)
+}
+
+// demand names the job the build serves; nil uses this target's admission winner.
+func (q *Queue) issuePreparationFor(m *Machine, kind, key string, demand *Job) HostLaunch {
 	if q.s.PreparationPlans == nil {
 		q.s.PreparationPlans = map[string]HostLaunch{}
 	}
@@ -50,7 +55,11 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 	if kind == "environment" {
 		l.CPUCores = 1 // Background builds do not borrow unrelated command cores.
 	}
-	if j := q.candidate(m, nil); j != nil {
+	j := demand
+	if j == nil {
+		j = q.candidate(m, nil)
+	}
+	if j != nil {
 		spec := Spec{Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class}
 		l.Spec = &spec
 		l.Demand = j.ID
