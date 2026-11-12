@@ -75,6 +75,7 @@ var holdKinds = map[string]holdKind{
 	"launch_capacity":          {ownerQueue, "waiting for launch capacity or an exact release", "capacity evidence changes or the pending release is acknowledged", "wait; nothing to do"},
 	"helper_charge":            {ownerQueue, "waiting for launch capacity that covers the job's measured helper memory", "capacity evidence changes or the pending release is acknowledged", "wait; nothing to do"},
 	"checkpoint_root":          {ownerStorage, "saved progress storage is unavailable", "the queue's checkpoint root is reachable again", "restore the queue's checkpoint storage mount"},
+	checkpointTargetHold:       {ownerQueue, "resuming on the target that wrote its checkpoint", "a host of that target can take it, or none remains in the fleet", "wait; if its checkpoints resume correctly on other targets, declare resume_compatibility for them"},
 	"scarce_host_yield":        {ownerQueue, "waiting for portable work to yield a scarce host", "the yielding attempt saves its checkpoint and releases the host", "wait; nothing to do"},
 	"shared_host_backoff":      {ownerQueue, "backing off a shared host whose owner needed it", "the host's owner pressure stays quiet for the measured recovery span", "wait; another eligible host can still take it"},
 	"storage_root":             {ownerStorage, "a worker's storage root is unreachable", "the storage root is reachable again", "restore the worker's storage mount"},
@@ -174,7 +175,7 @@ var holdDiagnosticCodes = map[string]string{
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
 	"paused": "holds", "production_admission": "holds", "production_hold": "holds", "production_reserved": "holds",
-	"pinned_model": "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
+	"pinned_model": "holds", checkpointTargetHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",
 	"deterministically_failed": "environment", "docker_runtime": "environment", "extension": "environment",

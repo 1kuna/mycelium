@@ -905,6 +905,18 @@ remains a separate requirement. `preemptible: true` instead opts only disposable
 non-resumable experiments into restarting without a checkpoint; it never grants
 this to an existing class implicitly. See the [approved yield contract](design-proposal.md#amendment-scarce-host-yield-327-328-my-26).
 
+**Resume target (#1437).** Generations are portable as files, but an
+application's resume may depend on replay that holds only on the target that
+wrote them. The queue records the target (OS/arch/platform, `cpu` for CPU work)
+of the attempt that wrote the newest accepted generation as the job's
+`checkpoint_target`. A copied generation never moves it; only a strictly newer
+one does. Placement then admits a resume only on a host of that target while one
+the job may use remains in the fleet, including hosts that are busy, disabled
+for maintenance or lost; a host that has left the fleet does not count. The wait
+appears as hold `checkpoint_target`. A job whose `resume_compatibility` lists
+both the writing target and the destination may cross between them. The
+attempt that is already running is never moved by this rule.
+
 Set `resumable: true` only when the command can safely restart. Mycelium sends
 SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
 deadline preemption and planned leave, to save and exit,
