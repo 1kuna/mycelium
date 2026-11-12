@@ -850,7 +850,10 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if complete {
 		gb := bytes / (1 << 30)
 		footprint = &gb
-		margin = a.currentGrowth.observe(at, gb)
+		// Check-ins arrive irregularly: report the largest growth measured
+		// between two of them, not a burst's rate over the longest gap.
+		a.currentGrowth.observe(at, gb)
+		margin = a.currentGrowth.increment
 		observed = a.currentGrowth.horizon > 0
 	} else {
 		a.currentGrowth = memoryGrowth{} // Never bridge a missing interval.

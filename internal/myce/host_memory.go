@@ -413,8 +413,16 @@ func (s hostMemorySample) hostGrowth(now time.Time) (float64, bool) {
 	if s.at.IsZero() || now.Before(s.at) || now.Sub(s.at) >= s.freshFor() || !validMemoryValue(s.gb) {
 		return 0, false
 	}
-	growth := s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
+	growth := s.growthGB + s.extrapolatedGB(now.Sub(s.at))
 	return growth, validMemoryValue(growth)
+}
+
+// extrapolatedGB is growth through a sample's age at its measured rate, at
+// most the largest growth the sample measured within one interval. The rate
+// is the fastest seen; projecting it across a long delivery gap charged a
+// 3 GiB job the whole host.
+func (s hostMemorySample) extrapolatedGB(age time.Duration) float64 {
+	return min(s.rateGB*age.Seconds(), s.growthGB)
 }
 
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
@@ -509,7 +517,7 @@ func (s hostMemorySample) hostForecast(now time.Time) float64 {
 	if s.at.IsZero() || now.Before(s.at) {
 		return 0
 	}
-	return max(s.gb, s.footprintGB) + s.growthGB + s.rateGB*now.Sub(s.at).Seconds()
+	return max(s.gb, s.footprintGB) + s.growthGB + s.extrapolatedGB(now.Sub(s.at))
 }
 
 func (s hostMemorySample) identifiedHostForecast(now time.Time) (float64, bool) {
