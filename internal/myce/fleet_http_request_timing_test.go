@@ -44,6 +44,10 @@ func TestFleetInstructionInactiveAvoidsWriter(t *testing.T) {
 				}
 				defer writer.Close()
 				before := q.db.Stats().WaitCount
+				var logs testLogBuffer
+				old := log.Writer()
+				log.SetOutput(&logs)
+				defer log.SetOutput(old)
 				mux := newRequestMux()
 				API{Queue: q}.registerFleetUpgrade(mux)
 				response := httptest.NewRecorder()
@@ -80,6 +84,10 @@ func TestFleetInstructionInactiveAvoidsWriter(t *testing.T) {
 				var instruction FleetUpdateInstruction
 				if err := json.Unmarshal(response.Body.Bytes(), &instruction); err != nil || instruction.Operation != "" || response.Header().Get("Cache-Control") != "no-store" {
 					t.Fatalf("inactive instruction: %+v %v", instruction, err)
+				}
+				// Idle requests name their caller for live attribution (#1393).
+				if !strings.Contains(logs.String(), `event=fleet_instruction_idle_request caller=worker host="fixture" machine="fixture"`) {
+					t.Fatal(logs.String())
 				}
 			})
 		})
@@ -200,7 +208,7 @@ func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 		}
 		<-done
 		line := logs.String()
-		if strings.Count(line, "event=slow_request") != 1 || !strings.Contains(line, "writer_wait_ms=2000.000 work_ms=0.000") || !strings.Contains(line, "mutex_wait_ms=0.000") || strings.Contains(line, "private-host") {
+		if strings.Count(line, "event=slow_request") != 1 || !strings.Contains(line, "writer_wait_ms=2000.000 work_ms=0.000 caller=worker") || !strings.Contains(line, "mutex_wait_ms=0.000") || strings.Contains(line, "private-host") {
 			t.Fatal(line)
 		}
 	})
