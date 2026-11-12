@@ -12,14 +12,11 @@ import (
 	"mycelium/internal/myce"
 )
 
-const fleetUsage = "usage: myce fleet upgrade [--release VERSION] [--urgency normal|critical] [--queue-only] [--wait-production-idle]\n       myce fleet supersede --operation ID --reason TEXT\n       " + fleetLeaseUsage
+const fleetUsage = "usage: myce fleet upgrade [--release VERSION] [--urgency normal|critical]\n       " + fleetLeaseUsage
 
 const fleetLeaseUsage = "myce fleet lease open --project P --key K --for DURATION [--platform LIST] [--memory-gb N] [--stages JSON]\n       myce fleet lease close --project P --key K\n       myce fleet lease list"
 
 func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) > 0 && args[0] == "supersede" {
-		return fleetSupersedeCommand(ctx, args[1:], out)
-	}
 	if len(args) > 0 && args[0] == "lease" {
 		return fleetLeaseCommand(ctx, args[1:], out)
 	}
@@ -29,9 +26,7 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := flag.NewFlagSet("fleet upgrade", flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	release := f.String("release", "", "approved signed release (default: current approval)")
-	urgency := f.String("urgency", "normal", "normal: next idle moment; critical: checkpoint/stop/requeue each selected host before update")
-	queueOnly := f.Bool("queue-only", false, "upgrade only the queue service, preserving worker versions")
-	waitIdle := f.Bool("wait-production-idle", false, "pause new production assignments and wait for fleet-wide production custody before queue restart")
+	urgency := f.String("urgency", "normal", "normal: each drained host's running work finishes first; critical: it checkpoints, stops and is requeued")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -43,33 +38,10 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	var status myce.FleetUpgradeStatus
-	if err = client.Call(ctx, "POST", "/api/fleet/upgrade", myce.FleetUpgradeRequest{Urgency: *urgency, Release: *release, QueueOnly: *queueOnly, WaitProductionIdle: *waitIdle}, &status); err != nil {
+	if err = client.Call(ctx, "POST", "/api/fleet/upgrade", myce.FleetUpgradeRequest{Urgency: *urgency, Release: *release}, &status); err != nil {
 		return err
 	}
 	return json.NewEncoder(out).Encode(status)
-}
-
-// Retire a stopped fleet operation with an audit record. Drains stay in place.
-func fleetSupersedeCommand(ctx context.Context, args []string, out io.Writer) error {
-	f := flag.NewFlagSet("fleet supersede", flag.ContinueOnError)
-	authority := installedClientFlags(f)
-	operation := f.String("operation", "", "stopped fleet operation ID shown by myce status")
-	reason := f.String("reason", "", "why the operation is being retired (kept in the audit record)")
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	if f.NArg() != 0 || *operation == "" || *reason == "" {
-		return errors.New(fleetUsage)
-	}
-	client, err := authority.client()
-	if err != nil {
-		return err
-	}
-	var record myce.FleetSupersession
-	if err = client.Call(ctx, "POST", "/api/fleet/supersede", myce.FleetSupersedeRequest{Operation: *operation, Reason: *reason}, &record); err != nil {
-		return err
-	}
-	return json.NewEncoder(out).Encode(record)
 }
 
 // A project declares open production work, including stages it has not

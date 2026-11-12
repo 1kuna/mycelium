@@ -134,10 +134,6 @@ func TestFleetUpgradeWaitsForProductionLeaseBetweenPipelineStages(t *testing.T) 
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
-	if got := fleetActivate(t, q, c); got != "queue-host/@queue" {
-		t.Fatal("queue should upgrade first", got)
-	}
-	fleetTick(t, q)
 	if got := fleetActivate(t, q, c); got != "other-host/worker-other-host" {
 		t.Fatal("idle unrelated host should upgrade while the lease holds", got, q.fleetUpgradeStatus())
 	}
@@ -173,6 +169,10 @@ func TestFleetUpgradeWaitsForProductionLeaseBetweenPipelineStages(t *testing.T) 
 	fleetTick(t, q)
 	if got := fleetActivate(t, q, c); got != "gpu-host/worker-gpu-host" {
 		t.Fatal("closed lease did not release the host", got, q.fleetUpgradeStatus())
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "queue-host/@queue" {
+		t.Fatal("the queue's host goes last", got)
 	}
 	fleetTick(t, q)
 	if q.s.FleetUpgrade.State != "complete" || q.maintenanceBlocked("gpu-host") {
@@ -231,7 +231,7 @@ func TestFleetOwnedDrainMakesProductionWaitThenStoppedDrainFails(t *testing.T) {
 	if got := job(t, q, waiting.ID); got.State != "queued" {
 		t.Fatal("stage failed during a temporary upgrade drain", got.State, got.Reason)
 	}
-	for range 2 {
+	for range 3 {
 		fleetActivate(t, q, c)
 		fleetTick(t, q)
 	}

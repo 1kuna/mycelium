@@ -97,7 +97,7 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 			if r.URL.Query().Get("revision") != strconv.Itoa(f.i.Revision) || r.URL.Query().Get("operation") != f.i.Operation || r.URL.Query().Get("host") != f.i.Host || r.URL.Query().Get("machine") != f.i.Machine || r.URL.Query().Get("session") != f.i.Session {
 				t.Error("authorization lost instruction fence")
 			}
-			if f.authorizations == f.denyAt {
+			if f.authorizations == f.denyAt || f.denyAt < 0 {
 				if f.denyCode != "" {
 					respond(w, nil, fleetError(f.denyCode))
 					return
@@ -191,9 +191,6 @@ func (f *fleetInstallFixture) command(_ context.Context, name string, args ...st
 		r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
 		if err != nil || r.Phase != "prepared" && r.Phase != "installed" {
 			f.t.Fatal("helper launched without durable receipt", err)
-		}
-		if len(f.acks) == 0 || f.acks[len(f.acks)-1] != "prepared" {
-			f.t.Fatal("helper launched before claiming its receipt revision")
 		}
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, f.c.Binary+" fleet-apply --config "+f.c.Config) || strings.Contains(joined, "--token") {
@@ -303,7 +300,7 @@ func TestFleetInstallPreservesSettingsAndRestartsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.assertBinary(f.next)
-	if f.restarts != 1 || !reflect.DeepEqual(f.acks, []string{"prepared", "installed", "restarting"}) {
+	if f.restarts != 1 || !reflect.DeepEqual(f.acks, []string{"restarting"}) || f.authorizations != 3 {
 		t.Fatal("incorrect activation", f.restarts, f.acks)
 	}
 	if err := f.apply(); err != nil || f.restarts != 1 || f.fetches != 1 {
@@ -517,7 +514,7 @@ func TestFleetInstallSavedJoiningTrustAndRedirectRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer untrusted.HTTP.CloseIdleConnections()
-	if fleetAuthorize(context.Background(), fleetNoRedirect(untrusted), f.i) == nil {
+	if _, err := fleetAuthorize(context.Background(), fleetNoRedirect(untrusted), f.i, nil); err == nil {
 		t.Fatal("saved queue TLS pin ignored")
 	}
 }
@@ -527,96 +524,28 @@ type fleetTestExit int
 func (e fleetTestExit) Error() string { return "synthetic manager exit" }
 func (e fleetTestExit) ExitCode() int { return int(e) }
 
-func TestFleetInstallExplicitRevisionRecovery(t *testing.T) {
-	for _, phase := range []string{"prepared", "installed", "restarting", "failed"} {
-		t.Run(phase, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			r, _ := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			r.Phase = phase
-			if phase == "prepared" {
-				if err := os.WriteFile(fleetStagingPath(f.c, f.i), []byte("interrupted partial"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if phase == "failed" {
-				r.Failure = "fleet_artifact_refused"
-			}
-			if phase == "installed" || phase == "restarting" {
-				if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := writeFleetReceipt(f.c, r); err != nil {
-				t.Fatal(err)
-			}
-			// An unchanged instruction never retries, even with the helper absent.
-			_ = f.launch()
-			if f.launches != 1 {
-				t.Fatal("automatic helper retry")
-			}
-			f.i.Revision++
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			if f.launches != 2 {
-				t.Fatal("explicit recovery did not launch")
-			}
-			recovered, _ := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			if recovered.Instruction.Revision != 2 || recovered.BeforePID != r.BeforePID || !sameFleetRuntime(recovered.BeforeRuntime, r.BeforeRuntime) || recovered.BeforeSHA256 != r.BeforeSHA256 {
-				t.Fatal("revision replaced original identity fences")
-			}
-			if err := f.apply(); err != nil {
-				t.Fatal(err)
-			}
-			f.assertBinary(f.next)
-			if f.restarts != 1 {
-				t.Fatal("explicit recovery skipped or repeated restart")
-			}
-			if err := f.apply(); err != nil || f.restarts != 1 {
-				t.Fatal("recovery blindly restarted twice", err)
-			}
-		})
+// One operation launches once; a later operation (a rerun after a failure)
+// launches its own helper.
+func TestFleetInstallRerunLaunchesNewOperationOnly(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	if err := f.launch(); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestFleetInstallRecoveryRequiresAbsentHelperAndExactOldProcess(t *testing.T) {
-	for _, fault := range []string{"helper-present", "runtime-changed", "manager-changed"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			if err := f.launch(); err != nil {
-				t.Fatal(err)
-			}
-			r, _ := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			r.Phase = "restarting"
-			if err := writeFleetReceipt(f.c, r); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
-				t.Fatal(err)
-			}
-			f.i.Revision++
-			switch fault {
-			case "helper-present":
-				f.helperPresent = true
-			case "runtime-changed":
-				f.runtimePID++
-			case "manager-changed":
-				f.managerPID++
-			}
-			err := f.launch()
-			if (err == nil) != (fault == "helper-present") || f.launches != 1 || f.restarts != 0 {
-				t.Fatal("ambiguous recovery duplicated helper/restart or active helper was not benign", err)
-			}
-			kept, readErr := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			if readErr != nil || kept.Instruction.Revision != 1 || kept.Phase != "restarting" {
-				t.Fatal("active/ambiguous recovery changed receipt", readErr)
-			}
-			f.assertBinary(f.next)
-		})
+	f.badArtifact = true
+	if err := f.apply(); err == nil {
+		t.Fatal("bad artifact accepted")
 	}
+	if err := f.launch(); err != nil || f.launches != 1 {
+		t.Fatal("failed operation relaunched", err, f.launches)
+	}
+	f.i.Operation, f.badArtifact = "fixture-rerun", false
+	if err := f.launch(); err != nil || f.launches != 2 {
+		t.Fatal("new operation not launched", err, f.launches)
+	}
+	if err := f.apply(); err != nil || f.restarts != 1 {
+		t.Fatal(err, f.restarts)
+	}
+	f.assertBinary(f.next)
 }
 
 func TestFleetInstallSharedBinaryStillRestartsOldWorker(t *testing.T) {
@@ -691,54 +620,6 @@ func TestFleetInstallStopsAfterFailedManagerHealth(t *testing.T) {
 	if f.apply() == nil || f.restarts != 1 {
 		t.Fatal("failed startup automatically retried")
 	}
-	for _, mode := range []string{"interrupted-health", "previous-pid", "changed-restarts"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newFleetInstallFixture(t, "linux")
-			observations := 0
-			base := f.deps.command
-			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				observations++
-				data, err := base(ctx, name, args...)
-				if observations == 11 || observations == 26 {
-					if mode == "interrupted-health" {
-						data = bytes.ReplaceAll(data, []byte("ActiveState=active"), []byte("ActiveState=activating"))
-					}
-					if mode == "previous-pid" {
-						data = bytes.ReplaceAll(data, []byte(fmt.Sprintf("MainPID=%d", f.managerPID)), []byte(fmt.Sprintf("MainPID=%d", f.managerPID-1)))
-					}
-				}
-				if mode == "changed-restarts" {
-					restarts := 0
-					if observations >= 11 {
-						restarts++
-					}
-					if observations >= 26 {
-						restarts++
-					}
-					data = bytes.ReplaceAll(data, []byte("NRestarts=0"), []byte(fmt.Sprintf("NRestarts=%d", restarts)))
-				}
-				return data, err
-			}
-			var verdicts []bool
-			f.deps.health.Timeout = 90 * time.Second
-			f.deps.health.HealthObserved = func(healthy bool) { verdicts = append(verdicts, healthy) }
-			if err := waitFleetManager(context.Background(), f.c, f.managerPID-1, f.deps); err != nil {
-				t.Fatal("healthy replacement never earned a fresh stable window", err)
-			}
-			want := 57
-			if mode == "changed-restarts" {
-				want = 56
-			}
-			if observations != want || len(verdicts) != want {
-				t.Fatal("helper retained interrupted stable time", observations, len(verdicts), want)
-			}
-			for i, healthy := range verdicts {
-				if healthy != (mode == "changed-restarts" || i != 10 && i != 25) {
-					t.Fatal("helper health bypassed parser or old-PID fence", i, healthy)
-				}
-			}
-		})
-	}
 }
 
 func TestFleetInstallActiveApplyLockIsBenign(t *testing.T) {
@@ -751,13 +632,14 @@ func TestFleetInstallActiveApplyLockIsBenign(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	f.i.Revision++
-	if err := f.launch(); err != nil || f.launches != 1 {
+	f.i.Operation = "fixture-rerun"
+	var refetch *fleetInstructionRefetchError
+	if err := f.launch(); !errors.As(err, &refetch) || f.launches != 1 {
 		t.Fatal("rerun interrupted active local helper", err)
 	}
 	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil || r.Instruction.Revision != 1 {
-		t.Fatal("active receipt revision replaced", err)
+	if err != nil || r.Instruction.Operation != "fixture-operation" {
+		t.Fatal("active receipt replaced", err)
 	}
 }
 

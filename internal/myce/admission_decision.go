@@ -295,7 +295,6 @@ const (
 	predicateProductionAdmission  AdmissionPredicate = "production_admission"
 	predicateProductionHold       AdmissionPredicate = "production_hold"
 	predicateProductionHost       AdmissionPredicate = "production_host"
-	predicateProductionPaused     AdmissionPredicate = "production_paused"
 	predicateProjectCapacity      AdmissionPredicate = "project_capacity"
 	predicateRecovering           AdmissionPredicate = "recovering"
 	predicateReleasePending       AdmissionPredicate = "release_pending"

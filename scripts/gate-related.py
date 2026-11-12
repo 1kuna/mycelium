@@ -21,6 +21,11 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/native_namespace_other.go'] = (
     'native_group_test.go', 'fault_evidence_test.go')
 SUPPLEMENTAL_CONSUMERS['internal/myce/signal_evidence.go'] = (
     'fault_evidence_test.go',)
+# The build-tagged fleet stability window has no tests of its own; the rollout
+# tests wait it out (the synthetic end-to-end builds use the short one).
+for _variant in ('fake', 'real'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/fleet_stability_{_variant}.go'] = (
+        'fleet_upgrade_test.go',)
 
 # The shared CLI image helper has no test roots of its own. Exercise its real
 # child-process launch and synthetic-probe boundary, including in quick mode.

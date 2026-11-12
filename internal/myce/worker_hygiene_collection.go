@@ -432,7 +432,9 @@ func collectionAllocatedBytes(ctx context.Context, paths ...string) (int64, erro
 
 // The durable fleet receipt proves ownership of exactly one staging path.
 // Never scan arbitrary binaries, recovery archives, rollback copies or unknown
-// staging. The updater's transaction lock and helper-absence check both bind.
+// staging. A failed receipt is written by a helper that then exits, and every
+// helper holds the update lock while it runs, so holding the lock proves none
+// is writing.
 func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (result error) {
 	unlock, err := commandLock(c.State, "fleet-update.lock", false)
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
@@ -463,13 +465,6 @@ func collectFailedFleetStaging(ctx context.Context, c ServiceConfig, command fun
 	_, hash, err := fleetConfig(c.Config)
 	if err != nil || hash != r.ConfigSHA256 {
 		return errors.New("installer state changed")
-	}
-	absent, err := fleetHelperAbsent(ctx, c, r.Instruction, command)
-	if err != nil {
-		return err
-	}
-	if !absent {
-		return nil
 	}
 	path := fleetStagingPath(c, r.Instruction)
 	info, err := os.Lstat(path)

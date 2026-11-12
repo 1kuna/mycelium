@@ -27,11 +27,11 @@ func TestFleetUpgradeCLICriticalIntent(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	var out bytes.Buffer
-	if err := fleetCommand(context.Background(), []string{"upgrade", "--urgency", "critical", "--queue-only", "--queue", server.URL, "--token", "test"}, &out); err != nil {
+	if err := fleetCommand(context.Background(), []string{"upgrade", "--urgency", "critical", "--queue", server.URL, "--token", "test"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if request.Urgency != "critical" || !request.QueueOnly {
-		t.Fatal("CLI lost explicit critical scope", request)
+	if request.Urgency != "critical" {
+		t.Fatal("CLI lost explicit critical urgency", request)
 	}
 	var response myce.FleetUpgradeStatus
 	if err := json.Unmarshal(out.Bytes(), &response); err != nil || response.Urgency != "critical" || response.Operation != "fixture-operation" {

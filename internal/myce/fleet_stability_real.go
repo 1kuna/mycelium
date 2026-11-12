@@ -2,11 +2,8 @@
 
 package myce
 
-// Normal builds retain the caller's clock and wait without model state.
-type fleetStability struct{}
+import "time"
 
-func (*fleetStability) clock(source Clock, _ bool) Clock { return source }
-
-func (*fleetStability) managerOptions(options EnrollmentWait) EnrollmentWait { return options }
-
-func (*fleetStability) observeManager(bool) {}
+// The enrollment stability window: it catches a service that crash-loops
+// shortly after start. Its cost is 30 seconds per updated service.
+const fleetStableFor = 30 * time.Second

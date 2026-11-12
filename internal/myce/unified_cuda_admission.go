@@ -50,7 +50,7 @@ func unifiedCUDAFloor(m *Machine) (float64, bool) {
 // check protects a sole qualified destination for queued, forecast production
 // before the dependency becomes runnable. Cancellation removes it immediately.
 func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
-	if !unifiedCUDA(m) || j.Spec.Needs.cpuOnly() || q.fleetPausesProduction() {
+	if !unifiedCUDA(m) || j.Spec.Needs.cpuOnly() {
 		return ""
 	}
 	host := hostID(m)

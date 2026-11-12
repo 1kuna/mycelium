@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -20,14 +19,6 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 			return
 		}
 		out, err := a.Queue.StartFleetUpgrade(request, r.Context())
-		respond(w, out, err)
-	})
-	mux.HandleFunc("POST /api/fleet/supersede", func(w http.ResponseWriter, r *http.Request) {
-		var request FleetSupersedeRequest
-		if !decode(w, r, &request) {
-			return
-		}
-		out, err := a.Queue.SupersedeFleetUpgrade(request, r.Context())
 		respond(w, out, err)
 	})
 	mux.HandleFunc("GET /api/fleet/publisher", func(w http.ResponseWriter, r *http.Request) {
@@ -45,54 +36,34 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		v := r.URL.Query()
 		var out FleetUpdateInstruction
 		unlock := requestReadLock(r.Context(), &a.Queue.mu)
-		// No instruction can be issued without a running upgrade. Ordinary
-		// maintenance belongs to Tick, not these otherwise read-only polls.
 		inactive := a.Queue.s.FleetUpgrade == nil || a.Queue.s.FleetUpgrade.State != "running"
-		stopping := a.Queue.stopping.Load()
 		unlock()
 		w.Header().Set("Cache-Control", "no-store")
-		if inactive && !stopping && v.Get("operation") == "" {
+		if inactive && v.Get("operation") == "" {
 			respond(w, out, nil)
 			return
 		}
-		// Active upgrades retain the atomic maintenance/selection transaction,
-		// which rechecks policy, custody and session fences under the lock.
+		// The selection and drain run in the same transaction as the answer.
 		err := a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
-			// Helpers refetch only their frozen operation. Empty means a temporary
-			// proof/custody wait; obsolete intent is a definitive refusal.
-			if operation := v.Get("operation"); operation != "" {
-				revision, _ := strconv.Atoi(v.Get("revision"))
-				u, h := a.Queue.s.FleetUpgrade, a.Queue.fleetActiveHost()
-				if u == nil || h == nil || u.State != "running" || u.Operation != operation || h.Host != v.Get("host") || revision <= 0 || revision > u.Revision || revision < h.HelperRevision {
-					return fleetError("fleet_instruction_stale")
-				}
-				queue := h.Phase == "queue_update" && v.Get("machine") == "@queue" && h.QueueBefore != nil && h.QueueBefore.Session == v.Get("session")
-				worker := h.Phase == "worker_update" && h.Machine == v.Get("machine") && h.Before != nil && h.Before.Session == v.Get("session")
-				if queue {
-					live := a.Queue.fleetQueue
-					queue = live != nil && (live.Session == "" || live.Session == v.Get("session")) && (live.Proof == nil || live.Proof.Session == v.Get("session"))
-				}
-				if worker {
-					live := a.Queue.s.Machines[v.Get("machine")]
-					worker = live != nil && live.Session == v.Get("session")
-				}
-				if !queue && !worker {
-					return fleetError("fleet_instruction_stale")
-				}
-			}
 			var e error
 			out, e = a.Queue.fleetInstruction(v.Get("host"), v.Get("machine"), v.Get("session"))
+			// A helper asking about its own operation learns when it is obsolete.
+			if operation := v.Get("operation"); e == nil && operation != "" && out.Operation != operation {
+				u := a.Queue.s.FleetUpgrade
+				if u == nil || u.State != "running" || u.Operation != operation {
+					e = fleetError("fleet_instruction_stale")
+				}
+			}
 			return e
 		}, &queueUpdateTiming{measureWriter: true})
 		respond(w, out, err)
 	})
 	mux.HandleFunc("GET /api/fleet/authorize", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
-		revision, _ := strconv.Atoi(v.Get("revision"))
 		var proof *FleetRuntimeProof
 		err := a.Queue.updateRequest(r.Context(), func() error {
-			if e := a.Queue.authorizeFleetUpdate(v.Get("operation"), v.Get("host"), v.Get("machine"), v.Get("session"), revision); e != nil {
+			if e := a.Queue.authorizeFleetUpdate(v.Get("operation"), v.Get("host"), v.Get("machine"), v.Get("session")); e != nil {
 				return e
 			}
 			if v.Get("machine") == "@queue" {

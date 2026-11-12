@@ -110,11 +110,12 @@ func (q *Queue) detectRemainingHealth() {
 	q.detectAttemptEndingHealth()
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			reason := fleetFailureCode(h.FailureCode)
-			if h.FailureCode == "runner_smoke_failed" {
-				reason = "runner_smoke_failed"
+			// A helper's code is allow-listed; otherwise the queue chose the reason.
+			reason := h.Failure
+			if h.FailureCode != "" {
+				reason = fleetFailureCode(h.FailureCode)
 			}
-			observe("update/"+h.Host, h.Phase == "failed" || h.Failure != "", HealthAlert{Kind: "update_failed", Host: h.Host, Reason: reason})
+			observe("update/"+h.Host, h.Failure != "" && h.Phase != "skipped", HealthAlert{Kind: "update_failed", Host: h.Host, Reason: reason})
 		}
 	}
 	for key := range q.s.Health.Conditions {
