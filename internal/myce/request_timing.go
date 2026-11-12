@@ -240,7 +240,9 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			}
 			phases := ""
 			if route == "GET /api/fleet/instruction" {
-				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond))
+				// Role only: hosts stay out of slow lines (#474); the idle-request
+				// event names host and machine.
+				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f caller=%s", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond), fleetInstructionCaller(r.URL.Query()))
 			}
 			logStarted := time.Now()
 			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)

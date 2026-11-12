@@ -408,15 +408,25 @@ func TestFleetRuntimeFetchesInstructionOnlyWhenWaiting(t *testing.T) {
 		return &FleetRuntimeProof{Session: "session", ServiceHealthy: true, ObservedAt: (RealClock{}).Now()}, nil
 	}, launch: func(context.Context, ServiceConfig, FleetUpdateInstruction) error { launches.Add(1); return nil }}
 	m := Machine{ID: "worker", HostID: "host", Session: "session"}
-	for n, step := range []struct {
+	idle := Reply{FleetInstructionProtocol: fleetInstructionProtocol}
+	steps := []struct {
+		reply             Reply
+		fetches, launches int32
+	}{{Reply{FleetInstructionProtocol: "unset"}, 1, 1}} // start: no reply yet, asks once
+	for range 20 { // idle heartbeats never ask (#1393)
+		steps = append(steps, struct {
+			reply             Reply
+			fetches, launches int32
+		}{idle, 1, 1})
+	}
+	steps = append(steps, []struct {
 		reply             Reply
 		fetches, launches int32
 	}{
-		{Reply{FleetInstructionProtocol: "unset"}, 1, 1}, // no reply yet
-		{Reply{FleetInstructionProtocol: fleetInstructionProtocol}, 1, 1},
 		{Reply{FleetInstructionProtocol: fleetInstructionProtocol, FleetInstructionWaiting: true}, 2, 1},
 		{Reply{}, 3, 1}, // previous-release queue
-	} {
+	}...)
+	for n, step := range steps {
 		if n > 0 {
 			r.noteReply(step.reply)
 		}
@@ -478,5 +488,71 @@ func TestFleetInstructionWaitingFlagsEveryIssuableInstruction(t *testing.T) {
 		if _, waiting := checkIn(w.ID); waiting {
 			t.Fatal("instruction flagged after completion")
 		}
+	}
+}
+
+// The queue never checks in, so its own runtime gates on queue state: no
+// instruction requests while idle or while its host's worker updates, and one
+// fetch per pass once its own queue_update phase starts (#1393).
+func TestFleetQueueRuntimeFetchesInstructionOnlyInItsUpdate(t *testing.T) {
+	q, c, _ := fleetFixture(t, "q", "q")
+	key := bytes.Repeat([]byte{1}, ed25519.PublicKeySize)
+	config := fleetRuntimeTestConfig(t)
+	if err := os.WriteFile(filepath.Join(config.State, "fleet-publisher.pub"), key, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var fetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fleet/instruction" || r.URL.Query().Get("machine") != "@queue" {
+			t.Error("unexpected request", r.URL.String())
+		}
+		fetches.Add(1)
+		_, _ = w.Write([]byte("null"))
+	}))
+	defer server.Close()
+	session := q.fleetQueue.Proof.Session
+	observer := &workerFleetRuntime{config: config, client: Client{URL: server.URL}, clock: c, collect: func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
+		return fleetTestProof(c, session, 100, false), nil
+	}, launch: func(context.Context, ServiceConfig, FleetUpdateInstruction) error { t.Error("launched"); return nil }}
+	machine := Machine{ID: "@queue", HostID: "q", Session: session}
+	var generation uint64
+	pass := func() {
+		t.Helper()
+		q.observeFleetQueue(context.Background(), observer, machine, &generation)
+		done := make(chan fleetPollResult, 1)
+		done <- <-observer.pending // finish this pass's poll; the next pass collects it
+		observer.pending = done
+	}
+	for range 20 {
+		pass()
+	}
+	if fetches.Load() != 0 {
+		t.Fatalf("idle queue fetched %d instructions", fetches.Load())
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	for step := 0; ; step++ {
+		fleetTick(t, q)
+		h := q.fleetActiveHost()
+		if step > 8 || h == nil {
+			t.Fatalf("queue update not reached: %+v", q.fleetUpgradeStatus())
+		}
+		if h.Phase == "queue_update" {
+			break
+		}
+		pass()
+		if fetches.Load() != 0 {
+			t.Fatalf("queue fetched during phase %s", h.Phase)
+		}
+		if h.Phase == "worker_update" {
+			fleetActivate(t, q, c)
+		} else {
+			fleetHeartbeatAdvance(t, q, c)
+		}
+	}
+	pass()
+	if fetches.Load() != 1 {
+		t.Fatalf("queue_update fetches=%d, want 1", fetches.Load())
 	}
 }

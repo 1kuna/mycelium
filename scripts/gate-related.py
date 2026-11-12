@@ -27,6 +27,10 @@ for _variant in ('fake', 'real'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/fleet_stability_{_variant}.go'] = (
         'fleet_upgrade_test.go',)
 
+# The queue's own fleet runtime loop is exercised with the worker runtime (#1393).
+SUPPLEMENTAL_CONSUMERS['internal/myce/fleet_queue_runtime.go'] = (
+    'fleet_runtime_test.go', 'fleet_upgrade_test.go')
+
 # The shared CLI image helper has no test roots of its own. Exercise its real
 # child-process launch and synthetic-probe boundary, including in quick mode.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)
