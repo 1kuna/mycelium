@@ -1511,6 +1511,9 @@
         },
         "output_bytes": {
           "type": "integer"
+        },
+        "scratch_bytes": {
+          "type": "integer"
         }
       },
       "type": "object"

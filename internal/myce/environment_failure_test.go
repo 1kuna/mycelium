@@ -224,7 +224,7 @@ func TestEnvironmentFailureClassificationAndPersistedExcerpt(t *testing.T) {
 			rt := &environmentRuntime{dir: t.TempDir(), cache: cache, reports: map[string]EnvironmentReport{}}
 			rt.sync([]EnvironmentRecipe{r}, false)
 			<-rt.done
-			_, reports, _ := rt.report()
+			_, reports, _, _ := rt.report()
 			if len(reports) != 1 || reports[0].FailureKind != tc.kind || !strings.Contains(reports[0].Log, tc.output) {
 				t.Fatal(reports)
 			}
@@ -232,7 +232,7 @@ func TestEnvironmentFailureClassificationAndPersistedExcerpt(t *testing.T) {
 			if err := restored.restore(); err != nil {
 				t.Fatal(err)
 			}
-			_, reports, _ = restored.report()
+			_, reports, _, _ = restored.report()
 			if len(reports) != 1 || reports[0].FailureKind != tc.kind || !strings.Contains(reports[0].Log, tc.output) {
 				t.Fatal("lost persisted excerpt", reports)
 			}

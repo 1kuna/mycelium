@@ -742,6 +742,16 @@ Optional `spec.disk.input_bytes` / `output_bytes` are fallback hints when sizes
 are absent or unknown. Nothing requires a declaration; without size evidence
 admission uses the floor alone. Inputs and outputs charge the data volume; the
 immutable input cache copy charges `file-cache`; NAS/path inputs bypass that cache.
+Work dir plus `TMPDIR` scratch also charges the data volume, as the larger of
+outputs and scratch because outputs are written inside the work dir. Scratch is
+the accepted managed-storage scratch peak plus its measured margin for the same
+storage key (see learned storage below), or the optional `spec.disk.scratch_bytes`
+hint before such a peak exists; a measured peak always replaces the hint.
+Workers report each ready environment's allocated size at the end of its build
+(`machines[].environment_bytes`). A job whose environment key a host has not
+cached charges that host's environment volume with the largest size any host
+reported for the key. A hold reads
+`disk_headroom: host H ROOTS disk: N GiB needed, M GiB free on H; free=… floor=… need=… total=…`.
 Shared volumes sum those writes once per
 role. Checkpoint writes charge only declared resumable/checkpoint work, using a
 measured resume manifest or optional `spec.disk.checkpoint_bytes` hint. A separate
@@ -756,8 +766,9 @@ admit concurrent checkpoint writes against the same free-space figure. A host
 with multiple GPUs can also admit several jobs before their writes appear in a
 sample. Both are accepted limits of admission from observations without disk
 reservations. Estimates do not predict future writes by other jobs or programs,
-or unreported scratch/archive expansion. Cross-job output-size learning remains
-a follow-up; existing observation keys learn memory/throughput, not disk size.
+or unreported scratch/archive expansion. Learned scratch peaks are keyed by
+storage identity, so another machine type or changed configuration falls back to
+the hint until it has its own accepted run.
 
 Machine `cpu_isolation` reports `select-none` after runtime qualification,
 `not-enforced` for cooperative CPU execution on macOS/Metal, or

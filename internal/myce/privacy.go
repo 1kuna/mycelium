@@ -65,6 +65,11 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			builds[statusEnvironmentName(name)] = max(builds[statusEnvironmentName(name)], seconds)
 		}
 		m.EnvironmentBuildSeconds = builds
+		sizes := map[string]uint64{}
+		for name, bytes := range m.EnvironmentBytes {
+			sizes[statusEnvironmentName(name)] = max(sizes[statusEnvironmentName(name)], bytes)
+		}
+		m.EnvironmentBytes = sizes
 		for i := range m.EnvironmentReports {
 			m.EnvironmentReports[i].Key = statusEnvironmentName(m.EnvironmentReports[i].Key)
 		}

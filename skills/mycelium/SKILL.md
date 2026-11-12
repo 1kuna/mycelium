@@ -102,6 +102,11 @@ submitting. Only production entries need a target list; every field is in
   common thread pools (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `GOMAXPROCS` and
   others) default to it, and `TMPDIR` and `MYCE_SCRATCH_DIR` point at the
   attempt's scratch. Size worker pools from `MYCE_CPUS`.
+- **Big scratch** (renders, builds, unpacked archives): add
+  `disk: {scratch_bytes: N}` with the work dir plus `TMPDIR` peak, so the job
+  waits for a host with room instead of failing inside a full disk. After one
+  accepted run Mycelium uses the measured peak instead
+  ([disk needs](references/submit.md#disk-needs)).
 - **Network** is off for the command unless you declare `needs: {network: true}`.
 
 ## 5. Inputs

@@ -164,7 +164,7 @@ func TestDiskHeadroomHTTPRefusesImpossibleSubmission(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	const reason = "disk_headroom: host a data free=107374182400 bytes floor=1073741824 bytes need=107374182400 bytes total=107374182400 bytes"
+	const reason = "disk_headroom: host a data disk: 100.0 GiB needed, 99.0 GiB free on a; free=107374182400 bytes floor=1073741824 bytes need=107374182400 bytes total=107374182400 bytes"
 	if response.Code != http.StatusConflict || body.Code != "disk_headroom" || body.Error != reason {
 		t.Errorf("expected sanitized disk capacity refusal, got HTTP %d: %s", response.Code, response.Body.String())
 	}

@@ -85,7 +85,7 @@ func TestMaintenanceDelayedEnvironmentLaunch(t *testing.T) {
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("payload ran after maintenance", err)
 				}
-				_, reports, _ := rt.report()
+				_, reports, _, _ := rt.report()
 				m.EnvironmentReports = reports
 				check(t, q, m, nil)
 				st, err := q.HostMaintenanceStatus("host")

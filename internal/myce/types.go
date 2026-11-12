@@ -693,6 +693,7 @@ type Machine struct {
 	EnvironmentBuilder          bool                  `json:"environment_builder,omitempty"`
 	EnvironmentReports          []EnvironmentReport   `json:"environment_reports,omitempty"`
 	EnvironmentBuildSeconds     map[string]float64    `json:"environment_build_seconds,omitempty"`
+	EnvironmentBytes            map[string]uint64     `json:"environment_bytes,omitempty" jsonschema:"description=Allocated bytes of each ready environment at the end of its build; uncached builds of the same key charge the environment volume."`
 	ModelCopySeconds            map[string]float64    `json:"model_copy_seconds,omitempty"`
 	CopyReports                 []CopyReport          `json:"copy_reports,omitempty"`
 	CopyBytesPerSecond          float64               `json:"copy_bytes_per_second,omitempty"`

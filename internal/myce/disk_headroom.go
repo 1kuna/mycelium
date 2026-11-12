@@ -13,6 +13,58 @@ type DiskNeeds struct {
 	InputBytes      uint64 `json:"input_bytes,omitempty" yaml:"input_bytes,omitempty"`
 	OutputBytes     uint64 `json:"output_bytes,omitempty" yaml:"output_bytes,omitempty"`
 	CheckpointBytes uint64 `json:"checkpoint_bytes,omitempty" yaml:"checkpoint_bytes,omitempty"`
+	// Peak work dir plus TMPDIR bytes, including outputs written there. A
+	// learned accepted-attempt peak for the same kind of work replaces it.
+	ScratchBytes uint64 `json:"scratch_bytes,omitempty" yaml:"scratch_bytes,omitempty"`
+}
+
+// diskWork is disk demand beyond manifests: work dir/TMPDIR scratch (learned
+// or declared) and an environment build this host has not cached yet.
+type diskWork struct{ scratch, environment uint64 }
+
+func declaredDiskWork(j *Job) diskWork {
+	if j.Spec.Disk == nil {
+		return diskWork{}
+	}
+	return diskWork{scratch: j.Spec.Disk.ScratchBytes}
+}
+
+// A measured peak beats the hint (MY-34). Lookups read queue memory only.
+func (q *Queue) diskWork(j *Job, m *Machine) diskWork {
+	w := declaredDiskWork(j)
+	if m == nil {
+		return w
+	}
+	if len(q.s.StorageObservations) > 0 {
+		if key := q.storageKey(j, m); key != nil {
+			if p, ok := q.s.StorageObservations[identityHash(key)]; ok && p.Scratch.Samples > 0 {
+				w.scratch = p.Scratch.need(p.AllocationUnit)
+			}
+		}
+	}
+	if q.environmentSizesKnown() {
+		if key := environmentKey(j, m); key != "" && !slices.Contains(m.Environments, key) {
+			w.environment = q.environmentBytes(key)
+		}
+	}
+	return w
+}
+func (q *Queue) environmentSizesKnown() bool {
+	for _, m := range q.s.Machines {
+		if len(m.EnvironmentBytes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Largest built size any host reported for this exact environment key.
+func (q *Queue) environmentBytes(key string) uint64 {
+	var n uint64
+	for _, m := range q.s.Machines {
+		n = max(n, m.EnvironmentBytes[key])
+	}
+	return n
 }
 
 func addDiskBytes(a, b uint64) uint64 {
@@ -63,10 +115,19 @@ func projectedDiskNeed(j *Job) uint64 {
 	return addDiskBytes(addDiskBytes(input, output), diskInputCacheBytes(j))
 }
 func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
+	return diskVolumeNeedWith(j, v, declaredDiskWork(j), machines...)
+}
+func (q *Queue) diskVolumeNeed(j *Job, v DiskVolume, m *Machine) (uint64, bool) {
+	return diskVolumeNeedWith(j, v, q.diskWork(j, m), m)
+}
+func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
+	spool := uint64(0)
 	if j.Spec.OutputDelivery == asyncNAS {
-		output = addDiskBytes(output, output) // Work files plus immutable unaccepted spool.
+		spool = output // Immutable unaccepted spool beside the work files.
 	}
+	// Outputs are written inside the work dir, so scratch covers them.
+	output = addDiskBytes(max(output, work.scratch), spool)
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {
@@ -102,7 +163,8 @@ func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 				need = addDiskBytes(need, checkpoint)
 			}
 		case "environment":
-			relevant = relevant || j.Spec.Environment.Key() != "" || j.Spec.extensionJob()
+			relevant = relevant || j.Spec.Environment.Key() != "" || j.Spec.extensionJob() || work.environment > 0
+			need = addDiskBytes(need, work.environment)
 		case "model-cache":
 			relevant = relevant || j.Spec.Needs.Model != ""
 		}
@@ -121,11 +183,15 @@ func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 	}
 	floor := diskFreeFloor(v.TotalBytes)
 	if v.FreeBytes < floor || need > v.FreeBytes-floor {
-		return fmt.Sprintf("%s free=%d bytes floor=%d bytes need=%d bytes total=%d bytes", label, v.FreeBytes, floor, need, v.TotalBytes)
+		usable := v.FreeBytes - min(v.FreeBytes, floor)
+		return fmt.Sprintf("%s disk: %.1f GiB needed, %.1f GiB free on %s; free=%d bytes floor=%d bytes need=%d bytes total=%d bytes", label, float64(need)/(1<<30), float64(usable)/(1<<30), hostID(m), v.FreeBytes, floor, need, v.TotalBytes)
 	}
 	return ""
 }
 func diskHeadroomReason(j *Job, m *Machine) string {
+	return diskHeadroomReasonWith(j, m, declaredDiskWork(j))
+}
+func diskHeadroomReasonWith(j *Job, m *Machine, work diskWork) string {
 	if j.OutputAdmissionPending {
 		return outputRetryHold
 	}
@@ -133,7 +199,7 @@ func diskHeadroomReason(j *Job, m *Machine) string {
 		return ""
 	}
 	for _, v := range m.DiskVolumes {
-		if need, relevant := diskVolumeNeed(j, v, m); relevant {
+		if need, relevant := diskVolumeNeedWith(j, v, work, m); relevant {
 			if reason := diskVolumeReason(m, v, need); reason != "" {
 				return reason
 			}
@@ -177,8 +243,9 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
 	}
+	work := q.diskWork(j, m)
 	for _, v := range m.DiskVolumes {
-		need, relevant := diskVolumeNeed(j, v, m)
+		need, relevant := diskVolumeNeedWith(j, v, work, m)
 		if !relevant {
 			continue
 		}
@@ -258,7 +325,7 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 		}
 		copy := *m
 		copy.DiskVolumes = diskCapacityVolumes(m.DiskVolumes)
-		if reason := diskHeadroomReason(j, &copy); reason != "" {
+		if reason := diskHeadroomReasonWith(j, &copy, q.diskWork(j, m)); reason != "" {
 			reasons = append(reasons, reason)
 		} else {
 			return ""
