@@ -17,7 +17,7 @@ OS/architecture pairs on the fleet; no per-backend entry, lock or check was need
 The same entry and lock trained the same model to the same result on Arc, Metal
 and CPU (test accuracy 0.9822 on each, final loss 0.000647 to 0.000648). The
 CUDA run did not run: the CUDA node was disabled for maintenance the whole time
-(CUDA_RESULT).
+(job `e5405dd0` waited an hour with that reason and was cancelled unrun).
 
 The friction was not in the files. Without a memory figure, the first run on a
 busy accelerator host waited for room it did not need: Arc held the job about
@@ -141,7 +141,7 @@ project was removed afterwards; this table is the record.
 | `120aa84d` | forced Metal | macOS arm64, Metal | `mps` / 2.15.0 | 0.9822 | 0.000648 | 3.1 s | 20.6 MiB | about 9 min |
 | `8bc8672a` | forced Arc | Linux amd64, Arc Pro B70 | `xpu:0` / 2.15.0+xpu | 0.9822 | 0.000648 | 3.7 s | 24.3 MiB | about 19 min |
 | `582ef7a5` | forced CPU | macOS arm64, CPU | `cpu` / 2.15.0 | 0.9822 | 0.000647 | 3.2 s | n/a | about 6 min |
-| `e5405dd0` | forced CUDA | did not run | n/a | | | | | CUDA_ROW |
+| `e5405dd0` | forced CUDA | did not run | n/a | | | | | cancelled unrun after about an hour |
 
 To land the same job on each platform once, the forced runs used a throwaway
 copy of the entry with `needs.platform` set to that one platform. That copy is a
