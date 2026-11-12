@@ -65,10 +65,24 @@ report the queue never received.
 
 ## Health and stopping
 
+A runtime proof is fresh against its own process's measured proof cadence
+(#1450). A worker sends the proof its runtime last collected, about one
+heartbeat old, and the queue keeps it until the next check-in, so a healthy
+proof reaches about two heartbeat cycles of age; host load stretches those
+cycles. The queue learns, per process, how old each proof got before the next
+one replaced it, and accepts a proof younger than that mean plus four
+deviations (the estimator worker loss uses). It is never stricter than 5
+seconds, a new process starts at 5 seconds, and no proof counts after 30
+seconds (the measured filesystem stall backstop). A refusal names the proof's
+age and the bound it was judged against.
+
 A service is verified when the queue sees a fresh runtime proof from a new
 process (new session and PID) with the release's version and exact bytes, a
 healthy service manager and runner smoke, stable for 30 seconds (the enrollment
-stability window, which catches a crash loop). A new process with other bytes
+stability window, which catches a crash loop). The window passes only on a
+proof the process collected at least 30 seconds after its first, so a process
+that stops proving never passes. One late proof keeps the window; a missing or
+unhealthy proof restarts it. A new process with other bytes
 stops the operation at once. If no verified process appears within 15 minutes of
 the update starting (the updater's 10-minute download bound, 3-minute manager
 command bound, 1-minute readiness wait and the stability window, rounded up),

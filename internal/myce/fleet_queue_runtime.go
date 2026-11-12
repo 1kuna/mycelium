@@ -65,6 +65,9 @@ func (q *Queue) observeFleetQueue(ctx context.Context, observer *workerFleetRunt
 	proof := observer.observe(ctx, machine, true)
 	q.mu.Lock()
 	if q.fleetQueue != nil {
+		if proof != nil && (q.fleetQueue.Proof == nil || !proof.ObservedAt.Equal(q.fleetQueue.Proof.ObservedAt)) {
+			q.noteFleetProof(q.fleetQueue.Proof, proof, q.clock.Now())
+		}
 		q.fleetQueue.Proof = cloneFleetProof(proof)
 		if *generation != observer.generation {
 			*generation = observer.generation

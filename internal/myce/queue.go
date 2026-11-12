@@ -186,6 +186,7 @@ type Queue struct {
 	healthNotifier                  string
 	healthStorageDelay              time.Duration
 	fleetQueue                      *fleetQueueRuntime
+	fleetCadence                    map[string]*fleetProofCadence // proof session -> measured proof cadence
 	fleetService                    *ServiceConfig
 	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
@@ -1562,12 +1563,18 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		m.HostMemoryDerivation = nil
 		// Worker clocks are unrelated to queue time. Translate local proof age
 		// into a queue-owned receipt timestamp; cached observations keep aging.
+		// Freshness is judged later against the process's own cadence.
 		if m.Fleet != nil {
 			age := m.Fleet.ObservationAgeSeconds
-			if math.IsNaN(age) || math.IsInf(age, 0) || age < 0 || age >= fleetRuntimeFreshFor.Seconds() {
+			if math.IsNaN(age) || math.IsInf(age, 0) || age < 0 || age >= fleetProofMaxAge.Seconds() {
 				m.Fleet = nil
 			} else {
 				m.Fleet.ObservedAt = q.clock.Now().Add(-time.Duration(age * float64(time.Second)))
+				var prev *FleetRuntimeProof
+				if old := q.s.Machines[m.ID]; old != nil {
+					prev = old.Fleet
+				}
+				q.noteFleetProof(prev, m.Fleet, q.clock.Now())
 			}
 		}
 		if err := inventoryTarget(&m); err != nil {
