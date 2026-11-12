@@ -210,6 +210,16 @@ experiment may declare `preemptible: true` so it can leave a scarce host by
 restarting from scratch (MY-26); class alone never implies it. See
 [checkpoints](../../../docs/files.md#resumable-jobs).
 
+Resumes stay on the checkpoint's target. The queue records the OS/arch/platform
+of the attempt that wrote the newest accepted generation and places the resume
+only on a host of that target while one remains in the fleet, even if it is
+busy, disabled for maintenance or temporarily lost; status names the wait
+`checkpoint_target`. A host leaving the fleet ends the wait. If your checkpoints
+replay identically across targets, declare it with tested `resume_compatibility`
+entries for each target (the same declaration scarce-host yield uses); a resume
+then moves between any listed targets. `portable: true` says only that the
+program runs on any arch.
+
 Plain `pieces:` (1–256, unique lowercase keys) run one command per piece. Each
 piece's `args` follow the base command and any CLI arguments; its `inputs` reach
 only that piece. A failed piece doesn't stop the others; the parent fails once

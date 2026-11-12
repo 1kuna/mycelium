@@ -289,7 +289,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionHold(j, m, heldBy(q.startupReleaseHold(hostID(m))), predicateStartupRelease) || !q.admissionHold(j, m, heldBy(q.dockerHold(hostID(m))), predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
-	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) {
+	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) || !q.admissionHold(j, m, q.checkpointTargetAdmission(j, m), predicateCheckpointTarget) {
 		return false
 	}
 	if !q.admissionHold(j, m, q.productionAdmissionHold(j, m), predicateProductionAdmission) {

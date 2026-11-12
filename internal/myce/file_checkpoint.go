@@ -102,9 +102,10 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			return ErrStale
 		}
 		allowed := false
+		var devices []string
 		for _, copy := range j.Copies {
 			if copy.Attempt == p.Attempt && copy.Machine == p.Machine && copy.Session == p.Session && (copy.Recoverable || j.Attempt == p.Attempt && j.Machine == p.Machine && j.Session == p.Session) {
-				allowed = true
+				allowed, devices = true, copy.AllocatedDevices
 			}
 		}
 		if !allowed {
@@ -121,6 +122,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 			j.FileCheckpoints = map[int]FileCheckpoint{}
 		}
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
+		noteCheckpointTarget(j, allocationMachine(q.s.Machines[p.Machine], devices), p.Attempt, p.Checkpoint.Generation)
 		return nil
 	}, nil)
 }

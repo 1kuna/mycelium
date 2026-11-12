@@ -463,7 +463,9 @@ type Job struct {
 	YieldPlan       *ScarceYieldProjection `json:"yield_plan,omitempty"`
 	ScarceHostYield *ScarceHostYield       `json:"scarce_host_yield,omitempty"`
 	YieldGeneration int64                  `json:"yield_generation,omitempty"`
-	FaultEvidence   []*FaultEvidence       `json:"fault_evidence,omitempty"`
+	// The target that wrote the newest accepted checkpoint generation (#1437).
+	CheckpointTarget *CheckpointOrigin `json:"checkpoint_target,omitempty"`
+	FaultEvidence    []*FaultEvidence  `json:"fault_evidence,omitempty"`
 	// Set only on read-only planner copies, never the durable job. Plain work's
 	// recipe and input identity is independent of the target or learned memory.
 	planningMemoryIdentity string
