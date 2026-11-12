@@ -703,10 +703,19 @@ release and that the default onboarding approval is the new release
 **First use.** Each service must run as an installed service on a release with
 this path. `myce fleet upgrade` refuses and names every service without a fresh
 runtime proof. To bring a service onto such a release, do the same steps by
-hand: `myce host drain HOST --wait` (it returns once the host is quiescent),
-run the verified new binary's `myce install ROLE --config CONFIG`,
-check `myce status` shows the new release and a new session, then
-`myce host resume HOST`, one host at a time with the queue's host last.
+hand, one host at a time with the queue's host last:
+
+1. Copy the published executable for the host's OS and architecture and check
+   its SHA-256 against the signed `release.json`.
+2. `myce host drain HOST --wait --timeout 2h` returns once the host is
+   quiescent. `--timeout` defaults to 30 seconds; a timeout keeps the drain and
+   changes nothing else, so rerun it. If running work will not finish soon and
+   its owner agrees, `myce host disable HOST --stop --wait --timeout 10m` stops it as planned
+   maintenance instead (step 3 of the run above).
+3. Run the verified binary's `myce install ROLE --config CONFIG` (add
+   `--dry-run` first to see the preserved settings).
+4. Check that `myce status` shows the new release and a new session, then run
+   `myce host resume HOST`.
 
 Queue shutdown fences new requests, cancels open HTTP observations and long
 polls, and lets an already committing SQLite transaction finish; batch attempts
