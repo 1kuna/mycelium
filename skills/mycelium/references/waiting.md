@@ -42,7 +42,7 @@ blocker remains. `last_planner_decision` keeps its original timestamp and wave
 vector. Read `latest.closed_at`/`latest.closed_reason` for ended waits and
 `capture_gaps`/`deferred_at` for capture deferred to protect control service.
 Missing values and dropped history stay unknown. See
-[wait evidence](../../../docs/status.md#retained-production-admission-waits-next-release-868).
+[wait evidence](../../../docs/status.md#retained-production-admission-waits-868).
 
 Overdue waits in every tier can include
 `admission_wait.latest.targets[].admission_decision`. `outcome`, `stage` and
@@ -52,7 +52,7 @@ means selection was skipped, not a rejected candidate; `not_selected` means an
 eligible candidate lost selection order. The threshold is one advertised or
 measured check-in opportunity, not a start promise. Unchanged evidence keeps its
 timestamp; sibling `predicates` are diagnostic projections. See
-[actual decisions](../../../docs/status.md#actual-all-tier-admission-decisions-next-release-1158).
+[actual decisions](../../../docs/status.md#actual-all-tier-admission-decisions-1158).
 
 Per-job JSON keeps `last_memory_admission` for a blocked RAM comparison:
 envelope, drift, signed headroom and charge/growth owners. It survives startup
@@ -103,7 +103,7 @@ timestamps in one `myce status JOB_ID`; delayed samples, ambiguous CUDA
 attribution and missing cores do not establish a cause. Report `unknown` until
 the causal chain is proved. Enabling cores is a separately authorized operator
 task; agents never change limits, core patterns or drivers. See
-[fault evidence](../../../docs/status.md#fault-evidence-next-release).
+[fault evidence](../../../docs/status.md#fault-evidence).
 
 ## Storage and disk holds
 

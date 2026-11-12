@@ -35,7 +35,7 @@ destination, sanitized underlying error and `command_exit_code: 0` when known.
 transport error is included. Retryable publication errors remain pending and
 retain local results; their typed cause clears after successful publication.
 
-From the next release, cold CPU probes report their initial reservation
+Cold CPU probes report their initial reservation
 in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
 complete cgroup footprint plus observed growth and launch drift instead of
@@ -50,7 +50,7 @@ ceilings, physical-memory rechecks and exact release remain independent.
 RAM wait text labels `live available` as available RAM after operator reserve,
 not memory in use. Linux reads `MemAvailable`, which includes reclaimable cache.
 
-From the next release (#850), `diagnostic_code: memory_evidence_recovering`
+`diagnostic_code: memory_evidence_recovering` (#850)
 means declared requirements have an eligible target but the learned/exploratory
 envelope does not. The durable queued job re-evaluates on evidence and capacity
 changes. No attempt starts below its resolved reservation or retained retry
@@ -58,7 +58,7 @@ floor. A new clean comparable result may replace an invalidated class prior;
 explicit impossible needs, incompatible targets and impossible per-job retry
 floors still refuse. This wait grants no capacity or cleanup permission.
 
-## Automatic host health (#834, next release)
+## Automatic host health (#834)
 
 Machine `host_health` contains a typed `drain_reason`, recent `history`, the
 healthy `baseline`, and CPU/RSS-leading `foreign` processes and service identities.
@@ -258,7 +258,7 @@ Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
 device entries carry their own extension fingerprints and reports. The scalar
 `extension_fingerprint` and reports retain a first-device compatibility view.
 
-From the next release (#891), extension report `reason` and status displays
+Extension report `reason` and status displays (#891)
 say `not yet checked on this device; run the extension check` when no matching
 work/device record exists for the installed version. Existing records distinguish
 `hardware/driver fingerprint changed`, `extension fingerprint (digest) changed`,
@@ -441,7 +441,7 @@ clock. The preservation guard requires that exact key's complete digest chain;
 another host's accepted sample alone never explains its mutation (#620).
 
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
-fresh. From the next release (#1052), status and job reads take an immutable committed
+fresh. Status and job reads (#1052) take an immutable committed
 input generation plus worker contact/private scalar facts under the queue lock.
 The commit journal publishes changed encoded records through a persistent tree;
 unchanged records and decoded inputs are shared across revisions. Traversal,
@@ -582,7 +582,7 @@ version and commit from its check-in. Missing worker releases mean unknown
 embed the source commit even with Go VCS stamping disabled. Development builds
 use Go's VCS revision when available, otherwise `unknown`.
 
-Worker CPU and I/O telemetry (next release) appears on job GET and status in
+Worker CPU and I/O telemetry appears on job GET and status in
 `resource_attempts`: exact attempt, machine, session and `resources`. This retains
 the first and latest 31 attempts like memory facts; `resource_attempts_dropped`
 counts evictions. Running heartbeats and final results update the same row, so
@@ -798,7 +798,7 @@ do not require `native_network`: they have no kernel network confinement to
 qualify. `needs.network: true` still declares outbound intent. This does not
 grant protected egress or change a frozen extension's isolation policy.
 
-From the next release, queued reasons explain network, environment preparation,
+Queued reasons explain network, environment preparation,
 GPU card contention and RAM envelope blockers per compatible target. Card waits
 say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
 and name the holding jobs and tiers (or retained custody awaiting exact release).
@@ -858,8 +858,8 @@ cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
 
 `host_capacity_accumulation` names a ready queued job whose host RAM or cores
-would otherwise be repeatedly consumed by smaller backfill (#787). From the
-next release this also covers CPU-only demand. New work behind the demand in
+would otherwise be repeatedly consumed by smaller backfill (#787). This
+also covers CPU-only demand. New work behind the demand in
 tier/fair-turn order waits on its selected host unless it fits beside the
 demand. Existing attempts finish normally. The projection
 selects one currently ready target per demand, prefers immediate capacity, and
@@ -1056,7 +1056,7 @@ that proof and no queue-recorded start/custody preserves ledger completeness,
 including a release-only acknowledgement before the final outcome. Missing
 process identity without this proof remains conservatively incomplete.
 
-### Positive execution evidence (#1008, next release)
+### Positive execution evidence (#1008)
 
 A production start refusal because every eligible host is disabled has
 `diagnostic_code: host_unavailable` and `execution_cause` with `operation: launch`,
@@ -1196,7 +1196,7 @@ the next run's learned envelope; the two-sample rule only enables the narrower
 complete-component range estimator. Identity includes project, name, exact run,
 environment and input references, so changing an argument or a job name can
 leave later runs exploratory even when earlier attempts report `eligible`.
-From the next release, resolve adds a non-blocking note pointing these auto
+Resolve adds a non-blocking note pointing these auto
 commands to the existing profile memory class. Use a stable adapter entry or
 profile base command and append item arguments/pass `--input` files; the default
 class shares evidence across items. `memory_class: per_item` isolates arguments
@@ -1269,7 +1269,7 @@ time, even if the actor's cached host-memory report predates CUDA initialization
 or is delayed by log/result I/O. Device age still starts at the original sensor
 reading, and the host counter keeps its own older age. A sampler that stops
 producing readings still becomes stale after ten seconds; refreshing the report
-does not renew its evidence. From the next release, unified CUDA admission
+does not renew its evidence. Unified CUDA admission
 requires a fresh sample from every existing tenant before adding another.
 
 When CUDA lists attempt PIDs but reports `[N/A]`, a Linux worker also reads
@@ -1514,7 +1514,7 @@ and the reason. An absent binding without retained custody can release. The
 release reason remains in status.
 Other reservations, device exclusions and newer operator drains remain intact.
 Device reservations leave CPU placement eligible within the host's CPU/RAM
-allowances. From the next release, a machine worker's CPU environment preparation
+allowances. A machine worker's CPU environment preparation
 also retains CPU scope, so its offer cannot withdraw the reserved GPU job at
 launch. The bound job's own exact preparation remains excluded from `pending`;
 it waits unassigned while its environment builds and launches after readiness.
@@ -1555,7 +1555,7 @@ Every host command uses queue evidence; there is no local envelope or rest verdi
 
 ### Live headroom and reservations
 
-From the next release, per-job JSON retains `last_memory_admission`: the last
+Per-job JSON retains `last_memory_admission`: the last
 changed blocking host-memory comparison in its current wait episode. It is
 retained through a start-deadline failure and queue restart; a retry starts a
 new episode. It records a target comparison, not a claim that RAM is the only
@@ -1592,7 +1592,7 @@ available RAM after its configured host reserve. `host_memory_in_use_gb` is
 Mycelium's reservation ledger, not measured process RSS.
 `free_host_memory_gb` is admitted headroom: the smaller of live availability
 minus running attempts' remaining growth room, and the configured allowance
-minus full reservations (when configured). From the next release, remaining
+minus full reservations (when configured). Remaining
 growth is `max(0, reservation - current nonreclaimable use, live growth forecast)`
 per attempt. The forecast includes the measured growth rate through the sample's
 age. The envelope and forecast cover the same future bytes; they are not added.
@@ -1606,7 +1606,7 @@ then sums disjoint container charges. The unified-CUDA device-growth floor
 remains: host cgroup memory cannot cancel the device reservation. Summed
 per-process device counters may include shared allocations; neither their sum
 nor RSS/host-delta estimates establish unique physical residency for credit.
-From the next release, heartbeat device snapshots freeze before reading physical
+Heartbeat device snapshots freeze before reading physical
 headroom; aging them afterward never fetches newer allocations.
 Native helper memory can be reported before main starts: occupancy does not
 establish main execution. Launch takes fresh actor snapshots before its live
@@ -1616,7 +1616,7 @@ and pending cleanup do not.
 Only this current nonreclaimable memory reduces growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
-From the next release, host sample validity follows twice the longest observed
+Host sample validity follows twice the longest observed
 exact-attempt sample delivery interval (one missed delivery); the five-second
 legacy window applies until cadence is measured. Only distinct negotiated
 `sample_id` observations train cadence; cached, unidentified repeated and
@@ -1842,8 +1842,8 @@ have explicit `runtime.reason` values. Plain commands still show elapsed time
 and explain their missing workload/reference metadata. These observations do not
 change placement or measurement qualification.
 
-From the next release (#879), exact repeated-command and comparable extension
-forecasts correct service time using accepted raw prediction error. Job timing
+Exact repeated-command and comparable extension
+forecasts correct service time using accepted raw prediction error (#879). Job timing
 `service_estimate` exposes `raw_seconds`, signed `correction_seconds`, `samples`
 (the number of accepted prediction/outcome pairs), `estimator`, `uncertainty` and
 an optional fallback `reason`. `predicted_seconds` is raw plus correction; the
@@ -1883,7 +1883,7 @@ with `json.dump` to a sibling temporary file and `os.replace` to publish it;
 Python `Client.get()` and `Client.list()` return the same JSON evidence.
 
 Both counts are required, finite and nonnegative, with `completed <= total`.
-**From the next release**, optional `stage_index` and `stage_count` are positive,
+Optional `stage_index` and `stage_count` are positive,
 one-based integers. A count requires an index, with index no greater than count;
 an index without a count means the number of stages is unknown. Counts and units
 describe the current stage, so they may reset/change when the stage advances.
@@ -2221,8 +2221,8 @@ cost evidence and its actual duration, never an assumed complete minute.
   Replays cannot increment it; planned stops are excluded. Successful
   or workload-caused endings break the streak. Historical failures interrupted
   by successful work do not fire. It preserves all existing attempt fences.
-  From the next release (#881), the episode and affected job retain an
-  `owner_required` decision receipt in `health_alerts[].recovery` and
+  The episode and affected job retain an
+  `owner_required` decision receipt (#881) in `health_alerts[].recovery` and
   `health_recovery`. It records the episode, exact execution/session, time,
   retained cause, sanitized admission comparison when available, plain-language
   summary and next owner action. `action: none` means no automatic repair was
@@ -2308,7 +2308,7 @@ uninterrupted coverage period; a rollback through an older binary can create
 a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
 
-## Local completion observer diagnostics (next release)
+## Local completion observer diagnostics
 
 `myce wait --observer-status` reads the user registry's `observer.status` and
 reports `owner_locked` from the lifetime lock. A record alone does not prove a
@@ -2353,7 +2353,7 @@ The first request may omit `after` and returns immediately. Replies contain
 `jobs`, an ordered array of scalar `id`, `state`, sanitized `reason` and
 `revision` records. Send the returned revisions on the next request; it waits
 until a selected record changes, becomes terminal, or the transport timeout
-expires. Use exact IDs after initial prefix resolution. From the next release, fitting ID count follows current memory capacity and
+expires. Use exact IDs after initial prefix resolution. Fitting ID count follows current memory capacity and
 wait duration follows caller intent and negotiated transport deadlines; see
 [request budgets](request-budgets.md). Malformed requests receive `wait_invalid`;
 capacity refusals name the fitting ID count. Unknown and
@@ -2459,7 +2459,7 @@ queue mutex and do not write the database.
 
 ### Variant eligibility (#499)
 
-From the next release, nonterminal native variant jobs expose
+Nonterminal native variant jobs expose
 `variant_eligibility` in status and job GET, and in the CLI and status page:
 
 - `extension`/`digest` identify the frozen implementation; `variant` is its exact
@@ -2519,7 +2519,7 @@ is not evidence that a particular release changed consumer behavior.
 
 ### Authored requirement explanations (#748)
 
-From the next release, adapter entries, legacy profiles and job specs retain
+Adapter entries, legacy profiles and job specs retain
 `requirement_reasons` in frozen submitted intent and private receipts. Existing
 native registrations already retain their map in each frozen extension snapshot.
 No scheduling authority, parity approval or pin policy comes from an explanation.
@@ -2661,7 +2661,7 @@ executable resolution as run. Recognized cache-capacity refusals preserve the
 required/capacity byte evidence and a dependency remedy. This is diagnosis, not execution or
 release verification; submit revalidates and results still need acceptance checks.
 
-## Worker cleanup (#834, next release)
+## Worker cleanup (#834)
 
 The #811 worker/queue release adds `hygiene_collection.disk_budget`: per-volume
 owned allocated bytes, free/floor/reserved bytes, measured control-file growth,
@@ -2788,7 +2788,7 @@ These are conditional admission comparisons. Hard eligibility, quotas and tier
 precedence remain binding; active same-tier work is not stopped to repay debt.
 
 
-## Learned native CPU memory growth (next release)
+## Learned native CPU memory growth
 
 At an exact native batch launch, fresh worker-local direct CUDA process memory
 can establish already occupied physical RAM on a unified host. Admission credits
@@ -2806,7 +2806,7 @@ exploratory reservations as predictions. Fresh exact-attempt footprint and growt
 same forecast as cold CPU probes, including sample age and measured drift, with
 the resolved estimate as a floor for learned jobs. Cold CPU probes keep their
 known-need floor and use the same physical/allowance execution ceiling.
-From the next release (#1048), bounded learned/exploratory estimates keep the
+Bounded learned/exploratory estimates (#1048) keep the
 resolved reservation plus measured growth and drift when telemetry is stale,
 missing or stopping. Exact-attempt `host_memory_charge` retains grown charges
 through smaller/missing reports, queue restarts and unconfirmed release custody;
@@ -2821,7 +2821,7 @@ in multiple processes. The reported estimate and the execution ceiling therefore
 serve different purposes. Explicit declarations, member limits and Docker keep
 their existing containment contract. See [native isolation](native-isolation.md).
 
-From the next release (#1064), declared native CPU attempts with enforced cgroup
+Declared native CPU attempts (#1064) with enforced cgroup
 v2 containment reserve their complete declaration plus ceiling slack. Their live
 growth forecast cannot add bytes beyond that containment, in either the static
 charge or pending physical growth. Larger actual anonymous/footprint observations
@@ -2896,7 +2896,7 @@ leaving, and a production job. `scripts/view-smoke.sh` loads the page in
 headless Chrome or Chromium against `myce dev` and checks for live frames and
 no script errors.
 
-## Queue efficiency (next release, #857)
+## Queue efficiency (#857)
 
 `myce efficiency` is the concise diagnosis; `myce efficiency --json` reads
 `GET /api/efficiency`. Status and inspection JSON also include `efficiency`.
@@ -3011,7 +3011,7 @@ soft budget, retained/protected bytes, reclamation and unavailable/over-budget
 state. Status does no measurement or collection. See [retention rules and the
 complete replacement inventory](retention.md).
 
-### Launch capacity waits (#1011, next release)
+### Launch capacity waits (#1011)
 
 A typed `launch/resource_limit/memory_capacity` refusal requeues the same logical
 job without charging infrastructure retries or losses. `execution_cause.admission`
@@ -3024,7 +3024,7 @@ exact attempt's release before the logical job can run elsewhere.
 fingerprint. A changed capacity measurement, allowance, competing reservation or
 exact release permits reevaluation; heartbeat timestamps alone do not. Ordinary
 lower-tier preemption can satisfy the measured deficit; equal-tier production
-waits. From the next release, `start_capacity_waiting` records any relative startup
+waits. `start_capacity_waiting` records any relative startup
 window suspended by qualified resource contention, including explicit
 `start_window` declarations. Typed uncharged launch refusals also suspend the
 relative window. Status reasons show the original window's seconds left with
@@ -3074,7 +3074,7 @@ response-cache refresh serialization is excluded. Earlier releases included
 the entire cache refresh/build in those fields, so their status/job hold figures
 alone cannot establish queue-mutex occupancy.
 
-## Retained production admission waits (next release, #868)
+## Retained production admission waits (#868)
 
 `admission_wait` on a production Job retains queue-clock first/latest waiting
 snapshots and a capacity-sized history of distinct transitions. Snapshot construction
@@ -3128,7 +3128,7 @@ child exists. Retained samples survive assignment/retry and queue restart with
 the job; existing job history retention still owns their lifetime.
 
 
-## Actual all-tier admission decisions (next release, #1158)
+## Actual all-tier admission decisions (#1158)
 
 After a queued job has waited one advertised or measured worker send interval,
 a real check-in can add `admission_wait.latest.targets[].admission_decision`
@@ -3166,7 +3166,7 @@ Per-target endpoints are bounded by current inventory; optional transitions
 share measured evidence headroom across all observed waiting jobs. Missing or
 dropped history cannot explain a past event retroactively.
 
-## Accelerator placement history (#1210, next release)
+## Accelerator placement history (#1210)
 
 `myce host status HOST` includes `device_use`: each used accelerator's stable
 `platform` and `identity`, `last_assigned_at`, and cumulative batch `assignments`.
@@ -3177,7 +3177,7 @@ within one clock instant. Fitness, readiness, memory fit, quarantine and operato
 maintenance remain authoritative. History records offers, including preparation,
 rather than claiming measured runtime or successful execution.
 
-## Fault evidence (next release)
+## Fault evidence
 
 `machines[].devices[].fault_evidence` retains a byte-bounded history of observed
 NVRM allocation errors and recognized xe/i915/Xid faults. Each record contains
@@ -3244,7 +3244,7 @@ GPU-host/native capture qualification remains separate from synthetic laptop
 proof. A recorded event is never itself a causal finding: report `unknown` until
 the retained evidence establishes the actual chain.
 
-## Shared owner yield and measured CPU (#389, next release)
+## Shared owner yield and measured CPU (#389)
 
 `cpu_in_use_cores` includes shared-host measured overuse, rounded up and never
 below declared cores. Job `cpu_observation` retains the exact sample identity,

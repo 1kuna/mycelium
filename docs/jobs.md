@@ -467,7 +467,7 @@ The notifier must deduplicate its stable `delivery_id`: a crash between the
 external side effect and durable acknowledgement can require replay.
 
 `myce wait --observer-status` reads local diagnostic metadata without queue access
-or notifier execution. See [observer status](status.md#local-completion-observer-diagnostics-next-release)
+or notifier execution. See [observer status](status.md#local-completion-observer-diagnostics)
 and [upgrade/recovery](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release).
 Newer versioned clients request a cooperative handoff from supporting older
 observers at a delivery boundary, preserving all registrations and the lifetime

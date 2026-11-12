@@ -583,18 +583,12 @@ post-commit capture/decoding, waiting reasons and deadline guidance. The
 `submission_advice` telemetry event reports those advice phases after unlock;
 existing update telemetry continues to measure the durable transaction.
 
-Before isolation, a native ARM64 fixture with `GOMAXPROCS=2` and three measured
-calls spent 61.31 ms/op holding the live mutex (16.93 ms wait reason, 42.94 ms
-status waiting reason, 1.44 ms deadline guidance). After isolation, marginal
-snapshot pinning takes about 3.9 microseconds/op inside the commit, with no
-post-commit acquisition. Warm advice takes 10.24 ms/op (8.12 ms capture/charged
-active copies and catalog reservation, 0.82 ms wait reason, 0.64 ms status reason, 0.60 ms deadline
-advice), versus 61.39 ms/op before. Retained payloads are borrowed read-only;
-only active jobs, worker ledgers and private planner caches are owned. One cold
-decode measured 1.72 seconds outside the live mutex; it happens once for
-unchanged immutable records across commits. The benchmark reports that cold
-sample separately from steady-state costs. This is fixture evidence, not a live
-tail claim; cold decoding remains visible and there is no history cutoff.
+Retained payloads are borrowed read-only; only active jobs, worker ledgers and
+private planner caches are owned. Cold decoding happens outside the live mutex,
+once for unchanged immutable records across commits; the benchmark reports that
+cold sample separately from steady-state costs. This is fixture evidence, not a
+live tail claim; cold decoding remains visible and there is no history cutoff.
+The pre-isolation and post-isolation measurements are in Git history (#1065).
 
 The HTTP regression blocks immutable decoding, completes a later control commit,
 and requires the original response to finish while another owner holds `q.mu`.
@@ -674,68 +668,20 @@ teach a larger selection's envelope. Source changes still reuse the profile's
 comparable work identity. After a full run inspect memory eligibility, ceiling
 events and swap; a constrained peak is a lower bound, not a sizing sample.
 
-The following is historical evidence from #766/#767, which initially retained
-explicit Linux bounds after an auto candidate hit its cgroup ceiling. Linux
-full retains main’s measured 6 GiB declaration pending separate memory-policy
-qualification; adaptive output supervision does not change that bound.
-
-Read-only job GET inspection on 2026-11-04 found these successful final attempts:
-
-- Four recent Linux gates had total cgroup peaks 3.467369–3.548534 GiB,
-  resident peaks 2.379230–2.456242 GiB and non-reclaimable peaks
-  2.423759–2.508663 GiB. All four were learning-eligible, with zero cgroup
-  memory events and zero swap. Their `resources` reported a learned envelope
-  of 3.276315 GiB with 13–17 accepted observations, versus 7.125 GiB charged
-  from the old declaration. Auto adds ordinary launch slack to the learned
-  figure; it does not substitute a raw resident peak for a cgroup ceiling.
-- Four recent Darwin gates reported 3.827286 GiB learned with 23–25 accepted
-  observations, versus 4.125 GiB charged. Darwin RSS is sampled and admission
-  only; Linux uses enforced cgroups. These are different measurements.
-- Ten additional retained successful Linux attempts had total cgroup peaks
-  3.181683–4.244785 GiB and non-reclaimable peaks 2.274590–2.476593 GiB.
-  Their learned envelopes reached 3.767576 GiB with 48–55 accepted samples.
-  Auto keeps the queue's measured range/25% margin and tracks comparable
-  configuration changes; a fixed lower declaration would discard that adaptation.
-
-Linux auto validation job `2686318521495ce7787d3a2269635f8a` passed in 1495s,
-with 410.27s submission-to-command-start wait, but was constrained: its learned
-3.276315 GiB + 0.125 GiB slack ceiling recorded 160 `max` events. Total cgroup
-peak was 3.401348 GiB, non-reclaimable peak 2.427307 GiB, with zero swap/OOM.
-This is a lower bound, not a new accepted sizing sample. #767 kept an explicit Linux
-bound per #559: recent unconstrained total max 4.244785 GiB plus
-max(range 1.063103, 25% of max 1.061196) = 5.307888 GiB, rounded to 6 GiB.
-Its cost is 1.755215 GiB above that recent maximum; it saves 1 GiB per Linux
-full gate versus the previous declaration. #559's older 4.472893 GiB maximum
-also fits below 6 GiB with 34% headroom, though its wider historical range
-would still round to 7 GiB. The revised bound uses the newer retained samples;
-it is not proof against all future suite growth. Darwin has no corresponding
-cgroup ceiling event and keeps its accepted RSS-based auto envelope.
-Unknown configurations explore; inspect envelope basis, learning
+Linux full retains main's measured 6 GiB declaration pending separate
+memory-policy qualification; adaptive output supervision does not change that
+bound. #767 kept that explicit bound per #559 after an auto candidate hit its
+cgroup ceiling: the recent unconstrained total cgroup maximum plus
+max(range, 25% of max), rounded up to 6 GiB. It is not proof against future
+suite growth. Auto adds ordinary launch slack to the learned figure and keeps
+the queue's measured range/25% margin; it does not substitute a raw resident
+peak for a cgroup ceiling. Darwin RSS is sampled and admission only, has no
+corresponding cgroup ceiling event, and keeps its accepted RSS-based auto
+envelope. Unknown configurations explore; inspect envelope basis, learning
 reason, memory events and swap after changes.
 
-A bounded recent-history snapshot contained 36 successful Linux full gates:
-submission-to-command-start wait was median 96.65s, maximum 2082.78s (34.71m).
-Fourteen successful Darwin gates waited median 36.65s, maximum 4052.41s (67.54m).
-These include staging and admission, not exclusively RAM wait. Failed and
-cancelled jobs are excluded; unfinished waits are not zero. The task's incident
-report separately observed RAM waits of at least 30m.
-
-A retained failed quick run built/vetted in 22s, finished 116 CLI tests in
-128.095s, and had completed 286 core tests before the 295s supervisor cutoff.
-A recent full run spent 482.033s in CLI and 1708.196s in core tests; the slowest
-journeys were fleet-upgrade (149.46s) and enrollment (135.78s). Removing a broad
-selection's unrelated main-only edits avoids executing these journeys for work
-that did not touch them; genuinely related journeys remain required.
-
-A paired fleet measurement on the same frozen diverged PR source reduced quick
-wall time from 161s to 119s (42s, 26.1%). The old moving-main comparison selected
-77 CLI + 125 core tests; merge-base selected 57 + 72, excluding only main-only
-changes. CLI package wall fell from 124.847s to 83.215s and core from 72.136s
-to 52.121s. Both accepted result markers were fetched and verified. Shared fleet
-occupancy was uncontrolled, so the timing difference is an observed pair, not
-an isolated scheduler or sustained-throughput benchmark. The reported incident's
-three 296s timeouts were a different selection. This patch's validation quick
-passed in 57s; that smaller selection is not the before/after comparator.
+The 2026-11-04 sizing samples, gate wait snapshots and quick-selection timing
+pair behind these choices are in #766, #767 and Git history.
 
 CI and PR gates retain the same `test` class and normal queue fairness. Reducing
 the Linux declaration using unconstrained total peaks is the first intervention;
@@ -975,30 +921,16 @@ exact-head local proof is the per-PR guarantee.** Main CI is optional additional
 evidence; coalesced intermediate commits need no separate main run. A failed or
 missing optional main run does not replace or waive pre-merge proof.
 
-Historical runner-capacity evidence (before coalescing): the change in [#751](https://github.com/1kuna/mycelium/issues/751)
-adds two lightweight submitter-role runner services to the fleet pool.
-The T3 host and hosts in a production hold are
-excluded from new runner placement. Both added services use the same repository
-scope, `mycelium-ci` label, clean environment and low-priority settings described
-below, with separate installation and work directories. No full suite runs in a
-runner service; Mycelium continues to admit and place all gate work.
-
-Measured on 2026-11-04, six recent completed Actions jobs occupied the single
-runner for 25.67, 26.68, 27.63, 34.18, 37.08 and 44.92 minutes (median 30.91;
-mean 32.69), excluding their Actions queue wait. These are runs `41751005700`,
-`41753870854`, `41755027580`, `41755730952`, `41756251565` and `41757108412`;
-both successes and failures count toward occupied capacity. Sixteen more runs
-were queued at inspection. Three runner slots increase the median-based runner
-capacity from 1.94 to 5.82 results/hour (mean-based: 1.84 to 5.51). This is a
-capacity estimate at the observed service times, not a guarantee: shared fleet
-CPU/RAM contention can still extend a run, and an existing burst takes time to
-drain. The target is roughly an hour per new merge after that backlog drains.
-
-That historical estimate assumed overlapping main runs. The concurrency group
-now admits one workflow at a time; existing runners are retained without service
-changes. That earlier throughput estimate does not describe the serialized
-workflow. The submitter still waits cheaply through `myce wait` and verifies
-accepted results rather than reporting success immediately after submission.
+[#751](https://github.com/1kuna/mycelium/issues/751) added two lightweight
+submitter-role runner services to the fleet pool. The T3 host and hosts in a
+production hold are excluded from new runner placement. Both use the same
+repository scope, `mycelium-ci` label, clean environment and low-priority
+settings described below, with separate installation and work directories. No
+full suite runs in a runner service; Mycelium admits and places all gate work.
+The concurrency group admits one workflow at a time. The submitter waits
+cheaply through `myce wait` and verifies accepted results rather than
+reporting success immediately after submission. The pre-coalescing capacity
+estimate is in #751 and Git history.
 
 ### Local merge proof
 
@@ -1913,33 +1845,27 @@ job GET traffic, active scheduling load, native device probes or live latency.
 ## CPU and I/O collector cost (#857 item 6)
 
 The collectors are diagnostic. Linux reuses the existing 200 ms cgroup sampler
-cadence and reads three aggregate counter files, with no descendant walk. Three
-300 ms laptop benchmark runs over a synthetic cgroup tree measured 39.4–45.4 us
-per complete CPU/stat/PSI sample (about 0.020–0.023% of one core at that cadence).
-This measures parser/filesystem overhead on ordinary local files, not native
-Linux virtual-file cost or contention. Host PSI adds one local read per existing
-heartbeat, through the existing single-outstanding local-observation probe. That
-probe's 25 ms control budget prevents a slow read from blocking heartbeat work;
-it can leave that heartbeat's pressure unknown and never spawns overlapping reads.
+cadence and reads three aggregate counter files, with no descendant walk. Host
+PSI adds one local read per existing heartbeat, through the existing
+single-outstanding local-observation probe. That probe's 25 ms control budget
+prevents a slow read from blocking heartbeat work; it can leave that
+heartbeat's pressure unknown and never spawns overlapping reads.
 
-Twenty native macOS process-tree CPU reads measured median 32.065 ms, p95
-35.676 ms and maximum 38.702 ms under shared load. At the 500 ms RSS cadence,
-median inventory cost would consume 6.4% of a core per attempt. CPU therefore
-reuses the existing five-second CPU/liveness cadence (tenfold fewer inventories,
-about 0.64% at that median). The cost is missed short-lived child CPU; the source
-is explicitly a lower bound, with root exit rusage supplementing sampling. The
-inventory deadline shares that cadence and its existing 200 ms drain allowance;
-a hung ps can delay final observation by that budget, while control stays separate.
-No new refusal, policy threshold, host preference or controller setting is added.
+A native macOS process-tree CPU read costs tens of milliseconds, too much for
+the 500 ms RSS cadence, so CPU reuses the existing five-second CPU/liveness
+cadence. The cost is missed short-lived child CPU; the source is explicitly a
+lower bound, with root exit rusage supplementing sampling. The inventory
+deadline shares that cadence and its existing 200 ms drain allowance; a hung ps
+can delay final observation by that budget, while control stays separate. No
+new refusal, policy threshold, host preference or controller setting is added.
 
 Reproduce parser/filesystem cost with
 `go test ./internal/myce -run '^$' -bench '^BenchmarkAttemptResourceCgroupSample$'`.
 `MYCE_NATIVE_RESOURCE_TEST=1 go test ./internal/myce -run '^TestAttemptResourcesNativeRead$' -count=1 -v`
 is a separate read-only native process-tree/host-PSI check. Normal gates use fake
-cgroup/proc data and an injected clock. The initial implementation ran that native
-check on macOS (CPU readings and explicit unsupported I/O); native Linux delegated
-cgroup CPU/stat/PSI and Linux host PSI were not run. No daemon, GPU, I/O isolation
-or loaded queue-latency qualification follows from these measurements.
+cgroup/proc data and an injected clock. Native Linux delegated cgroup
+CPU/stat/PSI and Linux host PSI have not been measured natively. The original
+measurements are in Git history (#857).
 
 
 ## Existing test-suite pruning record
@@ -1954,19 +1880,14 @@ platform/toolchain, package overlap, wall and resource-cost coverage. Preserve
 original verdicts, retained incident/security assertions and unproved donors;
 no runtime target by itself waives the existing gates.
 
-The 50% function-count target influenced #1086 planning; it is not acceptance under this v2.1 assignment. Do not delete or consolidate an additional test merely to reach a number. For every removed or replaced test, retain the duplicate/obsolete reason, any incident/security behavior, named surviving assertions and validation disposition. Keep uncertain donors. Treat the existing 21m30s figure as #1086's historical work-plan goal, not a v2.1 budget or gate exception; retaining an operational time budget requires a measured cost rationale and its source authority. Report actual before/after wall and fleet resource cost, with missing measurements explicit. A final count or passing full alone does not prove retained behavior.
-
-Dated inventory: the November 9, 2026 06:10 UTC common-base projection was
-3,396 → 1,698 Go Test functions at `67a487f3`, superseding the earlier
-3,377 → 1,680 snapshot. These are historical draft-source inventories, not
-merged counts, passing cases or measured speedup. The issue’s 06:20 UTC update
-withdraws the numeric target and records a per-cut rationale audit in progress.
-
-Next action: the #1086 coordinator retains each cut’s reason, surviving assertions
-and validation, keeps uncertain donors, and reports actual wall and
-fleet resource cost for the identified combined source. Missing measurements
-and unresolved behavior remain explicit; the final count or a passing full
-alone does not complete acceptance.
+Do not delete or consolidate a test merely to reach a number. For every removed
+or replaced test, retain the duplicate/obsolete reason, any incident/security
+behavior, named surviving assertions and validation disposition. Keep uncertain
+donors. Retaining an operational time budget requires a measured cost rationale
+and its source authority. Report actual before/after wall and fleet resource
+cost, with missing measurements explicit. A final count or passing full alone
+does not prove retained behavior. The withdrawn function-count target, the
+historical 21m30s goal and dated inventories are on #1086.
 
 ### Fault evidence cost and native qualification
 
@@ -1999,9 +1920,7 @@ core writing to delay Wait without losing earlier crash metadata. Systemd does
 not export process births; kernel crash timestamps have second resolution.
 Newest-first bounded journal reads retain recent evidence on long attempts. Synthetic
 `BenchmarkFaultEvidenceCapture` measures parsing/attribution overhead, not GPU
-sampling or native journal latency. A Darwin arm64 synthetic run measured 3.623 µs/op,
-1,256 bytes/op and 30 allocations/op (200 ms benchmark); this excludes real
-proc/PID I/O and is not a native latency claim.
+sampling, real proc/PID I/O or native journal latency.
 
 Laptop checks use injected clocks, kernel lines, cgroup files and wait statuses;
 core records/maps are synthetic. Native acceptance, after an authorized release,
