@@ -200,6 +200,9 @@ func (q *Queue) beforeWithFair(a, b *Job, m *Machine, score func(*Job, *Machine)
 	if (a.PreemptionPlacement != nil) != (b.PreemptionPlacement != nil) {
 		return a.PreemptionPlacement != nil
 	}
+	if before, decided := maintenanceResumeOrder(a, b); decided {
+		return before
+	}
 	// CPU commands backfill accelerator workers after same-tier GPU demand.
 	if m.GPU != "cpu" && a.Spec.Needs.cpuOnly() != b.Spec.Needs.cpuOnly() {
 		return !a.Spec.Needs.cpuOnly()

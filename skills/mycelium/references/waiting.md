@@ -199,8 +199,10 @@ deadline, then waiting age, and competing projects share by recent use. There
 is no in-tier ordering hint. To order your own work, use `after:` stages, and
 the class the work actually deserves; pauses, local locks and holding back
 submissions only hide work from the queue. A critical Mycelium update may
-checkpoint and requeue even production (MY-39), and owner pressure on a shared
-interactive host yields every tier (below). See
+checkpoint and requeue even production (MY-39); work stopped that way, or by
+host maintenance, resumes ahead of its tier's other queued work while its host
+drains toward it. Owner pressure on a shared interactive host yields every tier
+(below). See
 [scheduling](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md) and
 [start deadlines](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#production-start-deadline).
 

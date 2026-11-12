@@ -1,6 +1,9 @@
 package myce
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // CPU and accelerator targets share one physical host ledger. A ready job
 // must not disappear from CPU admission just because existing CPU reservations
@@ -10,6 +13,10 @@ type hostBackfillDemand struct {
 	job     *Job
 	machine *Machine
 	order   *candidateSet
+	// drain marks a maintenance resume's fence; start is when it is expected
+	// to fit anyway, or nil when unknown.
+	drain bool
+	start *time.Time
 }
 
 // Piece executions finish too. Parents describe demand; they never own
@@ -76,8 +83,10 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	}
 	choices := []*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
+	drains := map[string]*Machine{}
 	for _, j := range demands {
 		var best *hostBackfillDemand
+		drain := maintenanceResume(j) && j.Spec.FanOut == nil
 		demandInventory := inventory
 		if j.Spec.FanOut != nil && j.FanOut != nil {
 			for _, target := range scan.machines {
@@ -97,8 +106,17 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			if projected == nil || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
 				continue
 			}
+			device := m.FreeMemoryGB
+			if drain {
+				// The whole host drains toward a maintenance resume.
+				if drains[targetKey(m)] == nil {
+					p := q.drainProjection(m, q.drainingAttempts(m))
+					drains[targetKey(m)] = &p
+				}
+				projected, device = drains[targetKey(m)], drains[targetKey(m)].FreeMemoryGB
+			}
 			for _, candidate := range q.backfillCandidates(j, m, projected, demandInventory) {
-				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !q.batchSlotFree(m, candidate) || !fits(candidate, projected, m.FreeMemoryGB) {
+				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !drain && !q.batchSlotFree(m, candidate) || !fits(candidate, projected, device) {
 					continue
 				}
 				key := targetKey(m)
@@ -109,11 +127,14 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				ready := fits(candidate, m, m.FreeMemoryGB)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
-					best = &hostBackfillDemand{job: candidate, machine: m}
+					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain}
 				}
 			}
 		}
 		if best != nil {
+			if best.drain {
+				best.start = q.drainStart(best.job, best.machine, q.drainingAttempts(best.machine))
+			}
 			choices = append(choices, best)
 		}
 	}
@@ -146,8 +167,18 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	d := fence.job.Spec.Needs
 	// Backfill can use only capacity in excess of the demand. While a dimension
 	// is short, new work cannot deepen that deficit; other hosts remain free.
-	return hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-hostNeed(fence.machine, d.MemoryGB, d.HostMemoryGB)) &&
+	room := hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) <= max(0, m.FreeHostMemoryGB-m.hostReservationDebtGB-hostNeed(fence.machine, d.MemoryGB, d.HostMemoryGB)) &&
 		j.Spec.Needs.cores() <= max(0, m.FreeCPUCores-d.cores())
+	if !fence.drain {
+		return room
+	}
+	// A maintenance resume also keeps its accelerator: later work does not
+	// take that card. Either way, work expected to finish before the resume
+	// could start anyway still backfills.
+	if !d.cpuOnly() && !j.Spec.Needs.cpuOnly() && targetKey(m) == targetKey(fence.machine) {
+		room = false
+	}
+	return room || q.finishesBeforeDrain(j, m, fence.start)
 }
 
 func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {

@@ -3327,6 +3327,11 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "maintenance_resume": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "measured_needs": {
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"

@@ -1167,6 +1167,8 @@ func (q *Queue) retry(j *Job, why string) {
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.touchJob(j.ID)
+	// Read the stop cause while the attempt identity still names it.
+	maintenance := plannedMaintenanceStop(j)
 	j.PendingOutputRefs = nil
 	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
@@ -1226,6 +1228,10 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.s.Front++
 	j.Front = q.s.Front
 	j.State = "queued"
+	if maintenance {
+		now := q.clock.Now()
+		j.MaintenanceResume = &now
+	}
 }
 func (q *Queue) stop(j *Job, why string) {
 	q.touchJob(j.ID)
@@ -2893,6 +2899,9 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		// The resume has its place back. An assignment refused before it
+		// started keeps it.
+		j.MaintenanceResume = nil
 		for i := range j.Copies {
 			c := &j.Copies[i]
 			if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.StartedAt == nil {
