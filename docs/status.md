@@ -1255,9 +1255,14 @@ events and swap peaks remain in their existing fields; refault/swap-out counts
 are retained in `pressure`. Old attempts omit these details. A successful
 constrained attempt retains diagnostics but cannot alter accepted envelopes.
 
-CPU memory estimates prefer accepted same-OS evidence and retain foreign-OS
-evidence as a conservative prior. If no qualified target-OS allowance fits that
-prior, fresh comparable same-OS constrained evidence and a fitting hint may
+CPU memory estimates prefer accepted same-OS evidence. A peak measured on
+another OS is a floor, not a bound: with no measured transfer error between
+the two targets, the run is that OS's ordinary first run (`exploratory
+(transfer error unavailable)`), offered the room and floored at the foreign
+peak, any hint and any constrained lower bound (#1486). Once works have run on
+both targets, their measured transfer factor sizes it instead (`accepted
+transfer + measured error`). If no qualified target-OS allowance fits that
+floor, fresh comparable same-OS constrained evidence and a fitting hint may
 permit one `bounded cross-OS exploration` on the largest qualified allowance.
 The attempt retains normal slack, drift and launch guards. Assignment consumes
 the exception durably across restart and resubmission; OOM has no retry, and a

@@ -63,6 +63,12 @@ from the previous release keep the typed figure as the charge. With nothing
 learned the typed figure is the charge. The envelope shows `basis: learned`,
 `charge_host_gb` and `limit_host_gb` ([status](status.md)).
 
+Memory measured on one OS does not size work on another: the measurement
+differs (macOS samples process RSS, Linux reads the cgroup) and so does the
+work's footprint (one suite peaked 51% higher on Linux than on macOS). A
+foreign peak only floors the first run on the other OS, which runs as that
+OS's ordinary first run until the work has a measurement there.
+
 Among admissible targets for the same work, preserve scarce machines first
 (MY-18). Measured accelerator backends and usable memory tiers, plus host RAM
 tiers above the fleet minimum, form capability bands. Each band counts physical

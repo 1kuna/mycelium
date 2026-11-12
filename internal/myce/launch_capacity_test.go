@@ -776,7 +776,7 @@ func TestLaunchCapacityBoundedExploration(t *testing.T) {
 	for _, caller := range []bool{false, true} {
 		t.Run(fmt.Sprint(caller), func(t *testing.T) {
 			q, clock, linux, target, s := memoryExplorationFixture(t)
-			memoryExplorationSeed(t, q, clock, linux, target, s, 3, 3.634326934814453)
+			memoryExplorationSeed(t, q, clock, linux, target, s, 3, foreignPeakAboveDarwinAllowance)
 			s.Targets = []ExecutionTarget{machineTarget(&target)}
 			s.Needs.HostMemoryGB = 1
 			occupancy := s
