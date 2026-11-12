@@ -97,7 +97,15 @@ func TestAdapterPiecesDevResultsByKey(t *testing.T) {
 	}
 	j, err := d.Client().Wait(ctx, receipt.JobID)
 	if err != nil || j.State != "succeeded" {
-		t.Fatalf("parent %+v %v", j, err)
+		// A failed parent alone hides which piece failed and why (r6.12 Darwin full).
+		var children []any
+		if snap, serr := d.Queue.Snapshot(); serr == nil {
+			for _, c := range snap.Jobs {
+				children = append(children, map[string]any{"id": c.ID, "state": c.State, "reason": c.Reason, "attempt": c.Attempt, "losses": c.Losses, "finding": c.Finding, "history": c.AttemptHistory})
+			}
+		}
+		detail, _ := json.Marshal(children)
+		t.Fatalf("parent wait err=%v jobs=%s", err, detail)
 	}
 	for key, want := range map[string]string{"a": "first:alpha", "b": "second:beta"} {
 		dest := filepath.Join(root, "out", key, "result")
