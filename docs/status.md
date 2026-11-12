@@ -2656,7 +2656,11 @@ one; its detail stays on the job's own hold.
 
 `unprepared` means no builder has started; `waiting_for_builder` distinguishes
 an unstarted offer or unavailable preparation core; `building` requires a fresh
-builder report. `deterministically_failed` retains the failed immutable recipe's
+builder report. The queue builds a missing plain environment on every
+eligible host with a free builder core, for queued work that could use that
+host once it has room, not only for the job admissible now; such a build runs
+beside device commands. Extension setup and command discovery keep their
+admission-bound offers. `deterministically_failed` retains the failed immutable recipe's
 cause and log excerpt: the consumer must fix its inputs. Transient failures retain
 the existing retry evidence. `unknown_observation` asks the queue owner to restore
 missing/stale observations; it never claims preparation is progressing.
