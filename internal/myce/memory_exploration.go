@@ -110,34 +110,22 @@ func (q *Queue) sameOSMemoryLowerBoundFrom(key ObservationKey, configuration str
 func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration string, jobs iter.Seq[*Job], discrete bool, after time.Time) memoryConstraintEvidence {
 	history := q.memoryHistory()
 	evidence := memoryConstraintEvidence{}
-	for j := range jobs {
-		if j.Timing == nil || j.Timing.Key == nil {
-			continue
+	use := func(f *learnedMemoryFact, extensions []Extension) {
+		if f.Ended.Before(after) {
+			return
 		}
-		ended := time.Time{}
-		for _, outcome := range j.AttemptHistory {
-			if outcome.Attempt == j.Timing.Execution.Attempt && outcome.Machine == j.Timing.Machine && outcome.Session == j.Timing.Session {
-				ended = outcome.EndedAt
-			}
-		}
-		if ended.IsZero() && j.StartedAt != nil && j.FinishedAt != nil {
-			ended = *j.FinishedAt
-		}
-		if ended.IsZero() || ended.Before(after) {
-			continue
-		}
-		age := q.clock.Now().Sub(ended)
-		k := *j.Timing.Key
+		age := q.clock.Now().Sub(f.Ended)
+		k := f.Key
 		if k.Work != key.Work || age < 0 || k.Target.OS != key.Target.OS {
-			continue // Cheap identity filter before hashing the configuration.
+			return // Cheap identity filter before comparing the configuration.
 		}
-		point := WorkObservation{Key: k, MemoryConfiguration: memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)}
+		point := WorkObservation{Key: k, MemoryConfiguration: f.Configuration}
 		if !sameMemoryWork(point, key, configuration) {
-			continue
+			return
 		}
-		owner := history.s.Machines[j.Timing.Machine]
+		owner := history.s.Machines[f.Machine]
 		if owner == nil || owner.Gone || history.unreported[owner.ID] {
-			continue
+			return
 		}
 		m := owner
 		if owner.Devices != nil {
@@ -146,40 +134,36 @@ func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration s
 				m = allocationMachine(owner, []string{k.Component})
 				// The recorded card must still be present.
 				if m == owner {
-					continue
+					return
 				}
 			}
 		}
 		if hostID(m) != k.Host || m.ExtensionFingerprint != k.Fingerprint || machineTarget(m) != k.Target {
-			continue
+			return
 		}
 		if k.ExtensionDigest != "" {
 			usable := false
-			for _, e := range j.Extensions {
+			for _, e := range extensions {
 				if e.Digest == k.ExtensionDigest {
 					point.StaleReason = curveStaleReason(point, e, m)
 					usable = memoryIdentityUsable(point)
 				}
 			}
 			if !usable {
-				continue
+				return
 			}
 		}
-		for _, facts := range j.MemoryAttempts {
-			p := facts.MemoryPeak
-			if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(facts) {
-				continue
-			}
-			peak := hostMemoryPeakGB(p)
-			evidence.lower = max(evidence.lower, peak)
-			margin := memoryGrowthGB(p)
-			if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
-				margin = max(margin, peak-envelope.HostGB)
-			}
-			if margin > 0 && (facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed") {
-				evidence.recovery = max(evidence.recovery, peak+margin)
-			}
+		evidence.lower = max(evidence.lower, f.Lower)
+		evidence.recovery = max(evidence.recovery, f.Recovery)
+	}
+	for j := range jobs {
+		if f := learnedMemoryFactOf(j); f != nil {
+			use(f, j.Extensions)
 		}
+	}
+	for i := range history.expiredMemory {
+		f := &history.expiredMemory[i]
+		use(f, f.extensionHolder().Extensions)
 	}
 	return evidence
 }

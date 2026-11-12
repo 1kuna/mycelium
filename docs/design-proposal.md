@@ -453,17 +453,24 @@ health-proof window or releasing exact-attempt custody.
 | SHA-256 digest marker of `(project, key)` | Retained indefinitely after full-record expiry. Submit returns HTTP 410 `submission_key_expired`, never creating a job; cancel-by-key returns `unknown`. |
 | No record, with intact durable marker store | Genuinely never seen; cancel-by-key records an `absent` reservation. A cache miss alone never proves absence. |
 
-**Queue history retention.** Terminal jobs leave
-job listing and ID lookup after at least **168 hours from `finished_at`**. Result files use `--file-retention`, `72h` by default (MY-47). Longer configured result or log retention extends
-this minimum. Missing terminal timestamps start their durable window at the first maintenance observation.
-Removal waits for every known attempt's confirmed release, expired result/input
-files with durable reclamation ownership, and completed log cleanup. Pending
-blob cleanup transfers atomically to a deduplicated set of expired hashes; shared
-blobs remain protected by their other owners without retaining entire old jobs. Active work and
-learned work-curve observations are not pruned. Removal is automatic, in batches
-of at most 64 jobs per maintenance tick, in the existing crash-consistent SQLite
-transaction; failed commits restore both jobs and keyed answers. No bulk file or
-log-table cleanup runs under the queue mutex.
+**Queue history retention.** Finished job records leave job listing and ID
+lookup **14 days after `finished_at`** (MY-49). Result files use
+`--file-retention`, `72h` by default (MY-47). Missing terminal timestamps start
+their window at the first maintenance observation. A record stays while it is
+running, queued or held, owes delivery, release or custody, still holds files,
+logs or a checkpoint folder, is the `after:` parent of a retained job, or is an
+extension check that native qualification reads. Pending blob cleanup transfers
+atomically to a deduplicated set of expired hashes; shared blobs remain
+protected by their other owners. Before a record goes, a one-line summary (ID,
+project, name, final state, finish time, host, duration, peak memory) and every
+learning input it holds (retained memory evidence and the work observations its
+ledger learned) are written to the separate `job_summaries` table; ID lookup
+then answers HTTP 410 `job_expired` with the summary. A keyed answer keeps the
+job's identity and outcome for replay. Learned work-curve observations are not
+pruned. Removal is automatic, at most 64 records per maintenance pass: summaries
+are written outside the queue mutex, and each record is rechecked and removed in
+the existing crash-consistent SQLite transaction. Its logs are deleted after
+commit, outside the mutex.
 
 **Retained execution ledger.** The per-job append-only ledger shares the
 existing job/replay record and transaction, not a separate service or retention
@@ -545,17 +552,14 @@ durable exclusion. No job or attempt is created for an undispatched piece.
 
 This is a snapshot of registered work, not a closed submission transaction:
 future valid dependencies appear on subsequent reads and remain fenced after
-abort. Jobs currently have no automatic record removal; retained keyed answers
-follow the existing 30-day-after-removal limit, then digest-only expiry. Once a
+abort. Finished job records expire 14 days after they finish (MY-49) unless a
+retained job names them in `after:`; see [queue history retention](#submission-identity-and-cancellation).
+Retained keyed answers follow the existing 30-day-after-removal limit, then
+digest-only expiry. Once a
 source is no longer retained, new dependencies are rejected rather than inferred;
 GET cannot enumerate an expired/unknown source. Artifact expiry is independent
 and does not erase retained keys, scope or release custody. This projection adds
 no dependency types or graph scheduler.
-
-> **Conflict (kept, not resolved).** The paragraph above says "Jobs currently
-> have no automatic record removal"; [queue history retention](#submission-identity-and-cancellation)
-> says terminal jobs are removed automatically after at least 168 hours. Both
-> stand in the approved text.
 
 ## Queue-owned host maintenance
 

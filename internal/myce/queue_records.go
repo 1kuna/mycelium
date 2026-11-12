@@ -41,6 +41,8 @@ type queueRecords struct {
 	updating                  bool
 	checkpointExpiry          map[string]checkpointExpiryEntry // Settled job ID -> folder and earliest expiry (#894).
 	checkpointUndated         map[string]bool                  // Settled jobs with no timestamp to start a grace period.
+	after                     map[string]string                // Job ID -> its after: parent.
+	dependents                map[string]int                   // Parent ID -> retained jobs naming it in after:.
 }
 
 type recordDeadline struct {
@@ -75,10 +77,13 @@ func (d *recordDeadlines) set(id string, at time.Time) {
 	heap.Push(&d.heap, recordDeadline{id, at})
 }
 func (d *recordDeadlines) due(now time.Time) []string {
-	var ids []string
 	// Reuse the existing reclamation budget so equal-expiry producer waves do
 	// not monopolize the queue lock. Exact key lookups expire their own record.
-	for len(d.heap) > 0 && !d.heap[0].at.After(now) && len(ids) < fileReclaimBatch {
+	return d.dueN(now, fileReclaimBatch)
+}
+func (d *recordDeadlines) dueN(now time.Time, limit int) []string {
+	var ids []string
+	for len(d.heap) > 0 && !d.heap[0].at.After(now) && len(ids) < limit {
 		v := heap.Pop(&d.heap).(recordDeadline)
 		if d.scheduled[v.id] == v.at {
 			delete(d.scheduled, v.id)
@@ -122,6 +127,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 		q.evidenceGeneration++
 	}
 	q.indexCheckpointExpiry(id, j)
+	q.indexDependency(id, j)
 	if j == nil {
 		delete(q.records.statusHistory, id)
 		delete(q.records.live, id)
@@ -140,30 +146,45 @@ func (q *Queue) indexJob(id string, j *Job) {
 	}
 	q.records.files.set(id, q.fileExpiryDeadline(j))
 	var history, logs time.Time
-	if terminal(j.State) && (q.fileRetention > 0 || q.logRetention > 0) {
+	if terminal(j.State) && !mutableJob(j) {
 		ended := q.clock.Now()
 		if j.FinishedAt != nil {
 			ended = *j.FinishedAt
 		}
-		history = ended.Add(max(q.fileRetention, q.logRetention))
-		if j.FinishedAt == nil {
-			// First maintenance observation stamps the durable terminal time.
-			history = q.clock.Now()
-		} else if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || q.logRetention > 0 && !q.records.logsDone[id] {
-			// Blocked old records must not monopolize the earliest batch.
-			history = time.Time{}
-		}
+		// pruneJobHistory rechecks every blocker when the record comes due.
+		history = ended.Add(jobRecordRetention)
 		if q.logRetention > 0 && !q.records.logsDone[id] {
 			logs = ended.Add(q.logRetention)
 		}
 	}
-	_ = history
-	q.records.history.set(id, time.Time{})
-	// Recovered evidence and its original provenance are append-only history.
-	if len(j.RecoveredResults) > 0 || len(j.LedgerEntries) > 0 {
-		q.records.history.set(id, time.Time{})
-	}
+	q.records.history.set(id, history)
 	q.records.logs.set(id, logs)
+}
+
+// indexDependency counts after: references so expiry keeps every parent a
+// retained job names, without scanning history.
+func (q *Queue) indexDependency(id string, j *Job) {
+	if q.records.after == nil {
+		q.records.after, q.records.dependents = map[string]string{}, map[string]int{}
+	}
+	parent := ""
+	if j != nil && j.Spec.After != nil {
+		parent = j.Spec.After.Job
+	}
+	old, had := q.records.after[id]
+	if had && old == parent {
+		return
+	}
+	if had {
+		if q.records.dependents[old]--; q.records.dependents[old] <= 0 {
+			delete(q.records.dependents, old)
+		}
+		delete(q.records.after, id)
+	}
+	if parent != "" {
+		q.records.after[id] = parent
+		q.records.dependents[parent]++
+	}
 }
 func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 	var at time.Time

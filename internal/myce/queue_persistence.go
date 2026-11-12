@@ -314,7 +314,7 @@ func (q *Queue) loadPersistedState() error {
 	q.restoreLastSeen()
 	q.rebuildRecords()
 	q.histories = cloneHistories(q.s.EfficiencyHosts, q.s.HostLaunchMemory)
-	return nil
+	return q.loadExpiredLearning()
 }
 
 // A machine record holds what must survive a restart: identity, enrolment,

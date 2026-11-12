@@ -46,6 +46,13 @@ func TestFileStoreReclaimsExpiredFilesBeforeRefusing(t *testing.T) {
 		t.Helper()
 		for _, j := range []*Job{old, other} {
 			got, err := c.GetJob(context.Background(), j.ID)
+			// A 30-day-old record can itself expire (14 days) once its
+			// files are reclaimed; expiry requires that reclamation.
+			var gone *HTTPError
+			if errors.As(err, &gone) && gone.Code == "job_expired" {
+				n++
+				continue
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

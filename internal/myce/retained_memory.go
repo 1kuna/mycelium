@@ -22,56 +22,104 @@ type retainedMemoryEntry struct {
 }
 type retainedMemoryIndex map[memoryHistoryKey]map[memoryWorkKey][]retainedMemoryEntry
 
-func buildRetainedMemoryIndex(jobs map[string]*Job, skip map[string]*Job) retainedMemoryIndex {
+// learnedMemoryFact is one retained execution's memory evidence, reduced from
+// its job record. It outlives the record when the record expires, so memory
+// learning reads the same inputs before and after expiry.
+type learnedMemoryFact struct {
+	Key           ObservationKey `json:"key"`
+	Configuration string         `json:"configuration"`
+	Machine       string         `json:"machine"`
+	Ended         time.Time      `json:"ended"`
+	Extension     *Extension     `json:"extension,omitempty"`
+	Lower         float64        `json:"lower,omitempty"`
+	Recovery      float64        `json:"recovery,omitempty"`
+}
+
+// learnedMemoryFactOf returns nil when the record holds no usable evidence.
+func learnedMemoryFactOf(j *Job) *learnedMemoryFact {
+	if j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
+		return nil
+	}
+	ended := time.Time{}
+	for _, outcome := range j.AttemptHistory {
+		if outcome.Attempt == j.Timing.Execution.Attempt && outcome.Machine == j.Timing.Machine && outcome.Session == j.Timing.Session {
+			ended = outcome.EndedAt
+		}
+	}
+	if ended.IsZero() && j.StartedAt != nil && j.FinishedAt != nil {
+		ended = *j.FinishedAt
+	}
+	if ended.IsZero() {
+		return nil
+	}
+	evidence := memoryConstraintEvidence{}
+	valid := false
+	for _, facts := range j.MemoryAttempts {
+		p := facts.MemoryPeak
+		if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(facts) {
+			continue
+		}
+		valid = true
+		peak := hostMemoryPeakGB(p)
+		evidence.lower = max(evidence.lower, peak)
+		margin := memoryGrowthGB(p)
+		if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
+			margin = max(margin, peak-envelope.HostGB)
+		}
+		if margin > 0 && (facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed") {
+			evidence.recovery = max(evidence.recovery, peak+margin)
+		}
+	}
+	if !valid {
+		return nil
+	}
+	f := &learnedMemoryFact{Key: *j.Timing.Key, Configuration: memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program),
+		Machine: j.Timing.Machine, Ended: ended, Lower: evidence.lower, Recovery: evidence.recovery}
+	if f.Key.ExtensionDigest != "" {
+		for i := range j.Extensions {
+			if j.Extensions[i].Digest == f.Key.ExtensionDigest {
+				e := j.Extensions[i]
+				f.Extension = &e
+			}
+		}
+	}
+	return f
+}
+
+// extensionHolder carries an expired fact's extension where readers expect
+// the retained job's extension list.
+func (f *learnedMemoryFact) extensionHolder() *Job {
+	j := &Job{}
+	if f.Extension != nil {
+		j.Extensions = []Extension{*f.Extension}
+	}
+	return j
+}
+
+func buildRetainedMemoryIndex(jobs map[string]*Job, skip map[string]*Job, learned []learnedMemoryFact) retainedMemoryIndex {
 	groups := map[memoryLowerKey]map[retainedMemoryProvenance]memoryConstraintEvidence{}
-	for id, j := range jobs {
-		if skip[id] != nil || j.Timing == nil || j.Timing.Key == nil || len(j.MemoryAttempts) == 0 {
-			continue
-		}
-		ended := time.Time{}
-		for _, outcome := range j.AttemptHistory {
-			if outcome.Attempt == j.Timing.Execution.Attempt && outcome.Machine == j.Timing.Machine && outcome.Session == j.Timing.Session {
-				ended = outcome.EndedAt
-			}
-		}
-		if ended.IsZero() && j.StartedAt != nil && j.FinishedAt != nil {
-			ended = *j.FinishedAt
-		}
-		if ended.IsZero() {
-			continue
-		}
-		evidence := memoryConstraintEvidence{}
-		valid := false
-		for _, facts := range j.MemoryAttempts {
-			p := facts.MemoryPeak
-			if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(facts) {
-				continue
-			}
-			valid = true
-			peak := hostMemoryPeakGB(p)
-			evidence.lower = max(evidence.lower, peak)
-			margin := memoryGrowthGB(p)
-			if envelope := facts.MemoryEnvelope; envelope != nil && envelope.HostGB > 0 {
-				margin = max(margin, peak-envelope.HostGB)
-			}
-			if margin > 0 && (facts.LearningReason == "oom" || facts.LearningReason == "attempt_failed") {
-				evidence.recovery = max(evidence.recovery, peak+margin)
-			}
-		}
-		if !valid {
-			continue
-		}
-		key := *j.Timing.Key
-		work := memoryLowerIdentity(key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program))
-		provenance := retainedMemoryProvenance{key: key, machine: j.Timing.Machine, ended: ended}
-		if key.ExtensionDigest != "" {
-			provenance.extension = j
+	add := func(f *learnedMemoryFact, extension *Job) {
+		work := memoryLowerIdentity(f.Key, f.Configuration)
+		provenance := retainedMemoryProvenance{key: f.Key, machine: f.Machine, ended: f.Ended}
+		if f.Key.ExtensionDigest != "" {
+			provenance.extension = extension
 		}
 		if groups[work] == nil {
 			groups[work] = map[retainedMemoryProvenance]memoryConstraintEvidence{}
 		}
 		old := groups[work][provenance]
-		groups[work][provenance] = memoryConstraintEvidence{max(old.lower, evidence.lower), max(old.recovery, evidence.recovery)}
+		groups[work][provenance] = memoryConstraintEvidence{max(old.lower, f.Lower), max(old.recovery, f.Recovery)}
+	}
+	for id, j := range jobs {
+		if skip[id] != nil {
+			continue
+		}
+		if f := learnedMemoryFactOf(j); f != nil {
+			add(f, j)
+		}
+	}
+	for i := range learned {
+		add(&learned[i], learned[i].extensionHolder())
 	}
 	index := retainedMemoryIndex{}
 	for work, entries := range groups {
@@ -99,14 +147,14 @@ func (c *memoryPlanningCache) retainedMemoryEvidence(q *Queue, key memoryLowerKe
 			}
 			if history.retainedMemoryIndex == nil {
 				history.memoryHistoryJobs(true)
-				history.retainedMemoryIndex = buildRetainedMemoryIndex(history.s.Jobs, mutable)
+				history.retainedMemoryIndex = buildRetainedMemoryIndex(history.s.Jobs, mutable, history.expiredMemory)
 			}
 			// Live and touched cold jobs may acquire new execution facts in any
 			// mutating pass. Never lend their derived facts to the next pass.
-			c.history.index = buildRetainedMemoryIndex(mutable, nil)
+			c.history.index = buildRetainedMemoryIndex(mutable, nil, nil)
 			c.history.mergeRetainedIndex(history.retainedMemoryIndex)
 		} else {
-			c.history.index = buildRetainedMemoryIndex(history.memoryHistoryJobs(true), nil)
+			c.history.index = buildRetainedMemoryIndex(history.memoryHistoryJobs(true), nil, history.expiredMemory)
 		}
 	}
 	evidence := memoryConstraintEvidence{}

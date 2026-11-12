@@ -80,12 +80,35 @@ Alert history and per-host external summaries use separate durable rows. Closed
 alert history is not repeatedly serialized with base state. Status borrows
 immutable generations and copies/projects their histories after unlocking.
 
+## Job records
+
+Finished job records expire 14 days after they finish (MY-49; `jobRecordRetention`
+in `internal/myce/history_retention.go`). Before a record goes, the queue writes
+a one-line summary and the record's learning inputs to the `job_summaries`
+SQLite table: the retained memory evidence (lower bound and recovery margin,
+with its key, configuration, host, end time and extension) and the work
+observations its ledger learned, which stay pinned against evidence expiry.
+Durations, curves and storage envelopes already live outside job records. The
+record's logs are deleted with it; a keyed submission keeps only the job's
+identity and outcome for replay.
+
+A record stays past 14 days while it is running, queued or held, owes
+delivery, release or custody, still holds files, logs or a checkpoint folder,
+is the `after:` parent of a retained job, or is an extension check (native
+qualification reads it). Maintenance expires at most 64 records per pass, writes
+summaries outside the queue lock, and rechecks each record inside it. A blocked
+record is looked at again after an hour.
+
+`job_summaries` is a separate table, so the previous release opens an expired
+database unchanged; it simply doesn't see the summaries.
+
 ## Retired numerical defaults and their replacements
 
 - Results/logs/history seven days: omitted log retention is zero, retaining
   unique bytes until explicit release. Omitted file retention is `72h` (MY-47,
   #1365); an explicit zero retains until release. Positive operator durations still expire
-  their named payloads. They never expire job history. Recovered results without
+  their named payloads. They do not expire job records; see
+  [job records](#job-records). Recovered results without
   an explicit deadline remain protected. Seven-day defaults on an existing
   installation remain its saved policy until its owner changes them.
   Older installers that require positive retention refuse a new zero-retention
