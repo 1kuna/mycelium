@@ -298,6 +298,8 @@ func InstallSettings() []InstallSetting {
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
 		{Field: "FileCacheBytesExplicit"},
+		// Retired with managed Docker (MY-49): read from older configs, dropped on install.
+		{Field: "DockerEndpoint"}, {Field: "ContainerRetention"},
 		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }},
 		{Field: "Version", validate: func(c ServiceConfig) error {
 			if c.Version < 0 || c.Version > 1 {

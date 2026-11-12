@@ -126,7 +126,8 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		f := v.Field(i)
 		name := v.Type().Field(i).Name
 		switch name {
-		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
+		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS",
+			"DockerEndpoint": // Retired (MY-49): an install drops it rather than preserving it.
 			continue
 		}
 		switch f.Kind() {
@@ -183,8 +184,6 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		}
 	}
 
-	retention := 3 * time.Hour
-	c.ContainerRetention = &retention
 	os.MkdirAll(filepath.Dir(c.Config), 0700)
 	data, _ := json.Marshal(c)
 	if err = os.WriteFile(c.Config, data, 0600); err != nil {
@@ -404,7 +403,7 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	c, p := savedInstallFixture(t, "worker")
 	checkpoint := filepath.Join(c.NAS, "new-checkpoints")
-	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--container-retention=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
+	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
 	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +411,7 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
+	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
 		t.Fatal("worker explicit overlay ignored")
 	}
 	for _, flag := range []string{"--state-dir", "--host-id", "--device"} {

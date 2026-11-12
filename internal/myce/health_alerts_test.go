@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,8 +229,10 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	cancel()
 	<-done
 	{
-		submit(t, q, spec("production"))
-		m := machine("retained", "fake")
+		s := spec("production")
+		s.AllowedMachines = []string{"retained"}
+		submit(t, q, s)
+		m := machine("retained", "cuda")
 		assigned := check(t, q, m, nil).Job
 		if assigned == nil {
 			t.Fatal("no attempt")
@@ -258,7 +261,9 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 			t.Fatal("burst evicted unique incident history")
 		}
 		c.Advance(time.Second)
-		if err := q.Complete(r); err != nil {
+		// A replayed report of the same attempt may be refused as stale; either
+		// way it must not alert again.
+		if err := q.Complete(r); err != nil && !errors.Is(err, ErrStale) {
 			t.Fatal(err)
 		}
 		if firings(q, "production_attempt_lost") != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
