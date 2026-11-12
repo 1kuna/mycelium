@@ -5,7 +5,11 @@
 `myce status` prints current work, machines, holds and active health conditions.
 `--json` returns the same compact view. Add `--sections jobs,machines` for
 placement diagnostics and machine telemetry, `--jobs all` for a history page,
-or `--history` for the complete retained document. `--full` means full job IDs. For one job, `myce wait JOB_ID` prints each state change
+or `--history` for the complete retained document. Retained means finished in
+the last 14 days or still holding something (files, logs, custody, a checkpoint
+folder, a dependent `after:` job, an extension check). Older records expire
+and leave a one-line summary: `myce status JOB_ID` and `GET /api/jobs/ID`
+then answer `410 job_expired` with it (see [retention](retention.md#job-records)). `--full` means full job IDs. For one job, `myce wait JOB_ID` prints each state change
 and `myce logs JOB_ID` prints its output.
 
 - **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)

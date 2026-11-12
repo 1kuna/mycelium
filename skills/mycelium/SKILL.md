@@ -209,7 +209,13 @@ can't submit ahead.
   own queued job, and `myce resume JOB_ID` keeps its place.
 
 Finished jobs' files are kept for 3 days by default, then expire
-(`result_expired`); download results within that window.
+(`result_expired`); download results within that window. The job record itself
+is kept for 14 days after the job finishes. After that, `myce status JOB_ID`
+and job GET answer `410 job_expired` with a one-line summary (project, name,
+final state, finish time, host, duration, peak memory), and its logs are gone.
+A submission key still replays the same job ID and final state. What the queue
+learned from the job (memory evidence, durations, envelopes) stays. Record any
+detail you need from a job within 14 days.
 
 ## Python
 

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,9 +107,16 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/status?jobs=all&detail=full", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	// Unique cancellation/intent history survives along with replay answers.
-	if len(snapshot.Jobs) != 3 {
-		t.Fatalf("cancelled intent history lost: %d", len(snapshot.Jobs))
+	// Records finished 30 days ago expired (14-day retention); replay answers
+	// above still hold. Only the job bound after the advance is retained.
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].ID != retained.ID {
+		t.Fatalf("retained %d records, want only the new one", len(snapshot.Jobs))
+	}
+	var expired myce.Job
+	err = c.Call(ctx, "GET", "/api/jobs/"+live.ID, nil, &expired)
+	var refusal *myce.HTTPError
+	if !errors.As(err, &refusal) || refusal.Status != 410 || refusal.Code != "job_expired" || !strings.Contains(refusal.Message, live.ID) {
+		t.Fatalf("expired record lookup: %v", err)
 	}
 }
 

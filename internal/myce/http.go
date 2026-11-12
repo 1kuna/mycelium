@@ -282,6 +282,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				jobGets.record(r.UserAgent(), false)
 			}
 		}
+		err = a.Queue.expiredJobError(r.Context(), err)
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
 		type replySpec struct {
