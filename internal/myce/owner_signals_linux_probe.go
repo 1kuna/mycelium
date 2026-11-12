@@ -16,7 +16,6 @@ type linuxOwnerProbe struct {
 	glob      func(string) ([]string, error)
 	command   func(context.Context, string, ...string) ([]byte, error)
 	monotonic func() (float64, error)
-	host      OwnerSignalSource
 }
 
 func (p linuxOwnerProbe) detect(ctx context.Context) OwnerSignals {
@@ -26,11 +25,8 @@ func (p linuxOwnerProbe) detect(ctx context.Context) OwnerSignals {
 		return s
 	}
 	if strings.Contains(strings.ToLower(string(release)), "microsoft") {
-		// Only the explicitly configured authenticated host bridge may supply WSL
-		// readings. Never fall back to guest probes, including on bridge failure.
-		if p.host != nil {
-			return p.host(ctx)
-		}
+		// Guest probes cannot see the Windows owner's idle, power or heat, so WSL
+		// readings stay unknown.
 		return s
 	}
 	s.IdleSeconds, s.IdleKnown = p.idle(ctx)

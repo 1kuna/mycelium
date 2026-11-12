@@ -958,19 +958,6 @@ workers can return, and unreported machine names are allowed to join later.
 Resubmit after correcting restrictions or updating incompatible inventory.
 Policies persist across restart when the configuration flag is omitted.
 
-For a small synthetic example run:
-
-```sh
-myce sim --fleet examples/sim/production-hold/fleet.yaml \
-  --workload examples/sim/production-hold/workload.yaml --days .01 --seed 1 \
-  --json /tmp/production-hold-sim.json
-```
-
-Two experiments on a discrete-GPU Linux host run for 600 seconds each; a 60-second production command
-arrives at second 60. Both experiments are displaced, one continues on a unified-memory Linux worker,
-and the other returns after production and cleanup settle. Speeds, admission budgets and checkpoint
-behavior are synthetic; this is not a native throughput/latency qualification.
-
 ## Managed Docker batch commands
 
 `run.docker: true` (default `false`) opts a **direct** `docker run` or
@@ -1609,23 +1596,6 @@ serial admission for declared calls. Requests without the declaration keep
 their existing routing/caps, including zero-as-unlimited. Model calls retain
 their existing ephemeral request/retry/streaming semantics; this is not a durable
 workflow API or a second batching timer.
-
-## Laptop simulator comparison
-
-```sh
-myce sim --fleet examples/sim/fleet.yaml --workload examples/sim/declared-fan-out/workload.yaml --what-if declared-batch --days 7 --seed 1 --json sim-results.json
-```
-
-This compares unsplit, naive split and declared execution using identical arrival
-draws and policy. The added curves are explicitly synthetic work-units/second,
-not measurements of any fleet. Execution timers use these rates while the real
-queue chooses placement/count and handles preemption. The JSON records the
-paired mean makespan gain, worst individual batch regression, production-p95
-delta and gate result. A failed gate writes the JSON and exits nonzero. Each
-comparison uses the same synthetic component inventory and shared host ledger;
-virtual per-component workers retain the simulator's single-assignment transport.
-Native qualification and
-deployment require separate authorization.
 
 ## Start a consumer when one piece is accepted
 

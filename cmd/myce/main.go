@@ -61,7 +61,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|telemetry|gpu-telemetry-client|usage|view\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|dev|version|release|file|benchmark|extension|env|portability|detect|service|measure|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -161,9 +161,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "disable" || args[0] == "enable" {
 		return errors.New("retired host control; use myce host drain|disable|resume HOST")
 	}
-	if args[0] == "sim" {
-		return simCommand(args[1:], os.Stdout)
-	}
 	if args[0] == "doctor" && hasEnrollmentFlag(args[1:], "--project") {
 		return projectDoctor(context.Background(), args[1:], os.Stdout, os.Stderr)
 	}
@@ -220,11 +217,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		defer stop()
 
 		return waitCommand(ctx, args[1:], os.Stdout, os.Stderr)
-	}
-	if args[0] == "view" {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return viewCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "measure" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

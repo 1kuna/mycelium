@@ -22,8 +22,7 @@ and `myce logs JOB_ID` prints its output.
   main `execution_evidence` of `may_have_run` or `unknown`). False means no
   attempt's command began, so a resubmission cannot repeat this job's work.
 
-The rest of this page is a field-by-field reference, including
-[live view](#live-view-myce-view).
+The rest of this page is a field-by-field reference.
 
 With the worker/queue release containing #871's finalization correction, a
 command that exits zero can still fail output validation or publication.
@@ -286,7 +285,7 @@ compact JSON change, default `myce status --json` encodes the same projection
 The compatibility path `GET /api/status?view=snapshot` (Python
 `client.status(snapshot=True)`) returns the summary snapshot with full current
 job and machine objects; it shares the default's one-second cached capture.
-`myce view` and `myce leave` use it. Any of `sections`, `jobs`, `limit`,
+`myce leave` uses it. Any of `sections`, `jobs`, `limit`,
 `before` or `detail=full` also returns a snapshot, as before. Other `view`
 values are refused with `status_query_invalid`. `project`/`since` filters alone
 keep the compact view. Previous-release queues ignore `view` and return the
@@ -391,8 +390,7 @@ Python `client.status(sections="work,storage")` selects detail;
 `client.list()` still walks capacity-bounded `jobs=all` pages. Older queues ignore
 unknown section parameters and return their older larger default. `full=True`
 and `detail=full` continue to provide complete inspection across the supported
-adjacent release pair. `myce view` continues sharing the compact default poll;
-it uses only current job/machine fields and the latest host load sample.
+adjacent release pair.
 The HTML status page also accepts explicit sections, for example
 `/?sections=jobs,machines,usage`.
 `myce host status` uses its separate host-maintenance endpoint and retains stdout
@@ -2844,57 +2842,6 @@ exact job/worker-session launch-error reserve and ledger headroom at sizing.
 Unrelated inventory declines and other jobs' old launch errors cannot starve a
 new CPU probe or extension check. Exact launch refusals teach the same job's
 next offer; strict worker rechecks remain authoritative.
-
-## Live view (`myce view`)
-
-`myce view` serves a live, read-only picture of the cluster on this computer:
-waiting jobs gather in the middle, a thread runs to each machine, and each
-machine fills from the bottom as it gets busier. Running jobs sit inside their
-machine, beads travel the threads as work is placed or returned, a machine that
-drops out drains and shows a dashed ×, and production work is gold. One line
-counts running, waiting, done and offline work; one line below names the latest
-event. Machine size follows its memory capacity. "How busy" is the most-held of
-CPU cores, host memory and GPU memory reserved by running work; status reports
-memory held, not GPU utilisation.
-
-```sh
-myce view                      # installed config, or --queue URL with MYCE_TOKEN
-myce view --anonymize          # generic labels for recordings and screenshots
-```
-
-It prints a local address and runs only on the computer where you start it,
-never in the queue process. It listens on loopback by default and then refuses
-requests that name any other host. The page has no sign-in: if you choose a
-non-loopback `--listen` address, anyone who can reach it can watch the stream
-(names included, unless `--anonymize`), though never the token or any write. It
-is an ordinary status client:
-
-- It reads only the default `GET /api/status`, the shared one-second snapshot.
-  It never asks for `detail=full`, history or filtered views, and it never
-  writes to the queue. The page cannot send anything to the queue.
-- It reads only while at least one page is open, one read at a time, and every
-  open page shares that read.
-- It waits at least a second between reads (the snapshot's sharing period) and
-  at least nine times the last read's duration, so a slow queue is read less
-  often; this holds for failed reads too. Failures add a backoff doubling to
-  30 s; a 429's `Retry-After` is always honoured, even beyond that. Redirects
-  are never followed.
-- Silence is learned from each machine's own heartbeat cadence; a machine
-  already gone when the view opened is not drawn.
-
-`--anonymize` replaces machine, project, job, tier and device names with labels
-such as `hypha-1`, `project-a` and `job-07`, assigned in order of first
-appearance and stable while the view runs. Other text is dropped or reduced to
-fixed words, and errors on the page are fixed codes, so a recording shows no
-host names, addresses or project names. Assets are embedded in the binary; the
-page loads nothing from the network.
-
-To try it without a cluster, run `./myce dev --workers 5`, then
-`./myce view --queue http://127.0.0.1:7331 --token dev-token --anonymize`, and
-`examples/fleet-view-demo.sh` for a varied stream of small jobs, one machine
-leaving, and a production job. `scripts/view-smoke.sh` loads the page in
-headless Chrome or Chromium against `myce dev` and checks for live frames and
-no script errors.
 
 ## Queue efficiency (#857)
 

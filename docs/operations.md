@@ -24,7 +24,7 @@ Agent skill/harness installation lives [beside the skill](../skills/mycelium/set
 | Inspect health and recover | [monitoring](#monitoring-and-failures), [cleanup custody](#native-cleanup-custody), [other recovery](#other-recovery-procedures) | [status fields](status.md) |
 | Files, caches and retention | — | [file store](reference/file-store.md), [worker caches](reference/worker-caches.md) |
 | Models and measurement | — | [models](reference/models.md), [services](services.md) |
-| Daily-use, shared and Windows/WSL2 hosts | — | [shared and polite hosts](reference/shared-and-polite-hosts.md), [Windows host bridge](reference/windows-host-bridge.md) |
+| Daily-use, shared and Windows/WSL2 hosts | — | [shared and polite hosts](reference/shared-and-polite-hosts.md) |
 | Native sandbox and isolation | — | [native execution](reference/native-execution.md), [isolation limits](native-isolation.md) |
 
 [Native qualification](development.md#native-acceptance-checklist) and
@@ -1349,12 +1349,6 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="configure-deliberately"></a>[Configure deliberately](reference/shared-and-polite-hosts.md#configure-deliberately)
 - <a id="pressure-response"></a>[Pressure response](reference/shared-and-polite-hosts.md#pressure-response)
 - <a id="qualification-and-laptop-checks"></a>[Qualification and laptop checks](reference/shared-and-polite-hosts.md#qualification-and-laptop-checks)
-- <a id="windows-host-signals-for-wsl2"></a>[Windows host signals for WSL2](reference/windows-host-bridge.md#windows-host-signals-for-wsl2)
-- <a id="build-on-a-mac-or-linux-laptop"></a>[Build on a Mac or Linux laptop](reference/windows-host-bridge.md#build-on-a-mac-or-linux-laptop)
-- <a id="one-step-install-and-uninstall"></a>[One-step install and uninstall](reference/windows-host-bridge.md#one-step-install-and-uninstall)
-- <a id="connect-from-wsl2"></a>[Connect from WSL2](reference/windows-host-bridge.md#connect-from-wsl2)
-- <a id="uninstall-and-undo"></a>[Uninstall and undo](reference/windows-host-bridge.md#uninstall-and-undo)
-- <a id="native-verification"></a>[Native verification](reference/windows-host-bridge.md#native-verification)
 - <a id="queue-disk-contention-527"></a>[Queue disk contention (#527)](reference/queue-io.md#queue-disk-contention-527)
 - <a id="sqlite-backup-and-commit-limits"></a>[SQLite backup and commit limits](reference/queue-io.md#sqlite-backup-and-commit-limits)
 - <a id="standard-systemd-policy"></a>[Standard systemd policy](reference/queue-io.md#standard-systemd-policy)

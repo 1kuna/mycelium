@@ -105,8 +105,7 @@ preemption, eligibility and cleanup custody retain their existing rules.
 `last_resort` when true, and CLI/web status labels the host's placement policy.
 Queued job `reason` and the assigned attempt's `timing.placement_reason` explain
 last-resort fallback and retain the value-ranking explanation. These reasons are
-diagnostic text. See the paired [simulator fixture](../../examples/sim/last-resort-hosts/README.md)
-for synthetic placement and immediate overflow behavior.
+diagnostic text.
 
 Drain preserves Started work. Disable with `--stop` requests bounded stops of
 exact current attempts, preparations and engines. Issued preparation plans count

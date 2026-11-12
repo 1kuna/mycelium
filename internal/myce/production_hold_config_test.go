@@ -36,20 +36,3 @@ func TestHostPolicyDefaultsValidationAndPersistence(t *testing.T) {
 		t.Fatal("unknown setting accepted")
 	}
 }
-func TestProductionHoldSimulation(t *testing.T) {
-	var f SimFleet
-	var w SimWorkload
-	if e := ReadSimYAML("../../examples/sim/production-hold/fleet.yaml", &f); e != nil {
-		t.Fatal(e)
-	}
-	if e := ReadSimYAML("../../examples/sim/production-hold/workload.yaml", &w); e != nil {
-		t.Fatal(e)
-	}
-	r, e := Simulate(f, w, SimOptions{Days: .01, Seed: 1})
-	if e != nil {
-		t.Fatal(e)
-	}
-	if r.Completed != 3 || r.Preemptions != 2 || r.Production.P95 > 2 || r.Machines["spark"].BusyHours < .1 {
-		t.Fatalf("hold simulation %+v", r)
-	}
-}
