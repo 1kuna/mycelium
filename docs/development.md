@@ -608,10 +608,11 @@ verification belongs to the separately authorized release after deployment.
 ### Release upgrade compatibility
 
 The full gate runs `scripts/upgrade-compat.py` against the current sources and
-one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.11 candidate
-pairs with r6.10 (`302620cacaace8a16e7ed424e1183dbb10f46414`) as its only
+one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.13 candidate
+pairs with r6.12 (`5066f17f8a49f933180e3eb9b815ceab29635892`) as its only
 historical source. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
-release, along with `internal/myce/testdata/r6.10-queue.sql` and its generator.
+release. `internal/myce/testdata/r6.10-queue.sql` and its generator still pin
+r6.10; they prove main opens an older database.
 `prepare` fetches that exact public source before the offline gate; local gate
 snapshots carry only that predecessor archive.
 

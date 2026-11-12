@@ -18,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.11 must interoperate with the live r6.10 release.
+# MY-42: candidate r6.13 must interoperate with the live r6.12 release.
 # Advance this pair together at each release.
-PREVIOUS = "302620cacaace8a16e7ed424e1183dbb10f46414"
-OLD_VERSION = "v3.1.0-rc.20261110.s076r6.10"
-VERSION = "v3.1.0-rc.20261111.s076r6.11"
+PREVIOUS = "5066f17f8a49f933180e3eb9b815ceab29635892"
+OLD_VERSION = "v3.1.0-rc.20261112.s076r6.12"
+VERSION = "v3.1.0-rc.20261113.s076r6.13"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 
 
