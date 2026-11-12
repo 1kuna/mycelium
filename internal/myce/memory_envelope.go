@@ -341,6 +341,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		if floor := j.MemoryOOMFloor; floor != nil {
 			deviceFloor = max(deviceFloor, floor.MemoryGB)
 		}
+		var family familyMemoryBound
 		switch {
 		case !copy.Spec.Run.Docker && j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
 			// Recovery estimates demand. Free RAM is an admission constraint,
@@ -390,6 +391,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			// overlap and driver pins are bounded, retain both vectors.
 			// hostNeed already adds this GPU reservation to the host vector.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host)
+		case q.familyMemoryOverHint(j, m, estimate, hostFloor, &family):
+			// A per-item entry never repeats its exact work, so the hint would
+			// otherwise stand forever. Keep the bounded-first-run OOM protocol.
+			n.MemoryGB, n.HostMemoryGB, source, basis, evidence = 0, family.host, "submitter hint superseded; "+family.source, "exploratory", family.evidence
 		case j.MemoryFallback != nil && j.MemoryFallback.valid():
 			n.MemoryGB, n.HostMemoryGB = j.MemoryFallback.MemoryGB, j.MemoryFallback.HostMemoryGB
 			if n.cpuOnly() {

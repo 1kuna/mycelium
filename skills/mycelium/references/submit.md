@@ -67,7 +67,11 @@ disk:
 
 After one accepted run, the measured work dir and `TMPDIR` peak for the same kind of
 work (program, source, configuration, input shape and machine type), plus its
-measured margin, replaces `scratch_bytes`. A measured value always beats a hint.
+measured margin, replaces `scratch_bytes`. Work that runs once per item (new
+inputs or source each run) learns from its entry instead: after two accepted
+runs of the same project and name on that machine type, their peak plus the
+spread between items replaces `scratch_bytes`, and status shows storage basis
+`family`. A measured value always beats a hint.
 An environment that a host has not built yet is charged to that host's
 environment volume at the size another host reported for the same key. A job
 that fits nowhere right now waits with `disk_headroom` and a reason such as
