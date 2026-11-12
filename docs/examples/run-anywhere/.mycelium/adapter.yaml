@@ -1,0 +1,7 @@
+project: run-anywhere-example
+entries:
+  train:
+    run: {command: [python, train.py]}
+    environment: {lock_file: uv.lock, python: "3.12"}
+    needs: {platform: any}
+    outputs: {metrics.json: results}

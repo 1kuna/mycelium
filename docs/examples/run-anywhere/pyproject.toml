@@ -1,0 +1,29 @@
+[project]
+name = "digits-train"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "torch==2.15.0",
+  "scikit-learn>=1.6",
+  # torch+xpu needs Triton for XPU, which only the XPU index carries.
+  "triton-xpu; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv]
+# The OS/architecture pairs the job may land on. One accelerator family per pair.
+environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+# Linux amd64 takes torch from PyTorch's XPU index (Intel Arc); every other
+# platform takes the PyPI wheel (CUDA on Linux arm64, MPS on macOS).
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-xpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }]
+triton-xpu = [{ index = "pytorch-xpu" }]
