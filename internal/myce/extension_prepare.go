@@ -158,6 +158,7 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 	if err = InstallExtension(w.ExtensionRoot, e); err != nil {
 		return err
 	}
+	touchExtensionUse(w.ExtensionRoot, e, workerNow(w.Clock))
 	// A delayed/repeated offer is not a new environment identity. Retain the
 	// exact check only while every prepared prefix is still ready and use-locked.
 	{

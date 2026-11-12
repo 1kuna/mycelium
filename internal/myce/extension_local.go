@@ -537,6 +537,7 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 	if err != nil {
 		return nil, nil, err
 	}
+	touchExtensionUse(w.ExtensionRoot, *e, workerNow(w.Clock))
 	reports := LocalExtensionReports(w.ExtensionRoot, w.Machine.GPU, w.extensionFingerprint, &w.Machine)
 	m := w.Machine
 	m.ExtensionReports = reports
