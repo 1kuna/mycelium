@@ -22,7 +22,9 @@ func measuredOOMRecovery(j *Job) (bound, lower float64) {
 		peak := hostMemoryPeakGB(facts.MemoryPeak)
 		lower = max(lower, peak)
 		margin := max(memoryGrowthGB(facts.MemoryPeak), minimumHostMemoryGB)
-		if e := facts.MemoryEnvelope; e != nil && validRate(e.HostGB) {
+		// A run charged its floor grew past it by design, not past a ceiling:
+		// its measured growth is the uncertainty, never peak minus floor.
+		if e := facts.MemoryEnvelope; e != nil && validRate(e.HostGB) && !floorCharged(e) {
 			margin = max(margin, peak-e.HostGB)
 		}
 		// The durable floor already retains the previous host demand. The

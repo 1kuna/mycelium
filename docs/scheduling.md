@@ -63,6 +63,22 @@ from the previous release keep the typed figure as the charge. With nothing
 learned the typed figure is the charge. The envelope shows `basis: learned`,
 `charge_host_gb` and `limit_host_gb` ([status](status.md)).
 
+### First runs start at their floor
+
+A CPU job with `memory: auto` and nothing learned is charged its floor on its
+first run: member caps, any constrained lower bound, OOM floor or foreign peak
+(#1484). It no longer waits for, or preempts work to free, the host's whole
+free room. While it runs, the ledger charges what it uses, and its guard lets
+it grow into the room the worker's own ledger leaves it: the allowance less
+everyone else's charges, and live available memory less the reserve, others'
+pending growth and the host's measured loss of room until a stop could land.
+Host PSI and swap activity do not stop it; on a working Linux host they
+moved in up to 28% of 200 ms samples with 14 GiB or more available. If it
+outgrows that room, the guard stops it, it requeues with its measured peak as
+the floor, and it relearns. Production, the shared interactive host, hosts
+without a cgroup v2 or Darwin RSS guard, OOM retries, GPU first runs and
+workers without `first_run_floor_v1` keep the whole-room probe.
+
 Memory measured on one OS does not size work on another: the measurement
 differs (macOS samples process RSS, Linux reads the cgroup) and so does the
 work's footprint (one suite peaked 51% higher on Linux than on macOS). A

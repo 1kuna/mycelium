@@ -505,6 +505,7 @@ type modelRuntime struct {
 	batchSupervisors       map[attemptKey]*attemptSupervisor
 	admissionMu            sync.Mutex // Coherent stop publication and final accounting; no I/O.
 	batchHostMemorySamples map[attemptKey]hostMemorySample
+	hostLedger             atomic.Pointer[hostLedger]
 	verifyDevice           func() error
 	deviceEnv              map[string]string
 	authorize              func(context.Context, HostLaunch) error
@@ -1039,6 +1040,7 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 		}
 	}
 	rt.batchHostMemorySamples = maps.Clone(samples)
+	rt.publishHostLedgerLocked()
 	return samples
 }
 
@@ -1143,6 +1145,53 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		return fmt.Errorf("insufficient host RAM for launch and pending growth: %w", refuseAdmission("live_host_growth", "GiB", growth, hostFree, false, contributors...))
 	}
 	return nil
+}
+
+// hostLedger is this worker's ledger as launch admission computes it: what
+// each live attempt and loaded model is charged, and the part of that not yet
+// resident. Published under rt.mu wherever its inputs change, and read without
+// locks by attempt samplers (firstRunFloorRoom).
+type hostLedger struct {
+	charge, pending float64
+	attempts        map[attemptKey][2]float64
+}
+
+// Call with rt.mu held.
+func (rt *modelRuntime) publishHostLedgerLocked() {
+	now := time.Time{}
+	if rt.clock != nil {
+		now = rt.clock.Now()
+	}
+	l := &hostLedger{attempts: map[attemptKey][2]float64{}}
+	for _, j := range rt.batchJobs {
+		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
+			j = a.admissionJob()
+		}
+		if j.ReleaseConfirmed {
+			continue
+		}
+		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
+		c, p := memoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
+		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
+	}
+	for _, other := range rt.models {
+		if other.state != "unloaded" && other.state != "failed" {
+			need := hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
+			l.charge, l.pending = l.charge+need, l.pending+need
+		}
+	}
+	rt.hostLedger.Store(l)
+}
+
+// hostChargesExcept is the published ledger without one attempt: what every
+// other attempt and model is charged, and the part of that not yet resident.
+func (rt *modelRuntime) hostChargesExcept(key attemptKey) (charge, pending float64) {
+	l := rt.hostLedger.Load()
+	if l == nil {
+		return 0, 0
+	}
+	own := l.attempts[key]
+	return max(0, l.charge-own[0]), max(0, l.pending-own[1])
 }
 
 // Queue authorization can outlast preparation or any sensor read. Revalidate
