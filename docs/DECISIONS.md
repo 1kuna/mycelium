@@ -41,7 +41,7 @@ MY-17 vision statement, 2026-10-25 (#192). MY-22, 2026-10-27: “if you recommen
 </details>
 
 ### 3. Mycelium owns placement and learns it from its own measurements
-<a id="my-31"></a><a id="my-07"></a><a id="my-18"></a><a id="my-19"></a><a id="my-30"></a>
+<a id="my-31"></a><a id="my-07"></a><a id="my-18"></a><a id="my-19"></a><a id="my-30"></a><a id="my-50"></a>
 
 **Mycelium alone decides where work runs, from its own measurements. It uses the least valuable machine that fits, keeps scarce machines for work only they can do, and moves work only through checkpoint/requeue.**
 
@@ -50,11 +50,12 @@ MY-17 vision statement, 2026-10-25 (#192). MY-22, 2026-10-27: “if you recommen
 - Use measured per-work-type capability to place and split compatible work across the shared pool. Where the owner wants speed, split each pipeline stage across the machines that can run it, in parallel. A machine or variant joins a split only after its outputs match the reference within the owner's accuracy criteria; agents resolve discrepancies before splitting is accepted. Multi-machine/gang execution stays deferred until its design and qualification land. The vision is not evidence that every workload or mode is implemented. (MY-07, MY-19)
 - A multi-GPU host is one machine. Mycelium uses its GPUs separately (one job per card, experiments filling idle cards) or together (one job sharded across cards), whichever benefits the running projects most. This supersedes the earlier one-GPU-per-execution scope limit and, where it conflicts, the approved design's device-selection scope (an implementation task). (MY-30)
 - Production priority uses the existing priority tiers and preemption, not host-wide exclusion, blackout holds or orchestrator-negotiated special cases. Existing consumer customer-window records remain unless Zach changes them. (MY-30)
+- No machine is hard-reserved. Production priority on a GPU host covers only its GPU, never the whole machine, so its CPU and memory keep serving other work. (MY-50)
 - None of this relaxes MY-19 parity, exact-release custody before reuse, or the deploy guardrails in section 6; work moves only through supported checkpoint/requeue. MY-31 records intent, not implemented learning.
 
 <details><summary>Sources</summary>
 
-MY-31, 2026-11-02: “yes telemetry needs to be integral so mycelium can learn about jobs, cards, system setups, storage, memory, unified vs dedicated, etc. and picking the system, cards, amount of cards to use, when to transfer jobs, etc. is all on mycelium to figure out. truly a self improving, load balancing, local server cluster.” Pins: “i think pins are okay as a feature but definitely i wanna keep them as optional and situational like a single box for CI runners and builds or something for example”. MY-18 placement ruling, 2026-10-25 (#193). MY-07 vision ruling, 2026-10-21 (#107). MY-19 vision ruling, 2026-10-25 (#107). MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](research/dual-b70-and-xpu-variants.md).
+MY-50, 2026-11-12, maintainer, answering the orchestrator's question about the CUDA node's whole-machine production hold, relayed by the setup-audit orchestrator: “i dont want mycelium to just hard reserve the [CUDA node] at all. but yes if we're talking about priority then only the gpu not the whole machine.” Received by the Mycelium orchestrator. MY-31, 2026-11-02: “yes telemetry needs to be integral so mycelium can learn about jobs, cards, system setups, storage, memory, unified vs dedicated, etc. and picking the system, cards, amount of cards to use, when to transfer jobs, etc. is all on mycelium to figure out. truly a self improving, load balancing, local server cluster.” Pins: “i think pins are okay as a feature but definitely i wanna keep them as optional and situational like a single box for CI runners and builds or something for example”. MY-18 placement ruling, 2026-10-25 (#193). MY-07 vision ruling, 2026-10-21 (#107). MY-19 vision ruling, 2026-10-25 (#107). MY-30, 2026-11-02: “[the two-GPU host] is meant to be a dual card system. 64gb of vram. this whole "split the cards" thing is nonsense to me. we can either split the cards or shard the models across both cards. mycelium should understand that and handle it, whichever way is most beneficial to the running projects, that's the point. we need to stop with this whole [the production consumer] production paranoia stuff and get mycelium to a place where it can actually do its job for all my projects.” See [the dual-GPU research](research/dual-b70-and-xpu-variants.md).
 
 </details>
 
@@ -283,5 +284,6 @@ Each old number, its original date and title, and where it lives now. All are cu
 | MY-47 | 2026-11-11 | finished-job files kept 3 days | §10 |
 | MY-48 | 2026-11-12 | CUDA node owner reserve 4 GB | §5 |
 | MY-49 | 2026-11-12 | slimming choices left to the orchestrator | §11 |
+| MY-50 | 2026-11-12 | no hard reservation; production priority is GPU-only | §3 |
 
 Superseded agent defaults, both by MY-41: the 2026-11-07 orchestrator default that known, owned main failures do not block unrelated merges, and the 2026-11-08 weekly-review proposal on evidence for gate exceptions. Earlier version pins, private topology, temporary windows, routing recipes and receipts are in private local history and are not current fleet evidence.
