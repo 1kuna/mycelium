@@ -33,7 +33,7 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 					return fmt.Errorf("cache changed between environments")
 				}
 				shared = cache
-				if dir != c.Root && strings.HasPrefix(cache, dir+string(os.PathSeparator)) {
+				if dir != c.Root && dir != filepath.Join(c.Root, ".downloads") && strings.HasPrefix(cache, dir+string(os.PathSeparator)) {
 					return errors.New("download cache is scoped to environment")
 				}
 				if vars["MYCE_TOKEN"] != "" || vars["UV_HTTP_TIMEOUT"] != "60" || vars["UV_HTTP_RETRIES"] != "3" {
@@ -42,6 +42,10 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 				if len(args) > 2 && (args[1] == "cache" || args[1] == "clean") {
 					if strings.Join(args, " ") != map[string]string{"uv": "uv cache prune --ci", "pixi": "pixi clean cache --yes"}[backend] {
 						return fmt.Errorf("nonstandard pruning: %v", args)
+					}
+					// pixi reads a manifest from its working directory (#1480).
+					if dir != filepath.Join(c.Root, ".downloads") {
+						return fmt.Errorf("prune ran in %s, not the download cache", dir)
 					}
 					prunes++
 					return os.Remove(filepath.Join(cache, "shared-wheel"))
@@ -94,13 +98,59 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 			// Download bytes exceed the env budget, but not its separate budget.
 			c.DownloadLimit = 1
 			env := []string{"UV_CACHE_DIR=" + c.downloadCache("uv"), "PIXI_CACHE_DIR=" + c.downloadCache("pixi"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3"}
-			if err := c.pruneDownloads(context.Background(), c.Root, env, io.Discard, c.Run); err != nil {
+			if err := c.pruneDownloads(context.Background(), env, io.Discard, c.Run); err != nil {
 				t.Fatal(err)
 			}
 			if prunes != 1 || !c.ready(strings.Repeat("a", 64)) || !c.ready(strings.Repeat("b", 64)) {
 				t.Fatal("prune failed or removed installed environments", prunes)
 			}
 		})
+	}
+}
+
+// The download cache keeps the largest measured build's downloads: a smaller
+// later build never lowers the limit, and a build whose downloads exceed every
+// earlier one raises it before the post-install prune runs, so nothing it just
+// fetched is pruned (#1480). Without a measurement there is no separate limit.
+func TestEnvironmentDownloadLimitFollowsLargestMeasuredBuild(t *testing.T) {
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 64 << 20}
+	sizes := map[string]int{"small": 32 << 10, "large": 256 << 10, "later": 16 << 10}
+	prunes := 0
+	c.Run = func(_ context.Context, args []string, dir string, env []string, _, _ io.Writer) error {
+		if args[1] == "cache" {
+			prunes++
+			return nil
+		}
+		cache := ""
+		for _, e := range env {
+			if v, ok := strings.CutPrefix(e, "UV_CACHE_DIR="); ok {
+				cache = v
+			}
+		}
+		lock, err := os.ReadFile(filepath.Join(dir, "requirements.txt"))
+		if err != nil || args[1] != "pip" {
+			return err
+		}
+		name := strings.TrimSpace(string(lock))
+		return os.WriteFile(filepath.Join(cache, name+".whl"), make([]byte, sizes[name]), 0600)
+	}
+	if _, limited := c.downloadLimit(); limited {
+		t.Fatal("limit before any measured build")
+	}
+	for i, name := range []string{"small", "large", "later"} {
+		r := EnvironmentRecipe{Key: strings.Repeat(string(rune('a'+i)), 64), Backend: "uv", Python: "3.12", LockFile: "requirements.txt", Files: map[string][]byte{"requirements.txt": []byte(name + "\n")}}
+		_, release, err := c.Acquire(context.Background(), r)
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		release()
+		limit, limited := c.downloadLimit()
+		if !limited || limit < int64(max(sizes["small"], sizes[name])) {
+			t.Fatalf("after %s: limit %d below the largest measured downloads", name, limit)
+		}
+	}
+	if limit, _ := c.downloadLimit(); limit < int64(sizes["large"]) || prunes != 0 {
+		t.Fatalf("limit %d after a smaller build, prunes %d; want >= %d and none", limit, prunes, sizes["large"])
 	}
 }
 

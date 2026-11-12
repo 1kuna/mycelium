@@ -605,7 +605,8 @@ type EnvironmentCache struct {
 	Clock       Clock
 	Fetch       func(context.Context, FileRef, string) error
 	Run         func(context.Context, []string, string, []string, io.Writer, io.Writer) error
-	// DownloadLimit is separate from the prepared-environment limit.
+	// DownloadLimit overrides the measured download-cache limit
+	// (downloadLimit); zero derives it from builds on this host.
 	DownloadLimit int64
 }
 
@@ -665,9 +666,6 @@ func (c *EnvironmentCache) initStorage() error {
 			return
 		}
 		c.Root = root
-		if c.DownloadLimit == 0 {
-			c.DownloadLimit = 16 << 30
-		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
 				c.storageErr = e
@@ -1097,8 +1095,13 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 			return custom(ctx, argv, dir, env, stdout, stderr)
 		}
 	}
-	if e = c.pruneDownloads(ctx, partial, env, output, run); e != nil {
-		return e
+	// Pruning is housekeeping: its failure never fails a build. The worker
+	// disk floor still reclaims downloads under real pressure.
+	if err := c.pruneDownloads(ctx, env, output, run); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fmt.Fprintln(output, "download cache prune failed; continuing:", err)
 	}
 	downloads, e := c.lock(ctx, "downloads", syscall.LOCK_SH)
 	if e != nil {
@@ -1117,6 +1120,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 		logSize = st.Size()
 	}
 	cacheSize, _ = environmentSize(filepath.Join(c.Root, ".downloads"))
+	downloadsBefore := cacheSize
 	go func() {
 		defer close(monitorDone)
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -1267,10 +1271,15 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	}
 	stopMonitor()
 	e = errors.Join(e, budgetErr)
+	if err := c.recordDownloadNeed(ctx, downloadsBefore); err != nil {
+		fmt.Fprintln(output, "download need not recorded:", err)
+	}
 	unlockEnvironment(downloads)
 	downloads = nil
 	if ctx.Err() == nil {
-		e = errors.Join(e, c.pruneDownloads(ctx, partial, env, output, run))
+		if err := c.pruneDownloads(ctx, env, output, run); err != nil {
+			fmt.Fprintln(output, "download cache prune failed; keeping the installed environment:", err)
+		}
 	}
 	_ = output.Sync()
 	if e != nil {

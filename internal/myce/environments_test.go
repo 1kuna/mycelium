@@ -314,6 +314,16 @@ func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
 	if !c.ready(a.Key) || c.ready(b.Key) || !c.ready(d.Key) {
 		t.Fatal("evicted in-use entry instead of oldest available entry")
 	}
+	// An old entry a queued job still names is not evictable either: with
+	// one entry in use and the other referenced, admission refuses capacity.
+	c.references = func(_ context.Context, key string) (bool, error) { return key == d.Key, nil }
+	os.Chtimes(filepath.Join(c.Root, d.Key, "ready.json"), time.Unix(3, 0), time.Unix(3, 0))
+	if c.Limit, e = c.DiskUsage(); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = c.Acquire(context.Background(), binaryRecipe(t, "rocm")); e == nil || !c.ready(a.Key) || !c.ready(d.Key) {
+		t.Fatal("evicted an in-use or queued environment", e)
+	}
 	release()
 	trash, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
 	if len(trash) != 0 {
