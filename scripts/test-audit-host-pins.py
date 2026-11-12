@@ -15,7 +15,7 @@ class AuditTest(unittest.TestCase):
         pinned = job("1", "private-project", "production")
         pinned["spec"]["allowed_machines"] = ["private-host"]
         constraint = job("2", "other", placement_intent={"host_constraint": "pin"})
-        binding = job("3", "other", production_binding={"host": "private-host"}, placement_intent={"host_constraint": "exclusion"})
+        binding = job("3", "other", placement_intent={"host_constraint": "exclusion"})
         boundary = job("4", "other", queued="2026-11-05T00:00:00Z")
 
         class API:

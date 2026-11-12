@@ -942,8 +942,7 @@ one host, its explicit devices, `host=HOST;kind=gpu`, or
 `host=HOST;platform=PLATFORM`. The bound job must fit a selected target and is
 then restricted to that target. Unknown jobs, dependencies/fan-outs, incompatible
 targets, overlapping active reservations, and another reservation for the same
-job are rejected. Already queued production takeover demand on that host must
-settle before acquiring a competing reservation, avoiding a self-blocking hold.
+job are rejected.
 The reservation admits only the bound job through its own fence; all ordinary
 priority, memory, isolation, qualification, maintenance and cleanup gates remain.
 Production work already running is never displaced by a validation reservation.
@@ -1007,9 +1006,9 @@ retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.
 
 Host production holds use the same export and import. The export's `hosts`
-mapping is the live host policy. For example, to move one host from the
-exclusive host-wide hold to the device-scoped hold
-([hold scope](jobs.md#hold-scope)), add one line under that host and import:
+mapping is the live host policy. A hold is device-scoped
+([production hold](jobs.md#production-hold-on-a-gpu-host)); the policy API
+refuses a hold without `production_hold_scope: device`:
 
 ```yaml
 hosts:
@@ -1018,10 +1017,7 @@ hosts:
     production_hold_scope: device
 ```
 
-Set `production_hold_scope: host`, or delete the line, to restore the
-exclusive hold. Change one host at a time. The change takes effect on the next
-planning decision. Work that a host-scope hold already stopped still finishes
-stopping, and its exact release is still required. `queue --host-config` only
+The change takes effect on the next planning decision. `queue --host-config` only
 seeds host policy. A restart with the last accepted startup file keeps the
 live policy; a different startup file is refused, so edit host policy with
 `myce policy set`, not the file.

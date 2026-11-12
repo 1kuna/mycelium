@@ -139,13 +139,14 @@ the same or edited project config does not replace it or advance its revision.
 To deliberately change settings, export the current policy, edit its `projects`
 mapping, and import it with `myce policy set FILE --if-revision N` as below.
 
-The optional `hosts` mapping is the live [production hold](jobs.md#physical-host-production-hold)
+The optional `hosts` mapping is the live [production hold](jobs.md#production-hold-on-a-gpu-host)
 policy, keyed by physical host ID, with the same rules: omitting it preserves
 host policy, supplying it replaces the map, and `hosts: {}` removes every hold.
-Each entry has `production_hold` and an optional `production_hold_scope`
-(`host` by default, or `device`); a scope requires `production_hold: true`.
+Each entry has `production_hold` and `production_hold_scope`; a hold requires
+`production_hold_scope: device` (MY-50: no machine is reserved), and the
+removed whole-machine form is refused.
 `queue --host-config` seeds host policy once; see
-[changing a host's scope](operations.md#change-live-project-policy).
+[changing host policy](operations.md#change-live-project-policy).
 
 **Production parity hosts (project-owned).** Each project keeps its own `production_parity_hosts` list: for an exact work
 identity, the physical host IDs whose outputs the project has shown match its
@@ -554,8 +555,7 @@ Full live-coverage warnings at registration remain
 [#326](https://github.com/1kuna/mycelium/issues/326).
 
 Use the job's placement rationale when reporting “Mycelium placed it on X because
-Y”. `machine` and `allocated_devices` are assignment results; `production_host`
-can also be set by the scheduler and is not evidence of an agent-authored pin.
+Y”. `machine` and `allocated_devices` are assignment results.
 Status already reports scarcity/admission rationale. Retained intent summaries
 and clearer origin/explanation are tracked in
 [#418](https://github.com/1kuna/mycelium/issues/418): current job/status APIs redact

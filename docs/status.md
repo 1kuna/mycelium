@@ -1352,8 +1352,8 @@ retains `spec.allowed_machines` and `spec.excluded_machines` (machine names) and
 
 - `eligible_hosts`: sorted, unique host IDs of currently known machines allowed
   by both the job and project allow-lists, excluding `spec.excluded_machines`. For running and stopping jobs, including
-  in-flight model calls, this also includes the current machine's host and
-  `production_host` when set, even if policy no longer allows them. A restricted
+  in-flight model calls, this also includes the current machine's host, even
+  if policy no longer allows it. A restricted
   job with no known eligible or occupied host reports an empty array.
 - `eligible_unknown_machines`: sorted, unique machine names in the effective
   allow-list that are not currently known machines. The effective list is the intersection
@@ -1393,8 +1393,7 @@ eligibility alone proves no release of existing work. Loaded model servers
 appear under `loaded_models`, not jobs, and must be checked separately. Terminal
 jobs omit all three derived eligibility fields.
 
-Lower-tier job `reason` also explains host-specific admission delays independently
-of `production_hold`. Two production preemptions of the same job on one physical
+Lower-tier job `reason` also explains host-specific admission delays. Two production preemptions of the same job on one physical
 host within twice the larger of its measured cold preparation time and the
 150-second production start window delay re-admission there for one such interval.
 The job's `production_backoff` records the last preemption and retry time by host;
@@ -1445,8 +1444,8 @@ a unified CUDA reservation: the device portion always remains charged in full,
 including when device telemetry is missing. No CUDA/cgroup overlap is qualified.
 The external-RSS history is not added to reservations; raw available RAM already
 reflects both managed and unmanaged usage. Discrete CUDA and other platforms
-retain their existing memory admission rules. Production priority and takeover
-rules are unchanged.
+retain their existing memory admission rules. Production priority rules are
+unchanged.
 
 Host gates should read `holds`, an array (empty when there are no holds) of
 the same hold record jobs use: `kind`, `scope` (the host, device or selector),
@@ -1458,9 +1457,6 @@ devices also appear here, beside their own records.
 
 | `kind` | owner | When emitted |
 | --- | --- | --- |
-| `production_hold` | queue | Active production demand on a host-scope hold, including work between stages. Device-scope holds emit none. |
-| `production_stopping` | queue | Lower-priority work is within its stop grace. |
-| `production_release_unknown` | queue or operator | Production reservation has an unconfirmed release. Operator only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based case. Draining calls, recovery and the short wait for a kill result stay with the queue. |
 | `startup_release` | queue or operator | Failed startup awaits exact execution release; operator when any corresponding worker is gone/missing. |
 | `host_disabled` | operator | Queue host maintenance is drained/disabled. Does not clear by itself; resume with `myce host resume HOST`. A machine's `disabled` field is a status projection of this queue policy. |
 | `reservation_active` | reservation owner | A reservation holds components for one job until release or `expires`. |
@@ -1511,7 +1507,7 @@ uses `reservations`. Each record includes `id`, `job`, the canonical stable
 
 | State | Meaning |
 | --- | --- |
-| `draining` | Existing work, independent maintenance, production takeover, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
+| `draining` | Existing work, independent maintenance, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
 | `expired` | Never ready before max lifetime, still queued and without retained custody. Other jobs regain admission; the bound job remains queued until explicit release. `expired_at` is admission expiry, not physical cleanup. |
 | `ready` | The reserved components have no unrelated physical obligations or reservation readiness blockers. Ordinary qualification, priority and capacity checks still apply; this is not a launch grant. |
 | `in_use` | The bound job has Started and is running/stopping. |
@@ -1985,10 +1981,9 @@ retains older assignments under normal history retention. `eligible_hosts` and
 related fields remain a **current policy/eligibility projection**, not evidence
 of what was eligible at a past assignment or a promise of current capacity.
 
-`production_binding` reports the current queue binding with `origin: scheduler`;
-it never establishes an authored host pin. Old jobs lacking submission/assignment
-provenance explicitly report unknown intent and omit historical placement;
-status does not reconstruct intent from `production_host` or current eligibility.
+Old jobs lacking submission/assignment provenance explicitly report unknown
+intent and omit historical placement; status does not reconstruct intent from
+current eligibility.
 These fields are observational and do not change placement or qualification.
 See [the job schema](schemas/job-v1.schema.json) and
 [ledger schema](schemas/job-ledger-v1.schema.json).
@@ -2622,7 +2617,7 @@ that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage
 `production_parity_hosts`, `production_parity`, `no_matching_device`,
 `log_policy`, `project_cap`, `production_admission`, `unified_cuda_headroom`
 (a unified-memory host's headroom kept for expected production),
-`production_hold`, `production_reserved`, `pinned_model`, `disk_headroom`,
+`pinned_model`, `disk_headroom`,
 `reservation`, `capacity` (mixed or card/CPU causes),
 `memory`, `host_memory_headroom`, `cold_probe_margin` (a first run needs host
 memory above its launch margin), `host_backfill`, `host_unavailable`,
