@@ -1,0 +1,6747 @@
+{
+  "$defs": {
+    "AdmissionDecision": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "checkin_machine": {
+          "type": "string"
+        },
+        "checkin_session": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "hold": {
+          "$ref": "#/$defs/Hold"
+        },
+        "opportunity_seconds": {
+          "type": "number"
+        },
+        "outcome": {
+          "enum": [
+            "not_considered",
+            "rejected",
+            "not_selected"
+          ],
+          "type": "string"
+        },
+        "predicate": {
+          "description": "Code-owned first failed predicate at the actual check-in boundary; separate from diagnostic predicates.",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "checkin",
+            "candidate_eligibility",
+            "placement"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "checkin_machine",
+        "checkin_session",
+        "outcome",
+        "stage",
+        "predicate",
+        "opportunity_seconds"
+      ],
+      "type": "object"
+    },
+    "AdmissionDetail": {
+      "properties": {
+        "available": {
+          "type": "number"
+        },
+        "contributors": {
+          "items": {
+            "$ref": "#/$defs/HostGrowthContributor"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "envelope_device_gb": {
+          "type": "number"
+        },
+        "envelope_host_gb": {
+          "type": "number"
+        },
+        "envelope_source": {
+          "type": "string"
+        },
+        "required": {
+          "type": "number"
+        },
+        "subcheck": {
+          "type": "string"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subcheck",
+        "unit",
+        "required",
+        "envelope_host_gb",
+        "envelope_device_gb"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitEvidence": {
+      "properties": {
+        "budget_unknown": {
+          "type": "boolean"
+        },
+        "capture_gaps": {
+          "type": "integer"
+        },
+        "deferred_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dropped": {
+          "type": "integer"
+        },
+        "first": {
+          "$ref": "#/$defs/AdmissionWaitSnapshot"
+        },
+        "history_budget_bytes": {
+          "type": "integer"
+        },
+        "history_bytes": {
+          "type": "integer"
+        },
+        "latest": {
+          "$ref": "#/$defs/AdmissionWaitSnapshot"
+        },
+        "transitions": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitSnapshot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "history_budget_bytes",
+        "history_bytes"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitHolder": {
+      "properties": {
+        "admission_host_gb": {
+          "type": "number"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "charged_host_gb": {
+          "type": "number"
+        },
+        "cores": {
+          "type": "integer"
+        },
+        "declared_host_gb": {
+          "type": "number"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "enforced_host_gb": {
+          "type": "number"
+        },
+        "enforcement_basis": {
+          "type": "string"
+        },
+        "engine_attempt": {
+          "type": "string"
+        },
+        "forecast_host_gb": {
+          "type": "number"
+        },
+        "job": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "preemptible": {
+          "type": "boolean"
+        },
+        "preemption_reason": {
+          "type": "string"
+        },
+        "remaining_growth_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/PriorityMatch"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "machine",
+        "session",
+        "cores",
+        "sample_fresh",
+        "enforcement_basis",
+        "preemptible",
+        "preemption_reason"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitPlan": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "preemption": {
+          "$ref": "#/$defs/WaitPreemption"
+        },
+        "required_cores": {
+          "type": "integer"
+        },
+        "required_device_gb": {
+          "type": "number"
+        },
+        "required_host_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "at",
+        "preemption",
+        "required_cores",
+        "required_host_gb",
+        "required_device_gb"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitSnapshot": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "closed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "closed_reason": {
+          "type": "string"
+        },
+        "next_piece": {
+          "type": "integer"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "attempt",
+        "predicate"
+      ],
+      "type": "object"
+    },
+    "AdmissionWaitTarget": {
+      "properties": {
+        "admission_decision": {
+          "$ref": "#/$defs/AdmissionDecision"
+        },
+        "available_cores": {
+          "type": "integer"
+        },
+        "available_device_gb": {
+          "type": "number"
+        },
+        "available_host_gb": {
+          "type": "number"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_fault": {
+          "type": "string"
+        },
+        "device_memory_known": {
+          "type": "boolean"
+        },
+        "holders": {
+          "items": {
+            "$ref": "#/$defs/AdmissionWaitHolder"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_debt_gb": {
+          "type": "number"
+        },
+        "host_memory_known": {
+          "type": "boolean"
+        },
+        "last_planner_decision": {
+          "$ref": "#/$defs/AdmissionWaitPlan"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preemption": {
+          "$ref": "#/$defs/WaitPreemption"
+        },
+        "release_commitment": {
+          "type": "boolean"
+        },
+        "required_cores": {
+          "type": "integer"
+        },
+        "required_device_gb": {
+          "type": "number"
+        },
+        "required_host_gb": {
+          "type": "number"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "machine",
+        "session",
+        "resolution",
+        "required_cores",
+        "available_cores",
+        "required_host_gb",
+        "available_host_gb",
+        "host_memory_known",
+        "host_debt_gb",
+        "required_device_gb",
+        "available_device_gb",
+        "device_memory_known",
+        "preemption"
+      ],
+      "type": "object"
+    },
+    "AlertRecovery": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "episode": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "next_step": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "episode",
+        "action",
+        "state",
+        "cause",
+        "summary",
+        "machine",
+        "job_id",
+        "attempt",
+        "at"
+      ],
+      "type": "object"
+    },
+    "ApplicationProgress": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cadence_seconds": {
+          "type": "number"
+        },
+        "completed": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "stage_count": {
+          "type": "integer"
+        },
+        "stage_index": {
+          "type": "integer"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "total": {
+          "type": "number"
+        },
+        "total_work_known": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "completed",
+        "total",
+        "unit",
+        "attempt",
+        "machine",
+        "session",
+        "received_at",
+        "age_seconds",
+        "stale",
+        "total_work_known"
+      ],
+      "type": "object"
+    },
+    "AttemptCPUTime": {
+      "properties": {
+        "lower_bound": {
+          "type": "boolean"
+        },
+        "periods": {
+          "type": "integer"
+        },
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
+        },
+        "source": {
+          "type": "string"
+        },
+        "system_seconds": {
+          "type": "number"
+        },
+        "throttled_periods": {
+          "type": "integer"
+        },
+        "throttled_seconds": {
+          "type": "number"
+        },
+        "unavailable": {
+          "type": "string"
+        },
+        "usage_seconds": {
+          "type": "number"
+        },
+        "user_seconds": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "AttemptDiagnostics": {
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "summary": {
+          "$ref": "#/$defs/FailureSummary"
+        }
+      },
+      "required": [
+        "files"
+      ],
+      "type": "object"
+    },
+    "AttemptHostMemoryCharge": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "gib": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "observed_gb": {
+          "type": "number"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "sample_id": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "gib"
+      ],
+      "type": "object"
+    },
+    "AttemptIO": {
+      "properties": {
+        "pressure": {
+          "$ref": "#/$defs/IOPressure"
+        },
+        "read_bytes": {
+          "type": "integer"
+        },
+        "read_ops": {
+          "type": "integer"
+        },
+        "unavailable": {
+          "type": "string"
+        },
+        "write_bytes": {
+          "type": "integer"
+        },
+        "write_ops": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "AttemptLiveness": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "cpu": {
+          "$ref": "#/$defs/LivenessSignal"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "work_dir": {
+          "$ref": "#/$defs/LivenessSignal"
+        }
+      },
+      "required": [
+        "cpu",
+        "work_dir",
+        "attempt",
+        "machine",
+        "session",
+        "received_at",
+        "state"
+      ],
+      "type": "object"
+    },
+    "AttemptMemoryFacts": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "learning_reason": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "memory_envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope"
+        },
+        "memory_peak": {
+          "$ref": "#/$defs/AttemptMemoryPeak"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session"
+      ],
+      "type": "object"
+    },
+    "AttemptMemoryPeak": {
+      "properties": {
+        "cgroup_gb": {
+          "type": "number"
+        },
+        "combined_host_gb": {
+          "type": "number"
+        },
+        "constrained": {
+          "description": "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them.",
+          "type": "boolean"
+        },
+        "device_gb": {
+          "description": "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero.",
+          "type": "number"
+        },
+        "device_growth_gb": {
+          "type": "number"
+        },
+        "device_source": {
+          "type": "string"
+        },
+        "device_unavailable": {
+          "description": "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting.",
+          "type": "string"
+        },
+        "events": {
+          "$ref": "#/$defs/MemoryEventCounts",
+          "description": "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
+        },
+        "gpu_host": {
+          "$ref": "#/$defs/GPUHostMemory"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "nonreclaimable_gb": {
+          "type": "number"
+        },
+        "pressure": {
+          "$ref": "#/$defs/MemoryPressureEvidence"
+        },
+        "pressure_unavailable": {
+          "description": "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain.",
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string"
+        },
+        "swap_gb": {
+          "description": "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak.",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "AttemptOutcome": {
+      "properties": {
+        "admission_requeue": {
+          "type": "boolean"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "device_fault": {
+          "$ref": "#/$defs/DeviceFaultLoss"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/AttemptDiagnostics"
+        },
+        "ended_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
+        "fault_evidence": {
+          "items": {
+            "$ref": "#/$defs/FaultEvidence"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "forced": {
+          "type": "boolean"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "operator_stop": {
+          "type": "boolean"
+        },
+        "out_of_memory": {
+          "type": "boolean"
+        },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
+        },
+        "polite_stop": {
+          "type": "boolean"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "signal_evidence": {
+          "$ref": "#/$defs/SignalEvidence"
+        },
+        "state": {
+          "type": "string"
+        },
+        "stop_observation": {
+          "$ref": "#/$defs/AttemptStopObservation"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "ended_at",
+        "state"
+      ],
+      "type": "object"
+    },
+    "AttemptResourceFacts": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "resources": {
+          "$ref": "#/$defs/AttemptResources"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "resources"
+      ],
+      "type": "object"
+    },
+    "AttemptResources": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "cpu": {
+          "$ref": "#/$defs/AttemptCPUTime"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "io": {
+          "$ref": "#/$defs/AttemptIO"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sampled_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cpu",
+        "io",
+        "sampled_at",
+        "age_seconds",
+        "elapsed_seconds"
+      ],
+      "type": "object"
+    },
+    "AttemptStopObservation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "headroom_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_sample_age_seconds": {
+          "type": "number"
+        },
+        "io_pressure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/IOPressure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory_pressure": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "physical_used_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_age_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pressure_unit": {
+          "type": "string"
+        },
+        "swap_growth_bytes_per_second": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "io_pressure",
+        "at",
+        "host_sample_age_seconds",
+        "headroom_gb",
+        "physical_used_gb",
+        "memory_pressure",
+        "pressure_unit",
+        "pressure_age_seconds",
+        "swap_growth_bytes_per_second"
+      ],
+      "type": "object"
+    },
+    "AttemptStorageFacts": {
+      "properties": {
+        "envelope": {
+          "$ref": "#/$defs/JobStorageEnvelope"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "learning_reason": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "output_learned": {
+          "type": "boolean"
+        },
+        "peak": {
+          "$ref": "#/$defs/AttemptStoragePeak"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution",
+        "machine",
+        "session",
+        "learning_reason"
+      ],
+      "type": "object"
+    },
+    "AttemptStoragePeak": {
+      "properties": {
+        "allocation_unit": {
+          "type": "integer"
+        },
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "constrained": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "managed_bytes": {
+          "type": "integer"
+        },
+        "metadata_bytes": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "scratch_bytes": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "spool_bytes": {
+          "type": "integer"
+        },
+        "staged_input_bytes": {
+          "type": "integer"
+        },
+        "staged_input_files": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scratch_bytes",
+        "spool_bytes",
+        "checkpoint_bytes",
+        "metadata_bytes",
+        "managed_bytes",
+        "files",
+        "staged_input_files",
+        "staged_input_bytes",
+        "allocation_unit",
+        "samples",
+        "complete",
+        "source"
+      ],
+      "type": "object"
+    },
+    "BatchWork": {
+      "properties": {
+        "concurrency": {
+          "type": "integer"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/FanOutPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "run": {
+          "type": "boolean"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "share_xpu": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "parent",
+        "pieces",
+        "concurrency"
+      ],
+      "type": "object"
+    },
+    "Cancellation": {
+      "properties": {
+        "acknowledged_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": "string"
+        },
+        "release": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "submission_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "project",
+        "submission_key",
+        "state",
+        "will_not_run",
+        "release",
+        "acknowledged_at"
+      ],
+      "type": "object"
+    },
+    "CancellationMember": {
+      "properties": {
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "release": {
+          "enum": [
+            "not_applicable",
+            "pending",
+            "confirmed"
+          ],
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "state",
+        "will_not_run",
+        "release"
+      ],
+      "type": "object"
+    },
+    "CancellationPiece": {
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "dependents": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "materialized": {
+          "type": "boolean"
+        },
+        "release": {
+          "enum": [
+            "not_applicable",
+            "pending",
+            "confirmed"
+          ],
+          "type": "string"
+        },
+        "wave_id": {
+          "type": "string"
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "materialized",
+        "accepted",
+        "will_not_run",
+        "release",
+        "dependents"
+      ],
+      "type": "object"
+    },
+    "CancellationScope": {
+      "properties": {
+        "members": {
+          "items": {
+            "$ref": "#/$defs/CancellationMember"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/CancellationPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pieces",
+        "members"
+      ],
+      "type": "object"
+    },
+    "CheckpointOrigin": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "generation",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "CommandDiscovery": {
+      "properties": {
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "type": "object"
+    },
+    "Copy": {
+      "properties": {
+        "allocated_devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "extension": {
+          "$ref": "#/$defs/ExtensionSelection"
+        },
+        "liveness": {
+          "$ref": "#/$defs/AttemptLiveness"
+        },
+        "loss_charged": {
+          "type": "boolean"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "process_id": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "release_confirmed": {
+          "type": "boolean"
+        },
+        "release_reason": {
+          "type": "string"
+        },
+        "released_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "stop_cause": {
+          "type": "string"
+        },
+        "stopped_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recoverable",
+        "machine",
+        "session",
+        "attempt",
+        "progress"
+      ],
+      "type": "object"
+    },
+    "CoverageFinding": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "job": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "job",
+        "attempt",
+        "at",
+        "action"
+      ],
+      "type": "object"
+    },
+    "DeadlineGuidance": {
+      "properties": {
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "deadline_policy": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "details_deferred": {
+          "type": "boolean"
+        },
+        "eta": {
+          "type": "string"
+        },
+        "example": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "precedence_change": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "deadline_policy",
+        "precedence_change",
+        "eta",
+        "example",
+        "next_action",
+        "message"
+      ],
+      "type": "object"
+    },
+    "DeviceFaultLoss": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "platform",
+        "devices",
+        "at"
+      ],
+      "type": "object"
+    },
+    "DeviceFaultStartWait": {
+      "properties": {
+        "remaining": {
+          "type": "integer"
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "remaining"
+      ],
+      "type": "object"
+    },
+    "DiagnosticReport": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "format"
+      ],
+      "type": "object"
+    },
+    "DiagnosticSpec": {
+      "properties": {
+        "reports": {
+          "items": {
+            "$ref": "#/$defs/DiagnosticReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DiskNeeds": {
+      "properties": {
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
+        "input_bytes": {
+          "type": "integer"
+        },
+        "output_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "DockerReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "port",
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "DockerSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "memory_swap": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/$defs/DockerReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
+      "type": "object"
+    },
+    "EfficiencyAllocation": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "cpu_lower_bound": {
+          "type": "boolean"
+        },
+        "cpu_observed_attempts": {
+          "type": "integer"
+        },
+        "cpu_observed_elapsed_seconds": {
+          "type": "number"
+        },
+        "device_covered_seconds": {
+          "type": "number"
+        },
+        "host": {
+          "type": "string"
+        },
+        "io_lower_bound": {
+          "type": "boolean"
+        },
+        "io_observed_attempts": {
+          "type": "integer"
+        },
+        "measured_cpu_seconds": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_device_gb_seconds": {
+          "type": "number"
+        },
+        "measured_memory_gb_seconds": {
+          "type": "number"
+        },
+        "memory_covered_seconds": {
+          "type": "number"
+        },
+        "read_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reserved_covered_memory_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_cpu_seconds": {
+          "type": "number"
+        },
+        "reserved_device_gb_seconds": {
+          "type": "number"
+        },
+        "reserved_memory_gb_seconds": {
+          "type": "number"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "work": {
+          "type": "string"
+        },
+        "write_bytes": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "write_ops": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "host",
+        "work",
+        "basis",
+        "reserved_covered_memory_gb_seconds",
+        "reserved_device_gb_seconds",
+        "measured_device_gb_seconds",
+        "device_covered_seconds",
+        "reserved_memory_gb_seconds",
+        "measured_memory_gb_seconds",
+        "memory_covered_seconds",
+        "reserved_cpu_seconds",
+        "measured_cpu_seconds",
+        "cpu_observed_elapsed_seconds",
+        "cpu_observed_attempts",
+        "cpu_lower_bound",
+        "read_bytes",
+        "write_bytes",
+        "read_ops",
+        "write_ops",
+        "io_observed_attempts",
+        "io_lower_bound",
+        "seconds"
+      ],
+      "type": "object"
+    },
+    "EntryCoverage": {
+      "properties": {
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/CoverageFinding"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "lock_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "recipe": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "recipe"
+      ],
+      "type": "object"
+    },
+    "Environment": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "lock_file": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentLock": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "EnvironmentRecipe": {
+      "properties": {
+        "assets": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "binary": {
+          "type": "string"
+        },
+        "binary_relative": {
+          "type": "string"
+        },
+        "build": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "files_ref": {
+          "$ref": "#/$defs/FileRef"
+        },
+        "input_digest": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "launch": {
+          "$ref": "#/$defs/HostLaunch"
+        },
+        "lock_file": {
+          "type": "string"
+        },
+        "manifest": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "preparation": {
+          "$ref": "#/$defs/ExtensionSelection"
+        },
+        "python": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "key",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "Execution": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "ExecutionEvidence": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "environment_preparation": {
+          "type": "string"
+        },
+        "main": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "main",
+        "sidecars",
+        "environment_preparation"
+      ],
+      "type": "object"
+    },
+    "ExecutionMember": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "ExecutionSpec": {
+      "properties": {
+        "main": {
+          "$ref": "#/$defs/ExecutionMember"
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "main"
+      ],
+      "type": "object"
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "Extension": {
+      "properties": {
+        "assets": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "baselines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ExtensionBaseline"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "benchmark": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "check": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default_class": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "files_ref": {
+          "$ref": "#/$defs/FileRef"
+        },
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "isolation": {
+          "type": "string"
+        },
+        "kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "outputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "platform_baselines": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/ExtensionBaseline"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "production_parity_required": {
+          "type": "boolean"
+        },
+        "program_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requirement_reasons": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "run": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sandbox_default": {
+          "type": "boolean"
+        },
+        "setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "variants": {
+          "items": {
+            "$ref": "#/$defs/ExtensionVariant"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "purpose",
+        "platforms",
+        "memory_gb",
+        "run",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "ExtensionBaseline": {
+      "properties": {
+        "absolute": {
+          "type": "number"
+        },
+        "input": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "string"
+        },
+        "native": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "relative": {
+          "type": "number"
+        },
+        "variation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "measure",
+        "native",
+        "variation"
+      ],
+      "type": "object"
+    },
+    "ExtensionCheckRequest": {
+      "properties": {
+        "automatic": {
+          "$ref": "#/$defs/ExtensionReport"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "reserve": {
+          "$ref": "#/$defs/ReservationOptions"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work",
+        "directory"
+      ],
+      "type": "object"
+    },
+    "ExtensionReport": {
+      "properties": {
+        "check_digest": {
+          "type": "string"
+        },
+        "check_id": {
+          "type": "string"
+        },
+        "check_state": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "environment_identity": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "version": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest",
+        "platform",
+        "work",
+        "fingerprint",
+        "setup",
+        "qualified"
+      ],
+      "type": "object"
+    },
+    "ExtensionSelection": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "ExtensionVariant": {
+      "properties": {
+        "baselines": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ExtensionBaseline"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "check": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "environments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec"
+        },
+        "needs": {
+          "$ref": "#/$defs/ResourceNeeds"
+        },
+        "quality": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/QualityMeasurement"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "references": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkReference"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "setup": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sweeps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ReferenceSweep"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "needs",
+        "execution"
+      ],
+      "type": "object"
+    },
+    "FailedTest": {
+      "properties": {
+        "classname": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "FailureSummary": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "error": {
+          "type": "string"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "failed_tests": {
+          "items": {
+            "$ref": "#/$defs/FailedTest"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "report_errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "success",
+        "failed_tests"
+      ],
+      "type": "object"
+    },
+    "FanOut": {
+      "properties": {
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/FanOutPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "share_xpu": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pieces",
+        "max_concurrency"
+      ],
+      "type": "object"
+    },
+    "FanOutPiece": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "FanOutProgress": {
+      "properties": {
+        "children": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "next": {
+          "type": "integer"
+        },
+        "results": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PieceResult"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "next"
+      ],
+      "type": "object"
+    },
+    "FaultAttempt": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "device_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device_gb": {
+          "type": "number"
+        },
+        "device_source": {
+          "type": "string"
+        },
+        "host_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pid_unavailable": {
+          "type": "boolean"
+        },
+        "pids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session",
+        "pids",
+        "host_at",
+        "device_at"
+      ],
+      "type": "object"
+    },
+    "FaultEvidence": {
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/FaultAttempt"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "capture_ns": {
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_attribution": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "host": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kernel_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "omitted_attempts": {
+          "type": "integer"
+        },
+        "replaced": {
+          "type": "integer"
+        },
+        "unavailable": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "event",
+        "kind",
+        "device",
+        "kernel_at",
+        "captured_at",
+        "capture_ns",
+        "device_attribution",
+        "attempts",
+        "host"
+      ],
+      "type": "object"
+    },
+    "FaultLibrary": {
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "inode": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "address",
+        "offset",
+        "device",
+        "inode"
+      ],
+      "type": "object"
+    },
+    "FileCheckpoint": {
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "generation": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "files"
+      ],
+      "type": "object"
+    },
+    "FileManifest": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileRef"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "FileReclamation": {
+      "properties": {
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FileRef": {
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "FinalizationDetail": {
+      "properties": {
+        "command_exit_code": {
+          "type": "integer"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "http_status": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "string"
+        },
+        "step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step",
+        "error"
+      ],
+      "type": "object"
+    },
+    "GPUHostMemory": {
+      "properties": {
+        "driver_gb": {
+          "type": "number"
+        },
+        "host_drop_gb": {
+          "type": "number"
+        },
+        "outside_gb": {
+          "type": "number"
+        },
+        "sibling_adjusted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "driver_gb",
+        "host_drop_gb",
+        "outside_gb"
+      ],
+      "type": "object"
+    },
+    "GPUSelection": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Hold": {
+      "properties": {
+        "clears": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "expires": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "owner",
+        "reason",
+        "clears",
+        "next"
+      ],
+      "type": "object"
+    },
+    "HostGrowthContributor": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "charge_gb": {
+          "type": "number"
+        },
+        "helper_gb": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "launching": {
+          "type": "boolean"
+        },
+        "pending_gb": {
+          "type": "number"
+        },
+        "sample_age_seconds": {
+          "type": "number"
+        },
+        "sample_fresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "charge_gb",
+        "pending_gb",
+        "sample_fresh"
+      ],
+      "type": "object"
+    },
+    "HostLaunch": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "cpu_cores": {
+          "type": "integer"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "session": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/$defs/Spec"
+        },
+        "started": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "kind",
+        "key",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "HostMemoryLedger": {
+      "properties": {
+        "allowance_gb": {
+          "type": "number"
+        },
+        "available_gb": {
+          "type": "number"
+        },
+        "available_known": {
+          "type": "boolean"
+        },
+        "capacity_gb": {
+          "type": "number"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "debt_gb": {
+          "type": "number"
+        },
+        "free_gb": {
+          "type": "number"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "owners": {
+          "items": {
+            "$ref": "#/$defs/HostMemoryOwner"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reserved_gb": {
+          "type": "number"
+        },
+        "signed_room_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "captured_at",
+        "observed_at",
+        "available_known",
+        "available_gb",
+        "capacity_gb",
+        "allowance_gb",
+        "reserved_gb",
+        "growth_gb",
+        "signed_room_gb",
+        "debt_gb",
+        "free_gb",
+        "owners"
+      ],
+      "type": "object"
+    },
+    "HostMemoryOwner": {
+      "properties": {
+        "charge_gb": {
+          "type": "number"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "growth_gb": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_attempt": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "machine",
+        "session",
+        "charge_gb",
+        "growth_gb"
+      ],
+      "type": "object"
+    },
+    "IOPressure": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "full": {
+          "$ref": "#/$defs/PressureStall"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sampled_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "some": {
+          "$ref": "#/$defs/PressureStall"
+        },
+        "unavailable": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sampled_at",
+        "age_seconds"
+      ],
+      "type": "object"
+    },
+    "Job": {
+      "properties": {
+        "admission_requeues": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "admission_wait": {
+          "$ref": "#/$defs/AdmissionWaitEvidence",
+          "x-contract": "diagnostic"
+        },
+        "allocated_devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "application_progress": {
+          "$ref": "#/$defs/ApplicationProgress",
+          "x-contract": "diagnostic"
+        },
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "attempt": {
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "stable"
+        },
+        "attempt_history": {
+          "description": "Ended-attempt diagnostic evidence. Open work is pinned; capacity-aware maintenance may compact redundant closed-attempt diagnoses. Immutable custody/learning ledgers remain separate. Historical causes are not reconstructed.",
+          "items": {
+            "$ref": "#/$defs/AttemptOutcome"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "batch": {
+          "$ref": "#/$defs/BatchWork",
+          "x-contract": "diagnostic"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/Cancellation",
+          "description": "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence.",
+          "x-contract": "stable"
+        },
+        "cancellation_scope": {
+          "$ref": "#/$defs/CancellationScope",
+          "description": "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads.",
+          "x-contract": "stable"
+        },
+        "cancelled_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "checkpoint": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_expired": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_target": {
+          "$ref": "#/$defs/CheckpointOrigin",
+          "x-contract": "diagnostic"
+        },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
+        "command_discovery": {
+          "$ref": "#/$defs/CommandDiscovery",
+          "x-contract": "diagnostic"
+        },
+        "command_started": {
+          "description": "Reply-only answer to whether any attempt's command may have begun, derived from the queue's start acknowledgement on the job or a retained copy and from main execution evidence (may_have_run or unknown). Present on job GET and status job replies; false means no attempt's command began, so resubmission cannot duplicate this job's work.",
+          "type": "boolean",
+          "x-contract": "stable"
+        },
+        "copies": {
+          "items": {
+            "$ref": "#/$defs/Copy"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "cpu_observation": {
+          "$ref": "#/$defs/SharedCPUObservation",
+          "x-contract": "diagnostic"
+        },
+        "deadline_guidance": {
+          "$ref": "#/$defs/DeadlineGuidance",
+          "x-contract": "diagnostic"
+        },
+        "delivery": {
+          "$ref": "#/$defs/OutputDelivery",
+          "x-contract": "stable"
+        },
+        "dependency": {
+          "$ref": "#/$defs/PieceBinding",
+          "x-contract": "stable"
+        },
+        "device_fault_start_wait": {
+          "$ref": "#/$defs/DeviceFaultStartWait",
+          "x-contract": "diagnostic"
+        },
+        "device_memory_floor_gb": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "diagnostic_code": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "efficiency": {
+          "$ref": "#/$defs/JobEfficiency",
+          "x-contract": "diagnostic"
+        },
+        "eligible_hosts": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "eligible_unknown_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "eligible_unrestricted": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "entry_coverage": {
+          "$ref": "#/$defs/EntryCoverage",
+          "x-contract": "diagnostic"
+        },
+        "environment_failure_log": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "environment_lock": {
+          "$ref": "#/$defs/EnvironmentLock",
+          "description": "Single-job replies only: the lock_file environment's frozen inputs as sha256 by basename (for Pixi, pixi.lock and pixi.toml) and backend, recorded at acceptance. spec.environment stays projected away.",
+          "x-contract": "diagnostic"
+        },
+        "environment_recipes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
+        "execution_evidence": {
+          "$ref": "#/$defs/ExecutionEvidence",
+          "x-contract": "diagnostic"
+        },
+        "extension": {
+          "$ref": "#/$defs/ExtensionSelection",
+          "x-contract": "diagnostic"
+        },
+        "extensions": {
+          "items": {
+            "$ref": "#/$defs/Extension"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "fan_out": {
+          "$ref": "#/$defs/FanOutProgress",
+          "x-contract": "diagnostic"
+        },
+        "fault_evidence": {
+          "items": {
+            "$ref": "#/$defs/FaultEvidence"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "file_checkpoints": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[0-9]+$": {
+              "$ref": "#/$defs/FileCheckpoint"
+            }
+          },
+          "type": "object",
+          "x-contract": "diagnostic"
+        },
+        "file_reclamation": {
+          "$ref": "#/$defs/FileReclamation",
+          "x-contract": "diagnostic"
+        },
+        "file_transport": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "files_expired": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "finding": {
+          "$ref": "#/$defs/JobFinding",
+          "x-contract": "diagnostic"
+        },
+        "finished_at": {
+          "description": "Recorded terminal time, when present. Historical terminal records may omit it.",
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "front": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "health_recovery": {
+          "$ref": "#/$defs/AlertRecovery",
+          "x-contract": "diagnostic"
+        },
+        "hold": {
+          "$ref": "#/$defs/Hold",
+          "x-contract": "diagnostic"
+        },
+        "host_memory_charge": {
+          "$ref": "#/$defs/AttemptHostMemoryCharge",
+          "x-contract": "diagnostic"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "infrastructure_retries": {
+          "description": "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget.",
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "stable"
+        },
+        "inputs_staged_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "isolation": {
+          "description": "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "last_health_alert_attempt": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "last_memory_admission": {
+          "$ref": "#/$defs/MemoryAdmissionSnapshot",
+          "description": "Last changed blocking host-memory target comparison in this waiting episode, retained through startup failure and restart. Canonical exact-owner charges, growth and reservation pending state; historical diagnostic, not live usage or proof RAM is the only blocker. Absence is unknown. A retry clears it.",
+          "x-contract": "diagnostic"
+        },
+        "last_stop_outcome": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "launch_capacity_wait": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LaunchCapacityWait"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "ledger": {
+          "$ref": "#/$defs/JobLedgerInfo",
+          "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
+          "x-contract": "stable"
+        },
+        "liveness": {
+          "$ref": "#/$defs/AttemptLiveness",
+          "x-contract": "diagnostic"
+        },
+        "local_outputs": {
+          "$ref": "#/$defs/TaskOutputCustody",
+          "x-contract": "diagnostic"
+        },
+        "losses": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "machine": {
+          "description": "Assigned execution identity; omitted before assignment or after requeue.",
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "measured_needs": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "memory_attempts": {
+          "description": "Persisted memory facts, independent of learning and diagnostic history. Retention follows local capacity and evidence dependencies; open attempts and distinct measurements are preserved. memory_attempts_dropped counts historical evictions. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "items": {
+            "$ref": "#/$defs/AttemptMemoryFacts"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "memory_attempts_dropped": {
+          "description": "Number of historical memory attempt rows evicted by earlier releases. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "memory_envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope",
+          "x-contract": "diagnostic"
+        },
+        "memory_fallback": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "memory_oom_floor": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "model_environment_key": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "model_environment_needs_source": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "model_limits": {
+          "$ref": "#/$defs/ModelLimits",
+          "x-contract": "diagnostic"
+        },
+        "oom_capacity": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "oom_retries": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "output_admission_pending": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "output_files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "output_refs": {
+          "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "output_reservation_bytes": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "pause": {
+          "$ref": "#/$defs/JobPause",
+          "x-contract": "stable"
+        },
+        "pause_revision": {
+          "type": "integer",
+          "x-contract": "stable"
+        },
+        "pending_output_refs": {
+          "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision",
+          "x-contract": "diagnostic"
+        },
+        "placement_intent": {
+          "$ref": "#/$defs/PlacementIntent",
+          "x-contract": "diagnostic"
+        },
+        "preemption_count": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "preemption_placement": {
+          "$ref": "#/$defs/PreemptionPlacement",
+          "x-contract": "diagnostic"
+        },
+        "priority_policy": {
+          "$ref": "#/$defs/PriorityMatch",
+          "x-contract": "diagnostic"
+        },
+        "production_backoff": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProductionBackoff"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "production_binding": {
+          "$ref": "#/$defs/PlacementBinding",
+          "x-contract": "diagnostic"
+        },
+        "production_host": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "progress": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "queue_order": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "queued": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "reason": {
+          "description": "Sanitized diagnostic only. Do not parse or match its text.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "recovered_results": {
+          "description": "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at.",
+          "items": {
+            "$ref": "#/$defs/RecoveredResult"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "stable"
+        },
+        "release_confirmed": {
+          "description": "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release.",
+          "type": "boolean",
+          "x-contract": "stable"
+        },
+        "requeued_by_operator": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "require_production_parity": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "requirement_reasons": {
+          "items": {
+            "$ref": "#/$defs/RequirementReasonStatus"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "resource_attempts": {
+          "description": "Per-attempt cumulative CPU and block I/O counters with latest I/O PSI, retaining every distinct attempt. resource_attempts_dropped reports historical evictions. Exact attempt/machine/session fenced; missing counters unknown; process-tree CPU a sampled lower bound. Observational only.",
+          "items": {
+            "$ref": "#/$defs/AttemptResourceFacts"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "resource_attempts_dropped": {
+          "minimum": 0,
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceBasis"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "resume_files": {
+          "$ref": "#/$defs/FileCheckpoint",
+          "x-contract": "diagnostic"
+        },
+        "runtime": {
+          "$ref": "#/$defs/JobRuntime",
+          "x-contract": "diagnostic"
+        },
+        "scarce_host_yield": {
+          "$ref": "#/$defs/ScarceHostYield",
+          "x-contract": "diagnostic"
+        },
+        "session": {
+          "description": "Worker session of the assigned execution; combine with job ID and attempt.",
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "shared_host_backoff": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedHostBackoff"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "sidecar_environment_recipes": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/EnvironmentRecipe"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "spec": {
+          "$ref": "#/$defs/Spec",
+          "x-contract": "stable"
+        },
+        "spec_projection": {
+          "$ref": "#/$defs/SpecProjection",
+          "description": "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted.",
+          "x-contract": "stable"
+        },
+        "start_by_explicit": {
+          "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_budget": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "start_capacity_waiting": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "start_latency_seconds": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "start_window": {
+          "description": "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments.",
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "starts": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "paused",
+            "waiting",
+            "running",
+            "stopping",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "storage_allocation": {
+          "$ref": "#/$defs/StorageAllocation",
+          "x-contract": "diagnostic"
+        },
+        "storage_attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptStorageFacts"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "storage_attempts_dropped": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "storage_envelope": {
+          "$ref": "#/$defs/JobStorageEnvelope",
+          "x-contract": "diagnostic"
+        },
+        "submission_reused": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "timing": {
+          "$ref": "#/$defs/WorkTiming",
+          "x-contract": "diagnostic"
+        },
+        "variant_advice": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "variant_eligibility": {
+          "items": {
+            "$ref": "#/$defs/VariantEligibility"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "waiting_since": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "wall_time": {
+          "$ref": "#/$defs/WallTimeStatus",
+          "description": "Execution allowance, distinct from runtime estimates. Expiry/remaining appear after Started; elapsed grace or terminal state does not prove release.",
+          "x-contract": "diagnostic"
+        },
+        "yield_generation": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "yield_plan": {
+          "$ref": "#/$defs/ScarceYieldProjection",
+          "x-contract": "diagnostic"
+        }
+      },
+      "required": [
+        "priority_policy",
+        "start_latency_seconds",
+        "starts",
+        "losses",
+        "progress",
+        "id",
+        "spec",
+        "state",
+        "attempt",
+        "queued",
+        "front",
+        "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobEfficiency": {
+      "properties": {
+        "allocations": {
+          "items": {
+            "$ref": "#/$defs/EfficiencyAllocation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "rate": {
+          "$ref": "#/$defs/efficiencyRate"
+        },
+        "retained_rates": {
+          "items": {
+            "$ref": "#/$defs/efficiencyRate"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "at",
+        "work",
+        "wait_seconds",
+        "rate"
+      ],
+      "type": "object"
+    },
+    "JobFinding": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "what": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "owner",
+        "what",
+        "action"
+      ],
+      "type": "object"
+    },
+    "JobLedgerInfo": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "high_water": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "high_water"
+      ],
+      "type": "object"
+    },
+    "JobMemoryEnvelope": {
+      "properties": {
+        "available_host_gb": {
+          "type": "number"
+        },
+        "basis": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_gb": {
+          "type": "number"
+        },
+        "enforcement": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "integer"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "launch_drift_gb": {
+          "type": "number"
+        },
+        "learned": {
+          "$ref": "#/$defs/LearnedMemory"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "probe_floor_gb": {
+          "type": "number"
+        },
+        "refusal": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "machine",
+        "host_gb",
+        "device_gb",
+        "enforcement"
+      ],
+      "type": "object"
+    },
+    "JobPause": {
+      "properties": {
+        "parent": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "JobRuntime": {
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "history_age_seconds": {
+          "type": "number"
+        },
+        "limitation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "remaining_seconds": {
+          "type": "number"
+        },
+        "remaining_work_unknown": {
+          "type": "boolean"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "remaining_work_unknown",
+        "samples",
+        "limitation"
+      ],
+      "type": "object"
+    },
+    "JobStorageEnvelope": {
+      "properties": {
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
+        "enforcement": {
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/StorageObservation"
+        },
+        "exploration": {
+          "type": "string"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "hard_limit": {
+          "type": "integer"
+        },
+        "input_bytes": {
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/StorageKey"
+        },
+        "managed_bytes": {
+          "type": "integer"
+        },
+        "margin": {
+          "type": "integer"
+        },
+        "metadata_bytes": {
+          "type": "integer"
+        },
+        "multiplier": {
+          "type": "number"
+        },
+        "output_bytes": {
+          "type": "integer"
+        },
+        "positive_error": {
+          "type": "integer"
+        },
+        "predicted_need": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "scratch_bytes": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "spool_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "samples",
+        "input_bytes",
+        "margin",
+        "positive_error",
+        "multiplier",
+        "enforcement"
+      ],
+      "type": "object"
+    },
+    "KeepFile": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "LaunchCapacityWait": {
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "attempt",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "LearnedMemory": {
+      "properties": {
+        "device_gb": {
+          "type": "number"
+        },
+        "evidence": {
+          "type": "integer"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "peak_device_gb": {
+          "type": "number"
+        },
+        "peak_host_gb": {
+          "type": "number"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host_gb",
+        "evidence",
+        "source"
+      ],
+      "type": "object"
+    },
+    "LivenessSignal": {
+      "properties": {
+        "advancing": {
+          "type": "boolean"
+        },
+        "age_seconds": {
+          "type": "number"
+        },
+        "compared": {
+          "type": "boolean"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "age_seconds",
+        "compared",
+        "advancing",
+        "idle_seconds"
+      ],
+      "type": "object"
+    },
+    "MachOLinkage": {
+      "properties": {
+        "binary": {
+          "type": "string"
+        },
+        "library": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "binary",
+        "library"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionReservation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "job": {
+          "type": "string"
+        },
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pending_known": {
+          "type": "boolean"
+        },
+        "pending_observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "job",
+        "state",
+        "pending_known",
+        "pending"
+      ],
+      "type": "object"
+    },
+    "MemoryAdmissionSnapshot": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "drift_reserve_gb": {
+          "type": "number"
+        },
+        "envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope"
+        },
+        "host": {
+          "type": "string"
+        },
+        "ledger": {
+          "$ref": "#/$defs/HostMemoryLedger"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reservations": {
+          "items": {
+            "$ref": "#/$defs/MemoryAdmissionReservation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "waiting_since": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "captured_at",
+        "waiting_since",
+        "attempt",
+        "machine",
+        "session",
+        "host",
+        "target",
+        "envelope",
+        "drift_reserve_gb",
+        "reason",
+        "ledger",
+        "reservations"
+      ],
+      "type": "object"
+    },
+    "MemoryEventCounts": {
+      "properties": {
+        "high": {
+          "type": "integer"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "oom": {
+          "type": "integer"
+        },
+        "oom_group_kill": {
+          "type": "integer"
+        },
+        "oom_kill": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "high",
+        "max",
+        "oom",
+        "oom_kill",
+        "oom_group_kill"
+      ],
+      "type": "object"
+    },
+    "MemoryPressureEvidence": {
+      "properties": {
+        "available_floor_gb": {
+          "type": "number"
+        },
+        "cgroup_avg10": {
+          "type": "number"
+        },
+        "cgroup_refault_anon": {
+          "type": "integer"
+        },
+        "cgroup_stall_us": {
+          "type": "integer"
+        },
+        "cgroup_swap_out_pages": {
+          "type": "integer"
+        },
+        "elapsed_us": {
+          "type": "number"
+        },
+        "host_avg10": {
+          "type": "number"
+        },
+        "host_oom_delta": {
+          "type": "integer"
+        },
+        "host_pressure_level": {
+          "type": "integer"
+        },
+        "host_stall_us": {
+          "type": "integer"
+        },
+        "host_swap_growth_bytes": {
+          "type": "integer"
+        },
+        "host_swap_out_bytes": {
+          "type": "integer"
+        },
+        "min_available_gb": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reserve_gb": {
+          "type": "number"
+        },
+        "resident_gb": {
+          "type": "number"
+        },
+        "swap_budget_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "reason",
+        "elapsed_us",
+        "host_avg10",
+        "cgroup_avg10",
+        "host_swap_growth_bytes",
+        "host_swap_out_bytes",
+        "resident_gb",
+        "reserve_gb",
+        "available_floor_gb",
+        "swap_budget_gb",
+        "host_oom_delta"
+      ],
+      "type": "object"
+    },
+    "ModelLimits": {
+      "properties": {
+        "free_floor_bytes": {
+          "type": "integer"
+        },
+        "max_bytes": {
+          "type": "integer"
+        },
+        "policy_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "policy_revision"
+      ],
+      "type": "object"
+    },
+    "ModelSnapshot": {
+      "properties": {
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "NativeReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "NativeSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "readiness": {
+          "$ref": "#/$defs/NativeReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
+      "type": "object"
+    },
+    "ObservationKey": {
+      "properties": {
+        "allowance": {
+          "type": "string"
+        },
+        "batch_size": {
+          "type": "integer"
+        },
+        "check": {
+          "type": "boolean"
+        },
+        "component": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "configuration": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "extension_digest": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "hardware": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "reference": {
+          "$ref": "#/$defs/WorkReference"
+        },
+        "repeated_work": {
+          "type": "string"
+        },
+        "server_digest": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work",
+        "extension_digest",
+        "target",
+        "reference",
+        "host",
+        "component",
+        "hardware",
+        "fingerprint",
+        "environment",
+        "configuration",
+        "concurrency",
+        "batch_size"
+      ],
+      "type": "object"
+    },
+    "OutputDelivery": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "destination_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_attempt_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "last_progress_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "next_attempt_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "pending_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "progress_operations": {
+          "type": "integer"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "verification_round": {
+          "type": "integer"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination_id",
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "state",
+        "manifest_sha256",
+        "bytes",
+        "pending_at",
+        "attempts"
+      ],
+      "type": "object"
+    },
+    "OutputDestination": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "PathDiagnostic": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "companion": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "resolution_base": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "side",
+        "path",
+        "resolution_base",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "PieceBinding": {
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/Execution",
+          "description": "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
+        },
+        "executions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Execution"
+          },
+          "description": "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "job": {
+          "type": "string"
+        },
+        "piece": {
+          "type": "string"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "blocked",
+            "ready"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "job",
+        "piece",
+        "state",
+        "execution"
+      ],
+      "type": "object"
+    },
+    "PieceDependency": {
+      "properties": {
+        "job": {
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "piece": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job",
+        "outputs"
+      ],
+      "type": "object"
+    },
+    "PieceResult": {
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "output_files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "output_refs": {
+          "$ref": "#/$defs/FileManifest"
+        }
+      },
+      "required": [
+        "execution"
+      ],
+      "type": "object"
+    },
+    "PlacementBinding": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "host",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PlacementCoverage": {
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "state"
+      ],
+      "type": "object"
+    },
+    "PlacementDecision": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "device_choice": {
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_choice": {
+          "type": "string"
+        },
+        "limited_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "attempt",
+        "assigned_at",
+        "host",
+        "host_choice",
+        "device_choice",
+        "reason",
+        "limited_by"
+      ],
+      "type": "object"
+    },
+    "PlacementIntent": {
+      "properties": {
+        "device_constraint": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/PlacementCoverage"
+        },
+        "host_constraint": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "parity": {
+          "type": "string"
+        },
+        "preferred_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "qualification": {
+          "type": "string"
+        },
+        "recipe_device_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "scope",
+        "host_constraint",
+        "device_constraint",
+        "environment",
+        "qualification",
+        "parity"
+      ],
+      "type": "object"
+    },
+    "Platform": {
+      "properties": {
+        "any": {
+          "type": "boolean"
+        },
+        "preferred": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PreemptionPlacement": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "releases": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "device"
+      ],
+      "type": "object"
+    },
+    "PressureStall": {
+      "properties": {
+        "avg10": {
+          "type": "number"
+        },
+        "avg300": {
+          "type": "number"
+        },
+        "avg60": {
+          "type": "number"
+        },
+        "total_usec": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "avg10",
+        "avg60",
+        "avg300",
+        "total_usec"
+      ],
+      "type": "object"
+    },
+    "PriorityMatch": {
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "selector": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier",
+        "index",
+        "selector",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PriorityPreemption": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "victim": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cause",
+        "demand",
+        "victim",
+        "policy"
+      ],
+      "type": "object"
+    },
+    "ProductionBackoff": {
+      "properties": {
+        "last_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "last_at"
+      ],
+      "type": "object"
+    },
+    "Program": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "file"
+      ],
+      "type": "object"
+    },
+    "QualityMeasurement": {
+      "properties": {
+        "margin_of_error": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "reference_value": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reference",
+        "value",
+        "reference_value",
+        "margin_of_error"
+      ],
+      "type": "object"
+    },
+    "RSSLimitEvidence": {
+      "properties": {
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "observed_bytes": {
+          "type": "integer"
+        },
+        "quality": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "observed_bytes",
+        "limit_bytes",
+        "quality"
+      ],
+      "type": "object"
+    },
+    "RecoveredResult": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "recovered",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time.",
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recovered_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovered_by": {
+          "const": "operator",
+          "type": "string"
+        },
+        "requested_by": {
+          "description": "Operator-asserted requester label, not a separately authenticated user identity.",
+          "type": "string"
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/RecoverySource"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "key",
+        "requested_by",
+        "source",
+        "reason",
+        "files",
+        "result_id",
+        "kind",
+        "recovered_by",
+        "recovered_at",
+        "expires_at",
+        "manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "RecoverySource": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "location"
+      ],
+      "type": "object"
+    },
+    "ReferenceSweep": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "counts": {
+          "items": {
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "run": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "server_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "counts",
+        "max_concurrency"
+      ],
+      "type": "object"
+    },
+    "RequirementReasonStatus": {
+      "properties": {
+        "constraint": {
+          "type": "string"
+        },
+        "reason_source": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "constraint",
+        "reason_source",
+        "source"
+      ],
+      "type": "object"
+    },
+    "ReservationOptions": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "max_lifetime": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "selector",
+        "owner",
+        "reason",
+        "max_lifetime"
+      ],
+      "type": "object"
+    },
+    "ResourceBasis": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "declared": {
+          "type": "number"
+        },
+        "dimension": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "integer"
+        },
+        "learned": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string"
+        },
+        "used": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "dimension",
+        "basis"
+      ],
+      "type": "object"
+    },
+    "ResourceNeeds": {
+      "properties": {
+        "cpu_cores": {
+          "type": "integer"
+        },
+        "gpu": {
+          "$ref": "#/$defs/GPUSelection"
+        },
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "memory_gb",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "ResumeCompatibility": {
+      "properties": {
+        "checkpoint_format": {
+          "type": "string"
+        },
+        "result_contract": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ResumeTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "checkpoint_format",
+        "result_contract",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ResumeTarget": {
+      "properties": {
+        "environment": {
+          "type": "string"
+        },
+        "result_check": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "environment",
+        "result_check"
+      ],
+      "type": "object"
+    },
+    "RunSpec": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "docker": {
+          "description": "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability.",
+          "type": "boolean"
+        },
+        "docker_memory_gb": {
+          "type": "number"
+        },
+        "docker_memory_swap": {
+          "type": "number"
+        },
+        "docker_network": {
+          "type": "string"
+        },
+        "docker_sidecars": {
+          "items": {
+            "$ref": "#/$defs/DockerSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeCause": {
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
+        "class": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "finalization": {
+          "$ref": "#/$defs/FinalizationDetail"
+        },
+        "host": {
+          "type": "string"
+        },
+        "linkage": {
+          "$ref": "#/$defs/MachOLinkage"
+        },
+        "missing_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "operation": {
+          "type": "string"
+        },
+        "path_diagnostic": {
+          "$ref": "#/$defs/PathDiagnostic"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "prelaunch_refused": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "rss_limit": {
+          "$ref": "#/$defs/RSSLimitEvidence"
+        },
+        "staging": {
+          "$ref": "#/$defs/StagingCause"
+        }
+      },
+      "required": [
+        "operation",
+        "class"
+      ],
+      "type": "object"
+    },
+    "ScarceHostYield": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "authorized": {
+          "type": "boolean"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "destination_device": {
+          "type": "string"
+        },
+        "destination_target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "final_received": {
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "hold": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "victim": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cause",
+        "demand",
+        "victim",
+        "attempt",
+        "machine",
+        "session",
+        "destination",
+        "destination_device",
+        "destination_target",
+        "generation",
+        "authorized",
+        "final_received"
+      ],
+      "type": "object"
+    },
+    "ScarceYieldProjection": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "requirements": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "victims": {
+          "items": {
+            "$ref": "#/$defs/ScarceHostYield"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ServiceEstimate": {
+      "properties": {
+        "correction_seconds": {
+          "type": "number"
+        },
+        "estimator": {
+          "type": "string"
+        },
+        "raw_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimator",
+        "raw_seconds",
+        "correction_seconds",
+        "samples",
+        "uncertainty"
+      ],
+      "type": "object"
+    },
+    "SharedCPUObservation": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "peak_cores": {
+          "type": "number"
+        },
+        "session": {
+          "type": "string"
+        },
+        "usage_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "elapsed_seconds",
+        "usage_seconds",
+        "peak_cores"
+      ],
+      "type": "object"
+    },
+    "SharedHostBackoff": {
+      "properties": {
+        "last_observation": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "quiet_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovery_seconds": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "SharedInput": {
+      "properties": {
+        "archive": {
+          "type": "string"
+        },
+        "manifest": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "manifest_file": {
+          "type": "string"
+        },
+        "nas": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "unpacked_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SignalEvidence": {
+      "properties": {
+        "attribution": {
+          "type": "string"
+        },
+        "capture_ns": {
+          "type": "integer"
+        },
+        "core_bytes": {
+          "type": "integer"
+        },
+        "core_capture": {
+          "type": "string"
+        },
+        "core_pointer": {
+          "type": "string"
+        },
+        "core_truncated": {
+          "type": "boolean"
+        },
+        "exit_status": {
+          "type": "integer"
+        },
+        "fault_address": {
+          "type": "string"
+        },
+        "kernel_core_dumped": {
+          "type": "boolean"
+        },
+        "libraries": {
+          "items": {
+            "$ref": "#/$defs/FaultLibrary"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "unavailable": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "started_at",
+        "attribution",
+        "exit_status",
+        "pid",
+        "signal",
+        "observed_at",
+        "core_capture",
+        "capture_ns"
+      ],
+      "type": "object"
+    },
+    "SizeHint": {
+      "properties": {
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory_gb": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Spec": {
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/PieceDependency",
+          "x-contract": "stable"
+        },
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "authoring_origin": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "class": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "deadline": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/DiagnosticSpec",
+          "x-contract": "diagnostic"
+        },
+        "disk": {
+          "$ref": "#/$defs/DiskNeeds",
+          "description": "Optional fallback input/output/checkpoint size hints in bytes; known measured manifests take precedence. Missing size evidence uses only the volume free floor.",
+          "x-contract": "diagnostic"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment",
+          "x-contract": "diagnostic"
+        },
+        "excluded_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec",
+          "x-contract": "diagnostic"
+        },
+        "expected_minutes": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
+        "extension": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "extension_check": {
+          "$ref": "#/$defs/ExtensionCheckRequest",
+          "x-contract": "diagnostic"
+        },
+        "extension_digest": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "fan_out": {
+          "$ref": "#/$defs/FanOut",
+          "x-contract": "diagnostic"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest",
+          "description": "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker.",
+          "x-contract": "diagnostic"
+        },
+        "give_up_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "isolation": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "keep_on_failure": {
+          "items": {
+            "$ref": "#/$defs/KeepFile"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "kind": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "logs": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "model_snapshots": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSnapshot"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "name": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "needs": {
+          "$ref": "#/$defs/ResourceNeeds",
+          "x-contract": "diagnostic"
+        },
+        "output_delivery": {
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "output_destination": {
+          "$ref": "#/$defs/OutputDestination",
+          "x-contract": "diagnostic"
+        },
+        "output_retention": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "portable": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "preemptible": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "prepare_source": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "priority": {
+          "enum": [
+            "",
+            "production",
+            "deadline",
+            "experiment"
+          ],
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "profile_memory": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "program": {
+          "$ref": "#/$defs/Program",
+          "x-contract": "diagnostic"
+        },
+        "project": {
+          "minLength": 1,
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "quality_tolerance": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "reason": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "require_target": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "requirement_reasons": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "resumable": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
+        "resume_compatibility": {
+          "$ref": "#/$defs/ResumeCompatibility",
+          "x-contract": "diagnostic"
+        },
+        "run": {
+          "$ref": "#/$defs/RunSpec",
+          "x-contract": "diagnostic"
+        },
+        "shared_inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedInput"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "size_hint": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
+        "start_by": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "start_window": {
+          "description": "Optional production relative start duration (Go duration string), greater than zero and at most 1h. Defaults to 150s; explicit start_by takes precedence.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "storage_protocol": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "submission_key": {
+          "description": "Exact project-scoped submission identity echo. Omitted for an unkeyed job.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+          "type": "string",
+          "x-contract": "stable"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "wall_time": {
+          "description": "Optional positive per-attempt Go duration from accepted Started; omission is unlimited. Expiry follows ordinary command-failure policy, never infrastructure loss.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload",
+          "x-contract": "diagnostic"
+        }
+      },
+      "required": [
+        "name",
+        "project",
+        "priority",
+        "run",
+        "needs",
+        "resumable"
+      ],
+      "type": "object"
+    },
+    "SpecProjection": {
+      "properties": {
+        "omitted": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projected",
+        "omitted"
+      ],
+      "type": "object"
+    },
+    "StagingCause": {
+      "properties": {
+        "available_bytes": {
+          "type": "integer"
+        },
+        "blob": {
+          "type": "string"
+        },
+        "bytes_copied": {
+          "type": "integer"
+        },
+        "capacity": {
+          "type": "string"
+        },
+        "errno": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "expected_bytes": {
+          "type": "integer"
+        },
+        "input": {
+          "type": "string"
+        },
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "path_class": {
+          "type": "string"
+        },
+        "required_bytes": {
+          "type": "integer"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer"
+        },
+        "syscall": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "error"
+      ],
+      "type": "object"
+    },
+    "StorageAllocation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "backing": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "worker_custody": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "execution",
+        "machine",
+        "session",
+        "backing",
+        "bytes",
+        "files",
+        "worker_custody",
+        "at"
+      ],
+      "type": "object"
+    },
+    "StorageKey": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "input_shape": {
+          "type": "string"
+        },
+        "program": {
+          "type": "string"
+        },
+        "recipe": {
+          "type": "string"
+        },
+        "shape": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "program",
+        "recipe",
+        "source",
+        "variant",
+        "configuration",
+        "environment",
+        "shape",
+        "input_shape"
+      ],
+      "type": "object"
+    },
+    "StorageObservation": {
+      "properties": {
+        "allocation_unit": {
+          "type": "integer"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "files": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "key": {
+          "$ref": "#/$defs/StorageKey"
+        },
+        "lower_bound": {
+          "$ref": "#/$defs/AttemptStoragePeak"
+        },
+        "lower_bound_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "lower_bound_execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "lower_bound_reason": {
+          "type": "string"
+        },
+        "managed": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "metadata": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "output": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "output_execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "output_recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "scratch": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "spool": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "staging": {
+          "$ref": "#/$defs/StorageRange"
+        }
+      },
+      "required": [
+        "key",
+        "staging",
+        "output",
+        "scratch",
+        "spool",
+        "checkpoint",
+        "metadata",
+        "managed",
+        "files",
+        "allocation_unit",
+        "recorded_at",
+        "output_execution",
+        "output_recorded_at",
+        "execution"
+      ],
+      "type": "object"
+    },
+    "StorageRange": {
+      "properties": {
+        "min": {
+          "type": "integer"
+        },
+        "peak": {
+          "type": "integer"
+        },
+        "positive_error": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "samples",
+        "min",
+        "peak",
+        "positive_error"
+      ],
+      "type": "object"
+    },
+    "TaskOutputCustody": {
+      "properties": {
+        "allocation": {
+          "type": "string"
+        },
+        "collected_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "collection_requested_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "state": {
+          "type": "string"
+        },
+        "stored_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "allocation",
+        "files",
+        "stored_at"
+      ],
+      "type": "object"
+    },
+    "VariantEligibility": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "extension": {
+          "type": "string"
+        },
+        "freshness": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "variant": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "extension",
+        "digest",
+        "variant",
+        "host",
+        "target",
+        "freshness",
+        "qualified",
+        "eligible",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "WaitPreemption": {
+      "properties": {
+        "considered": {
+          "type": "boolean"
+        },
+        "planned": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "considered",
+        "planned",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "WallTimeStatus": {
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        },
+        "remaining_seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "type": "object"
+    },
+    "WorkLearningChange": {
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        }
+      },
+      "required": [
+        "key",
+        "before",
+        "after"
+      ],
+      "type": "object"
+    },
+    "WorkReference": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "input_shape",
+        "unit",
+        "units"
+      ],
+      "type": "object"
+    },
+    "WorkTiming": {
+      "properties": {
+        "actual_seconds": {
+          "type": "number"
+        },
+        "comparability": {
+          "type": "string"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "history_reason": {
+          "type": "string"
+        },
+        "history_recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "history_source": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "placement_reason": {
+          "type": "string"
+        },
+        "predicted_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "repeated_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "service_estimate": {
+          "$ref": "#/$defs/ServiceEstimate"
+        },
+        "session": {
+          "type": "string"
+        },
+        "uncertainty": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution",
+        "machine",
+        "session",
+        "samples"
+      ],
+      "type": "object"
+    },
+    "Workload": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "input_shape",
+        "units"
+      ],
+      "type": "object"
+    },
+    "efficiencyRate": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "device_valid_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "measured_device_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured_memory_gb": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release": {
+          "type": "string"
+        },
+        "reserved_cpu_cores": {
+          "type": "number"
+        },
+        "reserved_device_gb": {
+          "type": "number"
+        },
+        "reserved_memory_gb": {
+          "type": "number"
+        },
+        "valid_until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reserved_device_gb",
+        "measured_device_gb",
+        "device_valid_until",
+        "reserved_memory_gb",
+        "reserved_cpu_cores",
+        "measured_memory_gb",
+        "valid_until"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Job",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow.",
+  "title": "Mycelium Job reply v1"
+}
