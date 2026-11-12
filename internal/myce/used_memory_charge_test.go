@@ -430,7 +430,9 @@ func TestUnifiedUsedMemoryChargeGrowth(t *testing.T) {
 		{"stale host sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.at = at.Add(-2 * hostMemorySampleFreshFor) }},
 		{"multi-card attempt", func(j *Job, _ *Machine, _ *hostMemorySample) { j.AllocatedDevices = []string{"0", "1"} }},
 		{"docker", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Run.Docker = true }},
-		{"no cgroup ceilings", func(_ *Job, m *Machine, _ *hostMemorySample) { m.MemoryEnforcement = "memory ceiling not enforced on this host (x)" }},
+		{"no cgroup ceilings", func(_ *Job, m *Machine, _ *hostMemorySample) {
+			m.MemoryEnforcement = "memory ceiling not enforced on this host (x)"
+		}},
 		{"discrete CUDA", func(_ *Job, m *Machine, _ *hostMemorySample) { m.UnifiedMemory = false }},
 		{"Metal", func(_ *Job, m *Machine, _ *hostMemorySample) {
 			m.GPU, m.CapabilityProfile.OS, m.MemoryEnforcement = "metal", "darwin", darwinRSSGuardStatus
