@@ -338,7 +338,7 @@ func (q *Queue) environmentHold(j *Job, m *Machine) *Hold {
 	if extensionName.MatchString(key) {
 		label += " " + key
 	}
-	b := withAction(newHold("unprepared", "no builder has started"), "queue", "submit normally; the queue prepares the immutable environment before launch")
+	b := withAction(newHold("unprepared", "no builder has started"), "queue", "wait; the queue prepares the immutable environment before launch")
 	builder := m
 	for _, view := range q.placementTargets(live) {
 		if sameTarget(view, m) {

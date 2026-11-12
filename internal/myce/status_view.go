@@ -182,8 +182,30 @@ func ExtensionStatus(r ExtensionReport) string {
 
 // JobReason is the one-line reason with the hold's next action and evidence,
 // ending with the job's finding when it has one.
+// JobReason is the job's one current reason and its next action, as default
+// status, wait and run print it. JobReasonDetail adds the evidence.
 func JobReason(j *Job) string {
-	reason := jobReasonWith(j, (*Hold).FullText)
+	return jobReason(j, false)
+}
+
+// JobReasonDetail adds the hold's evidence and the isolation note, for detail
+// views (status --history and the status page).
+func JobReasonDetail(j *Job) string {
+	return jobReason(j, true)
+}
+
+func jobReason(j *Job, detail bool) string {
+	text := (*Hold).Text
+	if detail {
+		text = (*Hold).FullText
+	}
+	reason := jobReasonWith(j, text)
+	if isolation := jobNativeIsolationStatus(j); detail && isolation != "" {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += isolation
+	}
 	if j.Finding != nil {
 		if reason != "" {
 			reason += "; "
@@ -237,12 +259,6 @@ func jobReasonWith(j *Job, holdText func(*Hold) string) string {
 		if j.HealthRecovery.NextStep != "" {
 			reason += "; " + j.HealthRecovery.NextStep
 		}
-	}
-	if isolation := jobNativeIsolationStatus(j); isolation != "" {
-		if reason != "" {
-			reason += "; "
-		}
-		reason += isolation
 	}
 	return reason
 }

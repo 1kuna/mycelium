@@ -244,8 +244,8 @@ can't submit ahead.
   `myce result`): `owner` is `job`, `mycelium` or `unknown`, and `action` is the
   one thing to do. A `dead_end_wait` names what waiting can't fix; do it, then
   submit again.
-- **Waiting:** read `myce status JOB_ID` once. Its `hold` gives one reason, an
-  owner and one `next:` action. Fix what you authored, or record the owner and
+- **Waiting:** read `myce status JOB_ID` once. Its line gives one reason and one
+  `next:` action (`--history` adds the evidence). Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A hold with `runs_now_on` names platforms that would run the job now: add

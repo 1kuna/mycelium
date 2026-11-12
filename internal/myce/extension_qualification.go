@@ -100,7 +100,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 			if !slices.ContainsFunc(candidate.Extensions, eligible) {
 				continue
 			}
-			if q.diskHeadroomReason(candidate, m) != "" || !q.qualificationDemandPolicy(candidate, m) || !deviceAllowed(candidate, m) {
+			if q.diskHeadroomReason(candidate, m) != "" || !q.structuralDemandPolicy(candidate, m) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
@@ -116,13 +116,14 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 	return demand
 }
 
-// Whether the useful job could use this host once it has room: the host-level
-// and job-level requirements of placementDemandPolicy without its momentary
+// Whether the job could use this host once it has room: the host-level and
+// job-level requirements of placementDemandPolicy without its momentary
 // capacity and production holds. Those holds kept the queue's own check from
 // ever being offered on a busy host, so the job waited for a check that never
 // ran. The check, once submitted, still passes every admission hold itself.
-func (q *Queue) qualificationDemandPolicy(j *Job, m *Machine) bool {
-	if q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
+// Dead-end judgements use the same view: a busy host is still a host.
+func (q *Queue) structuralDemandPolicy(j *Job, m *Machine) bool {
+	if q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok && (!logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {

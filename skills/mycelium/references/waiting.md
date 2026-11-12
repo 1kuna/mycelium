@@ -23,7 +23,9 @@ retrying an unchanged deterministic failure. See [diagnostics](https://github.co
 Placement coverage reasons differ from occupied capacity or environment
 preparation: `missing_extension` needs a registered implementation;
 `execution_coverage` needs a compatible variant; `native_qualification` waits
-while the queue runs the exact native check itself; `production_parity` or `production_parity_kind` (formerly
+for the exact native check the queue runs itself, and its reason names that
+check and what it waits on (nothing to do; a failed check fails the job with
+its action); `production_parity` or `production_parity_kind` (formerly
 `production_parity_hosts`) needs reference-output evidence on a machine of a
 kind that can run it, then `myce parity add`. Detailed status also explains a
 single freshly observed compatible host and the project's approved kinds. These
