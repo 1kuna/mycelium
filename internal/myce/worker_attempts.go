@@ -747,7 +747,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
 	cores, why := cpuCapacity(&w.Machine)
-	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
+	usedCores, usedRAM := next.Spec.Needs.cores(), localJobCharge(w, next)
 	for _, n := range preparationCores {
 		usedCores += n
 	}
@@ -847,16 +847,27 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	return nil
 }
 func localJobHostNeed(w Worker, j Job) float64 {
+	m := localJobMachine(w, j)
+	return hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+}
+
+// localJobCharge is what launching j adds: its learned charge below a typed
+// limit, else its needs.
+func localJobCharge(w Worker, j Job) float64 {
+	m := localJobMachine(w, j)
+	return hostNeed(&m, j.Spec.Needs.MemoryGB, chargedHostGB(&j))
+}
+
+func localJobMachine(w Worker, j Job) Machine {
 	m := w.Machine
 	if !j.Spec.Needs.cpuOnly() {
 		for _, d := range m.Devices {
 			if d.ID == firstDevice(j, m) {
-				m = d.machine(m)
-				break
+				return d.machine(m)
 			}
 		}
 	}
-	return hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	return m
 }
 func attemptCards(j Job, m Machine) []string {
 	if len(j.AllocatedDevices) > 1 {
@@ -1233,6 +1244,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
 				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 			}
+			m.Capabilities = append(m.Capabilities, measuredMemoryChargeCapability)
 			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
 				m.Capabilities = append(m.Capabilities, metalFootprintGuardCapability)
 			}

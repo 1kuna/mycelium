@@ -25,7 +25,11 @@ native output parity.
 ## Needs, targets and variants
 
 Describe needs and class, without a host or device selector. Leave memory out
-and Mycelium learns it; a declared limit keeps its containment meaning.
+and Mycelium learns it. A typed figure is a limit, not a reservation: it stays
+the job's enforced ceiling, and once the work has accepted runs on a CPU
+target the queue charges their peak plus spread instead, so typing a large
+figure no longer holds memory other work could use. Production keeps its
+typed figure as the charge.
 
 A non-production entry without `targets` runs on any machine type its platform,
 lock and `needs.tools` fit. A first failure on a type the recipe never succeeded

@@ -128,6 +128,8 @@ func (q *Queue) workerLiveMemory(m, w *Machine) float64 {
 // memoryCharge is the charge of one live attempt on target m whose enforced
 // envelope (declared or assigned sizes plus slack) is envelope. growth is the
 // part not yet resident, which live availability does not already exclude.
+// A typed job charged below its typed limit starts from its learned charge;
+// the typed envelope stays its ceiling.
 func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time) (charge, growth float64) {
 	if j == nil || m == nil {
 		return envelope, envelope
@@ -137,6 +139,11 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 	device := unifiedDeviceWork(j, m)
 	floor, lend := lendingFloor(j, m, s, now)
 	retained, observed := retainedCharge(j, s, now)
+	below := chargedBelowLimit(j)
+	base := envelope
+	if below {
+		base = hostNeed(m, j.Spec.Needs.MemoryGB, chargedHostGB(j))
+	}
 	// Actual high water is real occupancy: never discarded or bounded.
 	peak := max(known(s.peakGB), known(s.gb), known(s.footprintGB), observed)
 	forecast := sampleForecast(s, now)
@@ -145,7 +152,7 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 		forecast = max(forecast, learned(j).PeakHostGB, peak) + max(learned(j).PeakDeviceGB, s.devicePeakGB, s.deviceGB, deviceForecast(s, now))
 		peak += max(s.devicePeakGB, s.deviceGB)
 	}
-	rss := lend == lendByUse && m.MemoryEnforcement == darwinRSSGuardStatus
+	rss := (lend == lendByUse || below) && m.MemoryEnforcement == darwinRSSGuardStatus
 	overshoot := 0.0
 	if rss {
 		// RSS can pass the limit before the sampled guard stops it.
@@ -153,22 +160,23 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 	}
 	margin := drift + overshoot
 	adaptive := adaptiveMemoryCeilingGB(j, m)
-	ceiling := enforcedCeiling(j, m, envelope, adaptive, lend == lendByUse) + overshoot
+	ceiling := enforcedCeiling(j, m, envelope, adaptive, lend == lendByUse || below) + overshoot
 	// Measured use carries the snapshot-to-launch margin wherever the charge
-	// can sit below what the attempt reaches: lent memory and adaptive
-	// estimates, whose execution ceiling is wider. A declared envelope and a
-	// probe floor are not measurements and carry none.
+	// can sit below what the attempt reaches: lent memory, adaptive estimates
+	// and typed limits, whose execution ceiling is wider. A declared envelope
+	// and a probe floor are not measurements and carry none; nor does a
+	// learned charge, which already holds measured growth.
 	measured := max(peak, forecast)
-	if measured > 0 && (lend != lendNone || adaptive > 0) {
+	if measured > 0 && (lend != lendNone || adaptive > 0 || below) {
 		measured += margin
 	}
-	if lend == lendByUse {
+	if lend == lendByUse && !below {
 		floor += margin
 	}
 	if lend != lendNone {
 		charge = max(peak, min(max(floor, measured), ceiling))
 	} else {
-		charge = max(envelope, retained, peak, min(measured, ceiling))
+		charge = max(base, retained, peak, min(measured, ceiling))
 	}
 	credit := 0.0
 	if fresh {
@@ -180,7 +188,7 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 		}
 	}
 	growth = max(0, charge-credit)
-	if lend == lendByUse {
+	if lend == lendByUse || below {
 		growth = max(growth, min(margin, charge))
 	} else if device && lend == lendNone {
 		// Without a measured device share, the declared device size is still
@@ -249,16 +257,25 @@ func lendingFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float6
 // byUseFloor is the by-use lending check and its floor: the accepted peaks.
 // Unified CUDA work needs one card's fresh per-process device counter (RSS
 // and host-delta fallbacks are estimates); Metal work needs the footprint
-// guard and footprint samples; CPU work a declared size under a guard.
+// guard and footprint samples; CPU work a declared size under a guard. A
+// typed job admitted on its learned charge lends from that charge.
 func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64, bool) {
 	if j == nil || m == nil || j.StartedAt == nil || j.State != "running" && j.State != "stopping" {
 		return 0, false
 	}
 	n, e := j.Spec.Needs, j.MemoryEnvelope
-	if m.SharedHost != nil || e == nil || e.Learned == nil || e.Learned.Evidence < 1 || !s.freshAt(now) || !validMemoryValue(s.footprintGB) || !validMemoryValue(s.rateGB) {
+	if m.SharedHost != nil || e == nil || !s.freshAt(now) || !validMemoryValue(s.footprintGB) || !validMemoryValue(s.rateGB) {
 		return 0, false
 	}
-	l, cgroup := e.Learned, m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)"
+	cgroup := m.MemoryEnforcement == cgroupMemoryEnforcement
+	guarded := cgroup || m.MemoryEnforcement == darwinRSSGuardStatus
+	if chargedBelowLimit(j) {
+		return hostNeed(m, 0, chargedHostGB(j)), guarded && n.cpuOnly() && max(s.gb, s.footprintGB) > 0
+	}
+	if e.Learned == nil || e.Learned.Evidence < 1 {
+		return 0, false
+	}
+	l := e.Learned
 	peaks := l.PeakDeviceGB > 0 && validMemoryValue(l.PeakDeviceGB) && validMemoryValue(l.PeakHostGB) && len(j.AllocatedDevices) <= 1 && m.HostMemoryMeasured && n.HostMemoryGB > 0
 	switch {
 	case unifiedDeviceWork(j, m):
@@ -267,7 +284,6 @@ func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64,
 	case metalFootprintWork(j, m):
 		return l.PeakHostGB + l.PeakDeviceGB, m.MemoryEnforcement == darwinRSSGuardStatus && m.UnifiedMemory && peaks && n.Memory != "auto" && s.footprintGB > 0
 	}
-	guarded := cgroup || m.MemoryEnforcement == darwinRSSGuardStatus
 	return hostNeed(m, 0, l.HostGB), guarded && n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0 && validMemoryValue(l.HostGB) && l.HostGB > 0 && max(s.gb, s.footprintGB) > 0
 }
 
@@ -278,7 +294,7 @@ func enforcedCeiling(j *Job, m *Machine, envelope, adaptive float64, guarded boo
 	if adaptive > 0 {
 		return max(envelope, adaptive)
 	}
-	if guarded || envelope > 0 && j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+	if guarded || envelope > 0 && j.Spec.Needs.cpuOnly() && m.MemoryEnforcement == cgroupMemoryEnforcement {
 		return envelope
 	}
 	if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 {

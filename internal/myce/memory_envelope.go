@@ -188,6 +188,29 @@ type JobMemoryEnvelope struct {
 	// What learned sizing would reserve on this target, recorded at
 	// assignment for explicit figures too, so stale numbers show (#585).
 	Learned *LearnedMemory `json:"learned,omitempty"`
+	// A typed host figure is the limit, not the charge (MY-31). With accepted
+	// evidence of the work on a guarded target, admission charges
+	// ChargeHostGB, what the work reached plus measured uncertainty, and the
+	// worker still enforces LimitHostGB, the typed figure the job's needs
+	// keep. Zero when the needs are the charge.
+	ChargeHostGB float64 `json:"charge_host_gb,omitempty"`
+	LimitHostGB  float64 `json:"limit_host_gb,omitempty"`
+}
+
+// chargedBelowLimit says a started or assigned typed job is charged its
+// learned figure below the typed limit its needs keep.
+func chargedBelowLimit(j *Job) bool {
+	e := j.MemoryEnvelope
+	return e != nil && e.ChargeHostGB > 0 && e.ChargeHostGB < e.LimitHostGB && e.LimitHostGB == j.Spec.Needs.HostMemoryGB && j.Spec.Needs.Memory != "auto"
+}
+
+// chargedHostGB is the host figure admission charged j: the learned charge
+// below a typed limit, else the needs.
+func chargedHostGB(j *Job) float64 {
+	if chargedBelowLimit(j) {
+		return j.MemoryEnvelope.ChargeHostGB
+	}
+	return j.Spec.Needs.HostMemoryGB
 }
 
 type LearnedMemory struct {
@@ -296,21 +319,15 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	copy := *j
 	n := &copy.Spec.Needs
 	source, refusal, basis, evidence := "declared", "", "declared", 0
-	probeFloor := 0.0
-	if n.Memory == "auto" {
+	probeFloor, limit := 0.0, 0.0
+	if n.Memory != "auto" {
+		if charge, why, runs, ok := q.typedMemoryCharge(j, m); ok {
+			limit, n.HostMemoryGB = n.HostMemoryGB, charge
+			source, basis, evidence = why, "learned", runs
+		}
+	} else {
 		// Explicit optional member caps remain declarations to preserve.
-		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB)
-		for _, side := range copy.Spec.Run.Sidecars {
-			hostFloor = max(hostFloor, side.MemoryGB)
-		}
-		if e := qualifiedExtension(&copy, m); e != nil {
-			if v := e.variant(machineTarget(m)); v != nil {
-				hostFloor = max(hostFloor, v.Execution.Main.MemoryGB)
-				for _, side := range v.Execution.Sidecars {
-					hostFloor = max(hostFloor, side.MemoryGB)
-				}
-			}
-		}
+		hostFloor := memberHostFloor(&copy, m)
 		estimate := q.memoryEstimate(j, m)
 		refusal = estimate.refusal
 		if estimate.source == spentMemoryExploration {
@@ -512,6 +529,11 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		enforcement = "admission-only"
 	}
 	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
+	if limit > 0 {
+		// The candidate's needs carry the charge for admission; assignment
+		// restores the typed limit to the job (assign).
+		copy.MemoryEnvelope.ChargeHostGB, copy.MemoryEnvelope.LimitHostGB = n.HostMemoryGB, limit
+	}
 	if basis == "exploratory" && evidence == 0 && estimatePhysicalSource(source) {
 		copy.MemoryEnvelope.LaunchDriftGB = q.jobProbeDriftMarginGB(j, m)
 		copy.MemoryEnvelope.AvailableHostGB = m.FreeHostMemoryGB

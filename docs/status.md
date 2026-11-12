@@ -43,7 +43,9 @@ in `memory_envelope.host_gb`, with known need and member/retry floors in
 `probe_floor_gb`. A running probe's host admission charge can follow its fresh
 complete cgroup footprint plus observed growth and launch drift instead of
 reserving all initial headroom. Machine `host_memory.charged_gb` sums those
-charges; declared and learned allocations retain their full reservations.
+charges. A typed CPU job charged its learned figure (`charge_host_gb`) is
+charged by use the same way, up to its typed limit; other declared and learned
+allocations retain their full reservations.
 Two timed samples establish a growth horizon; the measured rate extends that
 forecast through the sample's age. Batch launches and model loads use the same
 exact-attempt charge. Missing counters, old workers,
@@ -1194,7 +1196,13 @@ attempts behind a learned figure or similar-work bound) also appear in status
 and waiting reasons (#585). At assignment the envelope's optional `learned`
 (`host_gb`, `device_gb`, `evidence`, `source`) records what learned sizing
 would reserve on that target, for explicit figures too, so a stale number
-shows beside its evidence. Job GET `resources` lists each dimension
+shows beside its evidence. A typed host figure on a CPU job is a limit, not a
+reservation: once the work has accepted runs on that target (or its family two,
+as below), the envelope's `basis` is `learned`, `charge_host_gb` is the charge
+(accepted peak plus measured spread) and `limit_host_gb` the typed figure the
+worker still enforces. Production, the shared interactive host, hosts without
+a cgroup v2 or Darwin RSS guard, OOM retries and older workers keep the typed
+figure as the charge. Job GET `resources` lists each dimension
 (`host_memory_gb`, `device_memory_gb` for GPU jobs, `cpu_cores`,
 `storage_bytes`) with `declared`, `learned`, `evidence`, `used` and `basis`;
 a missing value means none, not zero. `used` host memory is the charged
