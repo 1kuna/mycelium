@@ -45,7 +45,9 @@ func stopCLIObserverFixtures(root string) error {
 					continue
 				}
 				executable, err = os.Readlink(filepath.Join("/proc", fields[0], "exe"))
-				if os.IsNotExist(err) {
+				// Exited, or another user's suite on a shared host (EACCES): this
+				// suite's observers run as this user under root, so neither is ours.
+				if os.IsNotExist(err) || os.IsPermission(err) {
 					continue
 				}
 				if err != nil {

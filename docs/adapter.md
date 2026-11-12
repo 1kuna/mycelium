@@ -832,18 +832,15 @@ its check. Queue service operators must preserve these flags/environment in thei
 service configuration; this slice does not install a receiver or alter fleet services.
 
 `--health-storage-delay 5m` controls continuous storage unavailability before an
-alert (positive duration). Other kinds are `disk_below_guard`,
-`host_unhealthy_or_stale`, and `production_attempt_lost`; storage uses
-`checkpoint_store_unavailable`. A JSON event includes `delivery_id`, `kind`, `at`,
-`delivered: false`, the optional fixed `store` label, and the relevant `host`,
-`job_id`, `attempt` identities. Read
+alert (positive duration). The hook receives openings and closings of
+host-level problems only; its input contract and kind list are in
+[status](status.md#health-notifier-hook-contract). Read
 `health_alerts` in authenticated status for one record per open or recently
-closed problem and its delivery acknowledgements; the hook receives openings and
-closings only (see [status](status.md#incident-health-alerts)). Keep host names non-sensitive. Events omit raw errors and paths,
+closed problem of every kind and its delivery acknowledgements. Keep host names non-sensitive. Events omit raw errors and paths,
 and the hook environment excludes `MYCE_TOKEN`. Hook output is not logged.
 
-Condition alerts deduplicate continuously unhealthy episodes and rate-limit flaps
-for 15 minutes. Every lost production attempt has its own event. Transport is paced
+Condition alerts deduplicate continuously unhealthy episodes into one record per
+problem. Transport is paced
 to at most one hook per second, retries failures after one minute and retains the
 same delivery identity across restart/ambiguous delivery; receivers must deduplicate
 that identity. The 30-second hook budget also applies to `--check`. Keep hook

@@ -14,7 +14,7 @@ import (
 func TestHealthAlertDeliveryStatusWithoutNotifier(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.update(func() error {
-		q.appendHealthAlert(HealthAlert{Kind: "queue_overload"})
+		q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard", Host: "h"})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestHealthAlertDeliveryConfigurationClearsAfterRestart(t *testing.T) {
 	}
 	if err := q.update(func() error {
 		for i := 0; i < 257; i++ {
-			q.appendHealthAlert(HealthAlert{Kind: "queue_overload"})
+			q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard", Host: "h"})
 		}
 		return nil
 	}); err != nil {
@@ -121,7 +121,7 @@ func TestHealthAlertDeliveryFailedHookRemainsUnacknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := q.update(func() error {
-		q.appendHealthAlert(HealthAlert{Kind: "queue_overload"})
+		q.appendHealthAlert(HealthAlert{Kind: "disk_below_guard", Host: "h"})
 		return nil
 	}); err != nil {
 		t.Fatal(err)

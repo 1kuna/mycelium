@@ -675,9 +675,58 @@ func TestHostHealthQueueRestartDoesNotAlertEveryHost(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
+			clock.Advance(hostDegradedSustain(q.s.Machines[m.ID])) // sustained past its evidence window
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
 			if got := firings(q, "host_degraded"); got != map[bool]int{true: 0, false: 1}[reports] {
 				t.Fatalf("host_degraded alerts after grace: %d", got)
 			}
 		})
+	}
+}
+
+// #1404: a report arriving late briefly expires probe evidence. Admission
+// withholds at once, but host_degraded opens only when the cause outlasts the
+// host's measured evidence window, and the first clear observation closes it.
+func TestHostDegradedOpensOnlyWhenSustained(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("flapping-health", "fake")
+	probe := &ProbeObservation{PeriodSeconds: 1, CostSeconds: .001, ValidSeconds: 2.1}
+	report := func() {
+		m.HostHealth = &HostHealth{Probe: probe, AgeSeconds: .01, History: []HostHealthSample{{At: clock.Now()}}}
+		check(t, q, m, nil)
+	}
+	tick := func() {
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window := probe.freshness()
+	report()
+	for range 50 { // each report lands up to most of a window late
+		clock.Advance(window + 400*time.Millisecond)
+		tick()
+		if reason := q.hostHygieneReason(q.s.Machines[m.ID]); reason != "host_probe_unknown" {
+			t.Fatal("late report did not withhold admission", reason)
+		}
+		clock.Advance(window - 500*time.Millisecond)
+		tick()
+		report()
+	}
+	if got := firings(q, "host_degraded"); got != 0 {
+		t.Fatalf("flapping evidence opened host_degraded %d times", got)
+	}
+	clock.Advance(window + 400*time.Millisecond)
+	tick()
+	clock.Advance(window)
+	tick()
+	if records := alertsOf(q, "host_degraded"); len(records) != 1 || records[0].Count != 1 || records[0].State != "open" || records[0].Reason != "host_probe_unknown" {
+		t.Fatalf("sustained unknown evidence did not open one record: %+v", records)
+	}
+	report()
+	tick()
+	if records := alertsOf(q, "host_degraded"); len(records) != 1 || records[0].State != "closed" {
+		t.Fatalf("recovery did not close the record: %+v", records)
 	}
 }

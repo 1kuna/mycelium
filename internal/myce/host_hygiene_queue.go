@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 )
 
 func validHostDrainReason(reason string) bool {
@@ -31,6 +32,24 @@ func acceptHostHygiene(m *Machine) {
 	evaluateHostPressure(m)
 }
 
+// hostDegradedSustain is how long a host_degraded or host_unhealthy_or_stale
+// cause must hold before it alerts: the host's own measured evidence window
+// (the worker's probe validity, which covers its report period, cost and
+// measured delivery variation; the legacy signal age without one). A report
+// one window late briefly expired that evidence on every host: live r6.10
+// saved 12,463 host_probe_unknown openings in four days, median 3 s apart on
+// one host whose evidence lasts 4.6 s, and 5,878 host_health_unavailable
+// openings (#1404). A cause still present a full window later means the next
+// predicted report did not clear it. Admission still withholds at once; only
+// the alert waits. Recovery closes it on the first clear observation.
+func hostDegradedSustain(m *Machine) time.Duration {
+	var probe *ProbeObservation
+	if m.HostHealth != nil {
+		probe = m.HostHealth.Probe
+	}
+	return probe.freshness()
+}
+
 func (q *Queue) detectHostHygiene() {
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil {
@@ -44,7 +63,7 @@ func (q *Queue) detectHostHygiene() {
 		// days). The age is the queue's outage, not host harm. Admission still
 		// refuses; the alert waits for the report or the end of restart grace.
 		if reason != "host_probe_unknown" || !q.unreported[m.ID] || !q.inRestartGrace(now) {
-			q.observeHealth("hygiene/"+m.ID, reason != "", 0, HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
+			q.observeHealth("hygiene/"+m.ID, reason != "", hostDegradedSustain(m), HealthAlert{Kind: "host_degraded", Host: hostID(m), Reason: reason})
 		}
 		q.detectDiskExhaustionForecast(m)
 		if m.HostHealth == nil || len(m.HostHealth.History) == 0 {

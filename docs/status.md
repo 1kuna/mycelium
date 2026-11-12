@@ -125,7 +125,14 @@ after a strict-decoder rejection, preserving session and attempt custody.
 Drains withhold new command, model and preparation launches without changing
 operator maintenance, killing running work or discarding exact-attempt custody.
 `host_degraded` alerts carry the typed cause; existing stale-worker alerts carry
-`reason: host_silent`. Existing notifier episode/cooldown and delivery custody
+`reason: host_silent`. Admission withholds at once, but `host_degraded` and
+`host_unhealthy_or_stale` open only when the cause outlasts the host's own
+measured evidence window (the worker's probe `valid_seconds`, which covers its
+report period, cost and measured delivery variation; 15 s for evidence without
+one, including the first window after a queue restart). A report a moment late
+no longer opens an alert (live r6.10: 12,463 `host_probe_unknown` openings in
+four days, median 3 s apart on one host whose evidence lasts 4.6 s, #1404). The
+first clear observation closes it. Existing notifier episode/cooldown and delivery custody
 apply. Operator drains still require their owner's resume.
 
 Mount probes inspect configured root metadata without traversing or remounting
@@ -2146,7 +2153,15 @@ closing is kept until delivered. Clearing changes no admission, retry or
 release-custody decision.
 
 The optional queue `--health-notify` executable receives openings and closings
-only. An opening uses the record's `delivery_id`; a closing uses
+of host-level problems only (MY-49): `host_degraded`,
+`host_unhealthy_or_stale`, `worker_stale_flapping`, `worker_reports_missing`,
+`host_mount_unavailable`, `host_mount_action_required`,
+`host_disk_exhaustion_forecast`, `disk_below_guard`,
+`checkpoint_store_unavailable`, `xpu_repeated_teardown_faults` and
+`repeated_launch_refusals`. Every other kind (efficiency, recipe, job, project
+and queue-load findings, and advisory `host_mount_degraded`, which
+`host_mount_unavailable` escalates when real) stays in status only: it is not
+counted `pending` and expires on retention with or without a hook. An opening uses the record's `delivery_id`; a closing uses
 `delivery_id + "/closed"` with `state: closed`. A record that closed before its
 opening was delivered sends one closing notification carrying its count. A
 record that reopens before its closing was delivered continues the episode the
@@ -2163,6 +2178,25 @@ from queue acknowledgement failures. Restarting without a hook clears its
 historical configuration flag. Successful hook exit does not itself prove
 downstream thread execution. Job completion observers and their thread-bound
 notifiers are independent of this queue-level channel.
+
+### Health notifier hook contract
+
+- Configured with `myce queue --health-notify EXECUTABLE` or
+  `MYCE_HEALTH_NOTIFY`, on the queue host. The queue resolves it on `PATH`.
+- Check: at startup the queue runs `EXECUTABLE --check` with no stdin. A
+  nonzero exit refuses startup.
+- Delivery: one run per notification, no arguments, one JSON object on stdin
+  (the record's `health_alerts` fields): `kind`, `delivery_id`, `state`
+  (`open` or `closed`), `at` (episode opening), `first_at`, `last_at`,
+  `closed_at` (closings), `count`, `delivered`, and the subject identities that
+  apply (`host`, `machine`, `device`, `store`, `reason`, `mount`, `recovery`).
+  A closing's `delivery_id` ends in `/closed`. Fields are identities and fixed
+  codes, never raw worker text or paths.
+- Exit 0 acknowledges. Any other exit, or no exit within 30 seconds, retries
+  the same `delivery_id` after a minute, so the receiver deduplicates by it.
+  Deliveries are paced one per second, in record order.
+- Environment: the queue's, without `MYCE_TOKEN`. Stdout and stderr are not
+  logged. Keep receiver credentials in the hook's own private configuration.
 
 Upgrade from the previous release folds its per-firing rows into records on
 the first queue transaction, closed at their last firing, and rearms active

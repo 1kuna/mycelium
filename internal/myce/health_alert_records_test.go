@@ -52,7 +52,7 @@ func TestHealthAlertRepeatedFiringsUpdateOneRecord(t *testing.T) {
 func TestHealthAlertCloseReopenAndExpire(t *testing.T) {
 	q, clock := fixture(t)
 	q.s.Health.DeliveryConfigured = true
-	e := HealthAlert{Kind: "queue_overload"}
+	e := HealthAlert{Kind: "disk_below_guard", Host: "h"}
 	ack := func(want string, closing bool) {
 		t.Helper()
 		pending := pendingHealthDeliveries(q.s.Health.Events)
@@ -204,5 +204,27 @@ func TestHealthAlertStatusShowsGroupedOpenRecords(t *testing.T) {
 	groups := statusAlertGroups(q.s.Health.Conditions)
 	if len(groups) != 1 || groups[0].Count != 1 {
 		t.Fatalf("groups %+v", groups)
+	}
+}
+
+// MY-49: the notifier receives host-level problems only. Efficiency, recipe,
+// job and queue findings stay in status, are not counted pending, and expire
+// on retention even with a notifier configured.
+func TestHealthAlertNotifierReceivesHostLevelProblemsOnly(t *testing.T) {
+	q, clock := fixture(t)
+	q.s.Health.DeliveryConfigured = true
+	host := HealthAlert{Kind: "host_degraded", Host: "h", Reason: "host_memory_pressure"}
+	for _, e := range []HealthAlert{host, {Kind: "efficiency_regression", Host: "h", Reason: "stranded_demand"}, {Kind: "environment_recipe_failed", Host: "h"}, {Kind: "queue_overload"}} {
+		flapHealth(t, q, clock, "test/"+e.Kind, e, true)
+		flapHealth(t, q, clock, "test/"+e.Kind, e, false)
+	}
+	pending := pendingHealthDeliveries(q.s.Health.Events)
+	if len(pending) != 1 || pending[0].alert.Kind != host.Kind || q.healthAlertDelivery().Pending != 1 {
+		t.Fatalf("notifier receives %+v", pending)
+	}
+	clock.Advance(HealthAlertRetention)
+	flapHealth(t, q, clock, "test/none", HealthAlert{}, false)
+	if len(q.s.Health.Events) != 1 || q.s.Health.Events[0].Kind != host.Kind {
+		t.Fatalf("status-only records kept for a notifier that never receives them: %+v", q.s.Health.Events)
 	}
 }

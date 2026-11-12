@@ -66,11 +66,27 @@ type healthDelivery struct {
 	closing bool
 }
 
-// pendingHealthDeliveries sends openings and closings only. A record that closed
-// before its opening was delivered sends one closing notification.
+// healthNotifyKinds are the host-level problems the notifier receives (MY-49):
+// a host, its worker, its storage or its devices needs someone. Efficiency,
+// recipe, job, project and queue-load findings, and advisory mount slowness
+// (host_mount_unavailable escalates a real stall), stay in status only.
+var healthNotifyKinds = []string{
+	"host_degraded", "host_unhealthy_or_stale", "worker_stale_flapping", "worker_reports_missing",
+	"host_mount_unavailable", "host_mount_action_required", "host_disk_exhaustion_forecast",
+	"disk_below_guard", "checkpoint_store_unavailable", "xpu_repeated_teardown_faults", "repeated_launch_refusals",
+}
+
+func healthAlertNotifies(e HealthAlert) bool { return slices.Contains(healthNotifyKinds, e.Kind) }
+
+// pendingHealthDeliveries sends openings and closings of host-level problems
+// only. A record that closed before its opening was delivered sends one
+// closing notification.
 func pendingHealthDeliveries(events []HealthAlert) []healthDelivery {
 	var out []healthDelivery
 	for _, r := range events {
+		if !healthAlertNotifies(r) {
+			continue
+		}
 		d := healthDelivery{alert: r, episode: r.DeliveryID}
 		switch {
 		case r.State == "open" && !r.Delivered:
@@ -124,7 +140,7 @@ func (d HealthAlertDelivery) Summary() string {
 func (q *Queue) healthAlertDelivery() *HealthAlertDelivery {
 	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured, Pending: len(pendingHealthDeliveries(q.s.Health.Events))}
 	for _, e := range q.s.Health.Events {
-		if e.State == "" && !e.Delivered {
+		if e.State == "" && !e.Delivered && healthAlertNotifies(e) {
 			d.Pending++
 		}
 	}
@@ -249,7 +265,7 @@ func (q *Queue) reconcileHealthRecords() {
 	}
 	for i := len(current) - 1; i >= 0; i-- {
 		r := current[i]
-		if r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && !(r.Delivered && r.ClosedDelivered) {
+		if r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && healthAlertNotifies(r) && !(r.Delivered && r.ClosedDelivered) {
 			continue
 		}
 		edit()
@@ -370,7 +386,7 @@ func (q *Queue) detectHealth() {
 				cause = "worker_suspect"
 			}
 		}
-		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host, Reason: cause})
+		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), hostDegradedSustain(m), HealthAlert{Kind: "host_unhealthy_or_stale", Host: host, Reason: cause})
 		checkpointRootMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })
 		q.observeHealth("storage/"+m.ID, !intentional && (m.CheckpointUnavailable || checkpointRootMissing), delay, HealthAlert{Kind: "checkpoint_store_unavailable", Host: host})
 		for _, v := range m.DiskVolumes {
