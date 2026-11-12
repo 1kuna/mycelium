@@ -962,7 +962,7 @@ entries:
           command: [sh, -c, 'exec vllm serve "$MYCE_MODEL_LLM" --host 127.0.0.1 --port "$MYCE_SIDECAR_PORT" --served-model-name llm --max-model-len 8192 --gpu-memory-utilization 0.3 --no-enable-log-requests']
           port: 0
           readiness: {path: /health, timeout: 20m}
-          env: {HF_HUB_OFFLINE: '1', VLLM_NO_USAGE_STATS: '1', XDG_CACHE_HOME: .cache, VLLM_CACHE_ROOT: .cache/vllm}
+          env: {HF_HUB_OFFLINE: '1', VLLM_NO_USAGE_STATS: '1'}
           memory_gb: 10
     environment: {lock_file: env/requirements.txt, python: '3.12'}
     model_snapshots:
@@ -972,6 +972,16 @@ entries:
 
 `--gpu-memory-utilization` is a fraction of the device's total memory. On a
 unified-memory host that is the shared RAM pool, so keep it, plus the weights,
-within the declared memory. The readiness timeout covers weight loading and
-torch.compile on a cold start. Relative cache variables keep compile caches in
-the attempt folder rather than the worker user's home.
+within the declared memory. The readiness timeout covers weight loading,
+torch.compile and kernel JIT on a cold start.
+
+- **Compile caches.** vLLM, Triton and FlashInfer cache compiled kernels under
+  the worker user's home by default, so later runs on that host start faster.
+  To keep a run self-contained instead, point `XDG_CACHE_HOME`,
+  `VLLM_CACHE_ROOT`, `TRITON_CACHE_DIR` and `FLASHINFER_WORKSPACE_BASE` at
+  relative paths; every attempt then compiles again.
+- **FP8 KV cache.** A checkpoint that asks for an FP8 KV cache (for example
+  ModelOpt NVFP4) makes FlashInfer JIT-compile its decode kernel on newer GPUs.
+  JIT needs a CUDA compiler: set `CUDA_HOME` and `PATH` to the host's CUDA
+  toolkit, or pass `--kv-cache-dtype bfloat16`. Note that `auto` follows the
+  checkpoint and stays FP8.
