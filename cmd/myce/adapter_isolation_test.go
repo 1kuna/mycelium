@@ -19,6 +19,18 @@ func TestAdapterDeclaredIsolation(t *testing.T) {
 	if err != nil || p.Isolation != "unsandboxed" || p.Reason != reason {
 		t.Fatal("flat entry lost isolation", p, err)
 	}
+	// MY-54: the advanced section is the authored home; the deprecated
+	// top-level form above yields the same frozen entry for one release.
+	nested := strings.Replace(cpuAdapterYAML("source"), "    source:", "    advanced: {isolation: unsandboxed, reason: "+reason+"}\n    source:", 1)
+	advanced, err := decodeAdapter([]byte(nested))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, frozenNested, err := adapterProfile(advanced, "work")
+	_, frozenFlat, flatErr := adapterProfile(a, "work")
+	if err != nil || flatErr != nil || string(frozenNested) != string(frozenFlat) {
+		t.Fatal("advanced and top-level placement froze differently", err, flatErr)
+	}
 	// Exercise native entry conversion and the actual extension author schema.
 	e := a.Entries["work"]
 	e.Version, e.Purpose = "1", "native isolation fixture"

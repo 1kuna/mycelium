@@ -259,6 +259,7 @@ func statusJobInputs(job *Job) Job {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
+	j.Advanced = AdvancedStatus(job.Spec)
 	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Preemptible: j.Spec.Preemptible, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}

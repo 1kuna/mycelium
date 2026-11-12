@@ -239,7 +239,7 @@ func cpuWait(j *Job, machines map[string]*Machine) *Hold {
 		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) {
 			continue
 		}
-		if !j.Spec.Needs.cpuOnly() && len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if !j.Spec.Needs.cpuOnly() && !j.Spec.backendAllows(m.GPU) {
 			continue
 		}
 		if cpuFits(j, m) {

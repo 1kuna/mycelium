@@ -316,6 +316,7 @@ func convertAdapterProfile(root, path string, keepTargets bool) (string, string,
 		}
 		notes = append(notes, "targets "+strings.Join(dropped, ", ")+" dropped: a non-production entry runs wherever its needs fit (--keep-targets pins them)")
 	}
+	nestAdvancedKeys(entry)
 	if err := validateConvertedEntry(entry); err != nil {
 		problems = append(problems, err)
 	}
@@ -411,10 +412,28 @@ func convertAdapterExtension(root, folder string, targets []myce.ExecutionTarget
 			delete(entry, field)
 		}
 	}
+	nestAdvancedKeys(entry)
 	if err := validateConvertedEntry(entry); err != nil {
 		problems = append(problems, err)
 	}
 	return e.Name, entry, problems
+}
+
+// Converted entries write settings with good defaults under advanced (MY-54).
+func nestAdvancedKeys(entry map[string]any) {
+	advanced, _ := entry["advanced"].(map[string]any)
+	for _, key := range myce.AdvancedKeys() {
+		if value, ok := entry[key]; ok {
+			if advanced == nil {
+				advanced = map[string]any{}
+			}
+			advanced[key] = value
+			delete(entry, key)
+		}
+	}
+	if advanced != nil {
+		entry["advanced"] = advanced
+	}
 }
 
 func validateConvertedEntry(entry map[string]any) error {
@@ -426,6 +445,9 @@ func validateConvertedEntry(entry map[string]any) error {
 	d := yaml.NewDecoder(bytes.NewReader(data))
 	d.KnownFields(true)
 	if err := d.Decode(&converted); err != nil {
+		return err
+	}
+	if _, err := converted.FoldAdvanced(); err != nil {
 		return err
 	}
 	if err := validateAdapterEntry(converted); err != nil {

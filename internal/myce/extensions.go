@@ -475,6 +475,12 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 }
 
 func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, string) {
+	if m.GPU == "cpu" && j.State == "queued" && j.Spec.cpuFallback() {
+		if c := cpuFallbackCandidate(j, m); c != nil {
+			return []*Job{c}, ""
+		}
+		return nil, "platform"
+	}
 	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" || j.MemoryEnvelope != nil && j.MemoryEnvelope.Machine == m.ID && j.MemoryEnvelope.Device == m.Device {
 		return []*Job{j}, ""
 	}

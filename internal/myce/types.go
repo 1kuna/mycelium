@@ -208,6 +208,12 @@ type Spec struct {
 
 	ResumeCompatibility *ResumeCompatibility `json:"resume_compatibility,omitempty" yaml:"resume_compatibility,omitempty"`
 	Preemptible         bool                 `json:"preemptible,omitempty" yaml:"preemptible,omitempty"`
+
+	// AllowCPUFallback is the wire form of advanced.allow_cpu_fallback (MY-54).
+	AllowCPUFallback bool `json:"allow_cpu_fallback,omitempty" yaml:"-"`
+	// Advanced is the authoring section for settings with good defaults.
+	// FoldAdvanced moves it onto the flat fields; stored specs never carry it.
+	Advanced *Advanced `json:"advanced,omitempty" yaml:"advanced,omitempty"`
 }
 
 func (s Spec) Validate() error {
@@ -216,6 +222,14 @@ func (s Spec) Validate() error {
 	}
 	if s.AuthoringOrigin != "" && s.Origin() != s.AuthoringOrigin {
 		return reject("job_execution_invalid", errors.New("authoring_origin must be a supported reader label"))
+	}
+	if s.Advanced != nil {
+		if _, err := s.FoldAdvanced(); err != nil {
+			return err
+		}
+	}
+	if err := validateCPUFallback(s); err != nil {
+		return rejectFieldRule("job_platform_invalid", err)
 	}
 	if err := validateWallTime(s); err != nil {
 		return reject("job_execution_invalid", err)
@@ -492,6 +506,12 @@ type Job struct {
 	LedgerEntries          []JobLedgerEntry `json:"ledger_entries,omitempty"`
 	// Read-only diagnostic retained when execution payloads are redacted.
 	Isolation string `json:"isolation,omitempty"`
+	// Advanced is derived on read: the advanced settings that differ from
+	// their defaults (MY-54). Never persisted.
+	Advanced *Advanced `json:"advanced,omitempty"`
+	// CPUFallbackFrom keeps the authored GPU needs while an opted-in attempt
+	// runs on a CPU target; a requeue restores them (MY-54).
+	CPUFallbackFrom *ResourceNeeds `json:"cpu_fallback_from,omitempty"`
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.
 	SubmissionReused       bool             `json:"submission_reused,omitempty"`
 	LastHealthAlertAttempt int              `json:"last_health_alert_attempt,omitempty"`

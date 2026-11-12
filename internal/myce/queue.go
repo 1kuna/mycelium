@@ -840,6 +840,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		log.Printf("submission rejected code=%s reason=%q", code, reason)
 	}()
+	// Direct API callers may send the MY-54 authoring form; store it flat.
+	if _, err := s.FoldAdvanced(); err != nil {
+		return nil, err
+	}
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
 			return nil, err
@@ -1231,6 +1235,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.WaitingSince = q.clock.Now()
 	q.s.Front++
 	j.Front = q.s.Front
+	restoreCPUFallback(j)
 	j.State = "queued"
 	if maintenance {
 		now := q.clock.Now()
@@ -3148,6 +3153,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j = q.touchJob(selected.ID)
 	j.PreemptionPlacement = nil
 	j.Spec.Needs = selected.Spec.Needs
+	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	if e := j.MemoryEnvelope; e != nil && e.LimitHostGB > 0 && e.ChargeHostGB == j.Spec.Needs.HostMemoryGB {
 		// Admission used the learned charge; the typed figure stays the limit.
