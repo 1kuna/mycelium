@@ -28,7 +28,7 @@ func (q *Queue) clearPreemptionPlacements(machine, session string) {
 // Reuse exact retained obligations; timers and projected headroom prove nothing.
 func (q *Queue) preemptionReleasesPending(j *Job) bool {
 	p := j.PreemptionPlacement
-	if p == nil || len(p.Releases) == 0 {
+	if p == nil || len(p.Releases) == 0 || q.preemptionTargetLostDisk(j) {
 		return false
 	}
 	for _, o := range q.hostObligations(q.executionHost(p.Machine)) {
@@ -37,6 +37,17 @@ func (q *Queue) preemptionReleasesPending(j *Job) bool {
 		}
 	}
 	return false
+}
+
+// A planned target that no longer has the disk room this job needs cannot
+// repay the teardown; any host with room may take the job instead.
+func (q *Queue) preemptionTargetLostDisk(j *Job) bool {
+	p := j.PreemptionPlacement
+	if p == nil {
+		return false
+	}
+	owner := q.s.Machines[p.Machine]
+	return owner != nil && q.diskHeadroomReason(j, owner) != ""
 }
 
 func (q *Queue) retainPlacementReleases(p *placementPlan, demand *Job) {
@@ -78,9 +89,7 @@ func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
 	if owner == nil || owner.Gone || owner.Session != p.Session {
 		return true
 	}
-	// A target that no longer has the disk room this job needs cannot repay
-	// the teardown; any host with room may take the job instead.
-	if q.diskHeadroomReason(j, owner) != "" {
+	if q.preemptionTargetLostDisk(j) {
 		return true
 	}
 	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
