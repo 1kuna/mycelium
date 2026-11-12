@@ -39,6 +39,9 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
 
 # Actual check-in admission decisions are exercised by the admission wait tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/admission_decision.go'] = ('admission_wait_test.go',)
+# The Linux owner probe and its constructor are exercised by the owner-signal tests.
+for source in ('owner_signals_linux', 'owner_signals_linux_probe'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('owner_signals_test.go',)
 # Cold-load readiness alerts are reviewed through the readiness regressions.
 SUPPLEMENTAL_CONSUMERS['internal/myce/readiness_health.go'] = ('readiness_review_test.go',)
 # The one memory rule's charge, room and release regressions (#990).
