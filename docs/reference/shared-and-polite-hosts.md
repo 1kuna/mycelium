@@ -76,12 +76,10 @@ concurrency, not watts, GPU percentage, fan speed or noise.
   the measured thermal recovery span. Unknown heat holds work. The recognized sensor list is intentionally
   small; unsensed accelerators and these margins are not hardware-qualified.
 - **WSL2:** owner activity, power and physical heat must come from the **Windows
-  host**, never the Linux guest. The [per-user Windows host bridge](windows-host-bridge.md)
-  supplies authenticated host idle/power over mirrored-network IPv4 loopback,
-  with verified single-console-session coverage or explicit unknowns. Missing,
-  stopped or unauthenticated helpers never fall back to guest signals. Windows
-  CPU thermal coverage remains **unknown**. An externally powered desktop
-  explicitly joined with `--daily-use --desktop` may use nominal measured GPU
+  host**, never the Linux guest. The Windows host bridge that supplied them was
+  removed (MY-49) until a Windows machine joins, so a WSL2 worker reports owner
+  idle, power and heat as **unknown** and never falls back to guest signals.
+  An externally powered desktop explicitly joined with `--daily-use --desktop` may use nominal measured GPU
   heat, with status **CPU thermal coverage waived for desktop**. A detected
   battery vetoes the waiver; without `--desktop`, CPU coverage stays required.
   Use `--daily-use --laptop` for a laptop; the flags are mutually exclusive.

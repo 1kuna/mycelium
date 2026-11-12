@@ -163,39 +163,6 @@ func TestValueLastResortFairnessAndHigherTier(t *testing.T) {
 	})
 }
 
-func TestValueLastResortSimulationPair(t *testing.T) {
-	for _, file := range []string{"baseline.yaml", "fleet.yaml"} {
-		t.Run(file, func(t *testing.T) {
-			var fleet SimFleet
-			var work SimWorkload
-			root := "../../examples/sim/last-resort-hosts/"
-			if err := ReadSimYAML(root+file, &fleet); err != nil {
-				t.Fatal(err)
-			}
-			if err := ReadSimYAML(root+"workload.yaml", &work); err != nil {
-				t.Fatal(err)
-			}
-			r := runSimTest(t, fleet, work, 259.2)
-			if r.Completed != 2 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
-				t.Fatal("paired fixture changed liveness or production wait", r)
-			}
-			firstHost, overflowHost := "small", "ordinary"
-			if file == "fleet.yaml" {
-				firstHost, overflowHost = overflowHost, firstHost
-			}
-			nearSim(t, r.Machines[firstHost].BusyHours*3600, 200)
-			nearSim(t, r.Machines[overflowHost].BusyHours*3600, 40)
-			latest := 0.0
-			for _, batch := range r.Batches {
-				if batch.FinishedSeconds == nil {
-					t.Fatal("unfinished batch")
-				}
-				latest = max(latest, *batch.FinishedSeconds)
-			}
-			nearSim(t, latest, 200)
-		})
-	}
-}
 func TestValueCPUAndAccelerator(t *testing.T) {
 	q, _, small, big := valueFleet(t)
 	cpu := submit(t, q, cpuSpec(1, 1))
@@ -486,32 +453,6 @@ func TestValueDistinctDeviceTiers(t *testing.T) {
 	}
 }
 
-func TestValueSimulation(t *testing.T) {
-	f := SimFleet{Machines: []SimMachine{
-		{Name: "a-scarce", Host: "scarce", Platform: "fake", MemoryGB: 64, HostGB: 64, Speed: 1},
-		{Name: "z-small", Host: "small", Platform: "fake", MemoryGB: 8, HostGB: 16, Speed: 1},
-	}}
-	general := simTestStream("ordinary", "experiment", 0, 100, 1)
-	general.Batch = 2
-	accelerator := simTestStream("accelerator", "experiment", 1, 50, 1)
-	accelerator.MemoryGB = 32
-	accelerator.Batch = 2
-	urgent := simTestStream("urgent", "production", 150, 5, 1)
-	urgent.Batch = 2
-	r := runSimTest(t, f, simTestWork(general, accelerator, urgent), 400)
-	if r.Failed != 0 || r.Unfinished != 0 || r.Completed != 3 || r.Production.P95 != 0 || r.IdleWaitingHours != 0 {
-		t.Fatal("shared simulator planner regression", r)
-	}
-	latest := 0.0
-	for _, batch := range r.Batches {
-		if batch.FinishedSeconds == nil {
-			t.Fatal("unfinished batch")
-		}
-		latest = max(latest, *batch.FinishedSeconds)
-	}
-	nearSim(t, latest, 200)
-}
-
 func TestValueCPUProductionHold(t *testing.T) {
 	q, _, small, big := valueFleet(t)
 	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true}, big.HostID: {ProductionHold: true}}); err != nil {
@@ -679,29 +620,6 @@ func TestValueTemporaryAvailabilityKeepsScarcity(t *testing.T) {
 	}
 }
 
-func TestValueSimulationCPUStreams(t *testing.T) {
-	var fleet SimFleet
-	var work SimWorkload
-	if err := ReadSimYAML("../../examples/sim/value-placement-cpu/fleet.yaml", &fleet); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReadSimYAML("../../examples/sim/value-placement-cpu/workload.yaml", &work); err != nil {
-		t.Fatal(err)
-	}
-	r := runSimTest(t, fleet, work, 864)
-	if r.Completed != 4 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
-		t.Fatal("mixed CPU/accelerator regression", r)
-	}
-	latest := 0.0
-	for _, batch := range r.Batches {
-		if batch.FinishedSeconds == nil {
-			t.Fatal("unfinished batch")
-		}
-		latest = max(latest, *batch.FinishedSeconds)
-	}
-	nearSim(t, latest, 201)
-}
-
 // Round 2 steered only J1: every CPU peer independently claimed the same head,
 // so the accelerator took J2 while four CPU hosts remained idle.
 func TestValueGlobalPlanClaimsDistinctCPUJobs(t *testing.T) {
@@ -764,34 +682,6 @@ func TestValuePlanningWorkCounts(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestValueSimulationIdleCPUHosts(t *testing.T) {
-	var fleet SimFleet
-	var work SimWorkload
-	if err := ReadSimYAML("../../examples/sim/value-placement-idle-cpus/fleet.yaml", &fleet); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReadSimYAML("../../examples/sim/value-placement-idle-cpus/workload.yaml", &work); err != nil {
-		t.Fatal(err)
-	}
-	r := runSimTest(t, fleet, work, 864)
-	if r.Completed != 3 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
-		t.Fatal("idle CPU fleet regression", r)
-	}
-	var acceleratorFinish float64
-	latest := 0.0
-	for name, batch := range r.Batches {
-		if batch.FinishedSeconds == nil {
-			t.Fatal("unfinished batch", name)
-		}
-		latest = max(latest, *batch.FinishedSeconds)
-		if strings.HasPrefix(name, "accelerator") {
-			acceleratorFinish = *batch.FinishedSeconds
-		}
-	}
-	nearSim(t, latest, 200)
-	nearSim(t, acceleratorFinish, 102)
 }
 
 func TestValueBackgroundCopyDoesNotBlockDispatch(t *testing.T) {

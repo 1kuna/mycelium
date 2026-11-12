@@ -184,7 +184,7 @@ uses normalized allocated GPU-seconds, including batch preparation and model
 loads charged once to their owner. CPU work uses allocated core-seconds in a separate family, with the same
 decay and weighted planner. GPU work also reserves host cores/RAM for admission. Optional all-class project concurrency caps live
 in the revision-CAS policy; legacy experiment concurrency and GPU memory-share
-caps retain their scope. Status and the simulator use the dispatch planner.
+caps retain their scope. Status uses the dispatch planner.
 This is admission fairness, with no same-tier interruption or bounded-wait
 promise for indefinite allocations. Strict higher tiers may starve lower ones.
 
@@ -217,7 +217,7 @@ its host and device capacities are never summed. Unknown value gets no invented
 ranking; prefer a known fitting alternative and explain an unknown-only choice.
 
 The shared planner applies this ordering to currently admissible targets across
-pulls, status and simulation. Owner activity, stale reports, maintenance and
+pulls and status. Owner activity, stale reports, maintenance and
 other temporary occupancy do not redefine measured supply or value; only
 immediate admission excludes those hosts. Compute scarcity once per read-only
 planning pass and discard the projection on state changes. Never reserve or
@@ -225,7 +225,7 @@ wait for a cheaper host: an idle scarce host runs the work when cheap hosts are
 busy, lost, owner-active, recovering or otherwise inadmissible. Attempt and
 cleanup custody remain authoritative across restarts. Status exposes the chosen
 host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
-inventory and simulator evidence establish laptop behavior, not native fleet
+inventory evidence establishes laptop behavior, not native fleet
 qualification. The explicit speed/deadline tradeoff is later work.
 
 ## Scarce-host yield
@@ -785,7 +785,7 @@ all GPU targets until exact cleanup; do not invent a component.
 
 ### Placement, protocol and compatibility
 
-Use one shared planner for jobs, models, status and simulation. Enumerate
+Use one shared planner for jobs, models and status. Enumerate
 (machine, device) GPU targets and (machine, no device) CPU targets. Qualification,
 engines, pins and readiness are exact-device identities; a neighbor's check never
 qualifies the selected card. Disk weights may share caches, not engine custody.
@@ -2333,10 +2333,8 @@ No automatic quality-tolerance policy is added; #145 remains eligibility first.
 
 Laptop acceptance includes the research arithmetic, short tails, daily-owner
 exclusion, exact affected-piece retries/gather and unchanged undeclared decisions.
-`myce sim` compares the existing mixed-load example with declared synthetic curves
-against the same unsplit and naive-split arrivals, policy and seeds. A makespan
-gain with exactly unchanged production p95 is mandatory before integration.
-Synthetic curves are assumptions, not fleet measurements.
+The `myce sim` comparison of declared synthetic curves against unsplit and
+naive-split arrivals was removed with the simulator (MY-49); Git history keeps it.
 
 ### Per-piece accepted-output dependencies
 <a id="per-piece-accepted-output-dependencies-175-approved-2026-10-25"></a>

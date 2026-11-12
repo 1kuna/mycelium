@@ -353,30 +353,6 @@ func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
 	}
 }
 
-func TestTierFairnessSimulatorUsesPolicy(t *testing.T) {
-	t.Parallel()
-	a := simTestStream("atlas", "production", 0, 1, 32)
-	v := simTestStream("verso", "experiment", 0, 1, 32)
-	w := simTestWork(a, v)
-	p := examplePriorityPolicy()
-	p.Projects = map[string]ProjectPolicy{"atlas": {Weight: 3}, "verso": {Weight: 1}}
-	w.Policy = &p
-	r := runSimTest(t, simTestFleet(1), w, 24)
-	nearSim(t, r.Projects["atlas"].GPUHours, 18.0/3600)
-	nearSim(t, r.Projects["verso"].GPUHours, 6.0/3600)
-	nearSim(t, r.IdleWaitingHours, 0)
-	// Arbitrary batch classes use the same catchall planner.
-	a.Priority = ""
-	a.Class = "training"
-	v.Priority = ""
-	v.Class = "preview"
-	w = simTestWork(a, v)
-	w.Policy = &PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "shared", Selectors: []string{"*/*"}}}}
-	r = runSimTest(t, simTestFleet(1), w, 24)
-	nearSim(t, r.Projects["atlas"].GPUHours, 12.0/3600)
-	nearSim(t, r.Projects["verso"].GPUHours, 12.0/3600)
-}
-
 func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.T) {
 	t.Parallel()
 	q, c, m := modelFixture(t)

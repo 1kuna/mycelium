@@ -135,7 +135,7 @@ class ShardTests(unittest.TestCase):
         import sys
         with TemporaryDirectory() as directory:
             selection = Path(directory) / 'selection'
-            selection.write_text('mycelium/internal/view\t.*\n@upgrade-compat\t\n')
+            selection.write_text('mycelium/internal/probeguard\t.*\n@upgrade-compat\t\n')
             with patch.object(sys, 'argv', ['scheduler', 'full', '4', str(selection)]), \
                  patch.object(scheduler, 'run', return_value=0) as run:
                 self.assertEqual(scheduler.main(), 0)
@@ -147,7 +147,7 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(Path(argv[1]).name, 'gate-progress.py')
             self.assertEqual(Path(argv[-2]).name, 'upgrade-compat.py')
             self.assertEqual(argv[-1], 'run')
-            self.assertEqual(entries[1:], ['mycelium/internal/view\t.*'])
+            self.assertEqual(entries[1:], ['mycelium/internal/probeguard\t.*'])
             self.assertEqual(environment['GOMAXPROCS'], '1')
 
     def test_full_nested_builds_inherit_shard_budget_and_quick_keeps_allocation(self):
@@ -155,7 +155,7 @@ class ShardTests(unittest.TestCase):
         import sys
         with TemporaryDirectory() as directory:
             selection = Path(directory) / 'selection'
-            selection.write_text('mycelium/internal/view\t.*\n')
+            selection.write_text('mycelium/internal/probeguard\t.*\n')
             with patch.dict(os.environ, GOFLAGS='-p=18', GOMAXPROCS='18'):
                 with patch.object(sys, 'argv', ['scheduler', 'full', '18', str(selection)]), \
                      patch.object(scheduler, 'run', return_value=0) as run:

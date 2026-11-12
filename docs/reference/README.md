@@ -18,7 +18,6 @@ its procedure.
 | [Worker caches](worker-caches.md) | Worker scratch retention, file and environment caches, environment catalog |
 | [Models](models.md) | Model storage, servers, joint measurement, engine interval history |
 | [Shared and polite hosts](shared-and-polite-hosts.md) | Daily-use hyphae, OS owner signals, shared interactive host profile |
-| [Windows host bridge](windows-host-bridge.md) | WSL2 owner signals from Windows: build, install, connect, undo |
 | [Queue disk I/O](queue-io.md) | Disk contention evidence, SQLite limits, systemd I/O weights |
 | [Completion observer](completion-observer.md) | Observer supervision, upgrade, legacy recovery, delivery acceptance |
 | [Migration archive](migrations.md) | Retired migration policy and parked storage guards |

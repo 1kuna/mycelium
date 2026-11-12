@@ -167,8 +167,8 @@ login/reboot or app-launch behavior.
 
 WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or
 mirrored networking with appropriate private-network and Hyper-V firewall rules.
-Mycelium does not change WSL networking or firewall configuration. Windows host owner-presence and power signals use the
-[host bridge](windows-host-bridge.md). Joining runs no throughput benchmark
+Mycelium does not change WSL networking or firewall configuration. A WSL2
+worker reports Windows owner-presence, power and heat as unknown. Joining runs no throughput benchmark
 unless explicitly requested; see the benchmark section below.
 
 Explicit `MYCE_QUEUE` plus `MYCE_TOKEN` joining continues to work as before,
