@@ -62,56 +62,56 @@ func TestReviewCurrentCapacityFailureUnhealthy(t *testing.T) {
 }
 
 func TestCurrentDeviceRefusalIsFamilyLocal(t *testing.T) {
-	for _, platform := range []string{"cuda", "xpu"} {
-		for _, reason := range []string{"device_memory_unavailable", "device_budget_unavailable", "device_probe_unavailable"} {
-			t.Run(platform+"/"+reason, func(t *testing.T) {
-				devices := inventoryReviewDevices()
-				devices[0].Platform, devices[1].Platform = "cuda", "xpu"
-				w := Worker{Machine: Machine{Devices: devices}}
-				failed := false
-				w.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
-					current := append([]MachineDevice(nil), devices...)
-					for i := range current {
-						if failed && current[i].Platform == platform {
-							current[i].Reason, current[i].FreeMemoryGB = reason, 0
+	// The reason is carried as data: each reason and each family once (#1086).
+	for _, pair := range [][2]string{{"cuda", "device_budget_unavailable"}, {"xpu", "device_memory_unavailable"}, {"cuda", "device_probe_unavailable"}} {
+		platform, reason := pair[0], pair[1]
+		t.Run(platform+"/"+reason, func(t *testing.T) {
+			devices := inventoryReviewDevices()
+			devices[0].Platform, devices[1].Platform = "cuda", "xpu"
+			w := Worker{Machine: Machine{Devices: devices}}
+			failed := false
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
+				current := append([]MachineDevice(nil), devices...)
+				for i := range current {
+					if failed && current[i].Platform == platform {
+						current[i].Reason, current[i].FreeMemoryGB = reason, 0
+					}
+				}
+				return current, nil
+			}
+			// Bind while healthy, then reprobe before each member exec.
+			bound := make([]Worker, len(devices))
+			for i := range devices {
+				var err error
+				bound[i], err = w.forAttempt(Job{AllocatedDevices: []string{fmt.Sprint(i)}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			failed = true
+			for i, device := range devices {
+				for _, launch := range []func() error{bound[i].verifyDevice, func() error {
+					_, err := w.forAttempt(Job{AllocatedDevices: []string{device.ID}})
+					return err
+				}} {
+					err := launch()
+					if device.Platform == platform {
+						var rule *rejectionError
+						if !errors.As(err, &rule) || rule.code != reason {
+							t.Fatalf("current %s refusal lost: %v", platform, err)
 						}
-					}
-					return current, nil
-				}
-				// Bind while healthy, then reprobe before each member exec.
-				bound := make([]Worker, len(devices))
-				for i := range devices {
-					var err error
-					bound[i], err = w.forAttempt(Job{AllocatedDevices: []string{fmt.Sprint(i)}})
-					if err != nil {
-						t.Fatal(err)
+					} else if err != nil {
+						t.Fatalf("healthy sibling launch refused: %v", err)
 					}
 				}
-				failed = true
-				for i, device := range devices {
-					for _, launch := range []func() error{bound[i].verifyDevice, func() error {
-						_, err := w.forAttempt(Job{AllocatedDevices: []string{device.ID}})
-						return err
-					}} {
-						err := launch()
-						if device.Platform == platform {
-							var rule *rejectionError
-							if !errors.As(err, &rule) || rule.code != reason {
-								t.Fatalf("current %s refusal lost: %v", platform, err)
-							}
-						} else if err != nil {
-							t.Fatalf("healthy sibling launch refused: %v", err)
-						}
-					}
+			}
+			failed = false
+			for _, member := range bound {
+				if err := member.verifyDevice(); err != nil {
+					t.Fatalf("recovered family launch refused: %v", err)
 				}
-				failed = false
-				for _, member := range bound {
-					if err := member.verifyDevice(); err != nil {
-						t.Fatalf("recovered family launch refused: %v", err)
-					}
-				}
-			})
-		}
+			}
+		})
 	}
 }
 

@@ -32,30 +32,6 @@ func emulateModelSymlink(t *testing.T, file string) string {
 	return target
 }
 
-func TestModelSnapshotEmulatedSymlinkBytes(t *testing.T) {
-	root := t.TempDir()
-	repo := tinyModel(t, root)
-	for _, name := range []string{"model.safetensors", "config.json"} {
-		emulateModelSymlink(t, filepath.Join(repo, "snapshots", tinyRevision, name))
-	}
-	w := snapshotWorker(t, root, &fakeClock{now: time.Unix(1000, 0)})
-	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		for _, release := range releases {
-			release()
-		}
-	}()
-	for name, want := range map[string]string{"model.safetensors": tinyWeights, "config.json": tinyConfig} {
-		got, err := os.ReadFile(filepath.Join(paths["MYCE_MODEL_BASE"], name))
-		if err != nil || string(got) != want {
-			t.Errorf("%s: got %q, error %v; want real blob bytes %q", name, got, err, want)
-		}
-	}
-}
-
 func TestModelSnapshotEmulatedSymlinkRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name, predicate string

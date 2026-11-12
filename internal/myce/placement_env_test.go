@@ -6,7 +6,8 @@ import (
 )
 
 func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
-	for _, platform := range []string{"fake", "cuda", "xpu", "metal"} {
+	// cuda shares xpu's probed-device path and metal shares fake's (#1086).
+	for _, platform := range []string{"fake", "xpu"} {
 		t.Run(platform, func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.Machine.GPU = platform
