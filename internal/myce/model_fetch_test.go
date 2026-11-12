@@ -202,9 +202,10 @@ func TestModelFetchCorruptPartialQuarantined(t *testing.T) {
 }
 
 func TestModelFetchDirectorySyncFailureRetry(t *testing.T) {
-	for _, failure := range []string{"staging-create", "bundle-create", "before-rename", "destination-after-rename", "staging-after-rename"} {
+	for _, failure := range []string{"root-create", "staging-create", "bundle-create", "before-rename", "destination-after-rename", "staging-after-rename"} {
 		t.Run(failure, func(t *testing.T) {
-			root := modelFetchRoot(t)
+			existing := modelFetchRoot(t)
+			root := filepath.Join(existing, "models")
 			relative := "bundle/nested/model.bin"
 			dest := filepath.Join(root, relative)
 			requests := 0
@@ -219,8 +220,14 @@ func TestModelFetchDirectorySyncFailureRetry(t *testing.T) {
 				partials, _ := filepath.Glob(filepath.Join(root, ".myce-fetch-*", "*.partial"))
 				_, published := os.Stat(dest)
 				_, bundle := os.Stat(filepath.Dir(dest))
+				// Existing ancestors may be unreadable inside a job sandbox (#1471).
+				if rel, err := filepath.Rel(existing, dir); err != nil || strings.HasPrefix(rel, "..") {
+					t.Errorf("synced existing ancestor %s above the created model root", dir)
+				}
 				match := false
 				switch failure {
+				case "root-create":
+					match = dir == existing
 				case "staging-create":
 					match = len(stages) == 1 && dir == root
 				case "bundle-create":
@@ -242,6 +249,9 @@ func TestModelFetchDirectorySyncFailureRetry(t *testing.T) {
 				t.Fatalf("directory sync error = %v", err)
 			}
 			assertModelFetchUnpublished(t, root, relative)
+			if _, err := os.Stat(root); failure == "root-create" && !os.IsNotExist(err) {
+				t.Fatalf("root whose parent sync failed was kept: %v", err)
+			}
 			if requests > 0 {
 				assertModelFetchBytes(t, modelFetchPartial(t, root), "weights")
 			}
