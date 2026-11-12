@@ -95,8 +95,8 @@ func validatePlainFanOut(s Spec) error {
 	if f.MaxConcurrency != 0 || f.ShareXPU {
 		return errors.New("plain-command pieces are ordinary jobs; omit max_concurrency and share_xpu")
 	}
-	if s.After != nil || s.Run.Docker || s.Run.Workdir != "" || s.Kind != "" || s.Program != nil || s.Workload != nil || s.ExtensionCheck != nil || len(s.Inputs) > 0 {
-		return errors.New("plain-command pieces cannot combine with after, Docker, workdir, kind/program, workload, checks or NAS inputs")
+	if s.After != nil || s.Run.Workdir != "" || s.Kind != "" || s.Program != nil || s.Workload != nil || s.ExtensionCheck != nil || len(s.Inputs) > 0 {
+		return errors.New("plain-command pieces cannot combine with after, workdir, kind/program, workload, checks or NAS inputs")
 	}
 	keys := map[string]bool{}
 	for _, p := range f.Pieces {

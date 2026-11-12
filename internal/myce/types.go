@@ -211,6 +211,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.Run.AsksForDocker() {
+		return reject("job_docker_retired", ErrDockerRetired)
+	}
 	if s.AuthoringOrigin != "" && s.Origin() != s.AuthoringOrigin {
 		return reject("job_execution_invalid", errors.New("authoring_origin must be a supported reader label"))
 	}
@@ -324,7 +327,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	// A missing figure is the queue's call (learned_memory policy), not a
@@ -334,19 +337,6 @@ func (s Spec) Validate() error {
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
 		return reject("job_memory_invalid", errors.New("needs.host_memory_gb must be finite and nonnegative"))
-	}
-	if err := s.validateDockerGroup(); err != nil {
-		return reject("job_docker_invalid", err)
-	}
-	if s.Run.Docker {
-		for name := range s.Run.Env {
-			if dockerDeviceEnvironment(name) {
-				return reject("job_docker_invalid", fmt.Errorf("Docker run.env cannot override worker device selector %s", name))
-			}
-		}
-		if _, err := dockerRunArgs(s.Run.Command); err != nil {
-			return reject("job_docker_invalid", err)
-		}
 	}
 	p := s.Needs.Platform
 	modes := 0
@@ -641,14 +631,14 @@ type Machine struct {
 	CPUIsolation           string                 `json:"cpu_isolation,omitempty"`
 	sharedInputClaims      map[string]SharedInput
 	cpuLedger              bool
-	CPUReserveCores        int           `json:"cpu_reserve_cores,omitempty"`
-	CPUBudgetCores         int           `json:"cpu_budget_cores,omitempty"`
-	EffectiveCPUCores      int           `json:"effective_cpu_cores"`
-	CPUInUseCores          int           `json:"cpu_in_use_cores"`
-	FreeCPUCores           int           `json:"free_cpu_cores"`
-	CPUCapacityReason      string        `json:"cpu_capacity_reason,omitempty"`
-	DockerCause            *RuntimeCause `json:"docker_cause,omitempty"`
-	BenchmarkPending       retiredField  `json:"benchmark_pending,omitzero"` // Previous release only (MY-49).
+	CPUReserveCores        int          `json:"cpu_reserve_cores,omitempty"`
+	CPUBudgetCores         int          `json:"cpu_budget_cores,omitempty"`
+	EffectiveCPUCores      int          `json:"effective_cpu_cores"`
+	CPUInUseCores          int          `json:"cpu_in_use_cores"`
+	FreeCPUCores           int          `json:"free_cpu_cores"`
+	CPUCapacityReason      string       `json:"cpu_capacity_reason,omitempty"`
+	DockerCause            retiredField `json:"docker_cause,omitzero"`      // Previous release only (MY-49).
+	BenchmarkPending       retiredField `json:"benchmark_pending,omitzero"` // Previous release only (MY-49).
 
 	CachedSharedInputs  []string             `json:"cached_shared_inputs,omitempty"`
 	SharedInputEvidence *SharedInputEvidence `json:"shared_input_evidence,omitempty"`
@@ -677,9 +667,9 @@ type Machine struct {
 	MemoryEnforcement           string                `json:"memory_enforcement,omitempty"`
 	HostMemoryBudgetGB          float64               `json:"host_memory_budget_gb,omitempty"`
 	MemoryCeilingSlackGB        float64               `json:"memory_ceiling_slack_gb,omitempty"`
-	DockerCleanup               string                `json:"docker_cleanup,omitempty"`
-	Disabled                    string                `json:"disabled,omitempty"`    // Status-only queue maintenance projection.
-	LastResort                  bool                  `json:"last_resort,omitempty"` // Status-only queue placement policy.
+	DockerCleanup               retiredField          `json:"docker_cleanup,omitzero"` // Previous release only (MY-49).
+	Disabled                    string                `json:"disabled,omitempty"`      // Status-only queue maintenance projection.
+	LastResort                  bool                  `json:"last_resort,omitempty"`   // Status-only queue placement policy.
 	HostID                      string                `json:"host_id,omitempty"`
 	HostAvailableMemoryGB       float64               `json:"host_available_memory_gb"`      // Check-in reading; deprecated in status (host_memory).
 	FreeHostMemoryGB            float64               `json:"free_host_memory_gb,omitempty"` // Deprecated in status (host_memory.room_gb).
@@ -828,7 +818,7 @@ type AttemptReport struct {
 	ApplicationProgress    *ProgressReport   `json:"application_progress,omitempty"`
 
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
-	DockerCause       *RuntimeCause      `json:"docker_cause,omitempty"`
+	DockerCause       retiredField       `json:"docker_cause,omitzero"` // Previous release only (MY-49).
 	Execution
 	InputsStagedAt *time.Time `json:"inputs_staged_at,omitempty"`
 	Session        string     `json:"session"`

@@ -150,7 +150,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].Model < usage[j].Model })
 	plan := []CopyTask{}
-	busy := q.dockerHold(hostID(m)).Kind != "" || q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
+	busy := q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
 	for _, j := range q.liveJobs() {
 		if j.Machine == m.ID && batchReservesCapacity(j) {
 			busy = true

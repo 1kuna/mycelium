@@ -43,13 +43,6 @@ func installSetting[T any](name, field, usage string, at func(*ServiceConfig) *T
 				f.Float64Var(p, name, *p, usage)
 			case *time.Duration:
 				f.DurationVar(p, name, *p, usage)
-			case **time.Duration:
-				value := DefaultContainerRetention
-				if *p != nil {
-					value = **p
-				}
-				*p = &value
-				f.DurationVar(*p, name, value, usage)
 			default:
 				panic("unsupported installer flag type")
 			}
@@ -162,7 +155,6 @@ func InstallSettings() []InstallSetting {
 		installSetting("enrollment", "Enrollment", "record exact-session enrollment and runner smoke", func(c *ServiceConfig) *bool { return &c.Enrollment }, installAny[bool]),
 		installSetting("allow-deviceless", "AllowDeviceless", "allow CPU/fake test worker", func(c *ServiceConfig) *bool { return &c.AllowDeviceless }, installAny[bool]),
 		installSetting("device", "Device", "physical GPU selector", func(c *ServiceConfig) *string { return &c.Device }, installAny[string]),
-		installSetting("docker-host", "DockerEndpoint", "opt in to managed Docker at this endpoint (empty disables Docker)", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),
 
 		installPath("joining-file", "JoiningFile", "private joining invitation", func(c *ServiceConfig) *string { return &c.JoiningFile }, false),
 		installNASSetting(),
@@ -248,12 +240,6 @@ func InstallSettings() []InstallSetting {
 		installPath("db", "DB", "queue SQLite path", func(c *ServiceConfig) *string { return &c.DB }, false),
 		installPath("project-config", "ProjectConfig", "project policy YAML", func(c *ServiceConfig) *string { return &c.ProjectConfig }, false),
 		installPath("host-config", "HostConfig", "host policy YAML", func(c *ServiceConfig) *string { return &c.HostConfig }, false),
-		installSetting("container-retention", "ContainerRetention", "acknowledged stopped container retention", func(c *ServiceConfig) **time.Duration { return &c.ContainerRetention }, func(v *time.Duration) error {
-			if v != nil {
-				return installNonnegativeDuration(*v)
-			}
-			return nil
-		}),
 		installSetting("file-retention", "FileRetention", "terminal job input/result retention", func(c *ServiceConfig) *time.Duration { return &c.FileRetention }, installNonnegativeDuration),
 		installSetting("file-store-bytes", "FileStoreBytes", "authoritative files plus upload reservations limit", func(c *ServiceConfig) *int64 { return &c.FileStoreBytes }, installBytes),
 		installContext(installSetting("file-store-production-reserve", "FileStoreProductionReserve", "file-store bytes reserved for production-tier submissions (zero disables)", func(c *ServiceConfig) *int64 { return &c.FileStoreProductionReserve }, installAny[int64]), func(c ServiceConfig) error {
@@ -312,6 +298,8 @@ func InstallSettings() []InstallSetting {
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
 		{Field: "FileCacheBytesExplicit"},
+		// Retired with managed Docker (MY-49): read from older configs, dropped on install.
+		{Field: "DockerEndpoint"}, {Field: "ContainerRetention"},
 		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }},
 		{Field: "Version", validate: func(c ServiceConfig) error {
 			if c.Version < 0 || c.Version > 1 {

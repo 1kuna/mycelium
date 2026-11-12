@@ -17,7 +17,6 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		Disabled:           "planned host maintenance",
 		MemoryEnforcement:  "memory ceiling not enforced on this host (requires Linux cgroup v2)",
 		HostMemoryBudgetGB: 5,
-		DockerCleanup:      "cleanup unconfirmed: start",
 		GPU:                "cuda",
 		Device:             "0",
 		TotalMemoryGB:      60, // 21.5 GiB in use.
@@ -29,7 +28,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 		CopyReports:        []CopyReport{{Model: "embed", State: "copying", Bytes: 50, Total: 100}},
 	}
 	snapshot := Snapshot{
-		Holds:    []Hold{scopedHold("docker_cleanup_operator_action", "b70", "b70: Docker cleanup unconfirmed; operator action required (myce resolve-docker)", true)},
+		Holds:    []Hold{scopedHold("host_disabled", "b70", "host b70 disabled by operator; operator action required", true)},
 		Jobs:     []*Job{job},
 		Machines: []*Machine{machine},
 		LoadedModels: []ModelSlot{
@@ -54,8 +53,8 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	for _, want := range []string{
 		"disabled by operator", "Mycelium", "spark", "cuda", "21.5", "38.5", "qwen", "torch-cuda",
 		"memory ceiling not enforced on this host (requires Linux cgroup v2)", "Host ceiling budget", "5 GiB",
-		"2 calls", "load warning", "cache read failed", "Docker cleanup unconfirmed: start",
-		"index backlog", "atlas is ahead of its fair share; verso goes first", "operator action required (myce resolve-docker)",
+		"2 calls", "load warning", "cache read failed",
+		"index backlog", "atlas is ahead of its fair share; verso goes first", "operator action required",
 		`<svg class="chart"`, `data-project="atlas"`, `setInterval(refresh, 5000)`,
 	} {
 		if !strings.Contains(html, want) {

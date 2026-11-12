@@ -26,7 +26,7 @@ func hostTelemetryCommand(ctx context.Context, args []string, probe myce.Machine
 	f.StringVar(&c.HostRef, "host-ref", "", "opaque host alias; never a host name/address")
 	f.IntVar(&c.QueuePID, "queue-pid", 0, "local queue daemon PID")
 	f.IntVar(&c.WorkerPID, "worker-pid", 0, "local worker daemon PID")
-	f.BoolVar(&c.NativeWorkerOnly, "native-worker-only", false, "assert no managed Docker attempts outside the worker tree; otherwise external attribution is missing")
+	f.BoolVar(&c.NativeWorkerOnly, "native-worker-only", false, "assert every managed attempt runs inside the worker tree; otherwise external attribution is missing")
 	duration := f.Duration("duration", 0, "required finite capture duration, including probe time")
 	interval := f.Duration("interval", 0, "required sampling cadence; use the same cadence in baseline and candidate")
 	f.Func("card", "opaque card alias=physical PCI identity; repeat for every card", func(s string) error {

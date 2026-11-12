@@ -120,18 +120,18 @@ class ProgressTests(unittest.TestCase):
             remove = progress.custody.remove_scratch
             inspected = []
             def inspect_and_remove(scratch):
-                for key in ('GATE_TEST_CLI_BINARY', 'GATE_TEST_DOCKER_BINARY'):
+                for key in ('GATE_TEST_CLI_BINARY',):
                     private = Path(scratch) / 'tmp' / key.lower()
                     self.assertEqual(private.read_bytes(), source.read_bytes())
                     self.assertTrue(os.access(private, os.X_OK))
                     self.assertNotEqual(private.stat().st_ino, source.stat().st_ino)
                     inspected.append((key, str(private)))
                 remove(scratch)
-            with (patch.dict(os.environ, GATE_TEST_CLI_BINARY=str(source), GATE_TEST_DOCKER_BINARY=str(source)),
+            with (patch.dict(os.environ, GATE_TEST_CLI_BINARY=str(source)),
                   patch.object(progress.custody, 'remove_scratch', side_effect=inspect_and_remove)):
                 code, _, _ = self.execute(root, [(20, b'')])
             self.assertEqual(code, 0)
-            self.assertEqual(len(inspected), 2)
+            self.assertEqual(len(inspected), 1)
             for key, private in inspected:
                 self.assertEqual(self.launched_environment[key], private)
                 self.assertFalse(Path(private).exists())

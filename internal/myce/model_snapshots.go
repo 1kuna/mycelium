@@ -47,7 +47,6 @@ type ModelLimits struct {
 const (
 	modelSnapshotsCapability = "model_snapshots_v1"
 	modelHubDirectory        = "hub"
-	dockerModelRoot          = "/myce/models"
 	defaultModelCacheBytes   = 100 << 30
 )
 
@@ -338,19 +337,6 @@ func (w *Worker) nativeInputPaths(j Job, paths map[string]string) {
 	}
 	slices.Sort(w.nativeSharedInputs)
 	slices.Sort(w.nativeModelInputs)
-}
-
-// Docker sees the same verified directory at a fixed container path.
-func dockerModelMounts(j Job, paths map[string]string) []dockerFileMount {
-	var mounts []dockerFileMount
-	for name := range j.Spec.ModelSnapshots {
-		key := "MYCE_MODEL_" + strings.ToUpper(name)
-		if source := paths[key]; source != "" {
-			mounts = append(mounts, dockerFileMount{Type: "bind", Source: source, Destination: dockerModelRoot + "/" + name})
-		}
-	}
-	slices.SortFunc(mounts, func(a, b dockerFileMount) int { return strings.Compare(a.Destination, b.Destination) })
-	return mounts
 }
 
 func init() {

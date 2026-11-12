@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,17 +229,17 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	cancel()
 	<-done
 	{
-		s := dockerJob().Spec
-		s.Priority = "production"
+		s := spec("production")
+		s.AllowedMachines = []string{"retained"}
 		submit(t, q, s)
-		m := dockerMachine("retained", "fake")
+		m := machine("retained", "cuda")
 		assigned := check(t, q, m, nil).Job
 		if assigned == nil {
 			t.Fatal("no attempt")
 		}
-		cause := &RuntimeCause{Operation: "inspect", Class: "timeout"}
+		cause := &RuntimeCause{Operation: "kill", Class: "timeout"}
 		r := result(assigned, false)
-		r.ReleasePending = true
+		r.Interrupted, r.ReleasePending = true, true
 		r.CleanupCause = cause
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
@@ -260,7 +261,9 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 			t.Fatal("burst evicted unique incident history")
 		}
 		c.Advance(time.Second)
-		if err := q.Complete(r); err != nil {
+		// A replayed report of the same attempt may be refused as stale; either
+		// way it must not alert again.
+		if err := q.Complete(r); err != nil && !errors.Is(err, ErrStale) {
 			t.Fatal(err)
 		}
 		if firings(q, "production_attempt_lost") != 1 || q.s.Jobs[assigned.ID].LastHealthAlertAttempt != assigned.Attempt {
@@ -296,57 +299,6 @@ func TestHealthAlertHealthyAndPlannedProduction(t *testing.T) {
 			}
 			if firings(q, "production_attempt_lost") != 0 {
 				t.Fatal("healthy/planned production alerted")
-			}
-		})
-	}
-}
-
-func TestHealthAlertDockerPendingTimeout(t *testing.T) {
-	for _, pending := range []bool{false, true} {
-		t.Run(map[bool]string{false: "observation heartbeat", true: "cleanup result"}[pending], func(t *testing.T) {
-			q, c := fixture(t)
-			s := spec("production")
-			s.Run.Command = nil
-			s.Run.Docker = true
-			s.Run.Command = dockerJob().Spec.Run.Command
-			submit(t, q, s)
-			m := dockerMachine("docker", "cuda")
-			assigned := check(t, q, m, nil).Job
-			if assigned == nil {
-				t.Fatal("no attempt")
-			}
-			if err := q.Started(result(assigned, false)); err != nil {
-				t.Fatal(err)
-			}
-			c.Advance(time.Second)
-			cause := &RuntimeCause{Operation: "inspect", Class: "timeout"}
-			if pending {
-				r := result(assigned, false)
-				r.ReleasePending = true
-				r.CleanupCause = cause
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				for i := 0; i < 2; i++ {
-					c.Advance(time.Second)
-					m.DockerCleanup = "observation pending"
-					m.DockerCause = cause
-					report := AttemptReport{Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}, Session: assigned.Session, Started: true, DockerCause: cause}
-					if _, err := q.Checkin(Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m, Attempts: []AttemptReport{report}}); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			events := alertsOf(q, "production_attempt_lost")
-			if len(events) != 1 || events[0].Attempt != assigned.Attempt {
-				t.Fatalf("pending timeout: %+v", events)
-			}
-			if q.s.Jobs[assigned.ID].ReleaseConfirmed {
-				t.Fatal("alert released custody")
 			}
 		})
 	}

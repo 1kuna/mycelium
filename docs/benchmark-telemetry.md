@@ -42,8 +42,8 @@ readings marked missing, then exits with an error. Retain that exit status; a
 partial receipt is not a completed capture. Sensor cancellation kills the owned
 process group; inherited output pipes have an additional one-second drain bound.
 
-Only assert `--native-worker-only` when the worker has no managed Docker
-attempts outside its process tree. Otherwise omit it: external attribution is
+Only assert `--native-worker-only` when the worker has no managed attempts
+outside its process tree. Otherwise omit it: external attribution is
 explicitly missing, while independent RAM/RSS/card readings remain available.
 The sampler does not inspect container state to invent this assertion.
 

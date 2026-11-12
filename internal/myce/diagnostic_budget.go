@@ -10,10 +10,32 @@ import (
 	"unsafe"
 )
 
+// boundedTail keeps the newest limit bytes, including one arbitrarily long line.
+type boundedTail struct {
+	data  []byte
+	limit int
+}
+
+func (b *boundedTail) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.limit <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
+	} else {
+		if extra := len(b.data) + len(p) - b.limit; extra > 0 {
+			b.data = append(b.data[:0], b.data[extra:]...)
+		}
+		b.data = append(b.data, p...)
+	}
+	return n, nil
+}
+
 // Streams reserve bytes as they arrive. Reserving all measured headroom for an
 // idle event subscription would starve the same attempt's exit/stderr capture.
 type diagnosticTail struct {
-	dockerTail
+	boundedTail
 	dir      string
 	reserve  func(uint64) (int64, func())
 	releases []func()
@@ -41,7 +63,7 @@ func (b *diagnosticTail) Write(p []byte) (int, error) {
 		}
 		b.limit += int(grant)
 	}
-	return b.dockerTail.Write(p)
+	return b.boundedTail.Write(p)
 }
 
 // A progress parser retains only its incomplete line. Exhaustion suppresses that
@@ -92,7 +114,7 @@ func (b *diagnosticTail) release() {
 	b.releases = nil
 }
 
-// A process-wide reservation includes concurrent progress, Docker and failure
+// A process-wide reservation includes concurrent progress and failure
 // captures. Available RAM excludes live allocations; outstanding grants cover
 // their not-yet-allocated peak too. Unknown measurements withhold optional copies.
 type diagnosticReservations struct {

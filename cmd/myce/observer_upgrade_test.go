@@ -21,7 +21,7 @@ import (
 
 func TestObserverNewerCLIHandoff(t *testing.T) {
 	t.Setenv("MYCE_DEV_SESSION_ROOT", t.TempDir())
-	next := filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "observer-next", "myce-dev-test")
+	next := filepath.Join(os.Getenv("MYCE_TEST_ROOT"), "observer-next", "myce-dev-test")
 	if err := os.MkdirAll(filepath.Dir(next), 0700); err != nil {
 		t.Fatal(err)
 	}

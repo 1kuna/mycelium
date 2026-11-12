@@ -117,7 +117,7 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 	}
 	sample := hostMemorySample{gb: 2, footprintGB: 2, growthGB: 2, rateGB: 20, at: clock.Now()}
 	clock.Advance(3 * time.Second)
-	for _, kind := range []string{"unenforced", "RSS", "Docker", "auto", "GPU"} {
+	for _, kind := range []string{"unenforced", "RSS", "auto", "GPU"} {
 		t.Run(kind, func(t *testing.T) {
 			job, machine := j, m
 			switch kind {
@@ -125,8 +125,6 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 				machine.MemoryEnforcement = ""
 			case "RSS":
 				machine.MemoryEnforcement = darwinRSSGuardStatus
-			case "Docker":
-				job.Spec.Run.Docker = true
 			case "auto":
 				job.Spec.Needs.Memory = "auto"
 			case "GPU":
@@ -134,8 +132,8 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 			}
 			charge, pending := memoryCharge(&job, &machine, 6.125, sample, clock.Now())
 			wantCharge, wantPending := 64.0, 62.0
-			if kind == "Docker" || kind == "auto" {
-				// A cgroup or Docker limit contains these CPU attempts, so the
+			if kind == "auto" {
+				// A cgroup limit contains these CPU attempts, so the
 				// forecast is bounded by that ceiling: charge and growth alike.
 				wantCharge, wantPending = 6.125, 4.125
 			}

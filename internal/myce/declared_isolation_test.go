@@ -434,15 +434,13 @@ func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 func TestNativeIsolationObservationPreservesPolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode, reason, want string
-		docker                   bool
 	}{
 		{name: "plain-default", want: "unsandboxed: " + plainNativeIsolationReason},
 		{name: "sandboxed", mode: "sandboxed"},
 		{name: "authored-exception", mode: "unsandboxed", reason: "requires host IPC", want: "unsandboxed: requires host IPC"},
-		{name: "docker", docker: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			j := Job{State: "succeeded", Spec: Spec{Isolation: tc.mode, Reason: tc.reason, Run: RunSpec{Command: []string{"true"}, Docker: tc.docker}}}
+			j := Job{State: "succeeded", Spec: Spec{Isolation: tc.mode, Reason: tc.reason, Run: RunSpec{Command: []string{"true"}}}}
 			for pass := 0; pass < 3; pass++ {
 				j = statusJobValue(&j)
 				data, err := json.Marshal(j)

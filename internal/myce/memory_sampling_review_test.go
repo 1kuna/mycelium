@@ -311,23 +311,3 @@ func TestMemorySamplingXPUKernelSizes(t *testing.T) {
 		})
 	}
 }
-
-func TestMemorySamplingDockerRestartDoesNotLearnPostExit(t *testing.T) {
-	_, clock := fixture(t)
-	a, err := fakeCeilings(t).create("attempt-recovered", 4<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.fs = &memorySamplingFS{}
-	d := &dockerAttempt{memory: a, clock: clock, dir: t.TempDir(), state: dockerExecution{Identity: "recovered", CgroupParent: "/synthetic", MainFinished: true, MemoryLimitBytes: 4 << 30}}
-	if err := d.releaseEnvelope(); err != nil {
-		t.Fatal(err)
-	}
-	r := dockerOutcome(d.state, Result{}, nil)
-	if !r.Success {
-		t.Fatalf("known main outcome changed: %+v", r)
-	}
-	if r.MemoryPeak != nil && r.MemoryPeak.HostGB != nil && !r.MemoryPeak.Constrained {
-		t.Fatalf("post-exit Docker reading became a learned peak: %+v", r.MemoryPeak)
-	}
-}

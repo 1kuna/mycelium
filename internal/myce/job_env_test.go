@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // A worker started inside a login session carries agent sockets, desktop buses
@@ -254,35 +253,4 @@ func TestJobEnvironmentAllowlistModelServer(t *testing.T) {
 		env[k] = v
 	}
 	requireJobEnv(t, "server", env, map[string]string{"MODEL_ENV": "kept", "CUDA_VISIBLE_DEVICES": "2"})
-}
-
-func TestJobEnvironmentAllowlistDockerContainer(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	setWorkerSession(t)
-	j := dockerJob()
-	j.Spec.Run.Env = map[string]string{"RUN_ENV": "kept"}
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	data, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if !strings.Contains(string(data), "--env RUN_ENV=kept") || !strings.Contains(string(data), "--env MYCE_JOB_ID="+j.ID) {
-		t.Fatalf("container env missing: %s", data)
-	}
-	// Containers only receive explicit --env values, never the CLI's environment.
-	for k := range workerSessionEnv {
-		if strings.Contains(string(data), k) {
-			t.Errorf("container create mentions worker %s", k)
-		}
-	}
-	p.stop(c.Now(), time.Second, false)
-	c.advance(time.Second)
-	p.enforceGrace(c.Now())
-	select {
-	case <-p.done:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("cleanup did not finish")
-	}
 }

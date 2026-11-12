@@ -2,7 +2,6 @@ package myce
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 )
@@ -41,26 +40,6 @@ func TestAttemptOutcomeCause(t *testing.T) {
 	}
 }
 
-func TestDockerStandaloneKillDiagnostic(t *testing.T) {
-	// A standalone container has no group observation to populate AmbiguousKill.
-	for _, stopIntent := range []bool{false, true} {
-		// #149: stop intent can exist even when the kill reply timed out.
-		r := dockerOutcome(dockerExecution{ExitCode: 137, InfrastructureStop: stopIntent,
-			CleanupCause: &RuntimeCause{Operation: "kill", Class: "timeout"}}, Result{}, nil)
-		if r.Success || r.Interrupted || !strings.Contains(r.Error, "SIGKILL; interruption cause unconfirmed") {
-			t.Fatal(r)
-		}
-	}
-}
-
-func TestDockerKnownMemoryFailureIsNotAmbiguous(t *testing.T) {
-	const failure = "Docker memory ceiling not enforced"
-	r := dockerOutcome(dockerExecution{ExitCode: 137, MemoryFailure: failure}, Result{}, nil)
-	if r.Success || r.Interrupted || r.Error != failure {
-		t.Fatal(r)
-	}
-}
-
 func TestAttemptOutcomeRecordedInfrastructure(t *testing.T) {
 	for _, kind := range []string{launchRefused, launchFailed, environmentFailed, foreignPort, "payload-stderr"} {
 		for _, invalid := range []bool{false, true} {
@@ -94,12 +73,5 @@ func TestAttemptOutcomeMissingDeliveryTimestamp(t *testing.T) {
 	}})
 	if r.Interrupted {
 		t.Fatal("untimestamped delivery became infrastructure evidence", r)
-	}
-}
-
-func TestDockerRecoveryErrorIsNotObservationEvidence(t *testing.T) {
-	r := dockerOutcome(dockerExecution{ExitCode: 143}, Result{}, errDockerRecovery)
-	if r.Success || r.Interrupted {
-		t.Fatal("recovery error substituted for a durable observation-loss fact", r)
 	}
 }

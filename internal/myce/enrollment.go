@@ -144,7 +144,7 @@ func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservatio
 	if !p.RunnerSmoke {
 		return incomplete("runner smoke missing")
 	}
-	if len(m.UnavailableRoots) > 0 || m.InventoryReason != "" || m.MemoryError != "" || m.CPUCapacityReason != "" || m.HostMemoryError != "" || m.CheckpointUnavailable || m.DockerCleanup != "" {
+	if len(m.UnavailableRoots) > 0 || m.InventoryReason != "" || m.MemoryError != "" || m.CPUCapacityReason != "" || m.HostMemoryError != "" || m.CheckpointUnavailable {
 		return incomplete("components, storage, cleanup or host policy are unavailable")
 	}
 	if len(m.Devices) != len(receipt.Devices) {

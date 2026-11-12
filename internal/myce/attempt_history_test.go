@@ -139,8 +139,6 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 		path, reason string
 	}{
 		{"release-only", "hypha waiting: on battery"},
-		{"heartbeat-other", "machine leaving"},
-		{"heartbeat-empty", "making room for production job"},
 		{"stop-expiry", "making room for production job"},
 		{"machine-quiet", "hypha waiting: on battery"},
 		{"priority-preemption", "making room for production job"},
@@ -148,15 +146,7 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
-			s := spec("experiment")
-			heartbeat := strings.HasPrefix(tc.path, "heartbeat-")
-			if heartbeat {
-				// Docker release-only ack settles custody; heartbeat omission
-				// then advances the stop, exercising both omission branches.
-				m = dockerMachine(m.ID, m.GPU)
-				s.Run = dockerJob().Spec.Run
-			}
-			submit(t, q, s)
+			submit(t, q, spec("experiment"))
 			first := check(t, q, m, nil).Job
 			if first == nil {
 				t.Fatal("missing assignment")
@@ -174,7 +164,7 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if tc.path == "release-only" || tc.path == "priority-preemption" || heartbeat {
+			if tc.path == "release-only" || tc.path == "priority-preemption" {
 				r := result(first, false)
 				r.ReleaseOnly = true
 				if err := q.Complete(r); err != nil {
@@ -182,14 +172,6 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 				}
 			}
 			switch tc.path {
-			case "heartbeat-other", "heartbeat-empty":
-				c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Recovering: true}
-				if tc.path == "heartbeat-other" {
-					c.Attempts = []AttemptReport{{Execution: Execution{ID: "unknown", Attempt: 1}, Session: m.Session}}
-				}
-				if _, err := q.Checkin(c); err != nil {
-					t.Fatal(err)
-				}
 			case "stop-expiry":
 				clock.Advance(job(t, q, first.ID).StopAt.Sub(clock.Now()))
 				check(t, q, observer(), nil)

@@ -17,16 +17,29 @@ import (
 // RunSpec is the existing worker wire contract. Composition lowers into it;
 // there is no separate extension executor.
 type RunSpec struct {
-	MemoryGB         float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
-	Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
-	DockerNetwork    string            `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
-	DockerMemoryGB   float64           `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`
-	DockerMemorySwap *float64          `json:"docker_memory_swap,omitempty" yaml:"docker_memory_swap,omitempty"`
-	DockerSidecars   []DockerSidecar   `json:"docker_sidecars,omitempty" yaml:"docker_sidecars,omitempty"`
-	Command          []string          `json:"command" yaml:"command"`
-	Workdir          string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
-	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	Sidecars         []NativeSidecar   `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
+	MemoryGB float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
+	Command  []string          `json:"command" yaml:"command"`
+	Workdir  string            `json:"workdir,omitempty" yaml:"workdir,omitempty"`
+	Env      map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	Sidecars []NativeSidecar   `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
+
+	// Managed Docker was retired on 2026-11-12 (MY-49). These fields are decoded
+	// only so a request that still asks for Docker gets a clear refusal instead
+	// of running its image name as a native command, and so retained records
+	// keep loading. Remove them after the release following r6.15 (MY-42).
+	Docker           bool     `json:"docker,omitempty" yaml:"docker,omitempty"`
+	DockerNetwork    string   `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
+	DockerMemoryGB   float64  `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`
+	DockerMemorySwap *float64 `json:"docker_memory_swap,omitempty" yaml:"docker_memory_swap,omitempty"`
+	DockerSidecars   []any    `json:"docker_sidecars,omitempty" yaml:"docker_sidecars,omitempty"`
+}
+
+// ErrDockerRetired is the one refusal for a request that still asks for Docker.
+var ErrDockerRetired = errors.New("managed Docker was retired (MY-49); run the work as a native job, using an environment for its software and native sidecars for services; see docs/services.md, \"A model server in a native job instead of a container image\"")
+
+// AsksForDocker reports a request that still uses the retired Docker fields.
+func (r RunSpec) AsksForDocker() bool {
+	return r.Docker || r.DockerNetwork != "" || r.DockerMemoryGB != 0 || r.DockerMemorySwap != nil || len(r.DockerSidecars) > 0
 }
 
 type GPUSelection struct {
@@ -107,19 +120,24 @@ func (e ExecutionSpec) validate() error {
 }
 func validateMemberEnv(env map[string]string) error {
 	for k := range env {
-		if strings.HasPrefix(strings.ToUpper(k), "MYCE_") || dockerDeviceEnvironment(strings.ToUpper(k)) {
+		if strings.HasPrefix(strings.ToUpper(k), "MYCE_") || deviceSelectorEnvironment(strings.ToUpper(k)) {
 			return fmt.Errorf("execution env cannot override worker control %s", k)
 		}
 	}
 	return nil
 }
 
+// The worker sets these from the attempt's device binding.
+func deviceSelectorEnvironment(name string) bool {
+	return slices.Contains([]string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK", "ZE_ENABLE_PCI_ID_DEVICE_ORDER"}, name)
+}
+
 // Old run descriptions and composed descriptions meet at this one adapter.
 func lowerExecution(s *Spec) error {
 	if s.Execution == nil {
 		if len(s.Run.Sidecars) > 0 || s.Run.MemoryGB != 0 {
-			if s.Run.Docker {
-				return errors.New("native sidecars cannot use Docker")
+			if s.Run.AsksForDocker() {
+				return ErrDockerRetired
 			}
 			if err := (ExecutionSpec{Main: ExecutionMember{Command: s.Run.Command, Env: s.Run.Env, MemoryGB: s.Run.MemoryGB}, Sidecars: s.Run.Sidecars}).validate(); err != nil {
 				return err

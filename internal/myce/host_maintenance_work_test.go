@@ -8,9 +8,9 @@ import (
 )
 
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
-// share their parent execution's exact release, including pending Docker creates.
+// share their parent execution's exact release.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "sidecar", "native-sidecar", "extension check", "extension-check-setup"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "native-sidecar", "extension check", "extension-check-setup"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -78,19 +78,13 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 						}
 						preparation = nil
 					}
-				case "batch-production", "batch-experiment", "sidecar", "native-sidecar":
+				case "batch-production", "batch-experiment", "native-sidecar":
 					priority := "experiment"
 					if kind == "batch-production" {
 						priority = "production"
 					}
 					s := spec(priority)
 					s.Needs.HostMemoryGB = 2
-					if kind == "sidecar" {
-						m.Capabilities = append(m.Capabilities, "docker")
-						m.CapabilityProfile.OS = "linux"
-						s = dockerGroupJob(t).Spec
-						s.Priority = priority
-					}
 					if kind == "native-sidecar" {
 						s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"helper"}, MemoryGB: 1}}
 					}
@@ -336,19 +330,8 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					r := result(batch, !action.stop)
 					r.Interrupted = action.stop
 					r.ReleaseOnly = job(t, q, batch.ID).Machine != batch.Machine
-					r.ReleasePending = kind == "sidecar"
 					if err := q.Complete(r); err != nil {
 						t.Fatal(err)
-					}
-					if kind == "sidecar" {
-						status, err = q.HostMaintenanceStatus("host")
-						if err != nil || status.Quiescent {
-							t.Fatal("pending sidecar cleanup settled", status, err)
-						}
-						r.ReleasePending, r.ReleaseOnly = false, true
-						if err := q.Complete(r); err != nil {
-							t.Fatal(err)
-						}
 					}
 				}
 				if preparation != nil {

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -29,12 +28,7 @@ func CheckFixtureLifecycle(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			tmp := t.TempDir()
 			child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1")
-			for _, entry := range os.Environ() {
-				if (mode == "success" || mode == "failure") && strings.HasPrefix(entry, "MYCE_TEST_DOCKER_BIN=") {
-					continue
-				}
-				child.Env = append(child.Env, entry)
-			}
+			child.Env = append(child.Env, os.Environ()...)
 			child.Env = append(child.Env, "TMPDIR="+tmp, "MYCE_FIXTURE_LIFECYCLE_HELPER="+mode)
 			want := 0
 			if mode == "failure" {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -474,61 +473,6 @@ func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 		})
 	}
 }
-func TestMaintenancePendingDockerCreateRetainsExactCustody(t *testing.T) {
-	q, c := fixture(t)
-	a, b := maintenanceMachines()
-	a.Capabilities = append(a.Capabilities, "docker")
-	a.CapabilityProfile.OS = "linux"
-	check(t, q, b, nil)
-	s := spec("production")
-	s.Run.Docker = true
-	s.Run.Command = dockerJob().Spec.Run.Command
-	s.Needs.HostMemoryGB = 2
-	s.AllowedMachines = []string{a.ID}
-	submit(t, q, s)
-	j := check(t, q, a, nil).Job
-	if j == nil {
-		t.Fatal("no Docker assignment")
-	}
-	a.DockerCleanup = "create pending"
-	check(t, q, a, j)
-	status := maintenanceChange(t, q, "disable", true)
-	if len(status.Attempts) != 1 || len(status.PendingReleases) != 1 || len(status.PendingCleanup) != 1 || status.Quiescent {
-		t.Fatal(status)
-	}
-	if err := q.Started(result(j, false)); !errors.Is(err, ErrStale) {
-		t.Fatal(err)
-	}
-	c.Advance(10 * time.Minute)
-	check(t, q, observer(), nil)
-	status, err := q.HostMaintenanceStatus("host")
-	if err != nil || status.Quiescent || len(status.Attempts) != 1 || len(status.PendingReleases) != 1 || status.MemoryInUseGB != 2 {
-		t.Fatal(status, err)
-	}
-	// Sibling reports and a wrong attempt cannot discharge a pending create.
-	check(t, q, b, nil)
-	r := result(j, false)
-	r.ReleaseOnly = true
-	r.Attempt++
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	status, _ = q.HostMaintenanceStatus("host")
-	if len(status.PendingReleases) != 1 {
-		t.Fatal("wrong attempt discharged create")
-	}
-	r.Attempt--
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	a.DockerCleanup = ""
-	check(t, q, a, nil)
-	check(t, q, b, nil)
-	status, _ = q.HostMaintenanceStatus("host")
-	if !status.Quiescent {
-		t.Fatal(status)
-	}
-}
 func TestMaintenanceQueueOutageAndWithdrawnStart(t *testing.T) {
 	q, _ := fixture(t)
 	a, _ := maintenanceMachines()
@@ -630,100 +574,6 @@ func TestMaintenancePlannedCausePersistsAndStageFailureWins(t *testing.T) {
 				t.Fatal(got)
 			}
 		})
-	}
-}
-
-func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
-	w, store, clock, root := dockerLateFixture(t, "late-create")
-	q, _ := fixture(t)
-	q.clock = clock
-	m := w.Machine
-	m.HostID = "host"
-	m.HostMemoryMeasured = true
-	m.HostAvailableMemoryGB = 32
-	check(t, q, m, nil)
-	maintenanceChange(t, q, "drain", false)
-	value := 4.0
-	if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &value}); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer((API{Queue: q, Token: "test"}).Handler())
-	defer server.Close()
-	w.Client = Client{URL: server.URL, Token: "test"}
-	w.Machine = m
-	var policyReply Reply
-	if err := w.Client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: m}, &policyReply); err != nil {
-		t.Fatal(err)
-	}
-	w.Machine.HostMemoryBudgetGB = policyReply.HostMemoryBudget.GiB
-	if w.Machine.HostMemoryBudgetGB != 4 {
-		t.Fatal("queue allowance not delivered")
-	}
-	if err := w.checkHostMemoryBudget(0, 5); !errors.Is(err, errWorkerMemory) {
-		t.Fatal("queue allowance bypassed", err)
-	}
-	m = w.Machine
-	check(t, q, m, nil)
-	maintenanceChange(t, q, "resume", false)
-	s := dockerJob().Spec
-	s.Priority = "production"
-	s.Needs.HostMemoryGB = 2
-	submit(t, q, s)
-	j := check(t, q, m, nil).Job
-	if j == nil {
-		t.Fatal("no assignment")
-	}
-	w.CheckpointRoot = q.root
-	p, err := startDockerFixture(w, store, *j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: create") })
-	m.DockerCleanup = p.docker.status()
-	check(t, q, m, j)
-	status := maintenanceChange(t, q, "disable", true)
-	if status.Quiescent || len(status.PendingReleases) != 1 {
-		t.Fatal(status)
-	}
-	// A scan can be empty while an accepted Docker create is still outstanding.
-	objects, err := p.docker.containers()
-	if err != nil || len(objects) != 0 {
-		t.Fatal(objects, err)
-	}
-	reply := check(t, q, m, j)
-	if !reply.Stop {
-		t.Fatal("pending create missed stop")
-	}
-	p.stop(clock.Now(), 0, true)
-	expireDockerStop(t, p)
-	status, _ = q.HostMaintenanceStatus("host")
-	if status.Quiescent || status.MemoryInUseGB != 2 {
-		t.Fatal("empty scan freed custody", status)
-	}
-	if err = os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case finish := <-p.done:
-		if finish.err != nil {
-			t.Fatal(finish.err)
-		}
-		if err = q.Complete(finish.result); err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("late create cleanup did not settle")
-	}
-	got := job(t, q, j.ID)
-	if got.State != "queued" || got.InfrastructureRetries != 0 {
-		t.Fatal(got)
-	}
-	m.DockerCleanup = ""
-	check(t, q, m, nil)
-	status, _ = q.HostMaintenanceStatus("host")
-	if !status.Quiescent {
-		t.Fatal("exact create cleanup did not settle host", status)
 	}
 }
 

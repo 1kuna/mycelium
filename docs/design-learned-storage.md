@@ -72,7 +72,7 @@ space minus measured control space and unwritten accepted hard limits. Count
 aliased roots, missing digests, remaining tus lengths and native backing/reserves
 once; existing bytes already reduce free space. Persist commitments before Started
 and retain them through exact cleanup/restart. Extend existing reservations and
-tier planning across input, native/Docker results, checkpoints and retries.
+tier planning across input, native results, checkpoints and retries.
 Production takes priority; MY-27/MY-26 consider every qualified compatible variant
 and host, with MY-18 least-valuable fit.
 

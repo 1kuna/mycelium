@@ -565,9 +565,8 @@ after each inventory. A reused PID cannot supply activity after its owned
 anchor exits. Membership changes or decreasing counters break
 idle comparisons; positive CPU advance remains useful. Short-lived processes
 between samples and detached descendants no longer connected to that tree can
-be missed. Docker without a verified local attempt cgroup, and recovered
-processes without a live anchor, report CPU unknown. No Docker client or worker
-process is substituted for payload CPU.
+be missed. Recovered processes without a live anchor report CPU unknown. No
+worker process is substituted for payload CPU.
 
 Directory measurement uses metadata only, never payload reads or symlink
 traversal, and excludes writes outside the managed attempt directory (including
@@ -1259,7 +1258,7 @@ by the same learning gate supersedes the prior. Refusals name capacity remedies.
 
 Peak fields `host_gb`, `cgroup_gb`, and `device_gb` identify the measured scopes;
 `swap_gb` is the Linux attempt parent's `memory.swap.peak`, when exposed.
-All sizes are GiB. The parent covers native or managed Docker main and sidecars;
+All sizes are GiB. The parent covers the native main command and sidecars;
 device memory is process-scoped. `events` holds hierarchical `memory.events`
 counts `high`, `max`, `oom`, `oom_kill`, and `oom_group_kill`, retaining the
 maximum per counter across the attempt's samples. Absent readings mean unknown;
@@ -1462,25 +1461,18 @@ devices also appear here, beside their own records.
 | `production_hold` | queue | Active production demand on a host-scope hold, including work between stages. Device-scope holds emit none. |
 | `production_stopping` | queue | Lower-priority work is within its stop grace. |
 | `production_release_unknown` | queue or operator | Production reservation has an unconfirmed release. Operator only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based case. Draining calls, recovery and the short wait for a kill result stay with the queue. |
-| `docker_transition` | queue | Recognized Docker startup/stop operation or final release report in progress. |
-| `docker_cleanup_waiting` | queue | Retained Docker custody or a `cleanup unconfirmed:`-prefixed status awaits confirmation, before escalation. |
-| `docker_cleanup_operator_action` | operator | Docker custody reached the cleanup escalation bound (`myce resolve-docker`). |
 | `startup_release` | queue or operator | Failed startup awaits exact execution release; operator when any corresponding worker is gone/missing. |
 | `host_disabled` | operator | Queue host maintenance is drained/disabled. Does not clear by itself; resume with `myce host resume HOST`. A machine's `disabled` field is a status projection of this queue policy. |
 | `reservation_active` | reservation owner | A reservation holds components for one job until release or `expires`. |
 | `component_exclusion` | operator | An active exclusion removes components from placement. |
 | `device_maintenance` | operator | An operator disabled a device. |
-| `unclassified` | operator | A production host blocker has no recognized explicit classification, or a worker reports an unrecognized Docker status (for example, `pull pending`). Never treated as self-clearing. |
+| `unclassified` | operator | A production host blocker has no recognized explicit classification. Never treated as self-clearing. |
 
 There is no idle production cooldown. `expires` is optional; refresh before acting. A queue
 owner means no fault currently demands operator attention, not that release is
 proven or that recovery has a deadline. In particular, deliberate
 Queue admission stays drained/disabled until explicit resume. Cleanup acknowledgements may clear an
 escalated hold without an operator override; custody remains fenced until proven.
-
-Docker summaries choose deterministically by severity: escalation, unclassified
-status, reported cleanup error, waiting release, then recognized transition.
-Equal severity uses lexical text order. A transition cannot hide waiting custody.
 Exact current executions that are healthy and starting or running do not accrue cleanup time;
 becoming live again clears stale timers. Stopped attempts escalate two minutes
 **after stop grace expires**. Lost/unconfirmed custody without a stop deadline
@@ -1651,10 +1643,8 @@ age. The envelope and forecast cover the same future bytes; they are not added.
 The static charge is at least the envelope and current anonymous residency plus
 that forecast, so observed over-use still consumes the allowance. The operator
 reserve is already removed from live availability; it is not subtracted again.
-Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
-including managed Docker containers with per-member caps and no shared parent.
-The worker verifies exact attempt labels and local container cgroup membership,
-then sums disjoint container charges. The unified-CUDA device-growth floor
+Only fresh exact-attempt cgroup anonymous resident memory reduces growth.
+The unified-CUDA device-growth floor
 remains: host cgroup memory cannot cancel the device reservation. Summed
 per-process device counters may include shared allocations; neither their sum
 nor RSS/host-delta estimates establish unique physical residency for credit.
@@ -1739,18 +1729,16 @@ The worker adds a current observation to its existing heartbeat on macOS and
 Linux. Host used RAM is physical RAM minus reclaimable RAM, undoing the worker's
 admission reserve. Raw reclaimable RAM is retained before the admission clamp,
 including pressure below that reserve. Current worker and descendant RSS (including native jobs and
-model processes) is subtracted, together with fresh exact-attempt anonymous
-resident memory from managed Docker containers outside that process tree.
-Missing or stale memory samples for a running Docker attempt skip the
-external-history sample instead of recording its memory as external.
-`memory_observation.attribution_unknown: true` marks this case; its `total_gb`
+model processes) is subtracted.
+`memory_observation.attribution_unknown: true` marks an attempt whose memory
+sample is missing or stale; its `total_gb`
 and `used_gb` still supply physical-memory admission, with full reservation
 growth when the attempt sample is unavailable. Invalid observations
 are skipped. Custom sources lacking raw
 RAM evidence cannot contribute while reserve-clamped.
 Reservations and attempt high-water marks are never subtracted. This is a
 sampled estimate: RSS may count shared pages more than once and miss compressed
-pages, reparented processes, or short spikes. Docker daemon children and other
+pages, reparented processes, or short spikes. Container daemon children and
 Mycelium processes outside the worker tree remain in the residual, conservatively
 reducing suggested budgets. Device-only GPU RAM is not host RAM.
 
@@ -1904,7 +1892,7 @@ fairness, disruption cost and scarcity. It grants no capacity, reserves no
 future slot and does not move running work.
 
 Native commands and extensions can atomically replace the local JSON file named
-by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
+by `MYCE_PROGRESS_FILE`:
 
 ```sh
 printf '{"completed":25,"total":100,"unit":"frames"}\n' > "$MYCE_PROGRESS_FILE.tmp"
@@ -2102,7 +2090,7 @@ publication-before-cleanup measurements. This cuts scheduled metadata traversals
 missed. End-only measurement would also miss longer-lived scratch removed before
 exit. Neither cadence enforces a bound. Native metadata sampling can miss writes
 deleted between scans. External writable
-work/checkpoint roots and Docker overlay coverage remain incomplete, with no
+work/checkpoint roots remain incomplete, with no
 accepted scratch estimate; native denial/confinement qualification is separate.
 No store cap, reservation, delivery contract, retry or placement policy changes.
 
@@ -2635,10 +2623,10 @@ that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage
 `log_policy`, `project_cap`, `production_admission`, `unified_cuda_headroom`
 (a unified-memory host's headroom kept for expected production),
 `production_hold`, `production_reserved`, `pinned_model`, `disk_headroom`,
-Docker cleanup kinds, `reservation`, `capacity` (mixed or card/CPU causes),
+`reservation`, `capacity` (mixed or card/CPU causes),
 `memory`, `host_memory_headroom`, `cold_probe_margin` (a first run needs host
 memory above its launch margin), `host_backfill`, `host_unavailable`,
-`capability`, `shared_input`, `docker_runtime`, `extension`, `no_eligible_host`,
+`capability`, `shared_input`, `extension`, `no_eligible_host`,
 `waiting_for_worker`, `model_engine` (a model call waits for its engine to
 recover) and the preparation and coverage kinds below. A queued model call's
 hold comes from the same scheduler wait as a job's. An unknown kind is
@@ -2893,7 +2881,7 @@ Cold probes still retain their complete ceiling without fresh complete evidence.
 Darwin RSS can increase
 the charge but grants no resident-memory credit because shared pages can appear
 in multiple processes. The reported estimate and the execution ceiling therefore
-serve different purposes. Explicit declarations, member limits and Docker keep
+serve different purposes. Explicit declarations and member limits keep
 their existing containment contract. See [native isolation](native-isolation.md).
 
 Declared native CPU attempts (#1064) with enforced cgroup
@@ -2902,7 +2890,7 @@ growth forecast cannot add bytes beyond that containment, in either the static
 charge or pending physical growth. Larger actual anonymous/footprint observations
 remain floors; only fresh uniquely charged anonymous residency reduces pending
 growth. Missing/stale observations retain the full reservation. This bound does
-not apply to auto estimates, sampled RSS, Docker or accelerator memory outside
+not apply to auto estimates, sampled RSS or accelerator memory outside
 the cgroup; authored member limits remain binding.
 
 Native CPU auto-memory and native accelerator-check host-OOM recovery retain a
@@ -2913,7 +2901,7 @@ uncertainty, rather than a permanent demand floor.
 attempt retains the envelope actually applied. Recovery does not fail merely
 because a fixed number of exploratory attempts OOMed. A lower bound exceeding
 all eligible physical/allowance capacities produces a capacity refusal. Linux
-kernel ceilings and the pressure guard still bound a leak. Docker and device-OOM retry contracts and accepted-family sizing are unchanged.
+kernel ceilings and the pressure guard still bound a leak. Device-OOM retry contracts and accepted-family sizing are unchanged.
 Physical probes also report `launch_drift_gb` and `available_host_gb`: the
 exact job/worker-session launch-error reserve and ledger headroom at sizing.
 Unrelated inventory declines and other jobs' old launch errors cannot starve a
@@ -3127,7 +3115,7 @@ quarantine from host RAM pressure. Several predicates may apply together.
 
 `enforced_host_gb` with `enforcement_basis=started_worker_contract_not_direct_read`
 comes from the successful Started native-cgroup contract, not a new controller
-read. Other/older/prestart/Docker enforcement remains unknown; sampled RSS is
+read. Other/older/prestart enforcement remains unknown; sampled RSS is
 not kernel containment. Missing forecasts/ages mean unknown, while numeric zero
 is measured zero. Interpret available memory with `host_memory_known` and
 `device_memory_known`; unknown telemetry is not measured zero. Current reservation,

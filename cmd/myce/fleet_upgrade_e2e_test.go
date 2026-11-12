@@ -314,7 +314,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_DOCKER_BIN="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_DOCKER_BIN"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
+	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_ROOT="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_ROOT"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
 	models, err := json.Marshal([]myce.Model{model})
 	if err != nil {
 		t.Fatal(err)

@@ -153,7 +153,10 @@ func validateAdapterEntry(e adapterEntry) error {
 	if e.MemoryClass != "" && e.MemoryClass != "per_item" {
 		return errors.New("memory_class must be per_item or omitted")
 	}
-	if s.Run.Workdir != "" || s.Run.Docker || len(s.Run.DockerSidecars) > 0 {
+	if s.Run.AsksForDocker() {
+		return myce.ErrDockerRetired
+	}
+	if s.Run.Workdir != "" {
 		return errors.New("source entries use an isolated attempt directory and native commands")
 	}
 	if len(e.Variants) > 0 {

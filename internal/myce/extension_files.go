@@ -94,15 +94,11 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		return errors.New("job files require a root and clean relative names")
 	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
-	workdir := dir
-	if dockerFileJob(j.Spec) {
-		workdir = filepath.Join(dir, "work")
-	}
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
 			return errors.New("attempt input folder is not a directory")
 		}
-		j.Spec.Run.Workdir = workdir
+		j.Spec.Run.Workdir = dir
 		return nil // Atomic publication makes retries idempotent.
 	} else if !os.IsNotExist(err) {
 		return err
@@ -123,16 +119,8 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 	}
 	defer os.RemoveAll(staged)
 	inputRoot := staged
-	if dockerFileJob(j.Spec) {
-		inputRoot = filepath.Join(staged, "inputs")
-		for _, path := range []string{inputRoot, filepath.Join(staged, "work")} {
-			if err := os.Mkdir(path, 0700); err != nil {
-				return err
-			}
-		}
-	}
 	operation = "extension_write"
-	if !j.Spec.Run.Docker && j.Extension != nil {
+	if j.Extension != nil {
 		var files map[string][]byte
 		for _, extension := range j.Extensions {
 			if extension.Digest == j.Extension.Digest {
@@ -218,7 +206,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 	if err := syncWorkerDir(filepath.Dir(dir)); err != nil {
 		return err
 	}
-	j.Spec.Run.Workdir = workdir
+	j.Spec.Run.Workdir = dir
 	return nil
 }
 
@@ -270,7 +258,7 @@ func (j Job) publishesNASOutputs() bool {
 func (w Worker) publishExtensionFiles(j Job, attemptWork string) (err error) {
 	step := "output_check"
 	defer func() { err = finalizationErrorFor(step, "", err) }()
-	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
+	if check := j.Spec.ExtensionCheck; check != nil && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
 		// Only the worker publishes the bounded check result into the CLI's
 		// scratch folder. Payloads never receive write access to shared caches.
 		actual, err := readExtensionCheckOutputAt(attemptWork, filepath.Join(".myce-check", "actual"))
@@ -412,7 +400,7 @@ func validateExtensionJob(s Spec) error {
 			return errors.New("program arguments belong in program.args")
 		}
 	}
-	if s.Execution != nil || (s.Kind == "" && s.Program == nil && len(s.Run.Env) > 0) || len(s.Run.Sidecars) > 0 || len(s.Run.Command) > 0 || s.Run.Workdir != "" || s.Run.Docker || len(s.Run.DockerSidecars) > 0 || s.Run.DockerNetwork != "" || s.Run.DockerMemoryGB != 0 || s.Run.DockerMemorySwap != nil || s.Environment.Key() != "" || s.Needs.CPUCores != 0 || s.Needs.MemoryGB != 0 || s.Needs.HostMemoryGB != 0 || s.Needs.Model != "" || s.Needs.Platform.Any || len(s.Needs.Platform.Required)+len(s.Needs.Platform.Preferred) > 0 {
+	if s.Execution != nil || (s.Kind == "" && s.Program == nil && len(s.Run.Env) > 0) || len(s.Run.Sidecars) > 0 || len(s.Run.Command) > 0 || s.Run.Workdir != "" || s.Environment.Key() != "" || s.Needs.CPUCores != 0 || s.Needs.MemoryGB != 0 || s.Needs.HostMemoryGB != 0 || s.Needs.Model != "" || s.Needs.Platform.Any || len(s.Needs.Platform.Required)+len(s.Needs.Platform.Preferred) > 0 {
 		return errors.New("kind/program jobs use extension-owned commands, environments and hardware reservations; use size_hint")
 	}
 	if !validMemoryValue(s.SizeHint.MemoryGB) || !validMemoryValue(s.SizeHint.HostMemoryGB) {

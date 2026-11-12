@@ -489,7 +489,7 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 		}
 		if len(j.Spec.SharedInputs) > 0 {
 			candidate := j.Spec
-			if err := e.lower(&candidate, m); err != nil || candidate.Run.Docker {
+			if err := e.lower(&candidate, m); err != nil {
 				continue
 			}
 		}

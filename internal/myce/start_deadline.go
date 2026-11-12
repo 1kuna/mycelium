@@ -117,9 +117,6 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 		if q.maintenanceBlocked(host) {
 			return "host " + host + " in planned maintenance"
 		}
-		if h := q.dockerHold(host); h.Kind != "" {
-			return "waiting for Docker cleanup to be confirmed on " + host + "; " + h.Detail
-		}
 		if b, _ := q.hostBlockerState(host); b != "" && q.held(host) {
 			return "waiting for lower-priority work to stop on " + host + "; " + b
 		}
@@ -355,13 +352,6 @@ func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 	}
 	if q.preparationStopping(m) {
 		return "preparation_stopping"
-	}
-	if j.Spec.Run.Docker && dockerStartingOrRunning(m.DockerCleanup) {
-		// A heartbeat can retain a healthy pending operation after its receipt.
-		// Reuse the exact-custody classifier; sibling and old-copy holds still fence.
-		previous := owner.DockerCleanup
-		m.DockerCleanup, owner.DockerCleanup = "", ""
-		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
 	switch {
 	case j.StartedAt == nil && j.ScarceHostYield != nil && !q.yieldResumeStartAllowed(j, m):

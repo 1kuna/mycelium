@@ -99,17 +99,11 @@ type Worker struct {
 	processMemory           *processMemoryProbe // Without cgroups only.
 	MemorySwapMaxBytes      int64
 	GPUTelemetryHelper      string // Operator-owned optional read-only telemetry executable.
-	DockerEndpoint          string
-	dockerEnvelope          bool
 	nativeListenerProbe     func(port string, group int) error
 
-	ContainerRetention *time.Duration
-	LogRetention       time.Duration
+	LogRetention time.Duration
 	// Zero uses DefaultExtensionRetention; negative keeps every registration.
 	ExtensionRetention time.Duration
-	dockerCallTimeout  time.Duration
-	dockerCommand      func(context.Context, ...string) ([]byte, error)
-	dockerDaemon       func(context.Context, ...string) ([]byte, error) // In-process daemon; no CLI transport timing.
 	Unit               string
 
 	SuperviseProcess bool
@@ -141,7 +135,6 @@ type Worker struct {
 	nativeSharedInputs          []string // Verified executable shared inputs, never authored paths.
 	nativeModelInputs           []string // Verified model data: reads only, including custom-code sources.
 	nativeCI                    bool     // Current attempt declared isolation: ci (#1298).
-	modelMounts                 []dockerFileMount
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -180,7 +173,6 @@ type process struct {
 	custodyAt        time.Time
 
 	machine    string
-	docker     *dockerAttempt
 	native     *nativeGroup
 	memory     *memoryAttempt // Plain command cgroup; carries live device samples.
 	rssMemory  atomic.Pointer[processResidentSample]
@@ -226,15 +218,6 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 			return err
 		}
 	}
-	if p.docker != nil {
-		p.docker.mu.Lock()
-		p.docker.state.PriorityStop = stop
-		err := p.docker.saveLocked()
-		p.docker.mu.Unlock()
-		if err != nil {
-			return err
-		}
-	}
 	p.priorityStop = stop
 	return nil
 }
@@ -256,14 +239,6 @@ func (p *process) stopService(now time.Time, grace time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.shutdown = true
-	if p.docker != nil {
-		p.docker.mu.Lock()
-		if !p.docker.state.Shutdown {
-			p.docker.state.Shutdown = true
-			p.docker.dirty = true
-		}
-		p.docker.mu.Unlock()
-	}
 	p.stopGroup = !p.job.Spec.Needs.cpuOnly() && !p.userCancel
 	p.stopLocked(now, grace, false)
 }
@@ -306,14 +281,7 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	if p.stopRequested.IsZero() {
 		p.stopRequested = now
 	}
-	if p.docker != nil {
-		p.docker.mu.Lock()
-		if p.userCancel && !p.docker.state.UserCancel {
-			p.docker.state.UserCancel = true
-			p.docker.dirty = true
-		}
-		p.docker.mu.Unlock()
-	} else if p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly() {
+	if p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly() {
 		if kill {
 			grace = p.stopGrace
 		}
@@ -335,10 +303,6 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	}
 	if p.native != nil {
 		p.native.stopLocked(now, grace, kill)
-		return
-	}
-	if p.docker != nil {
-		p.docker.stop(now, grace, kill)
 		return
 	}
 	if p.cmd == nil {
@@ -521,10 +485,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	inputRelease := sharedRelease
 	sharedRelease = func() { compilerRelease(); inputRelease() }
-	if !j.Spec.Run.Docker {
-		s.sharedRelease = sharedRelease // Docker releases when its observer exits.
-	}
-	w.modelMounts = dockerModelMounts(j, sharedEnv)
+	s.sharedRelease = sharedRelease
 	w.nativeInputPaths(j, sharedEnv)
 	sharedStarted := false
 	defer func() {
@@ -533,48 +494,44 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 || sharedReaders(j.Spec) {
-		value := j
-		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
-			// Keep the slot until the filesystem call really returns, even after
-			// this attempt has released. Two copies inside one stage remain allowed.
-			if s.inputStaging != nil && !s.inputStaging.CompareAndSwap(false, true) {
-				return stagedInputs{}, errCheckpointIOPending
-			}
-			if s.inputStaging != nil {
-				defer s.inputStaging.Store(false)
-			}
-			return captureStagedInputs(w.Clock, func() (string, error) {
-				transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
-				err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
-				return value.Spec.Run.Workdir, err
-			})
-		}, false)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	value := j
+	staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
+		// Keep the slot until the filesystem call really returns, even after
+		// this attempt has released. Two copies inside one stage remain allowed.
+		if s.inputStaging != nil && !s.inputStaging.CompareAndSwap(false, true) {
+			return stagedInputs{}, errCheckpointIOPending
 		}
-		if err != nil {
-			if errors.Is(err, errCheckpointIOPending) || errors.Is(err, errCheckpointIOTimeout) {
-				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
-			}
-			return nil, w.stagingFailure(s, j, err)
+		if s.inputStaging != nil {
+			defer s.inputStaging.Store(false)
 		}
-		j.Spec.Run.Workdir = staged.directory
-		// Timestamp the actual asynchronous completion, not the retry that
-		// consumes it. Preserve the first completion across later start retries.
-		if saved := s.state.Job; saved != nil && saved.ID == j.ID && saved.Attempt == j.Attempt && saved.Session == j.Session {
-			retainInputsStagedAt(saved, &staged.at)
-			j.InputsStagedAt = saved.InputsStagedAt
-		} else {
-			retainInputsStagedAt(&j, &staged.at)
+		return captureStagedInputs(w.Clock, func() (string, error) {
+			transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
+			err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
+			return value.Spec.Run.Workdir, err
+		})
+	}, false)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		if errors.Is(err, errCheckpointIOPending) || errors.Is(err, errCheckpointIOTimeout) {
+			return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
 		}
+		return nil, w.stagingFailure(s, j, err)
+	}
+	j.Spec.Run.Workdir = staged.directory
+	// Timestamp the actual asynchronous completion, not the retry that
+	// consumes it. Preserve the first completion across later start retries.
+	if saved := s.state.Job; saved != nil && saved.ID == j.ID && saved.Attempt == j.Attempt && saved.Session == j.Session {
+		retainInputsStagedAt(saved, &staged.at)
+		j.InputsStagedAt = saved.InputsStagedAt
+	} else {
+		retainInputsStagedAt(&j, &staged.at)
 	}
 
 	executionWork := j.Spec.Run.Workdir
-	if !j.Spec.Run.Docker {
-		if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
-			return nil, err
-		}
+	if err := checkPayloadMachOLinkage(ctx, machineTarget(&w.Machine), executionWork); err != nil {
+		return nil, err
 	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
@@ -604,7 +561,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		prepare = w.checkpointPrepare
 	}
 	var checkpoint string
-	var err error
 	if needsCheckpoint(&j) {
 		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
 			path, err := prepare(j)
@@ -651,7 +607,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 	}
 	expandExecution(&j.Spec, executionWork, environmentPath, machineTarget(&w.Machine))
-	if !j.Spec.Run.Docker && j.Spec.Run.Workdir == "" {
+	if j.Spec.Run.Workdir == "" {
 		j.Spec.Run.Workdir = executionWork
 	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
@@ -659,22 +615,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
-	}
-	if j.Spec.Run.Docker {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		environmentRelease := release
-		// Docker recovery/daemon boundaries are not observed by this native proof.
-		j.ExecutionEvidence.Main, j.ExecutionEvidence.Sidecars = executionUnknown, executionUnknown
-		p, e := w.startDocker(s, j, checkpoint, func() {
-			if environmentRelease != nil {
-				environmentRelease()
-			}
-			sharedRelease()
-		})
-		environmentStarted, sharedStarted = e == nil, e == nil
-		return p, e
 	}
 	env := jobBaseEnvironment()
 	if compilerPath != "" {
@@ -1286,15 +1226,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || !validMemoryValue(w.Machine.FreeMemoryGB) {
 		return errors.New("worker requires a name, GPU platform and finite nonnegative memory budget")
 	}
-	retention := DefaultContainerRetention
-	if w.ContainerRetention != nil {
-		retention = *w.ContainerRetention
-	}
-	if retention < 0 {
-		return errors.New("container-retention must be nonnegative")
-	}
 	w.initMemoryCeilings()
-	w.dockerEnvelope = w.dockerEnvelopeSupported()
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
 	}
@@ -1439,12 +1371,6 @@ func (w Worker) Run(stop context.Context) error {
 				} else if e.Error() != lastRetentionErr {
 					lastRetentionErr = e.Error()
 					log.Printf("worker retention: %v", e)
-				}
-				if w.DockerEndpoint == "" {
-					continue
-				}
-				if e := pruneStoppedDocker(retentionCtx, s.dir, w.Machine.ID, request.active, request.now, retention, nil); e != nil && retentionCtx.Err() == nil {
-					log.Printf("stopped-container retention (will retry): %v", e)
 				}
 			}
 		}

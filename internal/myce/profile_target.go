@@ -144,7 +144,7 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		if n.MemoryGB <= m.groupFloorGB {
 			return fmt.Sprintf("one card holds %g GiB; work spreads across cards only when no single card can hold it", n.MemoryGB)
 		}
-		return fmt.Sprintf("this host holds %g GiB only across %d cards; Docker, model-server and extension-check jobs run on one card", n.MemoryGB, len(m.groupMembers))
+		return fmt.Sprintf("this host holds %g GiB only across %d cards; model-server and extension-check jobs run on one card", n.MemoryGB, len(m.groupMembers))
 	case "cores":
 		reason := ""
 		if n.cpuOnly() {

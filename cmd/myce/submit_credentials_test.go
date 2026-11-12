@@ -19,7 +19,7 @@ func TestSubmitInstalledCredentials(t *testing.T) {
 	q, _, _, _ := waitQueue(t)
 	const token = "submit-fixture-private-token"
 	var refuseSpec atomic.Bool
-	const reason = "main Docker memory must fit needs.host_memory_gb"
+	const reason = "needs.host_memory_gb must be finite and nonnegative"
 	api := myce.API{Queue: q, Token: token}.Handler()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if refuseSpec.Load() {

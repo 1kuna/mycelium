@@ -12,8 +12,8 @@ deployment evidence**.
 
 Native CPU attempts use the worker's birth-fenced memory observer for both plain
 and sandboxed commands and sidecar groups. Explicit host-memory declarations keep
-their resolved threshold (including configured slack). GPU jobs, managed Docker,
-preparation and model servers retain their existing behavior.
+their resolved threshold (including configured slack). GPU jobs, preparation and
+model servers retain their existing behavior.
 
 Learned and bounded exploratory reservations are estimates, not authored hard limits. From the next
 release, a queue and worker that both support adaptive native CPU memory let a
@@ -308,15 +308,13 @@ are unchanged. `MYCE_MODEL_<NAME>` names the acquired data directory, not the hu
 - **macOS Seatbelt:** the acquired paths are readable and explicitly deny
   `file-write*` and direct execution, including caches outside the default spool
   or home. A conflicting write/execute grant refuses launch.
-- **Managed Docker:** the same cache directory is a worker-owned `readonly` bind
-  at `/myce/models/<name>`, with `MYCE_MODEL_<NAME>` set to that path.
 - **Plain native default (MY-25), or declared unsandboxed:** cache files and
   directories have write bits removed. Ordinary writes/creates/unlinks fail for
   the unprivileged worker user. **This is cooperative read-only access, not a
   security boundary:** a same-user job can chmod files/directories back to
   writable, replace entries through writable parents, or use another writable
   alias; root can bypass file modes. It can mutate shared cache bytes. Choose
-  `isolation: sandboxed` or managed Docker when payload write denial is required.
+  `isolation: sandboxed` when payload write denial is required.
   Unsandboxed processes on the host remain outside the sandbox threat model.
 
 Interpreters can read model Python sources and loaders can map model libraries;
@@ -325,13 +323,11 @@ indexes, downloads and generated caches in `MYCE_SCRATCH_DIR`, and use offline
 loader flags. These guarantees do not introduce verify-in-place access to a
 mutable hub.
 
-`TestModelSnapshotPlainReadOnlyViews`, `TestModelSnapshotLinuxReadOnlyViews`,
-`TestModelSnapshotSeatbeltReadOnlyViews` and `TestModelSnapshotDockerReadOnlyViews`
-use two live payloads holding concurrent acquisitions of the same cache inode,
+`TestModelSnapshotPlainReadOnlyViews`, `TestModelSnapshotLinuxReadOnlyViews` and
+`TestModelSnapshotSeatbeltReadOnlyViews` use two live payloads holding concurrent acquisitions of the same cache inode,
 and attempt writes against synthetic model bytes. Linux exercises Landlock and,
-when available, namespaces separately. Docker requires a local Linux daemon and
-an already-present POSIX image (no pulls); unavailable platform/runtime checks
-are skipped and must not be reported as native qualification.
+when available, namespaces separately. Unavailable platform checks are skipped
+and must not be reported as native qualification.
 
 Operators can declare additional local roots with repeatable worker/install
 flags, for example:
@@ -365,16 +361,8 @@ outputs are published by the worker after execution. The payload can read and
 write its exact `MYCE_CHECKPOINT_DIR` on the configured checkpoint mount. These
 file operations need no payload outbound-network opt-in; the host owns the
 mounted filesystem connection. They do not grant access to the entire NAS or
-arbitrary host paths. An application that previously used Docker volume
+arbitrary host paths. An application that previously used container volume
 mappings must use these declarations and attempt paths for native execution.
-
-Managed Docker batches have a separate [hashed-file contract](files.md#managed-docker-files):
-private inputs bind-mounted read-only at `/myce/inputs`, output/scratch at
-`/myce/work`, and worker-owned attempt checkpoint/progress mounts. Native jobs
-retain their existing single-workdir staging semantics. Docker file batches
-reject caller host mounts and environment, use the worker's numeric UID:GID
-with all capabilities dropped and `no-new-privileges`, and publish only after
-all container writers settle. This does not qualify an image or GPU runtime.
 
 Headless office tools must put their writable user profile and scratch beneath
 `{work}` (for example LibreOffice's `-env:UserInstallation=file://...` option).
@@ -543,7 +531,7 @@ HTTP 409 `no_qualified_target`; it must not sit in an impossible queue forever.
 Normal temporary capacity/maintenance waits on a capable host retain their
 existing semantics. Every native dispatch requires a recognized isolation capability; older
 workers with no report and unavailable workers cannot receive offline jobs
-either. Managed Docker retains its separate contract.
+either.
 
 macOS may advertise `native_network` when `sandbox-exec` is available. Its online
 profile continues to deny non-sidecar loopback, Unix control endpoints and the

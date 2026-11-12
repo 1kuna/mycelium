@@ -141,11 +141,10 @@ def run(label, command, cache, report, clock=time.monotonic):
         # Compile once, but keep each executable in its package's custody root.
         # A reparented/env-scrubbed fixture must still be discoverable by its
         # executable/mapping path without matching another shard's processes.
-        for key in ('GATE_TEST_CLI_BINARY', 'GATE_TEST_DOCKER_BINARY'):
-            if source := os.environ.get(key):
-                private = temporary / key.lower()
-                shutil.copy2(source, private)
-                child_env[key] = str(private)
+        if source := os.environ.get('GATE_TEST_CLI_BINARY'):
+            private = temporary / 'gate_test_cli_binary'
+            shutil.copy2(source, private)
+            child_env['GATE_TEST_CLI_BINARY'] = str(private)
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env)
     status = 1
     try:

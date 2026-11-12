@@ -208,11 +208,6 @@ func TestAttemptStorageUnmanagedPathsRemainIncomplete(t *testing.T) {
 	if p := o.finish(); p.Complete {
 		t.Fatal("external work/checkpoint coverage claimed", p)
 	}
-	j.Spec.Run.Workdir = root
-	j.Spec.Run.Docker = true
-	if p := w.observeAttemptStorage(j, state, "", "owned").finish(); p.Complete {
-		t.Fatal("Docker overlay coverage claimed", p)
-	}
 }
 
 func checkpointStorageAttempt(t *testing.T) (Job, string, *storageObserver) {

@@ -309,10 +309,6 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 	if result.Success && result.ExecutionCause != nil && result.ExecutionCause.Finalization != nil {
 		result.ExecutionCause, result.Error = nil, ""
 	}
-	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
-	if j.Spec.Run.Docker && result.ReleasePending {
-		return result, nil
-	}
 	if result.StoragePeak != nil {
 		if w.storageObserver == nil {
 			w.storageObserver = publicationStorageObserver(j, result, parent, metadata...)
@@ -338,10 +334,10 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil
 	}
-	if j.Spec.OutputDelivery == asyncNAS || dockerFileJob(j.Spec) {
+	if j.Spec.OutputDelivery == asyncNAS {
 		step = "output_spool"
 		root, files, err := captureDeliverySpool(j, parent, w.storageObserver)
-		if errors.Is(err, errRequiredDeliveryOutput) || dockerFileJob(j.Spec) && errors.Is(err, os.ErrPermission) {
+		if errors.Is(err, errRequiredDeliveryOutput) {
 			return finalizationResult(result, step, "", err, true), nil
 		}
 		if err != nil {

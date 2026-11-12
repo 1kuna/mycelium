@@ -12,7 +12,7 @@ import (
 
 func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	q, initial := fixture(t)
-	c := &dockerTestClock{now: initial.Now()}
+	c := &lockedTestClock{now: initial.Now()}
 	q.clock = c
 	s := spec("production")
 	s.Run.Command = []string{"/bin/sh", "-c", `echo ran > "$MYCE_CHECKPOINT_DIR/command-ran"`}
@@ -82,4 +82,17 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("command executed after durable deadline failure")
 	}
+}
+
+// lockedTestClock is a manually advanced clock safe for concurrent workers.
+type lockedTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *lockedTestClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *lockedTestClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
 }

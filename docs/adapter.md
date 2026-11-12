@@ -205,7 +205,7 @@ A cold environment may prepare first; its inventory is checked before dispatch.
 The launch check uses the effective PATH, including the prepared environment and
 `run.env` overrides. Worker inventories are captured at startup and when a new
 immutable environment becomes ready; launch rechecks catch subsequent removals.
-This declaration covers the main native command, not Docker/model runtimes.
+This declaration covers the main native command, not model runtimes.
 
 An entry's environment is installed tools (`environment: {}`), a named catalog
 environment, or an inline lock such as
@@ -389,7 +389,7 @@ A profile is ordinary batch YAML plus `source` and `check` (an argv array). Reus
 `run`, `needs`, `environment`, `inputs`, `outputs`, `project`, and `class` from
 [job reference](jobs.md). Declare exact `targets` with `os`, `arch`, and
 `platform` (the existing extension target grammar). Plain command profiles use
-an isolated working folder; extension/Docker/sidecar profiles are outside this
+an isolated working folder; extension/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
 uses installed tools. The gate profile selects the locked `mycelium-gate` catalog
 environment and checks the toolchain before running. It declares two CPU cores,
@@ -1390,7 +1390,7 @@ profile reader still accepts, such as `priority:` instead of `class:`, scalar
 `environment: NAME`, scalar `platform:` and `memory_gb:`, convert unchanged.
 Machine allowlists, run argv/env, memory class, input/output filenames,
 diagnostics and source selection survive. A field the adapter cannot represent
-(for example `run.docker`, `run.workdir`, sidecars or `execution`) is refused
+(for example `run.workdir`, sidecars or `execution`) is refused
 with one message naming it, and nothing is printed or written. Check the
 result with `myce spec check --resolve ADAPTER`.
 Standard `.mycelium/profiles/` roots are respected; convert Git profiles from

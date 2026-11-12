@@ -48,9 +48,6 @@ func (e Extension) unsandboxedReason() string {
 // Frozen registrations, never a caller's job override, own extension policy.
 // Placement evaluates one candidate; queued status may describe alternatives.
 func nativeUnsandboxedReasons(j *Job) []string {
-	if j.Spec.Run.Docker {
-		return nil
-	}
 	var reasons []string
 	if j.Spec.extensionJob() {
 		for _, e := range j.Extensions {
@@ -75,9 +72,6 @@ func nativeUnsandboxed(j *Job) bool { return len(nativeUnsandboxedReasons(j)) > 
 // Placement evaluates every queued candidate registration; a started attempt
 // follows its selected one.
 func nativeCIRequired(j *Job) bool {
-	if j.Spec.Run.Docker {
-		return false
-	}
 	if !j.Spec.extensionJob() {
 		return j.Spec.Isolation == nativeIsolationCI
 	}
@@ -94,8 +88,8 @@ func nativeCIRequired(j *Job) bool {
 
 func jobNativeIsolationStatus(j *Job) string {
 	// Observation projection removes the executable and frozen registrations.
-	// Its retained diagnostic is authoritative even when empty (sandboxed or
-	// Docker); absence of a redacted declaration is not a plain-native default.
+	// Its retained diagnostic is authoritative even when empty (sandboxed);
+	// absence of a redacted declaration is not a plain-native default.
 	if len(j.Spec.Run.Command) == 0 && j.Spec.Execution == nil && len(j.Extensions) == 0 {
 		return j.Isolation
 	}

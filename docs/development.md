@@ -103,9 +103,7 @@ Every quick selection also includes a fixed canary set (`CANARIES` in
 rendering in `internal/myce` and `cmd/myce`, and opening the previous release's
 database. Textual selection missed exactly these whole-output checks for several
 merges on 2026-11-11. They cost about 12 s of race test time (11.8 s in
-`internal/myce`, 0.5 s in `cmd/myce`, measured on the development host), and they
-make quick always build the shared Docker simulator image, which is normally
-cached. A docs-only change still runs the standalone dev smoke. Renaming a
+`internal/myce`, 0.5 s in `cmd/myce`, measured on the development host). A docs-only change still runs the standalone dev smoke. Renaming a
 canary away fails the selector regression.
 
 A change under `skills/` or `clients/python/` also selects the consumer skill
@@ -138,9 +136,7 @@ unconfirmed cleanup fails that gate and retains diagnostics while releasing loca
 
 Each gate builds one race-instrumented `myce_test` CLI for its dev journeys and
 shares its absolute path through `GATE_TEST_CLI_BINARY`. Ordinary `go test` builds
-the helper on demand. Core shards also share the external non-race Docker
-simulator through `GATE_TEST_DOCKER_BINARY`; worker/adapter assertions remain
-race-instrumented. Each watchdog copies those images into its private temporary
+the helper on demand. Each watchdog copies that image into its private temporary
 root so executable-path cleanup still identifies environment-scrubbed fixtures.
 Upgrade fixtures retain separately linked versioned images:
 the signed artifact identity and embedded version remain part of their proof.
@@ -354,15 +350,13 @@ PID is absent (including a zombie), or its recorded start identity differs from
 the live process. The host admission lock serializes reclamation and new
 reservations across checkouts. Live or unverifiable holders remain protected;
 never-admitted waiters are queue tickets, not supervisors. No global quiet,
-Docker/guest inventory or manual reconciliation is required to release dead
+guest inventory or manual reconciliation is required to release dead
 holder capacity. `--reconcile` remains a compatibility entry point for the same
 automatic operation.
 
 Cleanup and inventory failures produce exit 125, a negative cleanup receipt and
 `cleanup-error.json` with the exception and traceback. They release admission
-anyway, including when a Docker daemon becomes unreachable after creating a
-container. Current labelled fixtures journal daemon use before creating resources;
-a gate that never used Docker needs no daemon cleanup. A real cleanup failure
+anyway. A real cleanup failure
 never becomes a passing verdict. Source, logs and verdict receipts remain in
 the original run directory. Native process identity, marker, ancestry and handle
 checks still protect live fixtures; recovery never signals another run.
@@ -535,11 +529,8 @@ own selection and watchdog. Test parallelism uses that same CPU count.
 Tests that mutate process environment remain serial.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
 on each helper-process exit; product code and assertions remain race-instrumented
-and tests still join their workers. The external fake Docker CLI is built once
-with `go test -c -race=false` and shared by fixture calls. It only simulates the
-external daemon protocol; it never runs product tests. The worker and Docker
-adapter execute in the parent under `-race`. Vet runs explicitly once, so test commands use
-`-vet=off`. Ambient `MYCE_*` settings (including real-Docker opt-ins) are cleared.
+and tests still join their workers. Vet runs explicitly once, so test commands use
+`-vet=off`. Ambient `MYCE_*` settings are cleared.
 The package fixtures isolate local storage and substitute synthetic GPU and daemon
 probes; they don't need fleet or NAS access. HTTP integration tests use loopback
 servers and local temporary directories, never external storage.
@@ -709,7 +700,7 @@ Use separate submissions with distinct target lists for cross-platform proof.
 ## Local Linux VM
 
 Install `lima` through Homebrew. This headless Ubuntu VM uses Apple's native
-virtualization, needs no Docker Desktop UI and can be stopped without changing
+virtualization, needs no desktop UI and can be stopped without changing
 fleet services:
 
 ```sh
@@ -731,8 +722,7 @@ disable the global AppArmor restriction to make a gate pass. Subsequent starts
 reuse the installed prerequisites without repeating package installation.
 
 The 80 GiB disk is sparse. Provision Go 1.25.6+, GCC, Git, Python 3, uv and
-`uv python install 3.11` inside the VM; install Docker separately for real-daemon
-focused tests. Follow upstream checksum verification for the Go archive.
+`uv python install 3.11` inside the VM. Follow upstream checksum verification for the Go archive.
 Both platforms receive the same immutable snapshot of tracked and unignored
 source files, including uncommitted edits; host HOME/NAS directories are not mounted. Compilation and
 fixture I/O use the guest-native filesystem. Persistent guest caches are
@@ -1145,7 +1135,7 @@ runtime/model identity and simultaneous memory/headroom independently.
 | Freshness/outage | Missing/stale workers and queue outage cannot yield healthy quiescence or authorize new payloads. Reconnect never treats omission as release. |
 | Reboot | Disabled policy survives; prior session/attempt evidence cannot authorize new work. Exact old-session cleanup and fresh worker reports precede resume. |
 | Queue restart | Keyed lost-response replay returns the same job, changed specs conflict, cancellation reservations never run, stale protocols refuse and successful jobs do not rerun. |
-| Runtime/resources | Verify native groups, Docker main/sidecar/network cleanup, pending daemon operations and RAM/cgroup limits. Timeout cannot settle custody. |
+| Runtime/resources | Verify native groups and sidecar cleanup and RAM/cgroup limits. Timeout cannot settle custody. |
 
 Bound each observation and record command exits and effects, release/rollback
 receipts and unrun checks. Stop on the first failed native gate and preserve the
@@ -1156,8 +1146,8 @@ resume. There is no offline rest certificate.
 Use `myce measure` for the exact selected device/catalog, including representative
 overlapping warmups. Qualification stays UNQUALIFIED until native simultaneous
 peaks, runtime overhead, sidecars and OS headroom are measured. For private models
-with `logs: none`, verify actual null stdout/stderr and Docker log-driver behavior,
-including recovery; fake argv tests cannot qualify the daemon or journald.
+with `logs: none`, verify actual null stdout/stderr, including recovery; tests
+cannot qualify journald.
 
 ## Pressure and status agreement
 
@@ -1202,15 +1192,15 @@ MYCE_DEV_SMOKE_BINARY="$PWD/.reports/myce" go test -race -count=3 ./cmd/myce -ru
 ```
 
 `TestMaintenance*` covers two-device admission/Started, drain versus stop,
-restart/rejoin, stale or missing reports, unknown native/engine/Docker custody,
-pending creates, cancellation and memory policy/debt. Queue decisions use injected
+restart/rejoin, stale or missing reports, unknown native/engine custody,
+cancellation and memory policy/debt. Queue decisions use injected
 time. `TestDevProbeQueueRestart` exercises actual API outage, SQLite reopen,
 lost-response keyed replay and cancellation without duplicate command effects.
 `TestDevProbeRebootResume` restarts the real dev queue/workers with durable disabled
 policy and requires fresh reports before quiescence. Process restart models the
 protocol boundary; it does not claim an actual machine reboot.
 
-Keep Docker stop/recovery/result, cancellation/all-attempt release, engine and
+Keep stop/recovery/result, cancellation/all-attempt release, engine and
 model recovery, RAM/cgroup/sidecar limits, files, installer rollback/GPU environment
 and privacy suites. There are no local CAS, root-child or rest verdict matrices.
 Record command exits; the [native test plan](development.md) separately
@@ -1286,7 +1276,7 @@ UNKNOWN gets the existing bounded ready-routing grace.
 
 Every batch command, including non-production work, obtains the durable Started
 acknowledgement for its current execution before its payload executes. Current queue maintenance, placement, cancellation and exact attempt/session
-bindings are checked at that handoff. Docker, engine and preparation plans use
+bindings are checked at that handoff. Engine and preparation plans use
 queue maintenance and retain their exact cleanup custody. A rejected or stale report does not
 release another attempt's custody.
 

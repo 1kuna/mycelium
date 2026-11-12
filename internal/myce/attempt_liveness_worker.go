@@ -196,19 +196,13 @@ func livenessProcessCPU(ctx context.Context, p *process, source func(context.Con
 			birth = p.native.custody.Groups[root][root]
 		}
 	}
-	docker := p.docker
 	p.mu.Unlock()
-	if docker != nil {
-		memory = docker.envelope()
-	}
 	if memory != nil {
 		if value, err := livenessCgroupCPU(memory); err == nil {
 			return value, "cgroup", nil
 		}
 	}
-	// Never mistake a Docker client for container CPU; remote/Desktop containers
-	// without a verified local aggregate stay unknown.
-	if root == 0 || birth == "" || docker != nil || source == nil {
+	if root == 0 || birth == "" || source == nil {
 		return 0, "", errLivenessUnavailable
 	}
 	return source(ctx, root, birth)

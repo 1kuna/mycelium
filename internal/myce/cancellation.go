@@ -307,7 +307,7 @@ func (q *Queue) confirmCopyRelease(r Result, exact bool) {
 				}
 			}
 			if !c.ReleaseConfirmed {
-				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) && !unheldNeverLaunched(j, r) {
+				if c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) && !unheldNeverLaunched(j, r) {
 					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 				}
 				// Existing exact release authority settles every generation in this copy.

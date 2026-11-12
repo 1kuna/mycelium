@@ -20,9 +20,15 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 	}{
 		{"logs", "job_logs_invalid", "logs", func(_ *testing.T, _ *Queue, s *Spec) { s.Logs = "bad" }},
 		{"memory", "job_memory_invalid", "memory_gb", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = -1 }},
-		{"docker", "job_docker_invalid", "Docker memory", func(_ *testing.T, _ *Queue, s *Spec) {
-			s.Needs.HostMemoryGB = 1
-			s.Run.Docker, s.Run.DockerNetwork, s.Run.DockerMemoryGB = true, "private", 2
+		// Managed Docker was retired (MY-49): every field that still asks for it
+		// is refused with the pointer to native environments and sidecars.
+		{"docker", "job_docker_retired", "docs/services.md", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Run.Docker, s.Run.Command = true, []string{"registry.invalid/image:tag"}
+		}},
+		{"docker sidecars", "job_docker_retired", "native sidecars", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Needs.HostMemoryGB = 2
+			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo"}, MemoryGB: 1}}
+			s.Run.DockerSidecars = []any{map[string]any{"name": "server"}}
 		}},
 		{"fields", "job_fields_required", "required", func(_ *testing.T, _ *Queue, s *Spec) { s.Name = "" }},
 		{"deadline", "job_deadline_invalid", "deadline", func(_ *testing.T, _ *Queue, s *Spec) { s.Priority = "deadline" }},

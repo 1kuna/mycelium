@@ -11,7 +11,7 @@ import (
 )
 
 // HostMemoryObservation is simultaneous best-effort host used RAM and current
-// worker/descendant RSS plus managed Docker cgroup memory. It never uses
+// worker/descendant RSS. It never uses
 // reservations or historical attempt peaks. Unknown attribution does not
 // invalidate the independent physical-memory measurement.
 type HostMemoryObservation struct {

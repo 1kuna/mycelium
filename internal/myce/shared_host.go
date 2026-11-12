@@ -48,8 +48,6 @@ func sharedHostRefusal(j *Job, m *Machine) string {
 	switch {
 	case !j.Spec.Needs.cpuOnly():
 		return "shared host admits CPU-only work; this job requests an accelerator"
-	case j.Spec.Run.Docker:
-		return "shared host admits native commands only, not Docker"
 	case j.Spec.extensionJob():
 		return "shared host admits plain commands only, not extension work"
 	case !environmentReady(j, m):

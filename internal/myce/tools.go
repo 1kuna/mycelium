@@ -28,8 +28,8 @@ func validateTools(s Spec) error {
 			return reject("job_tools_invalid", fmt.Errorf("needs.tools requires executable basenames such as python3.12, node, npm or git"))
 		}
 	}
-	if len(s.Needs.Tools) > 0 && (s.Run.Docker || s.Needs.Model != "") {
-		return reject("job_tools_invalid", fmt.Errorf("needs.tools currently describes native command prerequisites; Docker images and model runtimes own their tools"))
+	if len(s.Needs.Tools) > 0 && s.Needs.Model != "" {
+		return reject("job_tools_invalid", fmt.Errorf("needs.tools currently describes native command prerequisites; model runtimes own their tools"))
 	}
 	return nil
 }

@@ -109,7 +109,7 @@ func validateSharedInputs(s Spec) error {
 	if len(s.SharedInputs) == 0 {
 		return nil
 	}
-	if s.Run.Docker || s.Run.Workdir != "" {
+	if s.Run.Workdir != "" {
 		return errors.New("shared inputs require plain native commands in an isolated work folder")
 	}
 	for n, input := range s.SharedInputs {
@@ -129,9 +129,6 @@ func validateSharedInputs(s Spec) error {
 }
 func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
 	ctx = w.storageIOContext(ctx)
-	if j.Spec.Run.Docker && len(j.Spec.SharedInputs) > 0 {
-		return nil, nil, errors.New("shared inputs require native execution")
-	}
 	env := map[string]string{}
 	releases := []func(){}
 	release := func() {

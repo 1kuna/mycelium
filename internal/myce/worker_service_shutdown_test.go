@@ -77,20 +77,18 @@ func TestWorkerServiceShutdownCancelsInventoryAndSilentCheckin(t *testing.T) {
 }
 
 func TestWorkerServiceShutdownDuringStagingRetainsInterruption(t *testing.T) {
-	for _, backend := range []string{"native", "docker"} {
-		for _, restart := range []bool{false, true} {
-			name := "drain"
-			if restart {
-				name = "reopen"
-			}
-			t.Run(backend+"/"+name, func(t *testing.T) {
-				testWorkerServiceStagingShutdown(t, backend == "docker", restart)
-			})
+	for _, restart := range []bool{false, true} {
+		name := "drain"
+		if restart {
+			name = "reopen"
 		}
+		t.Run("native/"+name, func(t *testing.T) {
+			testWorkerServiceStagingShutdown(t, restart)
+		})
 	}
 }
 
-func testWorkerServiceStagingShutdown(t *testing.T, docker, restart bool) {
+func testWorkerServiceStagingShutdown(t *testing.T, restart bool) {
 	w := recoveryWorker(t)
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
@@ -110,14 +108,6 @@ func testWorkerServiceStagingShutdown(t *testing.T, docker, restart bool) {
 	j := recoveryJob(t, []string{"true"})
 	j.Spec = cpuSpec(1, 1)
 	j.Spec.Run.Command = []string{"true"}
-	j.Spec.Run.Docker = docker
-	if docker {
-		j.Spec.Run.Command = []string{"docker", "run", "fixture-image", "true"}
-		w.dockerCommand = func(context.Context, ...string) ([]byte, error) {
-			t.Error("unlaunched input staging reached the Docker daemon")
-			return nil, fmt.Errorf("unexpected Docker operation")
-		}
-	}
 	j.Spec.Inputs = map[string]string{"input": "input"}
 	if err := normalizeResources(&j.Spec); err != nil {
 		t.Fatal(err)
@@ -199,11 +189,6 @@ func testWorkerServiceStagingShutdown(t *testing.T, docker, restart bool) {
 	}
 	if r := readResult(); r == nil || !r.Interrupted || r.ReleasePending {
 		t.Fatalf("cleanup lost the durable shutdown interruption: %+v", r)
-	}
-	if docker {
-		if _, err := os.Stat(filepath.Join(s.dir, ".result.json")); !os.IsNotExist(err) {
-			t.Fatalf("unlaunched Docker wrote a shared unnamed result: %v", err)
-		}
 	}
 }
 
@@ -416,37 +401,5 @@ func TestWorkerServiceShutdownPreservesPayloadFailure(t *testing.T) {
 				t.Fatalf("shutdown rewrote an already observed payload failure: %+v", r)
 			}
 		})
-	}
-}
-
-func TestWorkerServiceShutdownRequeuesDocker(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
-	j := dockerJob()
-	j.Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-	p, err := startDockerFixture(w, store, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.docker.close()
-	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
-	control := processControl{clock: clock, service: true, leaving: true, processes: map[attemptKey]*process{jobKey(p.job): p}}
-	control.apply()
-	await(t, func() bool {
-		data, _ := os.ReadFile(filepath.Join(root, "calls"))
-		return strings.Contains(string(data), "kill --signal=TERM ")
-	})
-	clock.advance(StopGrace)
-	control.apply()
-	r := d5Finish(t, p)
-	if r.Success || !r.Interrupted || r.ReleasePending {
-		t.Fatalf("Docker shutdown lost interruption or custody: %+v", r)
-	}
-	q := restartQueue(t, store, w)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if got := job(t, q, j.ID); got.State != "queued" || got.Losses != 1 || !got.AttemptHistory[0].Interrupted {
-		t.Fatalf("Docker service stop did not requeue: %+v", got)
 	}
 }

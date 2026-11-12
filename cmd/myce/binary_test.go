@@ -20,7 +20,7 @@ var devBinary struct {
 func devTestBinary(t *testing.T) string {
 	t.Helper()
 	devBinary.Do(func() {
-		devBinary.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "myce-dev-test")
+		devBinary.path = filepath.Join(os.Getenv("MYCE_TEST_ROOT"), "myce-dev-test")
 		if binary := os.Getenv("GATE_TEST_CLI_BINARY"); binary != "" {
 			// Reuse the compiled bytes, with the same path and independent inode
 			// as an ordinary go test. A gate-owned image outside this suite is

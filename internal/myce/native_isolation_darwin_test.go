@@ -325,7 +325,7 @@ func TestNativeIsolationCoreFoundationStartup(t *testing.T) {
 	env := jobBaseEnvironment()
 	env["TMPDIR"] = work
 	env["MYCE_CF_STARTUP_HELPER"] = "1"
-	env["MYCE_TEST_DOCKER_BIN"] = os.Getenv("MYCE_TEST_DOCKER_BIN")
+	env["MYCE_TEST_ROOT"] = os.Getenv("MYCE_TEST_ROOT")
 	env["MYCE_TEST_ISOLATED_HOME"] = work
 	env["GORACE"] = "atexit_sleep_ms=0"
 	if err := (Worker{}).isolateNativeCommand(cmd, spool, work, env, nil, false); err != nil {

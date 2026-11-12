@@ -1,8 +1,6 @@
 package myce
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -23,33 +21,5 @@ func TestD5ReviewNativeIndependent143BeforeSignal(t *testing.T) {
 				t.Fatal("independent payload exit became interruption", r)
 			}
 		})
-	}
-}
-
-func TestDockerIndependentHelper137BeforeStopObservation(t *testing.T) {
-	_, s, d, c, root := restartResultFixture(t)
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("sidecar-killed"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(root, "running-sidecar-sortformer"), filepath.Join(root, "natural-sidecar-exit")); err != nil {
-		t.Fatal(err)
-	}
-	d.stop(c.Now(), StopGrace, false)
-	restartTick(t, d)
-	c.advance(StopGrace)
-	for i := 0; i < 5 && !d.state.Released; i++ {
-		restartTick(t, d)
-	}
-	if !d.state.Released {
-		t.Fatal("custody not released")
-	}
-	state := restartRead(t, s)
-	helper := state.Containers["sidecar-sortformer"]
-	if len(helper.Signals) != 0 || helper.Exit == nil || helper.Exit.Status != 137 {
-		t.Fatal("independent helper evidence lost", helper)
-	}
-	r := dockerOutcome(state, Result{}, nil)
-	if r.Success || r.Interrupted {
-		t.Fatal("helper exit masked by later main delivery", r)
 	}
 }

@@ -85,7 +85,7 @@ for this automated route, and working GPU drivers where there's a GPU.
 **Solid, running real work every day:** the queue and scheduler, CPU and GPU
 batch jobs, checkpoint and resume, file transfer with or without a NAS, fair
 sharing between projects, and `myce dev`. Model calls and servers, software
-environments and optional Docker commands are also supported.
+environments and native sidecars are also supported.
 
 **Experimental:** learned placement (Mycelium measuring jobs and machines to
 place work better) is young and changing fast. Sandboxing is opt-in for plain

@@ -229,7 +229,7 @@ class ClientTests(unittest.TestCase):
                         self.assertIn("queue too old for this client; upgrade the queue first", str(caught.exception))
 
     def test_job_spec_invalid_message(self):
-        reason = "main Docker memory must fit needs.host_memory_gb"
+        reason = "needs.host_memory_gb must be finite and nonnegative"
         error = APIError(400, json.dumps({"code": "job_spec_invalid", "error": reason}))
         self.assertEqual(error.status, 400)
         self.assertEqual(error.code, "job_spec_invalid")

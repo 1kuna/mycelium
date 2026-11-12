@@ -10,7 +10,7 @@ import (
 // private copy so relative check commands cannot use the shared source as cwd.
 // Prepared software and assets remain shared, read-only runtime dependencies.
 func privateNativeExtension(j *Job, env map[string]string, work, cwd string) (string, error) {
-	if j.Spec.Run.Docker || j.Extension == nil {
+	if j.Extension == nil {
 		return cwd, nil
 	}
 	private := filepath.Join(work, ".myce-extension")

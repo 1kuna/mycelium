@@ -78,7 +78,7 @@ func modelSnapshotViews(t *testing.T, mode string, wrap func(*testing.T, Worker,
  printf 'ready\n'
  read gate
  `
-	if mode != "plain" && mode != "docker" {
+	if mode != "plain" {
 		script += `
  /bin/sh "$MYCE_MODEL_BASE/custom.sh"
  if ("$MYCE_MODEL_BASE/custom.sh") 2>/dev/null; then exit 87; fi

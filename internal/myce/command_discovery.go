@@ -29,7 +29,7 @@ func validateCommandDiscovery(s Spec) error {
 	if err := lowerExecution(&s); err != nil {
 		return err
 	}
-	if !s.Needs.cpuOnly() || s.Run.Docker || len(s.Run.DockerSidecars) > 0 || s.Environment.Name == "" {
+	if !s.Needs.cpuOnly() || s.Environment.Name == "" {
 		return errors.New("omitted-target portable discovery requires native CPU commands and a named managed environment with selected immutable lock coverage; otherwise declare explicit targets")
 	}
 	return nil

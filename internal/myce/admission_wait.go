@@ -576,8 +576,8 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 			h.ForecastHostGB, h.SampleFresh = waitNumber(forecast), true
 		}
 		// This is the Started worker contract, not a direct memory.max read.
-		// Never describe sampled RSS, unstarted work, or Docker as a kernel cap.
-		if j.StartedAt != nil && !j.Spec.Run.Docker && owner.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
+		// Never describe sampled RSS or unstarted work as a kernel cap.
+		if j.StartedAt != nil && owner.MemoryEnforcement == "memory ceilings enforced (cgroup v2)" {
 			cap := max(n, adaptiveMemoryCeilingGB(j, owner))
 			h.EnforcedHostGB, h.EnforcementBasis = waitNumber(cap), "started_worker_contract_not_direct_read"
 		}

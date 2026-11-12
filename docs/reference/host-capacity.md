@@ -187,7 +187,7 @@ Each host keeps one memory ledger and one rule: room = capacity − Σ charge.
   floor and the interactive owner reserve, applied once, never stacked. It is
   lowered to the host's one allowance, which workers enforce at launch.
 - A running attempt is charged its measured use plus forecast growth, bounded by
-  the ceiling that contains it (its cgroup, Docker limit or sampled guard, else
+  the ceiling that contains it (its cgroup or sampled guard, else
   physical RAM). Measured high water is always kept. Live availability already
   excludes resident memory, so that is credited once.
 - An attempt keeps its declared or learned envelope as the least it is charged,
@@ -344,23 +344,8 @@ advisory capability, not a required laptop prerequisite. If a qualified worker
 cannot install/confirm an attempt's limit or membership, it refuses that payload;
 it does not silently run it without a ceiling.
 
-Managed `run.docker: true` jobs are limited by the Docker daemon, since container
-processes are outside the worker service. The adapter supplies `--memory`;
-optional per-container `memory_swap` supplies `--memory-swap` (total RAM plus
-swap GiB), otherwise Docker defaults apply. It injects
-`MYCE_MEMORY_LIMIT_BYTES`, and verifies the labeled container's HostConfig before
-start and during reconciliation. Missing or changed limits refuse start or kill
-the owned container; `State.OOMKilled` reports the same ordinary failure. An
-unmanaged shell wrapper **must** pass the provided limit itself, for example:
-
-```sh
-docker run --memory "$MYCE_MEMORY_LIMIT_BYTES" \
-  --memory-swap "$MYCE_MEMORY_LIMIT_BYTES" IMAGE COMMAND
-```
-
-Unmanaged/nested containers and Docker-backed catalog servers cannot be
-certified by the native cgroup or inspected automatically; use the managed batch
-adapter and its custody/label contract for qualified container work.
+Containers a payload starts through a host container runtime run outside the
+worker service, so the native cgroup cannot contain or certify them.
 
 Preserve the conservative existing value as UNQUALIFIED input. Change queue
 allowance only during drained/disabled maintenance after checking retained work.

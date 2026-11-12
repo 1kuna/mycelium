@@ -41,11 +41,8 @@ func memoryIntent(j *Job) *Job {
 	copy.MemoryEnvelope = nil
 	copy.Spec.Needs.Memory = ""
 	n := &copy.Spec.Needs
-	n.HostMemoryGB = max(n.HostMemoryGB, minimumHostMemoryGB, j.Spec.Run.MemoryGB, j.Spec.Run.DockerMemoryGB)
+	n.HostMemoryGB = max(n.HostMemoryGB, minimumHostMemoryGB, j.Spec.Run.MemoryGB)
 	for _, side := range j.Spec.Run.Sidecars {
-		n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
-	}
-	for _, side := range j.Spec.Run.DockerSidecars {
 		n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
 	}
 	if floor := j.MemoryOOMFloor; floor != nil {
@@ -153,7 +150,7 @@ func (q *Queue) memorySizingDeadEnd(j *Job) string {
 		memory := false
 		for _, dimension := range fit.failed {
 			switch dimension {
-			case "platform", "target", "device", "excluded_machines", "allow-list", "cores", "hardware capacity", "Docker runtime", "card group":
+			case "platform", "target", "device", "excluded_machines", "allow-list", "cores", "hardware capacity", "card group":
 				return true // this target can never serve the job
 			case "memory envelope":
 				memory = true

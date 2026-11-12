@@ -1373,7 +1373,7 @@ func (q *Queue) maintain() {
 		// Machine attempts retain their exact device and host charge through kill;
 		// only their release acknowledgement can retire the stopping attempt.
 		m := q.s.Machines[j.Machine]
-		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && expired(j.StopAt, now) {
 			if cancelled(j) {
 				q.finishCancellation(j)
 			} else {
@@ -1401,7 +1401,6 @@ func (q *Queue) maintain() {
 	q.settleMaintenance()
 	q.maintainModels()
 	q.settleMaintenance()
-	q.escalateDockerCleanup()
 	q.finalizeHolds()
 	// Only display reasons change in this final read-only planning pass.
 	// Share memory evidence across the backlog, then discard it before the
@@ -1744,13 +1743,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.acceptContactPeriod(&m, c.period, c.contact)
 		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
-		for _, report := range reports {
-			cause := report.DockerCause
-			r := Result{Execution: report.Execution, Machine: m.ID, Session: report.Session, CleanupCause: cause}
-			if j, err := q.current(r); err == nil && j.Spec.Run.Docker {
-				q.alertAttemptLoss(j, attemptOutcome(j, r), false)
-			}
-		}
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
 		}
@@ -2128,7 +2120,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			// Native kill-time reports can carry cleanup only. Advance the
 			// recorded stop on this exact acknowledgement, rather than using
 			// an omitted attempt in the next heartbeat as release evidence.
-			if j.State == "stopping" && !j.Spec.Run.Docker {
+			if j.State == "stopping" {
 				if cancelled(j) {
 					q.finishCancellation(j)
 				} else {
@@ -2176,13 +2168,6 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		if r.ReleasePending {
 			j.LastStopOutcome += "; release pending"
 		}
-	}
-	if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
-		if j, err := q.current(r); err == nil {
-			q.alertAttemptLoss(j, attemptOutcome(j, r), false)
-		}
-		q.maintain()
-		return nil
 	}
 	if settled || pendingTracked {
 		if _, err := q.current(r); err != nil {
@@ -2476,9 +2461,6 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 	for host := range hosts {
 		out.HostStates[host] = q.hostMaintenanceStatus(host).State
 		out.DeviceMaintenance = append(out.DeviceMaintenance, q.deviceMaintenanceStatus(host)...)
-		if h := q.dockerHold(host); h.Kind != "" {
-			out.Holds = append(out.Holds, h)
-		}
 		if h := q.startupReleaseHold(host); h.Kind != "" {
 			out.Holds = append(out.Holds, h)
 		}
@@ -2681,7 +2663,7 @@ func (q *Queue) callView(c *ModelCall) *Job {
 }
 
 // callWait is the scheduler's wait for a model call, in the call's precedence:
-// log policy, host RAM, production/disk/Docker fences, project cap, model
+// log policy, host RAM, production/disk fences, project cap, model
 // placement, engine recovery, then an ordinary wait for a worker.
 func (q *Queue) callWait(c *ModelCall) *Hold {
 	call := q.callView(c)
@@ -2919,9 +2901,7 @@ func (q *Queue) markStarted(j *Job) {
 				c.StartedAt = &now
 			}
 		}
-		if !j.Spec.Run.Docker {
-			q.checkLedgerNativeCoverage(j)
-		}
+		q.checkLedgerNativeCoverage(j)
 		q.appendJobLedger(j, ledgerAttempt(j, "started", "start_authorized"))
 		q.beginWorkTiming(j)
 		if j.Spec.StartBy != nil && j.StartWindow == 0 {

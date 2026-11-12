@@ -130,27 +130,18 @@ func TestProductionStartDeadlineActualStart(t *testing.T) {
 }
 
 func TestProductionStartDeadlineBlockers(t *testing.T) {
-	for _, blocker := range []string{"experiments", "Docker"} {
+	for _, blocker := range []string{"experiments"} {
 		t.Run(blocker, func(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("b70", "xpu")
-			if blocker == "Docker" {
-				m.Capabilities = append(m.Capabilities, "docker")
-				m.CapabilityProfile.OS = "linux"
-			}
 			m.TotalMemoryGB = 8
 			check(t, q, m, nil)
 			var experiment *Job
-			if blocker == "experiments" || blocker == "Docker" {
+			if blocker == "experiments" {
 				if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
 					t.Fatal(err)
 				}
-				s := spec("experiment")
-				if blocker == "Docker" {
-					s.Run.Docker = true
-					s.Run.Command = []string{"docker", "run", "image@sha256:" + strings.Repeat("a", 64)}
-				}
-				submit(t, q, s)
+				submit(t, q, spec("experiment"))
 				experiment = check(t, q, m, nil).Job
 			} else if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 				t.Fatal(err)
@@ -164,9 +155,6 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 			}
 			waiting := job(t, q, j.ID)
 			want := "stopping 1 attempts"
-			if blocker == "Docker" {
-				want = "Docker cleanup"
-			}
 			if blocker == "disabled" {
 				want = "host b70 disabled by operator"
 			}
@@ -404,54 +392,6 @@ func TestProductionStartDeadlineRequiresSuccessfulExec(t *testing.T) {
 	}
 }
 
-func TestProductionStartDeadlineDockerLateDispatch(t *testing.T) {
-	q, _ := fixture(t)
-	w, store, clock, root := dockerFixture(t)
-	q.clock = clock
-	s := dockerJob().Spec
-	s.Priority = "production"
-	s.Resumable = false
-	submit(t, q, s)
-	assigned := check(t, q, w.Machine, nil).Job
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	w.Client = Client{URL: server.URL, Token: "test"}
-	clock.advance(ProductionStartTimeout)
-	p, err := startAfterFixtureInputs(t, w, store, *assigned)
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-p.done:
-	case <-time.After(testWaitTimeout):
-		p.stop(clock.Now(), 0, true)
-		t.Fatal("Docker cleanup did not settle")
-	}
-	if _, err := os.Stat(filepath.Join(root, "running")); !os.IsNotExist(err) {
-		t.Fatalf("late Docker start: %v", err)
-	}
-	if got := job(t, q, assigned.ID); got.State != "failed" {
-		t.Fatalf("job: %+v", got)
-	}
-}
-
-func TestProductionStartDeadlineUnconfirmedHost(t *testing.T) {
-	q, c := fixture(t)
-	m := machine("b70", "xpu")
-	m.DockerCleanup = "cleanup unconfirmed"
-	check(t, q, m, nil)
-	j := submit(t, q, spec("production"))
-	if reply := check(t, q, m, nil); reply.Job != nil {
-		t.Fatal("unconfirmed Docker host admitted production")
-	}
-	waiting := job(t, q, j.ID)
-	if !strings.Contains(waiting.Reason, "Docker cleanup") {
-		t.Fatal(waiting.Reason)
-	}
-	c.Advance(ProductionStartTimeout)
-	requireState(t, q, j.ID, "failed")
-}
-
 func TestProductionStartDeadlineRoomAtBoundary(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("b70", "xpu")
@@ -493,30 +433,6 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 				t.Fatalf("disabled-only fleet did not fail immediately: %+v", got)
 			}
 		})
-	}
-}
-
-func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
-	q, _ := fixture(t)
-	m := dockerMachine("b70", "xpu")
-	s := dockerJob().Spec
-	s.Priority = "production"
-	submit(t, q, s)
-	assigned := check(t, q, m, nil).Job
-	if assigned == nil {
-		t.Fatal("not assigned")
-	}
-	m.DockerCleanup = "creating"
-	check(t, q, m, assigned)
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatalf("own preparation rejected: %v", err)
-	}
-	sibling := machine("sibling", "xpu")
-	sibling.HostID = "b70"
-	sibling.DockerCleanup = "cleanup unconfirmed"
-	check(t, q, sibling, nil)
-	if err := q.Started(result(assigned, true)); err == nil {
-		t.Fatal("unknown sibling cleanup ignored")
 	}
 }
 

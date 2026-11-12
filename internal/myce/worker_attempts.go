@@ -45,22 +45,6 @@ type attemptSupervisor struct {
 	admissionReleased atomic.Bool
 }
 
-// Observation retries preserve running status. Their exact cause must still
-// reach the queue; successful recovery clears ObservationRetry and the report.
-func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
-	status := d.status()
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	var cause *RuntimeCause
-	if status != "running" || d.state.ObservationRetry != "" {
-		cause = safeRuntimeCause(d.state.CleanupCause)
-	}
-	if status == "running" {
-		status = ""
-	}
-	return status, cause
-}
-
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
 func (a *attemptSupervisor) admissionJob() Job {
 	j := a.job // Immutable execution identity; never inspect a process mutex here.
@@ -131,7 +115,6 @@ func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Jo
 		reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 		reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 	}
-	m.MemoryObservation = creditDockerObservation(m.MemoryObservation, jobs, reports, w.Clock.Now())
 }
 func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	// Scarce-host yield is provisional until its delivery authorization. It
@@ -204,27 +187,22 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	defer func() {
 		if p != nil {
 			p.stop(initial.Clock.Now(), 0, true)
-			if p.docker != nil {
-				p.docker.waitShutdown(initial.Clock)
-				p.docker.close()
-			} else {
-				wake := time.NewTicker(10 * time.Millisecond)
-				defer wake.Stop()
-				var f workerFinish
-				waiting := true
-				for waiting {
-					p.enforceGrace(initial.Clock.Now())
-					select {
-					case f = <-p.done:
-						waiting = false
-					case <-wake.C:
-					}
+			wake := time.NewTicker(10 * time.Millisecond)
+			defer wake.Stop()
+			var f workerFinish
+			waiting := true
+			for waiting {
+				p.enforceGrace(initial.Clock.Now())
+				select {
+				case f = <-p.done:
+					waiting = false
+				case <-wake.C:
 				}
-				if f.err != nil {
-					a.mu.Lock()
-					a.err = errors.Join(a.err, f.err)
-					a.mu.Unlock()
-				}
+			}
+			if f.err != nil {
+				a.mu.Lock()
+				a.err = errors.Join(a.err, f.err)
+				a.mu.Unlock()
 			}
 		}
 	}()
@@ -269,7 +247,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
-		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() && (!a.job.Spec.Run.Docker || s.state.Preparation != "" || s.inputWriterOnly()) {
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
@@ -381,7 +359,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			s.state.Result = &r
 		}
-		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
+		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.native == nil || p.native.started())}
 
 		if report.Started {
 			a.mu.Lock()
@@ -395,12 +373,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			switch {
 			case p.native != nil:
 				memory = p.native.memory
-			case p.docker != nil:
-				var fs memoryFS = osMemoryFS{}
-				if w.memoryCeilings != nil {
-					fs = w.memoryCeilings.fs
-				}
-				report.CurrentHostMemory = p.docker.currentHostMemory(w.Clock, fs)
 			case p.memory != nil:
 				memory = p.memory
 			case s.state.Cgroup != "":
@@ -410,11 +382,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 				memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
 			}
-			if p.docker == nil {
-				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
-				if memory == nil && w.reportsProcessSample(a.job) {
-					report.CurrentHostMemory = p.currentProcessHostMemory()
-				}
+			report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+			if memory == nil && w.reportsProcessSample(a.job) {
+				report.CurrentHostMemory = p.currentProcessHostMemory()
 			}
 		}
 		if s.state.Job != nil {
@@ -433,10 +403,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if diagnostics.FileTransferError == "" && s.inputTransferRecovering.Load() {
 			diagnostics.FileTransferError = inputTransferRecoveringReason
-		}
-		if p != nil && p.docker != nil {
-			diagnostics.DockerCleanup, diagnostics.DockerCause = dockerHeartbeatDiagnostic(p.docker)
-			report.DockerCause = diagnostics.DockerCause
 		}
 		if needsCheckpoint(&a.job) {
 			path := attemptCheckpoint(a.job)
@@ -464,7 +430,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			var err error
 			releaseAcknowledged := false
 			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
-				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
+				if s.state.Result != nil {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
 					err = w.Client.Call(ioCtx, "POST", "/api/workers/complete", released, nil)
@@ -582,12 +548,6 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 					s.state.PublishedAttempt = published
 				}
-				if a.job.Spec.Run.Docker {
-					if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {
-						finish(e)
-						return
-					}
-				}
 				preparation := s.state.Preparation
 				s.state.Job, s.state.Result, s.state.Preparation = nil, nil, ""
 				// This branch requires confirmed release and queue acknowledgement.
@@ -629,56 +589,37 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 	if w.memoryCeilings != nil {
 		fs = w.memoryCeilings.fs
 	}
-	if !s.state.Job.Spec.Run.Docker {
-		if err := s.recoverResult(w.Machine.ID); err != nil {
-			return nil, err
-		}
-		if err := s.recoverRSSCause(w.Machine.ID); err != nil {
-			return nil, err
-		}
-		if err := s.recoverNativeCause(w.Machine.ID, fs); err != nil {
-			return nil, err
-		}
+	if err := s.recoverResult(w.Machine.ID); err != nil {
+		return nil, err
 	}
-	inputWriterOnly := s.inputWriterOnly()
+	if err := s.recoverRSSCause(w.Machine.ID); err != nil {
+		return nil, err
+	}
+	if err := s.recoverNativeCause(w.Machine.ID, fs); err != nil {
+		return nil, err
+	}
 	if err := s.cleanupOrphan(w.Clock, fs); err != nil {
 		return nil, err
 	}
-	var p *process
-	var err error
-	if s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
-		p, err = w.restoreDocker(s)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if p != nil {
-		s.state.Result = nil
-		return p, nil
-	}
-	if err = s.recoverResult(w.Machine.ID); err != nil {
+	if err := s.recoverResult(w.Machine.ID); err != nil {
 		return nil, err
 	}
 	if s.state.Result == nil {
 		facts := memberOutcome{ObservationLost: true}
-		if err = saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
+		if err := saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
 			return nil, err
 		}
 		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
 		s.state.Result = &r
 	}
 	released := *s.state.Result
-	if !s.state.Job.Spec.Run.Docker || inputWriterOnly {
-		released.ReleasePending = false
-		s.state.InputWriterPending = false
-	}
+	released.ReleasePending = false
+	s.state.InputWriterPending = false
 	if s.state.OperatorStopped {
 		released = operatorOutcome(released, true)
 	}
-	if !s.state.Job.Spec.Run.Docker {
-		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
-			return nil, err
-		}
+	if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+		return nil, err
 	}
 	s.state.Result = &released
 	s.state.PID = 0
@@ -767,11 +708,6 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 	s := &workerStore{liveEvidence: unstartedExecution(j.Attempt), liveEvidenceKey: jobKey(j), inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
-	// Docker identity denotes durable Docker custody, not mere assignment.
-	// Refusals before startDocker must not request container recovery (#166).
-	if j.Spec.Run.Docker {
-		s.state.Identity = ""
-	}
 	s.nasPrepare.timeout = checkpointPreparationBudget
 	s.nasProgress.timeout = heartbeatFilesystemBudget
 	return s, s.save()
@@ -1036,7 +972,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	tick := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer tick.Stop()
 	var cpuQualification checkpointIO[string]
-	var dockerQualification checkpointIO[bool]
 	toolInventory := map[string][]string{"": executableTools(jobBaseEnvironment()["PATH"])}
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	var retry workerRetry
@@ -1097,9 +1032,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			reports = append(reports, report)
 			diagnostics.CheckpointUnavailable = diagnostics.CheckpointUnavailable || status.CheckpointUnavailable
 			diagnostics.FileTransferError = preferTransferError(diagnostics.FileTransferError, status.FileTransferError)
-			if status.DockerCleanup != "" && (diagnostics.DockerCleanup == "" || status.DockerCleanup < diagnostics.DockerCleanup) {
-				diagnostics.DockerCleanup, diagnostics.DockerCause = status.DockerCleanup, status.DockerCause
-			}
 			a.mu.Lock()
 			released := a.released
 			a.mu.Unlock()
@@ -1153,7 +1085,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
-			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
 			observed, probeErr := inventory.snapshot()
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
@@ -1291,7 +1222,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability)
 			if w.ModelRoot != "" && w.modelSnapshots != nil {
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
 			}
@@ -1304,16 +1235,6 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
 				m.Capabilities = append(m.Capabilities, metalFootprintGuardCapability)
-			}
-			if w.DockerEndpoint != "" {
-				// Refresh without allowing a slow daemon to block heartbeats.
-				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
-					w.dockerEnvelope = supported
-				}
-				m.Capabilities = append(m.Capabilities, "docker", dockerFilesCapability)
-				if w.dockerEnvelope {
-					m.Capabilities = append(m.Capabilities, "docker_envelope")
-				}
 			}
 			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
 			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)

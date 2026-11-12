@@ -92,9 +92,6 @@ jobs need not set these themselves:
   default install's state path the alias leaves room for a UUID-named socket.
   Where links are unsupported the real path is used.
 
-Docker jobs get their own `MYCE_*` paths (see [files](../files.md)) and are not
-covered by the thread defaults above.
-
 Payloads are offline by default. Add `needs.network: true` for payload-time
 downloads or API calls. Worker-owned environment/input preparation keeps its
 network access. Placement requires protected outbound capability; submission

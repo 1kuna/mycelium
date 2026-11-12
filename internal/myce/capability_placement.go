@@ -171,7 +171,7 @@ func (q *Queue) retryOOM(j *Job) {
 		j.State, j.Reason = "failed", j.MemoryEnvelope.Source+" exhausted after out of memory; "+memoryCapacityRemedies
 		return
 	}
-	if j.Spec.Needs.Memory == "auto" && (j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil && hostOOMAttempt(j)) && !j.Spec.Run.Docker {
+	if j.Spec.Needs.Memory == "auto" && (j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil && hostOOMAttempt(j)) {
 		q.retryHostOOM(j)
 		return
 	}

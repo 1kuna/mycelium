@@ -173,14 +173,8 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 					break
 				}
 				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-				cpu, kind, transition := false, "", "other"
-				if m != nil {
-					cpu, kind = cpuFits(j, m), q.dockerHold(hostID(m)).Kind
-					if dockerStartingOrRunning(m.DockerCleanup) {
-						transition = m.DockerCleanup
-					}
-				}
-				log.Printf("event=launch_placement_rejected job=%s attempt=%d predicate=%s cpu_fits=%t docker_hold_kind=%q docker_transition=%q", j.ID, j.Attempt, predicate, cpu, kind, transition)
+				cpu := m != nil && cpuFits(j, m)
+				log.Printf("event=launch_placement_rejected job=%s attempt=%d predicate=%s cpu_fits=%t", j.ID, j.Attempt, predicate, cpu)
 				q.recordStartRefusal(j, predicate)
 				reject("start_placement")
 			}

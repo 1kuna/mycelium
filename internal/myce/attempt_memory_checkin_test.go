@@ -38,7 +38,7 @@ func TestAttemptMemoryCheckinRefreshesDeviceSample(t *testing.T) {
 	// Capture the actors before CUDA initialization, then leave those reports
 	// untouched while their samplers continue during slow actor log/result I/O.
 	clock.Advance(12 * time.Second)
-	workerClock := &dockerTestClock{now: clock.Now()}
+	workerClock := &lockedTestClock{now: clock.Now()}
 	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock}
 	ctx, cancel := context.WithCancel(context.Background())
 	var results []<-chan deviceMemoryResult

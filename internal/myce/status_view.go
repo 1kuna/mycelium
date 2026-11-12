@@ -48,9 +48,6 @@ func HyphaAvailability(m *Machine) string {
 	if m.MemoryError != "" || m.HostMemoryError != "" {
 		return "waiting for memory readings"
 	}
-	if m.DockerCleanup != "" {
-		return "waiting for previous work to finish cleaning up"
-	}
 	if a := machineAvailability(m); a != nil && a.Available && a.Reason == "CPU thermal coverage waived for desktop" {
 		return "available for work; CPU thermal coverage waived for desktop"
 	}

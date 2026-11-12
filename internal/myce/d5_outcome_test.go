@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -41,8 +40,8 @@ func TestNativeOutcomeTermStop(t *testing.T) {
 	}
 }
 
-// Adapter production of these Results remains covered by TestOutcomeRuntimeNative,
-// TestOutcomeRuntimeNativeGroup and TestOutcomeRuntimeDocker.
+// Adapter production of these Results remains covered by TestOutcomeRuntimeNative
+// and TestOutcomeRuntimeNativeGroup.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
@@ -104,8 +103,8 @@ func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
 	}
 }
 
-// Adapter production of these Results remains covered by TestOutcomeRuntimeNative,
-// TestOutcomeRuntimeNativeGroup and TestOutcomeRuntimeDocker.
+// Adapter production of these Results remains covered by TestOutcomeRuntimeNative
+// and TestOutcomeRuntimeNativeGroup.
 func TestOutcomeCancellationPrecedence(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
@@ -140,7 +139,6 @@ type outcomeRow struct {
 
 func TestOutcomeRuntimeNative(t *testing.T)      { testOutcomeRuntime(t, "native") }
 func TestOutcomeRuntimeNativeGroup(t *testing.T) { testOutcomeRuntime(t, "native-group") }
-func TestOutcomeRuntimeDocker(t *testing.T)      { testOutcomeRuntime(t, "docker") }
 
 // Independent roots let the gate schedule each real adapter separately. Every
 // outcome row, signal, persisted result and recovery assertion stays intact.
@@ -173,9 +171,6 @@ func testOutcomeRuntime(t *testing.T, runtime string) {
 // synthetic wait-status helper.
 func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 	t.Helper()
-	if runtime == "docker" {
-		return d5DockerRuntimeOutcome(t, tc)
-	}
 	if tc.launchRefusal || tc.startFailureKind != "" {
 		return d5RuntimeStartFailure(t, runtime, tc.startFailureKind)
 	}
@@ -237,108 +232,6 @@ func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 		r = *s.state.Result
 	}
 	return r
-}
-
-func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
-	t.Helper()
-	if tc.startFailureKind == environmentFailed {
-		// Environment acquisition precedes runtime selection in Worker.start.
-		return d5RuntimeStartFailure(t, "docker", environmentFailed)
-	}
-	if tc.launchRefusal || tc.startFailureKind == launchFailed {
-		w, s, _, root := dockerFixture(t)
-		if tc.launchRefusal {
-			w.Client = d5DeniedLaunchClient(t)
-		} else {
-			if err := os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-create"), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		job := dockerGroupJob(t)
-		if tc.startFailureKind == launchFailed {
-			job = dockerJob()
-			job.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-		}
-		p, err := startDockerFixture(w, s, job)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(p.docker.close)
-		return d5Finish(t, p)
-	}
-	_, s, d, c, root := restartResultFixture(t)
-	if tc.priority {
-		d.mu.Lock()
-		d.state.PriorityStop = &PriorityPreemption{Cause: priorityPreemptionCause}
-		err := d.saveLocked()
-		d.mu.Unlock()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if tc.portProbe {
-		// Fake daemon boundary supplies a real, separate process group as the
-		// synthetic container's PID namespace. The listener is outside that group.
-		anchor := exec.Command("sleep", "600")
-		anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := anchor.Start(); err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = anchor.Process.Kill(); _ = anchor.Wait() }()
-		if err := d.recordInfrastructure(d5ForeignPortProbe(t, anchor.Process.Pid), nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte(fmt.Sprintf("main-exit-%d", tc.code)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if tc.oom {
-		// The fake daemon supplies OOMKilled through the real inspection adapter.
-		if err := os.WriteFile(filepath.Join(root, "table-oom"), nil, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if tc.lost {
-		if err := os.WriteFile(filepath.Join(root, "mode"), []byte("down"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := d.reconcile(); err == nil {
-			t.Fatal("lost daemon was observed")
-		}
-		if !restartRead(t, s).ObservationLost {
-			t.Fatal("observation loss was not persisted")
-		}
-		if err := os.WriteFile(filepath.Join(root, "mode"), []byte(fmt.Sprintf("main-exit-%d", tc.code)), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if tc.intent {
-		d.stop(c.Now(), StopGrace, false)
-	}
-	if tc.delivered {
-		d.stop(c.Now(), StopGrace, false)
-		restartTick(t, d) // persist confirmed delivery while main is live
-	}
-	if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "natural-exit")); err != nil {
-		t.Fatal(err)
-	}
-	if tc.late {
-		d.stop(c.Now(), StopGrace, false)
-	}
-	restartTick(t, d)
-	c.advance(StopGrace)
-	for i := 0; i < 5 && !d.state.Released; i++ {
-		restartTick(t, d)
-	}
-	if !d.state.Released {
-		t.Fatal("adapter did not release custody")
-	}
-	state := restartRead(t, s)
-	var recoveryErr error
-	if tc.recovery {
-		recoveryErr = dockerRecoveryError(state)
-	}
-	return dockerOutcome(state, Result{}, recoveryErr)
 }
 
 func TestNativeOutcomeIndependentExitWithStop(t *testing.T) {
@@ -472,9 +365,6 @@ func d5RuntimeStartFailure(t *testing.T, runtime string, kind string) Result {
 	j := recoveryJob(t, []string{"sleep", "600"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 2
-	if runtime == "docker" {
-		j.Spec.Run = dockerJob().Spec.Run
-	}
 	if kind == launchFailed {
 		j.Spec.Run.Command = []string{"/does-not-exist/myce-table"}
 	}

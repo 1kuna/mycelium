@@ -60,7 +60,7 @@ var rejectionMessages = map[string]string{
 	"job_program_invalid":                   "kind/program, inputs, outputs, args and size_hint must describe a valid extension job",
 	"job_memory_invalid":                    "needs.memory_gb must be positive and needs.host_memory_gb finite and nonnegative",
 	"job_platform_invalid":                  "needs.platform requires one valid platform string, list, or required/preferred/any mapping",
-	"job_docker_invalid":                    "run Docker command, environment, network, sidecars and memory must satisfy managed Docker rules",
+	"job_docker_retired":                    "managed Docker was retired; use a native environment and native sidecars (docs/services.md)",
 	"job_environment_invalid":               "environment must identify one configured environment or supported lock_file recipe",
 	"job_environment_platform_mismatch":     "job platform and environment recipes have no compatible execution platform",
 	"job_placement_invalid":                 "allowed_machines must satisfy the project's placement policy",
@@ -276,16 +276,8 @@ func runtimeErrorFor(operation string, err error) error {
 		c.Class = "invalid_response"
 	default:
 		switch err.Error() {
-		case "Docker inspection unconfirmed", "incomplete Docker inventory", "incomplete Docker network inventory":
-			c.Class = "inventory_incomplete"
-		case "Docker ownership mismatch", "Docker network ownership mismatch":
-			c.Class = "ownership_mismatch"
 		case errWorkerMemory.Error() + ": host allowance changed since queue admission":
 			c.Class = "admission_changed"
-		case "Docker restart policy unknown":
-			c.Class = "restart_policy_unknown"
-		case "legacy Docker assertion has unknown operation disposition":
-			c.Class = "disposition_unknown"
 		}
 	}
 	if c.Staging != nil {
@@ -317,7 +309,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		return nil
 	}
 	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
-	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
+	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true}
 	operations["execution"], classes[wallTimeLimit] = true, true
 	classes["tools_missing"] = true
 	if c.Operation == "outputs" && safeFinalization(c.Finalization) != nil {

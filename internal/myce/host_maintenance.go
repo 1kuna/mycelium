@@ -70,7 +70,6 @@ type HostMaintenanceStatus struct {
 	Preparations    int                  `json:"preparations"`
 	Sidecars        int                  `json:"sidecars"`
 	PendingReleases []HostRelease        `json:"pending_releases"`
-	PendingCleanup  []string             `json:"pending_cleanup"`
 	MemoryInUseGB   float64              `json:"memory_in_use_gb"`
 	MemoryDebtGB    float64              `json:"memory_debt_gb"`
 	// ProductionBlocker names open production work a planned drain of this
@@ -168,7 +167,7 @@ func (q *Queue) HostMaintenanceStatus(host string, requestContexts ...context.Co
 	return out, nil
 }
 func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
-	out := HostMaintenanceStatus{DeviceUse: q.deviceUseStatus(host), Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
+	out := HostMaintenanceStatus{DeviceUse: q.deviceUseStatus(host), Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}}
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}
@@ -205,9 +204,6 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)
 		out.MemoryDebtGB = max(out.MemoryDebtGB, m.hostReservationDebtGB)
-		if m.DockerCleanup != "" {
-			out.PendingCleanup = append(out.PendingCleanup, m.ID+": "+m.DockerCleanup)
-		}
 	}
 	obligations := q.hostObligations(host)
 	for _, obligation := range obligations {
@@ -232,7 +228,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		r := obligation.Result
 		attempt := MaintenanceAttempt{Execution: r.Execution, Machine: r.Machine, Session: r.Session, State: "release_pending"}
 		if j := q.s.Jobs[r.ID]; j != nil {
-			out.Sidecars += len(j.Spec.Run.DockerSidecars) + nativeSidecarCount(j, q.s.Machines[r.Machine])
+			out.Sidecars += nativeSidecarCount(j, q.s.Machines[r.Machine])
 			if j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 				attempt.State = j.State
 				attempt.Started = j.StartedAt != nil
@@ -252,7 +248,6 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	}
 	sort.Slice(out.Workers, func(i, j int) bool { return out.Workers[i].Machine.ID < out.Workers[j].Machine.ID })
 	sort.Slice(out.PendingReleases, func(i, j int) bool { return releaseKey(out.PendingReleases[i]) < releaseKey(out.PendingReleases[j]) })
-	sort.Strings(out.PendingCleanup)
 	operational = operational && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
 	out.Healthy = out.Healthy && operational
 	out.State = "unhealthy"
@@ -263,7 +258,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		}
 	}
 	// Fresh custody evidence is required; inventory and memory health are separate.
-	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
+	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0
 	return out
 }
 func (a API) registerHostMaintenance(mux *requestMux) {

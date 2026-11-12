@@ -10,12 +10,12 @@ import (
 )
 
 // #216: cleared attempts retain diagnosis for the log window; held and replay
-// pending custody, the machine index, and Docker cleanup retain their evidence.
+// pending custody and the machine index retain their evidence.
 func TestWorkerRetentionPreservesUniqueAttemptStateAfterLogWindow(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
 	ids := map[string]string{}
-	for _, kind := range []string{"cleared", "live", "replay", "indexed", "docker", "recent"} {
+	for _, kind := range []string{"cleared", "live", "replay", "indexed", "recent"} {
 		id := ID()
 		ids[kind] = id
 		state := workerState{Identity: id}
@@ -28,16 +28,13 @@ func TestWorkerRetentionPreservesUniqueAttemptStateAfterLogWindow(t *testing.T) 
 		if err := saveWorkerJSON(dir, "state-attempt-"+kind+".json", state); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{id + ".result.json", id + ".outcome.json", id + ".cid", id + "-helper.cid", id + ".docker-evidence.json", id + ".docker-events.json", "attempt-" + id + ".json", "native-" + id + ".json"} {
+		for _, name := range []string{id + ".result.json", id + ".outcome.json", "attempt-" + id + ".json", "native-" + id + ".json"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0600); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	if err := saveWorkerJSON(dir, "state.json", workerState{Attempts: []string{"state-attempt-indexed.json"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ids["docker"]+".docker.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)
@@ -72,80 +69,68 @@ func TestWorkerRetentionPreservesUniqueAttemptStateAfterLogWindow(t *testing.T) 
 	for kind, id := range ids {
 		keep := true
 		assertPresent("state-attempt-"+kind+".json", keep)
-		for _, name := range []string{id + ".result.json", id + ".outcome.json", id + ".cid", id + "-helper.cid", id + ".docker-evidence.json", id + ".docker-events.json", "attempt-" + id + ".json", "native-" + id + ".json"} {
+		for _, name := range []string{id + ".result.json", id + ".outcome.json", "attempt-" + id + ".json", "native-" + id + ".json"} {
 			assertPresent(name, keep)
 		}
 	}
-	// Removing stopped containers does not authorize deleting unique evidence.
-	if err := os.Remove(filepath.Join(dir, ids["docker"]+".docker.json")); err != nil {
-		t.Fatal(err)
-	}
-	pass()
-	assertPresent(ids["docker"]+".docker-evidence.json", true)
-	assertPresent("state-attempt-docker.json", true)
 }
 
-// Review regression: refused Docker jobs have no execution identity, and their
-// launch diagnostics use the job/attempt name rather than an execution identity.
+// Review regression: launch diagnostics use the job/attempt name rather than an
+// execution identity.
 func TestWorkerRetentionPreservesAcknowledgedLaunchRefusals(t *testing.T) {
-	for _, docker := range []bool{false, true} {
-		t.Run(map[bool]string{false: "native", true: "docker"}[docker], func(t *testing.T) {
-			dir := t.TempDir()
-			clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
-			root := &workerStore{dir: dir}
-			job := Job{ID: "refused", Attempt: 1}
-			job.Spec.Run.Docker = docker
-			store, err := newAttemptStore(root, job)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cause := store.startFailure(job, launchRefused, errors.New("refused before launch"))
-			result := startFailureOutcome(Result{}, cause)
-			store.state.Result = &result
-			if err := store.save(); err != nil {
-				t.Fatal(err)
-			}
-			outcome := store.state.LaunchOutcome
-			if outcome == "" || docker && store.state.Identity != "" {
-				t.Fatal("bad refusal fixture")
-			}
-			for _, name := range []string{store.stateName, outcome} {
-				if err := os.Chtimes(filepath.Join(dir, name), clock.Now(), clock.Now()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			pass := func() {
-				t.Helper()
-				if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
-					t.Fatal(err)
-				}
-			}
-			clock.Advance(2 * testLogRetention)
-			pass() // Result replay remains pending regardless of diagnostic age.
-			for _, name := range []string{store.stateName, outcome} {
-				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-					t.Fatal("replay evidence removed", err)
-				}
-			}
-			store.state.Job, store.state.Result = nil, nil
-			if err := store.save(); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chtimes(filepath.Join(dir, store.stateName), clock.Now(), clock.Now()); err != nil {
-				t.Fatal(err)
-			}
-			pass() // Acknowledgement starts the retention window, not the refusal date.
-			if _, err := os.Stat(filepath.Join(dir, outcome)); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(testLogRetention)
-			pass()
-			for _, name := range []string{store.stateName, outcome} {
-				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-					t.Fatalf("unique refusal %s lost: %v", name, err)
-				}
-			}
-		})
+	dir := t.TempDir()
+	clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+	root := &workerStore{dir: dir}
+	job := Job{ID: "refused", Attempt: 1}
+	store, err := newAttemptStore(root, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := store.startFailure(job, launchRefused, errors.New("refused before launch"))
+	result := startFailureOutcome(Result{}, cause)
+	store.state.Result = &result
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	outcome := store.state.LaunchOutcome
+	if outcome == "" {
+		t.Fatal("bad refusal fixture")
+	}
+	for _, name := range []string{store.stateName, outcome} {
+		if err := os.Chtimes(filepath.Join(dir, name), clock.Now(), clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pass := func() {
+		t.Helper()
+		if err := workerRetention(dir, clock.Now(), testLogRetention); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock.Advance(2 * testLogRetention)
+	pass() // Result replay remains pending regardless of diagnostic age.
+	for _, name := range []string{store.stateName, outcome} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatal("replay evidence removed", err)
+		}
+	}
+	store.state.Job, store.state.Result = nil, nil
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, store.stateName), clock.Now(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pass() // Acknowledgement starts the retention window, not the refusal date.
+	if _, err := os.Stat(filepath.Join(dir, outcome)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(testLogRetention)
+	pass()
+	for _, name := range []string{store.stateName, outcome} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("unique refusal %s lost: %v", name, err)
+		}
 	}
 }
 

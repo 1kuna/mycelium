@@ -141,7 +141,7 @@ The profile admits native CPU commands with already prepared environments,
 including CI/tests and small builds. It withholds accelerator work through the
 existing `kind=gpu` exclusion matching path, including future devices, without
 creating or editing an operator's selector. Explicit selector exclusions remain
-independent. Docker, extension execution, new environment/extension preparation,
+independent. Extension execution, new environment/extension preparation,
 and model loading/copying are withheld on this profile
 until their execution budgets and priority are covered. A job's own shell can
 still compile code: that work inherits its command's priority.
@@ -294,7 +294,7 @@ The response can cost one sampling interval plus checkpoint grace, and pressure
 can stop useful progress. PSI's averaged recovery may withhold capacity after
 stalls end. Larger RAM reserves and a smaller CPU allowance reduce interference
 but admit less work; a Linux hard quota also costs throughput while the owner is
-idle. Keep existing operator drains authoritative. Docker, extension execution,
+idle. Keep existing operator drains authoritative. Extension execution,
 new environment/extension preparation and models remain withheld; this change
 does not broaden execution eligibility or qualify their pressure handling.
 
@@ -315,4 +315,4 @@ starts the real `myce dev` API/worker/command runner with injected OS pressure a
 real local checkpoint copying. It verifies checkpoint, planned requeue, resume on
 attempt 2 and cancellation/release. `TestSharedHostDevCommandPriority` verifies
 real main/sidecar nice values, concurrency hints, token filtering and unchanged
-worker-control priority. No GPU, Docker or fleet changes are involved.
+worker-control priority. No GPU or fleet changes are involved.

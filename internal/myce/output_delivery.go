@@ -87,7 +87,7 @@ func validateOutputDelivery(s Spec) error {
 		return errors.New("async_nas requires outputs and positive disk.output_bytes")
 	}
 	// Fan-out aggregation has its own result ownership, not a single execution.
-	if s.FanOut != nil || s.Run.Docker {
+	if s.FanOut != nil {
 		return errors.New("async_nas requires individual tasks")
 	}
 	for name, prefix := range s.Outputs {

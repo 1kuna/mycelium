@@ -14,8 +14,7 @@ import (
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
 // and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
-	// Raw counter reads are not completed peaks (notably Docker release
-	// evidence). Only observeAttemptMemory promotes a complete sample history.
+	// Raw counter reads are not completed peaks. Only observeAttemptMemory promotes a complete sample history.
 	nonreclaimableSampleGB *float64
 	pressureTotalUS        uint64
 	pressureAvg10          float64
@@ -300,11 +299,8 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	probeFloor := 0.0
 	if n.Memory == "auto" {
 		// Explicit optional member caps remain declarations to preserve.
-		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB, copy.Spec.Run.DockerMemoryGB)
+		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB)
 		for _, side := range copy.Spec.Run.Sidecars {
-			hostFloor = max(hostFloor, side.MemoryGB)
-		}
-		for _, side := range copy.Spec.Run.DockerSidecars {
 			hostFloor = max(hostFloor, side.MemoryGB)
 		}
 		if e := qualifiedExtension(&copy, m); e != nil {
@@ -343,7 +339,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 		var family familyMemoryBound
 		switch {
-		case !copy.Spec.Run.Docker && j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
+		case j.OOMRetries > 0 && (n.cpuOnly() || j.Spec.ExtensionCheck != nil):
 			// Recovery estimates demand. Free RAM is an admission constraint,
 			// never the next attempt's predicted demand.
 			bound, lower := measuredOOMRecovery(j)
@@ -442,7 +438,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 			host, why := 0.0, ""
 			probeMachine := m
-			if !n.cpuOnly() && j.Spec.ExtensionCheck != nil && !copy.Spec.Run.Docker {
+			if !n.cpuOnly() && j.Spec.ExtensionCheck != nil {
 				physical := *m
 				physical.FreeHostMemoryGB = min(m.HostAvailableMemoryGB, q.qualificationCapacity(m).FreeHostMemoryGB)
 				physical.hostReservationDebtGB = 0
@@ -514,12 +510,6 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	enforcement := m.MemoryEnforcement
 	if enforcement == "" {
 		enforcement = "admission-only"
-	}
-	if copy.Spec.Run.Docker {
-		enforcement = "Docker member-only"
-		if dockerNeedsEnvelope(copy.Spec) && contains(m.Capabilities, "docker_envelope") {
-			enforcement = "Docker shared parent"
-		}
 	}
 	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
 	if basis == "exploratory" && evidence == 0 && estimatePhysicalSource(source) {
@@ -910,9 +900,6 @@ func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, true) {
-			if !dockerRuntimeFits(candidate, m) {
-				continue
-			}
 			candidate = q.memoryCandidate(candidate, m)
 			n := candidate.Spec.Needs
 			// A host the job can never use (target, backend, environment,

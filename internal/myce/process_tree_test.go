@@ -65,20 +65,6 @@ func TestProcessTreeCancellation(t *testing.T) {
 			j := recoveryJob(t, command)
 			j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 			j.Spec.Run.Env = map[string]string{"TREE_TEST_DIR": dir, "TREE_TEST_MODE": mode, "TREE_TEST_OWNER": strconv.Itoa(os.Getpid())}
-			if mode == "gate-budget" {
-				// The nested gate tests process custody, with no Docker resources.
-				// Give its new daemon inventory an explicit synthetic empty endpoint.
-				bin := filepath.Join(dir, "bin")
-				if err := os.MkdirAll(bin, 0700); err != nil {
-					t.Fatal(err)
-				}
-				docker := "#!/bin/sh\n[ \"$1\" != --host ] || shift 2\ncase \"$1:$2\" in info:*) echo '\"process-tree-fixture\"';; ps:*|network:ls) exit 0;; *) exit 99;; esac\n"
-				if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(docker), 0700); err != nil {
-					t.Fatal(err)
-				}
-				j.Spec.Run.Env["PATH"] = bin + string(os.PathListSeparator) + os.Getenv("PATH")
-				j.Spec.Run.Env["DOCKER_HOST"] = "unix://" + filepath.Join(dir, "fixture.sock")
-			}
 			var p *process
 			await(t, func() bool { p, err = w.start(store, j); return !errors.Is(err, errWorkerCheckpoint) })
 			if err != nil {

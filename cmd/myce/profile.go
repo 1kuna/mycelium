@@ -279,7 +279,10 @@ func readProfile(name string) (executionProfile, string, []byte, error) {
 	if reflect.ValueOf(p.Needs).IsZero() {
 		p.Needs = defaultEntryNeeds()
 	}
-	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || p.Run.Docker || len(p.Run.Sidecars) > 0 || len(p.Run.DockerSidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
+	if p.Run.AsksForDocker() {
+		return p, "", nil, waitError(64, "profile_invalid: "+myce.ErrDockerRetired.Error())
+	}
+	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || len(p.Run.Sidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
 		return p, "", nil, waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")
 	}
 	if p.MemoryClass != "" && p.MemoryClass != "per_item" {

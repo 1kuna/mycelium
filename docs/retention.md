@@ -41,9 +41,8 @@ sample adds to their retained counts.
 - Job intent, cancellation, wait/error attribution, individual attempt facts,
   custody ledgers, replay answers, accounting and incident delivery identities
   are unique evidence. Neither a file/log policy nor elapsed age deletes them.
-  This includes cleared worker actors and their result, signal, launch, usage
-  and private Docker evidence; deleting a stopped container is not permission
-  to delete its unique incident record.
+  This includes cleared worker actors and their result, signal, launch and
+  usage evidence.
   Under pressure, only byte-identical duplicate closed-attempt rows compact;
   distinct identities, placements, waits and prediction errors remain.
 - Open jobs/calls conservatively pin learning inputs, including pooled and
@@ -115,11 +114,9 @@ database unchanged; it simply doesn't see the summaries.
   saved config without changing it; omitting the zero to recover an old default
   would silently weaken protection. Explicit positive saved policies retain the
   supported installer/worker interoperability journey.
-- Publication six hours and attempt/Docker 24 hours: claims, references, measured
+- Publication six hours and attempt 24 hours: claims, references, measured
   publication delay and exact acknowledgement replace elapsed default authority.
-  Unknown folders remain. Docker's automatic sentinel is the maximum representable
-  duration, a protected mode rather than an actual age; explicit Docker durations
-  retain their existing operator meaning.
+  Unknown folders remain.
 - Keyed submissions 30 days, usage 90 days and lossy downsampling: unique replay
   and exact accounting survive. A duration representation overflow remains a
   physical API limit, not a chosen lookback window.
@@ -130,15 +127,10 @@ database unchanged; it simply doesn't see the summaries.
   continue between unlocked objects, yielding under measured control contention.
 - Diagnostic tail 64 KiB, report 1 MiB and eight reports: authored report lists
   retain their meaning. A process-wide reservation accounts for concurrent
-  failure/progress/Docker capture, raw/encoded strings, parser tokens, identifiers
+  failure/progress capture, raw/encoded strings, parser tokens, identifiers
   and backing-array growth using Go representation sizes. Unknown capacity
   withholds optional capture; it does not delete source reports/logs. A report
   outside its grant remains at its source and is reported unavailable/oversized.
-- Docker stderr 64 KiB/256 lines and events 256/64 KiB/reload 128 KiB: measured,
-  reserved byte allowances replace counts. Stderr streams through a byte tail;
-  stdout stays excluded. Accepted event records never evict earlier unique facts.
-  Exhaustion ends optional capture and preserves its existing archive; unreadable
-  or over-budget recovery archives are preserved rather than overwritten.
 - Progress 4 KiB/30 seconds: a reserved read checks the actual file size; ordered
   source updates teach cadence. Age stays visible. An unknown cadence cannot
   assert staleness, and unchanged file reports never renew freshness. Progress
@@ -163,22 +155,15 @@ database unchanged; it simply doesn't see the summaries.
   the duration representation quantum for a cold injected clock. Terminal/release
   invalidation still takes precedence. Inspection and filtered views capture fresh.
 
-These are synthetic laptop/fleet test mechanisms, not native hardware, real daemon
-or production-load qualification. The consumer's acceptance checks and exact-attempt
+These are synthetic laptop/fleet test mechanisms, not native hardware or
+production-load qualification. The consumer's acceptance checks and exact-attempt
 custody rules remain independent.
 
 Diagnostic streams reserve their measured expanded representations as input arrives.
-An idle event subscription reserves only its physical read page; records spanning
-pages grow through shared admission, without a page-sized record limit. Exit/stderr
-capture shares the process pool with the event archive, progress and failure reports.
-Raw event attributes hold transient parsing reservations; the persistent archive
-is charged only for the measured sanitized event representation. Discarded labels
-cannot consume the archive's future kill/exit capture capacity.
+Exit/stderr capture shares the process pool with progress and failure reports.
 
-Docker/model readiness parsers use the same shared pool for incomplete lines and
-transient decoding. Delimiters release raw/parser reservations; retained Docker
-layer identities reserve their own measured representation until command exit.
-Capacity exhaustion suppresses that optional progress observation through the next
+Model readiness parsers use the same shared pool for incomplete lines and
+transient decoding. Delimiters release raw/parser reservations. Capacity exhaustion suppresses that optional progress observation through the next
 delimiter, without changing captured output or treating a truncated suffix as
 progress. Process exit releases incomplete lines. No fixed progress-line size is
 required, and later smaller observations can resume after pressure clears.

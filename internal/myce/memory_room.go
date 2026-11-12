@@ -224,7 +224,7 @@ const (
 // lendingFloor says whether an attempt may be charged below its envelope, and
 // the least it is charged then. Charging by use lends the rest to neighbours,
 // which is safe only where all of these hold, each for a failure it prevents:
-//   - the attempt is started and not Docker, on a host other than the shared
+//   - the attempt is started, on a host other than the shared
 //     interactive one (MY-45 keeps its envelope);
 //   - a guard contains it at its ceiling: Linux cgroup v2, the Darwin RSS
 //     guard, or the Metal footprint guard; unified CUDA device memory escapes
@@ -255,7 +255,7 @@ func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64,
 		return 0, false
 	}
 	n, e := j.Spec.Needs, j.MemoryEnvelope
-	if j.Spec.Run.Docker || m.SharedHost != nil || e == nil || e.Learned == nil || e.Learned.Evidence < 1 || !s.freshAt(now) || !validMemoryValue(s.footprintGB) || !validMemoryValue(s.rateGB) {
+	if m.SharedHost != nil || e == nil || e.Learned == nil || e.Learned.Evidence < 1 || !s.freshAt(now) || !validMemoryValue(s.footprintGB) || !validMemoryValue(s.rateGB) {
 		return 0, false
 	}
 	l, cgroup := e.Learned, m.MemoryEnforcement == "memory ceilings enforced (cgroup v2)"
@@ -272,7 +272,7 @@ func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64,
 }
 
 // enforcedCeiling bounds a forecast: the ceiling that contains the attempt
-// where one does (adaptive guard, cgroup or Docker limit, or the by-use guard),
+// where one does (adaptive guard, cgroup limit, or the by-use guard),
 // else inventoried physical RAM, never the operator's smaller allowance.
 func enforcedCeiling(j *Job, m *Machine, envelope, adaptive float64, guarded bool) float64 {
 	if adaptive > 0 {
