@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 )
@@ -14,6 +15,12 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 			name, action string
 			stop         bool
 		}{{"drain", "drain", false}, {"disable", "disable", false}, {"disable-stop", "disable", true}} {
+			// Without --stop, disabled and drained hosts share one wait path
+			// (maintenanceBlocked). Keep disable where the mode itself is read:
+			// running preparations, production custody and the failed-pin fix.
+			if action.name == "disable" && !slices.Contains([]string{"batch-production", "engine-failed-pinned", "environment-build", "preparation", "extension-check-setup"}, kind) {
+				continue
+			}
 			t.Run(kind+"/"+action.name, func(t *testing.T) {
 				q, clock, m := modelFixture(t, "host")
 				obligationCount := func() int {
@@ -187,6 +194,20 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					reply := pulse()
 					if !reply.AdmissionBlocked || slot.State != "failed" || slot.Attempt != attempt {
 						t.Fatal("pin restarted during maintenance", reply)
+					}
+					// Ticks and repeated failed reports cannot restart it or revive custody.
+					for range 3 {
+						clock.Advance(time.Second)
+						if err := q.Tick(); err != nil {
+							t.Fatal(err)
+						}
+						if slot.State != "failed" || slot.Attempt != attempt {
+							t.Fatal("tick restarted pin during maintenance", slot)
+						}
+						pulse()
+					}
+					if status, err := q.HostMaintenanceStatus("host"); err != nil || !status.Quiescent || !status.Healthy || status.Sidecars != 0 || obligationCount() != 0 {
+						t.Fatal("cleaned engine retained custody", status, err)
 					}
 					if len(q.s.Pins) != 1 || q.s.Pins[0].Assigned != m.ID {
 						t.Fatal("maintenance removed pin intent", q.s.Pins)

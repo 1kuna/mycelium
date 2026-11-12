@@ -86,9 +86,8 @@ func TestHostHealthReportDeliveryAndFrozenExpiry(t *testing.T) {
 
 // Independent roots preserve the production-scale cadences and allow the
 // gate to overlap their real sensor/report waits. Do not shorten freshness.
-func TestDevHostHealthReportCadence(t *testing.T) {
-	testDevHostHealthReportCadence(t, time.Second, false)
-}
+// The one-second cadence runs inside SlowCheckins, which adds delayed
+// check-ins before the same delivery and admission checks.
 func TestDevHostHealthReportCadenceTwoSeconds(t *testing.T) {
 	testDevHostHealthReportCadence(t, 2*time.Second, false)
 }
