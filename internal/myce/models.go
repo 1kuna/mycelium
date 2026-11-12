@@ -253,7 +253,6 @@ type ModelCall struct {
 	PriorityStop                     *PriorityPreemption
 	Attempt, ExcludeAttempt          string
 	StopAt                           *time.Time
-	ProductionHost                   string
 	WaitingSince                     time.Time
 	StartedAt                        *time.Time
 	ID, Model, Project, Priority     string
@@ -649,7 +648,7 @@ func (q *Queue) modelReadiness(model string, m *Machine) int {
 }
 
 func callJob(c *ModelCall) *Job {
-	j := &Job{ProductionHost: c.ProductionHost, ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Class: c.Class, Deadline: c.Deadline}}
+	j := &Job{ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Class: c.Class, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
 	return j
 }

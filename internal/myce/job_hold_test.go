@@ -45,7 +45,9 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 			if scenario == "parity" {
 				if err := q.update(func() error {
 					q.touchJob(j.ID)
-					q.s.Jobs[j.ID].RequireProductionParity = true
+					for i := range q.s.Jobs[j.ID].Extensions {
+						q.s.Jobs[j.ID].Extensions[i].ProductionParityRequired = true
+					}
 					return nil
 				}); err != nil {
 					t.Fatal(err)

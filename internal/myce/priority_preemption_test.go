@@ -589,7 +589,7 @@ func TestPriorityPreemptionEngineHysteresis(t *testing.T) {
 			q, clock, m := modelFixture(t)
 			preemptionPolicy(t, q)
 			if kind == "pin-host-hold" {
-				if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -324,21 +324,6 @@ func (q *Queue) initEnginePreemption(s *ModelSlot) {
 	}
 }
 
-func (q *Queue) hostPreemptionDemand(host string) *Job {
-	spec := q.hostPrioritySpec(host)
-	for _, j := range q.liveJobs() {
-		if j.ProductionHost == host && !terminal(j.State) && !cancelled(j) && q.comparePriority(j.Spec, spec) == 0 {
-			return j
-		}
-	}
-	for _, c := range q.calls {
-		if c.ProductionHost == host && c.Error == "" && q.comparePriority(callJob(c).Spec, spec) == 0 {
-			return callJob(c)
-		}
-	}
-	return &Job{ID: "host/" + host, Spec: spec}
-}
-
 func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {
 	if l.Kind == "copy" {
 		return demand.Spec.Needs.Model != "" && l.Key == demand.Spec.Needs.Model

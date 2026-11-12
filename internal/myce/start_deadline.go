@@ -94,7 +94,7 @@ func (q *Queue) startCapacityPaused(j *Job) bool {
 }
 
 func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
-	if h := q.diskWait(j, j.ProductionHost); h != nil {
+	if h := q.diskWait(j, ""); h != nil {
 		return h.Detail
 	}
 	machines := q.planningMachines(scans...)
@@ -116,9 +116,6 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 		}
 		if q.maintenanceBlocked(host) {
 			return "host " + host + " in planned maintenance"
-		}
-		if b, _ := q.hostBlockerState(host); b != "" && q.held(host) {
-			return "waiting for lower-priority work to stop on " + host + "; " + b
 		}
 		if j.State == "queued" {
 			continue

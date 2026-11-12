@@ -309,20 +309,6 @@ func TestEngineRecoveryRejectedUnsafeCallRetries(t *testing.T) {
 	}
 }
 
-func TestEngineRecoveryUnloadingHoldBlocker(t *testing.T) {
-	q, _, a, _, _ := holdFleet(t, true)
-	q.s.ModelSlots[slotKey(a.ID, "test")] = &ModelSlot{Model: "test", Machine: a.ID, Session: a.Session, State: "unloading", Priority: "experiment"}
-	s := q.s.ModelSlots[slotKey(a.ID, "test")]
-	if text, class := q.hostBlockerState("b70"); class.Kind != "production_stopping" || !strings.Contains(text, "stopping 1 attempts") {
-		t.Fatalf("unloading missing from blockers: %s %+v", text, class)
-	}
-	q.s.Hosts["b70"].Active = true
-	q.maintainHolds()
-	if s.State != "unloading" {
-		t.Fatal("hold rewrote cleanup to draining")
-	}
-}
-
 func TestEngineRecoveryPinnedReservationRelease(t *testing.T) {
 	for _, measured := range []bool{false, true} {
 		t.Run(fmt.Sprint(measured), func(t *testing.T) {

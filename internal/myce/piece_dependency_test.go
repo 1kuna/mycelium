@@ -59,7 +59,7 @@ func TestPieceDependencyAcceptanceAndReplay(t *testing.T) {
 func TestPieceDependencyProductionWindowStartsAtReadiness(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 3)
 	s.Outputs = map[string]string{"out": "results"}
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	parent := submit(t, q, s)
@@ -73,7 +73,7 @@ func TestPieceDependencyProductionWindowStartsAtReadiness(t *testing.T) {
 	absolute := submit(t, q, explicit)
 	clock.Advance(ProductionStartTimeout + time.Second)
 	wave := check(t, q, m, nil).Job
-	if got := job(t, q, consumer.ID); got.State != "queued" || got.Spec.StartBy != nil || got.ProductionHost != "" {
+	if got := job(t, q, consumer.ID); got.State != "queued" || got.Spec.StartBy != nil {
 		t.Fatalf("blocked job earned start window/hold: %+v", got)
 	}
 	if got := job(t, q, absolute.ID); got.State != "failed" {

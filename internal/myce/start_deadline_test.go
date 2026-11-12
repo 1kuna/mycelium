@@ -138,7 +138,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 			check(t, q, m, nil)
 			var experiment *Job
 			if blocker == "experiments" {
-				if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 				submit(t, q, spec("experiment"))

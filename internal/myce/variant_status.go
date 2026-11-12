@@ -85,7 +85,7 @@ func (q *Queue) variantParityReason(j *Job, m *Machine) string {
 			reason = failure
 			continue
 		}
-		if production && !measured && !approved && (j.RequireProductionParity || e.ProductionParityRequired || len(j.Spec.QualityTolerance) > 0 || e.hasQuality(j.Spec.workType())) {
+		if production && !measured && !approved && (e.ProductionParityRequired || len(j.Spec.QualityTolerance) > 0 || e.hasQuality(j.Spec.workType())) {
 			reason = "quality measurements unknown; " + variantParityAction
 			continue
 		}
@@ -253,7 +253,6 @@ func (q *Queue) variantAdmissionReasons(j *Job, m *Machine) []string {
 			reasons = append(reasons, "job or project host restriction")
 		}
 		withoutParity := *candidate
-		withoutParity.RequireProductionParity = false
 		withoutParity.Spec.QualityTolerance = nil
 		withoutParity.Extensions = slices.Clone(candidate.Extensions)
 		for i := range withoutParity.Extensions {

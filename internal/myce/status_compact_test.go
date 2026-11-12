@@ -298,15 +298,11 @@ func TestStatusCompactCallsAndFilteredCapacity(t *testing.T) {
 		"model-running": {ID: "model-running", Model: "sample", Machine: "worker-00", Project: "first", Priority: "experiment", Queued: q.clock.Now()},
 		"model-queued":  {ID: "model-queued", Model: "sample", Project: "second", Priority: "experiment", Queued: q.clock.Now()},
 	}
-	q.s.Hosts = map[string]*HostState{"worker-00": {Active: true, Policy: HostPolicy{ProductionHold: true}}}
 	q.s.Machines["worker-00"].MaxJobs = 1
 	q.contacts = map[string]*workerContact{"worker-00": {allowance: time.Minute, arrivalAllowance: time.Minute, processed: q.clock.Now()}}
 	s := readStatusOptions(t, q, "?project=second&view=snapshot")
 	if len(s.Jobs) != 1 || s.Jobs[0].ID != "model-queued" || s.Jobs[0].State != "queued" {
 		t.Fatal("filtered call identity/lifecycle lost", s.Jobs)
-	}
-	if len(s.Holds) == 0 || !strings.Contains(s.Holds[0].Detail, "stopping") {
-		t.Fatal("call hold lost", s.Holds)
 	}
 	if s.Machines[0].AdmissionReason != "maximum simultaneous jobs reached" {
 		t.Fatal("filter changed fleet capacity", s.Machines[0].AdmissionReason)

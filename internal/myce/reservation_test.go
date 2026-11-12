@@ -529,7 +529,7 @@ func TestReservationBindingValidationAndPriority(t *testing.T) {
 		t.Fatal("mutually blocking reservation accepted")
 	}
 	// A validation hold never grants production priority or bypasses takeover.
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	production := exclusionSpec(m.ID, "1")
@@ -735,7 +735,7 @@ func TestReservationKeepsStartedQualification(t *testing.T) {
 func TestReservationDoesNotDisplaceProduction(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	machineCheck(t, q, m)
@@ -765,24 +765,6 @@ func TestReservationDoesNotDisplaceProduction(t *testing.T) {
 	finish(t, q, a, true)
 	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != bound.ID {
 		t.Fatal("bound check failed to follow production", next)
-	}
-}
-
-func TestReservationRejectsWaitingProductionModelDemand(t *testing.T) {
-	q, _, m := modelFixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
-		t.Fatal(err)
-	}
-	demand := addModelCall(t, q, "production")
-	if demand.ProductionHost != hostID(&m) || demand.Machine != "" {
-		t.Fatal("fixture did not bind pending production model demand", demand.ProductionHost, demand.Machine)
-	}
-	bound := submit(t, q, spec("experiment"))
-	if _, err := q.CreateReservation(reservationRequest("validation", "host="+hostID(&m), bound.ID)); err == nil || !strings.Contains(err.Error(), "production model call") {
-		t.Fatal("reservation acquired a self-blocking production takeover target", err)
-	}
-	if len(q.s.Reservations) != 0 || !q.held(hostID(&m)) || demand.Error != "" || demand.StopAt != nil {
-		t.Fatal("rejected reservation mutated production demand")
 	}
 }
 

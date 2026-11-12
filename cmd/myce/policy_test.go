@@ -153,7 +153,7 @@ func TestPolicyCLIRollingUpgradeKeepsHostHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"gpu-host": {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"gpu-host": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	upgraded := httptest.NewServer(myce.API{Queue: q, Token: "owner-test"}.Handler())

@@ -204,7 +204,7 @@ func compactStatusJob(j *Job) Job {
 		AllocatedDevices: j.AllocatedDevices, Hold: j.Hold, Finding: j.Finding, DeviceFaultStartWait: j.DeviceFaultStartWait, StartCapacityWaiting: j.StartCapacityWaiting, Delivery: j.Delivery, Reason: j.Reason, DiagnosticCode: j.DiagnosticCode, Pause: j.Pause, CancelledAt: j.CancelledAt,
 		ReleaseConfirmed: j.ReleaseConfirmed, LastStopOutcome: j.LastStopOutcome, StopAt: j.StopAt,
 		PriorityPolicy: j.PriorityPolicy, QueueOrder: j.QueueOrder, ApplicationProgress: j.ApplicationProgress,
-		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause, ProductionHost: j.ProductionHost,
+		ExecutionCause: j.ExecutionCause, CleanupCause: j.CleanupCause,
 		Timing: j.Timing, Liveness: j.Liveness, WallTime: j.WallTime, Progress: j.Progress,
 		// The whitelist drops the frozen reason maps (raw text). Carry their
 		// sanitized markers so the summary matches the per-job read (#748).

@@ -99,7 +99,7 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 			}
 			if kind == "held-cancel" {
 				if err := q.update(func() error {
-					q.s.Hosts = map[string]*HostState{hostID(&m): {Policy: HostPolicy{ProductionHold: true}, Active: true}}
+					q.s.Hosts = map[string]*HostState{hostID(&m): {Policy: HostPolicy{ProductionHold: true, ProductionHoldScope: "device"}}}
 					return nil
 				}); err != nil {
 					t.Fatal(err)

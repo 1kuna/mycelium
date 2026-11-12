@@ -77,7 +77,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 			}
 			for _, candidate := range q.memoryCandidates(demand, target) {
 				// Evidence belongs to this exact recipe, not a qualified sibling.
-				if q.variantParityReason(candidate, target) != "" || demand.ProductionHost != "" && hostID(target) != demand.ProductionHost && !q.productionParityKnown(candidate, target) {
+				if q.variantParityReason(candidate, target) != "" {
 					continue
 				}
 				if !fitsResources(candidate, target, target.TotalMemoryGB) {
@@ -91,8 +91,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 					// Reuse #401's immediate-admission proof, forecasting only the
 					// dependency's readiness. Approval alone is not spare capacity.
 					copy := *candidate
-					copy.ProductionHost, copy.Spec.After = "", nil
-					copy.RequireProductionParity = demand.ProductionHost != "" && hostID(target) != demand.ProductionHost || demand.RequireProductionParity
+					copy.Spec.After = nil
 					alternative := q.batchCandidateWithResources(&copy, target, nil)
 					if alternative == nil || !q.workerIdle(target, alternative) || q.immediateCandidate(alternative, target) == nil {
 						continue

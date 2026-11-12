@@ -27,7 +27,7 @@ func reportDisk(t *testing.T, m Machine, c Clock, id string, roots []string, tot
 
 func TestDiskHeadroomProductionRepins(t *testing.T) {
 	q, c := fixture(t)
-	if err := q.ConfigureHosts(map[string]HostPolicy{"hold-host": {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{"hold-host": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	a := reportDisk(t, machine("a", "fake", "hold-host"), c, "a-volume", []string{"data"}, 100<<30, 41<<30)
@@ -41,9 +41,6 @@ func TestDiskHeadroomProductionRepins(t *testing.T) {
 	s.Needs.MemoryGB = 1
 	s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
 	prod := submit(t, q, s)
-	if job(t, q, prod.ID).ProductionHost != "hold-host" {
-		t.Fatal("not pinned")
-	}
 	a = reportDisk(t, a, c, "a-volume", []string{"data"}, 100<<30, 2<<30)
 	check(t, q, a, busy)
 	held := job(t, q, prod.ID)
@@ -441,7 +438,7 @@ func TestDiskHeadroomRoutesReadyModelBelowFloor(t *testing.T) {
 		t.Run("production-hold="+stringBool(hold), func(t *testing.T) {
 			q, c, m := modelFixture(t, "model-host")
 			if hold {
-				if err := q.ConfigureHosts(map[string]HostPolicy{"model-host": {ProductionHold: true}}); err != nil {
+				if err := q.ConfigureHosts(map[string]HostPolicy{"model-host": {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 					t.Fatal(err)
 				}
 			}

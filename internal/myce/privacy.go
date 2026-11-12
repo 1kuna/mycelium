@@ -152,7 +152,6 @@ func (q *Queue) statusEligibility(j *Job) {
 		if m := q.s.Machines[j.Machine]; m != nil {
 			addHost(hostID(m))
 		}
-		addHost(j.ProductionHost)
 	}
 	if !j.EligibleUnrestricted || len(hosts) > 0 {
 		sort.Strings(hosts)

@@ -86,8 +86,6 @@ var holdKinds = map[string]holdKind{
 	"project_cap":              {ownerQueue, "waiting under the project's concurrency limit", "the project's running work drops below its limit", "wait; nothing to do"},
 	"production_admission":     {ownerQueue, "waiting for production to finish starting", "the production arrival or setup window passes", "wait; nothing to do"},
 	"unified_cuda_headroom":    {ownerQueue, "a unified-memory host's headroom is kept for expected production", "the expected production starts, or another host can take it", "wait; nothing to do"},
-	"production_hold":          {ownerQueue, "waiting for a production hold", "production releases the host", "wait; nothing to do"},
-	"production_reserved":      {ownerQueue, "a fitting host is reserved for production", "production demand on that host ends", "wait; nothing to do"},
 	"pinned_model":             {ownerOperator, "a pinned model prevents production placement", "the pin is removed or the model is unloaded", "unpin the model if production should use that host"},
 	"disk_headroom":            {ownerQueue, "waiting for disk space on an eligible host", "enough local disk is free", "wait; free disk space on the host if this persists"},
 	"file_store_capacity":      {ownerQueue, "waiting for file-store capacity to retry outputs", "the file store reacquires the output reservation", "wait; nothing to do"},
@@ -114,19 +112,17 @@ var holdKinds = map[string]holdKind{
 	"deterministically_failed": {ownerConsumer, "software preparation failed", "the recipe is fixed and resubmitted", "fix the recipe and resubmit with changed inputs"},
 
 	// Host and device fences.
-	"production_stopping":        {ownerQueue, "production is waiting for other work to stop", "the stopping attempts release the host", "wait; nothing to do"},
-	"production_release_unknown": {ownerQueue, "production is waiting for a worker to confirm a release", "the worker reports the release", "wait; check the named worker if this persists"},
-	"unclassified":               {ownerOperator, "a host fence has no known classification", "an operator resolves it", "inspect the host fence"},
-	"startup_release":            {ownerQueue, "a failed production start still holds its resources", "the exact execution is released", "wait; nothing to do"},
-	"host_disabled":              {ownerOperator, "the host is disabled for maintenance", "an operator resumes the host", "myce host resume HOST when maintenance is done"},
-	"reservation_active":         {ownerConsumer, "components are reserved for one job", "the reservation is released or expires", "myce reserve release ID when the reserved work is done"},
-	"component_exclusion":        {ownerOperator, "components are excluded from placement", "an operator removes the exclusion", "myce exclude remove SELECTOR when the components should run work"},
-	"device_maintenance":         {ownerOperator, "a device is disabled by an operator", "an operator enables the device", "myce host device enable HOST DEVICE when it should run work"},
-	"host_unavailable":           {ownerQueue, "eligible hosts are unavailable", "an eligible host is available again", "wait; check host status if this persists"},
-	"missing_extension":          {ownerConsumer, "no implementation is registered for this work", "an implementation is registered", "register an implementation with its targets, environment and native check"},
-	"execution_coverage":         {ownerConsumer, "no registered implementation covers an eligible target", "an implementation covers a supported target", "run myce portability and add an implementation for a supported target"},
-	"native_qualification":       {ownerQueue, "the queue is qualifying the implementation on compatible hardware", "the native check passes, or fails the job with its action", "wait; nothing to do"},
-	"production_parity":          {ownerConsumer, "production needs reference-output parity for this variant", "the project accepts parity for an eligible host", "compare outputs with the reference on an eligible host, then myce parity add --evidence JOB_ID"},
+	"unclassified":         {ownerOperator, "a host fence has no known classification", "an operator resolves it", "inspect the host fence"},
+	"startup_release":      {ownerQueue, "a failed production start still holds its resources", "the exact execution is released", "wait; nothing to do"},
+	"host_disabled":        {ownerOperator, "the host is disabled for maintenance", "an operator resumes the host", "myce host resume HOST when maintenance is done"},
+	"reservation_active":   {ownerConsumer, "components are reserved for one job", "the reservation is released or expires", "myce reserve release ID when the reserved work is done"},
+	"component_exclusion":  {ownerOperator, "components are excluded from placement", "an operator removes the exclusion", "myce exclude remove SELECTOR when the components should run work"},
+	"device_maintenance":   {ownerOperator, "a device is disabled by an operator", "an operator enables the device", "myce host device enable HOST DEVICE when it should run work"},
+	"host_unavailable":     {ownerQueue, "eligible hosts are unavailable", "an eligible host is available again", "wait; check host status if this persists"},
+	"missing_extension":    {ownerConsumer, "no implementation is registered for this work", "an implementation is registered", "register an implementation with its targets, environment and native check"},
+	"execution_coverage":   {ownerConsumer, "no registered implementation covers an eligible target", "an implementation covers a supported target", "run myce portability and add an implementation for a supported target"},
+	"native_qualification": {ownerQueue, "the queue is qualifying the implementation on compatible hardware", "the native check passes, or fails the job with its action", "wait; nothing to do"},
+	"production_parity":    {ownerConsumer, "production needs reference-output parity for this variant", "the project accepts parity for an eligible host", "compare outputs with the reference on an eligible host, then myce parity add --evidence JOB_ID"},
 }
 
 // reasonHold is a check's hold when it gives a reason, and nil when it passes.
@@ -171,7 +167,7 @@ var holdDiagnosticCodes = map[string]string{
 // The efficiency report's wait category for a scheduler wait kind. Kinds not
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
-	"paused": "holds", "production_admission": "holds", "production_hold": "holds", "production_reserved": "holds",
+	"paused": "holds", "production_admission": "holds",
 	"pinned_model": "holds", checkpointTargetHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",

@@ -60,9 +60,6 @@ func TestProductionAdmissionRepeatedPreemptionBackoff(t *testing.T) {
 			if reason := runtimeJob(t, q, victim.ID).Reason; !strings.Contains(reason, "production preemption back-off") || !strings.Contains(reason, "150s") {
 				t.Fatal("missing status reason", reason)
 			}
-			if q.held("host-a") {
-				t.Fatal("disabled production hold activated")
-			}
 			if err := q.Complete(result(first, true)); !errors.Is(err, ErrStale) {
 				t.Fatal("stale attempt accepted", err)
 			}
@@ -174,9 +171,6 @@ func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
 			}
 			if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "predictable production demand") || !strings.Contains(reason, "~90s") || !strings.Contains(reason, "setup 200s") {
 				t.Fatal("missing measured status", reason)
-			}
-			if q.held(hostID(&target)) {
-				t.Fatal("forecast enabled a production hold")
 			}
 			if edge == "producer-overrun" {
 				clock.Advance(91 * time.Second)
@@ -295,9 +289,6 @@ func TestProductionAdmissionParityDoesNotBlockOtherProjectPreparation(t *testing
 			job := submit(t, q, experiment)
 			reason := runtimeJob(t, q, job.ID).Reason
 			reply := check(t, q, target, nil)
-			if q.held(hostID(&target)) {
-				t.Fatal("disabled production hold activated")
-			}
 			if approved {
 				if !strings.Contains(reason, "predictable production demand "+demand.ID+" in ~0s") {
 					t.Fatal("eligible production lost preparation lookahead", reason)

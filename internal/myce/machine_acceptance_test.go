@@ -288,7 +288,7 @@ func TestM3SharedLossShortestAndPerAttemptBound(t *testing.T) {
 func TestM3HoldMaintenanceAndRepeatedPlannedStops(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{m.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	submit(t, q, m3Spec("experiment", "0", 2, 1))

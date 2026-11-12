@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
@@ -42,29 +41,6 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"holds":[`) {
 		t.Fatal("missing details array")
-	}
-}
-
-func TestHoldsDetailProductionKinds(t *testing.T) {
-	q, c, a, _, _ := holdFleet(t, true)
-	// Direct state fixtures isolate formatting from dispatch; snapshots above
-	// exercise the public status path after explicit maintenance.
-	h := q.s.Hosts["b70"]
-	h.Active = true
-	d := q.productionHold("b70")
-	if d.Kind != "production_hold" || d.operatorAction() || d.Detail != "b70: production hold" {
-		t.Fatalf("active: %+v", d)
-	}
-	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: a.Session, Attempt: 1, Until: c.Now().Add(10 * time.Second)}
-	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	d = q.productionHold("b70")
-	if d.Kind != "production_stopping" || d.operatorAction() || d.Detail != "b70: production hold; stopping 1 attempts; grace remaining 10s" {
-		t.Fatalf("grace: %+v", d)
-	}
-	c.Advance(10 * time.Second)
-	d = q.productionHold("b70")
-	if d.Kind != "production_release_unknown" || d.operatorAction() || d.Detail != "b70: production hold; release unknown: worker b70-0" {
-		t.Fatalf("unknown: %+v", d)
 	}
 }
 

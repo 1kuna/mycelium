@@ -306,16 +306,11 @@ func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
 	}
 	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b"}, false)
-	if err := q.update(func() error { q.touchJob(j.ID).ProductionHost = "host-production"; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	c.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b", "host-production"}, false)
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
 	c.Advance(time.Second)
-	assertEligibleStatus(t, q, j.ID, "stopping", nil, []string{"host-a", "host-b", "host-production"}, false)
+	assertEligibleStatus(t, q, j.ID, "stopping", nil, []string{"host-a", "host-b"}, false)
 }
 
 func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
@@ -336,17 +331,14 @@ func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := q.update(func() error { call.ProductionHost = "host-production"; return nil }); err != nil {
-				t.Fatal(err)
-			}
 			raw := statusJobs(t, q)[call.ID]
 			var hosts []string
 			if err := json.Unmarshal(raw["eligible_hosts"], &hosts); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"host-current", "host-production"}
+			want := []string{"host-current"}
 			if restricted {
-				want = []string{"host-current", "host-other", "host-production"}
+				want = []string{"host-current", "host-other"}
 			}
 			if !reflect.DeepEqual(hosts, want) {
 				t.Fatalf("hosts=%v want %v", hosts, want)

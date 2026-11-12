@@ -269,15 +269,12 @@ func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T
 	big := placementMachine("z-big", "unified", 128, 128, e)
 	check(t, q, small, nil)
 	check(t, q, big, nil)
-	if err := q.ConfigureHosts(map[string]HostPolicy{small.ID: {ProductionHold: true}, big.ID: {ProductionHold: true}}); err != nil {
+	if err := q.ConfigureHosts(map[string]HostPolicy{small.ID: {ProductionHold: true, ProductionHoldScope: "device"}, big.ID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
 		t.Fatal(err)
 	}
 	s := placementSpec(true)
 	s.Priority = "production"
 	j := submit(t, q, s)
-	if got := job(t, q, j.ID).ProductionHost; got != small.ID {
-		t.Fatalf("production chose %s, want %s", got, small.ID)
-	}
 	if check(t, q, big, nil).Job != nil {
 		t.Fatal("production consumed scarce held host")
 	}
