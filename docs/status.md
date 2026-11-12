@@ -749,7 +749,10 @@ hint before such a peak exists; a measured peak always replaces the hint.
 Workers report each ready environment's allocated size at the end of its build
 (`machines[].environment_bytes`). A job whose environment key a host has not
 cached charges that host's environment volume with the largest size any host
-reported for the key. A hold reads
+reported for the key. Likewise workers report held model snapshots
+(`machines[].model_snapshots`) and learned snapshot sizes
+(`machines[].model_snapshot_bytes`); a declared snapshot a host does not hold
+charges its `file-cache` volume with the largest learned size. A hold reads
 `disk_headroom: host H ROOTS disk: N GiB needed, M GiB free on H; free=… floor=… need=… total=…`.
 Shared volumes sum those writes once per
 role. Checkpoint writes charge only declared resumable/checkpoint work, using a

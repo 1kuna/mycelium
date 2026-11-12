@@ -19,8 +19,9 @@ type DiskNeeds struct {
 }
 
 // diskWork is disk demand beyond manifests: work dir/TMPDIR scratch (learned
-// or declared) and an environment build this host has not cached yet.
-type diskWork struct{ scratch, environment uint64 }
+// or declared), an environment build and model snapshots this host has not
+// cached yet.
+type diskWork struct{ scratch, environment, modelSnapshots uint64 }
 
 func declaredDiskWork(j *Job) diskWork {
 	if j.Spec.Disk == nil {
@@ -46,7 +47,28 @@ func (q *Queue) diskWork(j *Job, m *Machine) diskWork {
 			w.environment = q.environmentBytes(key)
 		}
 	}
+	w.modelSnapshots = q.uncachedSnapshotBytes(j, m)
 	return w
+}
+
+// Declared snapshots this host does not hold charge its file-cache volume
+// (where the snapshot cache lives) with the largest verified size any host
+// reported for the same declaration. An unknown size charges nothing; the
+// worker's own admission then refuses for disk and reports the size.
+func (q *Queue) uncachedSnapshotBytes(j *Job, m *Machine) uint64 {
+	var need uint64
+	for _, s := range j.Spec.ModelSnapshots {
+		id := snapshotIdentity(s)
+		if slices.Contains(m.ModelSnapshots, id) {
+			continue
+		}
+		var n uint64
+		for _, other := range q.s.Machines {
+			n = max(n, other.ModelSnapshotBytes[id])
+		}
+		need = addDiskBytes(need, n)
+	}
+	return need
 }
 func (q *Queue) environmentSizesKnown() bool {
 	for _, m := range q.s.Machines {
@@ -136,8 +158,8 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 			need = addDiskBytes(need, addDiskBytes(input, output))
 		case "file-cache":
 			cache := diskInputCacheBytes(j)
-			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0
-			need = addDiskBytes(need, cache)
+			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0 || work.modelSnapshots > 0
+			need = addDiskBytes(addDiskBytes(need, cache), work.modelSnapshots)
 			for _, input := range j.Spec.SharedInputs {
 				if len(machines) > 0 && machines[0] != nil && slices.Contains(machines[0].CachedSharedInputs, input.key()) {
 					continue

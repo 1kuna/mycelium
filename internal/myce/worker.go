@@ -77,16 +77,20 @@ type Worker struct {
 	// Synthetic harness seam; nil keeps physical native GPU resolution.
 	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
 
-	DailyUse                bool
-	Laptop                  bool
-	Desktop                 bool
-	OwnerSignals            OwnerSignalSource
-	availability            *availabilityMonitor
-	FileCacheRoot           string
-	FileCacheLimit          int64
-	fileCache               *FileCache
-	sharedInputs            *SharedInputCache
-	modelSnapshots          *SharedInputCache // Budgeted by CacheLimit, not FileCacheLimit.
+	DailyUse       bool
+	Laptop         bool
+	Desktop        bool
+	OwnerSignals   OwnerSignalSource
+	availability   *availabilityMonitor
+	FileCacheRoot  string
+	FileCacheLimit int64
+	fileCache      *FileCache
+	sharedInputs   *SharedInputCache
+	modelSnapshots *SharedInputCache // Budgeted by CacheLimit, not FileCacheLimit.
+	modelIndex     *modelSnapshotIndex
+	// Model hub for declared snapshots this host lacks; empty uses HF_ENDPOINT,
+	// else the public hub.
+	ModelHubURL             string
 	fileCheckpoints         bool
 	ExtensionRoot           string
 	JobFileRoot             string

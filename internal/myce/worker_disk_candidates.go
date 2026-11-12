@@ -70,11 +70,16 @@ type sharedRecoverySource struct {
 	Root    string            `json:"root,omitempty"`
 	Sources map[string]string `json:"sources,omitempty"`
 	Model   *ModelSnapshot    `json:"model,omitempty"`
+	// Fetched from the model hub at an exact revision: re-fetchable on demand.
+	Hub bool `json:"hub,omitempty"`
 }
 
 func (c *SharedInputCache) recoverable(ctx context.Context, source *sharedRecoverySource, victims ...string) error {
 	if source == nil {
 		return errors.New("cache source unknown")
+	}
+	if source.Hub && source.Model != nil {
+		return nil
 	}
 	s := source.Input
 	if s.ManifestFile != "" && len(s.Manifest) == 0 {

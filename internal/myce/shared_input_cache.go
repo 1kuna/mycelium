@@ -243,7 +243,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		c.mu.Unlock()
 		valid = true
 		if c.budget != nil {
-			if err = saveWorkerJSON(root, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}); err != nil {
+			if err = saveWorkerJSON(root, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model, Hub: s.hub}); err != nil {
 				return "", err
 			}
 		}
@@ -263,7 +263,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 	}
 	err = c.stageInputNamed(ctx, key, func(ctx context.Context, stage string) error {
 		if c.budget != nil {
-			if err := saveWorkerJSON(stage, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}); err != nil {
+			if err := saveWorkerJSON(stage, "recovery.json", sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model, Hub: s.hub}); err != nil {
 				return err
 			}
 		}
@@ -492,6 +492,14 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				return err
 			}
 			source := s.sources[name]
+			target := filepath.Join(dst, name)
+			if source == "" && s.fetch != nil {
+				if e := s.fetch(ctx, name, target, ref); e != nil {
+					return e
+				}
+				files[name] = ref
+				continue
+			}
 			if source == "" {
 				var e error
 				source, e = c.nasPathContext(ctx, nasRoot, filepath.ToSlash(filepath.Join(s.NAS, name)))
@@ -499,7 +507,6 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 					return e
 				}
 			}
-			target := filepath.Join(dst, name)
 			if e := copyNASInput(ctx, c.Client, source, target, &ref, c.readNAS); e != nil {
 				return e
 			}
@@ -572,7 +579,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
-	b, err := json.Marshal(sharedEntry{Files: files, Recovery: &sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model}})
+	b, err := json.Marshal(sharedEntry{Files: files, Recovery: &sharedRecoverySource{Input: s, Root: nasRoot, Sources: s.sources, Model: s.model, Hub: s.hub}})
 	if err != nil {
 		return err
 	}

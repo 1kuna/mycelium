@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ModelSnapshot declares one exact Hugging Face snapshot. Workers resolve it in
@@ -58,11 +60,12 @@ var (
 
 // Fixed, path-free refusal reasons; status may publish them verbatim.
 var modelSnapshotMessages = map[string]string{
-	"model_snapshot_missing":   "declared model repository is not in the shared model root; acquire it with a CPU download job (see the mycelium skill), then resubmit",
-	"model_snapshot_revision":  "the shared model root has this repository but not the declared revision; download that exact commit with a CPU download job, then resubmit",
+	"model_snapshot_missing":   "declared model repository was found neither in this host's model cache nor on the model hub",
+	"model_snapshot_revision":  "the model hub has no such repository revision; declare an existing full commit (private repositories need the hub token on workers)",
+	"model_snapshot_access":    "the model hub refused access: the repository is gated, private or does not exist; gated and private repositories need the hub token provisioned as local secret hf_token on workers",
 	"model_snapshot_mismatch":  "declared model snapshot files are missing or failed size or hash verification",
 	"model_snapshot_escape":    "declared model snapshot links outside its repository blob store",
-	"model_snapshot_too_large": "declared model snapshot exceeds the local model size limit or free-space floor",
+	"model_snapshot_too_large": "declared model snapshot exceeds the local model size limit",
 	"model_snapshot_policy":    "declared model snapshot has no admitting local model policy",
 }
 
@@ -287,38 +290,126 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 		return fail(modelSnapshotError("model_snapshot_mismatch", "io_error", err))
 	}
 	for name, m := range j.Spec.ModelSnapshots {
-		input, repo, err := resolveModelSnapshot(ctx, w.ModelRoot, m)
+		path, done, err := w.acquireModelSnapshot(ctx, j, m)
 		if err != nil {
 			return fail(err)
-		}
-		need := input.bytes()
-		input.model = &m
-		if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
-			return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", nil))
-		}
-		// Zero uses the cache's volume-derived disk floor during admission,
-		// after inactive entries have had a chance to be evicted.
-		if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 && w.modelSnapshots.budget == nil {
-			disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
-			if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
-				return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", e))
-			}
-		}
-		path, done, err := w.modelSnapshots.Acquire(context.WithValue(ctx, diskBudgetFloorKey{}, uint64(max(0, j.ModelLimits.FreeFloorBytes))), input, repo)
-		if err != nil {
-			if errors.Is(err, errCheckpointIOPending) || ctx.Err() != nil {
-				return fail(err)
-			}
-			var capacity *stagingCapacityError
-			if errors.As(err, &capacity) || strings.HasPrefix(err.Error(), "disk_headroom") {
-				return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", err))
-			}
-			return fail(modelSnapshotError("model_snapshot_mismatch", "io_error", err))
 		}
 		releases = append(releases, done)
 		paths["MYCE_MODEL_"+strings.ToUpper(name)] = path
 	}
 	return paths, releases, nil
+}
+
+// acquireModelSnapshot makes one declared snapshot present in this host's
+// model snapshot cache: an entry it already holds (no download, no source
+// read), else the local model root's hub, else the model hub. One lock per
+// declaration makes concurrent jobs share a single download.
+func (w Worker) acquireModelSnapshot(ctx context.Context, j Job, m ModelSnapshot) (path string, done func(), err error) {
+	c := w.modelSnapshots
+	id := snapshotIdentity(m)
+	err = c.withHubLock(ctx, id, func(scratch string) error {
+		var held bool
+		if path, done, held, err = w.acquireHeldSnapshot(ctx, j, id, m); err != nil || held {
+			return err
+		}
+		var input SharedInput
+		var root string
+		var resolveErr error = modelSnapshotError("model_snapshot_missing", "not_found", nil)
+		if w.ModelRoot != "" && !slices.ContainsFunc(w.Machine.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "model" }) {
+			input, root, resolveErr = resolveModelSnapshot(ctx, w.ModelRoot, m)
+		}
+		if missingLocally(resolveErr) {
+			hub, e := w.modelHub()
+			if e != nil {
+				return modelHubHostFault("io_error", e)
+			}
+			root = ""
+			input, resolveErr = w.resolveHubSnapshot(ctx, hub, m, scratch)
+		}
+		if resolveErr != nil {
+			return resolveErr
+		}
+		input.model = &m
+		// Learned before admission, so a host that refuses for disk reports
+		// the size and the queue charges it on the next placement.
+		w.modelIndex.learn(id, snapshotBytes(input))
+		if path, done, err = w.acquireResolvedSnapshot(ctx, j, input, root); err == nil {
+			w.modelIndex.record(c.cache.Root, m, input)
+		}
+		return err
+	})
+	return path, done, err
+}
+
+func missingLocally(err error) bool {
+	var typed *runtimeError
+	return errors.As(err, &typed) && (typed.diagnostic.Predicate == "model_snapshot_missing" || typed.diagnostic.Predicate == "model_snapshot_revision")
+}
+
+// acquireHeldSnapshot reuses an entry this worker recorded for the same
+// declaration. Its saved recovery source keeps eviction able to re-obtain it;
+// if the entry was evicted meanwhile, the caller resolves it again.
+func (w Worker) acquireHeldSnapshot(ctx context.Context, j Job, id string, m ModelSnapshot) (string, func(), bool, error) {
+	stored, ok := w.modelIndex.lookup(id)
+	if !ok {
+		return "", nil, false, nil
+	}
+	key := stored.key()
+	var entry sharedEntry
+	b, err := os.ReadFile(filepath.Join(w.modelSnapshots.cache.Root, key, "ready.json"))
+	if err != nil || json.Unmarshal(b, &entry) != nil || entry.Recovery == nil || entry.Recovery.Input.key() != key {
+		return "", nil, false, nil
+	}
+	r := entry.Recovery
+	s := r.Input
+	s.sources, s.model, s.hub = r.Sources, &m, r.Hub
+	if s.hub {
+		s.fetch = func(context.Context, string, string, FileRef) error { return errModelIndexStale }
+	}
+	path, done, err := w.acquireResolvedSnapshot(ctx, j, s, r.Root)
+	if errors.Is(err, errModelIndexStale) {
+		return "", nil, false, nil
+	}
+	return path, done, err == nil, err
+}
+
+// acquireResolvedSnapshot admits and copies (or reuses) one resolved snapshot.
+// The size limit is policy and fails the job; a disk shortage is this host's,
+// so it requeues the job without a predicate and the queue, which has now
+// learned the size, places it on a host with room.
+func (w Worker) acquireResolvedSnapshot(ctx context.Context, j Job, input SharedInput, root string) (string, func(), error) {
+	need := input.bytes()
+	if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
+		return "", nil, modelSnapshotError("model_snapshot_too_large", "storage_full", nil)
+	}
+	// Zero uses the cache's volume-derived disk floor during admission,
+	// after inactive entries have had a chance to be evicted.
+	if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 && w.modelSnapshots.budget == nil {
+		disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
+		if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
+			return "", nil, modelSnapshotDiskFault(e)
+		}
+	}
+	path, done, err := w.modelSnapshots.Acquire(context.WithValue(ctx, diskBudgetFloorKey{}, uint64(max(0, j.ModelLimits.FreeFloorBytes))), input, root)
+	if err != nil {
+		var typed *runtimeError
+		if errors.Is(err, errCheckpointIOPending) || errors.Is(err, errModelIndexStale) || ctx.Err() != nil || errors.As(err, &typed) {
+			return "", nil, err
+		}
+		var capacity *stagingCapacityError
+		if errors.As(err, &capacity) || strings.HasPrefix(err.Error(), "disk_headroom") || errors.Is(err, syscall.ENOSPC) {
+			return "", nil, modelSnapshotDiskFault(err)
+		}
+		return "", nil, modelSnapshotError("model_snapshot_mismatch", "io_error", err)
+	}
+	return path, done, nil
+}
+
+func modelSnapshotDiskFault(cause error) error {
+	if cause == nil {
+		cause = errors.New("model snapshot cache lacks room above the free-space floor")
+	}
+	return &runtimeError{diagnostic: RuntimeCause{Operation: "input_staging", Class: "storage_full"}, cause: cause}
 }
 
 // nativeInputPaths keeps model data separate from executable shared runtimes.

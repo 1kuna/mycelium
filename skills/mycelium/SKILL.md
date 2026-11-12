@@ -258,6 +258,7 @@ In an existing project, Mycelium now does these; delete your own:
 - thread-count variables and temp-dir setup: `MYCE_CPUS` and `TMPDIR`;
 - host pins and per-host entries: needs, with no target list off production;
 - shell NAS copies: `shared_inputs`;
+- model download jobs pinned to a host: declare `model_snapshots`;
 - one submission per input in a loop: `pieces:`.
 
 `myce adapter convert` turns old profiles into minimal entries

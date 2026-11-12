@@ -646,9 +646,39 @@ model_snapshots:
 Read `MYCE_MODEL_<UPPERCASE_NAME>`: a read-only directory holding the declared
 files at their snapshot-relative paths: the worker's verified local copy.
 
-The worker resolves the snapshot in the standard hub-cache layout under its
-`--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`), never an authored
-path. Each snapshot file must be a link into that repository's `blobs/` folder
+Declare the snapshot and submit; never pre-download it or aim a download job at
+a host. Wherever Mycelium places the job, the worker makes the snapshot present
+in its own model snapshot cache during preparation, before the command starts,
+in this order:
+
+1. **Held here:** an entry this host already holds for the same declaration is
+   reused. Nothing is downloaded and the hub is not contacted.
+2. **Local hub cache:** the standard hub-cache layout under the worker's
+   optional `--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`).
+3. **Model hub:** otherwise the worker fetches the exact revision from the
+   Hugging Face hub (`HF_ENDPOINT` on the worker, else `https://huggingface.co`)
+   straight into its cache. Large (LFS) files are verified against their
+   SHA-256 while populating, and small files against their Git blob SHA-1. One
+   lock per declaration lets concurrent jobs on a host share one download, and an
+   interrupted file resumes. The hub endpoint must be HTTPS, except on loopback.
+
+For gated or private repositories, provision the hub token on each worker as the
+local secret `hf_token` in its `--secret-root` (mode-0600 file in a mode-0700
+directory, see [local secrets](services.md#environment-and-local-named-secrets)).
+Only the worker reads it, for hub requests during preparation; it is never put in
+a job, a queue message or a log, and the job never sees it.
+
+Placement accounts for the download. Workers report each snapshot they hold
+(`machines[].model_snapshots`, by declaration identity) and each verified size
+they have learned (`machines[].model_snapshot_bytes`). A host that does not hold
+a declared snapshot has its `file-cache` volume charged with that size, so a host
+without room is not chosen and the job waits with a `disk_headroom` reason
+naming the GiB needed. A host that holds it is not charged and is preferred as a
+tie-break. Before any host has learned a snapshot's size, the first worker's own
+admission refuses a cache without room; that attempt requeues and the queue,
+which now knows the size, places it on a host with room.
+
+The local hub cache is read, never an authored path. Each snapshot file must be a link into that repository's `blobs/` folder
 or a regular file. On SMB/CIFS volumes without native symlinks, the worker
 recognizes fixed `XSym` (mfsymlink) files, checks their format checksum and
 resolves their targets within the same repository's content-addressed blobs.
@@ -676,23 +706,25 @@ attempt receipt before releasing them. A changed pinned entry is refused without
 rehashing or replacing the active snapshot. Copies are mode read-only, which is cooperative for
 unsandboxed jobs, as for shared inputs.
 
-Only workers with a model root advertise `model_snapshots_v1`; other workers do
-not receive these jobs. A job withheld before launch fails with one of these
+Every worker with a snapshot cache advertises `model_snapshots_v1`; a model
+root is optional. A job withheld before launch fails with one of these
 path-free reasons and never starts its command:
 
-- `model_snapshot_missing`: the repository is not in the shared model root;
-- `model_snapshot_revision`: the repository exists, but not the declared commit;
+- `model_snapshot_revision`: the hub has no such repository revision;
+- `model_snapshot_access`: the hub refused access. The public hub answers this
+  way for gated and private repositories without a token, and for repositories
+  that do not exist;
 - `model_snapshot_mismatch`: a declared file is missing, special, or its bytes do
   not match its blob identity;
-- `model_snapshot_escape`: a snapshot link points outside the repository's blobs;
-- `model_snapshot_too_large`: the snapshot exceeds the local size limit,
-  free-space floor or cache allowance.
+- `model_snapshot_escape`: a snapshot link or hub file name points outside the
+  repository;
+- `model_snapshot_too_large`: the snapshot exceeds the policy's `max_bytes`.
 
-To acquire a missing snapshot, run an ordinary CPU job with
-`needs.network: true` that downloads the exact commit into the shared hub cache,
-for example `hf download OWNER/NAME --revision COMMIT` with `HF_HUB_CACHE` set to
-the model root's `hub` folder recorded in your fleet's local notes, then
-resubmit. Mycelium does not download models during job preparation.
+A fault that belongs to the host, such as a disk without room above its floor,
+a network failure or a hub server error, does not fail the job. The attempt is
+requeued as infrastructure loss (`input_staging: storage_full`,
+`connection_refused` or `io_error`), and disk admission keeps it off hosts
+without room.
 
 From the release implementing [MY-44](DECISIONS.md#my-44), every repository is
 permitted by default. No `models` policy or `models.sources` entry is needed.

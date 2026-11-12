@@ -164,7 +164,8 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "job-files":
 			needs = len(jobInputPaths(j)) > 0 || j.publishesNASOutputs()
 		case "model":
-			needs = len(j.Spec.ModelSnapshots) > 0 || j.Spec.Needs.Model != ""
+			// Declared snapshots fall back to the model hub without this root.
+			needs = j.Spec.Needs.Model != ""
 		case "model-cache":
 			needs = j.Spec.Needs.Model != ""
 		case "file-cache":

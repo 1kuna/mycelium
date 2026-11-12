@@ -1073,6 +1073,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			inventory.requestTelemetry(slices.ContainsFunc(jobs, func(j Job) bool { return !j.Spec.Needs.cpuOnly() && fanOutDeviceSharing(&j) }))
 			m := cloneMachine(&w.Machine)
 			m.HygieneCollection = w.hygieneCollector.snapshot()
+			if w.modelSnapshots != nil {
+				m.ModelSnapshots, m.ModelSnapshotBytes = w.modelIndex.report(w.modelSnapshots.readyKeys())
+			}
 			if w.sharedInputs != nil {
 				m.CachedSharedInputs = w.sharedInputs.readyKeys()
 				m.SharedInputCache = w.sharedInputs.capacityReport()
@@ -1223,7 +1226,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability)
-			if w.ModelRoot != "" && w.modelSnapshots != nil {
+			if w.modelSnapshots != nil {
+				// Any worker with a snapshot cache fetches missing snapshots itself.
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
 			}
 			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
