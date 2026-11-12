@@ -41,7 +41,10 @@ func nativeIsolationLinuxAttack() error {
 			return err
 		}
 	}
-	if os.Getenv("TMPDIR") != filepath.Join(work, ".tmp") {
+	// TMPDIR may be a short spool alias (#1457); it must resolve to work/.tmp.
+	tmp, err := filepath.EvalSymlinks(os.Getenv("TMPDIR"))
+	want, wantErr := filepath.EvalSymlinks(filepath.Join(work, ".tmp"))
+	if err != nil || wantErr != nil || tmp != want {
 		return errors.New("worker temp directory is not private")
 	}
 	if err := os.WriteFile(filepath.Join(work, "own-output"), []byte("own"), 0600); err != nil {
