@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 )
@@ -14,6 +15,12 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 			name, action string
 			stop         bool
 		}{{"drain", "drain", false}, {"disable", "disable", false}, {"disable-stop", "disable", true}} {
+			// Without --stop, disabled and drained hosts share one wait path
+			// (maintenanceBlocked). Keep disable where the mode itself is read:
+			// running preparations, production custody and the failed-pin fix.
+			if action.name == "disable" && !slices.Contains([]string{"batch-production", "engine-failed-pinned", "environment-build", "preparation", "extension-check-setup"}, kind) {
+				continue
+			}
 			t.Run(kind+"/"+action.name, func(t *testing.T) {
 				q, clock, m := modelFixture(t, "host")
 				obligationCount := func() int {
