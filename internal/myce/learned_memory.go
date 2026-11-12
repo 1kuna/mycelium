@@ -63,10 +63,18 @@ const boundedFirstRun = "(bounded: "
 // fraction. The cost is local concurrency until a clean completion teaches us;
 // other hosts remain independent. Explicit containment and OOM floors win.
 func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, floor float64) (float64, string, int, bool) {
+	host, source, evidence, _, ok := q.coldMemoryBoundOrProbe(j, m, estimate, floor)
+	return host, source, evidence, ok
+}
+
+// A positive probe peak declines the bound in favour of that physical probe,
+// floored at the peak (see below); the caller keeps it as the probe floor.
+func (q *Queue) coldMemoryBoundOrProbe(j *Job, m *Machine, estimate memoryEstimate, floor float64) (float64, string, int, float64, bool) {
 	if !q.learnedMemory() {
-		return 0, "", 0, false
+		return 0, "", 0, 0, false
 	}
-	host, evidence := q.similarMemoryPeak(j, m)
+	peak, margin, evidence := q.similarMemoryPeak(j, m)
+	host := peak + margin
 	source := "exploratory first run"
 	if estimate.source != "" {
 		source = estimate.source
@@ -77,25 +85,42 @@ func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, flo
 		if facts.recovery > 0 {
 			bound, why := q.recoveryMemoryBound(j, m, estimate, host, 0)
 			if why != "" {
-				return 0, "", 0, false // Keep the physical probe's refusal diagnostic.
+				return 0, "", 0, 0, false // Keep the physical probe's refusal diagnostic.
 			}
-			return bound, source, 0, true
+			return bound, source, 0, 0, true
 		}
 	}
 	// A constrained completion is not an upper bound, even with a prior. Do
 	// not invent headroom by multiplying it. Physical probing remains subject
 	// to normal admission, release custody and the retained OOM requirement.
 	if host <= lower || evidence == 0 {
-		return 0, "", 0, false
+		return 0, "", 0, 0, false
 	}
 	if f := j.MemoryOOMFloor; f != nil {
 		floor = max(floor, f.HostMemoryGB)
 	}
 	host = max(host, floor, minimumHostMemoryGB)
 	if !validRate(host) {
-		return 0, "", 0, false
+		return 0, "", 0, 0, false
 	}
-	return host, source + " " + boundedFirstRun + "accepted family peaks + measured uncertainty)", evidence, true
+	// The margin is the spread between runs of differently sized work, so it
+	// can exceed a host's whole allowance while every accepted run fitted it.
+	// Refusing then makes the evidence cost more than having none: a host
+	// without evidence probes its whole allowance. Probe that way here too,
+	// never below the measured peak. Placement then stays on dedicated hosts
+	// that already ran this work rather than only on hosts that never have.
+	if allowance := hostMemoryAllowanceGB(m); j.Spec.Needs.cpuOnly() && allowance > 0 && hostNeed(m, 0, host) > allowance && hostNeed(m, 0, max(peak, floor)) <= allowance {
+		return 0, "", 0, max(peak, floor), false
+	}
+	return host, source + " " + boundedFirstRun + "accepted family peaks + measured uncertainty)", evidence, 0, true
+}
+
+// The host RAM this worker may ever give jobs: its allowance, else physical RAM.
+func hostMemoryAllowanceGB(m *Machine) float64 {
+	if m.EffectiveHostMemoryBudgetGB > 0 || m.CapabilityProfile == nil {
+		return m.EffectiveHostMemoryBudgetGB
+	}
+	return float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
 }
 
 // The largest retained constrained host peak of this work or job. It is a lower
@@ -165,7 +190,7 @@ func (q *Queue) unifiedGPUFirstRun(j *Job, m *Machine, estimate memoryEstimate, 
 // Fresh accepted unconstrained peaks of the same family on the same OS: CPU
 // peaks for CPU work, matching-layout GPU host peaks for GPU work. Rows written
 // before memory sample counting count once.
-func (q *Queue) similarMemoryPeak(j *Job, m *Machine) (float64, int) {
+func (q *Queue) similarMemoryPeak(j *Job, m *Machine) (float64, float64, int) {
 	family, gpu, layout := memoryFamily(j), !j.Spec.Needs.cpuOnly(), memoryLayout(j, m)
 	if !gpu {
 		layout = ""
@@ -176,7 +201,7 @@ func (q *Queue) similarMemoryPeak(j *Job, m *Machine) (float64, int) {
 			points = append(points, point)
 		}
 	}
-	return observedMemoryBound(points, false)
+	return observedMemoryPeakAndMargin(points, false)
 }
 
 // Origin names the figure's basis for status, job timing and waiting reasons.

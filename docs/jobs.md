@@ -1268,6 +1268,10 @@ host allowance (physical RAM if uncapped) available and no protected attempt or
 model residency charging a quarter of it. Its envelope uses the available
 allowance after existing reserves, charges and attempt slack. Existing priority
 and release rules still apply. Accepted exploratory peaks train later runs.
+A CPU first run bounded by similar work's peak plus the spread between its
+runs explores the same way on a host whose allowance holds every accepted peak
+but not that bound, never below the measured peak, rather than refusing a
+host that has already run the work.
 Input-size/duration scaling is a follow-up. The chosen
 source, reservation and enforcement mode appear in `memory_envelope` on the job.
 Finished attempt facts are also stored in `memory_attempts` on the job GET,

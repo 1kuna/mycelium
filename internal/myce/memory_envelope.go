@@ -448,12 +448,16 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, probeMachine, estimate, deviceFloor, 0, hostFloor)
 			if gpuBounded {
 				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
-			} else if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
+			} else if bound, bounded, similar, peak, ok := q.coldMemoryBoundOrProbe(j, m, estimate, hostFloor); ok {
 				host, source, evidence = bound, bounded, similar
 			} else {
 				host, why = q.exploratoryMemory(j, probeMachine)
 				if q.learnedMemory() && n.cpuOnly() {
 					probeFloor = hostFloor
+				}
+				if peak > 0 {
+					// Wait for the measured peak; never lend below it.
+					host, probeFloor = max(host, peak), max(probeFloor, peak)
 				}
 			}
 			refusal = why
@@ -846,10 +850,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 // a structural inability to run. Startup waiting uses this same sizing evidence.
 func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bool) {
 	drift := q.jobProbeDriftMarginGB(j, m)
-	allowance := m.EffectiveHostMemoryBudgetGB
-	if allowance <= 0 && m.CapabilityProfile != nil {
-		allowance = float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	}
+	allowance := hostMemoryAllowanceGB(m)
 	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
 	}
