@@ -1262,6 +1262,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.CapabilityProfile = &profile
 			}
 			if w.ExtensionRoot != "" {
+				pruneUnusedExtensions(w.ExtensionRoot, w.Clock.Now(), w.ExtensionRetention)
 				cpu := m
 				cpu.GPU, cpu.Device = "cpu", ""
 				cpu.ExtensionFingerprint = m.CPUExtensionFingerprint

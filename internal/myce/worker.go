@@ -109,6 +109,8 @@ type Worker struct {
 
 	ContainerRetention *time.Duration
 	LogRetention       time.Duration
+	// Zero uses DefaultExtensionRetention; negative keeps every registration.
+	ExtensionRetention time.Duration
 	dockerCallTimeout  time.Duration
 	dockerCommand      func(context.Context, ...string) ([]byte, error)
 	dockerDaemon       func(context.Context, ...string) ([]byte, error) // In-process daemon; no CLI transport timing.
@@ -1408,6 +1410,9 @@ func (w Worker) Run(stop context.Context) error {
 	w.batchMemory = &atomic.Uint64{}
 	if s.state.Job != nil {
 		w.batchMemory.Store(math.Float64bits(s.state.Job.Spec.Needs.MemoryGB))
+	}
+	if w.ExtensionRetention == 0 {
+		w.ExtensionRetention = DefaultExtensionRetention
 	}
 	if w.LogRetention == 0 {
 		w.LogRetention = DefaultLogRetention
