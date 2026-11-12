@@ -67,6 +67,11 @@ func memoryExplorationComplete(t *testing.T, q *Queue, clock *fakeClock, run *Jo
 	}
 }
 
+// A Linux peak above the fixture's 8 GiB Darwin allowance: only the bounded
+// exception can size such work on Darwin. A peak that fits is a floor for an
+// ordinary first run instead (TestForeignPeakFloorsFirstRunOnAnotherOS).
+const foreignPeakAboveDarwinAllowance = 9.0
+
 func memoryExplorationSeed(t *testing.T, q *Queue, clock *fakeClock, linux, darwin Machine, s Spec, lower, prior float64) {
 	t.Helper()
 	if lower > 0 {
@@ -124,7 +129,7 @@ func TestMemoryExplorationForeignPriorRefuses(t *testing.T) {
 
 func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 	q, clock, linux, darwin, s := memoryExplorationFixture(t)
-	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, foreignPeakAboveDarwinAllowance)
 	s.Targets = []ExecutionTarget{machineTarget(&darwin)}
 	s.Needs.HostMemoryGB = 1 // A fitting hint is a prerequisite, not the probe cap.
 	small := darwin
@@ -200,7 +205,7 @@ func TestMemoryExplorationFailureCannotLoop(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			q, clock, linux, darwin, s := memoryExplorationFixture(t)
-			memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+			memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, foreignPeakAboveDarwinAllowance)
 			s.Targets = []ExecutionTarget{machineTarget(&darwin)}
 			first := submit(t, q, s)
 			clock.Advance(time.Millisecond)
@@ -256,7 +261,7 @@ func TestMemoryExplorationFailureCannotLoop(t *testing.T) {
 // "bounded exploration already used".
 func TestMemoryExplorationUnlaunchedProbeIsReturned(t *testing.T) {
 	q, clock, linux, darwin, s := memoryExplorationFixture(t)
-	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, foreignPeakAboveDarwinAllowance)
 	s.Targets = []ExecutionTarget{machineTarget(&darwin)}
 	queued := submit(t, q, s)
 	run := check(t, q, darwin, nil).Job

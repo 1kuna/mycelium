@@ -244,6 +244,32 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	return budget, why, true
 }
 
+// foreignPriorFloor is the floor of CPU work sized only by a peak from
+// another OS, with no measured transfer error, and whether it can run here as
+// an ordinary first run floored there. The one measured pair in this fleet
+// peaked 51% higher on Linux than on macOS (a 7.01 GiB suite reached
+// 10.57 GiB), so the foreign peak cannot bound the run; it only floors it,
+// with any constrained lower bound, OOM floor and submitter hint. Refusing
+// instead kept 100 pieces of about 3 MB off two idle Linux hosts (#1486): the
+// bounded exception below needs the largest host's whole allowance free,
+// which a host carrying persistent services never has (MY-45). A floor
+// larger than this target's allowance still takes that exception or is
+// refused.
+func (q *Queue) foreignPriorFloor(j *Job, m *Machine, estimate memoryEstimate) (float64, bool) {
+	if !j.Spec.Needs.cpuOnly() || !estimate.foreign || !estimate.uncalibrated || estimate.escalation || estimate.host == nil || estimate.source == spentMemoryExploration {
+		return 0, false
+	}
+	floor := max(hostMemoryPeakGB(estimate.host)*estimate.hostFactor, q.constrainedMemoryLower(j, estimate))
+	if f := j.MemoryOOMFloor; f != nil {
+		floor = max(floor, f.HostMemoryGB)
+	}
+	if h := j.MemoryFallback; h != nil {
+		floor = max(floor, h.HostMemoryGB, h.MemoryGB)
+	}
+	allowance := hostMemoryAllowanceGB(m)
+	return floor, validRate(floor) && allowance > 0 && hostNeed(m, 0, floor) <= allowance
+}
+
 // Assignment consumes the exception in the same transaction as normal attempt
 // custody. Even loss/prelaunch refusal spends it: this costs one possible probe
 // but prevents duplicate launches after a lost offer or queue restart.

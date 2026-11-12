@@ -181,7 +181,7 @@ func TestColdProbeAdmissionLearnsExactRefusalAcrossRestart(t *testing.T) {
 
 func TestColdProbeAdmissionBoundedExplorationUsesSameDrift(t *testing.T) {
 	q, clock, linux, darwin, s := memoryExplorationFixture(t)
-	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, 3.634326934814453)
+	memoryExplorationSeed(t, q, clock, linux, darwin, s, 3, foreignPeakAboveDarwinAllowance)
 	clock.Advance(time.Second)
 	darwin.HostAvailableMemoryGB -= .5
 	check(t, q, darwin, nil)

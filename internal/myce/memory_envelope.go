@@ -333,7 +333,13 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		if estimate.source == spentMemoryExploration {
 			refusal = spentMemoryExploration + "; " + memoryCapacityRemedies
 		}
-		if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
+		foreignFloor, foreign := q.foreignPriorFloor(j, m, estimate)
+		if foreign {
+			// A peak measured on another OS is a floor here, not a bound: with
+			// no measured transfer error this is the OS's ordinary first run,
+			// offered the room and floored at that peak.
+			estimate.measuredHostGB = max(estimate.measuredHostGB, foreignFloor)
+		} else if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
 			estimate.measuredHostGB, estimate.source = host, boundedMemoryExploration
 			if !n.cpuOnly() {
 				estimate.source = boundedGPUExploration
@@ -345,7 +351,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			refusal = memoryCapacityRemedies
 		}
 		if q.learnedMemory() && n.cpuOnly() && !estimate.escalation && !boundedMemorySource(estimate.source) && estimate.uncalibrated {
-			probeFloor = hostFloor
+			probeFloor = max(hostFloor, foreignFloor)
 			if estimate.host != nil {
 				probeFloor = max(probeFloor, hostMemoryPeakGB(estimate.host))
 			}

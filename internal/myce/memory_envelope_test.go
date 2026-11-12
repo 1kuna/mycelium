@@ -375,8 +375,9 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	if _, err := q.Checkin(Checkin{Machine: darwin, Fresh: true, PreviousSession: previousSession}); err != nil {
 		t.Fatal(err)
 	}
-	// The lower bound permits one full-allowance measurement, not a 3 GiB cap.
-	complete(start(darwin, boundedMemoryExploration, 7.75), 4, false)
+	// The Linux peak fits Darwin's allowance, so it floors an ordinary first
+	// run, offered the full allowance here, not a 3 GiB cap.
+	complete(start(darwin, "exploratory (transfer error unavailable)", 7.75), 4, false)
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 2, true)
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 8.5, false)
