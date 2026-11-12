@@ -30,7 +30,7 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 // Memory sizing changes only the memory vector/envelope. These structural
 // eligibility predicates are identical before and after it.
 func memorySizingTargetFits(j *Job, m *Machine) bool {
-	return executionTargetMatches(j.Spec, m) && deviceAllowed(j, m) && dockerRuntimeFits(j, m) &&
+	return executionTargetMatches(j.Spec, m) && deviceAllowed(j, m) &&
 		(j.Spec.Needs.cpuOnly() || m.GPU != "cpu" && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)))
 }
 
@@ -56,7 +56,6 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(j.Spec.Needs.cpuOnly() || m.GPU != "cpu", "platform") &&
 		report.check(cpuFits(j, m), "cores") &&
 		report.check(!cancelled(j), "cancelled") &&
-		report.check(dockerRuntimeFits(j, m), "Docker runtime") &&
 		report.check(logPolicyFits(j.Spec.Logs, m), "log policy") &&
 		report.check(!availabilityBlocked(m), "availability") &&
 		report.check(capabilityFits(j, m), "hardware capacity") &&
@@ -72,9 +71,9 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 }
 
 // Spread across cards only work that no single card of the host can hold.
-// Docker, model-server and extension-check jobs keep one card.
+// Model-server and extension-check jobs keep one card.
 func groupFits(j *Job, m *Machine) bool {
-	return len(m.groupMembers) == 0 || !j.Spec.Needs.cpuOnly() && j.Spec.Needs.MemoryGB > m.groupFloorGB && j.Spec.Needs.Model == "" && !j.Spec.Run.Docker && j.Spec.ExtensionCheck == nil
+	return len(m.groupMembers) == 0 || !j.Spec.Needs.cpuOnly() && j.Spec.Needs.MemoryGB > m.groupFloorGB && j.Spec.Needs.Model == "" && j.Spec.ExtensionCheck == nil
 }
 
 func affinity(j *Job, m *Machine) int {
@@ -131,9 +130,6 @@ func waitingHold(j *Job, machines map[string]*Machine, jobs map[string]*Job) *Ho
 	}
 	if h := cpuWait(j, machines); h != nil {
 		return h
-	}
-	if reason := dockerRuntimeWaitingReason(j, machines); reason != "" {
-		return newHold("docker_runtime", reason)
 	}
 	if reason := extensionWaitingReason(j, machines); reason != "" {
 		return newHold("extension", reason)

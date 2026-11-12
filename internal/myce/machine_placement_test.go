@@ -219,33 +219,6 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	}
 }
 
-func TestM3DockerCreateKeepsLaunchAuthorization(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	m.Capabilities = append(m.Capabilities, "docker")
-	s := dockerJob().Spec
-	s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
-	j := submit(t, q, s)
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != j.ID {
-		t.Fatal("missing Docker assignment", a)
-	}
-	m.DockerCleanup = "creating"
-	machineCheck(t, q, m, a)
-	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: "1"}
-	if err := q.AuthorizeLaunch(launch); err != nil {
-		t.Fatalf("own device create rejected: %v", err)
-	}
-	if q.s.Machines[m.ID].DockerCleanup != "creating" {
-		t.Fatal("authorization changed persisted diagnostics")
-	}
-	m.DockerCleanup = "cleanup unconfirmed: inspect"
-	machineCheck(t, q, m, a)
-	if err := q.AuthorizeLaunch(launch); err == nil {
-		t.Fatal("unconfirmed cleanup permitted launch")
-	}
-}
-
 func TestM3ModelLoadWaitsForDeviceProbe(t *testing.T) {
 	m := m3Machine()
 	m.Devices[0].Reason = "device_probe_unavailable"

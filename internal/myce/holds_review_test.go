@@ -107,35 +107,6 @@ func TestHoldsReviewModelReleaseAttention(t *testing.T) {
 	}
 }
 
-func TestHoldsReviewDockerSeverityDeterministic(t *testing.T) {
-	q, c, a, b, _ := holdFleet(t, false)
-	q.s.Machines[a.ID].DockerCleanup = "creating"
-	q.s.Machines[b.ID].DockerCleanup = "cleanup unconfirmed: inspect"
-	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: "old", Attempt: 1, Docker: true}
-	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	assert := func(kind, text string) {
-		t.Helper()
-		for i := 0; i < 100; i++ {
-			d := q.dockerHold("b70")
-			if d.Kind != kind || d.Detail != text {
-				t.Fatalf("iteration %d: %+v", i, d)
-			}
-		}
-	}
-	assert("docker_cleanup_waiting", "b70: Docker cleanup unconfirmed; cleanup unconfirmed: inspect")
-	q.s.Machines[b.ID].DockerCleanup = "start pending"
-	assert("docker_cleanup_waiting", "b70: Docker cleanup unconfirmed; waiting for attempt old/1")
-	now := c.Now()
-	r.EscalatedAt = &now
-	q.s.HostReleases[releaseKey(r)] = r
-	q.s.Machines[b.ID].DockerCleanup = "cleanup unconfirmed: inspect"
-	assert("docker_cleanup_operator_action", "b70: Docker cleanup unconfirmed; waiting for attempt old/1; operator action required (myce resolve-docker)")
-	delete(q.s.HostReleases, releaseKey(r))
-	q.s.Machines[b.ID].DockerCleanup = "creating"
-	q.s.Machines[a.ID].DockerCleanup = "start pending"
-	assert("docker_transition", "b70: Docker cleanup unconfirmed; creating") // lexical tie-break.
-}
-
 func TestHoldsReviewStartupGone(t *testing.T) {
 	q, c := fixture(t)
 	m := machine("worker", "fake")
@@ -188,22 +159,5 @@ func TestHoldsReviewCallAttention(t *testing.T) {
 	d = q.productionHold("b70")
 	if !d.operatorAction() {
 		t.Fatalf("late release: %+v", d)
-	}
-}
-
-func TestHoldsReviewUnknownDockerStatusFailsClosed(t *testing.T) {
-	q, _, a, b, _ := holdFleet(t, false)
-	q.s.Machines[a.ID].DockerCleanup = "pull pending"
-	q.s.Machines[b.ID].DockerCleanup = "cleanup unconfirmed: inspect"
-	d := q.dockerHold("b70")
-	if d.Kind != "unclassified" || !d.operatorAction() || d.Expires != nil || d.Detail != "b70: Docker cleanup unconfirmed; pull pending" {
-		t.Fatalf("unknown Docker status must fail closed: %+v", d)
-	}
-	now := q.clock.Now()
-	r := HostRelease{Host: "b70", Job: "old", Machine: a.ID, Session: "old", Attempt: 1, Docker: true, EscalatedAt: &now}
-	q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
-	d = q.dockerHold("b70")
-	if d.Kind != "docker_cleanup_operator_action" || !d.operatorAction() {
-		t.Fatalf("unknown status hid escalation: %+v", d)
 	}
 }

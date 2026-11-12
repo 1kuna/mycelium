@@ -131,7 +131,7 @@ func (s *workerStore) startFailureAt(j Job, kind string, cause error, at time.Ti
 	// contrast, is written before any process can start and is never inferred
 	// from an absent Started report. Persist this positive refusal proof with
 	// the facts so release-only replay carries it too.
-	prelaunch := kind == launchRefused && !j.Spec.Run.Docker && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
+	prelaunch := kind == launchRefused && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
 	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: at, Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}}}
 	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
 	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {

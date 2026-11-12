@@ -45,7 +45,7 @@ accelerators as components (MY-06).
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.
 4. **One local network, one queue.** No peer network, leases, leader election or replicated registry.
 5. **One machine is one hypha.** A worker owns the machine and selects its components; CPU/RAM capacity is shared once.
-6. **Plain commands by default.** Software must exist or be built on the worker. Managed Docker containment is an explicit supported Linux command option, not a container scheduler.
+6. **Plain commands.** Software must exist or be built on the worker. Native processes, environments and sidecars are the one runtime; managed Docker containment was retired on 2026-11-12 under [MY-49](DECISIONS.md#my-49), and a request that still asks for it is refused at submission.
 
 ## A job
 
@@ -174,7 +174,7 @@ or legacy `X-Myce-Priority`, with conflicting declarations rejected.
 
 There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 
-One measured physical-host memory allowance covers simultaneous production demand, other admitted work, sidecars, launch overhead and headroom. Its numeric value comes from component measurements, not this spec. Keep aggregate accounting and cgroup/Docker enforcement. Do not rewrite budgets on every ownership switch: queue maintenance excludes new work while another owner uses the host.
+One measured physical-host memory allowance covers simultaneous production demand, other admitted work, sidecars, launch overhead and headroom. Its numeric value comes from component measurements, not this spec. Keep aggregate accounting and cgroup enforcement. Do not rewrite budgets on every ownership switch: queue maintenance excludes new work while another owner uses the host.
 
 **Data stays local.** Every machine in the fleet is on-premises, so job data never leaves our machines. A job can also list the specific machines it is allowed to run on.
 
@@ -425,7 +425,7 @@ still ages independently; liveness never manufactures fresh sensor evidence.
 
 **Production infrastructure retries.** An interrupted production batch job requeues at the front of its priority line under the same job ID and `submission_key`, at most **2** times (`queue --production-infrastructure-retries`, a nonnegative limit clamped to two; zero disables requeue). Worker restart or loss, an unreported attempt after queue restart, undelivered/lost results, worker interruption/release, planned leave and reboot all use the existing requeue path. A queue restart that reconnects a still-current running command or its buffered result does not interrupt it. The third interruption fails with `infrastructure_retries_exhausted` and a terminal timestamp. The durable job counter `infrastructure_retries` records requeues used and is an additive optional integer in status and job-v1 (omitted at zero). It survives restart; release evidence cannot refund or revive an exhausted production budget.
 
-Classification uses Mycelium-recorded facts for native, native-group and Docker attempts. Infrastructure evidence is a durably recorded stop or kill delivered to that member before its exit was observed; loss of observation; a Mycelium-side pre-execution or launch refusal/failure (including authorization, exec/spawn or environment preparation infrastructure failure); or Mycelium's own probe proving that an allocated readiness port belongs to a process outside this group when readiness fails. Exit codes, payload stderr, stop intent and signals recorded after exit observation are never infrastructure evidence. Independent member exits, OOM (including an extension job), and readiness timeouts without such evidence fail production immediately without an infrastructure retry. A successful terminal outcome is preserved. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
+Classification uses Mycelium-recorded facts for native and native-group attempts. Infrastructure evidence is a durably recorded stop or kill delivered to that member before its exit was observed; loss of observation; a Mycelium-side pre-execution or launch refusal/failure (including authorization, exec/spawn or environment preparation infrastructure failure); or Mycelium's own probe proving that an allocated readiness port belongs to a process outside this group when readiness fails. Exit codes, payload stderr, stop intent and signals recorded after exit observation are never infrastructure evidence. Independent member exits, OOM (including an extension job), and readiness timeouts without such evidence fail production immediately without an infrastructure retry. A successful terminal outcome is preserved. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
 
 A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. This also applies when the original length came from an explicit first-start `start_by`; the renewed cutoff retains its absolute semantics during capacity or device-recovery waiting. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
@@ -519,7 +519,7 @@ Schemas describe wire shape, not proof of physical release or permission to cons
 
 ### Cancellation acknowledgement
 
-Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` echoes the stored first `cancelled_at` (or reservation cancellation time) in UTC RFC3339; retries, reopen and reservation binding preserve it. It is null for an expired digest marker with no retained timestamp. `will_not_run: true` durably means no **new** attempt is created or assigned after the acknowledgement. An attempt already assigned before the acknowledgement may still begin briefly; the worker stops it at its next check, and `release` stays `pending` until release is proven. Consumers that need execution exclusion wait for `release: "confirmed"` (or `not_applicable` when never attempted). Every batch command requires the current attempt-fenced Started acknowledgement before its payload executes; Docker and engines retain exact execution custody and queue-authorized plans. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established. For a retained job, release always covers **every known attempt**, regardless of whether the job is queued, active, terminal or removed: `not_applicable` only when it never had an attempt; `pending` while any known attempt has unproven release (its charge remains); `confirmed` once all known attempts are proven released. In particular, a requeued job can still have a lost, unreleased attempt; cancelling it returns `pending`, then a repeated cancellation returns `confirmed` after that exact release is proven. Cancellation never creates release custody or placement blockers; runtime tracking owns charges. Fresh rejoin records release only for copies from the immediately previous session (`PreviousSession`, matching the recorded old session), even without a retained release record; older sessions remain unresolved. Pre-v3 persisted queue state is refused and never contributes inferred release evidence.
+Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` echoes the stored first `cancelled_at` (or reservation cancellation time) in UTC RFC3339; retries, reopen and reservation binding preserve it. It is null for an expired digest marker with no retained timestamp. `will_not_run: true` durably means no **new** attempt is created or assigned after the acknowledgement. An attempt already assigned before the acknowledgement may still begin briefly; the worker stops it at its next check, and `release` stays `pending` until release is proven. Consumers that need execution exclusion wait for `release: "confirmed"` (or `not_applicable` when never attempted). Every batch command requires the current attempt-fenced Started acknowledgement before its payload executes; engines retain exact execution custody and queue-authorized plans. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established. For a retained job, release always covers **every known attempt**, regardless of whether the job is queued, active, terminal or removed: `not_applicable` only when it never had an attempt; `pending` while any known attempt has unproven release (its charge remains); `confirmed` once all known attempts are proven released. In particular, a requeued job can still have a lost, unreleased attempt; cancelling it returns `pending`, then a repeated cancellation returns `confirmed` after that exact release is proven. Cancellation never creates release custody or placement blockers; runtime tracking owns charges. Fresh rejoin records release only for copies from the immediately previous session (`PreviousSession`, matching the recorded old session), even without a retained release record; older sessions remain unresolved. Pre-v3 persisted queue state is refused and never contributes inferred release evidence.
 
 | State at cancellation | Acknowledgement |
 | --- | --- |
@@ -626,8 +626,8 @@ allowance only while drained/disabled. Every worker view receives the policy
 and must report it consistently before new work starts. Lowering it keeps
 existing attempt charges and exposes aggregate RAM debt; it does not resize a
 running attempt's ceiling or release resources. Qualification remains
-`UNQUALIFIED` until separately authorized native measurement. Docker
-main/sidecar ceilings and total per-attempt charges are unchanged.
+`UNQUALIFIED` until separately authorized native measurement. Sidecar
+ceilings and total per-attempt charges are unchanged.
 
 Status reports policy, known worker freshness/device identities,
 allowance/mismatch, aggregate RAM/debt, attempt identities, preparations,
@@ -662,7 +662,7 @@ remain visible through `host status HOST`. `HostRelease` and the work enumeratio
 retain unknown custody after loss, stale reports or restart. Only exact completion,
 release acknowledgement or cleanup of the immediately previous worker session
 settles that custody. Timeouts, an empty inventory and service exit alone do not.
-The same cleanup handles native groups and Docker main/sidecar/network resources.
+The same cleanup handles native groups and their sidecars.
 
 Drain before an upgrade; use `disable --stop --wait` when active work must stop.
 Resume explicitly when ready. There is no offline handoff certification: during
@@ -709,10 +709,9 @@ A GPU holds several single-card batch attempts when their memory fits: the
 newcomer's declared or learned device vector and its host vector must fit the
 card's and host's existing headroom beside every co-tenant's charge, unified
 hosts counting the one pool. A finished co-tenant stays charged until exact
-release. Managed Docker batches use the same sharing rules, with enforced
-per-container host caps and declared or learned device memory. A learned host
+release. A learned host
 peak without a device measurement retains a recipe-default device figure;
-native and Docker attempts with that figure keep the card to themselves until
+attempts with that figure keep the card to themselves until
 an accepted device measurement supplies their learned vector. The
 envelope's `source` identifies `GPU recipe default` in this case. Model-server,
 extension-check, fan-out, exploratory first-run
@@ -763,7 +762,7 @@ the most free memory, reserved together with one release record, each charged
 `memory_gb / N`, host RAM and cores once. All are visible to every member
 (`MYCE_GPU_COUNT`, `MYCE_DEVICES`); preemption reclaims them as one attempt, and
 a card stopped for a waiting multi-card demand is withheld from equal and lower
-tiers until it starts, while the host's usable cards can still hold it. Docker, model-server and extension-check jobs keep one
+tiers until it starts, while the host's usable cards can still hold it. Model-server and extension-check jobs keep one
 card; unmeasured `memory: auto` first runs explore one card, and multi-card
 attempts do not feed per-card memory learning. Extension work needs every card
 qualified; no separate multi-card parity check exists yet. Using more cards for
@@ -913,7 +912,7 @@ cgroup, so ordinary service stop still contains every native descendant.
 Workers report unsupported enforcement plainly and keep laptop admission-only
 execution. An optional physical-host budget caps the sum of declared ceilings,
 including configurable slack, and retains unconfirmed allocations after loss.
-Managed Docker batches install and inspect daemon-side memory limits. OOM is a
+OOM is a
 normal failure rather than infrastructure loss. The configuration, unsupported
 cases and qualification limits are in [operations](reference/host-capacity.md#host-ram-admission-and-ceilings).
 
@@ -975,7 +974,7 @@ the host share and the footprint beyond RSS as the device share, so unified
 sizing can learn Metal work. Its charge is the larger of those accepted peaks,
 its high water and its forecast, plus drift and the guard's measured overshoot,
 bounded by the envelope plus that overshoot. First runs, auto-sized Metal work,
-non-cgo Darwin builds, discrete accelerators, multi-card attempts, Docker,
+non-cgo Darwin builds, discrete accelerators, multi-card attempts,
 interactive hosts and missing, stale or estimated samples keep the envelope.
 When by-use jobs grow back into memory lent to their neighbours and live free
 memory can no longer absorb the growth expected before a stop completes, one
@@ -1208,18 +1207,6 @@ device vector. Lower tiers must also leave room for a sole qualified host's
 queued or forecast production envelope with existing estimator margins. Existing
 production holds, preemption and work-scoped parity approvals remain authoritative.
 
-Envelope-only Docker groups require a verified local shared cgroup parent
-(cgroupfs with worker delegation). Unsupported daemons refuse with an explicit
-reason and native/capped alternatives. Existing capped Docker groups retain
-member-only enforcement. Shared-envelope Docker attempts end when the worker
-unit stops. If daemon inventory proves all members stopped but the delegated
-parent vanished, release custody with unknown peak and cause, without learning.
-If the parent survives but the running sampler was lost, its post-exit resident
-reading also cannot train an estimate, even when main had already succeeded.
-Docker driver and Linux/GPU enforcement qualification are deployment checks,
-separate from laptop proof. Verify each target's Docker driver and kernel XPU
-fdinfo size format (bare bytes, KiB or MiB) before claiming native qualification.
-
 ### Learned memory by default and bounded first runs
 <a id="amendment-learned-memory-by-default-and-bounded-first-runs-585-559"></a>
 
@@ -1405,33 +1392,17 @@ See [native isolation](native-isolation.md) for the platform guarantee table,
 limitations and a separately authorized per-host AppArmor option. Broader #177
 hardening remains separate from this minimum.
 
-## Docker command containment
+## Containers
 <a id="docker-command-containment-maintainer-2026-10-11"></a>
 
-Opt-in `run.docker` contains a supported, direct Docker batch command. One
-worker-owned create/start request, immutable attempt labels and durable cleanup
-custody keep daemon-owned containers within the existing worker/SQLite
-accounting contract. Unconfirmed release retains the physical host's exclusion
-across loss/restart. Plain commands remain the default and Docker stays
-optional (MY-13); no container scheduler, peer network or extra service is
-introduced. The exact supported subset and limits are in [job
-reference](jobs.md#managed-docker-batch-commands) and
-[operations](operations.md#docker-cleanup-custody).
-
-For plain managed Docker batches, hashed `files` and declared `outputs` use the
-existing verified v3 file transport. The `docker_files_v1` capability gates
-assignments. Inputs are attempt-private read-only mounts at `/myce/inputs`;
-`/myce/work` is a separate writable output/scratch mount and working directory.
-Main and managed sidecars receive the same roots. Bind mounts, numeric UID:GID
-and injected environment are worker-owned; authored mount/env/workdir/user
-overrides, NAS inputs, shared inputs and native environments remain rejected.
-File containers drop all capabilities and enable `no-new-privileges`. After
-every writer is proven stopped, existing durable spooling, hashing/upload and
-current-attempt verification publish outputs. Custody and local files survive
-uncertain operations and publication replay. The [file
-guide](files.md#managed-docker-files) specifies permissions, mount verification
-and daemon-local path requirements; no GPU qualification follows from laptop
-proof.
+Mycelium does not run containers. Managed Docker command containment, added
+on 2026-10-11 as an optional path (MY-13), was retired on 2026-11-12 under
+[MY-49](DECISIONS.md#my-49) once its last consumer ran its model jobs natively.
+A job spec, profile or adapter entry that still sets a `run.docker*` field is
+refused at submission with `job_docker_retired`, pointing to native
+environments and sidecars ([services](services.md#a-model-server-in-a-native-job-instead-of-a-container-image)).
+The previous release's Docker wire fields and install keys are accepted and
+ignored for one release (MY-42).
 
 ## Models
 <a id="models-nas-masters-local-cache-and-production-pins-maintainer-2026-10-09"></a>
@@ -1689,8 +1660,7 @@ omitted its leaf uses the parent cap. A separate control leaf contains the
 supervisor. Member OOM fails the stage and identifies that member; cleanup
 verifies the whole subtree and removes leaves before releasing the parent.
 macOS and nondelegated foreground workers remain admission-only; requiring
-memory ceilings refuses hosts without delegation. Docker sidecars retain their
-existing behavior.
+memory ceilings refuses hosts without delegation.
 
 The worker records a process-group anchor and gated member intent/PID/birth
 before exec, authorizes every member through the shared exact-attempt launch
@@ -1975,7 +1945,7 @@ use sanitized fixtures in Mycelium.
 
 | Work kind | Preserve and prove at its existing seam |
 | --- | --- |
-| Offline suites and native naming | Two offline-suite entries retain Pixi CPU tools, wrapper, exact target and JUnit check. Its native naming extension retains CUDA variant, sidecar, baseline/result names and production submit/key/cancel seam. Model endpoints remain unchanged; the consumer decides Docker/native direction. |
+| Offline suites and native naming | Two offline-suite entries retain Pixi CPU tools, wrapper, exact target and JUnit check. Its native naming extension retains CUDA variant, sidecar, baseline/result names and production submit/key/cancel seam. Model endpoints remain unchanged. |
 | Application backend/frontend/tooling | Backend/frontend/tooling entries retain targeted/full distinctions, macOS-only suites, placement restrictions, Python/Node prerequisites and markers/archive. Copy exact temporary queue-side lock bytes only under the approved environment option; do not infer Linux qualification from a list. |
 | Python/browser tests | Pytest/browser-e2e entries retain explicit Git bundle input and stale-bundle check (source omits `.git`), resources/thread limits, installed Python/Node/browser prerequisites and success markers. Conversion does not substitute a new environment. |
 | Rendering | Render/canary and per-item catalog entries retain frozen scene/binary inputs, snapshot identities, large frame archives, semantic checks, private placement and existing holds. Conversion must not launch another render. |
@@ -2646,7 +2616,7 @@ v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attem
 **Pre-v3 formats are refused; operators archive and install fresh.** Pre-marker queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no pre-v3 converter or dual runtime decoder. Split-worker conversion is retired under MY-42. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
 Installation overlays explicit options on saved current configuration, preserving
-queue address, NAS, names, Docker endpoint, GPU environment and secret references.
+queue address, NAS, names, GPU environment and secret references.
 Matching binaries and service definitions replace each selected installation.
 There is no local start condition, stage-only host gate or timer installation.
 Linux workers start as ordinary-account services with `Restart=on-failure`,
@@ -2729,7 +2699,7 @@ with positive existing CPU/RAM allowances, an explicitly measured interactive
 reserve, historical/live RAM admission and existing last-resort placement. GPU
 admission uses the existing component exclusion path. Drains, exact launch
 fences and cleanup remain authoritative. First phase uses prepared
-environments; Docker/extensions/new preparations remain withheld.
+environments; extensions/new preparations remain withheld.
 Shared-profile commands and sidecars use background taskpolicy on macOS; common
 runtime concurrency is bounded by declared cores. Linux's delegated execution
 subtree enforces aggregate CPU weight/quota outside worker control threads.
@@ -2749,7 +2719,7 @@ The queue records health events from its existing check-ins, maintenance clock a
 attempt outcomes; no agent or user polls for alerts. V1 detects only measured disk
 free space below the existing guard (1%, minimum 256 MiB), an unhealthy or stale
 host, a production attempt lost to machine silence or a start/observation/cleanup
-timeout (including diagnostics while Docker still retains custody), and
+timeout, and
 checkpoint/NAS/file storage unavailable continuously for a configurable
 duration (default five minutes). Planned leave and host maintenance suppress host
 alerts; planned and operator stops do not count as lost production attempts.
@@ -2782,9 +2752,7 @@ Not implemented: #200's extension-configuration or architecture-caused
 workload-failure detectors, trend analysis or automatic issue filing. Those
 broader acceptance criteria remain open.
 
-Docker heartbeats carry `docker_cause` on each exact attempt report, avoiding
-attribution from an aggregate host error when several jobs share a host. Legacy
-single-attempt reports can use their unambiguous host diagnostic. A pending cleanup
+A pending cleanup
 result can alert before release; neither alert path changes execution state or
 releases resources. Stale attempt diagnostics cannot emit a production-loss alert.
 
@@ -2795,7 +2763,7 @@ owner-attention health alert.
 
 Keep laptop tests for queue policy across both device workers, Started/cancel
 races, queue and worker restart, stale/missing reports, unknown release custody,
-RAM/debt and sidecar limits, exact Docker stop/recovery/result, files and privacy.
+RAM/debt and sidecar limits, exact stop/recovery/result, files and privacy.
 Use injected clocks for queue decisions. `myce dev` runs the real API and command
 runner with fake GPU inventory; standalone e2e checks a command effect, exact
 release, queue maintenance and complete process/listener teardown.
@@ -2806,7 +2774,7 @@ authorized native acceptance; laptop fakes do not qualify hardware. See
 
 ## Scope and later work
 
-Supported v3 features include plain batch commands, queue-managed model calls and HTTP servers, software environments, production pins, fair sharing, enforced memory ceilings and opt-in managed Docker commands. Capability profiles, authenticated discovery/joining, qualified extensions, polite daily-use participation, optional measured placement and verified file transport are also implemented. An extension describes a kind of work or program; qualification is tied to its exact version and a matching native baseline. Hardware facts or benchmark timing alone do not qualify it. Unknown required participation signals withhold work; unsupported hardware is reported rather than silently using the CPU.
+Supported v3 features include plain batch commands, queue-managed model calls and HTTP servers, software environments, production pins, fair sharing, enforced memory ceilings and native sidecars. Capability profiles, authenticated discovery/joining, qualified extensions, polite daily-use participation, optional measured placement and verified file transport are also implemented. An extension describes a kind of work or program; qualification is tied to its exact version and a matching native baseline. Hardware facts or benchmark timing alone do not qualify it. Unknown required participation signals withhold work; unsupported hardware is reported rather than silently using the CPU.
 
 Explicit NAS roots remain supported for models, shared files and checkpoints. The queue file store also supports jobs without a NAS. Ordinary commands and servers do not need to become extensions. These are supported v3 paths, not a second runtime or a reason to restore older worker/report protocols.
 

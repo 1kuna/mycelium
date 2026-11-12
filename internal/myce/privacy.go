@@ -37,12 +37,8 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}
-	unsafeDockerHolds := map[string]string{}
 	for _, m := range s.Machines {
 		publicWorkerCollection(m)
-		if m.DockerCleanup != "" && !safeDockerHoldStatus(m.DockerCleanup) {
-			unsafeDockerHolds[hostID(m)+": Docker cleanup unconfirmed; "+m.DockerCleanup] = hostID(m) + ": Docker cleanup unconfirmed"
-		}
 		m.Disabled = diagnostic(m.Disabled, "disabled by operator")
 		if m.AdmissionReason != "" {
 			if strings.HasPrefix(m.AdmissionReason, "maximum simultaneous jobs reached") {
@@ -86,11 +82,6 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		}
 		m.FaultMonitorError = diagnostic(m.FaultMonitorError, "kernel log not readable")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
-		m.DockerCause = safeRuntimeCause(m.DockerCause)
-		m.DockerCleanup = diagnostic(m.DockerCleanup, "Docker cleanup unconfirmed")
-		if m.DockerCleanup != "" && m.DockerCause != nil {
-			m.DockerCleanup += "; " + m.DockerCause.String()
-		}
 		for i := range m.CopyReports {
 			m.CopyReports[i].Error = diagnostic(m.CopyReports[i].Error, "model copy failed")
 		}
@@ -100,14 +91,6 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			m.EnvironmentReports[i].PathDiagnostic = safeWorkerPathDiagnostic(m.EnvironmentReports[i].PathDiagnostic)
 		}
 	}
-	// Hold text is derived from worker reports too. Sanitize that projection,
-	// rather than only the machine field from which it was built.
-	for i := range s.Holds {
-		if replacement, unsafe := unsafeDockerHolds[s.Holds[i].Detail]; unsafe {
-			s.Holds[i].Detail = replacement
-		}
-	}
-
 	return s, err
 }
 
@@ -175,22 +158,6 @@ func (q *Queue) statusEligibility(j *Job) {
 		sort.Strings(hosts)
 		j.EligibleHosts = &hosts
 	}
-}
-
-// Preserve the established fixed lifecycle vocabulary, including legacy safe
-// inspection diagnostics. Arbitrary worker error suffixes are never public.
-func safeDockerHoldStatus(value string) bool {
-	switch value {
-	case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
-		return true
-	}
-	if operation, ok := strings.CutPrefix(value, "cleanup unconfirmed: "); ok {
-		switch operation {
-		case "create", "start", "wait", "inspect", "stop", "kill", "logs", "remove", "network-create", "network-remove":
-			return true
-		}
-	}
-	return false
 }
 
 func statusJobCopy(job *Job) Job {

@@ -324,7 +324,7 @@ func (o *resourceObserver) sample() {
 }
 
 // Final counter reads can fail during teardown. Preserve prior measurements
-// explicitly as lower bounds, including Docker's durable pre-removal snapshot.
+// explicitly as lower bounds.
 func retainResourceCounters(previous, r *AttemptResources) *AttemptResources {
 	if r == nil {
 		return previous
@@ -376,7 +376,7 @@ func (w Worker) observeResources(p *process, memory *memoryAttempt) *resourceObs
 	period := attemptMemorySamplePeriod
 	seen := map[string]float64{}
 	o.read = func() *AttemptResources { return cgroupResources(memory, clock.Now()) }
-	if memory == nil && runtime.GOOS == "darwin" && p.docker == nil {
+	if memory == nil && runtime.GOOS == "darwin" {
 		// Native measurement found 32ms per ps tree inventory (6.4% of a
 		// core at the RSS cadence). Reuse the existing five-second CPU/liveness
 		// cadence instead: tenfold less inventory cost. Exit rusage catches roots;

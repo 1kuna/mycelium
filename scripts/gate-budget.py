@@ -19,9 +19,6 @@ from email.utils import parsedate
 
 
 MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles.py'))]
-spec = importlib.util.spec_from_file_location('gate_runtime', Path(__file__).with_name('gate-runtime.py'))
-runtime = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(runtime)
 
 
 def admission_module():
@@ -465,10 +462,6 @@ def main():
     runtime_dir = root.parent / '.reports/gate-runtime' / child_env['GATE_RUN_ID']
     runtime_dir.mkdir(parents=True, mode=0o700)
     child_env['GATE_RUNTIME_DIR'] = str(runtime_dir)
-    entry = runtime.docker_snapshot()
-    entry['marker'] = child_env['GATE_RUN_ID']
-    entry['labelled_fixtures'] = (root.parent / 'internal/myce/gate_runtime_test.go').is_file()
-    (runtime_dir / 'docker-entry.json').write_text(json.dumps(entry) + '\n')
     # Receipt authority belongs only to this supervisor, never nested fixtures.
     receipt_path = child_env.pop('GATE_CLEANUP_RECEIPT', None)
     receipt_identity = child_env.pop('GATE_CLEANUP_ID', None)
@@ -502,8 +495,7 @@ def main():
         # catches leaked fixtures after an otherwise successful shell exit.
         try:
             stopped = stop_fixtures(marker, scratch, child)
-            runtime_proof = runtime.runtime_cleanup(runtime_dir, child_env['GATE_RUN_ID'])
-            (runtime_dir / 'cleanup.json').write_text(json.dumps(dict(stopped=stopped, docker=runtime_proof)) + '\n')
+            (runtime_dir / 'cleanup.json').write_text(json.dumps(dict(stopped=stopped)) + '\n')
             if stopped:
                 remove_scratch(scratch)
         except Exception as error:

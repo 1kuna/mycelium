@@ -79,7 +79,7 @@ func TestDegradedInventoryZeroCustodyQuiescent(t *testing.T) {
 	m.Devices, m.MemoryError, m.InventoryReason = []MachineDevice{}, "device_probe_unavailable", "device_probe_unavailable"
 	check(t, q, m, nil)
 	status := maintenanceChange(t, q, "disable", true)
-	if status.Healthy || !status.Quiescent || len(status.Attempts) != 0 || status.Calls != 0 || status.Preparations != 0 || status.Sidecars != 0 || len(status.PendingReleases) != 0 || len(status.PendingCleanup) != 0 {
+	if status.Healthy || !status.Quiescent || len(status.Attempts) != 0 || status.Calls != 0 || status.Preparations != 0 || status.Sidecars != 0 || len(status.PendingReleases) != 0 {
 		t.Fatalf("inventory health blocks zero-custody maintenance: %+v", status)
 	}
 }

@@ -3,7 +3,7 @@ package myce
 // Sandboxed native execution requires an advertised kernel boundary. Only the
 // frozen stage policy can waive that requirement, including legacy registrations.
 func nativeNetworkFits(j *Job, m *Machine) bool {
-	if j.Spec.Run.Docker || nativeUnsandboxed(j) {
+	if nativeUnsandboxed(j) {
 		return true
 	}
 	if !nativeBoundaryReported(m) {
@@ -20,9 +20,6 @@ func nativeBoundaryReported(m *Machine) bool {
 }
 
 func nativeNetworkRequired(j *Job) bool {
-	if j.Spec.Run.Docker {
-		return false
-	}
 	if j.Spec.Needs.Network {
 		return true
 	}
@@ -42,7 +39,7 @@ func nativeAttemptError(j Job, message string) string {
 	if message == "exit status 126" {
 		message += "; program could not execute; check whether it was built for another architecture, name its required arch in targets, or declare portable: true if it runs on any arch"
 	}
-	if message != "" && !j.Spec.Run.Docker && !nativeUnsandboxed(&j) && !j.Spec.Needs.Network {
+	if message != "" && !nativeUnsandboxed(&j) && !j.Spec.Needs.Network {
 		return message + "; native networking is offline except reserved sidecar ports; declare needs.network: true for general outbound access (requires a capable host)"
 	}
 	return message

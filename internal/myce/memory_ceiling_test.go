@@ -229,51 +229,6 @@ func TestMemoryCeilingModelOOMAfterReady(t *testing.T) {
 	}
 }
 
-func TestMemoryCeilingDockerContract(t *testing.T) {
-	for _, mode := range []string{"", "missing-memory-limit", "docker-oom"} {
-		t.Run(mode, func(t *testing.T) {
-			w, s, _, root := dockerFixture(t)
-			w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
-			j := dockerJob()
-			j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-			j.Spec.Needs.HostMemoryGB = 5
-			if err := os.WriteFile(filepath.Join(root, "mode"), []byte(mode), 0600); err != nil {
-				t.Fatal(err)
-			}
-			p, err := startDockerFixture(w, s, j)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer p.docker.close()
-			if mode == "" {
-				await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
-				p.stop(w.Clock.Now(), 0, true)
-				expireDockerStop(t, p)
-			}
-			expireDockerStop(t, p)
-			select {
-			case f := <-p.done:
-				calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-				if !strings.Contains(string(calls), "--memory 5368709120") || !strings.Contains(string(calls), "MYCE_MEMORY_LIMIT_BYTES=5368709120") {
-					t.Fatalf("ceiling not supplied: %s", calls)
-				}
-				if mode == "missing-memory-limit" {
-					if strings.Contains(string(calls), "start id1") || f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "Docker memory ceiling not enforced") {
-						t.Fatalf("unlimited container started: %+v %s", f, calls)
-					}
-				}
-				if mode == "docker-oom" {
-					if f.result.Success || f.result.Interrupted || f.result.Error != "exceeded its 5 GiB memory ceiling" {
-						t.Fatalf("Docker OOM: %+v", f)
-					}
-				}
-			case <-time.After(testWaitTimeout):
-				t.Fatal("Docker did not finish")
-			}
-		})
-	}
-}
-
 func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
 	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") {
@@ -556,28 +511,6 @@ func TestMemoryCeilingModelOOMDuringLoad(t *testing.T) {
 	}
 	if err := e.Unload(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestMemoryCeilingDockerUndeclaredOOM(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("docker-oom"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.docker.close()
-	select {
-	case f := <-p.done:
-		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "OOM-killed without a declared memory ceiling") {
-			t.Fatalf("undeclared OOM claimed a ceiling: %+v", f)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("Docker did not finish")
 	}
 }
 

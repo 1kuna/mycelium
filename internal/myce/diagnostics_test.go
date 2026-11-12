@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -60,58 +59,6 @@ func TestAPIRejectionDiagnostics(t *testing.T) {
 	}
 }
 
-func TestDockerCleanupCauseSurvivesTransientRecovery(t *testing.T) {
-	// Run the actual attempt loop with a blocked daemon boundary, not a daemon.
-	dir := t.TempDir()
-	output, err := os.Create(filepath.Join(dir, "output"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := &process{done: make(chan workerFinish, 1)}
-	second := make(chan struct{})
-	resume := make(chan struct{})
-	d := &dockerAttempt{dir: dir, clock: RealClock{}, timeout: time.Second, halt: make(chan struct{}), closed: make(chan struct{}), state: dockerExecution{Identity: "attempt", LogsNone: true}}
-	calls := 0
-	d.command = func(ctx context.Context, args ...string) ([]byte, error) {
-		calls++
-		if calls == 1 {
-			return nil, fmt.Errorf("private-secret: %w", context.DeadlineExceeded)
-		}
-		if calls == 2 {
-			close(second)
-			<-resume
-		}
-		return nil, nil
-	}
-	go d.run(p, Job{}, "session", output, nil, func() error { return errors.New("private-launch-secret") })
-	select {
-	case <-second:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("no retry")
-	}
-	d.mu.Lock()
-	saved := d.state
-	d.mu.Unlock()
-	if !strings.Contains(saved.Error, "ps: timeout") || strings.Contains(saved.Error, "private-secret") {
-		close(resume)
-		t.Fatalf("lost cleanup cause: %s", saved.Error)
-	}
-	close(resume)
-	select {
-	case finish := <-p.done:
-		data, _ := json.Marshal(finish.result)
-		if strings.Contains(string(data), "private-") || !strings.Contains(string(data), `"cleanup_cause"`) || !strings.Contains(string(data), `"execution_cause"`) {
-			t.Fatalf("result lost causes or leaked input: %s", data)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("no result")
-	}
-	<-d.closed
-	if d.status() != "released" {
-		t.Fatal("cleanup did not settle")
-	}
-}
-
 func TestRuntimeCauseClassificationAndPrivacy(t *testing.T) {
 	for _, tc := range []struct {
 		err   error
@@ -142,27 +89,6 @@ func TestRuntimeCauseClassificationAndPrivacy(t *testing.T) {
 	var exit *exec.ExitError
 	if !errors.As(wrapped, &exit) || runtimeDiagnostic(wrapped).ExitCode == nil || *runtimeDiagnostic(wrapped).ExitCode != 7 {
 		t.Fatal("typed exit cause was discarded")
-	}
-	q, _ := fixture(t)
-	m := machine("cause-worker", "fake")
-	m.DockerCleanup = "private-secret"
-	m.DockerCause = &RuntimeCause{Operation: "inspect", Class: "timeout"}
-	check(t, q, m, nil)
-	for _, unsafe := range []bool{false, true} {
-		if unsafe {
-			q.s.Machines[m.ID].DockerCause = &RuntimeCause{Operation: "private-secret", Class: "private-secret"}
-		}
-		snap, err := q.publicSnapshot()
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, _ := json.Marshal(snap)
-		if strings.Contains(string(data), "private-secret") {
-			t.Fatal("worker-injected diagnostic leaked")
-		}
-		if !unsafe && !strings.Contains(string(data), "inspect: timeout") {
-			t.Fatal("public boundary discarded safe cleanup cause")
-		}
 	}
 }
 

@@ -15,11 +15,11 @@ The goal behind all of them, as relayed from Zach on 2026-11-11 when asking for 
 - Mycelium is an open, general compute platform: general compute and third-party extensions across machine types, including serving, joining and daily-use participation. Any one consumer is an example, never the product definition. Check the vision before cutting a feature. (MY-11)
 - Public docs and graphics describe generic machines and job kinds, not one private deployment. (MY-01)
 - Mechanisms are generic and reusable. Deployment-specific production windows, host roles and project holds live in the local queue's durable policy or database, never hardcoded in this public repository; prefer learned or derived values where supported. Discrete accelerator memory and host memory are distinct needs; a unified-memory system shares one physical pool. (MY-29)
-- Installation and normal operation work without Docker. Native processes, environments and sidecars are the default; managed Docker stays an explicit, supported option for a concrete need. (MY-13)
+- Installation and normal operation work without Docker. Native processes, environments and sidecars are the one runtime. Managed Docker, which MY-13 kept as an explicit option for a concrete need, was retired on 2026-11-12 under [MY-49](#my-49) (an agent decision) after the last consumer moved its model jobs to native execution ([#1456](https://github.com/1kuna/mycelium/issues/1456)). (MY-13, MY-49)
 
 <details><summary>Sources</summary>
 
-MY-06 terminology ruling, 2026-10-21. MY-11 scope ruling, 2026-10-19 (#16, #17, #22, #69); it superseded job-only simplification. MY-01 general-not-consumer-specific ruling, 2026-10-23. MY-29, 2026-11-01, policy intent (not implemented learning or holds). MY-13 runtime ruling, 2026-10-19.
+MY-06 terminology ruling, 2026-10-21. MY-11 scope ruling, 2026-10-19 (#16, #17, #22, #69); it superseded job-only simplification. MY-01 general-not-consumer-specific ruling, 2026-10-23. MY-29, 2026-11-01, policy intent (not implemented learning or holds). MY-13 runtime ruling, 2026-10-19: Docker is optional; installation and normal operation must work without it, native processes, environments and sidecars are the default, and managed Docker commands remain an explicit supported option for a concrete need. Retirement of that option, 2026-11-12: orchestrator decision under MY-49, not a maintainer ruling.
 
 </details>
 
@@ -188,7 +188,7 @@ Mycelium's product keeps control-plane cost per check-in low, default status out
 
 <a id="my-49"></a>Zach left the five slimming choices from the 2026-11-11 audit to the orchestrator (MY-49). The orchestrator chose the following. They are agent decisions, not his words, and can be changed on evidence:
 - Delete the simulator, the fleet viewer and the Windows host bridge. Git history keeps them, and the bridge comes back when a Windows machine joins.
-- Retire managed Docker (MY-13's supported option) once the one project still using it runs its model jobs natively. Until then it stays.
+- Retire managed Docker (MY-13's supported option) once the one project still using it runs its model jobs natively. Done 2026-11-12, after that project's native run matched its Docker run ([#1456](https://github.com/1kuna/mycelium/issues/1456)).
 - Cut curves, benchmarks, time prediction and batch planning down to the last accepted duration and peak per kind of work. Placement keeps learning from its own measurements (MY-31).
 - Make `myce fleet upgrade` the one rollout path (MY-21, MY-35), reduced to what host-by-host rollouts have proven: drain the host, swap the verified binary, restart, check health. Private per-release rollout scripts go.
 - Keep finished job records for 14 days after de-duplication, plus a one-line summary and what was learned. Files stay at 3 days (MY-47).

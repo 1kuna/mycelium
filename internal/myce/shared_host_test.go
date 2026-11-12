@@ -259,10 +259,6 @@ func TestSharedHostRejectsUnsafePolicyAndLaunches(t *testing.T) {
 	if !sharedHostJobFits(&native, &m) {
 		t.Fatal("native CPU command refused")
 	}
-	native.Spec.Run.Docker = true
-	if sharedHostJobFits(&native, &m) {
-		t.Fatal("Docker descendants cannot inherit native priority")
-	}
 	// Worker checks raw availability after the protected reserve, not only its default reserve.
 	w := Worker{Machine: m, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 4, nil }}
 	m.SharedHost.InteractiveReserveGB = 4

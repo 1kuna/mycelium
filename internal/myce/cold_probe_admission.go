@@ -137,7 +137,7 @@ func (q *Queue) recordColdProbeRefusal(j *Job, r Result) {
 // For native CPU probes and extension checks, learn launch error from this
 // job's exact refused offers instead of turning unrelated history into a cap.
 func (q *Queue) jobProbeDriftMarginGB(j *Job, m *Machine) float64 {
-	if !j.Spec.Run.Docker && (j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil) {
+	if j.Spec.Needs.cpuOnly() || j.Spec.ExtensionCheck != nil {
 		margin := exploratoryDriftMarginGB(m)
 		if h := q.s.HostLaunchMemory[hostID(m)]; h != nil && h.Machine == m.ID && h.Session == m.Session {
 			margin = max(margin, h.Refusals[j.ID])

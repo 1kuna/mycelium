@@ -1,9 +1,7 @@
 package myce
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,41 +50,6 @@ func TestMemoryReviewLegacyObservationKey(t *testing.T) {
 	}
 	if !q.s.WorkObservations[identityHash(key)].Forbidden {
 		t.Fatal("persisted pre-146 Forbidden observation no longer resolves")
-	}
-}
-
-func TestMemoryReviewDockerMissingParentReleases(t *testing.T) {
-	_, clock := fixture(t)
-	parent, err := fakeCeilings(t).create("attempt-stopped-unit", 4<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := parent.cleanup(clock); err != nil {
-		t.Fatal(err)
-	}
-	unavailable := true
-	d := &dockerAttempt{clock: clock, dir: t.TempDir(), memory: parent,
-		state: dockerExecution{Identity: "stopped-unit", CgroupParent: "/worker/attempt-stopped-unit", Stopped: true, MemoryLimitBytes: 4 << 30},
-		command: func(_ context.Context, args ...string) ([]byte, error) {
-			if args[0] != "ps" && !(args[0] == "network" && args[1] == "ls") {
-				t.Fatalf("unexpected daemon operation %v", args)
-			}
-			if unavailable {
-				return nil, errors.New("daemon unavailable")
-			}
-			return nil, nil // Successful inventory proves no labelled members remain.
-		}}
-	if done, err := d.reconcile(); err == nil || done || d.state.Released {
-		t.Fatal("missing parent released without daemon proof")
-	}
-	unavailable = false
-	done, err := d.reconcile()
-	if err != nil || !done || !d.state.Released {
-		t.Fatalf("stopped unit held custody: done=%v err=%v", done, err)
-	}
-	r := dockerOutcome(d.state, Result{}, errDockerRecovery)
-	if r.MemoryPeak != nil || r.Success || !r.Interrupted {
-		t.Fatalf("lost counters were learned or called successful: %+v", r)
 	}
 }
 

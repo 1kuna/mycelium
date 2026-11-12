@@ -84,7 +84,7 @@ func TestUnifiedAttemptMemorySharing(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, N/A\\nGPU-one, 43, N/A\\n'\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			workerClock := &dockerTestClock{now: clock.Now()}
+			workerClock := &lockedTestClock{now: clock.Now()}
 			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock}
 			ctx, cancel := context.WithCancel(context.Background())
 			var results []<-chan deviceMemoryResult

@@ -59,9 +59,6 @@ actual loading progress. Process existence, heartbeat arrival and repeated HTTP
 
 | Previous policy | Replacement, failure prevented and cost |
 | --- | --- |
-| Docker observation 2s and start 30s | Observation RPCs learn their response envelope. Mutating operations and sidecar initialization separately learn successful initialization for the same local daemon/image/command; unknown initialization has no guessed cutoff. A timed-out read increases its next uncertainty allowance. Streaming forward progress renews silence without extending any explicit caller deadline. This catches an unresponsive CLI/daemon without imposing a whole-operation load clock; cold observations have less evidence than later ones. |
-| Docker retry 100ms..5s and warning after 2m | Each failed observation leaves the daemon an idle interval equal to the I/O cost it just consumed. The first unavailable observation records one warning. Recovery can be delayed by the preceding failed request, rather than a deployment-specific cooldown. |
-| Docker reconcile 100ms, shutdown checks 10ms, post-stop 5s | Serial reconciliation leaves an interval equal to its measured cost; shutdown uses the observed inspect envelope after the existing stop deadline. Unknown disposition stays pending, including after shutdown. |
 | Readiness probes 100ms, timeout 5s, three failures over 15s | Serial probes use their own measured cost for cadence and mean plus deviation for I/O uncertainty. Completed failures confirm continuous failure beyond that envelope; one failure cannot withdraw readiness. Timed-out responses widen the next probe allowance and retain degraded custody so slower healthy replies remain observable. HTTP/container health transitions renew load observation. Explicit sidecar timeouts still win; omission opts into progress-based readiness. |
 | Model idle 10m | Per-model, per-worker request spacing and successful reload cost determine how long retaining idle residency is useful. Assigned or eligible local demand and pins protect the matching residency; competing work can still reclaim residency through the scheduler. Explicit `idle_timeout` remains authoritative. |
 | Model wait 5m, queue load slack 5s | Omitted `max_wait` waits for caller cancellation or a real load failure. A positive authored value bounds that caller's queued wait, not a progressing worker load. The worker owns stall detection; the queue's worker-loss and exact-release protocol remain independent. Legacy `load_until` values are cleared. |
@@ -70,57 +67,28 @@ actual loading progress. Process existence, heartbeat arrival and repeated HTTP
 
 The latency estimator uses RFC 6298 mean/deviation smoothing and a one-second
 initial **transport observation** allowance. Completed observations replace that
-protocol seed; timeouts expand the next allowance. It never bounds cold process,
-container start or sidecar initialization. Learned silence permits one additional
+protocol seed; timeouts expand the next allowance. It never bounds cold process
+start or sidecar initialization. Learned silence permits one additional
 observed quiet gap as measurement uncertainty. Duration arithmetic saturates at
 the representation limit to prevent overflow. The existing diagnostic line-size
 bound protects stream parser memory against unterminated untrusted lines;
 oversized lines cannot provide progress. These safeguards cost observation latency
-or lost malformed evidence, and none supplies release proof. Shutdown cancels
-active Docker observations even when an outage enlarged their allowance, without
-recording deliberate observer shutdown as execution loss. A mutation reply can
-still settle its dispatch custody; explicit parent/user cancellation binds.
-
-Docker inventory reads count arriving bytes as transport progress and skip the
-pull-stream parser: container metadata must not cause a host-capacity probe for
-every JSON line. A CLI pipe-drain timeout retries the observation just like a
-response timeout, preserving the running container and exact custody. Retry
-allowances include the measured failed read's full cost; one fast response
-cannot erase that evidence. Successful samples gradually retire the allowance
-using the RTT estimator's smoothing rate, and recovery clears the retry cause.
-Daemon RPCs measure real transport elapsed time, independently of lifecycle clock
-advances. Their observers join when the response returns, before local history
-publication; slow durable metadata cannot turn a completed response into a
-transport timeout. Explicit reconciliation after the background observer has
-joined owns a separate lifetime and retains the same custody fences. After
-CLI cancellation, inherited pipes get one local inspect interval to drain, using
-the transport seed only while that latency is unknown; an escaping pipe holder
-cannot keep shutdown waiting through outage backoff. A drain failure retains
-unresolved custody.
-
-Managed Docker continues to require already-local digest-pinned images and
-`--pull=never`. The pull/extract decoder observes per-layer forward byte counts
-and phase transitions if a Docker command supplies such a stream; it does not
-add a registry download, authorize network access or change image preparation.
-Native pulls are not part of this managed-launch contract.
+or lost malformed evidence, and none supplies release proof.
 
 This change deliberately preserves the lifecycle/retry owner's stop grace,
 crash retry/reset policy and worker-loss protocol (#832), and the client-wait
 owner's SDK transport defaults (#819). The #800 inventory's extension check wall
-deadline is also an execution-lifecycle policy, outside the Docker/model
+deadline is also an execution-lifecycle policy, outside the model
 readiness paths. Those existing tracked policies are not claimed to have a
 new measured basis here. Inference `request_timeout` is separate from loading.
 
 ## Proof and limits
 
-Fake-clock tests exercise slow advancing model loads and image pull/extract
-streams, fast local latency, repeated/non-progressing signals, a true silent
+Fake-clock tests exercise slow advancing model loads, fast local latency, repeated/non-progressing signals, a true silent
 stall, identity-bound load history, and burst demand followed by idle on one and
-200 synthetic workers with different CPU/RAM inventories. Real subprocess,
-loopback HTTP and fake Docker tests check supervision and exact-attempt custody
-without GPUs or a Docker daemon.
+200 synthetic workers with different CPU/RAM inventories. Real subprocess and
+loopback HTTP tests check supervision and exact-attempt custody without GPUs.
 
-Native Docker daemon recovery, real registry pull/extraction, GPU initialization
-and native device/boot qualification remain separate checks. They were not run
+GPU initialization and native device/boot qualification remain separate checks. They were not run
 for this implementation; no fleet service, worker configuration or production
 state was changed.

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -31,7 +32,6 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("MYCE_TOKEN", "")
 	t.Setenv("MYCE_QUEUE", "http://ambient.invalid")
-	t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,6 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.EnvironmentFile, c.HostID = environment, fmt.Sprintf("fixture-host-%d", i)
-		c.DockerEndpoint = "unix:///var/run/docker.sock"
 		if role == "worker" {
 			c.AllowDeviceless = true
 			// Preservation uses a custom value; the retired default migrates.
@@ -169,10 +168,9 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 			t.Fatal("removed local gate still installed")
 		}
 	}
-	// Once an explicit endpoint is provisioned,
+	// Once an explicit value is provisioned,
 	// the same overlay must retain it on the next omitted-flag invocation.
-	endpoint := "unix:///run/fixture-pinned.sock"
-	args := []string{"install", "worker", "--config", configs[1].Config, "--docker-host", endpoint}
+	args := []string{"install", "worker", "--config", configs[1].Config, "--log-retention", "48h"}
 	if e := setupCommandWithProbe(args, probe, home); e != nil {
 		t.Fatal(e)
 	}
@@ -185,9 +183,9 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	}
 	want := configs[1]
 	want.Version = 1
-	want.DockerEndpoint = endpoint
+	want.LogRetention = 48 * time.Hour
 	if !reflect.DeepEqual(got, want) {
-		t.Fatal("saved endpoint or unrelated config changed")
+		t.Fatal("saved value or unrelated config changed")
 	}
 	configs[1] = got
 	if !reflect.DeepEqual(archived, archiveHashes()) {

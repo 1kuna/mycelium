@@ -228,11 +228,10 @@ For an existing current installation, select its exact saved config:
 ```
 
 Omitted flags preserve saved values, including false/zero/empty settings,
-queue/NAS addresses, Docker opt-in, GPU runtime environment, catalogs and secret
+queue/NAS addresses, GPU runtime environment, catalogs and secret
 references. Explicit flags overlay only their setting. Identity cannot be moved
 over an existing installation. Fresh Linux installs use one `myce-worker.service` and spool per machine;
 `--device` restricts its inventory. Split installations are below the [supported release floor](DECISIONS.md#my-42); archive their state and install a current machine worker.
-Docker is optional (`--docker-host` opts in); ambient `DOCKER_HOST` is not adopted.
 
 The queue saves its selected TLS joining bind as `discovery_listen` in the queue
 install config on first start and reuses it across restarts and reinstalls.
@@ -1238,38 +1237,25 @@ worker and require fresh queue maintenance status confirming release before
 rerunning the normal upgrade. Preserve existing drain/disable ownership throughout.
 No manual spool or database edits are needed.
 
-## Docker cleanup custody
+## Leftovers from retired managed Docker
+<a id="docker-cleanup-custody"></a>
 
-Managed Docker batches use exact immutable attempt labels and a durable create/start
-journal. Inventory every configured endpoint, including sidecars and late accepted
-operations. Only Mycelium-owned labeled objects may be stopped. Native cgroup
-release alone does not settle daemon custody. Paused/restarting containers are
-live; an unavailable endpoint or unknown create/start disposition stays UNKNOWN
-and charged. Preserve journals and stopped evidence containers.
+Managed Docker was retired on 2026-11-12 ([MY-49](DECISIONS.md#my-49)). Workers
+no longer start, observe or clean up containers, and `myce resolve-docker` is
+gone. For one release (MY-42):
 
-Use `myce resolve-docker --state-dir WORKER_SPOOL --attempt-id ATTEMPT_ID`
-(as the ordinary worker account) to reconcile exact offline
-custody. This uses the same worker executor and inspection path; it does not
-accept an operator assertion or launch work. Reconnect workers and require fresh queue maintenance status and exact release
-acknowledgements afterward. See [managed Docker](jobs.md#managed-docker-batch-commands)
-for supported command/network/sidecar forms. Unmanaged containers remain outside
-this containment contract.
+- A worker started by an older service unit that still passes `--docker-host`
+  or `--container-retention` starts normally and logs that it ignores them.
+  Reinstall (`myce install worker --config ...`) to drop them from the unit.
+- An installed config that still has `docker_endpoint` or `container_retention`
+  loads normally; the next install warns once and removes both keys.
 
-Stopped-container retention defaults to 24 hours **after the queue result is
-acknowledged**, rather than after container exit. The normal collector covers
-the current worker's spool and identity. Retired conversion tooling is available
-only in source history for installations below the supported release floor.
-
-Each managed attempt also retains a private `ATTEMPT_ID.docker-events.json`
-in its worker spool, including with `logs: none`. A separate `docker events`
-subscription retains the last 256 lifecycle events (container ID, daemon
-timestamp, action, numeric signal and exit code), plus dropped/rejected counts
-and stream start/end status. Labels, images, command output and daemon stderr
-are excluded. The file survives stopped-container retention and is mode 0600.
-Recovery preserves prior events and increments the stream count; subscription
-interruptions and Docker's finite replay history can leave gaps. These are
-diagnostic observations, not proof that Mycelium delivered a signal, and cannot
-change attempt outcomes or custody. Capture failures do not stop jobs.
+Containers and networks that earlier releases kept as evidence carry the
+`myce.attempt` label. Mycelium no longer removes them. Once no record needs
+them, the host operator can list them with
+`docker ps -a --filter label=myce.attempt` and
+`docker network ls --filter label=myce.attempt`, and remove them. Old private
+spool files (`*.docker*.json`, `*.cid`) follow ordinary worker retention.
 
 ## Other recovery procedures
 

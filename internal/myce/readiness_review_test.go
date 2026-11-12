@@ -73,42 +73,6 @@ func TestAdaptiveReadinessHistoryConcurrentRecipeAndTarget(t *testing.T) {
 	}
 }
 
-func TestAdaptiveReadinessDockerColdStartAndShutdown(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	d := &dockerAttempt{clock: clock, halt: make(chan struct{}), dir: t.TempDir()}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		clock.Advance(2 * time.Second)
-		return []byte("started"), ctx.Err()
-	}
-	if _, err := d.callWithTimeout(0, "start", "cold-id"); err != nil {
-		t.Fatalf("silent cold start failed: %v", err)
-	}
-	// An unavailable observer can have a very large learned allowance. Halt must
-	// cancel its active RPC, without clearing durable custody.
-	d.observationBudget = map[string]time.Duration{"inspect": 24 * time.Hour}
-	started := make(chan struct{})
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		close(started)
-		<-ctx.Done()
-		return nil, context.Cause(ctx)
-	}
-	result := make(chan error, 1)
-	go func() { _, err := d.call("inspect", "owned-id"); result <- err }()
-	<-started
-	close(d.halt)
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("halt did not cancel active observation")
-	}
-	if d.state.Released {
-		t.Fatal("cancel released unresolved custody")
-	}
-}
-
 func TestAdaptiveReadinessProbeRecoversSlowerHealthyResponse(t *testing.T) {
 	t.Run("nonempty_response_reuses_connection", func(t *testing.T) {
 		var mu sync.Mutex
@@ -427,28 +391,5 @@ func TestAdaptiveReadinessSingleProcessResidentGrowth(t *testing.T) {
 	}
 	if _, _, err := readinessProcessResident(probe, map[int]string{7: "original-model"}, birthOf); err == nil {
 		t.Fatal("PID reuse during RSS inventory supplied activity")
-	}
-}
-
-func TestAdaptiveReadinessDockerRPCClockAndReconcileLifetime(t *testing.T) {
-	clock := &manualWorkerClock{now: time.Unix(1, 0)}
-	d := &dockerAttempt{clock: clock, halt: make(chan struct{}), closed: make(chan struct{}), dir: t.TempDir()}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		clock.Advance(time.Hour)
-		return []byte("inspected"), ctx.Err()
-	}
-	for range 10 {
-		if _, err := d.callWithTimeout(time.Second, "inspect", "owned"); err != nil {
-			t.Fatalf("lifecycle time expired an OS RPC: %v", err)
-		}
-	}
-	// Explicit reconciliation after the observer has joined still works; the
-	// existing shutdown regression separately covers cancellation of active RPCs.
-	close(d.halt)
-	close(d.closed)
-	for range 10 {
-		if _, err := d.call("inspect", "owned"); err != nil {
-			t.Fatalf("joined observer poisoned later custody reconciliation: %v", err)
-		}
 	}
 }

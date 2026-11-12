@@ -278,12 +278,7 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 	}) {
 		t.Fatal("portability did not call pressure temporary", admissions)
 	}
-	docker := s
-	docker.Run = RunSpec{Docker: true, Command: []string{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 	var httpErr *HTTPError
-	if _, err := q.Submit(docker); !errors.As(err, &httpErr) || httpErr.Code != "no_qualified_target" {
-		t.Fatal("structural shared-host refusal accepted under pressure", err)
-	}
 	tooLarge := s
 	tooLarge.Needs.HostMemoryGB = 1000
 	if _, err := q.Submit(tooLarge); !errors.As(err, &httpErr) || httpErr.Code != "no_qualified_target" {

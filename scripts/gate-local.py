@@ -28,7 +28,7 @@ capacity, receipts, sources = (module('gate-' + name) for name in ('capacity', '
 trim_cache = module('gate-cache').trim_cache
 # Workers' direct go test runs fill the default cache, which nothing else trims (#1224).
 trim_default_cache = module('gate-default-cache').trim_default_cache
-HELPERS = ('gate-runtime.py', 'gate-budget.py', 'gate-capacity.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
+HELPERS = ('gate-budget.py', 'gate-capacity.py', 'gate-handles.py', 'gate-command.sh', 'gate-leg.sh',
            'gate-cache.py', 'gate-measure.py', 'gate-memory.py', 'gate-guest.py', 'gate-receipt.py')
 
 

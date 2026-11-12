@@ -427,9 +427,6 @@ truncate or split them. Multi-device execution remains
 renumbers selected cards from zero; a single selected card is `cuda:0` inside
 the process.
 Keep `{device}` for physical selectors, not framework-local device arguments.
-A server launched through `docker run` must explicitly forward these variables
-with Docker `--env NAME` and expose the required device nodes; a Docker client
-environment is not automatically the container environment.
 CUDA selectors resolve to a stable GPU UUID used by both server execution and
 `nvidia-smi --id` inventory; numeric CUDA ordering cannot change the measured card. XPU admission remains
 an explicit conservative fixed allowance, not a live external-allocation guard.
@@ -527,17 +524,7 @@ upgrade drains live opted-out servers until each host's worker is upgraded.
 Upgrade queue and workers together, and drain opted-out work before any downgrade. See the
 [job reference](jobs.md#scheduling-and-results) for downgrade behavior.
 
-Before claiming native Docker qualification, use an authorized disposable daemon
-and a retained managed container with `logs: none` to verify:
-
-- `docker logs CONTAINER` refuses because the `none` driver does not support logs.
-- The daemon's container directory has neither `*-json.log` nor
-  `container-cached.log`, including after completion and worker recovery.
-- Managed `create` still succeeds when that daemon has default `log-opts` set
-  for its normal logging driver. Check the container's actual driver is `none`.
-
-The fake Docker tests cover argv and recovery behavior; they do not establish
-these daemon results or native journald behavior. For native journal proof, have
+Tests do not establish native journald behavior. For native journal proof, have
 a harmless payload assert fd 1 and fd 2 identify the null device, then emit
 synthetic markers and confirm neither marker reaches the worker's journal.
 
@@ -785,8 +772,7 @@ Device masks select the accelerator for cooperative runtimes; they do not deny
 OS access to other device nodes. For example, `xpu-smi discovery` enumerates
 cards directly and can briefly open another card's DRM node even with
 `ZE_AFFINITY_MASK` set. Such an open alone does not establish out-of-mask compute.
-Docker exposure of `/dev/dri` and per-attempt memory cgroups do not provide a
-GPU device allowlist either. Apply the same limits to sidecars.
+Per-attempt memory cgroups do not provide a GPU device allowlist either. Apply the same limits to sidecars.
 
 For host-level holder checks on Linux, run `sudo fuser -v /dev/dri/*` (or
 `sudo lsof /dev/dri/*`) on the host, outside the attempt/container. Correlate
@@ -808,7 +794,7 @@ are not a security boundary for hostile commands.
 
 A native job may launch trusted helper processes with `run.sidecars`, or use
 `execution.main` and `execution.sidecars`. Extensions use the same execution
-schema. No Docker daemon is needed. For example, with these scripts already
+schema. For example, with these scripts already
 available in the job workdir:
 
 ```yaml
@@ -928,14 +914,14 @@ persisted TERM/KILL deadline or shorten sidecar grace. Native restart
 authenticates the saved custody and resumes cancellation's main-then-sidecar
 phases using their original deadlines; a new sidecar deadline is granted only
 when that phase has not begun. No release is confirmed while any authenticated
-process or cgroup may remain populated. Missing saved
-Docker output finalization remains a recovery interruption; a known payload
-failure is retained.
+process or cgroup may remain populated. A known payload failure is retained.
 
 ## A model server in a native job instead of a container image
 
 A project whose job runs a GPU stack from a container image, such as vLLM, can
-run the same stack natively. It needs no Docker and no queue-owner setup:
+run the same stack natively. Mycelium no longer runs container images (managed
+Docker was retired under [MY-49](DECISIONS.md#my-49)), and this needs no
+queue-owner setup:
 
 - **Software:** a pinned `requirements.txt` (or `uv.lock`) for the target
   platform, compiled once with
@@ -962,7 +948,7 @@ entries:
           command: [sh, -c, 'exec vllm serve "$MYCE_MODEL_LLM" --host 127.0.0.1 --port "$MYCE_SIDECAR_PORT" --served-model-name llm --max-model-len 8192 --gpu-memory-utilization 0.3 --no-enable-log-requests']
           port: 0
           readiness: {path: /health, timeout: 20m}
-          env: {HF_HUB_OFFLINE: '1', VLLM_NO_USAGE_STATS: '1'}
+          env: {HF_HUB_OFFLINE: '1', VLLM_NO_USAGE_STATS: '1', MAX_JOBS: '4'}  # MAX_JOBS = cpu_cores
           memory_gb: 10
     environment: {lock_file: env/requirements.txt, python: '3.12'}
     model_snapshots:
@@ -985,3 +971,11 @@ torch.compile and kernel JIT on a cold start.
   JIT needs a CUDA compiler: set `CUDA_HOME` and `PATH` to the host's CUDA
   toolkit, or pass `--kv-cache-dtype bfloat16`. Note that `auto` follows the
   checkpoint and stays FP8.
+- **First run on a host is slow.** The first run on a host JIT-compiles
+  FlashInfer's kernels for that GPU architecture (sm120 in the last consumer's case).
+  That took about 1,000 s once; the kernels are cached per host afterwards
+  (see compile caches above), so later runs skip it. Allow for it in the
+  readiness timeout.
+- **Bound the compile's parallelism.** With ninja's default parallelism that
+  first JIT compile exceeded a 52 GiB memory ceiling. Setting `MAX_JOBS` to the
+  job's declared `cpu_cores` (in `env`) kept it within the job's memory.

@@ -125,7 +125,10 @@ type ServiceConfig struct {
 
 	Version int `json:"version"`
 
-	DockerEndpoint        string         `json:"docker_endpoint"`
+	// Retired with managed Docker (MY-49). Configs written by earlier releases
+	// still carry these keys: they are accepted, ignored and dropped on the next
+	// install, with a warning. Remove after the release following r6.15 (MY-42).
+	DockerEndpoint        string         `json:"docker_endpoint,omitempty"`
 	WorkerUser            string         `json:"worker_user"`
 	WorkerHome            string         `json:"worker_home"`
 	LocalDisableReceipts  bool           `json:"local_disable_receipts"`
@@ -138,7 +141,7 @@ type ServiceConfig struct {
 	HostConfig            string         `json:"host_config"`
 	UploadSpoolDir        string         `json:"upload_spool_dir"`
 	UploadSpoolBytes      int64          `json:"upload_spool_bytes"`
-	ContainerRetention    *time.Duration `json:"container_retention"`
+	ContainerRetention    *time.Duration `json:"container_retention,omitempty"` // Retired; see DockerEndpoint.
 	FileRetention         time.Duration  `json:"file_retention"`
 	LogRetention          time.Duration  `json:"log_retention"`
 	Heartbeat             time.Duration  `json:"heartbeat"`
@@ -857,17 +860,11 @@ func (c ServiceConfig) Args() []string {
 			args = append(args, "--device-settings", string(data))
 		}
 
-		if c.DockerEndpoint != "" {
-			args = append(args, "--docker-host", c.DockerEndpoint)
-		}
 		if c.Enrollment {
 			args = append(args, "--enrollment")
 		}
 		if c.OnboardingBenchmark {
 			args = append(args, "--onboarding-benchmark")
-		}
-		if c.ContainerRetention != nil {
-			args = append(args, "--container-retention", c.ContainerRetention.String())
 		}
 	}
 	if c.LogRetention > 0 {

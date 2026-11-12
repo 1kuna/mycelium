@@ -52,7 +52,7 @@ func TestAdapterConvertFixturesResolveOnDev(t *testing.T) {
 			err = adapterCommand(context.Background(), []string{"convert", "--profile", "profile.yaml"}, &out, &report)
 			golden := filepath.Join(fixtures, name, "adapter.yaml")
 			if name == "unconvertible" {
-				if err == nil || out.Len() != 0 || strings.Count(report.String(), "Conversion refused:") != 1 || !strings.Contains(report.String(), "native commands") {
+				if err == nil || out.Len() != 0 || strings.Count(report.String(), "Conversion refused:") != 1 || !strings.Contains(report.String(), "managed Docker was retired") {
 					t.Fatalf("want one clear refusal and no output: %v\n%s", err, report.String())
 				}
 				return

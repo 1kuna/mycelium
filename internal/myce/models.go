@@ -108,7 +108,7 @@ func validateModels(c ModelConfig) error {
 			return err
 		}
 		for k, v := range m.DeviceEnv {
-			if dockerDeviceEnvironment(k) && k != "ZE_ENABLE_PCI_ID_DEVICE_ORDER" {
+			if deviceSelectorEnvironment(k) && k != "ZE_ENABLE_PCI_ID_DEVICE_ORDER" {
 				if err := singleDeviceMask(v); err != nil {
 					return err
 				}

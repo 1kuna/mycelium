@@ -71,8 +71,7 @@ local source paths. Only explicitly mapped inputs are uploaded, never a whole
 project or home folder. Inputs are copied into a private working folder before
 running. Programs cannot mutate shared cached blobs. Plain commands can also
 use `files` with relative command arguments and declared outputs; stored inputs
-cannot be combined with a caller workdir or NAS input mappings. Managed Docker
-batches support stored files with separate input/output roots, described below.
+cannot be combined with a caller workdir or NAS input mappings.
 A NAS-mode job declaring any stored `files` returns all its outputs through the
 file store rather than the worker's `--job-file-root` (`JobFileRoot`).
 
@@ -149,84 +148,6 @@ is preflighted like outputs: if the store cannot admit it, none is kept and
 `report_errors` says so. Retrieve with `myce result JOB_ID --attempt N --out DIR`.
 `keep_on_failure` needs a plain command with stored input `files`, like
 `diagnostics`.
-
-### Managed Docker files
-
-A plain `run.docker: true` batch with `files` or `outputs` requires a Linux
-worker advertising `docker_files_v1` as well as `docker`. Older workers cannot
-receive it. The worker stages verified private copies at `/myce/inputs`,
-read-only in main and every managed sidecar, preserving relative input names.
-`/myce/work` is a separate private read-write output/scratch directory and the
-container's working directory. Outputs are relative to this directory.
-`MYCE_INPUT_DIR=/myce/inputs`, `MYCE_OUTPUT_DIR=/myce/work` and
-`MYCE_SCRATCH_DIR=/myce/work` describe these roots. Inputs are not copied into
-work. The durable result spool is outside all container mounts.
-
-All bind mounts are worker-owned attempt directories, including the existing
-checkpoint and progress mounts. Caller bind mounts, `run.workdir`, Docker
-`--workdir`, `--user`, `--group-add`, all authored environment (`run.env`, sidecar
-`env`, Docker `--env`), NAS `inputs`, `shared_inputs`, prepared source and native
-environments are refused for this contract. Put configuration in hashed files
-or payload arguments. Images must already be local and digest-pinned; image
-defaults remain part of those immutable image bytes.
-
-The worker sets the container user to its own numeric UID:GID, drops all Linux
-capabilities and sets `no-new-privileges`. Private directories stay mode 0700;
-inputs are private copies, never writable shared cache blobs. Images must
-support this non-root numeric identity, readable application files and writable
-state beneath work/checkpoint/progress. A fixed image `USER` is overridden.
-Root-only entrypoints or incompatible user-namespace mappings fail visibly;
-the worker never widens permissions or uses privileged helpers to repair
-root-owned output. Existing device selection, limits, offline/private networks,
-start authorization and exact-attempt custody still apply.
-
-The daemon must access the worker's local paths. `--mount` refuses missing
-source directories; inspection checks exact sources, destinations and read-only
-mode before start and during observation. Images declaring `VOLUME` are refused
-before creation, avoiding anonymous host volumes. Remote-daemon and Docker Desktop path sharing are not assumed. Check
-the worker-local Docker refusal when a mount cannot be created.
-
-After every writer is proven stopped, the worker validates declared regular
-files, hashes and durably spools them, uploads through the normal verified file
-store and submits an attempt-specific result. Missing, escaping, non-regular or
-unreadable outputs fail the job. Upload/acknowledgement failures retain the
-spool and custody for replay, including restart; stale attempts cannot publish.
-Cleanup uses existing attempt-file and Docker retention after queue settlement.
-
-For a CPU example, use a joined Linux worker with `--docker-host
-unix:///var/run/docker.sock`. Prepare its image explicitly:
-
-```sh
-docker pull busybox:1.37.0
-docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}'
-printf 'hash-in hash-out\n' > data.txt
-myce file put data.txt
-```
-
-Substitute the returned file identity and image digest in `docker-files.yaml`
-(including the actual byte count printed by `myce file put`):
-
-```yaml
-name: docker-files
-project: demo
-priority: experiment
-submission_key: docker-files-example-v1
-files:
-  data.txt: {sha256: REPLACE_WITH_FILE_SHA256, size_bytes: 17}
-outputs: {answer.txt: results}
-run:
-  docker: true
-  command: [docker, run, "busybox@sha256:REPLACE_WITH_IMAGE_DIGEST", sh, -ec,
-            'cat /myce/inputs/data.txt > /myce/work/answer.txt']
-needs: {cpu_cores: 1, memory_gb: 0.125, platform: [cpu]}
-resumable: false
-```
-
-Run `myce submit docker-files.yaml`, wait for success, then use `myce result
-JOB_ID --out ./download`. The accepted `output_refs.answer.txt` must match
-`files.data.txt`. Reusing the same submission key and spec returns the same job;
-use a new key for changed inputs or commands. This proves CPU file transport;
-GPU runtime and application parity require their own qualification.
 
 ## Transfer behavior
 
@@ -711,7 +632,7 @@ whole-transfer or default API deadline.
 
 ## Declared model snapshots (#553)
 
-A plain native or managed Docker batch can declare an exact Hugging Face model
+A plain native batch can declare an exact Hugging Face model
 snapshot instead of asking for a host bind mount:
 
 ```yaml
@@ -723,10 +644,7 @@ model_snapshots:
 ```
 
 Read `MYCE_MODEL_<UPPERCASE_NAME>`: a read-only directory holding the declared
-files at their snapshot-relative paths. Native jobs receive the worker's verified
-local copy; Docker jobs see the same directory mounted read-only at
-`/myce/models/<name>`. Docker jobs that declare snapshots follow the Docker file
-rules: worker-owned mounts and environment only.
+files at their snapshot-relative paths: the worker's verified local copy.
 
 The worker resolves the snapshot in the standard hub-cache layout under its
 `--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`), never an authored
@@ -853,8 +771,7 @@ cleanup without retaining the completion actor. Retrieve `output_refs` immediate
 A consumer requiring NAS paths must explicitly wait for `delivery.state` to be
 `verified` on `GET /api/jobs/ID`, and match `delivery.id`/`attempt` to the accepted
 execution. Job success by itself no longer promises a NAS path for these tasks.
-Fan-out parent aggregation and explicit plain Docker submissions do not support
-this policy; submit individual native/extension tasks instead.
+Fan-out parent aggregation does not support this policy; submit individual native/extension tasks instead.
 
 The queue process runs one background publisher per configured root, with the
 existing two-file staging bound. It publishes complete immutable directories at

@@ -219,7 +219,6 @@ func TestInstallPreservesEveryConfigField(t *testing.T) {
 			}
 			t.Setenv("MYCE_QUEUE", "http://ambient.invalid")
 			t.Setenv("PATH", "/usr/bin:/bin")
-			t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
 			if err := setupCommandWithProbe([]string{"install", role, "--config", c.Config}, p, filepath.Dir(c.NAS)); err != nil {
 				t.Fatal(err)
 			}

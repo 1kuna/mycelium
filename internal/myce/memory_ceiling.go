@@ -488,9 +488,6 @@ func ceilingDiagnostic(value, fallback string) string {
 	const prefix = "exceeded its "
 	const suffix = " GiB memory ceiling"
 	text := strings.TrimPrefix(value, "command failed: ")
-	if text == "Docker memory ceiling not enforced" {
-		return text
-	}
 	if strings.HasPrefix(text, prefix) && strings.HasSuffix(text, suffix) {
 		n, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(text, prefix), suffix), 64)
 		if err == nil && n > 0 && validMemoryValue(n) && text == fmt.Sprintf("exceeded its %g GiB memory ceiling", n) {

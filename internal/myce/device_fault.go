@@ -504,13 +504,6 @@ func (p *process) teardownTimes() []time.Time {
 			add(m.memberOutcome)
 		}
 	}
-	if p.docker != nil {
-		p.docker.mu.Lock()
-		for _, m := range p.docker.state.Containers {
-			add(m.memberOutcome)
-		}
-		p.docker.mu.Unlock()
-	}
 	return times
 }
 

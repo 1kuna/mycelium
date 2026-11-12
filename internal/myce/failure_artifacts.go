@@ -86,7 +86,7 @@ func validateDiagnosticSpec(s Spec) error {
 	if !s.capturesFailure() {
 		return nil
 	}
-	if len(s.Files) == 0 || s.Run.Docker || s.Execution != nil || s.extensionJob() {
+	if len(s.Files) == 0 || s.Execution != nil || s.extensionJob() {
 		return errors.New("diagnostics and keep_on_failure require a plain command with stored input files")
 	}
 	if s.Diagnostics != nil {

@@ -44,7 +44,7 @@ class GateBudgetTests(unittest.TestCase):
         # Path.home() mocks stay in this process; fixture subprocesses must
         # also use the private coordinator and never inherit a real gate lane.
         fixture_environment = {name: value for name, value in os.environ.items()
-                               if not name.startswith(('GATE_', 'MYCE_', 'DOCKER_', 'XDG_'))}
+                               if not name.startswith(('GATE_', 'MYCE_', 'XDG_'))}
         fixture_environment.update(HOME=home.name, USERPROFILE=home.name,
                                    XDG_CONFIG_HOME=home.name + '/.config',
                                    XDG_CACHE_HOME=home.name + '/.cache',
@@ -52,12 +52,6 @@ class GateBudgetTests(unittest.TestCase):
         environment = patch.dict(os.environ, fixture_environment, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
-        fakebin = Path(home.name) / 'bin'
-        fakebin.mkdir()
-        docker = fakebin / 'docker'
-        docker.write_text('#!/bin/sh\nif [ "$1:$2" = context:inspect ]; then printf \'"unix:///var/run/docker.sock"\\n\';\nelif [ "$1:$2" = context:ls ]; then printf \'"default"\\n\';\nelif [ "$3" = info ]; then printf \'"fixture-daemon"\\n\'; fi\n')
-        docker.chmod(0o755)
-        os.environ['PATH'] = str(fakebin) + os.pathsep + os.environ['PATH']
 
     def test_native_only_full_obeys_resource_group_but_fleet_remains_background(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -260,8 +254,6 @@ class GateBudgetTests(unittest.TestCase):
                   patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
                   patch.object(budget, 'acquire_full_slot') as slot,
                   patch.object(budget.subprocess, 'Popen', return_value=child),
-                  patch.object(budget.runtime, 'docker_snapshot', return_value={}),
-                  patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                   patch.object(budget, 'stop_fixtures', return_value=True),
                   contextlib.redirect_stdout(io.StringIO())):
                 self.assertEqual(budget.main(), 0)
@@ -320,8 +312,6 @@ class GateBudgetTests(unittest.TestCase):
                           patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
                           patch.object(budget, 'acquire_full_slot', return_value=first),
                           patch.object(budget.subprocess, 'Popen', return_value=child),
-                          patch.object(budget.runtime, 'docker_snapshot', return_value={}),
-                          patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                           patch.object(budget, 'stop_fixtures', return_value=False),
                           contextlib.redirect_stdout(io.StringIO()),
                           contextlib.redirect_stderr(io.StringIO())):
@@ -333,8 +323,8 @@ class GateBudgetTests(unittest.TestCase):
                     first.close()
                     budget.release_full_slot(peer, True)
 
-    def test_failed_docker_inventory_releases_slot_and_preserves_diagnostic(self):
-        for failure in ('docker', 'scratch'):
+    def test_failed_cleanup_releases_slot_and_preserves_diagnostic(self):
+        for failure in ('scratch',):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder).resolve()
                 gate = root / 'scripts/gate.sh'
@@ -350,18 +340,15 @@ class GateBudgetTests(unittest.TestCase):
                           patch.object(sys, 'argv', ['gate-budget.py', str(gate), 'full']),
                           patch.object(budget, 'acquire_full_slot', return_value=slot),
                           patch.object(budget.subprocess, 'Popen', return_value=child),
-                          patch.object(budget.runtime, 'docker_snapshot', return_value={}),
-                          patch.object(budget.runtime, 'runtime_cleanup',
-                              return_value=[], side_effect=RuntimeError('Docker daemon cleanup is unknown or unreachable') if failure == 'docker' else None),
                           patch.object(budget, 'remove_scratch', side_effect=PermissionError('scratch removal failed') if failure == 'scratch' else None),
                           patch.object(budget, 'stop_fixtures', return_value=True),
-                          patch.dict(os.environ, GATE_CLEANUP_RECEIPT=str(receipt), GATE_CLEANUP_ID='docker-failure')):
+                          patch.dict(os.environ, GATE_CLEANUP_RECEIPT=str(receipt), GATE_CLEANUP_ID='cleanup-failure')):
                         self.assertEqual(budget.main(), 125)
                     verdict = json.loads(receipt.read_text())
                     self.assertFalse(verdict['stopped'])
                     self.assertEqual(verdict['status'], 125)
                     diagnostic = next((root / '.reports/gate-runtime').glob('*/cleanup-error.json'))
-                    self.assertIn('Docker daemon cleanup' if failure == 'docker' else 'scratch removal failed', diagnostic.read_text())
+                    self.assertIn('scratch removal failed', diagnostic.read_text())
                     self.assertTrue(list((root / '.gate').iterdir()))
                     replacement = budget.acquire_full_slot()
                     budget.release_full_slot(replacement, True)
@@ -377,7 +364,6 @@ class GateBudgetTests(unittest.TestCase):
             shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
             shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
             shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
-            shutil.copyfile(Path(__file__).with_name('gate-runtime.py'), scripts / 'gate-runtime.py')
             for name in ('gate-capacity.py', 'gate-cache.py', 'gate-memory.py'):
                 shutil.copyfile(Path(__file__).with_name(name), scripts / name)
             shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
@@ -561,8 +547,6 @@ elif args[0] == 'test':
             output = io.StringIO()
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
                   patch.object(subprocess, 'Popen', return_value=child),
-                  patch.object(budget.runtime, 'docker_snapshot', return_value={}),
-                  patch.object(budget.runtime, 'runtime_cleanup', return_value=[]),
                   patch.object(budget, 'owned_processes', side_effect=[{12345}, set(), set(), set(), set()]),
                   patch.object(os, 'kill', side_effect=PermissionError('fixture denied')),
                   contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
@@ -643,7 +627,6 @@ with patch.object(subprocess.Popen, 'wait', wait):
             shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
             shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
             shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
-            shutil.copyfile(scripts / "gate-runtime.py", root / "scripts/gate-runtime.py")
             for name in ("gate-capacity.py", "gate-cache.py", "gate-memory.py"):
                 shutil.copyfile(scripts / name, root / "scripts" / name)
             shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")

@@ -141,23 +141,6 @@ func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
 	}
 }
 
-func TestInventoryRereviewDockerProbeRefusal(t *testing.T) {
-	w := recoveryWorker(t)
-	s, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.close()
-	d := inventoryReviewDevices()[0]
-	w.selectedDevice = &d
-	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return nil, errors.New("offline") }
-	j := recoveryJob(t, []string{"true"})
-	_, err = w.startDocker(s, j, "", nil)
-	if err == nil || !startFailureOutcome(result(&j, false), err).Interrupted {
-		t.Fatalf("Docker probe error was not infrastructure: %v", err)
-	}
-}
-
 func TestInventoryRereviewUnmatchedSelectors(t *testing.T) {
 	for _, selection := range []string{"7", "GPU-nope", "0,7", "0,GPU-nope"} {
 		t.Run(selection, func(t *testing.T) {

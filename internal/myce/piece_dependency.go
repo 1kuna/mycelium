@@ -36,8 +36,8 @@ func validatePieceDependency(s Spec) error {
 	if a == nil {
 		return nil
 	}
-	if a.Job == "" || len(a.Outputs) == 0 || s.FanOut != nil && a.Piece != "" || s.ExtensionCheck != nil || s.Program != nil || s.Run.Workdir != "" || s.Run.Docker {
-		return errors.New("after requires one parent job and output mapping without check, program, workdir or Docker; fan_out consumers require the whole parent (omit piece)")
+	if a.Job == "" || len(a.Outputs) == 0 || s.FanOut != nil && a.Piece != "" || s.ExtensionCheck != nil || s.Program != nil || s.Run.Workdir != "" {
+		return errors.New("after requires one parent job and output mapping without check, program or workdir; fan_out consumers require the whole parent (omit piece)")
 	}
 	names := []string{}
 	for name := range s.Files {

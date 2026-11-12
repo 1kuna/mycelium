@@ -46,52 +46,6 @@ func TestAdaptiveReadinessProgressClock(t *testing.T) {
 	}
 }
 
-func TestAdaptiveReadinessDockerPullExtractClock(t *testing.T) {
-	for _, gap := range []time.Duration{30 * time.Second, time.Millisecond} {
-		clock := &manualWorkerClock{now: time.Unix(1, 0)}
-		history := readinessHistory{}
-		history.Load.observe(gap)
-		p := newReadinessProgress(clock, history)
-		output := &dockerProgressOutput{output: io.Discard, progress: p}
-		for _, stage := range []string{"Downloading", "Extracting"} {
-			for i := 1; i <= 30; i++ {
-				clock.Advance(gap)
-				fmt.Fprintf(output, "{\"id\":\"layer\",\"status\":%q,\"progressDetail\":{\"current\":%d,\"total\":30}}\n", stage, i)
-				if _, stalled := p.state(); stalled {
-					t.Fatal("slow advancing pull/extract treated as stalled")
-				}
-			}
-		}
-		budget, _ := p.state()
-		clock.Advance(budget)
-		fmt.Fprintln(output, `{"id":"layer","status":"Extracting","progressDetail":{"current":30,"total":30}}`)
-		fmt.Fprintln(output, `{"id":"layer","status":"Downloading","progressDetail":{"current":30,"total":30}}`)
-		if _, stalled := p.state(); !stalled {
-			t.Fatal("duplicate/regressed layer phase concealed a stall")
-		}
-	}
-}
-
-func TestAdaptiveReadinessDockerCommandProgress(t *testing.T) {
-	d := &dockerAttempt{clock: RealClock{}, timeout: 20 * time.Millisecond}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) {
-		for i := 0; i < 12; i++ {
-			if err := readinessPause(ctx, 5*time.Millisecond); err != nil {
-				return nil, err
-			}
-			ctx.Value(ioProgressKey{}).(func())()
-		}
-		return []byte("done"), nil
-	}
-	if b, err := d.callWithTimeout(d.timeout, "start"); err != nil || string(b) != "done" {
-		t.Fatalf("progressing command: %s %v", b, err)
-	}
-	d.command = func(ctx context.Context, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, context.Cause(ctx) }
-	if _, err := d.callWithTimeout(d.timeout, "start"); err == nil {
-		t.Fatal("silent command never expired")
-	}
-}
-
 func TestAdaptiveReadinessBurstThenIdleClock(t *testing.T) {
 	for _, hostCount := range []int{1, 200} {
 		t.Run(fmt.Sprint(hostCount), func(t *testing.T) {

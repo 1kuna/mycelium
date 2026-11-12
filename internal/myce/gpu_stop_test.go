@@ -34,53 +34,11 @@ func TestGPUStopPreemptionWithinStartBudget(t *testing.T) {
 		}
 		testGPUStopNative(t, false, "", d)
 	})
-	t.Run("docker", func(t *testing.T) { testGPUStopDocker(t, false) })
-	t.Run("docker-infrastructure", func(t *testing.T) { testGPUStopDocker(t, true) })
 }
 
 func TestGPUStopTermExitNeverKilled(t *testing.T) {
 	t.Run("native", func(t *testing.T) { testGPUStopNative(t, true, "") })
 	t.Run("native-shutdown", func(t *testing.T) { testGPUStopNative(t, true, "shutdown") })
-	q, clock := fixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	submit(t, q, s)
-	m := machine("gpu", "fake")
-	victim := check(t, q, m, nil).Job
-	submit(t, q, spec("production"))
-	directive := check(t, q, m, victim)
-	if directive.Kill || directive.GraceSeconds <= 0 {
-		t.Fatal("no TERM grace", directive)
-	}
-	d, dc, root := stopAttempt(t)
-	if err := os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	d.stop(dc.Now(), time.Duration(directive.GraceSeconds)*time.Second, directive.Kill)
-	if _, err := d.reconcile(); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate the daemon observing the main and helper's cooperative exits.
-	if err := os.Remove(filepath.Join(root, "running")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(root, "extra")); err != nil {
-		t.Fatal(err)
-	}
-	dc.advance(time.Second)
-	if done, err := d.reconcile(); err != nil || !done {
-		t.Fatal("TERM exit not released", done, err)
-	}
-	dc.advance(20 * time.Second)
-	if _, err := d.reconcile(); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Contains(string(b), "kill --signal=KILL ") {
-		t.Fatal("KILL after TERM exit", string(b))
-	}
-	clock.Advance(time.Second)
-	finishInterrupted(t, q, victim)
 }
 
 func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directives ...Reply) {
@@ -197,66 +155,6 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 				t.Errorf("member %s killed after TERM exit", m.Name)
 			}
 		}
-	}
-}
-
-func testGPUStopDocker(t *testing.T, infrastructure bool) {
-	t.Helper()
-	q, clock := fixture(t)
-	s := spec("experiment")
-	s.Resumable = false
-	submit(t, q, s)
-	m := machine("gpu", "fake")
-	victim := check(t, q, m, nil).Job
-	prod := submit(t, q, spec("production"))
-	directive := check(t, q, m, victim)
-	if !directive.Stop || directive.Kill || directive.UserCancel || directive.GraceSeconds != 10 {
-		t.Fatalf("GPU preemption bypassed grace: %+v", directive)
-	}
-	d, dc, root := stopAttempt(t)
-	if err := os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	d.state.Accelerator = true
-	if infrastructure {
-		d.stop(dc.Now(), 0, true)
-	} else {
-		d.stop(dc.Now(), time.Duration(directive.GraceSeconds)*time.Second, directive.Kill)
-	}
-	reconcile := func() {
-		t.Helper()
-		if _, err := d.reconcile(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	signals := func() string { b, _ := os.ReadFile(filepath.Join(root, "calls")); return string(b) }
-	reconcile()
-	if got := signals(); strings.Count(got, "kill --signal=TERM ") != 2 || strings.Contains(got, "kill --signal=KILL ") {
-		t.Fatal("group did not receive TERM first", got)
-	}
-	dc.advance(10*time.Second - time.Nanosecond)
-	reconcile()
-	if strings.Contains(signals(), "kill --signal=KILL ") {
-		t.Fatal("early KILL")
-	}
-	dc.advance(time.Nanosecond)
-	reconcile()
-	if strings.Count(signals(), "kill --signal=KILL ") != 2 {
-		t.Fatal("missing deadline escalation", signals())
-	}
-	reconcile()
-	clock.Advance(10 * time.Second)
-	finishInterrupted(t, q, victim)
-	next := check(t, q, m, nil).Job
-	if next == nil || next.ID != prod.ID {
-		t.Fatal("production not assigned", next)
-	}
-	if err := q.Started(result(next, false)); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, prod.ID)
-	if got.StartedAt == nil || !got.StartedAt.Before(*got.Spec.StartBy) || got.StartLatencySeconds > 15 {
-		t.Fatal("production missed start budget", got)
 	}
 }
 

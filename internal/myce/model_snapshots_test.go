@@ -351,78 +351,6 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 	}
 }
 
-func TestModelSnapshotsDockerMountMatchesNativePath(t *testing.T) {
-	w, s, _, root := dockerFixtureCommand(t, func(root string) func(context.Context, ...string) ([]byte, error) {
-		daemon := fakeDockerGroupCommand(root)
-		return func(ctx context.Context, args ...string) ([]byte, error) {
-			switch args[0] {
-			case "image":
-				return []byte("null"), nil // The image declares no VOLUME mounts.
-			case "create":
-				// Record the daemon request, then refuse: no container ever runs.
-				f, err := os.OpenFile(filepath.Join(root, "calls"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-				if err != nil {
-					return nil, err
-				}
-				fmt.Fprintln(f, strings.Join(args, " "))
-				f.Close()
-				return nil, &exec.ExitError{Stderr: []byte("Error response from daemon: test stops after create")}
-			}
-			return daemon(ctx, args...)
-		}
-	})
-	modelRoot := t.TempDir()
-	tinyModel(t, modelRoot)
-	w.ModelRoot = modelRoot
-	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: w.Clock}}
-	t.Cleanup(func() { _ = removeSharedEntry(w.modelSnapshots.cache.Root) })
-	w.Machine.Capabilities = append(w.Machine.Capabilities, dockerFilesCapability)
-	j := dockerJob()
-	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
-	j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/tiny", Revision: tinyRevision}}
-	j.ModelLimits = &ModelLimits{MaxBytes: 1 << 20}
-	if err := j.Spec.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	// The native environment value is the verified copy the Docker mount must expose.
-	native, release, err := w.acquireSharedInputs(context.Background(), j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release()
-	source := native["MYCE_MODEL_BASE"]
-	for name, want := range map[string]string{"model.safetensors": tinyWeights, "config.json": tinyConfig} {
-		info, err := os.Lstat(filepath.Join(source, name))
-		data, _ := os.ReadFile(filepath.Join(source, name))
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0222 != 0 || string(data) != want {
-			t.Fatalf("verified copy %s: %v %v %q", name, err, info, data)
-		}
-	}
-	p, err := startDockerFixture(w, s, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-p.done:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("refused create did not finish")
-	}
-	calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-	mount := "--mount type=bind,src=" + source + ",dst=/myce/models/base,readonly"
-	if !strings.Contains(string(calls), mount) || !strings.Contains(string(calls), "--env MYCE_MODEL_BASE=/myce/models/base") {
-		t.Fatalf("Docker create lacks the read-only model mount %q:\n%s", mount, calls)
-	}
-	if strings.Contains(string(calls), modelRoot) {
-		t.Fatal("Docker received the shared hub path", string(calls))
-	}
-
-	// Without an admitting policy snapshot the worker refuses before Docker.
-	j.ModelLimits = nil
-	if _, _, err := w.acquireSharedInputs(context.Background(), j); err == nil || !strings.Contains(runtimeDiagnostic(err).String(), "no admitting local model policy") {
-		t.Fatal("policy-less model accepted", err)
-	}
-}
-
 // snapshotWorker wires the worker's real file-transfer caches: a tiny file
 // cache and the default model-sized snapshot budget.
 func snapshotWorker(t *testing.T, modelRoot string, clock Clock) *Worker {
@@ -663,35 +591,6 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	_ = cache.admit(context.Background(), "other", 10)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("cleaned snapshot not evicted", err)
-	}
-}
-
-func TestModelSnapshotDockerPreparationRestartReleasesPins(t *testing.T) {
-	clock := &fakeClock{now: time.Unix(1000, 0)}
-	root := &workerStore{dir: t.TempDir()}
-	j := Job{ID: "docker-preparation", Attempt: 1, Session: "session", Spec: Spec{Run: RunSpec{Docker: true}}}
-	owner, err := newAttemptStore(root, j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cacheRoot, key := t.TempDir(), strings.Repeat("a", 64)
-	if _, err := owner.pinSharedInput(cacheRoot, key); err != nil {
-		t.Fatal(err)
-	}
-	// Reload the persisted pre-dispatch identity instead of retaining callbacks.
-	data, err := os.ReadFile(filepath.Join(root.dir, owner.stateName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted := &workerStore{dir: root.dir, stateName: owner.stateName}
-	if err := decodeWorkerState(data, &restarted.state); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (Worker{Clock: clock}).recoverAttempt(restarted); err != nil {
-		t.Fatal(err)
-	}
-	if pinned, err := sharedInputPinned(cacheRoot, key); err != nil || pinned {
-		t.Fatal("pre-launch Docker pin leaked", err)
 	}
 }
 

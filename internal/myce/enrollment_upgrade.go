@@ -131,7 +131,7 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 		}
 	}
 	if status.Policy.Mode == "enabled" {
-		if !status.Healthy && !firstEnrollment || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || len(status.PendingCleanup) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
+		if !status.Healthy && !firstEnrollment || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
 			return status, errors.New("upgrade refused before drain: local host still has execution custody; rerun after jobs finish")
 		}
 		// Save a unique intent before crossing the queue mutation boundary.

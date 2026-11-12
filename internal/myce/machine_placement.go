@@ -206,13 +206,6 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }))
 }
 
-func dockerSharesDevice(j *Job) bool {
-	if !j.Spec.Run.Docker {
-		return true
-	}
-	return j.Spec.Needs.HostMemoryGB > 0
-}
-
 // A single-card batch attempt with a declared or learned memory vector may share
 // its card when memory fits (MY-30/31, #538). Model-server,
 // extension-check, default fan-out, exploratory and multi-card work keeps the card, as
@@ -220,10 +213,10 @@ func dockerSharesDevice(j *Job) bool {
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
 	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
-	// Host-only learning can retain a recipe default for device memory. Native
-	// and Docker attempts both keep the card until that vector is measured.
+	// Host-only learning can retain a recipe default for device memory. The
+	// attempt keeps the card until that vector is measured.
 	unstated = unstated || e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default")
-	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceSharing(j)) && len(j.AllocatedDevices) <= 1 && !unstated
+	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && j.Spec.ExtensionCheck == nil && (j.Spec.FanOut == nil || fanOutDeviceSharing(j)) && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
 // XPU teardown can reset shared engines (#652). CUDA co-tenants can grow past

@@ -268,8 +268,6 @@ const (
 	predicateDeviceAdmission      AdmissionPredicate = "device_admission"
 	predicateDeviceFaultRetry     AdmissionPredicate = "device_fault_retry"
 	predicateDiskHeadroom         AdmissionPredicate = "disk_headroom"
-	predicateDockerRelease        AdmissionPredicate = "docker_release"
-	predicateDockerRuntime        AdmissionPredicate = "docker_runtime"
 	predicateEnvironment          AdmissionPredicate = "environment"
 	predicateEnvironmentFailure   AdmissionPredicate = "environment_failure"
 	predicateExistingAssignment   AdmissionPredicate = "existing_assignment"

@@ -73,8 +73,8 @@ type HostTelemetryCapture struct {
 	RunID, HostRef, CaptureID string
 	QueuePID, WorkerPID       int
 	Cards                     []HostTelemetryCard
-	// This caller assertion does not infer container custody from process RSS.
-	// Without it, managed Docker memory outside the tree cannot be excluded.
+	// Caller assertion that every managed attempt runs inside the worker tree;
+	// without it, managed memory outside the tree cannot be excluded.
 	NativeWorkerOnly        bool
 	Birth                   func(int) (string, error)
 	queueBirth, workerBirth string

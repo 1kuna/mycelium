@@ -77,7 +77,7 @@ func reconcileNativeAttempt(ctx context.Context, dir, identity string, members f
 	}
 	s := selected
 	j := s.state.Job
-	if j.Spec.Run.Docker || len(j.Spec.Run.DockerSidecars) != 0 || j.ID == "" || filepath.Base(j.ID) != j.ID || j.ID == "." || j.ID == ".." || j.Attempt <= 0 || s.state.Session == "" || j.Session != "" && j.Session != s.state.Session {
+	if j.ID == "" || filepath.Base(j.ID) != j.ID || j.ID == "." || j.ID == ".." || j.Attempt <= 0 || s.state.Session == "" || j.Session != "" && j.Session != s.state.Session {
 		return errors.New("invalid native attempt custody")
 	}
 	// recoverResult fences both copies by job, attempt, worker and session.

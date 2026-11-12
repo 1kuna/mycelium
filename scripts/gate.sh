@@ -109,9 +109,6 @@ if [[ -f scripts/test-gate-local.py && ${GATE_FLEET_PROFILE:-} == 1 ]]; then
 elif [[ -f scripts/test-gate-local.py ]]; then
   step gate-local-regressions python3 scripts/test-gate-local.py
 fi
-if [[ -f scripts/test-gate-runtime.py ]]; then
-  step gate-runtime-regressions python3 scripts/test-gate-runtime.py
-fi
 if [[ -f scripts/test-gate-reconcile.py ]]; then
   step gate-reconcile-regressions python3 scripts/test-gate-reconcile.py
 fi
@@ -139,12 +136,6 @@ done < <("$scratch/bin/myce" release build-targets)
 # gate, devTestBinary still builds its own image for ordinary go test users.
 step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
 export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
-# The external Docker simulator intentionally has no race runtime; assertions
-# and the adapter still run in the race test process. Share that image too.
-if [[ $mode == full ]] || grep -q 'internal/myce' "$scratch/selection"; then
-  step build-test-docker go test -c -race=false -vet=off -o "$scratch/bin/fake-docker.test" ./internal/myce
-  export GATE_TEST_DOCKER_BINARY="$scratch/bin/fake-docker.test"
-fi
 if [[ $mode == full ]]; then
   step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must

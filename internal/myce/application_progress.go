@@ -53,11 +53,6 @@ func (p *ProgressReport) valid() bool {
 // Session is in the file name so a replacement worker cannot read its predecessor.
 func applicationProgressFile(spool string, j Job) string {
 	dir := filepath.Join(spool, "job-files", j.ID, strconv.Itoa(j.Attempt))
-	if dockerFileJob(j.Spec) {
-		// The writable progress bind must not alias read-only inputs or expose
-		// the result spool through the parent attempt directory.
-		dir = filepath.Join(dir, "progress")
-	}
 	return filepath.Join(dir, ".myce-progress-"+identityHash(j.Session)+".json")
 }
 

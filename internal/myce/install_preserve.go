@@ -14,16 +14,21 @@ import (
 
 // InstallFlags uses the same table as parsing, overlay and validation.
 func (c ServiceConfig) InstallFlags() map[string]string {
-	hadRetention := c.ContainerRetention != nil
 	f := flag.NewFlagSet("saved-install", flag.ContinueOnError)
 	RegisterInstallFlags(f, &c)
 	out := map[string]string{}
-	f.VisitAll(func(v *flag.Flag) {
-		if v.Name != "container-retention" || hadRetention {
-			out[v.Name] = v.Value.String()
-		}
-	})
+	f.VisitAll(func(v *flag.Flag) { out[v.Name] = v.Value.String() })
 	return out
+}
+
+// DropRetiredDocker clears the retired Docker install keys (MY-49) and says
+// what it ignored, so the next saved config no longer carries them.
+func (c *ServiceConfig) DropRetiredDocker() string {
+	if c.DockerEndpoint == "" && c.ContainerRetention == nil {
+		return ""
+	}
+	c.DockerEndpoint, c.ContainerRetention = "", nil
+	return "warning: ignoring docker_endpoint and container_retention in the installed config: managed Docker was retired (MY-49); run containerized work as native jobs (docs/services.md)"
 }
 
 func ValidateInstallIdentity(old, next ServiceConfig) error {

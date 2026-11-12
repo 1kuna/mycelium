@@ -68,7 +68,7 @@ func TestObserverFixtureLifecycle(t *testing.T) {
 			report := filepath.Join(tmp, "observer-pid.json")
 			cmd := exec.Command(os.Args[0], "-test.run=^TestObserverFixtureLifecycle$", "-test.count=1")
 			for _, e := range os.Environ() {
-				if !strings.HasPrefix(e, "MYCE_TEST_DOCKER_BIN=") {
+				if !strings.HasPrefix(e, "MYCE_TEST_ROOT=") {
 					cmd.Env = append(cmd.Env, e)
 				}
 			}
@@ -121,7 +121,7 @@ func TestObserverFixtureLifecycle(t *testing.T) {
 			}
 			wait(t, ctx, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
 			if mode == "fixture" {
-				dirs, _ := filepath.Glob(filepath.Join(tmp, "myce-cli-docker-tests-*"))
+				dirs, _ := filepath.Glob(filepath.Join(tmp, "myce-cli-tests-*"))
 				if len(dirs) != 0 {
 					t.Fatal("fixture retained after observer stopped", strconv.Itoa(pid))
 				}

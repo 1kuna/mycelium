@@ -234,7 +234,6 @@ adds `run.env`, environment activation, device and placement selectors and the
 `MYCE_JOINING_FILE`, are dropped; pass anything else a job needs, including an
 authenticated proxy, through `run.env`. The same base applies to native
 helpers, extension setup/check/run, environment builds and model servers.
-Managed Docker containers receive only explicit `--env` values.
 
 Environment builds also keep these operator uv settings: `UV_LINK_MODE`,
 `UV_CONCURRENT_BUILDS`, `UV_CONCURRENT_DOWNLOADS`, `UV_CONCURRENT_INSTALLS`,
@@ -332,9 +331,7 @@ catalog field. Both streams go directly to the OS null device, so large output
 cannot fill an undrained pipe or reach the worker's journal. The queue also
 discards log chunks for that job after checking execution identity. Success,
 failure (including the command exit-status diagnostic), cancellation and lifecycle
-timestamps remain available through the existing result/status paths. Managed
-Docker uses the `none` logging driver for every member, skips log collection and
-private stderr tails, and preserves exit/cleanup evidence through recovery.
+timestamps remain available through the existing result/status paths.
 Omitted or `logs: keep` retains existing capture and retention behavior. This
 does not remove older logs or control files/telemetry written by the payload or
 environment-build logs held under their own environment records. These logs are
@@ -391,7 +388,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `host placement HOST --last-resort=true\|false` | `false` | Queue-owned placement policy; ordinary admissible hosts first, unchanged MY-18 order within each group, immediate fallback without waiting or reservation; may change while enabled. For model calls, a ready or loading engine on a last-resort host beats a cold ordinary host (readiness before value). |
 | `join/install worker --host-memory-budget-gb` | `0` | initial queue allowance input; subsequent changes use `host budget HOST` while drained/disabled |
 | `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
-| `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt; managed Docker uses optional run-spec total RAM-plus-swap values |
+| `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt |
 | `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |
 | `join --device` | Sole detected CUDA card / platform default | One physical card per worker; CUDA resolves to a stable UUID for inventory/execution; select explicitly on multi-GPU hosts |
 | `join --gpu` | Auto-detected | Override with `cuda`, `xpu`, `metal`, or `fake`; same detection as `install worker` |
@@ -413,7 +410,6 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --model-listen` | `127.0.0.1:0` | Authenticated worker proxy bind; engines stay loopback |
 | `join --model-advertise` | Local proxy URL | Explicit URL reachable by queue for LAN workers |
 | `leave --name` | Hostname | Stop assigning work; ask wait/stop for non-resumable jobs |
-| `resolve-docker --state-dir DIR --attempt-id ID` | Verified offline reconciliation | Reconcile exact registered custody under the worker spool lock; unknown operation disposition stays charged; see [operator recovery](operations.md#docker-cleanup-custody) |
 | `leave --now` | `false` | Signal all jobs, still allowing checkpoint grace |
 | `wait ID [ID...] --timeout DURATION` | Unlimited | Wait for every final state; timeout never cancels jobs |
 | `logs ID --follow` | `false` | Follow until terminal and drain final logs |
@@ -575,8 +571,8 @@ Jobs created with ledger support have complete coverage. Older retained jobs,
 and native attempts reported without custody receipts by an older worker,
 report `complete=false`: earlier native generations cannot be reconstructed
 from the bounded diagnostic arrays. An incomplete ledger must not be treated
-as proof of all historical execution. Docker jobs retain attempt identities and
-release transitions; native custody generations describe native supervisors.
+as proof of all historical execution. Native custody generations describe
+native supervisors.
 
 Retention follows [queue history pruning](design-proposal.md#submission-identity-and-cancellation-80):
 keep the entire ledger with its job, with no independent row eviction. Released
@@ -733,7 +729,8 @@ wins, including for every physical fan-out child.
 
 Without `start_by`, the queue saves submission time plus `start_window`, which
 defaults to **150 seconds**: the ordinary
-10-second experiment grace, two-minute Docker cleanup escalation, and a small
+10-second experiment grace, two minutes for stopped work to confirm cleanup
+(originally the managed Docker cleanup bound, retired in MY-49), and a small
 reporting margin. This is a bounded availability policy, not a native startup
 latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
 Ordinary unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
@@ -809,7 +806,7 @@ During qualified capacity waiting they show the restored start budget with
 New queued production fails immediately when every known eligible host is disabled
 by the operator. An interrupted production job may wait for reopening until its
 recovery start window expires. Unknown inventory may still join within the deadline. Pending stops,
-unconfirmed Docker cleanup, worker recovery and environment preparation
+worker recovery and environment preparation
 can exhaust an active budget. Qualified capacity waiting pauses relative windows;
 absolute cutoffs keep counting down. At `now >= start_by`, an unstarted job with
 an active budget fails with
@@ -823,8 +820,7 @@ queue serializes that hand-off with expiry in one SQLite transaction: at the
 deadline expiry wins; a previously accepted start is not failed by `start_by`.
 This records an accepted hand-off, not proof of successful physical exec or
 model readiness. A private exec-helper pipe holds plain-command execution until
-the positive reply; managed Docker uses the same confirmation before its start
-operation. From the release containing #1028, a slow control-plane response
+the positive reply. From the release containing #1028, a slow control-plane response
 retains the same gated execution and custody without charging a loss or
 retry. Ambiguous transport replies replay the same exact identity with measured
 request-RTT pacing and jitter. Typed refusal, stale custody and cancellation
@@ -848,7 +844,7 @@ custody across later maintenance changes.
 Late result messages cannot
 revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
 status says `release pending` until the matching cleanup acknowledgement.
-Experiment stops and Docker cleanup continue independently after production fails.
+Experiment stops continue independently after production fails.
 Failure does **not** authorize a fallback to reuse uncertain resources.
 
 Expiry runs on queue ticks and API mutations (including status), so observation
@@ -958,214 +954,20 @@ workers can return, and unreported machine names are allowed to join later.
 Resubmit after correcting restrictions or updating incompatible inventory.
 Policies persist across restart when the configuration flag is omitted.
 
-## Managed Docker batch commands
+## Containers: managed Docker was retired
 
-`run.docker: true` (default `false`) opts a **direct** `docker run` or
-`docker container run` argument array into worker-owned containment. The worker
-converts it to `docker create --pull=never` followed by `docker start`, injects
-`--init`, a private name, `--label myce.attempt=<opaque attempt ID>`,
-`--label myce.worker=<worker ID>`, and a private spool `--cidfile`. Use an
-already-local immutable `IMAGE@sha256:<64 hex digits>`; no image is pulled.
-Do not put labels/name/cidfile in the submitted command: the worker owns them.
+Mycelium no longer runs Docker containers. Managed Docker was retired on
+2026-11-12 ([MY-49](DECISIONS.md#my-49)) after its last consumer moved its model
+jobs to native execution. A job spec, profile or adapter entry that still sets
+`run.docker`, `run.docker_network`, `run.docker_memory_gb`,
+`run.docker_memory_swap` or `run.docker_sidecars` is refused at submission with
+`job_docker_retired`; it is never run as a native command. Run the same software
+as a native job: a pinned [environment](environments.md) supplies its packages,
+[native sidecars](services.md#native-job-sidecars) supply services, and `model_snapshots` supply
+weights. See [a model server in a native job](services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
 
-```yaml
-name: docker-experiment
-project: transcribe
-priority: experiment
-run:
-  docker: true
-  command: [docker, run, --device, /dev/dri/renderD128, "IMAGE@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/experiment.py]
-needs:
-  memory_gb: 8
-  host_memory_gb: 6
-  platform: [xpu]
-resumable: true
-```
-
-The example's image is a substitution marker, not a runnable image. Supported
-options before the image are `--init`, explicit `--env`/`-e KEY=value`,
-`--volume`/`-v`, `--device`, `--gpus`, `--entrypoint`, `--workdir`/`-w`, and
-`--user`/`-u`, plus repeatable `--group-add <gid|name>` (also `--group-add=value`)
-for supplemental device groups with non-root images. Group values must be GIDs
-from 0 to 2147483647 or group names starting with a letter/underscore, followed
-by letters, digits, underscores, dots or hyphens, with an optional trailing `$`.
-All other options are rejected before contacting Docker, including
-detach, auto-remove, restart policies, privileged mode, label/name/cidfile
-changes, daemon/context selection and Docker socket mounts. Image arguments
-are passed unchanged. The payload must forward TERM and implement the ordinary
-checkpoint contract; `--init` is not a checkpoint implementation.
-
-Plain batches can declare hashed `files` and `outputs` with the
-[`docker_files_v1` contract](files.md#managed-docker-files): private
-read-only `/myce/inputs`, writable `/myce/work`, and current-attempt verified
-`output_refs`. The worker owns all mounts, numeric UID:GID, working directory
-and environment for these jobs; the authored volume/env/workdir/user/group
-options above are rejected. Image `USER` is overridden, capabilities are dropped
-and privilege escalation is disabled. Native environments, `shared_inputs` and
-NAS input mixing remain unsupported. Main and managed sidecars share these
-attempt roots. Outputs are captured only after every writer has settled and
-retained across upload/acknowledgement failures and restart.
-
-The container receives `MYCE_ATTEMPT_ID` (opaque, unique across attempts),
-`MYCE_DOCKER_LABEL` (`myce.attempt=<ID>`), `MYCE_JOB_ID`, `MYCE_ATTEMPT`,
-placement environment, selected-device environment, and `MYCE_MEMORY_LIMIT_BYTES`
-when host RAM is declared. The adapter installs and inspects this limit before
-start; payload arguments cannot override it. `MYCE_CHECKPOINT_DIR`
-is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory.
-For batches without managed files/outputs, `run.env` ordinary entries are also
-explicit container env; `MYCE_TOKEN` is
-removed from the Docker client and never forwarded. MYCE identity overrides
-in Docker `--env` are rejected. `CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`
-and `ZE_AFFINITY_MASK` are worker-owned: neither `run.env` nor Docker `--env`
-may override them. Configure the worker device instead. Docker `--device`
-mappings are forwarded as declared; Mycelium does not add or translate render
-nodes. Keep the Intel card inventory visible in the container
-(for example, pass both `/dev/dri/renderD128` and `/dev/dri/renderD129` for a
-two-card host) when using the host physical affinity mask. Passing only one card
-can renumber the container inventory before the mask is applied; do not assume
-that a host mask `1` still identifies it. After the mask, SYCL/PyTorch use local
-index zero for a single card. GPU mappings and image/library behavior still
-need native qualification. Declared host RAM ceilings are enforced through
-worker-owned Docker memory flags and verified inspection; device isolation still
-requires qualification.
-
-The worker pins the daemon endpoint from its own `DOCKER_HOST` (default
-`unix:///var/run/docker.sock`) in its custody record; `DOCKER_CONTEXT` is
-unsupported. Configure each worker for its intended daemon. Workers retain
-stopped containers, cidfiles and spool records as evidence. Main Docker output is
-collected into the ordinary job log after the container settles.
-Every settled main/sidecar also retains its exit code and private stderr tail
-(last 256 lines, at most 64 KiB) in the attempt record and mode-0600
-`<identity>.docker-evidence.json`. Sidecar stderr is excluded from queue logs,
-results and public status; this private evidence survives container retention.
-Stopped containers become eligible for removal 24 hours after result
-acknowledgement by default. See [Docker cleanup custody](operations.md#docker-cleanup-custody)
-for one-time reconciliation of retained containers from retired worker identities.
-
-For an existing **unmanaged** wrapper (`run.docker: false`), a cooperative
-container launch would be `docker run --label "$MYCE_DOCKER_LABEL" ...`, but
-that wrapper must supply a unique label itself **and** use
-`--memory "$MYCE_MEMORY_LIMIT_BYTES" --memory-swap "$MYCE_MEMORY_LIMIT_BYTES"`
-for the default no-swap contract. Mycelium cannot prove custody
-for hidden shell/nested Docker calls or infer their labels from a process tree.
-Use managed direct argv for production handover. A managed job cannot forget
-its label; inspection mismatches remain visibly unconfirmed and no unrelated
-container is signaled. Docker-backed catalog model servers are not covered by
-this batch adapter; keep them out of a containment-qualified handover.
-
-### Private networks and worker-owned sidecars
-
-Add `run.docker_network: private` to a managed batch. The worker creates one
-`myce-<opaque attempt ID>` bridge with `--internal` and the exact `myce.attempt`
-label. Each container joins only that network and receives
-`MYCE_DOCKER_NETWORK`, attempt/checkpoint identity, and placement/device selectors.
-No outbound option is offered: models and images must be local and work offline.
-Without this field the managed container uses `--network none`.
-
-`run.docker_sidecars` is an optional ordered list with unique lowercase DNS
-`name` (1–63 letters/digits/hyphens; `main` is reserved), direct Docker `command`,
-optional positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
-`readiness: {port, path, timeout}`. Main retains `run.command` and may declare
-`run.docker_memory_gb`. The cap does not select a network. This explicit main-container cap works with the default
-`--network none`; only sidecars require the private network. Without the explicit
-cap, the worker supplies `--memory` from the resolved host reservation (including
-the device reservation on unified CUDA hosts). The adapter inspects the enforced
-limit before accepting release. With a declared or learned device figure, managed
-Docker batches can share a GPU under the ordinary fit and priority rules
-(available from the next release). The worker starts sidecars in order, awaits each configured
-HTTP GET readiness (2xx), then starts main. DNS aliases are the declared names
-and `main`. Jobs have no Docker socket and cannot launch containers themselves.
-Readiness probes use the inspected container IP from the worker, without proxies
-or redirects. The worker must reach the daemon's bridge IP (normally local Linux);
-Docker Desktop/remote bridge reachability is not assumed. Unreachable probes fail
-at their positive declared timeout, measured with the injected Clock.
-
-Explicit member limits must individually fit `needs.host_memory_gb`; their sum
-may exceed it. A group omitting any member cap requires a shared local cgroup v2
-parent with a cgroupfs Docker daemon and delegated worker memory. Its aggregate
-parent limit includes all members and forbids swap; omitted member caps inherit
-that envelope. Unsupported daemons refuse explicitly with the native/capped
-alternatives. Existing capped groups retain **member-only** enforcement and
-their existing swap settings. The native XPU Docker driver remains unverified until
-the separately authorized deployment check.
-
-Main's `run.docker_memory_swap` and sidecar `memory_swap` are optional GiB values
-for Docker's total RAM plus swap limit (`--memory-swap`), at least the container's
-RAM limit. Equal to RAM explicitly forbids swap. When omitted, the worker leaves
-the flag unset: Docker's daemon default applies (normally RAM plus an equal swap
-allowance when host swap is available). Native `--memory-swap-max-bytes` still
-defaults to zero for native cgroups; it does not configure managed Docker.
-These legacy member-only swap settings do not weaken a shared parent's zero
-swap limit. Swap-free production transcription requires separate native qualification.
-
-A transcription production batch (replace placeholders with real local digests
-and use measured memory/device mappings):
-
-```yaml
-name: transcribe-recording-batch
-project: transcribe
-priority: production
-run:
-  docker: true
-  docker_network: private
-  docker_memory_gb: 24
-  # docker_memory_swap: 28  # optional total RAM plus swap, GiB
-  command: [docker, run, --device, /dev/dri/renderD128, "PIPELINE@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/process.py]
-  env:
-    SORTFORMER_URL: http://sortformer:8080
-    NAMING_URL: http://naming:8080
-  docker_sidecars:
-    - name: sortformer
-      memory_gb: 16
-      command: [docker, run, --device, /dev/dri/renderD128, "SORTFORMER@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/server.py]
-      readiness: {port: 8080, path: /health, timeout: 120s}
-    - name: naming
-      memory_gb: 12
-      command: [docker, run, --device, /dev/dri/renderD128, "NAMING@sha256:REPLACE_WITH_64_HEX_DIGITS", python, /app/server.py]
-      readiness: {port: 8080, path: /health, timeout: 120s}
-needs:
-  memory_gb: 24
-  host_memory_gb: 24.5
-  platform: [xpu]
-resumable: false
-```
-
-These memory values illustrate nonsummed peaks, not qualification evidence.
-The application's CPU api/worker/render services remain outside Mycelium. This
-is a batch lifecycle, not a Docker-backed catalog model server.
-
-Main's exit code determines the result; early sidecar exit fails the job. Main
-exit stops remaining sidecars with ordinary grace (normally two minutes).
-Each exact container gets at most one TERM attempt, with permanent intent saved
-before delivery. Failed/uncertain TERM waits for idempotent, retried KILL at the
-original deadline; worker restart never renews grace or resends recorded TERM.
-Existing forced containment/operator cleanup remains immediate. Label-only orphans
-instead get one bounded `docker stop --time` per worker process lifetime; their
-report records that no attempt exit/stderr evidence was retained.
-
-A restart during grace succeeds with one attempt and no loss only when main exit
-zero was already durable and the full recovery path completes: cleanup, private
-evidence, network removal, durable release, output finalization and result save.
-A restart before durable main completion remains a loss and retries. Released
-custody without a saved result also remains interrupted and retries; unexpected
-private-network disconnection remains a containment failure. Replayed results
-must match the exact job, attempt, machine and session.
-See [Docker cleanup custody](operations.md#docker-cleanup-custody) for delivery
-outcomes, private-evidence review and recovery.
-
-Stop, restart, loss reconciliation and queue disable-stop stop all labeled containers, confirm
-nonrunning/absent execution, disconnect owned stopped endpoints, remove labeled
-networks, and confirm network absence. Stopped containers remain evidence;
-networks do not. RAM custody stays held until both proofs succeed. Late containers
-are rescanned. Stuck removal uses existing cleanup status, the two-minute
-`docker_cleanup_escalated` event and `myce resolve-docker`; that assertion must
-also cover network absence.
-
-Publishing host ports (including publish-all), host networking, joining other
-networks, socket mounts, privileged mode and submitted network/alias/lifecycle
-flags remain forbidden. Inspected violations stop the whole attempt with a
-specific reason. Labels are inspected before removal; unlabeled networks and
-unrelated containers are never touched.
+A plain command may still call a container runtime the host provides, like any
+other host tool, but Mycelium neither manages nor contains those containers.
 
 ## v3 extension jobs
 
@@ -1306,7 +1108,6 @@ member caps so the job can measure its need within the shared envelope. A
 successful unconstrained run teaches a new peak. Ceiling pressure alone leaves
 the job outcome unchanged; an OOM retains a job-local host floor for one retry
 with 25% more room, without persisting a floor for later jobs.
-Shared-envelope Docker attempts end on worker-unit stop.
 Verified stopped members with a vanished parent release custody with unknown
 memory/cause and supply no learning data. A surviving parent's post-exit reading
 cannot train an estimate when the running sampler was lost during restart.
@@ -1480,7 +1281,7 @@ holds its one key.
 
 Limits: 1 to 256 pieces, with unique lowercase keys. A piece input must not
 overlap a common input or an output. Omit `max_concurrency` and `share_xpu`.
-Plain pieces cannot be combined with `after:`, Docker, `workdir`,
+Plain pieces cannot be combined with `after:`, `workdir`,
 kind/program, `workload` or `fan_out:`. Native entries keep `fan_out:`.
 
 ## Observing parents and native children
@@ -1572,8 +1373,8 @@ after:
 
 `outputs` maps the consumer's local input name to the producer's declared output
 name. The full parent ID, project, piece and output names are checked at submit.
-One selected-piece edge is supported; it cannot be combined with `fan_out`, checks, programs,
-Docker or a caller-selected working directory. Dependency inputs cannot collide
+One selected-piece edge is supported; it cannot be combined with `fan_out`, checks, programs
+or a caller-selected working directory. Dependency inputs cannot collide
 with other inputs or outputs, or mix stored-file and NAS input transports.
 
 The wire state stays `queued`. `dependency.state` is `blocked` until acceptance,

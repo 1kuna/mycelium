@@ -322,7 +322,6 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         {{end}}
         {{with .HostMemory}}<div class="detail"><div class="label">Host RAM</div><div class="value">capacity {{printf "%.1f" .CapacityGB}} · charged {{printf "%.1f" .ChargedGB}} · room {{printf "%.1f" .RoomGB}} GiB</div></div>{{end}}
         {{if or .MemoryEnforcement .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if and .HostMemoryBudgetGB (not .EffectiveHostMemoryBudgetGB)}}<div>Host ceiling budget (last reported): {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
-        {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
         <div class="detail"><div class="label">Capability profile</div><div class="value">{{range profileLines .}}<div>{{.}}</div>{{end}}</div></div>
         <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>
         <div class="detail"><div class="label">Extensions</div><div class="value">{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{else}}<span class="empty-inline">No qualification reported</span>{{end}}</div></div>

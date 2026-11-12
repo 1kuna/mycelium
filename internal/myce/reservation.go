@@ -387,10 +387,6 @@ func (q *Queue) reservationPending(r Reservation) []string {
 		if q.unreported[m.ID] || !q.workerFresh(m, now) {
 			pending = append(pending, "worker evidence unavailable: "+m.ID)
 		}
-		ownDocker := bound != nil && bound.Spec.Run.Docker && bound.Machine == m.ID && bound.Session == m.Session && bound.State == "running" && dockerStartingOrRunning(m.DockerCleanup)
-		if m.DockerCleanup != "" && !ownDocker {
-			pending = append(pending, "physical cleanup pending: "+m.ID)
-		}
 	}
 	if !present {
 		pending = append(pending, "reserved component absent from inventory")

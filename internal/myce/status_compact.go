@@ -77,7 +77,6 @@ func (q *Queue) notQuiescentHosts() []StatusQuiescence {
 				row.Other = append(row.Other, "worker "+w.Machine.ID+" has no fresh custody report")
 			}
 		}
-		row.Other = append(row.Other, st.PendingCleanup...)
 		for _, n := range []struct {
 			count int
 			what  string

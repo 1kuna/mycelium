@@ -12,9 +12,9 @@ const learnedMemoryGuardEnforcement = "adaptive native CPU memory guard"
 // limits. Cold CPU probes use the same physical guard: residual admission
 // headroom is not a measured upper bound on an unknown command.
 // The kernel still contains the attempt within physical RAM and the operator's
-// explicit allowance. Member limits, Docker and declared thresholds are unchanged.
+// explicit allowance. Member limits and declared thresholds are unchanged.
 func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
-	if j == nil || m == nil || j.Spec.Run.Docker || !j.Spec.Needs.cpuOnly() || j.Spec.Needs.Memory != "auto" || j.MemoryEnvelope == nil || j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
+	if j == nil || m == nil || !j.Spec.Needs.cpuOnly() || j.Spec.Needs.Memory != "auto" || j.MemoryEnvelope == nil || j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
 		return 0
 	}
 	e := j.MemoryEnvelope
@@ -45,7 +45,7 @@ const metalFootprintGuardCapability = "metal_footprint_guard_v1"
 func (w Worker) footprintGuarded(j Job) bool {
 	n := j.Spec.Needs
 	return w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint &&
-		!n.cpuOnly() && !j.Spec.Run.Docker && n.Memory != "auto" && n.HostMemoryGB > 0
+		!n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0
 }
 
 func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
@@ -66,7 +66,7 @@ func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
 func (w Worker) reportsProcessSample(j Job) bool {
 	n := j.Spec.Needs
 	return adaptiveMemoryCeilingGB(&j, &w.Machine) > 0 || w.footprintGuarded(j) ||
-		w.Machine.MemoryEnforcement == darwinRSSGuardStatus && n.cpuOnly() && !j.Spec.Run.Docker && n.Memory != "auto" && n.HostMemoryGB > 0
+		w.Machine.MemoryEnforcement == darwinRSSGuardStatus && n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0
 }
 
 func (w Worker) jobCeilingBytes(j Job) (int64, error) {

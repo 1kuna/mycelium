@@ -197,9 +197,6 @@ func validateJobFiles(s Spec) error {
 	if len(s.Files) > 0 && (len(s.Inputs) > 0 || s.Run.Workdir != "") {
 		return errors.New("stored files use a private working folder; cannot mix NAS inputs or workdir")
 	}
-	if err := validateDockerFiles(s); err != nil {
-		return err
-	}
 	all := FileManifest{}
 	for n, f := range s.Files {
 		all[n] = f

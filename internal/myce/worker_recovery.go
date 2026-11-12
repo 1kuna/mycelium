@@ -234,7 +234,7 @@ func (s *workerStore) recoverResult(machine string) error {
 		return errors.New("mismatched saved worker result")
 	}
 	if s.state.Identity == "" {
-		return nil // Unlaunched Docker has only its exact attempt-state receipt.
+		return nil
 	}
 	var r Result
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".result.json"))
@@ -544,8 +544,7 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 func (s *workerStore) inputWriterOnly() bool {
 	return s.state.InputWriterPending && s.state.Job != nil &&
 		s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending &&
-		len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == "" &&
-		(!s.state.Job.Spec.Run.Docker || s.state.Identity == "")
+		len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
 }
 
 // A preparation helper has an explicit outstanding release obligation. Unlike
@@ -553,7 +552,7 @@ func (s *workerStore) inputWriterOnly() bool {
 // helper group cannot be treated as proof of exit.
 func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
 	defer func() {
-		if cleanupErr == nil && (s.state.Job == nil || !s.state.Job.Spec.Run.Docker || s.state.Identity == "") {
+		if cleanupErr == nil {
 			s.releaseSharedInputs()
 			cleanupErr = s.releaseSharedInputPins()
 		}
@@ -632,7 +631,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		}
 	}
 	if s.state.PID <= 0 || s.state.Identity == "" {
-		if (s.state.Job == nil || !s.state.Job.Spec.Run.Docker) && s.state.Result != nil && s.state.Result.ReleasePending {
+		if s.state.Result != nil && s.state.Result.ReleasePending {
 			return errors.New("attempt cleanup custody unavailable; release pending")
 		}
 		return nil
@@ -657,7 +656,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		}
 	}
 	if s.state.Job != nil && len(members) > 0 && !owned {
-		if !s.state.Job.Spec.Run.Docker && s.state.Result != nil && s.state.Result.ReleasePending {
+		if s.state.Result != nil && s.state.Result.ReleasePending {
 			return errors.New("attempt process group identity unconfirmed; release pending")
 		}
 		return nil // Preserve a live command whose identity does not match.

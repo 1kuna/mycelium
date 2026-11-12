@@ -5,11 +5,8 @@ import (
 	"mycelium/internal/testenv"
 	"mycelium/internal/testguard"
 	"os"
-	"path/filepath"
 	"testing"
 )
-
-var dockerTestOriginalPath = os.Getenv("PATH")
 
 func TestMain(m *testing.M) {
 	os.Exit(coreTestMain(m))
@@ -32,12 +29,12 @@ func coreTestMain(m *testing.M) int {
 	installSyntheticWorkerHost()
 	// The crash/restart drill is another process on the same provisioned host.
 	// Preserve its inherited operation rather than inventing a conflicting host.
-	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" || os.Getenv("MYCE_TEST_DOCKER_BIN") != "" {
+	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" || os.Getenv("MYCE_TEST_ROOT") != "" {
 		cleanupHome := testguard.Install()
 		defer cleanupHome()
 		return m.Run()
 	}
-	dir, err := os.MkdirTemp("", "myce-docker-tests-")
+	dir, err := os.MkdirTemp("", "myce-core-tests-")
 	if err != nil {
 		panic(err)
 	}
@@ -50,16 +47,9 @@ func coreTestMain(m *testing.M) int {
 	}
 	cleanupHome := testguard.Install()
 	defer cleanupHome()
-	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
-	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {
-		panic(err)
-	}
-	if err = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
-		panic(err)
-	}
 	// Helpers may call os.Exit or be deliberately killed. They reuse this
-	// parent-owned shim instead of creating a temp root they cannot clean up.
-	if err = os.Setenv("MYCE_TEST_DOCKER_BIN", dir); err != nil {
+	// parent-owned root instead of creating a temp root they cannot clean up.
+	if err = os.Setenv("MYCE_TEST_ROOT", dir); err != nil {
 		panic(err)
 	}
 	code := m.Run()

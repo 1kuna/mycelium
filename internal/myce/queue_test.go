@@ -859,5 +859,3 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 
 // Operator-authored publication window used only by lifecycle fixtures.
 const filePublicationGrace = 6 * time.Hour
-
-const dockerStderrTailBytes = 64 * 1024 // injected diagnostic allowance in tests

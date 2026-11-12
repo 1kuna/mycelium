@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"io"
-	"log"
 	"maps"
 	"os"
 	"reflect"
@@ -35,14 +34,11 @@ type HostState struct {
 // a fresh worker's completed cleanup can settle them.
 type HostRelease struct {
 	// Omitted older records retain conservative GPU-slot exclusion.
-	CPUOnly                     bool       `json:"cpu_only,omitempty"`
-	CPUCores                    int        `json:"cpu_cores,omitempty"`
-	CleanupSince                *time.Time `json:"cleanup_since,omitempty"`
-	EscalatedAt                 *time.Time `json:"escalated_at,omitempty"`
-	HostChargeGB                float64    `json:"host_charge_gb,omitempty"`
-	Docker                      bool       `json:"docker,omitempty"`
-	CleanupFailed               bool       `json:"cleanup_failed,omitempty"`
-	Device                      string     `json:"device,omitempty"`
+	CPUOnly                     bool    `json:"cpu_only,omitempty"`
+	CPUCores                    int     `json:"cpu_cores,omitempty"`
+	HostChargeGB                float64 `json:"host_charge_gb,omitempty"`
+	CleanupFailed               bool    `json:"cleanup_failed,omitempty"`
+	Device                      string  `json:"device,omitempty"`
 	MemoryGB, HostMemoryGB      float64
 	Preparation                 bool `json:"preparation,omitempty"`
 	Host, Job, Machine, Session string
@@ -171,13 +167,13 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if j.Spec.Needs.CPUCores == 0 && (m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs == 0) && !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.EffectiveHostMemoryBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if j.Spec.Needs.CPUCores == 0 && (m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs == 0) && !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && m.HostMemoryBudgetGB == 0 && m.EffectiveHostMemoryBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
 		q.s.HostReleases = map[string]HostRelease{}
 	}
-	r := HostRelease{CPUOnly: j.Spec.Needs.cpuOnly(), CPUCores: jobCPUCharge(j, m), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: deviceShareGB(j), HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
+	r := HostRelease{CPUOnly: j.Spec.Needs.cpuOnly(), CPUCores: jobCPUCharge(j, m), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Device: m.Device, MemoryGB: deviceShareGB(j), HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
 	if len(j.AllocatedDevices) > 1 {
 		r.Device, r.Devices = j.AllocatedDevices[0], slices.Clone(j.AllocatedDevices)
 	}
@@ -187,13 +183,6 @@ func (q *Queue) retainRelease(j *Job) {
 	old := q.s.HostReleases[releaseKey(r)]
 	r.HostChargeGB = max(r.HostChargeGB, q.hostJobCharge(j), retainedHostCharge(j), old.HostChargeGB)
 	r.CleanupFailed = old.CleanupFailed
-	r.CleanupSince = old.CleanupSince
-	r.EscalatedAt = old.EscalatedAt
-	// A new stop resets an un-escalated boot/create timer (#74), but must
-	// preserve an existing escalation until the release resolves.
-	if r.Docker && (q.dockerReleaseLive(r) || old.EscalatedAt == nil && old.Until.IsZero() && !r.Until.IsZero()) {
-		r.CleanupSince, r.EscalatedAt = nil, nil
-	}
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result, exact bool) bool {
@@ -218,7 +207,7 @@ func (q *Queue) settleRelease(r Result, exact bool) bool {
 func (q *Queue) reconcileHostReleases(c Checkin) {
 	q.confirmPreviousCopies(c)
 	for key, r := range q.s.HostReleases {
-		if r.Docker || r.Machine != c.Machine.ID {
+		if r.Machine != c.Machine.ID {
 			continue
 		}
 		old := q.s.Machines[c.Machine.ID]
@@ -274,7 +263,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot)) {
 		return false
 	}
-	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, dockerRuntimeFits(j, m), predicateDockerRuntime) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
+	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
@@ -286,7 +275,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 		}
 	}
 
-	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionHold(j, m, heldBy(q.startupReleaseHold(hostID(m))), predicateStartupRelease) || !q.admissionHold(j, m, heldBy(q.dockerHold(hostID(m))), predicateDockerRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
+	if !q.admissionPass(j, m, !availabilityBlocked(m), predicateAvailability) || !q.admissionPass(j, m, !(q.machineCapacityReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))), predicateMachineCapacity) || !q.admissionHold(j, m, heldBy(q.startupReleaseHold(hostID(m))), predicateStartupRelease) || !q.admissionPass(j, m, q.jobAllowsMachine(j, m.ID), predicateAllowedMachine) {
 		return false
 	}
 	if !q.admissionPass(j, m, !(j.ProductionHost != "" && j.ProductionHost != hostID(m)), predicateProductionHost) || !q.admissionHold(j, m, q.checkpointTargetAdmission(j, m), predicateCheckpointTarget) {
@@ -394,7 +383,7 @@ func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
 	return scopedHold("unclassified", host, detail, true)
 }
 
-// Production, disk and Docker fences that hold this job.
+// Production and disk fences that hold this job.
 func (q *Queue) holdWait(j *Job) *Hold {
 	for _, m := range q.plannerMachines() {
 		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
@@ -405,13 +394,6 @@ func (q *Queue) holdWait(j *Job) *Hold {
 	}
 	if h := q.diskWait(j, j.ProductionHost); h != nil {
 		return h
-	}
-	for _, m := range q.plannerMachines() {
-		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
-			if h := q.dockerHold(hostID(m)); h.Reason != "" {
-				return newHold(h.Kind, h.Detail)
-			}
-		}
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
 		if reason := q.productionOccupancyReason(j); reason != "" {
@@ -542,7 +524,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerHold(hostID(m)).Kind != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
+		if !q.reservationAllows(j, m) || diskReason != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {
@@ -639,7 +621,7 @@ func (q *Queue) maintainHolds() {
 			j.ProductionHost = target
 			j.RequireProductionParity = true
 		}
-		if j.State == "queued" && j.ProductionHost != "" && (q.dockerHold(j.ProductionHost).Kind != "" || q.diskWait(j, j.ProductionHost) != nil) {
+		if j.State == "queued" && j.ProductionHost != "" && q.diskWait(j, j.ProductionHost) != nil {
 			if target := q.productionTarget(j, nil); target != "" {
 				if j.ProductionHost != target || j.RequireProductionParity != (j.Spec.extensionJob() && j.Spec.ExtensionCheck == nil) {
 					q.touchJob(j.ID)
@@ -790,89 +772,6 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 		}
 	}
 	return false
-}
-
-// Lost/stopping Docker executions fence the physical host, even without host
-// policy. The zero Hold means no fence.
-func (q *Queue) dockerHold(host string) Hold {
-	best := Hold{}
-	severity := 0
-	choose := func(h Hold, rank int) {
-		if rank > severity || rank == severity && h.Detail < best.Detail {
-			best, severity = h, rank
-		}
-	}
-	for _, m := range q.s.Machines {
-		if hostID(m) != host || m.DockerCleanup == "" {
-			continue
-		}
-		kind, rank, action := "unclassified", 4, true
-		if strings.HasPrefix(m.DockerCleanup, "cleanup unconfirmed:") {
-			kind, rank, action = "docker_cleanup_waiting", 3, false
-		}
-		switch m.DockerCleanup {
-		case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
-			kind, rank, action = "docker_transition", 1, false
-		}
-		choose(scopedHold(kind, host, host+": Docker cleanup unconfirmed; "+m.DockerCleanup, action), rank)
-	}
-	for _, r := range q.s.HostReleases {
-		if !r.Docker || r.Host != host || q.dockerReleaseLive(r) {
-			continue
-		}
-		detail := host + ": Docker cleanup unconfirmed; waiting for attempt " + r.Job + fmt.Sprintf("/%d", r.Attempt)
-		if r.EscalatedAt != nil {
-			choose(scopedHold("docker_cleanup_operator_action", host, detail+"; operator action required (myce resolve-docker)", true), 5)
-			continue
-		}
-		choose(scopedHold("docker_cleanup_waiting", host, detail, false), 2)
-	}
-	return best
-}
-
-// Escalation bounds silent waiting, never custody or physical memory ownership.
-func (q *Queue) escalateDockerCleanup() {
-	now := q.clock.Now()
-	for key, r := range q.s.HostReleases {
-		if !r.Docker {
-			continue
-		}
-		if q.dockerReleaseLive(r) {
-			r.CleanupSince, r.EscalatedAt = nil, nil
-			q.s.HostReleases[key] = r
-			continue
-		}
-		if r.CleanupSince == nil || !r.Until.IsZero() && r.CleanupSince.Before(r.Until) {
-			since := now
-			// Stopped attempts retain ordinary grace before the cleanup bound.
-			if !r.Until.IsZero() {
-				since = r.Until
-			}
-			r.CleanupSince = &since
-		}
-		if r.EscalatedAt == nil && !now.Before(r.CleanupSince.Add(2*time.Minute)) {
-			r.EscalatedAt = &now
-			log.Printf("event=docker_cleanup_escalated host=%q job=%q attempt=%d machine=%q session=%q operator_action_required=true", r.Host, r.Job, r.Attempt, r.Machine, r.Session)
-		}
-		q.s.HostReleases[key] = r
-	}
-}
-
-func (q *Queue) dockerReleaseLive(r HostRelease) bool {
-	j := q.s.Jobs[r.Job]
-	m := q.s.Machines[r.Machine]
-	return j != nil && j.Attempt == r.Attempt && j.Session == r.Session && j.Machine == r.Machine && j.State == "running" && j.StopAt == nil && m != nil && m.Session == r.Session && !m.Gone && !q.unreported[m.ID] && dockerStartingOrRunning(m.DockerCleanup) && !r.CleanupFailed
-}
-
-// Only healthy startup/running reports keep the exact current execution live.
-// Stopping, errors, replacement sessions and lost workers retain custody.
-func dockerStartingOrRunning(status string) bool {
-	switch status {
-	case "", "creating", "create pending", "network-create pending", "start pending":
-		return true
-	default:
-		return false
-	}
 }
 
 // Finalize release-only state after this transaction's decisions. This never

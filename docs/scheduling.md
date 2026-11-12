@@ -211,7 +211,7 @@ The alternative must still pass placement, maintenance, freshness, memory,
 environment and exact frozen extension version/digest qualification checks.
 Running work keeps its attempt and host custody. Without an exact work entry,
 existing measured-parity and registration rules apply. Measurements never widen
-an explicit host list. Docker/disk recovery obeys the same production boundary.
+an explicit host list. Disk recovery obeys the same production boundary.
 Queued bindings to hosts removed from the list are cleared and placed again,
 including bindings saved by older releases or retained after holds are disabled.
 Preparation lookahead considers only parity-eligible production candidates on

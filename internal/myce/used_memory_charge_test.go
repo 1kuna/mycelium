@@ -139,7 +139,6 @@ func TestUsedMemoryChargeKeepsEnvelopeWithoutContainment(t *testing.T) {
 	}{
 		{"no learned evidence", func(j *Job, _ *Machine, _ *hostMemorySample) { j.MemoryEnvelope.Learned = nil }},
 		{"accelerator job", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Needs.Platform = Platform{Any: true} }},
-		{"docker", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Run.Docker = true }},
 		{"auto sizing", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Needs.Memory = "auto" }},
 		{"unenforced host", func(_ *Job, m *Machine, _ *hostMemorySample) {
 			m.MemoryEnforcement = "memory ceiling not enforced on this host (x)"
@@ -429,7 +428,6 @@ func TestUnifiedUsedMemoryChargeGrowth(t *testing.T) {
 		{"missing device sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.deviceAt = time.Time{} }},
 		{"stale host sample", func(_ *Job, _ *Machine, s *hostMemorySample) { s.at = at.Add(-2 * hostMemorySampleFreshFor) }},
 		{"multi-card attempt", func(j *Job, _ *Machine, _ *hostMemorySample) { j.AllocatedDevices = []string{"0", "1"} }},
-		{"docker", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Run.Docker = true }},
 		{"no cgroup ceilings", func(_ *Job, m *Machine, _ *hostMemorySample) {
 			m.MemoryEnforcement = "memory ceiling not enforced on this host (x)"
 		}},

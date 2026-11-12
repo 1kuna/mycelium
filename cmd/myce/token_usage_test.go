@@ -23,7 +23,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 	// Include every command and nested action, including commands sharing a FlagSet.
 	commands := []string{
 		"queue", "join", "leave", "submit", "run", "usage", "status", "logs", "cancel", "dev",
-		"disable", "enable", "resolve-docker", "detect", "service", "wait", "measure",
+		"disable", "enable", "detect", "service", "wait", "measure",
 		"invite", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",

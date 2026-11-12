@@ -147,12 +147,17 @@ exact mismatch. A lock written by an older Pixi can fail here (for example
 `__unix=0` where 0.81 expects `__unix=0=0`): run `pixi lock` with Pixi 0.81.0
 or later, commit it and run again.
 
-To move a job off a container image (for example vLLM), pin the image's Python
+Mycelium doesn't run container images: managed Docker was retired (MY-49), and
+a `run.docker*` field is refused at submission with `job_docker_retired`. To
+move a job off a container image (for example vLLM), pin the image's Python
 stack in a lock file for the target platform. Declare the weights as
 `model_snapshots`, and run the server as a native sidecar of a plain
 (unsandboxed) job. See [a model server in a native job](../../../docs/services.md#a-model-server-in-a-native-job-instead-of-a-container-image).
 uv environments carry their own interpreter, so Triton's run-time C builds find
 `Python.h`. `TMPDIR` is short enough for servers that bind Unix sockets there.
+A first run on a host can JIT-compile GPU kernels for a long time (about
+1,000 s for vLLM's FlashInfer kernels); set `MAX_JOBS` to your declared
+`cpu_cores` so that compile stays within the job's memory.
 
 npm projects use `environment: {backend: npm, lock_file: package-lock.json}`.
 `node_modules` and post-install tool downloads such as headless browsers are
@@ -183,7 +188,7 @@ files, or the worker user's credential stores (`~/.ssh`, `~/.config/gh`,
 submit through the worker's authority or act as the worker user on GitHub,
 registries, clouds or SSH; pass such access as a declared input. A Linux worker
 without Landlock ABI 2 logs that it can't withhold them. Declare
-`isolation: sandboxed`, or use managed Docker, for an enforced boundary.
+`isolation: sandboxed` for an enforced boundary.
 
 For builds and tests of your repository, declare `isolation: ci`. It needs no
 owner approval. The job then can't read the NAS, the worker user's home, the
@@ -261,7 +266,7 @@ piece's `args` follow the base command and any CLI arguments; its `inputs` reach
 only that piece. A failed piece doesn't stop the others; the parent fails once
 all settle and names the failed keys, while accepted pieces keep their outputs.
 Cancelling or pausing the parent covers every unfinished piece. Pieces can't be
-combined with `after:`, Docker, `workdir`, kind/program, `workload` or
+combined with `after:`, `workdir`, kind/program, `workload` or
 `fan_out:`. See [pieces](../../../docs/jobs.md#plain-command-pieces).
 
 An `after:` stage binds retained accepted outputs of a succeeded parent, even if

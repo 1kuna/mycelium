@@ -178,9 +178,9 @@ func attemptPublicationRoot(j Job, state string) string {
 func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string, metadata ...string) *storageObserver {
 	root := attemptStorageRoot(j, state)
 	o := &storageObserver{root: root, publication: attemptPublicationRoot(j, state), state: state, identity: identity, metadata: metadata, peak: AttemptStoragePeak{Complete: true, Source: managedStorageSource}, stop: make(chan struct{}), done: make(chan struct{})}
-	// Only known managed roots can claim complete sampling. Docker overlay writes
-	// and external checkpoint/work paths need #506 accounting before they can learn.
-	if j.Spec.Run.Docker || filepath.Clean(j.Spec.Run.Workdir) != filepath.Clean(root) {
+	// Only known managed roots can claim complete sampling. External
+	// checkpoint/work paths need #506 accounting before they can learn.
+	if filepath.Clean(j.Spec.Run.Workdir) != filepath.Clean(root) {
 		o.peak.Complete = false
 	}
 	if checkpoint != "" {
