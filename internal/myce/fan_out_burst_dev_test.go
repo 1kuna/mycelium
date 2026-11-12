@@ -232,6 +232,22 @@ func devFanOutBurst62(t testing.TB, window bool) devFanOutBurstResult {
 		t.Error("status reader:", err)
 	default:
 	}
+	// A wave completes asynchronously after the burst; wait for one (the
+	// functional test has no six-second window) rather than sleeping.
+	waveCtx, cancelWave := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancelWave()
+	probeWait(t, waveCtx, func() bool {
+		s, err := d.Queue.Snapshot()
+		if err != nil {
+			return false
+		}
+		for _, j := range s.Jobs {
+			if j.Batch != nil && j.State == "succeeded" {
+				return true
+			}
+		}
+		return false
+	})
 	snap, err := d.Queue.Snapshot()
 	if err != nil {
 		t.Fatal(err)
