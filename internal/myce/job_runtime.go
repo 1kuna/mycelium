@@ -11,6 +11,10 @@ type JobRuntime struct {
 	LastAcceptedSeconds *float64 `json:"last_accepted_seconds,omitempty"`
 	Reason              string   `json:"reason,omitempty"`
 	Limitation          string   `json:"limitation"`
+	// Always emitted for the previous release's v1 reply (MY-42). Remaining
+	// work is never forecast (MY-49); samples is the accepted history count.
+	RemainingWorkUnknown bool `json:"remaining_work_unknown"`
+	Samples              int  `json:"samples"`
 }
 
 func (q *Queue) projectRuntime(j *Job) {
@@ -29,7 +33,7 @@ func (q *Queue) projectRuntime(j *Job) {
 	if j.State != "running" && j.State != "stopping" {
 		return
 	}
-	r := &JobRuntime{Limitation: "history of this kind of work, not a forecast or completion deadline"}
+	r := &JobRuntime{RemainingWorkUnknown: true, Limitation: "history of this kind of work, not a forecast or completion deadline"}
 	j.Runtime = r
 	if j.StartedAt == nil {
 		r.Reason = "execution has not acknowledged Started"
@@ -46,7 +50,7 @@ func (q *Queue) projectRuntime(j *Job) {
 	case t.Execution.ID != j.ID || t.Execution.Attempt != j.Attempt || t.Machine != j.Machine || t.Session != j.Session:
 		r.Reason = "last accepted duration unknown: attempt changed"
 	case t.LastAcceptedSeconds != nil:
-		r.LastAcceptedSeconds, r.Reason = t.LastAcceptedSeconds, ""
+		r.LastAcceptedSeconds, r.Reason, r.Samples = t.LastAcceptedSeconds, "", t.Samples
 	case t.HistoryReason != "":
 		r.Reason = "last accepted duration unknown: " + t.HistoryReason
 	case t.Key != nil:
