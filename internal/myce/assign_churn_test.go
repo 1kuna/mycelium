@@ -47,10 +47,6 @@ func assignChurnWaveFixture(t *testing.T, ram float64) (*Queue, *workerFakeClock
 	m.Devices = []MachineDevice{}
 	m.CPUExtensionFingerprint = m.ExtensionFingerprint
 	check(t, q, m, nil)
-	for key, point := range q.s.WorkObservations {
-		point.HostMemoryGB = ram
-		q.s.WorkObservations[key] = point
-	}
 	wave.Priority, wave.SizeHint.HostMemoryGB = "production", ram
 	return q, clock, m, wave
 }
@@ -104,7 +100,7 @@ func TestAssignChurnProductionAfterRunningWave(t *testing.T) {
 }
 
 func TestAssignChurnProductionWaveUsesFreeTarget(t *testing.T) {
-	for _, mode := range []string{"measured", "serial fallback"} {
+	for _, mode := range []string{"serial"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _, m, wave := assignChurnWaveFixture(t, 32)
 			peer := cloneMachine(&m)
@@ -114,14 +110,6 @@ func TestAssignChurnProductionWaveUsesFreeTarget(t *testing.T) {
 			report.Setup, report.Qualified, report.CheckID = true, true, "peer-check"
 			peer.ExtensionReports = []ExtensionReport{report}
 			check(t, q, peer, nil)
-			if mode == "measured" {
-				key, why := curveKey(e, cpuMachineView(q.s.Machines[peer.ID]), wave.workType())
-				if key == nil {
-					t.Fatal(why)
-				}
-				key.Concurrency = 1
-				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, Rate: 10, HostMemoryGB: 32, Samples: 1, RecordedAt: q.clock.Now()}
-			}
 			h := cpuSpec(2, 16)
 			h.Priority, h.AllowedMachines = "production", []string{m.ID}
 			submit(t, q, h)
@@ -136,7 +124,7 @@ func TestAssignChurnProductionWaveUsesFreeTarget(t *testing.T) {
 			if got := assignedJob(machineCheck(t, q, m, running)); got == nil || got.ID != lower.ID {
 				t.Fatal("consumer withheld despite an immediately usable production target", got)
 			}
-			if got := assignedJob(machineCheck(t, q, peer)); got == nil || got.Batch == nil || got.Batch.Parent != demand.ID || got.Batch.Run != (mode == "measured") {
+			if got := assignedJob(machineCheck(t, q, peer)); got == nil || got.Batch == nil || got.Batch.Parent != demand.ID {
 				t.Fatal("production did not use free target", got)
 			}
 		})

@@ -15,11 +15,9 @@ import (
 
 func modelCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin|measurement-digest [flags]")
+		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin [flags]")
 	}
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
-	modelConfig := f.String("model-config", "", "model catalog for measurement-digest (read only)")
-	environmentConfig := f.String("environment-config", "", "environment catalog for measurement-digest")
 	authority := installedClientFlags(f)
 	to := f.String("to", "", "sync to machine, platform, or all")
 	cancel := f.Bool("cancel", false, "cancel pre-copy request; keep resumable partial bytes")
@@ -46,26 +44,6 @@ func modelCommand(args []string) error {
 	}
 	if f.NArg() != 1 {
 		return errors.New("supply one model name (or NAS-relative destination for fetch)")
-	}
-	if args[0] == "measurement-digest" {
-		if *modelConfig == "" {
-			return errors.New("measurement-digest requires --model-config")
-		}
-		catalog, err := myce.ReadModels(*modelConfig)
-		if err != nil {
-			return err
-		}
-		environments, err := myce.ReadEnvironments(*environmentConfig)
-		if err != nil {
-			return err
-		}
-		for _, model := range catalog.Models {
-			if model.Name == f.Arg(0) {
-				fmt.Fprintln(os.Stdout, myce.ModelMeasurementDigest(model, environments))
-				return nil
-			}
-		}
-		return errors.New("unknown model")
 	}
 	if args[0] == "approve-local" {
 		m, err := myce.ApproveLocalModel(context.Background(), *approvalRoot, f.Arg(0), *localPath, *approvedRoot)

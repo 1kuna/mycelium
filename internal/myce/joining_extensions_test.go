@@ -85,7 +85,7 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 			if err := client.Call(ctx, "GET", "/api/status?sections=machines", nil, &snap); err != nil {
 				t.Fatal(err)
 			}
-			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {
+			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" {
 				t.Fatal("check-in lost profile or extension reports")
 			}
 			for _, report := range snap.Machines[0].ExtensionReports {

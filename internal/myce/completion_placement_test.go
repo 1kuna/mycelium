@@ -20,7 +20,7 @@ func TestCompletionUnknownPlacementUnchanged(t *testing.T) {
 	r.Setup, r.Qualified, r.CheckID = true, true, "other-check"
 	other.ExtensionReports = []ExtensionReport{r}
 	check(t, q, other, nil)
-	q.s.WorkObservations = map[string]WorkObservation{"unrelated": {Rate: 1000, Samples: 1, RecordedAt: clock.Now()}}
+	q.s.WorkObservations = map[string]WorkObservation{"unrelated": {LastSeconds: 1, Samples: 1, RecordedAt: clock.Now()}}
 	command := submit(t, q, s)
 	run := check(t, q, other, nil).Job
 	if run == nil || run.ID != command.ID {
@@ -83,7 +83,7 @@ func completionFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machine, Spec
 	return q, clock, warm, cold, s
 }
 
-func seedCompletion(t *testing.T, q *Queue, j *Job, m *Machine, rate float64) {
+func seedCompletion(t *testing.T, q *Queue, j *Job, m *Machine, seconds float64) {
 	t.Helper()
 	copy := *extensionJobs(j, m, true)[0]
 	copy.Machine, copy.Session = m.ID, m.Session
@@ -94,88 +94,68 @@ func seedCompletion(t *testing.T, q *Queue, j *Job, m *Machine, rate float64) {
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
-	q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, Rate: rate, Units: 10, Seconds: 10 / rate, Samples: 2, RecordedAt: q.clock.Now()}
+	q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, LastSeconds: seconds, Samples: 2, RecordedAt: q.clock.Now()}
 }
 
-func TestCompletionColdFastWarmSlowAndStatus(t *testing.T) {
-	for _, units := range []float64{10, 100} {
-		t.Run(map[float64]string{10: "small-warm", 100: "large-cold"}[units], func(t *testing.T) {
-			q, clock, warm, cold, s := completionFixture(t)
-			s.Workload.Units = units
-			j := submit(t, q, s)
-			wm, cm := q.s.Machines[warm.ID], q.s.Machines[cold.ID]
-			seedCompletion(t, q, q.s.Jobs[j.ID], wm, 1)
-			seedCompletion(t, q, q.s.Jobs[j.ID], cm, 10)
-			clock.Advance(time.Second)
-			// Small: warm=10, cold=10+1; large: warm=100, cold=10+10.
-			better, known := q.completionBetter(q.s.Jobs[j.ID], cm, wm)
-			if !known || better != (units == 100) {
-				t.Fatal("wrong completion choice", better, known)
-			}
-			if units == 100 {
-				if got := check(t, q, warm, nil).Job; got != nil {
-					t.Fatal("warm slow stole large work")
-				}
-				// Existing preparation finishes; the next pull can admit it.
-				cold.Environments = warm.Environments
-				warm, cold = cold, warm
-			}
-			run := check(t, q, warm, nil).Job
-			if run == nil || run.ID != j.ID {
-				t.Fatal("chosen worker did not receive work", run)
-			}
-			if err := q.Started(result(run, true)); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(time.Second)
-			finish(t, q, run, true)
-			got := job(t, q, j.ID)
-			if got.Timing == nil || !strings.Contains(JobTiming(got), "measured completion") || !strings.Contains(got.Timing.PlacementReason, "concurrency 1") {
-				t.Fatal("missing chosen reason", got.Timing)
-			}
-			var html bytes.Buffer
-			snap, err := q.publicSnapshot()
-			if err != nil || statusPage.Execute(&html, snap) != nil || !strings.Contains(html.String(), "measured completion") {
-				t.Fatal("HTML hid reason", err)
-			}
-		})
+// Placement learns from its own accepted work (MY-31): the target whose last
+// accepted run of this kind of work was shorter wins, and status says why.
+func TestCompletionLastDurationPlacementAndStatus(t *testing.T) {
+	q, clock, warm, cold, s := completionFixture(t)
+	j := submit(t, q, s)
+	wm, cm := q.s.Machines[warm.ID], q.s.Machines[cold.ID]
+	seedCompletion(t, q, q.s.Jobs[j.ID], wm, 10)
+	seedCompletion(t, q, q.s.Jobs[j.ID], cm, 1)
+	clock.Advance(time.Second)
+	if better, known := q.completionBetter(q.s.Jobs[j.ID], cm, wm); !known || !better {
+		t.Fatal("shorter last accepted duration did not win", better, known)
+	}
+	if got := check(t, q, warm, nil).Job; got != nil {
+		t.Fatal("slower target stole work")
+	}
+	// Existing preparation finishes; the next pull can admit it.
+	cold.Environments = warm.Environments
+	run := check(t, q, cold, nil).Job
+	if run == nil || run.ID != j.ID {
+		t.Fatal("chosen worker did not receive work", run)
+	}
+	if err := q.Started(result(run, true)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	finish(t, q, run, true)
+	got := job(t, q, j.ID)
+	if got.Timing == nil || !strings.Contains(got.Timing.PlacementReason, "last accepted duration 1.00s on this target") {
+		t.Fatal("missing chosen reason", got.Timing)
+	}
+	var html bytes.Buffer
+	snap, err := q.publicSnapshot()
+	if err != nil || statusPage.Execute(&html, snap) != nil || !strings.Contains(html.String(), "last accepted duration 1.00s on this target") {
+		t.Fatal("HTML hid reason", err)
 	}
 }
 
-func TestCompletionTransferExactEvidenceAndReleaseCosts(t *testing.T) {
-	q, clock, warm, cold, s := completionFixture(t)
+func TestCompletionExactEvidenceAndReleaseCosts(t *testing.T) {
+	q, _, warm, cold, s := completionFixture(t)
 	j := submit(t, q, s)
 	live := q.s.Jobs[j.ID]
 	wm, cm := q.s.Machines[warm.ID], q.s.Machines[cold.ID]
-	seedCompletion(t, q, live, wm, 1)
-	seedCompletion(t, q, live, cm, 100)
+	seedCompletion(t, q, live, wm, 10)
+	seedCompletion(t, q, live, cm, 1)
 	live.Spec.Resumable, live.Attempt = true, 1
 	if _, ok := q.estimateCompletion(live, wm); ok {
-		t.Fatal("first queued retry reused full-work estimate")
+		t.Fatal("first queued retry reused full-work duration")
 	}
 	live.Spec.Resumable, live.Attempt = false, 0
-	live.Spec.Files = FileManifest{"input": {SizeBytes: 100}}
-	wm.CapabilityProfile.Benchmark = &BenchmarkResult{Measurements: []Throughput{{Resource: "network", Method: "file-store-download-8MiB-sha256-v1", Unit: "bytes/s", Rate: 100}}}
-	cm.CapabilityProfile.Benchmark = &BenchmarkResult{Measurements: []Throughput{{Resource: "network", Method: "file-store-download-8MiB-sha256-v1", Unit: "bytes/s", Rate: 1}}}
-	if better, known := q.completionBetter(live, cm, wm); !known || better {
-		t.Fatal("transfer ignored")
-	}
-	// Unknown transfers and expired observations never masquerade as zero cost.
-	cm.CapabilityProfile.Benchmark = nil
-	if _, ok := q.estimateCompletion(live, cm); ok {
-		t.Fatal("unknown transfer predicted")
-	}
-	live.Spec.Files = nil
+	// Invalidated and forbidden records never rank placement.
 	for id, p := range q.s.WorkObservations {
-		p.RecordedAt = clock.Now().Add(-31 * 24 * time.Hour)
 		p.StaleReason = "driver or backend fingerprint changed"
 		q.s.WorkObservations[id] = p
 	}
 	if _, ok := q.completionBetter(live, cm, wm); ok {
-		t.Fatal("stale rates ranked")
+		t.Fatal("stale durations ranked")
 	}
-	seedCompletion(t, q, live, wm, 1)
-	seedCompletion(t, q, live, cm, 100)
+	seedCompletion(t, q, live, wm, 10)
+	seedCompletion(t, q, live, cm, 1)
 	for id, p := range q.s.WorkObservations {
 		if p.Key.Host == cm.HostID {
 			p.Forbidden = true
@@ -183,10 +163,10 @@ func TestCompletionTransferExactEvidenceAndReleaseCosts(t *testing.T) {
 		}
 	}
 	if _, ok := q.estimateCompletion(live, cm); ok {
-		t.Fatal("OOM point reused")
+		t.Fatal("OOM record reused")
 	}
-	seedCompletion(t, q, live, cm, 100)
-	// The rate cannot override existing useful-victim disruption ordering.
+	seedCompletion(t, q, live, cm, 1)
+	// A duration cannot override existing useful-victim disruption ordering.
 	if q.completionPlanBetter(live, &placementPlan{machine: cm, stops: 1}, &placementPlan{machine: wm}) {
 		t.Fatal("speed authorized extra victim")
 	}
@@ -195,6 +175,6 @@ func TestCompletionTransferExactEvidenceAndReleaseCosts(t *testing.T) {
 	}
 	model, _, m := modelFixture(t)
 	if _, ok := model.estimateCompletion(callJob(&ModelCall{Model: "test"}), &m); ok {
-		t.Fatal("unqualified model invented estimate")
+		t.Fatal("unqualified model invented a duration")
 	}
 }

@@ -22,12 +22,14 @@ func runtimeJob(t *testing.T, q *Queue, id string) *Job {
 	return nil
 }
 
-func TestJobRuntimeElapsedRemainingAndNoHistory(t *testing.T) {
+// Runtime shows elapsed time and this kind of work's last accepted duration;
+// it never promises a remaining time (MY-49).
+func TestJobRuntimeElapsedAndLastAcceptedDuration(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	first := startObservation(t, q, m, s)
 	clock.Advance(10 * time.Second)
 	r := runtimeJob(t, q, first.ID).Runtime
-	if r == nil || *r.ElapsedSeconds != 10 || r.RemainingSeconds != nil || !strings.Contains(r.Reason, "no accepted matching measurement") {
+	if r == nil || *r.ElapsedSeconds != 10 || r.LastAcceptedSeconds != nil || !strings.Contains(r.Reason, "no accepted matching measurement") {
 		t.Fatalf("first run: %+v", r)
 	}
 	finish(t, q, &first, true)
@@ -39,24 +41,24 @@ func TestJobRuntimeElapsedRemainingAndNoHistory(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(apiJob.Runtime, r) {
 		t.Fatalf("job/status runtime mismatch: %+v / %+v, %v", apiJob, r, err)
 	}
-	if *r.ElapsedSeconds != 3 || r.RemainingSeconds == nil || *r.RemainingSeconds != 7 || r.Samples != 1 || r.Unit != "records" || r.Source == "" || *r.HistoryAgeSeconds != 3 {
-		t.Fatalf("measured ETA: %+v", r)
+	if *r.ElapsedSeconds != 3 || r.LastAcceptedSeconds == nil || *r.LastAcceptedSeconds != 10 || r.Reason != "" {
+		t.Fatalf("last accepted duration: %+v", r)
 	}
-	if !strings.Contains(JobTiming(j), "remaining ~7.00s") {
-		t.Fatal(JobTiming(j))
+	if text := JobTiming(j); !strings.Contains(text, "last accepted duration 10.00s") || strings.Contains(text, "remaining") {
+		t.Fatal(text)
 	}
 	// Projection must not persist advancing elapsed time or change frozen timing.
-	if q.s.Jobs[j.ID].Runtime != nil || *q.s.Jobs[j.ID].Timing.PredictedSeconds != 10 {
+	if q.s.Jobs[j.ID].Runtime != nil || *q.s.Jobs[j.ID].Timing.LastAcceptedSeconds != 10 {
 		t.Fatal("projection mutated state")
 	}
-	clock.Advance(7 * time.Second)
-	r = runtimeJob(t, q, j.ID).Runtime
-	if r.RemainingSeconds != nil || !strings.Contains(r.Reason, "estimate exceeded") {
-		t.Fatalf("overrun promised completion: %+v", r)
+	// An overrun still shows history, never a negative or promised remainder.
+	clock.Advance(30 * time.Second)
+	if r = runtimeJob(t, q, j.ID).Runtime; *r.ElapsedSeconds != 33 || *r.LastAcceptedSeconds != 10 {
+		t.Fatalf("overrun: %+v", r)
 	}
 }
 
-func TestJobRuntimeStaleAndNoncomparableHistory(t *testing.T) {
+func TestJobRuntimeOldAndNoncomparableHistory(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	first := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
@@ -68,17 +70,17 @@ func TestJobRuntimeStaleAndNoncomparableHistory(t *testing.T) {
 	}
 	second := startObservation(t, q, m, s)
 	r := runtimeJob(t, q, second.ID).Runtime
-	if r.RemainingSeconds == nil || r.RemainingWorkUnknown {
+	if r.LastAcceptedSeconds == nil {
 		t.Fatalf("age alone expired comparable evidence: %+v", r)
 	}
 	if err := q.update(func() error {
-		q.touchJob(second.ID).Timing.Reason = "mixed or unknown host occupancy"
+		q.touchJob(second.ID).Timing.Reason = "reference, qualification or configuration changed"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	r = runtimeJob(t, q, second.ID).Runtime
-	if !strings.Contains(r.Reason, "mixed or unknown host occupancy") {
+	if r.LastAcceptedSeconds != nil || !strings.Contains(r.Reason, "configuration changed") {
 		t.Fatalf("incompatible history: %+v", r)
 	}
 }
@@ -101,9 +103,9 @@ func TestJobRuntimePlainCommandAndStartedBoundary(t *testing.T) {
 	}
 	clock.Advance(2 * time.Second)
 	r = runtimeJob(t, q, j.ID).Runtime
-	// Plain commands now support learned timing, but this legacy fake machine
-	// has no physical inventory. That missing evidence must keep ETA unknown.
-	if *r.ElapsedSeconds != 2 || r.RemainingSeconds != nil || !r.RemainingWorkUnknown || !strings.Contains(r.Reason, "physical component inventory unavailable") {
+	// Plain commands learn durations, but this legacy fake machine has no
+	// physical inventory. That missing evidence keeps the duration unknown.
+	if *r.ElapsedSeconds != 2 || r.LastAcceptedSeconds != nil || !strings.Contains(r.Reason, "physical component inventory unavailable") {
 		t.Fatalf("plain command: %+v", r)
 	}
 }

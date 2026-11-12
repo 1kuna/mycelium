@@ -23,11 +23,17 @@ func TestCancellationScopeFanOut(t *testing.T) {
 				s.Outputs = map[string]string{"out": "results"}
 				s.AllowedMachines = []string{m.ID}
 				parent := submit(t, q, s)
+				// Pieces run as ordinary serial jobs (MY-49).
 				first := check(t, q, m, nil).Job
-				if first == nil || len(first.Batch.Pieces) != 2 {
-					t.Fatal("missing first two-piece wave")
+				if first == nil || len(first.Batch.Pieces) != 1 {
+					t.Fatal("missing first piece")
 				}
 				finish(t, q, first, true)
+				second := check(t, q, m, nil).Job
+				if second == nil || len(second.Batch.Pieces) != 1 {
+					t.Fatal("missing second piece")
+				}
+				finish(t, q, second, true)
 				readySpec := pieceConsumer(s, parent.ID, "item-1")
 				readySpec.SubmissionKey, readySpec.AllowedMachines = "ready", []string{"unjoined"}
 				ready := submit(t, q, readySpec)
@@ -52,8 +58,8 @@ func TestCancellationScopeFanOut(t *testing.T) {
 					t.Fatal(err)
 				}
 				wave := check(t, q, m, nil).Job
-				if wave == nil || len(wave.Batch.Pieces) != 2 {
-					t.Fatalf("missing second two-piece wave: %+v", wave.Batch)
+				if wave == nil || len(wave.Batch.Pieces) != 1 {
+					t.Fatalf("missing third piece: %+v", wave.Batch)
 				}
 				if stage == "running" {
 					if err := q.Started(result(wave, true)); err != nil {
@@ -67,7 +73,7 @@ func TestCancellationScopeFanOut(t *testing.T) {
 						t.Fatal(err)
 					}
 					if job(t, q, wave.ID).State != "queued" {
-						t.Fatal("wave did not requeue")
+						t.Fatal("piece did not requeue")
 					}
 				}
 				server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
@@ -87,7 +93,7 @@ func TestCancellationScopeFanOut(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				assertCancellationScope(t, got, first, wave, ready, blocked, consumer, "pending")
+				assertCancellationScope(t, got, first, second, wave, ready, blocked, consumer, "pending")
 				var status Snapshot
 				if err := client.Call(ctx, "GET", "/api/status", nil, &status); err != nil {
 					t.Fatal(err)
@@ -146,7 +152,7 @@ func TestCancellationScopeFanOut(t *testing.T) {
 				if err != nil || ackRelease(*got.Cancellation) != "confirmed" || got.ReleaseConfirmed {
 					t.Fatalf("settled aggregate: %+v %v", got, err)
 				}
-				if len(got.FanOut.Children) != 2 || len(got.FanOut.Results) != 2 || !got.CancellationScope.Pieces[0].Accepted {
+				if len(got.FanOut.Children) != 3 || len(got.FanOut.Results) != 2 || !got.CancellationScope.Pieces[0].Accepted {
 					t.Fatal("terminal results or dispatch fence lost")
 				}
 				if got.CancellationScope.Pieces[6].Materialized || got.CancellationScope.Pieces[6].Release != "not_applicable" {
@@ -170,13 +176,13 @@ func TestCancellationScopeFanOut(t *testing.T) {
 	}
 }
 
-func assertCancellationScope(t *testing.T, got, first, wave, ready, blocked, consumer *Job, release string) {
+func assertCancellationScope(t *testing.T, got, first, second, wave, ready, blocked, consumer *Job, release string) {
 	t.Helper()
 	if got.Cancellation == nil || ackRelease(*got.Cancellation) != release || !got.Cancellation.WillNotRun {
 		t.Fatalf("missing GET cancellation: %+v", got)
 	}
 	scope := got.CancellationScope
-	if scope == nil || len(scope.Pieces) != 7 || len(scope.Members) != 5 {
+	if scope == nil || len(scope.Pieces) != 7 || len(scope.Members) != 6 {
 		t.Fatalf("incomplete scope: %+v", scope)
 	}
 	members := map[string]CancellationMember{}
@@ -186,7 +192,7 @@ func assertCancellationScope(t *testing.T, got, first, wave, ready, blocked, con
 			t.Fatal("member not fenced", m)
 		}
 	}
-	for id, want := range map[string]string{first.ID: "confirmed", wave.ID: "pending", ready.ID: "not_applicable", blocked.ID: "not_applicable", consumer.ID: "pending"} {
+	for id, want := range map[string]string{first.ID: "confirmed", second.ID: "confirmed", wave.ID: "pending", ready.ID: "not_applicable", blocked.ID: "not_applicable", consumer.ID: "pending"} {
 		if members[id].Release != want {
 			t.Fatalf("member %s release=%s want=%s", id, members[id].Release, want)
 		}

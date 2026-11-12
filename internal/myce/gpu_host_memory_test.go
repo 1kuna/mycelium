@@ -969,7 +969,7 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 					t.Fatal("curve key removed", old.Key)
 				}
 				if success {
-					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout || old.HostMemoryGB != point.HostMemoryGB || old.DeviceMemoryGB != point.DeviceMemoryGB || old.IncrementalHostMemoryGB != point.IncrementalHostMemoryGB || old.IncrementalDeviceMemoryGB != point.IncrementalDeviceMemoryGB {
+					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout {
 						t.Fatal("constrained neighbour changed accepted memory", old, point)
 					}
 				} else if !point.MemoryRecordedAt.IsZero() || point.MemoryRange != nil || point.GPUHostRange != nil {

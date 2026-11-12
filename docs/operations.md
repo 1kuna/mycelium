@@ -1194,7 +1194,7 @@ or cancelled job's partial outputs from its current attempt's
 release) or explicit release. The former fixed 24-hour scratch promise is retired; unknown/unreleased
 data stays protected. For a slow queue, capture
 [live queue profiles](reference/queue-maintenance.md#opt-in-live-queue-profiling)
-and read the [queue timing log lines](reference/queue-maintenance.md#benchmarks-outages-and-control-timing).
+and read the [queue timing log lines](reference/queue-maintenance.md#outages-and-control-timing).
 
 ## Native cleanup custody
 

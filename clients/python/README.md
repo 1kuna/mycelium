@@ -54,8 +54,8 @@ For a fan-out abort, cancel the parent by ID or `cancel_submission(project, key)
 Read `client.get(parent_id)["cancellation"]["release"]` until it is `confirmed`
 or `not_applicable`; `wait()` returning a terminal state does not prove release.
 `cancellation_scope["pieces"]` enumerates every declared key with materialization,
-acceptance, optional wave ID, registered `dependents`, exclusion and release.
-`cancellation_scope["members"]` lists retained wave/consumer jobs and release.
+acceptance, optional `wave_id` (the piece job), registered `dependents`, exclusion and release.
+`cancellation_scope["members"]` lists retained piece/consumer jobs and release.
 Children need no separate cancel calls. Future valid consumers of a retained
 cancelled parent cannot execute and appear on subsequent scope reads. Scope
 requires the retained source; artifact expiry does not settle release. See the
@@ -297,7 +297,7 @@ and Go `RunOptions.After` accept it too; Go uses an empty `Piece`.
 Read `dependency.executions[KEY]` for immutable accepted producing attempts.
 Every producer piece must succeed; failure fails the consumer without an attempt,
 and upstream cancellation stops downstream stages and their children. Explicit
-keyed input paths are common inputs to every wave, with no automatic enumeration.
+keyed input paths are common inputs to every piece, with no automatic enumeration.
 
 ### Retained execution ledger
 

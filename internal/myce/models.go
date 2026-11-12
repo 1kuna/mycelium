@@ -34,12 +34,12 @@ type VLLMPreset struct {
 }
 type Model struct {
 	readinessRecipe string
-	Measurement     *ModelMeasurementBinding `yaml:"measurement,omitempty" json:"measurement,omitempty"`
-	Project         string                   `yaml:"project,omitempty" json:"project,omitempty"`
-	AllowedMachines []string                 `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
-	Env             map[string]string        `yaml:"env,omitempty" json:"env,omitempty"`
-	SecretEnv       map[string]string        `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
-	LocalSource     string                   `yaml:"local_source,omitempty" json:"local_source,omitempty"`
+	Measurement     retiredField      `yaml:"measurement,omitempty" json:"measurement,omitzero"`
+	Project         string            `yaml:"project,omitempty" json:"project,omitempty"`
+	AllowedMachines []string          `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
+	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	SecretEnv       map[string]string `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
+	LocalSource     string            `yaml:"local_source,omitempty" json:"local_source,omitempty"`
 	secretRoot      string
 	fleetToken      string
 
@@ -247,7 +247,6 @@ type ModelReport struct {
 type ModelCall struct {
 	FanOut                           string
 	Workload                         *Workload
-	BatchConcurrency                 int
 	Device                           string
 	PreemptionCount                  int
 	Class                            string
@@ -531,7 +530,7 @@ func (q *Queue) maintainModels() {
 			s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 			switch {
 			case s != nil && s.State == "ready":
-				if limit := q.declaredCallLimit(c, m, model); limit >= 0 {
+				if limit := declaredCallLimit(c, model); limit >= 0 {
 					p = q.callSlotPlan(m, c, s, limit)
 				}
 			case s != nil && s.State == "loading":
@@ -556,12 +555,9 @@ func (q *Queue) maintainModels() {
 		}
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 		if s != nil && s.State == "ready" {
-			limit := q.declaredCallLimit(c, m, model)
+			limit := declaredCallLimit(c, model)
 			if limit < 0 || limit > 0 && s.InFlight >= limit {
 				continue
-			}
-			if c.FanOut != "" {
-				c.BatchConcurrency = limit
 			}
 			c.Machine, c.Session, c.Attempt, c.Device = m.ID, m.Session, s.Attempt, s.Device
 			c.StartedAt = &now
@@ -667,7 +663,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		return false
 	}
 	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "ready" {
-		limit := q.declaredCallLimit(c, m, model)
+		limit := declaredCallLimit(c, model)
 		return limit >= 0 && q.callSlotPlan(m, c, s, limit) != nil
 	}
 	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
@@ -795,6 +791,16 @@ func modelError(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message, "type": "mycelium_error"}})
 }
+
+// A declared call group runs one call per engine at a time; other calls use
+// the model's in-flight bound.
+func declaredCallLimit(c *ModelCall, model Model) int {
+	if c.FanOut != "" {
+		return 1
+	}
+	return model.MaxInFlight
+}
+
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority"), Class: r.Header.Get("X-Myce-Class")}
 	if group := r.Header.Get("X-Myce-Fan-Out"); group != "" {

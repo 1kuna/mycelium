@@ -49,7 +49,7 @@ func TestJobSnapshotPollingLoad(t *testing.T) {
 				}
 				q.s.WorkObservations = map[string]WorkObservation{}
 				for i := range 1300 {
-					q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: ObservationKey{Work: fmt.Sprint(i), Hardware: strings.Repeat("hardware", 8), Configuration: "config"}, Samples: 10, Units: 100, Seconds: 20, RecordedAt: clock.Now()}
+					q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: ObservationKey{Work: fmt.Sprint(i), Hardware: strings.Repeat("hardware", 8), Configuration: "config"}, Samples: 10, LastSeconds: 20, RecordedAt: clock.Now()}
 				}
 				if err := q.update(func() error { return nil }); err != nil {
 					t.Fatal(err)

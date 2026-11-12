@@ -152,10 +152,6 @@ func TestJoinRejectsConflictingChassisDeclarations(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--desktop and --laptop are mutually exclusive") {
 		t.Fatal(err)
 	}
-	err = benchmarkCommand([]string{"--desktop", "--laptop"})
-	if err == nil || !strings.Contains(err.Error(), "--desktop and --laptop are mutually exclusive") {
-		t.Fatal(err)
-	}
 }
 
 func TestJoinAcceptsOnboardingBenchmarkFlag(t *testing.T) {

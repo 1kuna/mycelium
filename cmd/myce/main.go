@@ -116,9 +116,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "file" {
 		return fileCommand(args[1:])
 	}
-	if args[0] == "benchmark" {
-		return benchmarkCommand(args[1:])
-	}
 	if args[0] == "policy" {
 		return policyCommand(args[1:], os.Stdout)
 	}
@@ -335,8 +332,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	modelListen := f.String("model-listen", "127.0.0.1:0", "worker model proxy listen address")
 	modelAdvertise := f.String("model-advertise", "", "worker model proxy URL reachable by queue")
 	enrollment := f.Bool("enrollment", false, "record small runner smoke and exact-session enrollment")
-	curveMaxConcurrency := f.Int("curve-max-concurrency", 0, "opt in to extension reference curves up to this concurrency (0 disables; requires onboarding benchmark)")
-	onboardingBenchmark := f.Bool("onboarding-benchmark", false, "measure throughput before admission (may take nine minutes)")
+	// Retired with the onboarding benchmark (MY-49); accepted and ignored so
+	// service units written by the previous release still start.
+	f.Int("curve-max-concurrency", 0, "retired; ignored")
+	f.Bool("onboarding-benchmark", false, "retired; ignored")
 	dailyUse := f.Bool("daily-use", false, "take work only after 5 idle minutes, on external power, with known safe heat signals")
 	laptop := f.Bool("laptop", false, "require external power even in dedicated mode")
 	desktop := f.Bool("desktop", false, "declare a desktop; allow GPU-only thermal coverage on external power")
@@ -779,10 +778,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		if *curveMaxConcurrency < 0 || *curveMaxConcurrency > 64 || *curveMaxConcurrency > 0 && !*onboardingBenchmark {
-			return errors.New("curve-max-concurrency requires onboarding-benchmark and a bound from 1 to 64")
-		}
-		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: myce.AcceleratorMemoryMeasured(*gpu, *memoryMode), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: myce.AcceleratorMemoryMeasured(*gpu, *memoryMode), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {

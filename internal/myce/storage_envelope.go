@@ -126,7 +126,7 @@ type AttemptStorageFacts struct {
 }
 
 func (q *Queue) storageKey(j *Job, m *Machine) *StorageKey {
-	if m == nil || j.Spec.Resumable && j.Attempt > 1 || j.Batch != nil && (j.Batch.Run || j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1) {
+	if m == nil || j.Spec.Resumable && j.Attempt > 1 || j.Batch != nil && (j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1) {
 		return nil
 	}
 	if j.Spec.Needs.cpuOnly() && m.Devices != nil {

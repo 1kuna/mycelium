@@ -28,7 +28,6 @@ func (t ExecutionTarget) matches(actual ExecutionTarget) bool {
 type ExtensionVariant struct {
 	Quality map[string]map[string]QualityMeasurement `json:"quality,omitempty" yaml:"quality,omitempty"`
 
-	Sweeps       map[string]ReferenceSweep    `json:"sweeps,omitempty" yaml:"sweeps,omitempty"`
 	References   map[string]WorkReference     `json:"references,omitempty" yaml:"references,omitempty"`
 	Target       ExecutionTarget              `json:"target" yaml:"target"`
 	Environments map[string]EnvironmentRecipe `json:"environments,omitempty" yaml:"environments,omitempty"`
@@ -43,7 +42,7 @@ func (e Extension) validateVariants() error {
 	if !extensionName.MatchString(e.Name) || !extensionName.MatchString(e.Version) || e.Purpose == "" {
 		return errors.New("extension requires name, version and purpose")
 	}
-	if len(e.Run) > 0 || len(e.Platforms) > 0 || e.MemoryGB != 0 || e.HostMemoryGB != 0 || len(e.Setup) > 0 || len(e.Check) > 0 || len(e.Baselines) > 0 || len(e.PlatformBaselines) > 0 || len(e.Benchmark) > 0 {
+	if len(e.Run) > 0 || len(e.Platforms) > 0 || e.MemoryGB != 0 || e.HostMemoryGB != 0 || len(e.Setup) > 0 || len(e.Check) > 0 || len(e.Baselines) > 0 || len(e.PlatformBaselines) > 0 {
 		return errors.New("variants are complete recipes; do not mix legacy execution fields with variants")
 	}
 	for _, n := range append(slices.Clone(e.Kinds), e.ProgramTypes...) {
@@ -95,11 +94,6 @@ func (e Extension) validateVariants() error {
 		view.Check = v.Check
 		if err := view.validateBaselines(v.Baselines); err != nil {
 			return err
-		}
-		for work, sweep := range v.Sweeps {
-			if _, ok := v.References[work]; !ok || !sweep.valid() {
-				return errors.New("sweep requires a reference, command, bounded concurrency and sorted power-of-two counts starting at one")
-			}
 		}
 		for work, ref := range v.References {
 			if _, ok := v.Baselines[work]; !ok || !ref.valid() {

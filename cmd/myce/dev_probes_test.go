@@ -227,7 +227,7 @@ cat expected > effect`}
 				return false
 			}
 			p := current.ApplicationProgress
-			return current.State == "running" && p != nil && p.Completed == 10 && p.Total == 10 && p.StageIndex != nil && *p.StageIndex == 1 && p.StageCount != nil && *p.StageCount == 2 && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
+			return current.State == "running" && p != nil && p.Completed == 10 && p.Total == 10 && p.StageIndex != nil && *p.StageIndex == 1 && p.StageCount != nil && *p.StageCount == 2 && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil && current.Runtime.LastAcceptedSeconds == nil
 		})
 		// Status JSON and the job reply expose the same attempt's evidence.
 		waitFor(func() bool {
@@ -238,7 +238,7 @@ cat expected > effect`}
 			for _, current := range snapshot.Jobs {
 				if current.ID == job.ID && current.ApplicationProgress != nil {
 					text := myce.JobTiming(current)
-					return current.State == "running" && current.ApplicationProgress.Attempt == 1 && strings.Contains(text, "stage 1/2") && strings.Contains(text, "reported stage progress 10/10 frames") && strings.Contains(text, "whole-job progress unknown") && strings.Contains(text, "checkpoint evidence: none reported") && current.Runtime.RemainingWorkUnknown && current.Progress <= 0
+					return current.State == "running" && current.ApplicationProgress.Attempt == 1 && strings.Contains(text, "stage 1/2") && strings.Contains(text, "reported stage progress 10/10 frames") && strings.Contains(text, "whole-job progress unknown") && strings.Contains(text, "checkpoint evidence: none reported") && current.Progress <= 0
 				}
 			}
 			return false
@@ -249,7 +249,7 @@ cat expected > effect`}
 		}
 		waitFor(func() bool {
 			current, err := client.GetJob(ctx, job.ID)
-			return readReady(err) && current.State == "running" && current.ApplicationProgress != nil && current.ApplicationProgress.StageIndex != nil && *current.ApplicationProgress.StageIndex == 2 && current.Runtime.RemainingSeconds == nil && current.Runtime.RemainingWorkUnknown
+			return readReady(err) && current.State == "running" && current.ApplicationProgress != nil && current.ApplicationProgress.StageIndex != nil && *current.ApplicationProgress.StageIndex == 2 && current.Runtime.LastAcceptedSeconds == nil
 		})
 		if err := os.WriteFile(filepath.Join(work, "release"), nil, 0600); err != nil {
 			t.Fatal(err)

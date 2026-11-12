@@ -9,8 +9,18 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"mycelium/internal/probeguard"
 )
+
+// retiredField accepts a field that the previous release still sends and drops
+// it (MY-42): strict request decoding would otherwise refuse that release.
+// Remove each use once the previous release no longer sends it.
+type retiredField struct{}
+
+func (*retiredField) UnmarshalJSON([]byte) error     { return nil }
+func (*retiredField) UnmarshalYAML(*yaml.Node) error { return nil }
 
 type AcceleratorProfile struct {
 	Type        string `json:"type"`
@@ -18,11 +28,11 @@ type AcceleratorProfile struct {
 	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
 }
 
-// CapabilityProfile records hardware, participation and measured reference throughput.
+// CapabilityProfile records hardware and participation.
 // Shared memory is counted once, in SystemMemoryBytes, and is also reachable by
 // each accelerator. Zero sizes with an unavailable note mean unknown.
 type CapabilityProfile struct {
-	Benchmark         *BenchmarkResult     `json:"benchmark,omitempty"`
+	Benchmark         retiredField         `json:"benchmark,omitzero"`
 	Availability      *Availability        `json:"availability,omitempty"`
 	Version           int                  `json:"version"`
 	Onboarding        string               `json:"onboarding"`
@@ -120,7 +130,7 @@ func (p CapabilityProfile) Summary() string {
 	for _, a := range p.Accelerators {
 		resources = append(resources, fmt.Sprintf("%s %.1f GiB", a.Type, float64(a.MemoryBytes)/(1<<30)))
 	}
-	return fmt.Sprintf("capability profile v%d: %s/%s, %d logical CPUs, %s memory, system %.1f GiB, resources [%s], disk %.1f GiB total / %.1f GiB free; %s; unavailable=%v", p.Version, p.OS, p.Arch, p.LogicalCPUs, p.MemoryLayout, float64(p.SystemMemoryBytes)/(1<<30), strings.Join(resources, ", "), float64(p.DiskTotalBytes)/(1<<30), float64(p.DiskFreeBytes)/(1<<30), p.Onboarding+"; "+p.Benchmark.Summary(), p.Unavailable)
+	return fmt.Sprintf("capability profile v%d: %s/%s, %d logical CPUs, %s memory, system %.1f GiB, resources [%s], disk %.1f GiB total / %.1f GiB free; %s; unavailable=%v", p.Version, p.OS, p.Arch, p.LogicalCPUs, p.MemoryLayout, float64(p.SystemMemoryBytes)/(1<<30), strings.Join(resources, ", "), float64(p.DiskTotalBytes)/(1<<30), float64(p.DiskFreeBytes)/(1<<30), p.Onboarding, p.Unavailable)
 }
 
 // An operator-fixed device budget (--memory-mode fixed --memory-gb) sizes a

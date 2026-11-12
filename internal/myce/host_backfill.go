@@ -12,9 +12,8 @@ type hostBackfillDemand struct {
 	order   *candidateSet
 }
 
-// Wave executions finish too. The movement predicate deliberately excludes
-// them, but that is not a reason to hide their eventual RAM/core release from
-// admission. Parents describe demand; they never own execution capacity.
+// Piece executions finish too. Parents describe demand; they never own
+// execution capacity.
 func backfillFiniteExecution(j *Job) bool {
 	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil && j.Spec.ExtensionCheck == nil
 }
@@ -22,12 +21,6 @@ func backfillFiniteExecution(j *Job) bool {
 func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, inventory []*Machine) []*Job {
 	if j.Spec.FanOut != nil {
 		if candidate := q.fanOutCandidateWithResources(j, projected, nil, inventory); candidate != nil {
-			return []*Job{candidate}
-		}
-		return nil
-	}
-	if j.Batch != nil && j.Batch.Run {
-		if candidate := q.retryWaveCandidate(j, m); candidate != nil {
 			return []*Job{candidate}
 		}
 		return nil

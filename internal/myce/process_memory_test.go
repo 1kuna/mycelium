@@ -282,7 +282,7 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		t.Fatalf("status lost memory-only curve: %+v", snap.WorkCurves)
 	}
 	point := snap.WorkCurves[0]
-	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 0 || point.HostMemoryGB != 0 || point.DeviceMemoryGB != 0 || !strings.Contains(point.Summary(), "peak host/device 1.00/0.00 GiB") {
+	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 0 || !strings.Contains(point.Summary(), "peak host 1.00 GiB") {
 		t.Fatalf("status lost memory-only facts: %+v; %s", point, point.Summary())
 	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")

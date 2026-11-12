@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -87,38 +86,6 @@ func TestRealProbeGuard(t *testing.T) {
 			}()
 			call()
 		})
-	}
-}
-
-// Simulate the conflicting GB10 inventory without executing a host tool or
-// opening a device. The maintenance fixture must never consult this default.
-func TestMaintenanceBenchmarkIgnoresSparkInventory(t *testing.T) {
-	var calls atomic.Int32
-	previous := workerMachineProbe
-	workerMachineProbe = func() MachineProbe {
-		calls.Add(1)
-		return MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{
-			"dev/dri/renderD128":                                  &fstest.MapFile{},
-			"sys/bus/pci/devices/0000:01:00.0/vendor":             &fstest.MapFile{Data: []byte("0x10de")},
-			"sys/bus/pci/devices/0000:01:00.0/class":              &fstest.MapFile{Data: []byte("0x030000")},
-			"sys/bus/pci/devices/0000:01:00.0/current_link_width": {Data: []byte("0")},
-		}, Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-			if len(args) > 0 && strings.HasPrefix(args[0], "--query-gpu=uuid,driver_version") {
-				return []byte("GPU-synthetic-gb10, 580.159.03"), nil
-			}
-			return []byte("NVIDIA GB10, [N/A]"), nil
-		}}
-	}
-	t.Cleanup(func() { workerMachineProbe = previous })
-	// Confirm the simulated hardware has the reserve that broke the 8 GiB fixture.
-	detected, err := workerMachineProbe().Detect(context.Background())
-	if err != nil || detected.Platform != "cuda" || detected.ReserveGB != 0 {
-		t.Fatal(detected, err)
-	}
-	calls.Store(0)
-	TestMaintenanceRunningBenchmark(t)
-	if calls.Load() != 0 {
-		t.Fatalf("synthetic fixture consulted Spark discovery %d times", calls.Load())
 	}
 }
 

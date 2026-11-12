@@ -3,7 +3,6 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -36,8 +35,6 @@ type BatchWork struct {
 	Parent      string        `json:"parent"`
 	Pieces      []FanOutPiece `json:"pieces"`
 	Concurrency int           `json:"concurrency"`
-	Run         bool          `json:"run,omitempty"`
-	Seconds     float64       `json:"seconds,omitempty"`
 	// Frozen from the parent declaration; survives stripping Spec.FanOut on assignment.
 	ShareXPU bool `json:"share_xpu,omitempty"`
 }
@@ -54,7 +51,7 @@ func validateFanOut(s Spec) error {
 		return errors.New("fan_out requires extension work, a homogeneous workload, 1..256 pieces and max_concurrency in 1..64; programs and checks are unsupported")
 	}
 	seen := map[string]bool{}
-	names := []string{".myce-batch.json"}
+	names := []string{}
 	for name := range s.Files {
 		names = append(names, name)
 	}
@@ -189,161 +186,6 @@ func (q *Queue) fanOutTemplate(j *Job) *Job {
 	return &copy
 }
 
-func scaledBatchNeeds(n ResourceNeeds, p WorkObservation, count int) ResourceNeeds {
-	n.CPUCores = max(1, n.CPUCores) * count
-	n.MemoryGB *= float64(count)
-	n.HostMemoryGB *= float64(count)
-	if n.cpuOnly() {
-		n.HostMemoryGB = max(n.HostMemoryGB, p.HostMemoryGB)
-	} else {
-		n.HostMemoryGB = max(n.HostMemoryGB, p.HostMemoryGB)
-		n.MemoryGB = max(n.MemoryGB, p.DeviceMemoryGB)
-	}
-	return n
-}
-
-// A retry keeps membership and count, but uses the destination's own measured
-// resource envelope. A fast variant's per-piece floor is not a whole-wave floor.
-func (q *Queue) retryWaveCandidate(j *Job, m *Machine) *Job {
-	e := qualifiedExtension(j, m)
-	if e == nil {
-		return nil
-	}
-	v := e.variant(machineTarget(m))
-	if v == nil {
-		return nil
-	}
-	sweep := v.Sweeps[j.Spec.workType()]
-	if len(sweep.Run) == 0 || !slices.Contains(sweep.Counts, j.Batch.Concurrency) {
-		return nil
-	}
-	key, _ := curveKey(*e, m, j.Spec.workType())
-	if key == nil || key.Reference.InputShape != j.Spec.Workload.InputShape {
-		return nil
-	}
-	key.Concurrency = j.Batch.Concurrency
-	p := q.s.WorkObservations[identityHash(key)]
-	if !q.usableCurve(p, *key) {
-		return nil
-	}
-	copy := *j
-	n := v.Needs
-	n.Network = n.Network || j.Spec.Needs.Network
-	n.Platform = Platform{Required: []string{m.GPU}}
-	s := Spec{Needs: n}
-	if normalizeResources(&s) != nil {
-		return nil
-	}
-	n = s.Needs
-	n.MemoryGB = max(n.MemoryGB, j.Spec.SizeHint.MemoryGB)
-	n.HostMemoryGB = max(n.HostMemoryGB, j.Spec.SizeHint.HostMemoryGB)
-	n = scaledBatchNeeds(n, p, j.Batch.Concurrency)
-	n.GPU = j.Spec.Needs.GPU
-	n.CPUCores = max(n.CPUCores, j.Spec.Needs.CPUCores)
-	n.HostMemoryGB = max(n.HostMemoryGB, j.Spec.Needs.HostMemoryGB)
-	if !n.cpuOnly() {
-		n.MemoryGB = max(n.MemoryGB, j.Spec.Needs.MemoryGB)
-	}
-	copy.Spec.Needs = n
-	batch := *j.Batch
-	batch.Seconds = j.Spec.Workload.Units * float64(batch.Concurrency) / p.Rate
-	copy.Batch = &batch
-	return &copy
-}
-
-func (q *Queue) usableCurve(p WorkObservation, key ObservationKey) bool {
-	return p.Key == key && p.Samples > 0 && !p.Forbidden && p.StaleReason == "" && validRate(p.Rate) && !q.clock.Now().Before(p.RecordedAt)
-}
-
-// Keep exact occupancy for OOM invalidation, without treating a whole wave as
-// a serial timing sample. Accepted wave throughput refinement remains deferred.
-func (q *Queue) waveObservationKey(j *Job) (*ObservationKey, string) {
-	owner := q.s.Machines[j.Machine]
-	if owner != nil && owner.Session == j.Session && !owner.Gone && !q.unreported[owner.ID] {
-		for _, m := range q.machineTargets(owner) {
-			if j.Spec.Needs.cpuOnly() && m.GPU != "cpu" || !j.Spec.Needs.cpuOnly() && !batchOnTarget(j, m) {
-				continue
-			}
-			if e := qualifiedExtension(j, m); e != nil {
-				if key, _ := curveKey(*e, m, j.Spec.workType()); key != nil {
-					key.Concurrency = j.Batch.Concurrency
-					return key, "declared wave; throughput refinement disabled"
-				}
-			}
-		}
-	}
-	return nil, "declared wave; component evidence unavailable"
-}
-
-func (q *Queue) fanOutComponents(j *Job, inventories ...[]*Machine) ([]batchComponent, map[string]*Job) {
-	var components []batchComponent
-	candidates := map[string]*Job{}
-	if q.preemptionReleasesPending(j) {
-		return nil, candidates
-	}
-	var machines []*Machine
-	if len(inventories) > 0 {
-		machines = inventories[0]
-	} else {
-		machines = q.plannerMachines()
-	}
-	for _, m := range machines {
-		if !q.preemptionPlacementAllows(j, m) || !q.workerIdle(m, j) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
-			continue
-		}
-		for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
-			q.applyLearnedNeeds(candidate)
-			if q.variantParityReason(candidate, m) != "" || q.capReasonFor(candidate, m) != "" || !fitsResources(candidate, m, m.FreeMemoryGB) {
-				continue
-			}
-			e := qualifiedExtension(candidate, m)
-			if e == nil {
-				continue
-			}
-			v := e.variant(machineTarget(m))
-			if v == nil {
-				continue
-			}
-			sweep, ok := v.Sweeps[j.Spec.workType()]
-			if !ok || len(sweep.Run) == 0 || sweep.ServerDigest != "" {
-				continue
-			}
-			key, _ := curveKey(*e, m, j.Spec.workType())
-			if key == nil || key.Reference.InputShape != j.Spec.Workload.InputShape {
-				continue
-			}
-			transfer, known := inputTransferSeconds(candidate, m)
-			if !known {
-				continue
-			}
-			component := batchComponent{id: targetKey(m), host: hostID(m), ready: environmentSeconds(candidate, m) + transfer, cpuBudget: float64(m.FreeCPUCores), hostBudget: m.FreeHostMemoryGB}
-			for _, count := range sweep.Counts {
-				if count > j.Spec.FanOut.MaxConcurrency {
-					continue
-				}
-				k := *key
-				k.Concurrency = count
-				p := q.s.WorkObservations[identityHash(k)]
-				if !q.usableCurve(p, k) {
-					continue
-				}
-				copy := *candidate
-				copy.Spec.Needs = scaledBatchNeeds(copy.Spec.Needs, p, count)
-				if !fitsResources(&copy, m, m.FreeMemoryGB) || q.capReasonFor(&copy, m) != "" {
-					continue
-				}
-				component.points = append(component.points, batchPoint{count: count, rate: p.Rate, cpu: float64(copy.Spec.Needs.CPUCores), host: hostNeed(m, copy.Spec.Needs.MemoryGB, copy.Spec.Needs.HostMemoryGB)})
-			}
-			if len(component.points) > 0 {
-				components = append(components, component)
-				candidates[component.id] = candidate
-				break
-			}
-		}
-	}
-	return components, candidates
-}
-
 func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	return q.fanOutCandidateWithResources(j, m, nil)
 }
@@ -352,34 +194,8 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
-	components, candidates := q.fanOutComponents(j, inventories...)
-	remaining := len(j.Spec.FanOut.Pieces) - j.FanOut.Next
-	plan := planBatch(components, remaining, j.Spec.Workload.Units)
-	for _, a := range plan {
-		if a.component != targetKey(m) {
-			continue
-		}
-		copy := *candidates[a.component]
-		e := qualifiedExtension(&copy, m)
-		if e == nil {
-			continue
-		}
-		key, _ := curveKey(*e, m, j.Spec.workType())
-		if key == nil {
-			continue
-		}
-		key.Concurrency = a.count
-		copy.Spec.Needs = scaledBatchNeeds(copy.Spec.Needs, q.s.WorkObservations[identityHash(key)], a.count)
-		copy.Spec.FanOut = j.Spec.FanOut
-		copy.FanOut = j.FanOut
-		copy.Batch = &BatchWork{Parent: j.ID, Pieces: slices.Clone(j.Spec.FanOut.Pieces[j.FanOut.Next : j.FanOut.Next+a.count]), Concurrency: a.count, Run: true, Seconds: float64(a.count) * j.Spec.Workload.Units / q.s.WorkObservations[identityHash(key)].Rate, ShareXPU: j.Spec.FanOut.ShareXPU}
-		return &copy
-	}
-	if len(plan) > 0 {
-		return nil
-	}
-	// Unknown/ineligible curves grant no slots. Reuse ordinary serial eligibility
-	// and release planning, rather than waiting for a measured but busy machine.
+	// Each piece is an ordinary serial job: reuse ordinary eligibility and
+	// release planning.
 	for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
 		candidate.Spec.Args = append(slices.Clone(candidate.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
 		q.applyLearnedNeeds(candidate)
@@ -395,7 +211,7 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 }
 
 // Called inside assignment's existing transaction, after the current planner
-// has admitted this wave. No forecast is persisted as a machine reservation.
+// has admitted this piece.
 func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	parent := q.touchJob(selected.ID)
 	copy := cloneJob(selected)
@@ -404,14 +220,8 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	copy.Spec.AuthoringOrigin = OriginFanOutChild
 	copy.FanOut = nil
 	copy.Spec.Outputs = map[string]string{}
-	for _, piece := range copy.Batch.Pieces {
-		for name, prefix := range parent.Spec.Outputs {
-			local := name
-			if copy.Batch.Run {
-				local = filepath.Join(piece.Key, name)
-			}
-			copy.Spec.Outputs[local] = prefix
-		}
+	for name, prefix := range parent.Spec.Outputs {
+		copy.Spec.Outputs[name] = prefix
 	}
 	if q.simulation {
 		q.simID++
@@ -484,14 +294,10 @@ func (q *Queue) maintainFanOutJob(parent *Job) {
 			q.touchJob(parent.ID)
 			r := PieceResult{Execution: Execution{ID: child.ID, Attempt: child.Attempt}, OutputRefs: FileManifest{}, OutputFiles: map[string]string{}}
 			for name := range parent.Spec.Outputs {
-				local := name
-				if child.Batch.Run {
-					local = filepath.Join(piece.Key, name)
-				}
-				if ref, ok := child.OutputRefs[local]; ok {
+				if ref, ok := child.OutputRefs[name]; ok {
 					r.OutputRefs[name] = ref
 				}
-				if path, ok := child.OutputFiles[local]; ok {
+				if path, ok := child.OutputFiles[name]; ok {
 					r.OutputFiles[name] = path
 				}
 			}
@@ -541,9 +347,4 @@ func plainPieceFailure(keys []string, total int) string {
 		reason += fmt.Sprintf(" and %d more", len(keys)-len(shown))
 	}
 	return reason
-}
-
-// A public snapshot can omit nil collections without losing keyed membership.
-func batchManifest(j *Job) map[string]any {
-	return map[string]any{"parent": j.Batch.Parent, "pieces": j.Batch.Pieces, "concurrency": j.Batch.Concurrency, "args": j.Spec.Args, "inputs": slices.Sorted(maps.Keys(jobInputPaths(j))), "files": slices.Sorted(maps.Keys(jobInputFiles(j))), "outputs": slices.Sorted(maps.Keys(j.Spec.Outputs))}
 }

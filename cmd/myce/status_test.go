@@ -68,7 +68,7 @@ func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"host example: degraded", "hypha example capability profile v0:", "benchmark complete", "cpu sha256 123.00 bytes/s", "unified memory", "NVIDIA (CUDA): 16.0 GiB", "hypha example:", "hypha on battery; waiting for external power", "sample@1 · kind of work sample · qualified", "running sample", "hypha=example", "waiting sample", "waiting for a hypha to take this job"} {
+	for _, want := range []string{"host example: degraded", "hypha example capability profile v0:", "unified memory", "NVIDIA (CUDA): 16.0 GiB", "hypha example:", "hypha on battery; waiting for external power", "sample@1 · kind of work sample · qualified", "running sample", "hypha=example", "waiting sample", "waiting for a hypha to take this job"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %q", want)
 		}

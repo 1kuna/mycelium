@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -58,11 +59,10 @@ type MemoryEscalationPrior struct {
 	RecordedAt time.Time          `json:"recorded_at"`
 }
 
-// One bounded aggregate per comparable key, persisted as its own SQLite row.
+// One record per kind of work (MY-49): its last accepted duration and, through
+// memory learning, its accepted peak. Persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
-	Calibration         *ServiceCalibration    `json:"service_calibration,omitempty"`
-	Repeated            *RepeatedWorkTiming    `json:"repeated,omitempty"`
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
 	MemoryRange         *MemoryPeakRange       `json:"memory_range,omitempty"`
@@ -70,68 +70,57 @@ type WorkObservation struct {
 	MemoryConfiguration string                 `json:"memory_configuration,omitempty"`
 	// Family and accepted memory sample count since the last invalidation
 	// (#585); zero on rows written before them.
-	MemoryFamily              string             `json:"memory_family,omitempty"`
-	MemorySamples             int                `json:"memory_samples,omitempty"`
-	MemoryRecordedAt          time.Time          `json:"memory_recorded_at,omitempty"`
-	MemoryPeak                *AttemptMemoryPeak `json:"memory_peak,omitempty"`
-	SampleID                  string             `json:"sample_id,omitempty"`
-	Rate                      float64            `json:"rate,omitempty"`
-	LatencySeconds            float64            `json:"latency_seconds,omitempty"`
-	HostMemoryGB              float64            `json:"host_memory_gb,omitempty"`
-	DeviceMemoryGB            float64            `json:"device_memory_gb,omitempty"`
-	IncrementalHostMemoryGB   float64            `json:"incremental_host_memory_gb,omitempty"`
-	IncrementalDeviceMemoryGB float64            `json:"incremental_device_memory_gb,omitempty"`
-	Forbidden                 bool               `json:"forbidden,omitempty"`
-	StaleReason               string             `json:"stale_reason,omitempty"`
-	Source                    string             `json:"source,omitempty"`
-	Key                       ObservationKey     `json:"key"`
-	Samples                   int                `json:"samples"`
-	Units                     float64            `json:"units"`
-	Seconds                   float64            `json:"seconds"`
-	RecordedAt                time.Time          `json:"recorded_at"`
-	Job                       string             `json:"job"`
-	Machine                   string             `json:"machine"`
-	Session                   string             `json:"session"`
-	Attempt                   int                `json:"attempt"`
+	MemoryFamily     string             `json:"memory_family,omitempty"`
+	MemorySamples    int                `json:"memory_samples,omitempty"`
+	MemoryRecordedAt time.Time          `json:"memory_recorded_at,omitempty"`
+	MemoryPeak       *AttemptMemoryPeak `json:"memory_peak,omitempty"`
+	SampleID         string             `json:"sample_id,omitempty"`
+	// LastSeconds is the last accepted attempt's duration, Started to completion.
+	LastSeconds float64        `json:"last_seconds,omitempty"`
+	Forbidden   bool           `json:"forbidden,omitempty"`
+	StaleReason string         `json:"stale_reason,omitempty"`
+	Source      string         `json:"source,omitempty"`
+	Key         ObservationKey `json:"key"`
+	Samples     int            `json:"samples"`
+	RecordedAt  time.Time      `json:"recorded_at"`
+	Job         string         `json:"job"`
+	Machine     string         `json:"machine"`
+	Session     string         `json:"session"`
+	Attempt     int            `json:"attempt"`
 }
 
 type WorkTiming struct {
-	ServiceEstimate   *ServiceEstimate `json:"service_estimate,omitempty"`
-	RepeatedKey       *ObservationKey  `json:"repeated_key,omitempty"`
-	Comparability     string           `json:"comparability,omitempty"`
-	Uncertainty       string           `json:"uncertainty,omitempty"`
-	HistoryReason     string           `json:"history_reason,omitempty"`
-	HistoryRecordedAt *time.Time       `json:"history_recorded_at,omitempty"`
-	HistorySource     string           `json:"history_source,omitempty"`
+	HistoryReason   string          `json:"history_reason,omitempty"`
+	PlacementReason string          `json:"placement_reason,omitempty"`
+	Execution       Execution       `json:"execution"`
+	Machine         string          `json:"machine"`
+	Session         string          `json:"session"`
+	Key             *ObservationKey `json:"key,omitempty"`
+	// LastAcceptedSeconds is this kind of work's last accepted duration when
+	// the attempt began. It is history, not a forecast or deadline.
+	LastAcceptedSeconds *float64 `json:"last_accepted_seconds,omitempty"`
+	// Deprecated: mirrors LastAcceptedSeconds for the adjacent release (MY-42).
+	PredictedSeconds *float64 `json:"predicted_seconds,omitempty"`
+	ActualSeconds    *float64 `json:"actual_seconds,omitempty"`
+	Reason           string   `json:"reason,omitempty"`
+}
 
-	PlacementReason  string          `json:"placement_reason,omitempty"`
-	Execution        Execution       `json:"execution"`
-	Machine          string          `json:"machine"`
-	Session          string          `json:"session"`
-	Key              *ObservationKey `json:"key,omitempty"`
-	PredictedSeconds *float64        `json:"predicted_seconds,omitempty"`
-	ActualSeconds    *float64        `json:"actual_seconds,omitempty"`
-	Samples          int             `json:"samples"`
-	Reason           string          `json:"reason,omitempty"`
+func validRate(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+func plainCommandWork(s Spec) bool {
+	return !s.extensionJob() && s.Workload == nil && len(s.Run.Command) > 0
 }
 
 func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if j.Batch != nil {
-		if j.Batch.Run {
-			return q.waveObservationKey(j)
-		}
 		if j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1 {
-			return nil, "declared wave; serial occupancy is not comparable"
+			return nil, "declared wave; occupancy is not comparable"
 		}
-		// A serial child runs the ordinary recipe with its piece arguments.
-		// Keep its identity for memory, without asserting comparable occupancy.
+		// A piece runs the ordinary recipe with its piece arguments: that is
+		// its kind of work, for memory and duration alike.
 		serial := *j
 		serial.Batch = nil
-		key, reason := q.workObservationKey(&serial)
-		if key == nil {
-			return nil, reason
-		}
-		return key, "declared wave; serial occupancy is not comparable"
+		return q.workObservationKey(&serial)
 	}
 	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !plainCommandWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
@@ -246,11 +235,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		Args    []string
 		Program *Program
 	}{args, program})})
-	serverDigest := ""
-	if v := e.variant(machineTarget(m)); v != nil {
-		serverDigest = v.Sweeps[work].ServerDigest
-	}
-	return &ObservationKey{ServerDigest: serverDigest, Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
+	return &ObservationKey{Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
 		Host: hostID(m), Component: component, Hardware: hardware, Fingerprint: m.ExtensionFingerprint,
 		Environment: extensionEnvironmentIdentity(e, m), Allowance: observationAllowance(m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
 }
@@ -259,7 +244,6 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	defer q.calibrateWorkTiming(j)
 	if j.Spec.Workload == nil && !plainCommandWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
 	}
@@ -268,59 +252,38 @@ func (q *Queue) beginWorkTiming(j *Job) {
 		placement = j.Timing.PlacementReason
 	}
 	key, reason := q.workObservationKey(j)
-	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
-	j.Timing.PlacementReason = placement
-	if plainCommandWork(j.Spec) {
-		j.Timing.RepeatedKey, j.Timing.Reason = q.repeatedObservationKey(j)
-		q.beginRepeatedTiming(j)
+	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason, PlacementReason: placement}
+	if key == nil || reason != "" || j.Spec.ExtensionCheck != nil {
+		return
+	}
+	if seconds, ok := q.lastAcceptedSeconds(key); ok {
+		last, mirror := seconds, seconds
+		j.Timing.LastAcceptedSeconds, j.Timing.PredictedSeconds = &last, &mirror
 		return
 	}
 	j.Timing.HistoryReason = "no accepted matching measurement"
-	if key != nil {
-		if old, ok := q.s.WorkObservations[identityHash(key)]; ok {
-			switch {
-			case old.Forbidden:
-				j.Timing.HistoryReason = "measurement forbidden after resource failure"
-			case old.StaleReason != "":
-				j.Timing.HistoryReason = "measurement invalidated"
-			default:
-				j.Timing.HistoryReason = "matching measurement has no qualified throughput"
-			}
-		}
-	}
-	if key != nil && reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
-		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && validRate(old.Units) && validRate(old.Seconds) {
-			rate := old.Rate
-			if !validRate(rate) {
-				rate = old.Units / old.Seconds
-			}
-			predicted := j.Spec.Workload.Units / rate
-			if validRate(predicted) {
-				j.Timing.HistoryReason = ""
-				j.Timing.PredictedSeconds, j.Timing.Samples = &predicted, old.Samples
-				j.Timing.HistoryRecordedAt, j.Timing.HistorySource = &old.RecordedAt, "matching measured work curve"
-			}
+	if old, ok := q.s.WorkObservations[identityHash(key)]; ok {
+		switch {
+		case old.Forbidden:
+			j.Timing.HistoryReason = "measurement forbidden after resource failure"
+		case old.StaleReason != "":
+			j.Timing.HistoryReason = "measurement invalidated"
 		}
 	}
 }
 
-// Only called on mutation paths. Preserve a mixed/unknown interval even when
-// the competing work finishes before this attempt. Reuse exact host custody.
-func (q *Queue) invalidateWorkTimings() {
-	obligations := map[string][]HostObligation{}
-	for _, j := range q.liveJobs() {
-		if j.Timing == nil || j.Timing.Key == nil || j.Timing.Reason != "" || j.State != "running" {
-			continue
-		}
-		host := j.Timing.Key.Host
-		if _, ok := obligations[host]; !ok {
-			obligations[host] = q.hostObligations(host)
-		}
-		q.validateWorkTiming(j, obligations[host])
+// lastAcceptedSeconds is the kind of work's last accepted duration, unless its
+// record is invalidated or forbidden after a resource failure.
+func (q *Queue) lastAcceptedSeconds(key *ObservationKey) (float64, bool) {
+	p, ok := q.s.WorkObservations[identityHash(key)]
+	if !ok || p.Key != *key || p.Forbidden || p.StaleReason != "" || !validRate(p.LastSeconds) {
+		return 0, false
 	}
+	return p.LastSeconds, true
 }
 
-func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
+// A changed attempt or identity cannot teach this key a duration.
+func (q *Queue) validateWorkTiming(j *Job) {
 	t := j.Timing
 	if t == nil || t.Key == nil || t.Reason != "" {
 		return
@@ -334,100 +297,64 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 	if reason != "" || key == nil || *key != *t.Key {
 		q.touchJob(j.ID)
 		t.Reason = "reference, qualification or configuration changed"
-		return
-	}
-	if t.RepeatedKey != nil {
-		current, reason := q.repeatedObservationKey(j)
-		if reason != "" || current == nil || *current != *t.RepeatedKey {
-			q.touchJob(j.ID)
-			t.Reason = "exact command/source/input configuration changed"
-			return
-		}
-		if m := q.s.Machines[j.Machine]; q.s.HostMaintenance[hostID(m)].SharedHost != nil {
-			if reason := q.hostPressureReason(m); reason != "" {
-				q.touchJob(j.ID)
-				t.Reason = "host pressure unknown or contended"
-				return
-			}
-		}
-	}
-	for _, p := range obligations {
-		r := p.Result
-		if p.Launch != nil || p.Engine != nil || p.Call != nil || p.Preparation || r.ID != j.ID || r.Attempt != j.Attempt || r.Machine != j.Machine || r.Session != j.Session {
-			q.touchJob(j.ID)
-			t.Reason = "mixed or unknown host occupancy"
-			return
-		}
 	}
 }
 
+// recordWorkObservation records an accepted attempt's duration and hands its
+// eligible memory sample to recordWorkMemory. Accepted whole extension workload
+// runs refresh their record's provenance and identity, as they always have, and so
+// does a memory sample on a new or invalidated record; any other work adds
+// only its duration and leaves memory evidence untouched.
 func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySample) {
 	t := j.Timing
 	if t == nil || t.Key == nil || j.StartedAt == nil || r.ReleasePending || j.State != "running" || r.Interrupted || r.OutOfMemory || r.Forced {
 		return
 	}
-	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
-	if t.RepeatedKey != nil && t.Reason == "" {
-		q.touchJob(j.ID)
-		t.Reason = repeatedContentionReason(r)
-		if t.Reason == "" {
-			q.recordRepeatedObservation(j, r)
-		}
+	q.validateWorkTiming(j)
+	seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
+	// Whole extension workload runs refresh provenance; pieces never have.
+	workload := t.Reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil && j.Batch == nil
+	if workload && !validRate(seconds) {
+		return // An unmeasurable workload run teaches nothing, memory included.
 	}
-	throughput := t.Reason == "" && !plainCommandWork(j.Spec)
+	// A qualification check learns memory, never a duration (#618).
+	duration := t.Reason == "" && j.Spec.ExtensionCheck == nil && validRate(seconds)
 	memory := sample != nil && sample.work
-	if !throughput && !memory {
+	if !duration && !memory {
 		return
+	}
+	if duration {
+		q.touchJob(j.ID)
+		t.ActualSeconds = &seconds
 	}
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
-	original := old
-	if q.s.WorkObservations == nil {
-		q.s.WorkObservations = map[string]WorkObservation{}
-	}
-	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Source: "accepted work",
-		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
-	if old.StaleReason != "" {
-		old.Rate, old.LatencySeconds = 0, 0
-	}
-	if throughput && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
-		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
-		point.Units, point.Seconds = old.Units+j.Spec.Workload.Units, old.Seconds+seconds
-		if !validRate(seconds) || !validRate(point.Units) || !validRate(point.Seconds) {
-			return
+	point := old
+	if !workload && !memory {
+		if !exists {
+			point = WorkObservation{Key: *t.Key, Source: "accepted work", RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
 		}
-		t.ActualSeconds = &seconds
-		point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
-		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
-	} else if !memory {
+		point.LastSeconds = seconds
+		q.putWorkObservation(key, point)
+		q.recordCurveLearning(j, old, exists, point)
 		return
-	} else if exists && old.StaleReason == "" {
-		// Memory-only samples leave the existing throughput and provenance
-		// untouched, including the clock that ages the throughput out.
-		point = old
-		point.Samples++
 	}
-	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
-	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
-	point.Forbidden = old.Forbidden
-	// A fresh raw sample cannot rehabilitate invalidated paired errors.
-	point.Calibration, _ = q.calibrationPrior(old)
-	if throughput {
-		q.recordServiceCalibration(j, r, original, &point)
+	if workload || !exists || old.StaleReason != "" {
+		if old.StaleReason != "" {
+			point.LastSeconds = 0
+		}
+		point.Key, point.StaleReason, point.Source = *t.Key, "", "accepted work"
+		point.RecordedAt, point.Job, point.Machine, point.Session, point.Attempt = q.clock.Now(), j.ID, r.Machine, r.Session, r.Attempt
 	}
-	point.SampleID = old.SampleID
-	point.MemoryEscalation = old.MemoryEscalation
-	point.MemoryPeak = old.MemoryPeak
-	point.MemoryRange = old.MemoryRange
-	point.GPUHostRange = old.GPUHostRange
-	point.MemoryRecordedAt = old.MemoryRecordedAt
-	point.MemoryConfiguration, point.MemoryLayout = old.MemoryConfiguration, old.MemoryLayout
-	point.MemoryFamily, point.MemorySamples = old.MemoryFamily, old.MemorySamples
+	point.Samples = old.Samples + 1
+	if duration {
+		point.LastSeconds = seconds
+	}
 	if memory {
 		q.recordWorkMemory(*sample, old, &point)
 	}
 	q.putWorkObservation(key, point)
-	q.recordCurveLearning(j, original, exists, point)
+	q.recordCurveLearning(j, old, exists, point)
 }
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.
@@ -441,33 +368,24 @@ func JobTiming(j *Job) string {
 	}
 	t := j.Timing
 	if t == nil {
-		return "prediction unknown; actual unknown" + envelope + runtimeText(j)
+		return "last accepted duration unknown; actual unknown" + envelope + runtimeText(j)
 	}
-	prediction, actual := "unknown", "unknown"
-	if t.PredictedSeconds != nil {
-		prediction = fmt.Sprintf("%.2fs (%d samples)", *t.PredictedSeconds, t.Samples)
+	last, actual := "unknown", "unknown"
+	if t.LastAcceptedSeconds != nil {
+		last = fmt.Sprintf("%.2fs", *t.LastAcceptedSeconds)
 	}
 	if t.ActualSeconds != nil {
 		actual = fmt.Sprintf("%.2fs", *t.ActualSeconds)
 	}
-	text := "prediction " + prediction + "; actual " + actual
+	text := "last accepted duration " + last + "; actual " + actual
 	if t.Reason != "" {
 		text += "; " + t.Reason
 	}
-	if t.Comparability != "" {
-		text += "; " + t.Comparability
-	}
-	if t.Uncertainty != "" {
-		text += "; " + t.Uncertainty
-	}
-	if t.PredictedSeconds == nil && t.HistoryReason != "" {
+	if t.LastAcceptedSeconds == nil && t.HistoryReason != "" {
 		text += "; " + t.HistoryReason
 	}
 	if t.PlacementReason != "" {
 		text += "; " + t.PlacementReason
-	}
-	if t.ServiceEstimate != nil {
-		text += "; " + t.ServiceEstimate.text()
 	}
 	return text + envelope + runtimeText(j)
 }

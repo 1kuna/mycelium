@@ -352,7 +352,7 @@ func TestEvidenceRetentionLearntKeyAndUniqueWaitRemain(t *testing.T) {
 			Efficiency:    &JobEfficiency{WaitSeconds: map[string]float64{"memory_reservation": 42}},
 			MemoryAttempts: []AttemptMemoryFacts{{Attempt: 1, Machine: "synthetic", Session: "session", LearningReason: "eligible",
 				MemoryEnvelope: &JobMemoryEnvelope{Basis: "exploratory", HostGB: 12}, MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}}},
-			Timing: &WorkTiming{Execution: Execution{ID: "decision", Attempt: 1}, PredictedSeconds: &predicted, ActualSeconds: &actual}}
+			Timing: &WorkTiming{Execution: Execution{ID: "decision", Attempt: 1}, LastAcceptedSeconds: &predicted, ActualSeconds: &actual}}
 		for range 100 {
 			job.AttemptHistory = append(job.AttemptHistory, AttemptOutcome{Attempt: 1, Machine: "synthetic", Session: "session", Reason: "same diagnosis"})
 		}

@@ -77,10 +77,6 @@ type Worker struct {
 	// Synthetic harness seam; nil keeps physical native GPU resolution.
 	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
 
-	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
-	CurveMaxConcurrency     int
-	OnboardingBenchmark     bool
-	Benchmark               func(context.Context, BenchmarkConfig, *CapabilityProfile) error
 	DailyUse                bool
 	Laptop                  bool
 	Desktop                 bool
@@ -1478,17 +1474,6 @@ func (w Worker) Run(stop context.Context) error {
 		w.availability.run(availabilityCtx, w.OwnerSignals, availabilityWake)
 	}()
 	defer func() { availabilityCancel(); <-availabilityDone }()
-	// Benchmark before any model load or admission, and never over a recovered job.
-	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
-	if w.OnboardingBenchmark && w.Benchmark != nil && (w.Machine.GPU != "fake" || w.CurveMaxConcurrency > 0) && len(stores) == 0 {
-		if err = w.runBenchmark(stop, s); err != nil {
-			return err
-		}
-	} else if w.OnboardingBenchmark {
-		if err = saveWorkerJSON(s.dir, "capability-profile.json", w.Machine.CapabilityProfile); err != nil {
-			return err
-		}
-	}
 	// All worker copies, including the model runtime and launch closures, must
 	// capture the same live health owner before any model plan can be accepted.
 	health, err := startWorkerHealth(availabilityCtx, w, s)

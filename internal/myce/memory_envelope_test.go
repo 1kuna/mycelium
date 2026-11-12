@@ -245,9 +245,6 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
-		if timing := q.s.Jobs[j.ID].Timing; timing != nil && (timing.PredictedSeconds != nil || timing.ActualSeconds != nil) {
-			t.Fatalf("plain profile learned timing: %+v", timing)
-		}
 	}
 	setSource("commit one")
 	first := start(physicalMemoryProbe, 0)
@@ -282,8 +279,8 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	// Similar local work uses its accepted peak and measured variability.
 	complete(start("exploratory first run (bounded: accepted family peaks + measured uncertainty)", 4+minimumHostMemoryGB), 1)
 	for _, point := range q.s.WorkObservations {
-		if point.StaleReason != "" || point.Rate != 0 || point.Seconds != 0 || point.Units != 0 || point.LatencySeconds != 0 {
-			t.Fatalf("profile memory observation contains stale/timing data: %+v", point)
+		if point.StaleReason != "" {
+			t.Fatalf("profile memory observation is stale: %+v", point)
 		}
 	}
 	s.Needs.Memory, s.Needs.HostMemoryGB = "", 3
@@ -1236,8 +1233,8 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Errorf("successful constrained sample changed accepted envelope: %+v", next.MemoryEnvelope)
 	}
 	for _, point := range q.s.WorkObservations {
-		if point.MemoryRecordedAt.IsZero() || point.Forbidden || !validRate(point.Rate) || *point.MemoryPeak.CgroupGB != 12 {
-			t.Errorf("rejected sample must preserve accepted memory and throughput: %+v", point)
+		if point.MemoryRecordedAt.IsZero() || point.Forbidden || *point.MemoryPeak.CgroupGB != 12 {
+			t.Errorf("rejected sample must preserve accepted memory: %+v", point)
 		}
 	}
 	clock.Advance(time.Second)

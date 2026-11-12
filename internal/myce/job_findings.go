@@ -211,9 +211,6 @@ func memoryExhaustedFinding(j *Job, raw string) *JobFinding {
 	case raw == "out of memory; previous capability unavailable":
 		return &JobFinding{"out_of_memory", findingOwnerJob,
 			"Your command ran out of memory, and no host with more memory is available to retry it.", reduce}
-	case raw == "declared wave exceeded its measured resource envelope":
-		return &JobFinding{"out_of_memory", findingOwnerJob,
-			"A member of this batch wave ran out of memory inside the wave's fixed measured envelope, so Mycelium could not retry it larger.", "resubmit the wave with a larger memory declaration or fewer members per host."}
 	case strings.HasPrefix(raw, "needs more memory than any eligible host allows"):
 		return &JobFinding{"memory_exceeds_hosts", findingOwnerJob,
 			"Your command ran out of memory, and the memory it needs " + strings.TrimPrefix(raw, "needs more memory than any eligible host allows ") + " exceeds every host it may run on.",

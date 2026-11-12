@@ -82,14 +82,9 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 					continue
 				}
 			}
-			timing := "ETA unknown: no comparable duration observation"
-			if r.Timing != nil && r.Timing.Reason == "" && r.Timing.PredictedSeconds != nil && r.StartedAt != nil {
-				remaining := *r.Timing.PredictedSeconds - q.clock.Now().Sub(*r.StartedAt).Seconds()
-				if remaining > 0 {
-					timing = fmt.Sprintf("observed duration estimate: %.0fs remaining; not assured", remaining)
-				} else {
-					timing = "ETA unknown: observed duration estimate overrun"
-				}
+			timing := "last accepted duration unknown"
+			if r.Timing != nil && r.Timing.Reason == "" && r.Timing.LastAcceptedSeconds != nil {
+				timing = fmt.Sprintf("last accepted duration %.0fs; not assured", *r.Timing.LastAcceptedSeconds)
 			}
 			d.Blockers = append(d.Blockers, fmt.Sprintf("non-resumable command %s on %s (tier %s); deadline demand waits for release; %s", r.ID, m.ID, q.priorityMatch(r.Spec).Tier, timing))
 		}

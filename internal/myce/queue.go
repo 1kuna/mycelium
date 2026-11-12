@@ -427,12 +427,6 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.migrateProjectParity()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
-		for _, j := range q.liveJobs() {
-			if j.Timing != nil && !terminal(j.State) && j.Timing.Reason != "queue restarted; occupancy unknown" {
-				q.touchJob(j.ID)
-				j.Timing.Reason = "queue restarted; occupancy unknown"
-			}
-		}
 		return nil
 	}); err != nil {
 		db.Close()
@@ -743,7 +737,6 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	if err == nil {
 		q.detectHealth()
-		q.invalidateWorkTimings()
 		q.invalidateWorkCurves()
 	}
 	if err == nil {
@@ -1764,7 +1757,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.hostMemorySamples[m.ID] = updateHostMemorySamples(reports, memoryReceivedAt, q.hostMemorySamples[m.ID])
 		q.retainHostMemoryCharges(m.ID, q.clock.Now())
 		q.refreshHostMemory()
-		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
 		q.checkinCheckpointExpiry(c, &m, &reply)
 		q.s.LastWorkerContact = m.LastSeen
@@ -1821,21 +1813,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}
-			if m.BenchmarkPending || c.BenchmarkDone != "" {
-				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) && !q.benchmarkDeviceAdmissionBlocked(&m) {
-					l := q.issuePreparation(&m, "benchmark", "onboarding")
-					reply.BenchmarkPlan = &l
-					copy := cloneMachine(&m)
-					reply.BenchmarkMachine = &copy
-					for _, point := range q.s.WorkObservations {
-						if point.Key.Host == hostID(&m) {
-							reply.BenchmarkCurves = append(reply.BenchmarkCurves, point)
-						}
-					}
-				}
-				q.cancelUnofferedPreparations(&m, reply)
-				return
-			}
 			for _, l := range q.s.PreparationPlans {
 				if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
 					boundStop(&reply.PreparationStopAt, *l.StopAt)
@@ -1860,10 +1837,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}()
 		q.beginAdmissionCheckin(&m)
 		reply.Leave = m.Leaving
-		if m.BenchmarkPending || c.BenchmarkDone != "" {
-			q.skipAdmissionSelection(&m, predicateBenchmark)
-			return nil
-		}
 		if m.Leaving {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && j.Spec.Resumable {
@@ -2330,9 +2303,6 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
-	} else if oomFailure && j.Batch != nil && j.Batch.Run {
-		// Fixed measured occupancy cannot be retried after OOM forbids it.
-		j.State, j.Reason = "failed", "declared wave exceeded its measured resource envelope"
 	} else if oomFailure && j.Spec.extensionJob() {
 		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {

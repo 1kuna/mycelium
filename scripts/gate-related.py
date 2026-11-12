@@ -191,6 +191,9 @@ def select(base):
             # surviving symbol consumers above, and still reject unmapped live code.
             if not path.exists():
                 continue
+            # A benchmark-only test file has no tests to run; vet compiles it.
+            if name.endswith('_test.go') and not re.search(r'^func Test\w+\(', path.read_text(), re.M):
+                continue
             raise ValueError(f'no related tests for {name}')
         # The reflected Job schema includes nested types across this package.
         # Textual references miss field-only edits and indirect definitions (#413).

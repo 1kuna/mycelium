@@ -856,20 +856,20 @@ func efficiencyPredictions(j *Job) []PredictionError {
 			delta := reserved - peak
 			row.ReservedDeviceGB, row.AcceptedDevicePeakGB, row.DeviceErrorGB = &reserved, &peak, &delta
 		}
-		if t := j.Timing; t != nil && t.Execution.Attempt == f.Attempt && t.PredictedSeconds != nil && t.ActualSeconds != nil {
-			delta := *t.PredictedSeconds - *t.ActualSeconds
-			row.PredictedSeconds, row.ActualSeconds, row.DurationErrorSeconds = t.PredictedSeconds, t.ActualSeconds, &delta
+		if t := j.Timing; t != nil && t.Execution.Attempt == f.Attempt && t.LastAcceptedSeconds != nil && t.ActualSeconds != nil {
+			delta := *t.LastAcceptedSeconds - *t.ActualSeconds
+			row.PredictedSeconds, row.ActualSeconds, row.DurationErrorSeconds = t.LastAcceptedSeconds, t.ActualSeconds, &delta
 		}
 		rows = append(rows, row)
 	}
 	// Timing can exist without memory telemetry (including older workers).
-	if t := j.Timing; t != nil && t.PredictedSeconds != nil && t.ActualSeconds != nil && !slices.ContainsFunc(rows, func(r PredictionError) bool { return r.Attempt == t.Execution.Attempt }) {
-		delta := *t.PredictedSeconds - *t.ActualSeconds
+	if t := j.Timing; t != nil && t.LastAcceptedSeconds != nil && t.ActualSeconds != nil && !slices.ContainsFunc(rows, func(r PredictionError) bool { return r.Attempt == t.Execution.Attempt }) {
+		delta := *t.LastAcceptedSeconds - *t.ActualSeconds
 		work := profileMemoryIdentity(j)
 		if j.Efficiency != nil {
 			work = j.Efficiency.Work
 		}
-		rows = append(rows, PredictionError{JobID: j.ID, Work: work, Attempt: t.Execution.Attempt, Basis: efficiencyBasis(j), PredictedSeconds: t.PredictedSeconds, ActualSeconds: t.ActualSeconds, DurationErrorSeconds: &delta})
+		rows = append(rows, PredictionError{JobID: j.ID, Work: work, Attempt: t.Execution.Attempt, Basis: efficiencyBasis(j), PredictedSeconds: t.LastAcceptedSeconds, ActualSeconds: t.ActualSeconds, DurationErrorSeconds: &delta})
 	}
 	return rows
 }

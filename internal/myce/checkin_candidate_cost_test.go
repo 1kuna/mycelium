@@ -83,7 +83,7 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 		if key == nil {
 			t.Fatal(why)
 		}
-		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: *key, MemoryFamily: memoryFamily(source), MemoryConfiguration: memoryConfiguration(provenance.Spec.Needs, provenance.Spec.Args, provenance.Spec.Program), MemoryLayout: "separate", MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}, MemorySamples: 2, Samples: 2, RecordedAt: clock.Now(), Rate: 10, Units: 10, Seconds: 1}
+		q.s.WorkObservations[fmt.Sprint(i)] = WorkObservation{Key: *key, MemoryFamily: memoryFamily(source), MemoryConfiguration: memoryConfiguration(provenance.Spec.Needs, provenance.Spec.Args, provenance.Spec.Program), MemoryLayout: "separate", MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &peak}, MemorySamples: 2, Samples: 2, RecordedAt: clock.Now(), LastSeconds: 1}
 	}
 	// Retained constrained attempts exercise same-OS diagnostic lower bounds.
 	for i := range 160 {

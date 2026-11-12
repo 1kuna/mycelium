@@ -164,7 +164,7 @@ conventional file from its project root.
 
 `run` and composed `execution` are alternatives. Existing resource, allowlist,
 I/O, diagnostic and fan-out contracts still apply. `checks.result` runs after the
-main command on each attempt or declared wave, before accepted output publication.
+main command on each attempt or piece, before accepted output publication.
 Omitting it requires command success and required-output verification. An argv is
 never evaluated as shell text unless the author explicitly chooses a shell.
 
@@ -433,8 +433,8 @@ environment and common profile input bytes. Per-submission `--input` files and
 arguments appended after `--` are excluded by default. Use `memory_class: per_item`
 in the profile to include both when items differ materially. The frozen source archive digest is excluded,
 so a new commit of the same suite can reuse its peak. Changing the command or
-base configuration starts a separate memory class. These observations learn memory
-only, without throughput or timing curves. Plain commands outside the profile
+base configuration starts a separate memory class. The same record keeps the
+kind of work's last accepted duration (MY-49). Plain commands outside the profile
 submission contract still require hints or explore on each run.
 
 Choose exactly one source:
@@ -990,8 +990,8 @@ With an authored `references` entry, a successful solo auto check can seed
 the memory envelope of later work with the same frozen variant, work type and
 input shape until that work has accepted peaks of its own, which then replace
 the seed. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
-Checks teach no throughput or timing data, and the peak stays usable for 30
-days from the check even after the point's throughput ages out. Failed or ceiling-constrained peaks
+Checks teach no duration, and the peak stays usable for 30 days from the check.
+Failed or ceiling-constrained peaks
 cannot seed an estimate. The variant's auto mode applies when the caller omits
 `needs.memory`; an explicit caller mode takes precedence. Numeric variants keep
 their existing reservations, and legacy extensions still require numeric floors.
@@ -1200,8 +1200,6 @@ frozen versions, absent baseline, setup/check failures, identity changes,
 routing both forms and waiting explanations. Then run the ordinary build, vet,
 race suite and dev end-to-end. Use isolated native hardware only when authorized.
 
-For optional timed native-reference work, see [Onboarding benchmark](development.md).
-
 ## Complete tiny example
 
 [http-stage](../examples/extensions/http-stage/) contains the unchanged
@@ -1399,15 +1397,15 @@ Standard `.mycelium/profiles/` roots are respected; convert Git profiles from
 their original project root. Other explicit profile paths already resolve from
 the invocation root. Runtime `--input` arguments remain caller-owned.
 
-Native checks become `checks.qualification`; their baselines, references and
-sweeps keep their existing acceptance criteria. Setup, assets, resumability,
+Native checks become `checks.qualification`; their baselines and references
+keep their existing acceptance criteria. Setup, assets, resumability,
 member caps/readiness and existing inline composed environments are preserved.
 Native source points to the original small extension directory relative to the
 invocation root, so sources need not move and existing commands keep working.
 The host's measured native source memory allowance applies. Output lists use the
 existing `filename: results` convention; omitted outputs remain omitted.
-Legacy `benchmark` has no equivalent and is refused instead of becoming an
-invented sweep.
+Reference `sweeps` and the legacy `benchmark` field are retired (MY-49); an
+extension or adapter declaring them is refused.
 
 Direct native entries require their existing `extension:NAME` baseline on every
 variant. Sources with only kind/program baselines are refused with guidance to

@@ -753,7 +753,7 @@ tiers until it starts, while the host's usable cards can still hold it. Docker, 
 card; unmeasured `memory: auto` first runs explore one card, and multi-card
 attempts do not feed per-card memory learning. Extension work needs every card
 qualified; no separate multi-card parity check exists yet. Using more cards for
-speed when one fits waits for measured work curves. Cross-machine gang execution
+speed when one fits is not planned (MY-49 removed work curves). Cross-machine gang execution
 remains deferred.
 
 ### Attempt fencing and containment
@@ -2133,6 +2133,8 @@ establish that a hard requirement is unjustified. See
 Mycelium learns from its own accepted attempts and uses those measurements to
 place work (MY-07, MY-31).
 
+> **Cut down by [MY-49](DECISIONS.md#my-49) (2026-11-12).** Each kind of work keeps one record: its last accepted duration and accepted peak. Throughput curves, sweeps, the onboarding benchmark, calibrated forecasts and batch/wave planning are removed; placement prefers the shorter last accepted duration on each eligible target (MY-31), and declared pieces run as ordinary serial jobs. The subsections below record the earlier design. See [status](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
+
 ### Comparable observations
 <a id="comparable-observations-slice-1-107-approved-2026-10-22"></a>
 
@@ -2174,6 +2176,8 @@ reads.
 ### Safe sparse curves
 <a id="safe-sparse-curves-slice-2-107-approved-2026-10-24"></a>
 
+> **Removed by [MY-49](DECISIONS.md#my-49).**
+
 Sweeps change no placement or ordinary admission/concurrency limit.
 
 A variant may declare `sweeps`, keyed by a declared reference work type, with a
@@ -2214,6 +2218,8 @@ Native mixed-load curves and fleet acceptance require separate authorization.
 
 ### Completion-aware placement
 <a id="completion-aware-placement-slice-3-107-approved-2026-10-24"></a>
+
+> **Reduced by [MY-49](DECISIONS.md#my-49)** to the last accepted duration on each target.
 
 Rank qualified extension commands using a common completion estimate: declared
 workload units divided by the exact comparable serial measured rate, plus cold
@@ -2285,6 +2291,8 @@ machine. Prediction-error calibration is separate work (#879).
 
 ## Declared fan-out and batch planning
 <a id="declared-fan-out-and-batch-planning-slice-4-107-approved-2026-10-24"></a>
+
+> **Batch planning removed by [MY-49](DECISIONS.md#my-49).** Declared pieces remain; each runs as an ordinary serial job.
 
 Splitting follows measured capability and output parity (MY-07, MY-19). This
 covers explicit homogeneous independent pieces, measured discrete horizon

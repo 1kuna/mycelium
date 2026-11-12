@@ -318,9 +318,6 @@ func (q *Queue) machineCapacityReason(m *Machine) string {
 	if reason := q.hostHygieneReason(m); reason != "" {
 		return reason
 	}
-	if q.hostBenchmarkPending(hostID(m)) {
-		return "host onboarding benchmark pending"
-	}
 	limit := q.machineJobLimit(m)
 	if limit == 0 {
 		return ""

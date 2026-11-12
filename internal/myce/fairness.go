@@ -283,13 +283,6 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	variants := extensionJobs(j, m, true)
 	q.admissionPass(j, m, len(variants) > 0, predicateExtensionCandidates)
 	for _, candidate := range variants {
-		if j.Batch != nil && j.Batch.Run {
-			candidate = q.retryWaveCandidate(candidate, m)
-			if candidate == nil {
-				q.admissionPass(j, m, false, predicateRetryWave)
-				continue
-			}
-		}
 		q.applyLearnedNeeds(candidate)
 		// These final eligibility predicates cannot be changed by memory
 		// sizing. Reject incompatible routes before reducing their evidence;

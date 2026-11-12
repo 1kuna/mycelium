@@ -58,7 +58,7 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	for _, o := range q.s.WorkObservations {
 		observed = o
 	}
-	if observed.Key.Work != "extension:sample" || observed.Key.Target.Platform != "cpu" || observed.Key.Host != "synthetic-host" || observed.Key.Component != "cpu" || observed.Key.Reference.InputShape != "small-v1" || observed.Key.Concurrency != 1 || observed.Key.BatchSize != 1 || observed.Seconds != 2 || observed.Units != 10 || observed.Samples != 1 || observed.Job != j.ID || observed.Attempt != j.Attempt {
+	if observed.Key.Work != "extension:sample" || observed.Key.Target.Platform != "cpu" || observed.Key.Host != "synthetic-host" || observed.Key.Component != "cpu" || observed.Key.Reference.InputShape != "small-v1" || observed.Key.Concurrency != 1 || observed.Key.BatchSize != 1 || observed.LastSeconds != 2 || observed.Samples != 1 || observed.Job != j.ID || observed.Attempt != j.Attempt {
 		t.Fatalf("wrong observation: %+v", observed)
 	}
 	if !observed.RecordedAt.Equal(clock.Now()) {
@@ -70,8 +70,8 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	}
 	second := startObservation(t, q, m, s)
 	timing := q.s.Jobs[second.ID].Timing
-	if timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 || timing.Samples != 1 {
-		t.Fatalf("prediction: %+v", timing)
+	if timing.LastAcceptedSeconds == nil || *timing.LastAcceptedSeconds != 2 || timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 {
+		t.Fatalf("last accepted duration: %+v", timing)
 	}
 	clock.Advance(3 * time.Second)
 	finish(t, q, &second, true)
@@ -92,11 +92,11 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	found := false
 	for _, job := range snap.Jobs {
 		if job.ID == second.ID {
-			found = strings.Contains(JobTiming(job), "prediction 2.00s (1 samples); actual 3.00s")
+			found = strings.Contains(JobTiming(job), "last accepted duration 2.00s; actual 3.00s")
 		}
 	}
 	if !found {
-		t.Fatal("status lost prediction/actual")
+		t.Fatal("status lost last accepted/actual duration")
 	}
 	var database string
 	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
@@ -135,7 +135,7 @@ func TestWorkObservationRejectsFailedStaleAndDuplicate(t *testing.T) {
 	finish(t, q, &j, true)
 	finish(t, q, &j, true)
 	for _, o := range q.s.WorkObservations {
-		if o.Samples != 1 || o.Seconds != 2 {
+		if o.Samples != 1 || o.LastSeconds != 2 {
 			t.Fatal("duplicate learned", o)
 		}
 	}
@@ -159,7 +159,7 @@ func TestWorkObservationUnknownAndInvalidation(t *testing.T) {
 	// Placement metadata can explain the host without inventing a measured
 	// prediction or observation for an old profile.
 	timing := q.s.Jobs[j.ID].Timing
-	if !strings.HasPrefix(JobTiming(q.s.Jobs[j.ID]), "prediction unknown; actual unknown") || len(q.s.WorkObservations) != 0 || timing != nil && (timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Samples != 0) {
+	if !strings.HasPrefix(JobTiming(q.s.Jobs[j.ID]), "last accepted duration unknown; actual unknown") || len(q.s.WorkObservations) != 0 || timing != nil && (timing.LastAcceptedSeconds != nil || timing.ActualSeconds != nil) {
 		t.Fatal("old profile invented comparable evidence")
 	}
 	j = startObservation(t, q, m, s)
@@ -183,26 +183,6 @@ func TestWorkObservationUnknownAndInvalidation(t *testing.T) {
 	changed = freezeComposition(t, changed)
 	if changed.Digest == e.Digest || extensionQualificationReason(changed, m.ExtensionReports[0], &m) == "" {
 		t.Fatal("reference change kept qualification")
-	}
-}
-
-func TestWorkObservationMixedHostIntervalExcluded(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	j := startObservation(t, q, m, s)
-	other := cpuSpec(1, .1)
-	other.Name = "competing"
-	competing := submit(t, q, other)
-	// Use machine inventory so ordinary concurrent CPU admission is enabled.
-	// Direct assign is the existing queue transaction seam, no fake timing API.
-	if err := q.update(func() error { q.assign(q.s.Jobs[competing.ID], q.s.Machines[m.ID]); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	finish(t, q, q.s.Jobs[competing.ID], true)
-	clock.Advance(time.Second)
-	finish(t, q, &j, true)
-	if len(q.s.WorkObservations) != 0 || q.s.Jobs[j.ID].Timing.Reason != "mixed or unknown host occupancy" {
-		t.Fatal("mixed interval learned", q.s.Jobs[j.ID].Timing)
 	}
 }
 
@@ -264,12 +244,12 @@ func TestWorkObservationLargerExplicitMemoryAfterOOM(t *testing.T) {
 	finish(t, q, &larger, true)
 	third := startObservation(t, q, m, s)
 	timing := q.s.Jobs[third.ID].Timing
-	if timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 {
-		t.Fatalf("larger successful reservation lost prediction after OOM: %+v", timing)
+	if timing.LastAcceptedSeconds == nil || *timing.LastAcceptedSeconds != 2 {
+		t.Fatalf("larger successful reservation lost its last duration after OOM: %+v", timing)
 	}
 }
 
-func TestWorkObservationStatusLabelsExpiredThroughput(t *testing.T) {
+func TestWorkObservationStatusShowsLastAcceptedDuration(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	j := startObservation(t, q, m, s)
 	clock.Advance(2 * time.Second)
@@ -285,12 +265,9 @@ func TestWorkObservationStatusLabelsExpiredThroughput(t *testing.T) {
 			t.Fatal(err, snap.WorkCurves)
 		}
 		cli := snap.WorkCurves[0].SummaryAt(snap.Now)
-		fresh := strings.Contains(cli, "5.00 records/s; measured")
-		if days == 0 && (!fresh || !strings.Contains(html.String(), "5.00 records/s; measured")) {
-			t.Fatalf("fresh rate not shown: %s", cli)
-		}
-		if days > 0 && (!fresh || !strings.Contains(html.String(), "5.00 records/s; measured")) {
-			t.Fatalf("unchanged rate lost on elapsed time: %s", cli)
+		// History has no age limit: the last accepted run is shown until replaced.
+		if want := "last accepted duration 2.00s"; !strings.Contains(cli, want) || !strings.Contains(html.String(), want) {
+			t.Fatalf("last accepted duration not shown after %d days: %s", days, cli)
 		}
 	}
 }

@@ -1075,12 +1075,6 @@
             "null"
           ]
         },
-        "run": {
-          "type": "boolean"
-        },
-        "seconds": {
-          "type": "number"
-        },
         "share_xpu": {
           "type": "boolean"
         }
@@ -1997,15 +1991,6 @@
             "null"
           ]
         },
-        "benchmark": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
         "check": {
           "items": {
             "type": "string"
@@ -2370,15 +2355,6 @@
           },
           "type": [
             "array",
-            "null"
-          ]
-        },
-        "sweeps": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ReferenceSweep"
-          },
-          "type": [
-            "object",
             "null"
           ]
         },
@@ -3964,7 +3940,7 @@
         "elapsed_seconds": {
           "type": "number"
         },
-        "history_age_seconds": {
+        "last_accepted_seconds": {
           "type": "number"
         },
         "limitation": {
@@ -3972,26 +3948,9 @@
         },
         "reason": {
           "type": "string"
-        },
-        "remaining_seconds": {
-          "type": "number"
-        },
-        "remaining_work_unknown": {
-          "type": "boolean"
-        },
-        "samples": {
-          "type": "integer"
-        },
-        "source": {
-          "type": "string"
-        },
-        "unit": {
-          "type": "string"
         }
       },
       "required": [
-        "remaining_work_unknown",
-        "samples",
         "limitation"
       ],
       "type": "object"
@@ -5273,49 +5232,6 @@
       ],
       "type": "object"
     },
-    "ReferenceSweep": {
-      "properties": {
-        "command": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "counts": {
-          "items": {
-            "type": "integer"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "max_concurrency": {
-          "type": "integer"
-        },
-        "run": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "server_digest": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "command",
-        "counts",
-        "max_concurrency"
-      ],
-      "type": "object"
-    },
     "RequirementReasonStatus": {
       "properties": {
         "constraint": {
@@ -5682,36 +5598,6 @@
       },
       "required": [
         "reason"
-      ],
-      "type": "object"
-    },
-    "ServiceEstimate": {
-      "properties": {
-        "correction_seconds": {
-          "type": "number"
-        },
-        "estimator": {
-          "type": "string"
-        },
-        "raw_seconds": {
-          "type": "number"
-        },
-        "reason": {
-          "type": "string"
-        },
-        "samples": {
-          "type": "integer"
-        },
-        "uncertainty": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "estimator",
-        "raw_seconds",
-        "correction_seconds",
-        "samples",
-        "uncertainty"
       ],
       "type": "object"
     },
@@ -6610,24 +6496,17 @@
         "actual_seconds": {
           "type": "number"
         },
-        "comparability": {
-          "type": "string"
-        },
         "execution": {
           "$ref": "#/$defs/Execution"
         },
         "history_reason": {
           "type": "string"
         },
-        "history_recorded_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "history_source": {
-          "type": "string"
-        },
         "key": {
           "$ref": "#/$defs/ObservationKey"
+        },
+        "last_accepted_seconds": {
+          "type": "number"
         },
         "machine": {
           "type": "string"
@@ -6641,27 +6520,14 @@
         "reason": {
           "type": "string"
         },
-        "repeated_key": {
-          "$ref": "#/$defs/ObservationKey"
-        },
-        "samples": {
-          "type": "integer"
-        },
-        "service_estimate": {
-          "$ref": "#/$defs/ServiceEstimate"
-        },
         "session": {
-          "type": "string"
-        },
-        "uncertainty": {
           "type": "string"
         }
       },
       "required": [
         "execution",
         "machine",
-        "session",
-        "samples"
+        "session"
       ],
       "type": "object"
     },

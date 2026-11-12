@@ -143,7 +143,7 @@ acceptance, receiving-thread arrival and owner disposition are separate evidence
 that a receipt or PID alone cannot show.
 
 For a long detached job, set one stall check at about twice its expected
-duration, bound to your thread, verifying one thing (state or log growth), and
+duration (`runtime.last_accepted_seconds` when known), bound to your thread, verifying one thing (state or log growth), and
 delete it when done. If duration is unknown, record that and a next owner rather
 than inventing an ETA; use the foreground wait while this session owns completion.
 
@@ -179,10 +179,12 @@ then. Rewrite at least every 30 seconds to keep the evidence fresh.
 
 `myce status JOB_ID` or `Client.get(JOB_ID)` shows `application_progress` (stage
 index/count, work-known flag, exact attempt, age, `stale`) and, separately,
-`runtime` (elapsed and remaining time, source, sample count, history age,
-limitations). Missing timing stays unknown; finishing stage one never yields
-zero whole-job remaining, and an exceeded estimate becomes unknown. See the
-[report contract](../../../docs/status.md#execution-elapsed-time-remaining-estimates-and-application-progress).
+`runtime`: `elapsed_seconds` and `last_accepted_seconds`, the last accepted
+duration of this kind of work, or a `reason` it is unknown. It is history, not
+a remaining time or deadline; Mycelium no longer predicts completion (MY-49).
+`remaining_seconds`, `samples`, `source` and `history_age_seconds` are gone, and
+`timing.predicted_seconds` is a deprecated mirror for one release. See the
+[report contract](../../../docs/status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
 
 Checkpoint `progress` is a durable generation number, not a percentage or ETA.
 Neither stage completion nor a checkpoint means success or resource release:

@@ -48,7 +48,7 @@ func TestPlainPiecesRunAsOrdinaryJobsAndGatherByKey(t *testing.T) {
 	refs := map[string]FileRef{}
 	for range 3 {
 		run := check(t, q, m, nil).Job
-		if run == nil || run.Batch == nil || run.Batch.Parent != parent.ID || run.Batch.Run || run.Spec.FanOut != nil {
+		if run == nil || run.Batch == nil || run.Batch.Parent != parent.ID || run.Spec.FanOut != nil {
 			t.Fatalf("piece is not an ordinary child job: %+v", run)
 		}
 		key := run.Batch.Pieces[0].Key

@@ -15,7 +15,7 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 		t.Helper()
 		parent := submit(t, q, s)
 		j := assignedJob(machineCheck(t, q, m))
-		if j == nil || j.Batch == nil || j.Batch.Parent != parent.ID || j.Batch.Run || !slices.Equal(j.Spec.Args, []string{"base", "piece-arg"}) {
+		if j == nil || j.Batch == nil || j.Batch.Parent != parent.ID || !slices.Equal(j.Spec.Args, []string{"base", "piece-arg"}) {
 			t.Fatalf("serial child/arguments: %+v", j)
 		}
 		if err := q.Started(result(j, false)); err != nil {
@@ -41,23 +41,14 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 		t.Fatalf("clean serial child did not learn: %+v", q.s.WorkObservations)
 	}
 	for _, p := range q.s.WorkObservations {
-		if p.MemoryPeak == nil || !p.MemoryRecordedAt.Equal(clock.Now()) || p.Rate != 0 || p.Seconds != 0 {
-			t.Fatalf("memory must learn independently of throughput: %+v", p)
+		// One record holds the piece's accepted peak and last duration (MY-49).
+		if p.MemoryPeak == nil || !p.MemoryRecordedAt.Equal(clock.Now()) || p.LastSeconds != 1 {
+			t.Fatalf("piece record lost its peak or duration: %+v", p)
 		}
-	}
-	// Existing ordinary timing must not become a prediction for the child.
-	if err := q.update(func() error {
-		for id, p := range q.s.WorkObservations {
-			p.Rate, p.Units, p.Seconds = 10, 10, 1
-			q.putWorkObservation(id, p)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
 	}
 	next := start()
-	if timing := job(t, q, next.ID).Timing; timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Reason != "declared wave; serial occupancy is not comparable" {
-		t.Fatalf("serial child invented comparable throughput: %+v", timing)
+	if timing := job(t, q, next.ID).Timing; timing.LastAcceptedSeconds == nil || *timing.LastAcceptedSeconds != 1 || timing.ActualSeconds != nil || timing.Reason != "" {
+		t.Fatalf("next piece lost its kind of work's duration: %+v", timing)
 	}
 	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != total+device+2*minimumHostMemoryGB+.125 {
 		t.Fatalf("next piece lost peak/arguments: %+v", next.MemoryEnvelope)
@@ -156,7 +147,7 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			if run == nil {
 				t.Fatalf("qualified device1 must receive the serial child: %s", job(t, q, parent.ID).Reason)
 			}
-			if run.Machine != m.ID || !slices.Equal(run.AllocatedDevices, []string{"1"}) || run.Batch == nil || run.Batch.Run || run.Batch.Concurrency != 1 {
+			if run.Machine != m.ID || !slices.Equal(run.AllocatedDevices, []string{"1"}) || run.Batch == nil || run.Batch.Concurrency != 1 {
 				t.Fatalf("wrong serial placement: %+v", run)
 			}
 			if run.MemoryEnvelope == nil {

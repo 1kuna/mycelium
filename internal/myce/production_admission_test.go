@@ -97,14 +97,24 @@ func TestProductionAdmissionRepeatedPreemptionBackoff(t *testing.T) {
 // matching preparation history; all timing and custody use the queue fake clock.
 func productionAdmissionFixture(t *testing.T) (*Queue, *workerFakeClock, Machine, Machine, Spec, Spec) {
 	t.Helper()
-	q, clock, source, p := fanOutFixture(t, 2)
+	// One piece: pieces run serially on this single-job worker (MY-49).
+	q, clock, source, p := fanOutFixture(t, 1)
 	if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	for key, point := range q.s.WorkObservations {
-		point.Rate /= 100 // Each measured wave takes 100 seconds.
-		q.s.WorkObservations[key] = point
+	// One accepted 100-second piece gives this kind of work its last duration.
+	taught := p
+	taught.FanOut = &FanOut{MaxConcurrency: 8, Pieces: []FanOutPiece{{Key: "taught"}}}
+	submit(t, q, taught)
+	piece := check(t, q, source, nil).Job
+	if piece == nil {
+		t.Fatal("missing taught piece")
 	}
+	if err := q.Started(result(piece, true)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(100 * time.Second)
+	finish(t, q, piece, true)
 	target := cloneMachine(&source)
 	target.ID, target.HostID, target.Session = "destination", "destination-host", "destination-session"
 	e := registeredExtension(t, q, p.Extension)
@@ -125,6 +135,20 @@ func productionAdmissionFixture(t *testing.T) (*Queue, *workerFakeClock, Machine
 	return q, clock, source, target, p, x
 }
 
+// Start the producer's one piece: its kind of work's last accepted duration
+// gives the dependent demand a known arrival.
+func startProducerPieces(t *testing.T, q *Queue, source Machine) []*Job {
+	t.Helper()
+	piece := check(t, q, source, nil).Job
+	if piece == nil || piece.Batch == nil {
+		t.Fatal("no producer piece", piece)
+	}
+	if err := q.Started(result(piece, false)); err != nil {
+		t.Fatal(err)
+	}
+	return []*Job{piece}
+}
+
 func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
 	for _, edge := range []string{"piece", "whole-parent", "fan-out-stage", "producer-overrun"} {
 		t.Run(edge, func(t *testing.T) {
@@ -141,13 +165,7 @@ func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
 				c.After.Piece, c.After.Outputs["input"] = "item-0", "out"
 			}
 			consumer := submit(t, q, c)
-			wave := check(t, q, source, nil).Job
-			if wave == nil || wave.Batch == nil || !wave.Batch.Run {
-				t.Fatal("no measured producer wave", wave)
-			}
-			if err := q.Started(result(wave, false)); err != nil {
-				t.Fatal(err)
-			}
+			startProducerPieces(t, q, source)
 			clock.Advance(10 * time.Second)
 			experiment := submit(t, q, x)
 			reply := check(t, q, target, nil)
@@ -232,13 +250,7 @@ func TestProductionAdmissionCachedPreparationAndQueuedDemand(t *testing.T) {
 				check(t, q, target, nil)
 			}
 			parent := submit(t, q, p)
-			wave := check(t, q, source, nil).Job
-			if wave == nil {
-				t.Fatal("missing producer")
-			}
-			if err := q.Started(result(wave, false)); err != nil {
-				t.Fatal(err)
-			}
+			pieces := startProducerPieces(t, q, source)
 			experiment := submit(t, q, x)
 			offer := check(t, q, target, nil).EnvironmentPlan
 			if len(offer) != 1 || offer[0].Launch == nil {
@@ -252,7 +264,9 @@ func TestProductionAdmissionCachedPreparationAndQueuedDemand(t *testing.T) {
 				t.Fatal("cached preparation bypassed new predictable demand", err)
 			}
 			// Readiness makes the expected arrival immediate, without enabling a hold.
-			finish(t, q, wave, true)
+			for _, piece := range pieces {
+				finish(t, q, piece, true)
+			}
 			if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "predictable production demand") || !strings.Contains(reason, "~0s") {
 				t.Fatal("ready queued production not explained", reason)
 			}

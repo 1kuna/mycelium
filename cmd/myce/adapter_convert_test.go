@@ -127,10 +127,6 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := original.Variants[0]
-	// Lowering allocates an empty sweep map even when no sweep was authored.
-	if want.Sweeps == nil {
-		want.Sweeps = map[string]myce.ReferenceSweep{}
-	}
 	got := p.Native.Variants[0]
 	if p.Name != original.Name || p.Native.Name != original.Name || p.Class != original.DefaultClass || p.Source.Directory != "examples/extensions/http-stage" || p.Native.Version != original.Version || p.Outputs["result.json"] != "results" {
 		t.Fatalf("native identity/source/output changed: %+v", p)
@@ -258,13 +254,13 @@ func TestAdapterConvertAggregatesMissingConflictsAndUnsupportedFields(t *testing
 	conversionWrite(t, "one.yaml", conversionProfile)
 	conversionWrite(t, "two.yaml", strings.ReplaceAll(conversionProfile, "project: example", "project: different"))
 	conversionWrite(t, "bad.yaml", strings.ReplaceAll(conversionProfile, "memory_class: per_item", "memory_class: invented"))
-	conversionWrite(t, "native/extension.yaml", conversionLegacy+"benchmark: [python, benchmark.py]\n")
+	conversionWrite(t, "native/extension.yaml", conversionLegacy)
 	args := []string{"convert", "--profile", "one.yaml", "--profile", "two.yaml", "--profile", "bad.yaml", "--profile", "missing.yaml", "--extension", "native", "--out", "new.yaml", "--apply"}
 	var out, report bytes.Buffer
 	if err := adapterCommand(context.Background(), args, &out, &report); err == nil {
 		t.Fatal("invalid conversion accepted")
 	}
-	for _, text := range []string{"conflicting project", "conflicting entry name", "missing.yaml", "memory_class", "benchmark has no adapter equivalent", "app.py", "setup.py", "check.py", "input.json", "fake.json", "cuda.json", "OS/ARCH/fake", "OS/ARCH/cuda"} {
+	for _, text := range []string{"conflicting project", "conflicting entry name", "missing.yaml", "memory_class", "app.py", "setup.py", "check.py", "input.json", "fake.json", "cuda.json", "OS/ARCH/fake", "OS/ARCH/cuda"} {
 		if !strings.Contains(report.String(), text) {
 			t.Errorf("missing diagnostic %q in %s", text, report.String())
 		}
@@ -277,7 +273,7 @@ func TestAdapterConvertAggregatesMissingConflictsAndUnsupportedFields(t *testing
 	}
 }
 
-func TestAdapterConvertNativeKeepsReferencesSweepsAndAssets(t *testing.T) {
+func TestAdapterConvertNativeKeepsReferencesAndAssets(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const source = `name: composed
 version: '3'
@@ -299,11 +295,9 @@ variants:
       extension:composed: {input: input.json, output: output.json, measure: numeric, absolute: 0.1, relative: 0.01, native: reference, variation: measured}
     references:
       extension:composed: {input_shape: one, unit: item, units: 1}
-    sweeps:
-      extension:composed: {command: [python, '{extension}/check.py'], run: [python, '{extension}/sweep.py'], counts: [1, 2], max_concurrency: 2}
 `
 	conversionWrite(t, "native/extension.yaml", source)
-	for _, name := range []string{"app.py", "service.py", "setup.py", "check.py", "sweep.py", "input.json", "output.json"} {
+	for _, name := range []string{"app.py", "service.py", "setup.py", "check.py", "input.json", "output.json"} {
 		conversionWrite(t, "native/"+name, "[1]\n")
 	}
 	var out, report bytes.Buffer

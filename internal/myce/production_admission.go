@@ -210,25 +210,16 @@ func (q *Queue) productionArrival(j *Job) (float64, bool) {
 	return seconds, true
 }
 
+// productionRemaining is a running production attempt's last accepted
+// duration less its elapsed time; unknown history or an overrun is unknown.
 func (q *Queue) productionRemaining(j *Job) (float64, bool) {
 	if j.State != "running" || j.Spec.Priority != "production" || cancelled(j) || j.StartedAt == nil {
 		return 0, false
 	}
-	key, reason := q.workObservationKey(j)
-	// Measured waves deliberately disable throughput refinement, but their
-	// qualified concurrency curve still predicts the declared wave's service.
-	wave := j.Batch != nil && j.Batch.Run
-	if key == nil || !wave && (reason != "" || j.Timing == nil || j.Timing.Reason != "") {
+	t := j.Timing
+	if t == nil || t.Reason != "" || t.LastAcceptedSeconds == nil {
 		return 0, false
 	}
-	point := q.s.WorkObservations[identityHash(key)]
-	if !q.usableCurve(point, *key) || j.Spec.Workload == nil {
-		return 0, false
-	}
-	units := j.Spec.Workload.Units
-	if j.Batch != nil && j.Batch.Run {
-		units *= float64(len(j.Batch.Pieces))
-	}
-	seconds := units/point.Rate - max(0, q.clock.Now().Sub(*j.StartedAt).Seconds())
+	seconds := *t.LastAcceptedSeconds - max(0, q.clock.Now().Sub(*j.StartedAt).Seconds())
 	return seconds, validRate(seconds)
 }

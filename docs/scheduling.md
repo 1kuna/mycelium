@@ -5,9 +5,9 @@ machine. Eligibility and owner tiers precede weighted fairness, available capaci
 victim disruption and least-valuable fit. Same-tier indefinite work has no bounded
 wait guarantee. Advice and estimates are snapshots, never reservations.
 
-CPU backfill also accounts for queued fan-out waves and wave retries. The
-ordinary wave planner selects their measured resource vector and destination;
-finite CPU executions, including running waves, can supply projected RAM/cores
+CPU backfill also accounts for queued fan-out pieces and their retries. Each
+piece is an ordinary serial job with its own resource vector and destination;
+finite CPU executions, including running pieces, can supply projected RAM/cores
 as they finish. New work behind that demand's tier/fair turn may use only the
 remaining capacity. An immediately usable production destination takes precedence
 over a different host's projected releases. Projections never authorize an early
@@ -18,8 +18,10 @@ start or release existing custody; withdrawal removes the admission fence.
 - [Fair sharing and usage](#sharing-gpus-and-measuring-the-pool)
 - [Declare requirements and inspect portability](#declare-requirements-let-mycelium-place)
 
-Measured curves, completion estimates and declared independent pieces are current
-contracts in the [spec](design-proposal.md) and [jobs reference](jobs.md).
+Declared independent pieces are a current contract in the [spec](design-proposal.md)
+and [jobs reference](jobs.md). Placement keeps one measured record per kind of
+work, its last accepted duration and peak (MY-49); there are no throughput
+curves, benchmarks, completion forecasts or batch plans.
 Automatic same-tier scarce-host yield and arbitrary workflow orchestration
 remain pending in [#324](https://github.com/1kuna/mycelium/issues/324) and
 [#107](https://github.com/1kuna/mycelium/issues/107). A job no single card holds
@@ -51,7 +53,8 @@ tiers above the fleet minimum, form capability bands. Each band counts physical
 hosts, regardless of their number of devices or worker rows. Compare how many
 bands each host supplies alone, then how many it shares with one other host,
 and so on: fewer rare bands wins. Equal vectors prefer smaller usable host RAM,
-then existing measured completion/affinity and stable target identity. Unified
+then the shorter last accepted duration of this kind of work, affinity and
+stable target identity. Unified
 RAM remains one physical allowance; host and accelerator RAM are never added to
 invent capacity or value. Unknown inventory has no invented cheap score; a known
 fitting host precedes it, but an unknown-only admissible target still runs.
@@ -63,9 +66,10 @@ owner-active, recovering or otherwise inadmissible cheap host cannot make work
 wait on an idle scarce host. Value creates no reservation, changes no fair-share
 charge and never preempts equal-tier work. Pulls, status and simulation use the
 shared planner; status reports the host scarcity vector and usable RAM, or an
-explicit unknown reason. See [the onboarding benchmark](development.md)
-for the measured completion tie-break. Explicit speed/deadline goals are a later
-slice; no new goal or deadline policy is introduced here.
+explicit unknown reason. The duration tie-break is described in
+[status](status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
+Explicit speed/deadline goals are a later slice; no new goal or deadline policy
+is introduced here.
 
 Successful current attempts save observations in the same SQLite queue. The
 next matching submission and already queued matching programs reuse the largest

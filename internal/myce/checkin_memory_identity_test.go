@@ -143,7 +143,7 @@ func BenchmarkQueueCheckinFleet(b *testing.B) {
 	q.s.WorkObservations = map[string]WorkObservation{}
 	for i := range 100 {
 		key := ObservationKey{Work: fmt.Sprintf("plain:synthetic-%d", i/5), Host: workers[i%5].HostID, Component: "cpu", Hardware: "synthetic-cpu", Fingerprint: "synthetic-cpu", Concurrency: 1, BatchSize: 1}
-		q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: key, Samples: 3, Rate: 10, Units: 10, Seconds: 1, RecordedAt: clock.Now()}
+		q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: key, Samples: 3, LastSeconds: 1, RecordedAt: clock.Now()}
 	}
 	// Keep the backlog stable while exercising maintenance and planning.
 	for i := range workers {
