@@ -2654,93 +2654,44 @@ approve` is eligible. Never silently update, downgrade, change GPU drivers, OS
 or packages, or use SSH. The downgrade credential scope remains separate and
 unchanged.
 
-Freeze the signed envelope, provisioned publisher trust, origin/CA, target hashes
-and enrolled host membership in the existing SQLite queue. Retain the signed
-envelope at approval; approvals missing it need identical verified reapproval.
-An identical invocation resumes durable progress; an explicitly selected approved
-newer release can supersede a stopped operation to fix forward. Approval changes
-never silently retarget the operation. The queue continues after CLI disconnect.
+It is the one rollout path (MY-35, MY-49); the procedure is in
+[operations](operations.md#rolling-fleet-upgrades) and the failure codes in
+[fleet upgrade internals](reference/fleet-upgrades.md). The operation lives in
+the existing SQLite queue, continues after the CLI exits and survives the
+queue's own restart. One host is active at a time: idle hosts first, then busy
+hosts, then hosts running production, and the queue's host last, its worker
+before its queue. For each host the queue:
 
-`--queue-only` freezes only the queue service as the update target; colocated
-workers still supply fresh drain custody but are not restarted.
-`--wait-production-idle` persists an opt-in fence on new production batch
-assignments until queue health is verified, and waits for production attempts
-and their release custody anywhere in the fleet before queue cutover. Assigned
-work finishes naturally. Recheck this fence when issuing and authorizing the
-queue instruction. Preserve scope and policy on resume; reject conflicting
-flags while unfinished. A completed queue-only update may be followed by a full
-same-release operation. Neither option bypasses signed release, maintenance
-ownership, storage preflight or running-image health checks.
+1. drains it, as the drain owner; a host an operator drained or disabled keeps
+   the operator's policy and is never resumed by the rollout;
+2. waits, with no deadline, for its running attempts, preparations, model calls
+   and streams, engines and cleanup to finish on their own (MY-35). Draining
+   withdraws unstarted work and blocks admission; it never stops started work.
+   A normal update leaves a host enabled while draining it would strand open
+   production work (#1387);
+3. has each service fetch the release through the queue's authenticated
+   endpoint and verify it against its pinned publisher key, the signed size and
+   SHA-256, version and protocols, and on macOS its code-signing identity; a
+   finite helper of the same binary replaces the binary atomically and restarts
+   the existing unit;
+4. requires a fresh runtime proof from a new process with the release's exact
+   bytes, a healthy service manager and runner smoke, stable for the
+   enrollment window;
+5. resumes only the drain it took, then advances.
 
-Upgrade one physical host at a time, restoring admission before advancing.
-Recheck production demand before selecting each remaining host and put
-production hosts last. Upgrade the queue before workers needing its new
-protocol and before its colocated worker. If that conflicts with
-production-last ordering, refuse incompatible workers before mutation; protocol
-migrations need a separate plan. Normal updates leave an enabled busy host
-pending with ordinary admission open until its next fresh natural idle moment
-(MY-35). Skip busy hosts so an idle compatible host can progress. Select idle
-and acquire the existing drain in the same queue transaction before placement
-can refill the gap. Unreleased attempts, preparations, cleanup and calls remain
-busy regardless of elapsed time; a ready idle model may enter drain, but must
-unload with exact confirmed custody before restart. Pending intent survives
-queue restart without owning a drain. Freeze current validated runtime
-identities when selecting that idle host; already-issued helpers and operator
-maintenance keep their original fences. Drain withdraws unstarted assignments
-and blocks admission. All Started work finishes naturally: exact attempt,
-preparation, engine, model-call and release custody must settle before restart.
-Offline or uncertain custody means a visible wait, never permission from a
-deadline or empty local inventory. At queue cutover, pause model-call admission
-and wait for calls/streams; preserve running batch attempts and buffered
-results through existing restart reconciliation.
-
-`--urgency normal|critical` is explicit durable intent (MY-35); a critical
-update may run during a production run (MY-39). Omitted urgency means normal,
-including retained operations from older releases. Critical retains sequential
-host cutover but requests the existing maintenance stop immediately when each
-host is selected. It uses the existing per-work-kind checkpoint/signal grace
-and planned requeue, without a second lifecycle classifier. The selected queue
-also stops its model streams; queue-only critical leaves remote batch work
-running. Exact release is still required after the deadline. Record exact stop
-requests and pre-stop accepted progress, distinguishing requested interruption
-from signal, final-checkpoint and release evidence in the existing job history.
-Preserve urgency on resume/fix-forward and in supersession audit records.
-Existing operator maintenance stays authoritative and is never resumed by the
-rollout.
-
-Each host follows drain/wait, verify, install in place, restart, health and
-running-hash verification, then conditional resume. Workers fetch and verify
-approved bytes themselves through the authenticated control path, using
-separately provisioned publisher trust, the signed manifest and size/SHA-256.
-Instructions cannot replace publisher trust. Reuse installer saved settings,
-storage preflight, identity, spool, state, catalogs, allowances and cache roots.
-Darwin preserves its installed path and exact designated signing requirement;
-never locally re-sign. A finite helper of the same binary executes outside the
-service being restarted, using its existing service manager, with local durable
-operation receipt before replacement (including queue restart intent). No extra
-daemon, peer network or database.
-
-Completion requires manager health, a new exact PID/session, compatible protocols,
-expected inventory/budgets, runner smoke and the approved running-executable hash.
-A version string or installed-file hash alone is insufficient. Resume only the
-operation's own drain via owner/timestamp CAS; preserve prior operator maintenance
-and stop on conflicting edits. Interruption/rerun rechecks the same postconditions
-rather than blindly restarting. Stop on the first download, verification, install,
-restart or health failure, leaving that host maintained and later hosts untouched.
-Fix forward; never invoke installer restore/rollback, bypass storage
-preflight or automatically retry. Status shows target, order, host phase, wait
-reason, last verified progress and failure. Decisions use the injected Clock;
-network, hashing and service probes run outside the queue lock. Retain compact
-receipts and remove owned rebuildable staging after settlement.
-
-Fake-clock tests cover ordering, production waits, interruption/resume,
-maintenance ownership and failure-stop. A `myce dev` end-to-end rolls three
-local command workers plus the queue between locally signed releases while work
-completes without identity changes, extra attempts, loss or failures; include
-in-flight model-call completion before cutover. Tested releases roll out
-without separate authorization (MY-28); fleet hardware, OS, driver and package
-changes stay outside that authority. Native manager/signature acceptance
-remains separate (MY-21).
+`--urgency critical` (MY-39) uses the planned-maintenance stop on the selected
+host instead of waiting: resumable work checkpoints and is requeued without a
+retry charge, and status lists each stop request. An unhealthy result stops
+the operation with the host's drain kept and later hosts untouched; nothing
+rolls back (MY-03), and a rerun is a new operation that adopts the left drains.
+Decisions use the injected Clock; network, hashing and service probes run
+outside the queue lock. Fake-clock tests cover ordering, drains waiting on
+running work, critical stops, failure-stop and rerun; a real-process
+end-to-end rolls two workers and the queue between locally signed releases
+while each worker's production command, and a model stream on a drained
+worker, finish untouched. Tested releases roll out without separate authorization (MY-28);
+hardware, OS, driver and package changes stay outside that authority, and
+native manager/signature acceptance remains separate (MY-21).
 
 ### Open production work
 <a id="amendment-to-the-fleet-upgrade-open-production-work-1009-my-35"></a>
