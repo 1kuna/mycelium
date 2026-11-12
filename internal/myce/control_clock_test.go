@@ -110,6 +110,81 @@ func TestControlClockDeadWorkerDetection(t *testing.T) {
 	}
 }
 
+// #1450: a worker's check-in loop can stall on local work (a slow fsync under
+// host load) while the process is alive. Its stop-event poll runs separately;
+// while that connection is open, the worker's running work and model streams
+// are not charged a loss. Suspicion still withholds new work. A dropped
+// connection restores the measured allowance, and a wedged loop is still
+// confirmed lost once check-in silence passes the bounded stall.
+func TestControlClockLiveEventPollIsNotWorkerLoss(t *testing.T) {
+	for _, end := range []string{"dropped connection", "wedged loop"} {
+		t.Run(end, func(t *testing.T) {
+			q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			polled := make(chan struct{})
+			go func() {
+				defer close(polled)
+				// Re-poll as the worker's watchStops does after each bounded wait.
+				client := Client{URL: server.URL, Token: "test"}
+				for ctx.Err() == nil {
+					var event WorkerEvent
+					_ = client.Call(ctx, "GET", "/api/workers/"+worker.ID+"/events?session="+worker.Session, nil, &event)
+				}
+			}()
+			polling := func() bool {
+				q.contactMu.Lock()
+				defer q.contactMu.Unlock()
+				p := q.workerPolls[worker.ID][worker.Session]
+				return p != nil && p.open > 0
+			}
+			state := func() (bool, bool, Job) {
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				m := q.s.Machines[worker.ID]
+				return m.Gone, q.workerSuspect(m, clock.Now()), *q.s.Jobs[job.ID]
+			}
+			await(t, polling)
+			q.mu.Lock()
+			allowance := q.machineLossTimeout(worker.ID)
+			q.contactMu.Lock()
+			bound := q.checkinStallBound(q.s.Machines[worker.ID])
+			q.contactMu.Unlock()
+			q.mu.Unlock()
+			stalled := 3 * allowance
+			advanceReportingPeer(t, q, clock, peer, stalled)
+			gone, suspect, got := state()
+			if gone || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Attempt != job.Attempt {
+				t.Fatalf("live worker with stalled check-ins charged a loss: gone=%v state=%s losses=%d retries=%d attempt=%d", gone, got.State, got.Losses, got.InfrastructureRetries, got.Attempt)
+			}
+			if !suspect {
+				t.Fatal("stalled check-ins must still withhold new work")
+			}
+			if end == "dropped connection" {
+				cancel()
+				<-polled
+				await(t, func() bool { return !polling() })
+				advanceReportingPeer(t, q, clock, peer, allowance)
+			} else {
+				advanceReportingPeer(t, q, clock, peer, allowance+bound-2*time.Second-stalled)
+				if gone, _, got = state(); gone || got.Losses != 0 {
+					t.Fatalf("lost before the stall bound %v: gone=%v losses=%d", bound, gone, got.Losses)
+				}
+				advanceReportingPeer(t, q, clock, peer, 3*time.Second)
+				if !polling() {
+					t.Fatal("poll closed; the wedged case needs it open")
+				}
+			}
+			gone, _, got = state()
+			if !gone || got.Losses != 1 {
+				t.Fatalf("%s not confirmed lost: gone=%v losses=%d", end, gone, got.Losses)
+			}
+		})
+	}
+}
+
 func TestControlClockCancelledQueueWaitDoesNotChargeRetry(t *testing.T) {
 	q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
 	ctx, cancel := context.WithCancel(context.Background())

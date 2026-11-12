@@ -22,6 +22,7 @@ type workerContact struct {
 	cadence              probeEstimate // Wall-time send cadence, independent of service availability.
 	delivery             probeEstimate // Completed control response cost, including queue service.
 	gap                  probeEstimate
+	longestGap           time.Duration // Longest completed arrival gap, in opportunity time.
 	path                 probeEstimate
 	retry                workerRetry // Existing legacy worker reconnect schedule.
 	arrivalOpportunity   time.Duration
@@ -149,6 +150,7 @@ func (q *Queue) acceptContactPeriod(m *Machine, period time.Duration, pending *c
 			}
 			if gap := pending.opportunity - c.arrivalOpportunity; gap > 0 {
 				c.gap.observe(gap.Seconds())
+				c.longestGap = max(c.longestGap, gap)
 			}
 		}
 		c.arrivalOpportunity, c.arrivalWall, c.seenArrival = pending.opportunity, pending.arrived, true
@@ -267,6 +269,70 @@ func (q *Queue) trackWorkerCheckin(machine, session string, period time.Duration
 	}
 }
 
+// workerPoll records one worker session's stop-event long polls. The worker
+// runs that poll beside its check-in loop, so an open poll shows the process is
+// alive and connected while local work (a slow fsync under host load) delays
+// its next check-in (#1450). It protects only against confirmed loss; suspicion
+// and cadence learning still come from check-ins alone.
+type workerPoll struct {
+	open int
+	last time.Duration // Control opportunity of the latest proof of life.
+}
+
+// trackWorkerPoll registers an events request for its lifetime. A poll that
+// ends normally is contact at its end; a dropped connection proves nothing
+// after its start. A silently dead host therefore keeps its credit for at most
+// the server's existing poll window.
+func (q *Queue) trackWorkerPoll(ctx context.Context, machine, session string) func() {
+	if machine == "" || session == "" {
+		return func() {}
+	}
+	q.contactMu.Lock()
+	defer q.contactMu.Unlock()
+	if q.workerPolls == nil {
+		q.workerPolls = map[string]map[string]*workerPoll{}
+	}
+	sessions := q.workerPolls[machine]
+	if sessions == nil {
+		sessions = map[string]*workerPoll{}
+		q.workerPolls[machine] = sessions
+	}
+	for s, p := range sessions {
+		if s != session && p.open == 0 {
+			delete(sessions, s) // A replaced session's settled record.
+		}
+	}
+	p := sessions[session]
+	if p == nil {
+		p = &workerPoll{}
+		sessions[session] = p
+	}
+	p.open++
+	p.last = q.controlNow()
+	return func() {
+		q.contactMu.Lock()
+		defer q.contactMu.Unlock()
+		p.open--
+		if ctx.Err() == nil {
+			p.last = q.controlNow()
+		}
+	}
+}
+
+// Detached views keep the same poll evidence as the live loss decision.
+// Caller holds contactMu.
+func (q *Queue) cloneWorkerPolls() map[string]map[string]*workerPoll {
+	out := make(map[string]map[string]*workerPoll, len(q.workerPolls))
+	for machine, sessions := range q.workerPolls {
+		out[machine] = make(map[string]*workerPoll, len(sessions))
+		for session, p := range sessions {
+			copy := *p
+			out[machine][session] = &copy
+		}
+	}
+	return out
+}
+
 // lastContact is the later of m.LastSeen and the queue's own contact record for
 // m's current session; active processing protects that worker from confirmed
 // loss, while wall-clock suspicion remains independent. Callers hold q.mu.
@@ -292,11 +358,42 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 	allowance := q.machineLossTimeout(m.ID)
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
+	opportunity := q.controlNow()
+	contact := q.checkinContact(m, now, includePending, allowance, opportunity)
+	p := q.workerPolls[m.ID][m.Session]
+	if !includePending || p == nil {
+		return contact
+	}
+	polled := now
+	if p.open == 0 {
+		polled = now.Add(-max(0, opportunity-p.last))
+	}
+	// A poll proves the process, not its check-in loop. It extends check-in
+	// contact by a bounded stall, so a wedged loop is still confirmed lost.
+	return maxTime(contact, minTime(polled, contact.Add(q.checkinStallBound(m))))
+}
+
+// checkinStallBound is how long a live poll can cover check-in silence. The
+// evidenced stall is the loop's own durable file writes, so the floor is the
+// measured filesystem-operation stall backstop (#289). A session whose loop
+// has already completed longer stalls gets twice its longest completed gap:
+// one interval waiting behind contended I/O and one completing it, the same
+// basis as that backstop. A wedged loop never completes a gap, so this stays
+// finite. Caller holds contactMu.
+func (q *Queue) checkinStallBound(m *Machine) time.Duration {
+	bound := onboardingFilesystemStallBudget
+	if c := q.contacts[m.ID]; c != nil && c.session == m.Session {
+		bound = max(bound, 2*c.longestGap)
+	}
+	return bound
+}
+
+// checkinContact is the contact time from check-ins alone. Caller holds contactMu.
+func (q *Queue) checkinContact(m *Machine, now time.Time, includePending bool, allowance, opportunity time.Duration) time.Time {
 	c := q.contacts[m.ID]
 	if c == nil || c.session != m.Session {
 		return m.LastSeen
 	}
-	opportunity := q.controlNow()
 	contact := false
 	for pending := range c.pending {
 		if !includePending {
@@ -314,8 +411,5 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 	if c.measured {
 		return maxTime(m.LastSeen, now.Add(-max(0, opportunity-c.processedOpportunity)))
 	}
-	if c.processed.After(m.LastSeen) {
-		return c.processed
-	}
-	return m.LastSeen
+	return maxTime(m.LastSeen, c.processed)
 }

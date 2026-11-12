@@ -909,7 +909,9 @@ From the release containing #661's adaptive loss correction, worker freshness in
 maintenance, fleet, inventory and placement follows the same session contact
 calculation as loss detection, with a separate wall-time suspicion check. It measures missed expected check-ins while the
 queue can serve control traffic; queue transaction time does not imply worker
-silence. A current-session in-flight check-in protects only that worker. A
+silence. A current-session in-flight check-in protects only that worker, and so
+does that worker's open stop-event poll for confirmed loss only, up to a bounded
+check-in stall (#1450). A
 cancelled call has a measured reconnect opportunity; rejection and stale sessions
 do not refresh accepted contact. `last_seen` remains the actual accepted queue
 timestamp, so an old timestamp alone does not establish a lost machine during a

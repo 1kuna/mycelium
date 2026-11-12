@@ -900,6 +900,7 @@ func (capture *committedReadCapture) statusContactInputs(q *Queue, at time.Time)
 			v.contacts[id] = &copy
 		}
 	}
+	v.workerPolls = q.cloneWorkerPolls()
 	return v
 }
 

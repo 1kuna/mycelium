@@ -178,5 +178,6 @@ func (q *Queue) captureContactInputs(clock Clock) *Queue {
 			v.contacts[id] = &copy
 		}
 	}
+	v.workerPolls = q.cloneWorkerPolls()
 	return v
 }
