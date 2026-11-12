@@ -15,11 +15,9 @@ import (
 // original bytes, so every reader decodes the same values. This is a SQLite
 // form only; replies, status and the wire keep the ordinary job JSON.
 //
-// MY-42: r6.10 decodes job rows directly and cannot read this form, so writing
-// it stays off while r6.10 is the previous release. Every reader expands it.
-// Enable slimJobRecordsDefault in the release after the first one that ships
-// this reader; Open then converts retained records once.
-const slimJobRecordsDefault = false
+// MY-42: every release since r6.11 expands this form, so with r6.12 as the
+// previous release the writer is on. Open converts retained records once.
+const slimJobRecordsDefault = true
 
 var (
 	jobRecordRefsPrefix = []byte(`{"$refs":[`)

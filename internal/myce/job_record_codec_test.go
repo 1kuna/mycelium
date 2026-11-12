@@ -21,6 +21,7 @@ import (
 func retainedJobRecordFixture(t *testing.T, jobs int) (path string, files string, clock *fakeClock) {
 	t.Helper()
 	q, clock, m, s, out := storageFixture(t)
+	q.slimJobRecords = false // Rows as a release before the writer wrote them.
 	for i := 0; i < jobs; i++ {
 		spec := s
 		spec.Name = fmt.Sprintf("storage-profile-%d", i%5)
