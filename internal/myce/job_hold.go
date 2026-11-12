@@ -99,6 +99,15 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				blocker.Detail += fmt.Sprintf("; the project's production_parity_hosts list approves %d physical hosts for this work; Mycelium selects within that list without a job host pin; the project widens it with myce parity add after a passing output comparison", len(placementStrings(hosts)))
 			}
 		}
+		blocker.RunsNowOn = q.portableRoomNow(j, compatibleHosts, func(visit func(targetFit, *Job, *Machine)) {
+			for _, t := range targets {
+				visit(t.fit, t.job, t.m)
+			}
+		})
+		if blocker.RunsNowOn != "" {
+			// Part of the one action: default status prints only reason and next.
+			blocker.Next += "; this job would run now on " + blocker.RunsNowOn + " if its targets and environment allowed it: add that platform (myce portability), never name a host"
+		}
 		if len(compatibleHosts) == 1 && len(j.Spec.AllowedMachines) == 0 && len(j.Spec.ExcludedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
 			blocker.Detail += "; only one freshly observed physical host meets the declared software, resource, qualification and parity requirements; this is observed coverage, not a required host pin; keep the job unpinned unless an explicit restriction is intended"
 		}
@@ -203,6 +212,50 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 		b.retag("unknown_observation", ownerPolicy, "restore the missing observation named in the detail")
 	}
 	return b
+}
+
+// Platforms with room now for a waiting job that only its authored targets
+// refuse. Uses the targets jobHold already evaluated against permanent
+// capacity; only those failing solely on "target" are re-checked against the
+// live target's current free memory, cores and host memory. A platform where
+// the job can already be placed is not advice. Names platforms, never hosts.
+func (q *Queue) portableRoomNow(j *Job, compatibleHosts map[string]bool, targets func(func(targetFit, *Job, *Machine))) string {
+	if len(j.Spec.Targets) == 0 {
+		return ""
+	}
+	covered := map[string]bool{}
+	room := map[string]bool{}
+	targets(func(fit targetFit, candidate *Job, m *Machine) {
+		label := targetLabel(portabilityTarget(machineTarget(m)))
+		if compatibleHosts[hostID(m)] {
+			covered[label] = true
+		}
+		if fit.excluded || m.Replacement != nil || len(fit.failed) != 1 || fit.failed[0] != "target" || room[label] {
+			return
+		}
+		live := q.s.Machines[m.ID]
+		if live == nil || !q.inventoryFresh(live) {
+			return
+		}
+		for _, view := range q.placementTargets(live) {
+			if !sameTarget(view, m) {
+				continue
+			}
+			now := targetFit{}
+			fitsResourcesChecked(candidate, view, view.FreeMemoryGB, &now)
+			if len(now.failed) == 1 && now.failed[0] == "target" && hostFits(view, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
+				room[label] = true
+			}
+		}
+	})
+	var out []string
+	for label := range room {
+		if !covered[label] {
+			out = append(out, label)
+		}
+	}
+	slices.Sort(out)
+	return strings.Join(out, ", ")
 }
 
 // Kinds whose mechanism already says exactly why and who acts. Generic

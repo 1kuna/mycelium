@@ -214,6 +214,8 @@ can't submit ahead.
   owner and one `next:` action. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+  A hold with `runs_now_on` names platforms that would run the job now: add
+  them to its targets and environment rather than naming a host.
 - **Long waits:** one foreground `myce wait JOB_A JOB_B` covers up to 256 jobs,
   and a timeout leaves them running. `queue_stalled` means the queue stopped
   making progress: read status once, then repeat the same command

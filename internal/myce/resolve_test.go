@@ -245,7 +245,8 @@ func TestResolveRegisteredExtensionJob(t *testing.T) {
 // normal load because resolve took the full status capture, copying and
 // charging every retained execution into one request lane. Resolve plans one
 // hypothetical job; retained history stays shared and is never copied.
-func TestResolveFitsRequestLaneWithLargeRetainedHistory(t *testing.T) {
+// Live r6.13: myce portability drew the same refusal from the same capture.
+func TestResolveAndPortabilityFitRequestLaneWithLargeRetainedHistory(t *testing.T) {
 	q, clock, _ := learnedMemoryFixture(t)
 	retained := &Job{ID: "retained-0000", State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: cpuResolveSpec()}
 	retained.Spec.Run.Command = []string{"echo", strings.Repeat("payload", 4096)}
@@ -293,7 +294,26 @@ func TestResolveFitsRequestLaneWithLargeRetainedHistory(t *testing.T) {
 	if len(report.Targets) != 1 || !report.Targets[0].Eligible || report.Targets[0].Freshness != "fresh" {
 		t.Fatalf("resolve lost the live target: %+v", report.Targets)
 	}
+	spec := cpuResolveSpec()
+	data, err = json.Marshal(PortabilityRequest{Spec: &spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest("POST", "/api/portability", bytes.NewReader(data))
+	r.Header.Set("Authorization", "Bearer test")
+	w = httptest.NewRecorder()
+	API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatal("portability refused under normal capacity", w.Code, w.Body.String())
+	}
+	var portability PortabilityReport
+	if err := json.Unmarshal(w.Body.Bytes(), &portability); err != nil {
+		t.Fatal(err)
+	}
+	if len(portability.Targets) != 1 || len(portability.Targets[0].Hosts) != 1 || portability.Targets[0].Hosts[0].Admission != "can admit now" {
+		t.Fatalf("portability lost the live target: %+v", portability.Targets)
+	}
 	if q.requestBudgets.held != 0 || len(q.s.Jobs) != 512 {
-		t.Fatal("resolve leaked capacity or changed jobs", q.requestBudgets.held, len(q.s.Jobs))
+		t.Fatal("resolve or portability leaked capacity or changed jobs", q.requestBudgets.held, len(q.s.Jobs))
 	}
 }
