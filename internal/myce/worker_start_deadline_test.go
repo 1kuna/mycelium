@@ -92,7 +92,13 @@ func TestWorkerStartHandoffCapacity(t *testing.T) {
 
 func TestWorkerStartHandoffQueueWait(t *testing.T) {
 	for _, state := range []string{"current", "cancelled", "lost-reply", "cancel-after-commit", "outage-after-commit"} {
-		t.Run(state, func(t *testing.T) {
+		// "current" replays the incident on wall time over real HTTP: the
+		// exec-receipt pipe deadline re-armed after Started is OS-poller time,
+		// which synctest cannot advance. The other states run the same handler,
+		// queue mutex and exec path in a synctest bubble over an in-memory
+		// transport, so their 3.3s hold is virtual.
+		virtual := state != "current"
+		run := func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
 			s := spec("production")
@@ -103,10 +109,9 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			a := check(t, q, m, nil).Job
 			handler := (API{Queue: q, Token: "test"}).Handler()
 			var calls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			server := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/workers/started" && calls.Add(1) == 1 && state != "lost-reply" && state != "cancel-after-commit" && state != "outage-after-commit" {
 					q.mu.Lock()
-					// Real I/O and mutex waits cannot use synctest time.
 					select {
 					case <-time.After(3300 * time.Millisecond):
 						clock.Advance(3300 * time.Millisecond)
@@ -120,16 +125,20 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 					}
 				}
 				handler.ServeHTTP(rw, r)
-			}))
-			defer server.Close()
-			w := Worker{control: &processControl{clock: clock}, StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: Client{URL: server.URL, Token: "test"}}
+			})
+			w := Worker{control: &processControl{clock: clock}, StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: Client{URL: "http://queue.invalid", Token: "test", HTTP: &http.Client{Transport: handlerTestTransport(server)}}}
+			if !virtual {
+				live := httptest.NewServer(server)
+				defer live.Close()
+				w.Client = Client{URL: live.URL, Token: "test"}
+			}
 			if state == "lost-reply" || state == "cancel-after-commit" || state == "outage-after-commit" {
 				var dropped atomic.Bool
 				w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 					if state == "outage-after-commit" && r.URL.Path == "/api/workers/started" && dropped.Load() {
 						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 					}
-					response, err := http.DefaultTransport.RoundTrip(r)
+					response, err := handlerTestTransport(server).RoundTrip(r)
 					if err == nil && r.URL.Path == "/api/workers/started" && !dropped.Swap(true) {
 						if state == "lost-reply" {
 							// A replayable acknowledgement must not admit another native
@@ -221,6 +230,13 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			// An old session cannot obtain an additional positive hand-off.
 			if err := w.authorizeStart(*a, a.Session+"-old"); err == nil {
 				t.Fatal("stale session authorized")
+			}
+		}
+		t.Run(state, func(t *testing.T) {
+			if virtual {
+				synctest.Test(t, run)
+			} else {
+				run(t)
 			}
 		})
 	}

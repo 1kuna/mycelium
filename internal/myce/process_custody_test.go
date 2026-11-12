@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // A stalled inspector is killed and reports its deadline, rather than an
@@ -16,7 +17,9 @@ func TestProcessPSStalledInspector(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if _, err := processPS("-ax"); !errors.Is(err, context.DeadlineExceeded) {
+	// A real stalled child is OS timing, so this stays on wall time. The bound
+	// itself is a constant; a short one proves the same cancellation path.
+	if _, err := processPSWithin(100*time.Millisecond, "-ax"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("missing inspector cancellation evidence: %v", err)
 	}
 }

@@ -45,13 +45,17 @@ func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Dura
 	if clock == nil {
 		clock = RealClock{}
 	}
+	pause := l.healthPause
+	if pause == nil {
+		pause = readinessPause
+	}
 	go func() {
 		defer close(l.monitorDone)
 		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		failures := serverProbeFailures{latency: l.probeLatency}
 		probe := readinessProbe{latency: l.probeLatency}
 		for {
-			if readinessPause(ctx, failures.latency.cadence()) != nil {
+			if pause(ctx, failures.latency.cadence()) != nil {
 				return
 			}
 			select {

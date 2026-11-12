@@ -306,7 +306,9 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 			}))
 			defer health.Close()
 			clock := &manualWorkerClock{now: time.Unix(0, 0)}
-			e := &LlamaEngine{exited: make(chan struct{}), Clock: clock}
+			// Probe pacing is wall time; each probe here waits for its permit,
+			// so skipping the pause keeps the same probe sequence.
+			e := &LlamaEngine{exited: make(chan struct{}), Clock: clock, healthPause: func(ctx context.Context, _ time.Duration) error { return ctx.Err() }}
 			e.startHealthMonitorTimeout(health.URL, 250*time.Millisecond)
 			defer func() { e.monitorCancel(); <-e.monitorDone }()
 			// Two failures, then a success: failure count must start over.

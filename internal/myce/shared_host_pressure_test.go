@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -373,44 +374,48 @@ func TestSharedHostPressureFailingProbeHealthViews(t *testing.T) {
 	}
 }
 
+// The monitor re-reads its injected clock on a real control-period timer.
+// synctest makes that timer virtual, so each fake-clock step costs no wall time.
 func TestSharedHostPressureRefreshIndependentOfCheckins(t *testing.T) {
-	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	var failing, blocked atomic.Bool
-	entered, release := make(chan struct{}, 1), make(chan struct{})
-	monitor := &sharedPressureMonitor{clock: clock, enabled: true, source: func(context.Context) (SharedHostPressure, error) {
-		if blocked.Load() {
-			entered <- struct{}{}
-			<-release
+	synctest.Test(t, func(t *testing.T) {
+		clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+		var failing, blocked atomic.Bool
+		entered, release := make(chan struct{}, 1), make(chan struct{})
+		monitor := &sharedPressureMonitor{clock: clock, enabled: true, source: func(context.Context) (SharedHostPressure, error) {
+			if blocked.Load() {
+				entered <- struct{}{}
+				<-release
+			}
+			if failing.Load() {
+				return SharedHostPressure{}, errors.New("probe failed")
+			}
+			return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
+		}}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); monitor.run(ctx) }()
+		defer func() { cancel(); close(release); <-done }()
+		// No check-in consumes the probe during twenty seconds of queue delay.
+		for i := 0; i < 5; i++ {
+			await(t, func() bool { p := monitor.snapshot(true); return p != nil && p.AgeSeconds == 0 })
+			if i < 4 {
+				clock.Advance(signalRefresh)
+			}
 		}
-		if failing.Load() {
-			return SharedHostPressure{}, errors.New("probe failed")
+		failing.Store(true)
+		clock.Advance(signalRefresh)
+		await(t, func() bool { return monitor.snapshot(true) == nil })
+		failing.Store(false)
+		clock.Advance(signalRefresh)
+		await(t, func() bool { return validSharedPressure(monitor.snapshot(true)) })
+		blocked.Store(true)
+		clock.Advance(signalRefresh)
+		<-entered
+		clock.Advance(signalMaxAge)
+		if validSharedPressure(monitor.snapshot(true)) {
+			t.Fatal("pending probe renewed old evidence")
 		}
-		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
-	}}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() { defer close(done); monitor.run(ctx) }()
-	defer func() { cancel(); close(release); <-done }()
-	// No check-in consumes the probe during twenty seconds of queue delay.
-	for i := 0; i < 5; i++ {
-		await(t, func() bool { p := monitor.snapshot(true); return p != nil && p.AgeSeconds == 0 })
-		if i < 4 {
-			clock.Advance(signalRefresh)
-		}
-	}
-	failing.Store(true)
-	clock.Advance(signalRefresh)
-	await(t, func() bool { return monitor.snapshot(true) == nil })
-	failing.Store(false)
-	clock.Advance(signalRefresh)
-	await(t, func() bool { return validSharedPressure(monitor.snapshot(true)) })
-	blocked.Store(true)
-	clock.Advance(signalRefresh)
-	<-entered
-	clock.Advance(signalMaxAge)
-	if validSharedPressure(monitor.snapshot(true)) {
-		t.Fatal("pending probe renewed old evidence")
-	}
+	})
 }
 
 // Expected owner yield must not consume an infrastructure-failure alert's
