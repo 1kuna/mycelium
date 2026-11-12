@@ -201,6 +201,19 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiMu.RLock()
 		defer apiMu.RUnlock()
+		if strings.HasSuffix(r.URL.Path, "/events") {
+			// A held five-second event long-poll otherwise delays both the queue
+			// restart (apiMu) and the partition drain by that whole window. End
+			// each poll early with the reply its expired timer would send.
+			ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
+			defer cancel()
+			poll := &eventPollWriter{ResponseWriter: w}
+			handler.ServeHTTP(poll, r.WithContext(ctx))
+			if !poll.wrote && r.Context().Err() == nil {
+				respond(w, WorkerEvent{Cursor: r.URL.Query().Get("after")}, nil)
+			}
+			return
+		}
 		handler.ServeHTTP(w, r)
 	}))
 	client := Client{URL: server.URL, Token: "copy-fault-test", HTTP: &http.Client{Timeout: testWaitTimeout}}
@@ -558,4 +571,16 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 	if j := job(t, q, j.ID); j.Attempt != 1 || j.Losses != 0 {
 		t.Fatal("build restart counted as an execution loss", j)
 	}
+}
+
+// eventPollWriter records whether the event handler answered before its poll ended.
+type eventPollWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *eventPollWriter) WriteHeader(code int) { w.wrote = true; w.ResponseWriter.WriteHeader(code) }
+func (w *eventPollWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
 }
