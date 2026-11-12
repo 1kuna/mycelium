@@ -612,143 +612,111 @@ To upgrade one machine with a printed invitation line, or to replace a
 
 ## Rolling fleet upgrades
 
-Queue shutdown fences new requests without waiting for the queue mutex and
-cancels accepted HTTP/HTTPS observations, long polls and socket I/O. An
-uncommitted control transaction retries against the replacement queue; an
-already committing SQLite transaction finishes at its existing atomic boundary.
-The journal reports `event=queue_shutdown` phases `fenced`, `api_draining`,
-`api_closed`, `storage_wait` and `storage_closed`. A prolonged `storage_wait`
-requires transaction/storage evidence, not permission to treat a timeout as
-confirmed release. Both API transports share the existing ten-second HTTP
-stop budget; expiry closes their sockets and reports failure. It does not kill
-the queue or prove storage closure. The installed service-manager timeout is
-unchanged pending measured native shutdown evidence (#889); laptop cancellation
-tests do not qualify a native stop duration.
+`myce fleet upgrade` is the one way a release reaches the fleet (MY-21, MY-35,
+MY-49). It does what the per-release rollout scripts did, host by host: drain,
+wait for running work, swap in the verified binary, restart, check health,
+resume, advance. No SSH, and nothing changes on a host except Mycelium's own
+binary, restarted under its existing service unit.
 
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Critical updates may deploy during a production
 consumer's run (MY-39); patch time is weighed and is being made quick, but it is
-not a precondition. Ordinary updates wait during a successful run. Fixing a run failing because of Mycelium is allowed and expected.
-Orchestrator application: announce rollouts to consumer orchestrators and prefer
-quick rolling updates through existing supported paths that preserve running
-attempts and resumable checkpoints. This authority does not bypass custody,
-health checks or the supported rollout's current idle waits. Keep the
-fleet on a healthy, tested release before each scheduled production window. There is
-no pre-production freeze, consumer canary deploy gate, or need to ask about
-deploy timing (MY-33, amended by MY-39).
+not a precondition. Ordinary updates wait during a successful run. Fixing a run
+failing because of Mycelium is allowed and expected. Orchestrator application:
+announce rollouts to consumer orchestrators. Keep the fleet on a healthy, tested
+release before each scheduled production window. There is no pre-production
+freeze, consumer canary deploy gate, or need to ask about deploy timing
+(MY-33, amended by MY-39).
 
-> **Before deploying bounded status (#439), migrate preservation checks.**
-> Default `GET /api/status` includes active/cleanup-pending jobs and only the
-> newest 100 other terminal jobs. Before/after preservation, protected-job,
-> history and curve-provenance checks must request `/api/status?detail=full`
-> (Python: `client.status(full=True)`, CLI: `myce status --history --json`) or
-> collect every `jobs=all` page through `jobs_page.next_before`. Existing complete
-> `/api/inspection` collectors remain supported. Migrate private release-script
-> copies before queue cutover; a passing pre-upgrade read does not prove the
-> post-upgrade collector is complete. Curves remain included by default, but
-> missing historical jobs must never count as preservation or confirmed release.
+**Before.** Publish the signed release and approve it with `myce release approve`
+([publish](#publish-and-approve-an-onboarding-release)). Save the queue's
+complete history for the after-check: `myce status --history --json > before.json`.
 
-After publishing a signed release and approving it with `myce release approve`,
-run `myce fleet upgrade` (or `myce fleet upgrade --release vX.Y.Z`). The command
-uses the same saved installed authority as `myce status` and returns a durable
-operation ID. It can exit immediately: the queue owns progress. Watch phases,
-wait reasons and failures with `myce status`. An approval from before signed
-envelope retention needs identical verified reapproval first.
+**Run.**
 
-For a critical update (MY-39), add `--urgency critical`. Each host is still
-updated one at a time, but when it is selected the queue requests the existing
-planned-maintenance stop at once instead of waiting for an idle moment:
-resumable work checkpoints within the usual stop grace and is requeued, and
-the selected queue also stops its model streams. Open production leases do not
-hold a critical update; production requeued or submitted during the upgrade's
-drain waits for the host to return. Exact release is still required before
-restart, and an elapsed grace never proves it. Status lists each host's
-`stop_requests` (the attempt, whether it was resumable, its accepted progress
-before the stop). Resume and fix-forward must repeat the same urgency; a
-replaced critical operation keeps its stop records in `fleet_superseded`.
-Without the flag, urgency is normal.
+```sh
+myce fleet upgrade                      # the approved release, normal urgency
+myce fleet upgrade --release vX.Y.Z     # name the approved release explicitly
+myce fleet upgrade --urgency critical   # MY-39: stop running work at a checkpoint
+```
 
-For a queue hotfix that should wait for production to finish, use
-`myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
-`--queue-only` selects only the queue service, including when workers share its
-host or installed binary. It still drains that host and waits for fresh exact
-custody; worker services are not restarted or required to support self-update.
-Other hosts retain their maintenance policies and versions.
+The command returns the operation and exits; the queue runs it. `myce status`
+shows each host's `phase`, `wait` and `failure`. For each host in turn the queue:
 
-`--wait-production-idle` also works for a full upgrade. It pauses new production
-batch assignments until queue running-image health is verified, and waits for
-all assigned production attempts, retained release custody and production calls
-across the fleet before queue restart. Existing work finishes naturally without
-a deadline. All model calls/streams still settle at queue cutover. A stopped
-operation keeps the admission fence until explicit recovery. Queued production
-keeps its ordinary start/give-up deadlines; choose the maintenance window with
-that in mind. Status includes both policy flags and the current wait reason.
+1. **Picks the host.** Hosts idle now go first, hosts running production after,
+   and the queue's own host last. A normal update leaves a host enabled while
+   draining it would strand open production work: a
+   [production lease](#production-leases) or a queued production stage,
+   including one still waiting on `after:` (#1387). Its wait names that work;
+   the host goes once the work starts, ends, or the lease closes or expires.
+2. **Drains it**, with the operation as drain owner. A host an operator already
+   drained or disabled keeps the operator's policy: it is updated, never resumed.
+   While the operation's drain holds, a production job whose only eligible hosts
+   it drained waits for them instead of failing.
+3. **Waits for its running work**, model calls and cleanup to finish on their
+   own, with no deadline. With `--urgency critical` it stops that work at once
+   through the planned-maintenance stop instead: resumable work checkpoints
+   within the stop grace and is requeued without a retry charge, and each
+   host's `stop_requests` lists what was stopped (attempt, whether resumable,
+   accepted progress). Exact release of every attempt is still required; an
+   elapsed grace never proves it. On the queue's host, new model calls wait
+   while it is updated, because the queue restart ends every model stream.
+4. **Updates each Mycelium service on the host**, the worker first and then, on
+   the queue's host, the queue. The service fetches the release through the
+   queue's authenticated endpoint and checks it against its locally pinned
+   publisher key, the signed size and SHA-256, the reported version and
+   protocols, and on macOS its code-signing identity. It asks the queue once
+   more, replaces the installed binary atomically and restarts its existing
+   service. Settings, units and state are untouched.
+5. **Checks health**: a fresh runtime proof from a new process running the
+   release's exact bytes, with a healthy service manager and runner smoke,
+   stable for 30 seconds.
+6. **Resumes the drain it took** and moves to the next host.
 
-For an existing operation stuck at "waiting for production attempts and release
-custody across the fleet" solely because failed jobs have every copy
-`release_confirmed: true` but an unset job-level flag, install a queue version
-with the copy-release reconciliation fix through the supported
-[queue service installation/restart procedure](#install-and-upgrade), using the
-existing saved queue config. On startup it derives the missing job flag from
-the confirmed copies. If the restarted queue runs the waiting operation's exact
-frozen release version and artifact hash, the same operation finishes after
-fresh runtime proofs and the remaining cutover checks pass, without another
-queue restart. If the fixed queue is a newer release than that frozen target,
-the old operation stops with `queue_running_hash_mismatch` after custody settles;
-its drain and production admission fence remain. Approve that newer signed
-release, then explicitly run `myce fleet upgrade --release NEWER_RELEASE` with
-the original `--queue-only` (if used) and `--wait-production-idle` flags. This
-supported fix-forward path carries the drain into a new operation and verifies
-already-current queue bytes without restarting them. A restart never silently
-retargets the frozen operation or authorizes a downgrade.
+Services already on the release are not drained or restarted. A drained or
+disabled host without a usable runtime proof is `skipped` and named; rerun once
+it is back. Rerunning while the operation runs returns it unchanged; a different
+release or urgency is refused until it finishes or stops.
 
-No database or helper-receipt edits are needed. A running wait has no
-cancel/supersede command; `fleet supersede` remains limited to stopped operations.
-Any unconfirmed copy, retained host custody, or production call still blocks;
-failed/completed state, loss and elapsed time never establish release.
+**When a host is unhealthy**, the operation stops (`state: stopped`), that host
+keeps its drain, and later hosts are untouched. The host's `failure` says why:
+a code from the service's updater, a new process running other bytes
+(`worker_running_hash_mismatch`, `queue_running_hash_mismatch`), no healthy new
+process within 15 minutes (`worker_update_not_verified`,
+`queue_update_not_verified`), or a maintenance change by someone else
+(`maintenance_changed`, keeping their policy). Look the code up in the
+[failure code table](reference/fleet-upgrades.md#failure-codes-and-repairs).
+Nothing rolls back. Fix forward, then rerun `myce fleet upgrade` (with
+`--release NEWER` once a fixed release is approved). A rerun is a new operation:
+it takes over the drains the stopped operation left, verifies those hosts and
+resumes them, and skips services already on the release. If the queue itself is
+unhealthy, roll it back as in
+[queue-only rollback](#queue-only-rollback-to-the-previous-release).
 
-Repeat the same flags when resuming: scope and idle policy cannot change during
-an unfinished operation, including when selecting a newer fix-forward release.
-After queue-only completion, a full same-release invocation creates a separate
-operation for the workers without restarting the already-current queue.
-These options require a queue version that implements them; they cannot change
-restart behavior inside an older installed queue or helper.
+**After.** `myce status` shows the operation `complete`, every host `complete`
+or a named `skipped`. Check `myce status --history --json` against `before.json`:
+every earlier job ID is present, running attempts kept their attempt number, and
+the priority policy is unchanged. Confirm `myce status` lists each worker's
+release and that the default onboarding approval is the new release
+([advance the default](#advance-the-default-after-a-signed-update)).
 
-A rollout needs no consumer confirmation. The rollout keeps an enabled host for
-each queued production job, including a stage still waiting on `after:`, and
-for each open [production lease](#production-leases), which projects open only
-for stages they cannot submit ahead. It upgrades those hosts once the job
-starts, is cancelled or fails, or the lease closes or expires. The earlier manual zero-open check before each
-restart is retired once a queue with #1009 is deployed. Rollback to the previous
-release stays as described in
-[queue-only rollback](#queue-only-rollback-to-the-previous-release); a newer queue's
-leases are simply ignored by an older one.
+**First use.** Each service must run as an installed service on a release with
+this path. `myce fleet upgrade` refuses and names every service without a fresh
+runtime proof. To bring a service onto such a release, do the same steps by
+hand: `myce host drain HOST --wait` (it returns once the host is quiescent),
+run the verified new binary's `myce install ROLE --config CONFIG`,
+check `myce status` shows the new release and a new session, then
+`myce host resume HOST`, one host at a time with the queue's host last.
 
-Host order, idle-moment selection, helper verification, stale-authorization
-recovery and per-host failure handling are in
-[fleet upgrade internals](reference/fleet-upgrades.md). When an operation stops,
-look up its `failure_code` in the
-[failure code table](reference/fleet-upgrades.md#failure-codes-and-repairs),
-repair locally through the authorized owner, then rerun `myce fleet upgrade`.
+Queue shutdown fences new requests, cancels open HTTP observations and long
+polls, and lets an already committing SQLite transaction finish; batch attempts
+on other hosts reconnect unchanged. The journal reports `event=queue_shutdown`
+phases `fenced`, `api_draining`, `api_closed`, `storage_wait` and
+`storage_closed`. The ten-second HTTP stop budget closes sockets on expiry; it
+does not prove storage closure.
 
-A refused `myce fleet upgrade` names the blocking operation (ID, state, flags,
-age and host failure) and every service missing a fresh runtime proof, with the
-next step. To abandon a stopped operation instead of resuming it, run
-`myce fleet supersede --operation ID --reason TEXT`. Only the current stopped
-operation can be superseded. The queue keeps an audit record (operation,
-release, flags, per-host phases and failures, reason and time) in status as
-`fleet_superseded`, and the next `myce fleet upgrade` starts a new operation.
-Supersession never resumes a drain. Hosts the operation drained stay drained and
-are listed as `retained_drains`; resume each with `myce host resume HOST` once
-it is healthy. Its production admission fence is released. A worker settles a
-failure receipt the queue definitively refuses (any 4xx except 401, 403, 408
-and 429). It retries other delivery failures with backoff from 2 s up to 5 min
-and keeps reporting its runtime proof meanwhile.
-
-No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
-changes occur. Offline or unknown custody stays a visible wait; elapsed time
-never proves release. Native service/signing qualification and the first live
-rollout remain separate from the laptop acceptance tests.
+How hosts are chosen, how services verify a release, and every failure code are
+in [fleet upgrade internals](reference/fleet-upgrades.md).
 
 ## Production leases
 
@@ -1303,7 +1271,7 @@ change attempt outcomes or custody. Capture failures do not stop jobs.
 - **Completion notifications stopped or a legacy observer is stuck:**
   [completion observer recovery](reference/completion-observer.md).
 - **Fleet upgrade stopped:** [failure codes and repairs](reference/fleet-upgrades.md#failure-codes-and-repairs),
-  then rerun or [supersede](#rolling-fleet-upgrades).
+  then [rerun](#rolling-fleet-upgrades).
 - **Queue check-ins slow under disk load:** [queue disk I/O](reference/queue-io.md).
 - **Shared host under owner pressure:** [pressure response](reference/shared-and-polite-hosts.md#pressure-response).
 - **File store full:** [file store reference](reference/file-store.md), including

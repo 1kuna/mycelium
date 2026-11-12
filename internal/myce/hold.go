@@ -84,7 +84,6 @@ var holdKinds = map[string]holdKind{
 	"project_cap":              {ownerQueue, "waiting under the project's concurrency limit", "the project's running work drops below its limit", "wait; nothing to do"},
 	"production_admission":     {ownerQueue, "waiting for production to finish starting", "the production arrival or setup window passes", "wait; nothing to do"},
 	"unified_cuda_headroom":    {ownerQueue, "a unified-memory host's headroom is kept for expected production", "the expected production starts, or another host can take it", "wait; nothing to do"},
-	"production_paused":        {ownerQueue, "production starts are paused for a fleet upgrade", "the upgrade verifies queue health", "wait; nothing to do"},
 	"production_hold":          {ownerQueue, "waiting for a production hold", "production releases the host", "wait; nothing to do"},
 	"production_reserved":      {ownerQueue, "a fitting host is reserved for production", "production demand on that host ends", "wait; nothing to do"},
 	"pinned_model":             {ownerOperator, "a pinned model prevents production placement", "the pin is removed or the model is unloaded", "unpin the model if production should use that host"},
@@ -175,7 +174,7 @@ var holdDiagnosticCodes = map[string]string{
 // listed are capacity waits.
 var holdEfficiencyCategories = map[string]string{
 	"paused": "holds", "production_admission": "holds", "production_hold": "holds", "production_reserved": "holds",
-	"production_paused": "holds", "pinned_model": "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
+	"pinned_model": "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",
 	"deterministically_failed": "environment", "docker_runtime": "environment", "extension": "environment",

@@ -14,6 +14,8 @@ import (
 	"testing"
 )
 
+// The helper installs over the running bytes, or restarts onto the release
+// already in place; any other installed bytes are refused untouched.
 func TestReleaseSlotFleetReconciliation(t *testing.T) {
 	for _, state := range []string{"approved", "unknown", "match"} {
 		t.Run(state, func(t *testing.T) {
@@ -30,15 +32,11 @@ func TestReleaseSlotFleetReconciliation(t *testing.T) {
 			}
 			err := f.launch()
 			if state == "unknown" {
-				var refusal *HTTPError
-				if !errors.As(err, &refusal) || refusal.Code != "fleet_slot_unapproved" || !strings.Contains(err.Error(), fleetBytesHash(f.old)) || !strings.Contains(err.Error(), fleetBytesHash(slot)) {
-					t.Fatalf("missing identities/refusal: %v", err)
-				}
-				if f.launches != 0 || f.restarts != 0 || f.fetches != 0 {
-					t.Fatal("unknown slot mutated installation")
+				if err == nil || err.Error() != "fleet_install_changed" || f.launches != 0 || f.restarts != 0 || f.fetches != 0 {
+					t.Fatalf("unknown slot not refused untouched: %v", err)
 				}
 				if _, err := os.Stat(filepath.Join(f.c.State, fleetUpdateReceiptFile)); !os.IsNotExist(err) {
-					t.Fatal("unknown slot wrote intent", err)
+					t.Fatal("unknown slot wrote a receipt", err)
 				}
 				f.assertBinary(slot)
 				return
@@ -46,24 +44,12 @@ func TestReleaseSlotFleetReconciliation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			receipt, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state == "approved" {
-				r := receipt.SlotReconciliation
-				if r == nil || r.Running.SHA256 != fleetBytesHash(f.old) || r.Slot.SHA256 != fleetBytesHash(f.next) || r.Slot.Version != f.i.Release.Manifest.Version || r.RollbackTarget != "installed_slot" || receipt.BeforeSHA256 != r.Slot.SHA256 {
-					t.Fatalf("ambiguous rollback: %+v", receipt)
-				}
-			} else if receipt.SlotReconciliation != nil {
-				t.Fatal("matching images reported mismatch")
-			}
 			if err := f.apply(); err != nil {
 				t.Fatal(err)
 			}
 			f.assertBinary(f.next)
-			if f.restarts != 1 {
-				t.Fatal("did not activate installed release")
+			if f.restarts != 1 || (state == "approved") != (f.fetches == 0) {
+				t.Fatal("did not activate the installed release", f.restarts, f.fetches)
 			}
 		})
 	}
@@ -192,8 +178,11 @@ func TestReleaseSlotAfterFailedFleetActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil || r.SlotReconciliation == nil || r.BeforeRuntime.SHA256 != fleetBytesHash(f.old) || r.BeforeSHA256 != fleetBytesHash(f.next) {
+	if err != nil || r.BeforeRuntime.SHA256 != fleetBytesHash(f.old) || r.BeforeSHA256 != fleetBytesHash(f.next) {
 		t.Fatalf("failed activation lost identities: %+v %v", r, err)
+	}
+	if err := f.apply(); err != nil || f.restarts != 2 || f.fetches != 1 {
+		t.Fatal("rerun did not restart onto the published release", err, f.restarts, f.fetches)
 	}
 }
 

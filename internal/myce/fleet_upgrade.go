@@ -8,19 +8,22 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 )
 
-// The operation is part of the queue state transaction, never a second queue.
-// Public status deliberately excludes publisher locations and signed envelopes.
+// One rollout path (MY-21, MY-35, MY-49), the sequence the per-host release
+// rollouts proved: for each host in turn, drain it, wait for its running work,
+// let each Mycelium service on it fetch, verify and swap in the approved
+// release and restart, check health, resume the drain, then advance. The
+// queue's own host goes last. An unhealthy result stops advancing and keeps the
+// host drained; nothing rolls back. The operation lives in the queue state.
 type FleetUpgradeStatus struct {
-	Urgency            string            `json:"urgency"`
-	QueueOnly          bool              `json:"queue_only"`
-	WaitProductionIdle bool              `json:"wait_production_idle"`
-	Operation          string            `json:"operation"`
-	Release            string            `json:"release"`
-	State              string            `json:"state"`
-	Hosts              []FleetHostStatus `json:"hosts"`
+	Urgency   string            `json:"urgency"`
+	Operation string            `json:"operation"`
+	Release   string            `json:"release"`
+	State     string            `json:"state"`
+	Hosts     []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
 	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
@@ -32,34 +35,39 @@ type FleetHostStatus struct {
 	ProgressAt   time.Time          `json:"progress_at"`
 }
 type fleetUpgrade struct {
-	Urgency            string              `json:"urgency,omitempty"`
-	QueueOnly          bool                `json:"queue_only,omitempty"`
-	WaitProductionIdle bool                `json:"wait_production_idle,omitempty"`
-	Revision           int                 `json:"revision"`
-	Operation          string              `json:"operation"`
-	Release            EnrollmentRelease   `json:"release"`
-	PublisherKey       []byte              `json:"publisher_key"`
-	State              string              `json:"state"`
-	Hosts              []*fleetUpgradeHost `json:"hosts"`
-	CreatedAt          time.Time           `json:"created_at,omitempty"`
+	Urgency string `json:"urgency,omitempty"`
+	// Revision stays 1. Helpers fence on operation and session; the field
+	// keeps the instruction and acknowledgement wire format unchanged.
+	Revision     int                 `json:"revision"`
+	Operation    string              `json:"operation"`
+	Release      EnrollmentRelease   `json:"release"`
+	PublisherKey []byte              `json:"publisher_key"`
+	State        string              `json:"state"`
+	Hosts        []*fleetUpgradeHost `json:"hosts"`
+	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	stability      fleetStability
 	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
-	RetryPhase     string     `json:"retry_phase,omitempty"`
+	StepAt         time.Time  `json:"step_at,omitempty"`
 	HealthSince    time.Time  `json:"health_since,omitempty"`
 	HealthIdentity string     `json:"health_identity,omitempty"`
-	HelperRevision int        `json:"helper_revision,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
 	WorkerDone  bool               `json:"worker_done"`
 	Machine     string             `json:"machine,omitempty"`
-	Before      *Machine           `json:"before,omitempty"`
+	Before      *FleetRuntimeProof `json:"worker_before,omitempty"`
 	QueueBefore *FleetRuntimeProof `json:"queue_before,omitempty"`
 	Policy      HostMaintenance    `json:"policy"`
 	Owned       bool               `json:"owned"`
 }
+
+// fleetAbandoned is what remains of operations retired by releases before
+// MY-49: only their IDs, so the next upgrade can adopt drains they left.
+type fleetAbandoned struct {
+	Operation string `json:"operation"`
+}
+
 type fleetQueueRuntime struct {
 	Session    string
 	Host       string
@@ -69,10 +77,8 @@ type fleetQueueRuntime struct {
 	ObservedAt time.Time
 }
 type FleetUpgradeRequest struct {
-	Urgency            string `json:"urgency,omitempty"`
-	QueueOnly          bool   `json:"queue_only,omitempty"`
-	WaitProductionIdle bool   `json:"wait_production_idle,omitempty"`
-	Release            string `json:"release,omitempty"`
+	Urgency string `json:"urgency,omitempty"`
+	Release string `json:"release,omitempty"`
 }
 type FleetUpgradeAck struct {
 	Runtime   *FleetRuntimeProof `json:"runtime,omitempty"`
@@ -85,29 +91,44 @@ type FleetUpgradeAck struct {
 	Failure   string             `json:"failure,omitempty"`
 }
 
+// The longest one service update can take: the helper's 10-minute artifact
+// transfer, a 3-minute manager restart command and 1-minute readiness wait,
+// plus the 30-second stability window, rounded up. A step older than this has
+// outlived every bound the helper has, so it died or hung: stop advancing.
+const fleetStepTimeout = 15 * time.Minute
+
 func fleetError(code string) error { return &HTTPError{Status: 409, Code: code, Message: code} }
+
+func fleetUrgency(value string) string {
+	if value == "" {
+		return "normal"
+	}
+	return value
+}
 
 func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	u := q.s.FleetUpgrade
 	if u == nil {
 		return nil
 	}
-	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
+	out := &FleetUpgradeStatus{Urgency: fleetUrgency(u.Urgency), Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
 		out.Hosts = append(out.Hosts, h.FleetHostStatus)
 	}
 	return out
 }
 
+// StartFleetUpgrade starts a new operation for the approved release. Rerunning
+// while one runs returns it unchanged; after it stopped or completed, a rerun
+// is a new operation that adopts the drains the stopped one left and skips
+// services already on the release.
 func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts ...context.Context) (*FleetUpgradeStatus, error) {
-	requestCtx := requestContext(requestContexts)
-
 	var out *FleetUpgradeStatus
 	request.Urgency = fleetUrgency(request.Urgency)
 	if request.Urgency != "normal" && request.Urgency != "critical" {
 		return nil, &HTTPError{Status: 400, Code: "fleet_urgency_invalid", Message: "fleet urgency must be normal or critical"}
 	}
-	err := q.updateRequest(requestCtx, func() error {
+	err := q.updateRequest(requestContext(requestContexts), func() error {
 		approved := q.s.EnrollmentRelease
 		if approved == nil || len(approved.SignedRelease) == 0 {
 			return fleetError("fleet_release_reapproval_required")
@@ -118,78 +139,32 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		if !bytes.Equal(approved.PublisherKey, q.s.EnrollmentReleaseKey) {
 			return fleetError("fleet_publisher_changed")
 		}
-		if previous := q.s.FleetUpgrade; previous != nil {
-			samePolicy := previous.QueueOnly == request.QueueOnly && previous.WaitProductionIdle == request.WaitProductionIdle && fleetUrgency(previous.Urgency) == request.Urgency
-			if !samePolicy && previous.State != "complete" {
-				return q.fleetOperationRefusal("fleet_upgrade_policy_conflict", request)
-			}
-			if samePolicy && previous.Release.Manifest.Version == approved.Manifest.Version && reflect.DeepEqual(previous.Release.Manifest, approved.Manifest) {
-				// An explicit identical rerun clears only a failure. The exact drain
-				// and old session remain fenced; health is always re-observed.
-				if previous.State != "complete" {
-					previous.Revision++
-				}
-				if h := q.fleetActiveHost(); h != nil {
-					if previous.State == "stopped" {
-						// Explicit recovery supersedes the already reported failure.
-						h.HelperRevision = previous.Revision
-					}
-					if h.Phase == "queue_health" && h.QueueBefore.Version != approved.Manifest.Version && q.fleetQueue != nil && q.fleetQueue.Proof != nil && q.fleetQueue.Proof.Session == h.QueueBefore.Session && q.fleetQueue.Proof.SHA256 == h.QueueBefore.SHA256 {
-						h.Phase = "queue_update"
-					}
-					if h.Phase == "worker_health" && h.Before.Fleet.Version != approved.Manifest.Version {
-						if m := q.s.Machines[h.Machine]; m != nil && m.Fleet != nil && m.Session == h.Before.Session && m.Fleet.SHA256 == h.Before.Fleet.SHA256 {
-							h.Phase = "worker_update"
-						}
-					}
-				}
-				if previous.State == "stopped" {
-					previous.State = "running"
-					for _, h := range previous.Hosts {
-						if h.Failure != "" {
-							h.Failure, h.FailureCode = "", ""
-							h.Wait = "reconciling interrupted step"
-						}
-					}
-				}
-				// Only explicit operator intent retries a failed disabled worker.
-				// Completed hosts retain their verified progress.
-				for _, h := range previous.Hosts {
-					if h.Phase == "failed" {
-						if previous.State == "complete" {
-							previous.Revision++
-							previous.State = "running"
-						}
-						h.Phase, h.Failure, h.Wait = "pending", "", ""
-						h.FailureCode = ""
-					}
-				}
+		previous := q.s.FleetUpgrade
+		if previous != nil && previous.State == "running" {
+			if previous.Release.Manifest.Version == approved.Manifest.Version && fleetUrgency(previous.Urgency) == request.Urgency {
 				out = q.fleetUpgradeStatus()
 				return nil
 			}
-			if previous.State != "complete" && (previous.State != "stopped" || request.Release == "") {
-				return q.fleetOperationRefusal("fleet_upgrade_target_conflict", request)
-			}
-			if err := CheckReleaseUpgrade(approved.Manifest.Version, previous.Release.Manifest.Version, false); err != nil {
-				return fleetError("fleet_downgrade_refused")
-			}
+			return q.fleetOperationRefusal(previous)
 		}
-		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
-			return q.fleetProofRefusal("fleet_queue_unmanaged", request)
+		if previous != nil && CheckReleaseUpgrade(approved.Manifest.Version, previous.Release.Manifest.Version, false) != nil {
+			return fleetError("fleet_downgrade_refused")
 		}
-		u := &fleetUpgrade{Urgency: request.Urgency, Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle, CreatedAt: q.clock.Now()}
 		queue := q.fleetQueue
+		if queue == nil || !q.fleetProofFresh(queue.Proof) {
+			return q.fleetProofRefusal("fleet_queue_unmanaged")
+		}
 		a, err := approved.Manifest.Select(queue.OS, queue.Arch)
 		if err != nil {
 			return fleetError("fleet_queue_target_incompatible")
 		}
-		if err = CheckReleaseUpgrade(approved.Manifest.Version, queue.Proof.Version, false, queue.Proof.SHA256 == a.SHA256); err != nil {
+		if CheckReleaseUpgrade(approved.Manifest.Version, queue.Proof.Version, false, queue.Proof.SHA256 == a.SHA256) != nil {
 			return fleetError("fleet_queue_downgrade_refused")
 		}
-		qh := &fleetUpgradeHost{FleetHostStatus: FleetHostStatus{Host: queue.Host, Phase: "pending"}, Queue: true, QueueBefore: cloneFleetProof(queue.Proof)}
-		byHost := map[string]*fleetUpgradeHost{queue.Host: qh}
+		u := &fleetUpgrade{Urgency: request.Urgency, Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", CreatedAt: q.clock.Now()}
+		byHost := map[string]*fleetUpgradeHost{queue.Host: {FleetHostStatus: FleetHostStatus{Host: queue.Host, Phase: "pending"}, Queue: true, QueueDone: q.fleetCurrent(queue.Proof, queue.OS, queue.Arch)}}
 		for _, m := range q.s.Machines {
-			if request.QueueOnly || m.Replacement != nil {
+			if m.Replacement != nil {
 				continue
 			}
 			h := byHost[hostID(m)]
@@ -200,63 +175,48 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 			if h.Machine != "" {
 				return fleetError("fleet_legacy_siblings")
 			}
-			before := cloneMachine(m)
 			h.Machine = m.ID
-			h.Before = &before
-			if policy := q.s.HostMaintenance[h.Host]; policy.Mode == "disabled" {
-				// Freeze the operator receipt even when this out-of-service
-				// worker cannot yet supply a usable runtime/inventory proof.
-				h.Policy = policy
-				h.Failure = q.fleetWorkerFailure(m, approved)
-			} else if reason := q.fleetWorkerFailure(m, approved); reason != "" {
-				if reason == "worker_unmanaged" {
-					return q.fleetProofRefusal("fleet_worker_unmanaged", request)
+			if reason := q.fleetWorkerFailure(m, approved); reason != "" {
+				if !q.maintenanceBlocked(h.Host) {
+					if reason == "worker_unmanaged" {
+						return q.fleetProofRefusal("fleet_worker_unmanaged")
+					}
+					return fleetError("fleet_" + reason)
 				}
-				return fleetError("fleet_" + reason)
+				// An out-of-service host the operator drained or disabled is
+				// left alone, visibly; rerun once it is back.
+				h.Phase, h.Failure = "skipped", reason
+				h.Wait = "out of service without a usable runtime proof; rerun myce fleet upgrade once it is back"
+				continue
 			}
+			h.WorkerDone = q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch)
+		}
+		// Abandoned operations' drains belong to this operation now: it
+		// verifies those hosts and then resumes them.
+		abandoned := map[string]bool{}
+		if previous != nil && previous.State != "complete" {
+			abandoned[previous.Operation] = true
+		}
+		for _, a := range q.s.FleetSuperseded {
+			abandoned[a.Operation] = true
 		}
 		for _, h := range byHost {
+			if policy := q.s.HostMaintenance[h.Host]; policy.Mode == "drained" && policy.DrainOwner != "" && abandoned[policy.DrainOwner] {
+				h.Policy, h.Owned = policy, true
+			}
+			if h.Phase == "pending" && (h.Machine == "" || h.WorkerDone) && (!h.Queue || h.QueueDone) {
+				h.Phase, h.Wait = "complete", "already on the release"
+				if h.Owned {
+					h.Phase, h.Wait = "verified", ""
+				}
+			}
 			u.Hosts = append(u.Hosts, h)
 		}
 		sort.Slice(u.Hosts, func(i, j int) bool { return u.Hosts[i].Host < u.Hosts[j].Host })
-		// Manifest validation already requires the current start/attempt protocols.
-		// Thus workers preceding a production queue remain compatible with it.
-		// New protocol migrations cannot enter approval under this implementation.
-		if old := q.s.FleetUpgrade; old != nil && old.State == "stopped" {
-			// Carry unresolved drain custody into explicit fix-forward intent.
-			for _, h := range u.Hosts {
-				for _, p := range old.Hosts {
-					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" && p.Phase != "failed" {
-						h.Policy = p.Policy
-						h.Owned = p.Owned
-						if !q.fleetPolicyMatches(p) {
-							current := q.s.HostMaintenance[h.Host]
-							if current.Mode != "drained" && current.Mode != "disabled" {
-								return &HTTPError{Status: 409, Code: "fleet_maintenance_changed", Message: "stopped upgrade maintenance was replaced; explicitly drain or disable the host before selecting a newer approved release"}
-							}
-							// Explicit newer-release intent may use the operator's current
-							// admission fence, but never inherit authority to resume it.
-							h.Policy = current
-							h.Owned = false
-						}
-						h.Phase = "draining"
-					}
-				}
-			}
+		if !slicesContainsPhase(u.Hosts, "pending") && !slicesContainsPhase(u.Hosts, "verified") {
+			u.State = "complete"
 		}
-		if old := q.s.FleetUpgrade; old != nil {
-			for _, h := range old.Hosts {
-				if len(h.StopRequests) > 0 {
-					// Released obligations cannot regenerate interruption evidence.
-					// Keep every host's records under the original operation, including
-					// completed/failed hosts that do not carry drain custody forward.
-					record := q.fleetSupersession(old, "replaced by explicit fleet upgrade")
-					record.Next = "continue fleet operation " + u.Operation
-					q.s.FleetSuperseded = append(q.s.FleetSuperseded, record)
-					break
-				}
-			}
-		}
+		q.s.FleetSuperseded = nil
 		q.s.FleetUpgrade = u
 		out = q.fleetUpgradeStatus()
 		return nil
@@ -276,9 +236,19 @@ func cloneFleetProof(p *FleetRuntimeProof) *FleetRuntimeProof {
 	return &out
 }
 
-// A disabled worker is validated when its turn comes, so missing or unhealthy
-// proofs cannot prevent enabled hosts from being processed. No failed check
-// authorizes an update; its named failure remains visible on that host.
+// fleetCurrent reports a service already running the operation's release.
+func (q *Queue) fleetCurrent(p *FleetRuntimeProof, goos, arch string) bool {
+	release := q.s.EnrollmentRelease
+	if u := q.s.FleetUpgrade; u != nil && u.State == "running" {
+		release = &u.Release
+	}
+	if p == nil || release == nil {
+		return false
+	}
+	a, err := release.Manifest.Select(goos, arch)
+	return err == nil && p.Version == release.Manifest.Version && p.SHA256 == a.SHA256
+}
+
 func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) string {
 	if m == nil || !q.fleetProofFresh(m.Fleet) || m.CapabilityProfile == nil {
 		return "worker_unmanaged"
@@ -287,7 +257,7 @@ func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) strin
 	if err != nil {
 		return "worker_target_incompatible"
 	}
-	if err := CheckReleaseUpgrade(release.Manifest.Version, m.Fleet.Version, false, m.Fleet.SHA256 == artifact.SHA256); err != nil {
+	if CheckReleaseUpgrade(release.Manifest.Version, m.Fleet.Version, false, m.Fleet.SHA256 == artifact.SHA256) != nil {
 		return "worker_downgrade_refused"
 	}
 	return ""
@@ -299,24 +269,20 @@ func (q *Queue) fleetProofFresh(p *FleetRuntimeProof) bool {
 	if !fleetProofReady(p) || p.ObservedAt.IsZero() {
 		return false
 	}
-	now := q.clock.Now()
-	age := now.Sub(p.ObservedAt)
+	age := q.clock.Now().Sub(p.ObservedAt)
 	return age >= 0 && age < fleetRuntimeFreshFor
 }
 
-// Match the existing enrollment stability window. It catches service crash loops
-// before restoring admission; its cost is 30 seconds per updated service.
+// fleetStable requires the same healthy process for fleetStableFor, the
+// enrollment stability window, so a service that crash-loops shortly after
+// start stops the rollout instead of passing it.
 func (q *Queue) fleetStable(h *fleetUpgradeHost, p *FleetRuntimeProof) bool {
 	identity := fmt.Sprintf("%s/%d/%s", p.Session, p.PID, p.SHA256)
-	// Only synthetic child builds model this window; proof freshness and all
-	// queue decisions continue to use q.clock. Identity changes reset the model.
-	now := h.stability.clock(q.clock, h.HealthIdentity != identity || h.HealthSince.IsZero()).Now()
 	if h.HealthIdentity != identity || h.HealthSince.IsZero() {
-		h.HealthIdentity = identity
-		h.HealthSince = now
+		h.HealthIdentity, h.HealthSince = identity, q.clock.Now()
 	}
-	if now.Sub(h.HealthSince) < 30*time.Second {
-		h.Wait = "waiting for stable service and running-image health"
+	if q.clock.Now().Sub(h.HealthSince) < fleetStableFor {
+		h.Wait = "waiting for stable service health"
 		return false
 	}
 	return true
@@ -338,7 +304,7 @@ func (q *Queue) fleetProduction(host string) bool {
 func (q *Queue) fleetActiveHost() *fleetUpgradeHost {
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "failed" {
+			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "skipped" {
 				return h
 			}
 		}
@@ -348,155 +314,125 @@ func (q *Queue) fleetActiveHost() *fleetUpgradeHost {
 func (q *Queue) fleetPolicyMatches(h *fleetUpgradeHost) bool {
 	return reflect.DeepEqual(h.Policy, q.s.HostMaintenance[h.Host])
 }
+
+// fleetStop records an unhealthy or refused step and stops advancing. The
+// host keeps its drain; the operator fixes forward and reruns.
 func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
-	// An operator-disabled worker contributes no admission capacity. Preserve
-	// its failure and policy, but let other hosts finish. Queue cutover and
-	// changed maintenance receipts still stop, retaining their existing fences.
-	if h.Policy.Mode == "disabled" && !h.Owned && q.fleetPolicyMatches(h) && (!h.Queue || h.QueueDone) {
-		q.s.FleetUpgrade.State = "running"
-		h.RetryPhase = h.Phase
-		h.Phase = "failed"
-		h.Wait = "host remains disabled; repair the cause, then rerun myce fleet upgrade"
-	}
-	if reason == "maintenance_changed" {
-		h.Wait = "maintenance was replaced; preserve the current operator policy and select an approved newer release with myce fleet upgrade --release VERSION to fix forward"
-	}
 	h.ProgressAt = q.clock.Now()
 }
 func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
-	if h.Machine == "" {
-		// Queue-only operations still require fresh custody from colocated workers.
-		for _, m := range q.s.Machines {
-			if hostID(m) == h.Host && m.Replacement == nil {
-				return q.hostMaintenanceStatus(h.Host).Quiescent
-			}
-		}
-		return h.Queue && len(q.hostObligations(h.Host)) == 0
-	}
-	return q.hostMaintenanceStatus(h.Host).Quiescent
-}
-
-// An enabled host retains ordinary admission until its next fresh, natural idle
-// moment. Select and acquire its drain in the same queue transaction, before
-// placement can refill the gap. Existing operator drains/recovery keep their
-// original fences; no deadline or empty stale report proves idle custody.
-func (q *Queue) fleetPendingWait(h *fleetUpgradeHost) string {
-	critical := fleetUrgency(q.s.FleetUpgrade.Urgency) == "critical"
-	if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
-		return ""
-	}
-	policy := q.s.HostMaintenance[h.Host]
-	if policy.Mode != "" && policy.Mode != "enabled" {
-		return ""
-	}
-	if h.Queue && !h.QueueDone {
-		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
-			return "waiting for healthy queue runtime proof before idle cutover"
-		}
-		if q.s.FleetUpgrade.WaitProductionIdle && !q.fleetProductionIdle() {
-			return "waiting for production attempts and release custody across the fleet; host admission remains enabled"
-		}
-		if !critical && len(q.calls) > 0 {
-			return "waiting for model calls and streams to finish; host admission remains enabled"
-		}
-	}
-	found := false
 	for _, m := range q.s.Machines {
 		if hostID(m) == h.Host && m.Replacement == nil {
-			found = true
-			break
+			return q.hostMaintenanceStatus(h.Host).Quiescent
 		}
 	}
-	if found {
-		status := q.hostMaintenanceStatus(h.Host)
-		if len(status.PendingCleanup) > 0 || len(status.Workers) == 0 {
-			return "waiting for the next fresh idle moment; host admission remains enabled"
-		}
-		for _, worker := range status.Workers {
-			if !worker.Fresh {
-				return "waiting for the next fresh idle moment; host admission remains enabled"
-			}
-		}
-		for _, obligation := range q.hostObligations(h.Host) {
-			if critical {
-				break
-			}
-			if engine := obligation.Engine; engine != nil {
-				// A ready idle model can unload through the existing drain. It
-				// has custody, but no work is interrupted. Loading, live calls
-				// and uncertain teardown are not an idle moment.
-				if slot := q.s.ModelSlots[slotKey(engine.Machine, engine.Model, engine.Device)]; slot != nil && slot.Session == engine.Session && slot.Attempt == engine.Attempt && slot.State == "ready" && slot.InFlight == 0 && !slot.Recovering && !slot.ReleasingCalls && !slot.CallsUnconfirmed {
-					continue
-				}
-			}
-			return "waiting for the next fresh idle moment; host admission remains enabled"
-		}
-	} else if !h.Queue || len(q.hostObligations(h.Host)) > 0 {
-		return "waiting for fresh exact execution and release custody; host admission remains enabled"
-	}
-	if h.Machine != "" && q.fleetWorkerFailure(q.s.Machines[h.Machine], &q.s.FleetUpgrade.Release) != "" {
-		return "waiting for compatible worker runtime proof before idle cutover"
-	}
-	// Open production work, declared or queued, keeps an enabled host able to
-	// start its next stage. Expiry or closure releases the wait; no deadline here.
-	// A critical update may interrupt production (MY-39): it checkpoints and
-	// requeues, and requeued production waits for the host under the
-	// upgrade's temporary drain instead of failing.
-	if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical {
-		return "waiting for open production work: " + reason + "; host admission remains enabled"
-	}
-	return ""
+	return len(q.hostObligations(h.Host)) == 0
 }
 
 // fleetDrainTemporary reports a drain the running upgrade owns. It ends when
 // that host's step verifies; a stopped operation's retained drain does not.
 func (q *Queue) fleetDrainTemporary(host string) bool {
 	u := q.s.FleetUpgrade
-	policy := q.s.HostMaintenance[host]
-	return u != nil && u.State == "running" && policy.Mode == "drained" && policy.DrainOwner != "" && policy.DrainOwner == u.Operation
-}
-func (q *Queue) fleetPausesCalls() bool {
-	h := q.fleetActiveHost()
-	return h != nil && h.Queue && !h.QueueDone && q.s.FleetUpgrade.State != "complete"
-}
-
-// Hold new production assignments until queue health is verified, including
-// while stopped. This closes the idle-check/admission race without draining
-// unrelated hosts or interrupting already assigned work.
-func (q *Queue) fleetPausesProduction() bool {
-	u := q.s.FleetUpgrade
-	if u == nil || !u.WaitProductionIdle || u.State == "complete" {
+	if u == nil || u.State != "running" {
 		return false
 	}
 	for _, h := range u.Hosts {
-		if h.Queue && !h.QueueDone {
+		if h.Host == host && h.Owned && q.fleetPolicyMatches(h) && h.Policy.Mode == "drained" {
 			return true
 		}
 	}
 	return false
 }
 
-func (q *Queue) fleetProductionIdle() bool {
-	for _, j := range q.liveJobs() {
-		if j.Spec.Priority != "production" && j.Spec.Class != "production" {
+// The queue restart ends every model HTTP stream, so new calls wait while its
+// host's step runs.
+func (q *Queue) fleetPausesCalls() bool {
+	h := q.fleetActiveHost()
+	return h != nil && h.Queue && !h.QueueDone
+}
+
+// fleetSelectHost picks the next pending host: hosts idle now first, hosts
+// running production after, the queue's host last. A normal update leaves a
+// host enabled while draining it would strand open production work (#1387).
+func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
+	var pending []*fleetUpgradeHost
+	for _, h := range u.Hosts {
+		if h.Phase == "pending" {
+			pending = append(pending, h)
+		}
+	}
+	idle := map[*fleetUpgradeHost]bool{}
+	production := map[*fleetUpgradeHost]bool{}
+	for _, h := range pending {
+		idle[h], production[h] = len(q.hostObligations(h.Host)) == 0, q.fleetProduction(h.Host)
+	}
+	sort.SliceStable(pending, func(i, j int) bool {
+		a, b := pending[i], pending[j]
+		if a.Queue != b.Queue {
+			return !a.Queue
+		}
+		if production[a] != production[b] {
+			return !production[a]
+		}
+		if idle[a] != idle[b] {
+			return idle[a]
+		}
+		return a.Host < b.Host
+	})
+	critical := fleetUrgency(u.Urgency) == "critical"
+	for _, h := range pending {
+		wait := ""
+		failure := ""
+		if h.Machine != "" && !h.WorkerDone {
+			failure = q.fleetWorkerFailure(q.s.Machines[h.Machine], &u.Release)
+		}
+		if failure != "" && !h.Owned && q.maintenanceBlocked(h.Host) {
+			// Taken out of service while waiting: leave it, visibly.
+			h.Phase, h.Failure, h.ProgressAt = "skipped", failure, q.clock.Now()
+			h.Wait = "out of service without a usable runtime proof; rerun myce fleet upgrade once it is back"
 			continue
 		}
-		if j.State == "running" || j.State == "stopping" {
-			return false
+		if h.Queue && q.fleetOthersPending(u, h) {
+			wait = "the queue's host goes last"
+		} else if failure != "" {
+			wait = "waiting for a fresh worker runtime proof"
+		} else if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical && !h.Owned && !q.maintenanceBlocked(h.Host) {
+			wait = "waiting for open production work: " + reason + "; host admission remains enabled"
 		}
-		// Completion/loss is not proof that the remote attempt has released custody.
-		if attemptReleasePending(j) {
-			return false
+		if wait != h.Wait {
+			h.Wait, h.ProgressAt = wait, q.clock.Now()
+		}
+		if wait == "" {
+			return h
 		}
 	}
-	for _, c := range q.calls {
-		if c.Priority == "production" || c.Class == "production" {
+	return nil
+}
+
+// fleetBeginHost drains a selected host. An operator's drain or disable stays
+// theirs: the operation updates the host but never resumes it.
+func (q *Queue) fleetBeginHost(u *fleetUpgrade, h *fleetUpgradeHost) bool {
+	h.Phase, h.ProgressAt = "draining", q.clock.Now()
+	if h.Owned {
+		return true
+	}
+	policy := q.s.HostMaintenance[h.Host]
+	switch policy.Mode {
+	case "", "enabled":
+		if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: policy.Mode, IfUpdatedAt: &policy.UpdatedAt, DrainOwner: u.Operation}); err != nil {
+			q.fleetStop(h, "drain_conflict")
 			return false
 		}
+		h.Owned = true
+	case "drained", "disabled":
+	default:
+		q.fleetStop(h, "maintenance_unavailable")
+		return false
 	}
+	h.Policy = q.s.HostMaintenance[h.Host]
 	return true
 }
 
@@ -510,236 +446,49 @@ func (q *Queue) maintainFleetUpgrade() {
 	}
 	h := q.fleetActiveHost()
 	if h == nil {
-		var pending []*fleetUpgradeHost
-		for _, v := range u.Hosts {
-			if v.Phase == "pending" {
-				pending = append(pending, v)
+		if h = q.fleetSelectHost(u); h == nil {
+			if !slicesContainsPhase(u.Hosts, "pending") {
+				u.State = "complete"
 			}
-		}
-		if len(pending) == 0 {
-			u.State = "complete"
 			return
 		}
-		sort.SliceStable(pending, func(i, j int) bool {
-			di := q.s.HostMaintenance[pending[i].Host].Mode == "disabled"
-			dj := q.s.HostMaintenance[pending[j].Host].Mode == "disabled"
-			if di != dj {
-				return !di
-			}
-			pi, pj := q.fleetProduction(pending[i].Host), q.fleetProduction(pending[j].Host)
-			if pi != pj {
-				return !pi
-			}
-			if pending[i].Queue != pending[j].Queue {
-				return pending[i].Queue
-			}
-			return pending[i].Host < pending[j].Host
-		})
-		// Retain completed history, then the selected idle host and pending order.
-		var ordered []*fleetUpgradeHost
-		for _, v := range u.Hosts {
-			if v.Phase == "complete" || v.Phase == "failed" {
-				ordered = append(ordered, v)
-			}
-		}
-		for _, candidate := range pending {
-			wait := q.fleetPendingWait(candidate)
-			if wait != candidate.Wait {
-				candidate.Wait, candidate.ProgressAt = wait, q.clock.Now()
-			}
-			if wait == "" {
-				h = candidate
-				ordered = append(ordered, h)
-				break
-			}
-		}
-		for _, candidate := range pending {
-			if candidate != h {
-				ordered = append(ordered, candidate)
-			}
-		}
-		u.Hosts = ordered
-		if h == nil {
+		if !q.fleetBeginHost(u, h) {
 			return
-		}
-		// No helper has been issued for a pending host. A supported restart
-		// while waiting can change its session; freeze the current idle runtime
-		// rather than authorizing its obsolete operation-start identity.
-		if h.RetryPhase == "" && h.Policy.Mode != "disabled" {
-			if h.Machine != "" {
-				if m := q.s.Machines[h.Machine]; q.fleetWorkerFailure(m, &u.Release) == "" {
-					before := cloneMachine(m)
-					h.Before = &before
-				}
-			}
-			if h.Queue && !h.QueueDone && q.fleetQueue != nil && q.fleetQueue.Proof != nil {
-				h.QueueBefore = cloneFleetProof(q.fleetQueue.Proof)
-			}
-		}
-		if h.RetryPhase != "" || h.Policy.Mode == "disabled" {
-			// Keep the original maintenance and runtime phase fences when
-			// retrying; pending is only a place in the sequential order.
-			h.Phase = "draining"
-			if h.RetryPhase != "" {
-				h.Phase, h.RetryPhase = h.RetryPhase, ""
-			}
-			h.HelperRevision = u.Revision
-		} else {
-			policy := q.s.HostMaintenance[h.Host]
-			if policy.Mode == "" && h.Machine == "" {
-				if q.s.HostMaintenance == nil {
-					q.s.HostMaintenance = map[string]HostMaintenance{}
-				}
-				policy.Mode = "enabled"
-				q.s.HostMaintenance[h.Host] = policy
-			}
-			h.Policy = policy
-			h.Phase = "draining"
-			h.ProgressAt = q.clock.Now()
-			if policy.Mode == "enabled" {
-				if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: policy.Mode, IfUpdatedAt: &policy.UpdatedAt, DrainOwner: u.Operation}); err != nil {
-					q.fleetStop(h, "drain_conflict")
-					return
-				}
-				h.Owned = true
-				h.Policy = q.s.HostMaintenance[h.Host]
-			} else if policy.Mode != "drained" && policy.Mode != "disabled" {
-				q.fleetStop(h, "maintenance_unavailable")
-				return
-			}
 		}
 	}
 	if !q.fleetPolicyMatches(h) {
 		q.fleetStop(h, "maintenance_changed")
+		h.Wait = "maintenance was replaced; the operator's policy stays; rerun myce fleet upgrade to continue"
 		return
 	}
-	if h.Phase == "draining" {
-		if h.Policy.Mode == "disabled" && h.Machine != "" && (!h.Queue || h.QueueDone) {
-			m := q.s.Machines[h.Machine]
-			if reason := q.fleetWorkerFailure(m, &u.Release); reason != "" {
-				q.fleetStop(h, reason)
-				return
-			}
-			// No worker helper has been issued in this phase. A previously
-			// unavailable worker now has a validated starting identity.
-			before := cloneMachine(m)
-			h.Before = &before
-			h.Failure = ""
-		}
-		if fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
-			return
-		}
-		if !q.fleetHostQuiet(h) {
-			h.Wait = "waiting for fresh exact execution and release custody"
-			return
-		}
-		if h.Queue && !h.QueueDone && u.WaitProductionIdle && !q.fleetProductionIdle() {
-			h.Wait = "waiting for production attempts and release custody across the fleet"
-			return
-		}
-		if h.Queue && !h.QueueDone && len(q.calls) > 0 {
-			h.Wait = "waiting for model calls and streams to finish"
-			return
-		}
-		if h.Queue && !h.QueueDone {
-			h.Phase = "queue_update"
-			h.HelperRevision = u.Revision
-			if h.QueueBefore.Version == u.Release.Manifest.Version {
-				h.Phase = "queue_health"
-			}
-		} else if h.Machine != "" && !h.WorkerDone {
-			h.Phase = "worker_update"
-			h.HelperRevision = u.Revision
-			if h.Before.Fleet.Version == u.Release.Manifest.Version {
-				h.Phase = "worker_health"
-			}
-		} else {
-			h.Phase = "verified"
-		}
-		h.Wait = ""
-		h.ProgressAt = q.clock.Now()
-	}
-	if h.Phase == "queue_update" || h.Phase == "queue_health" {
-		p := q.fleetQueue
-		if p == nil || p.Host != h.Host || !q.fleetProofFresh(p.Proof) {
-			h.HealthSince = time.Time{}
-			h.HealthIdentity = ""
-			h.Wait = "waiting for healthy queue runtime proof"
-			return
-		}
-		a, _ := u.Release.Manifest.Select(p.OS, p.Arch)
-		if p.Proof.Version == u.Release.Manifest.Version && p.Proof.SHA256 == a.SHA256 {
-			if h.QueueBefore.Version != u.Release.Manifest.Version && (p.Proof.Session == h.QueueBefore.Session || p.Proof.PID == h.QueueBefore.PID) {
-				h.Wait = "waiting for a new queue process and session"
-				return
-			}
-			if !q.fleetStable(h, p.Proof) {
-				return
-			}
-			h.HealthSince = time.Time{}
-			h.HealthIdentity = ""
-			h.QueueDone = true
-			h.Phase = "draining"
-			h.Wait = ""
-			h.ProgressAt = q.clock.Now()
-			return
-		}
-		// An out-of-band queue restart invalidates the old helper/session fence
-		// even before a helper acknowledged restarting. If it did not install
-		// the frozen target, stop so explicit newer-release recovery can proceed.
-		if p.Proof.Session != h.QueueBefore.Session {
-			q.fleetStop(h, "queue_running_hash_mismatch")
-			return
-		}
+	if h.Phase == "draining" && !q.fleetDrain(u, h) {
+		return
 	}
 	if h.Phase == "worker_update" || h.Phase == "worker_health" {
 		m := q.s.Machines[h.Machine]
-		if m == nil || !q.fleetProofFresh(m.Fleet) {
-			h.HealthSince = time.Time{}
-			h.HealthIdentity = ""
-			h.Wait = "waiting for worker runtime proof"
+		if m == nil || m.CapabilityProfile == nil {
+			q.fleetStop(h, "worker_unmanaged")
 			return
 		}
-		a, _ := u.Release.Manifest.Select(h.Before.CapabilityProfile.OS, h.Before.CapabilityProfile.Arch)
-		if m.Fleet.Version == u.Release.Manifest.Version && m.Fleet.SHA256 == a.SHA256 {
-			if m.Fleet.Session != m.Session || h.Before.Fleet.Version != u.Release.Manifest.Version && (m.Session == h.Before.Session || m.Fleet.PID == h.Before.Fleet.PID) {
-				h.Wait = "waiting for new worker process and session"
-				return
-			}
-			profile := h.Before.CapabilityProfile
-			r := EnrollmentReceipt{Session: m.Session, Version: u.Release.Manifest.Version, Devices: h.Before.Devices, LogicalCPUs: profile.LogicalCPUs, SystemMemoryBytes: profile.SystemMemoryBytes}
-			status := q.hostMaintenanceStatus(h.Host)
-			fresh := false
-			for _, v := range status.Workers {
-				if v.Machine.ID == m.ID {
-					fresh = v.Fresh
-				}
-			}
-			observed := cloneMachine(m)
-			if observed.Enrollment == nil {
-				p := m.Fleet
-				observed.Enrollment = &EnrollmentProof{Version: p.Version, StartGate: p.StartGate, AttemptProtocol: p.AttemptProtocol, RunnerSmoke: p.RunnerSmoke}
-			}
-			_, err := evaluateEnrollmentVersion(r, EnrollmentObservation{Machine: observed, Fresh: fresh, StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol, Policy: status.Policy}, u.Release.Manifest.Version)
-			if err != nil {
-				h.HealthSince = time.Time{}
-				h.HealthIdentity = ""
-				h.Wait = "waiting for enrollment inventory, budgets and runner health"
-				return
-			}
-			if !q.fleetStable(h, m.Fleet) {
-				return
-			}
-			h.HealthSince = time.Time{}
-			h.HealthIdentity = ""
-			h.WorkerDone = true
-			h.Phase = "verified"
-			h.Wait = ""
-			h.ProgressAt = q.clock.Now()
-		} else if h.Phase == "worker_health" && m.Session != h.Before.Session {
-			q.fleetStop(h, "worker_running_hash_mismatch")
+		if !q.fleetVerify(h, m.Fleet, h.Before, m.CapabilityProfile.OS, m.CapabilityProfile.Arch, "worker") {
 			return
 		}
+		h.WorkerDone = true
+		if h.Phase = "draining"; !q.fleetDrain(u, h) {
+			return
+		}
+	}
+	if h.Phase == "queue_update" || h.Phase == "queue_health" {
+		p := q.fleetQueue
+		var proof *FleetRuntimeProof
+		goos, arch := "", ""
+		if p != nil && p.Host == h.Host {
+			proof, goos, arch = p.Proof, p.OS, p.Arch
+		}
+		if !q.fleetVerify(h, proof, h.QueueBefore, goos, arch, "queue") {
+			return
+		}
+		h.QueueDone, h.Phase = true, "verified"
 	}
 	if h.Phase == "verified" {
 		if h.Owned {
@@ -748,43 +497,109 @@ func (q *Queue) maintainFleetUpgrade() {
 				return
 			}
 		}
-		h.Phase = "complete"
-		h.Wait = ""
-		h.ProgressAt = q.clock.Now()
+		h.Phase, h.Wait, h.ProgressAt = "complete", "", q.clock.Now()
+		if !slicesContainsPhase(u.Hosts, "pending") && q.fleetActiveHost() == nil {
+			u.State = "complete"
+		}
 	}
 }
 
+func (q *Queue) fleetOthersPending(u *fleetUpgrade, self *fleetUpgradeHost) bool {
+	for _, h := range u.Hosts {
+		if h != self && h.Phase == "pending" {
+			return true
+		}
+	}
+	return false
+}
+
+func slicesContainsPhase(hosts []*fleetUpgradeHost, phase string) bool {
+	for _, h := range hosts {
+		if h.Phase == phase {
+			return true
+		}
+	}
+	return false
+}
+
+// fleetDrain waits for the drained host's work to finish (critical: stops it
+// at a checkpoint first), then starts the next service's update: the worker,
+// then the queue. It reports whether the host moved past draining.
+func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
+	if fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
+		return false
+	}
+	if !q.fleetHostQuiet(h) {
+		h.Wait = "waiting for running work on the host to finish"
+		return false
+	}
+	if h.Queue && !h.QueueDone && len(q.calls) > 0 {
+		h.Wait = "waiting for model calls and streams to finish"
+		return false
+	}
+	h.Wait, h.StepAt, h.HealthSince, h.HealthIdentity = "", q.clock.Now(), time.Time{}, ""
+	switch {
+	case h.Machine != "" && !h.WorkerDone:
+		h.Phase, h.Before = "worker_update", cloneFleetProof(q.s.Machines[h.Machine].Fleet)
+	case h.Queue && !h.QueueDone:
+		var proof *FleetRuntimeProof
+		if q.fleetQueue != nil {
+			proof = cloneFleetProof(q.fleetQueue.Proof)
+		}
+		h.Phase, h.QueueBefore = "queue_update", proof
+	default:
+		h.Phase = "verified"
+	}
+	h.ProgressAt = q.clock.Now()
+	return true
+}
+
+// fleetVerify reports a service healthy on the release: a fresh runtime proof
+// from a new process with the release's exact bytes, stable for
+// fleetStableFor. A different new process, or no verification within
+// fleetStepTimeout, stops the operation.
+func (q *Queue) fleetVerify(h *fleetUpgradeHost, p, before *FleetRuntimeProof, goos, arch, role string) bool {
+	fresh := q.fleetProofFresh(p)
+	restarted := fresh && before != nil && p.Session != before.Session && p.PID != before.PID
+	if fresh && restarted && q.fleetCurrent(p, goos, arch) {
+		return q.fleetStable(h, p)
+	}
+	h.HealthSince, h.HealthIdentity = time.Time{}, ""
+	if restarted {
+		q.fleetStop(h, role+"_running_hash_mismatch")
+		return false
+	}
+	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+		q.fleetStop(h, role+"_update_not_verified")
+		return false
+	}
+	h.Wait = "waiting for the " + role + " to install the release, restart and report healthy"
+	return false
+}
+
 func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInstruction, error) {
-	u := q.s.FleetUpgrade
-	h := q.fleetActiveHost()
+	u, h := q.s.FleetUpgrade, q.fleetActiveHost()
 	if u == nil || u.State != "running" || h == nil || h.Host != host {
 		return FleetUpdateInstruction{}, nil
 	}
 	if !q.fleetPolicyMatches(h) {
 		return FleetUpdateInstruction{}, fleetError("fleet_maintenance_changed")
 	}
-	if h.Phase == "queue_update" && machine == "@queue" && h.QueueBefore.Session == session || h.Phase == "worker_update" && h.Machine == machine && h.Before.Session == session {
-		if machine == "@queue" {
-			if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) || q.fleetQueue.Proof.Session != session {
-				return FleetUpdateInstruction{}, nil
-			}
-		} else {
-			m := q.s.Machines[machine]
-			if m == nil || m.Session != session || !q.fleetProofFresh(m.Fleet) {
-				return FleetUpdateInstruction{}, nil
-			}
-		}
-		if !q.fleetHostQuiet(h) || h.Queue && !h.QueueDone && (len(q.calls) > 0 || u.WaitProductionIdle && !q.fleetProductionIdle()) {
-			return FleetUpdateInstruction{}, nil
-		}
-		return FleetUpdateInstruction{Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
+	ok := false
+	switch {
+	case machine == "@queue":
+		ok = h.Phase == "queue_update" && h.QueueBefore != nil && h.QueueBefore.Session == session && q.fleetQueue != nil && q.fleetProofFresh(q.fleetQueue.Proof) && q.fleetQueue.Proof.Session == session && len(q.calls) == 0
+	case machine == h.Machine:
+		m := q.s.Machines[machine]
+		ok = h.Phase == "worker_update" && h.Before != nil && h.Before.Session == session && m != nil && m.Session == session && q.fleetProofFresh(m.Fleet)
 	}
-	return FleetUpdateInstruction{}, nil
+	if !ok || !q.fleetHostQuiet(h) {
+		return FleetUpdateInstruction{}, nil
+	}
+	return FleetUpdateInstruction{Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
 }
-func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string, revision int) error {
-	if q.s.FleetUpgrade == nil || (revision <= 0 || revision > q.s.FleetUpgrade.Revision) {
-		return fleetError("fleet_instruction_stale")
-	}
+
+func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string) error {
 	i, err := q.fleetInstruction(host, machine, session)
 	if err != nil {
 		return err
@@ -792,102 +607,91 @@ func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string, r
 	if i.Operation == "" || i.Operation != operation {
 		return fleetError("fleet_instruction_stale")
 	}
-	if revision < q.fleetActiveHost().HelperRevision {
-		return fleetError("fleet_instruction_stale")
-	}
 	return nil
 }
 
-// Runtime failures carry their receipt plus the exact current process identity.
-// A prior helper revision can report a new process's cached smoke failure, but
-// an obsolete process/session cannot poison a later recovery.
-func (q *Queue) fleetRuntimeFailureCurrent(h *fleetUpgradeHost, ack FleetUpgradeAck) bool {
-	p := ack.Runtime
-	if p == nil || p.Failure != "runner_smoke_failed" || ack.Failure != "runner_smoke_failed" || p.RunnerSmoke || p.PID <= 0 || p.Session == "" || p.Version != q.s.FleetUpgrade.Release.Manifest.Version {
-		return false
-	}
-	var goos, arch string
-	if ack.Machine == "@queue" {
-		if q.fleetQueue == nil || q.fleetQueue.Host != h.Host || q.fleetQueue.Session != p.Session {
-			return false
-		}
-		goos, arch = q.fleetQueue.OS, q.fleetQueue.Arch
-	} else {
-		m := q.s.Machines[ack.Machine]
-		if m == nil || m.Session != p.Session || h.Machine != m.ID || m.CapabilityProfile == nil {
-			return false
-		}
-		goos, arch = m.CapabilityProfile.OS, m.CapabilityProfile.Arch
-	}
-	artifact, err := q.s.FleetUpgrade.Release.Manifest.Select(goos, arch)
-	return err == nil && p.SHA256 == artifact.SHA256
-}
-
+// AckFleetUpgrade records a helper's report. Only "restarting" and "failed"
+// change anything; health is verified from runtime proofs, not from acks.
 func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
-
-	return q.updateRequest(requestCtx, func() error {
-		u := q.s.FleetUpgrade
-		h := q.fleetActiveHost()
-		if u == nil || h == nil || u.Operation != ack.Operation || ack.Revision <= 0 || ack.Revision > u.Revision || h.Host != ack.Host || u.State != "running" {
+	return q.updateRequest(requestContext(requestContexts), func() error {
+		u, h := q.s.FleetUpgrade, q.fleetActiveHost()
+		if u == nil || h == nil || u.State != "running" || u.Operation != ack.Operation || h.Host != ack.Host {
 			return fleetError("fleet_ack_stale")
 		}
-		// An operator rerun permits recovery; it does not replace an active
-		// helper. Only a durable replacement receipt claims the newer attempt.
-		// Thus that helper's failure remains authoritative until superseded.
-		runtimeFailure := ack.Phase == "failed" && q.fleetRuntimeFailureCurrent(h, ack)
-		if !runtimeFailure && (ack.Revision < h.HelperRevision || ack.Phase == "failed" && ack.Revision != h.HelperRevision && ack.Revision != u.Revision) {
-			return fleetError("fleet_ack_stale")
-		}
-		queue := ack.Machine == "@queue" && h.QueueBefore != nil && ack.Session == h.QueueBefore.Session && (h.Phase == "queue_update" || h.Phase == "queue_health")
-		worker := ack.Machine == h.Machine && h.Before != nil && ack.Session == h.Before.Session && (h.Phase == "worker_update" || h.Phase == "worker_health")
+		queue := ack.Machine == "@queue" && h.QueueBefore != nil && ack.Session == h.QueueBefore.Session && strings.HasPrefix(h.Phase, "queue_")
+		worker := ack.Machine == h.Machine && h.Before != nil && ack.Session == h.Before.Session && strings.HasPrefix(h.Phase, "worker_")
 		if !queue && !worker {
 			return fleetError("fleet_ack_stale")
 		}
-		if !q.fleetPolicyMatches(h) {
-			q.fleetStop(h, "maintenance_changed")
-			return nil
-		}
 		switch ack.Phase {
-		case "prepared":
-			if err := q.authorizeFleetUpdate(ack.Operation, ack.Host, ack.Machine, ack.Session, ack.Revision); err != nil {
-				return err
-			}
-			h.HelperRevision = ack.Revision
+		case "prepared", "installed":
+		case "restarting":
+			h.Phase = strings.Replace(h.Phase, "_update", "_health", 1)
+			h.ProgressAt = q.clock.Now()
 		case "failed":
-			reason := fleetFailureCode(ack.Failure)
-			if ack.Failure == "runner_smoke_failed" {
-				if !q.fleetRuntimeFailureCurrent(h, ack) {
-					return fleetError("fleet_ack_stale")
-				}
-				reason = "runner_smoke_failed"
-			}
-			if ack.Failure == "fleet_storage_preflight_failed" {
+			h.FailureCode = fleetFailureCode(ack.Failure)
+			reason := h.FailureCode
+			switch h.FailureCode {
+			case "fleet_storage_preflight_failed":
 				reason = "storage_preflight_failed"
-			}
-			if ack.Failure == "fleet_health_failed" {
+			case "fleet_health_failed":
 				reason = "service_health_failed"
 			}
-			h.FailureCode = fleetFailureCode(ack.Failure)
-			if ack.Failure == "runner_smoke_failed" {
-				h.FailureCode = "runner_smoke_failed"
-			}
 			q.fleetStop(h, reason)
-		case "installed": // Not proof of activation, and no phase regression on delayed ACK.
-			h.HelperRevision = ack.Revision
-		case "restarting":
-			h.HelperRevision = ack.Revision
-			if queue {
-				h.Phase = "queue_health"
-			} else {
-				h.Phase = "worker_health"
-			}
-			h.ProgressAt = q.clock.Now()
 		default:
 			return errors.New("invalid fleet acknowledgement")
 		}
 		return nil
 	}, nil)
+}
+
+// fleetOperationRefusal names the running operation a different request
+// would replace.
+func (q *Queue) fleetOperationRefusal(u *fleetUpgrade) error {
+	msg := fmt.Sprintf("fleet operation %s is running (release %s, urgency %s); wait for it to finish or stop (myce status), then rerun", u.Operation, u.Release.Manifest.Version, fleetUrgency(u.Urgency))
+	return &HTTPError{Status: 409, Code: "fleet_upgrade_target_conflict", Message: msg}
+}
+
+func (q *Queue) fleetProofRefusal(code string) error {
+	var gaps []string
+	if q.fleetQueue == nil {
+		gaps = append(gaps, "queue: no fleet runtime proof")
+	} else if why := q.fleetProofGap(q.fleetQueue.Proof); why != "" {
+		gaps = append(gaps, "queue on host "+q.fleetQueue.Host+": "+why)
+	}
+	var workers []string
+	for _, m := range q.s.Machines {
+		if m.Replacement != nil || q.maintenanceBlocked(hostID(m)) {
+			continue
+		}
+		why := q.fleetProofGap(m.Fleet)
+		if why == "" && m.CapabilityProfile == nil {
+			why = "no capability profile"
+		}
+		if why != "" {
+			workers = append(workers, fmt.Sprintf("worker %s on host %s: %s", m.ID, hostID(m), why))
+		}
+	}
+	sort.Strings(workers)
+	msg := strings.Join(append(gaps, workers...), "; ")
+	msg += "; install the release as a service on each named host (docs/operations.md#rolling-fleet-upgrades), or drain it to leave it out; a healthy service presents its proof on its next poll"
+	return &HTTPError{Status: 409, Code: code, Message: msg}
+}
+
+func (q *Queue) fleetProofGap(p *FleetRuntimeProof) string {
+	switch {
+	case p == nil:
+		return "no fleet runtime proof"
+	case !fleetProofReady(p):
+		why := fmt.Sprintf("fleet runtime proof not ready (service_healthy=%t, runner_smoke=%t", p.ServiceHealthy, p.RunnerSmoke)
+		if p.Failure != "" {
+			why += ", failure=" + p.Failure
+		}
+		return why + ")"
+	case !q.fleetProofFresh(p):
+		return "fleet runtime proof stale (observed " + q.clock.Now().Sub(p.ObservedAt).Round(time.Second).String() + " ago)"
+	}
+	return ""
 }
 
 // Marshal-copy the frozen operation before handing it to network code.

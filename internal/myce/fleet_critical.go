@@ -2,13 +2,6 @@ package myce
 
 import "time"
 
-func fleetUrgency(value string) string {
-	if value == "" {
-		return "normal"
-	}
-	return value
-}
-
 // StopRequests record intent, not proof of signal delivery, a saved checkpoint
 // or physical release. Exact attempt history/checkpoint receipts remain owned
 // by the existing worker/result protocol and lifecycle classifier.
@@ -19,9 +12,9 @@ type FleetStopRequest struct {
 	ProgressBefore int64          `json:"progress_before"`
 }
 
-// Critical retains sequential host cutover and starts the existing maintenance
-// stop as soon as that host is selected, rather than waiting for a natural idle
-// moment. StopGrace is the existing checkpoint/signal-delivery budget, not idle
+// Critical keeps the host-by-host order but starts the existing maintenance
+// stop as soon as a host is drained, rather than waiting for its work to
+// finish: resumable work checkpoints and is requeued (MY-39). StopGrace is the existing checkpoint/signal-delivery budget, not idle
 // evidence: even after it expires all custody gates still bind. Operator policy
 // is not rewritten, and its drain/disable is never resumed by this operation.
 func (q *Queue) maintainFleetCriticalStops(h *fleetUpgradeHost) bool {

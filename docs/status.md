@@ -366,7 +366,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 | `health` | `health_alerts`: one record per open or recently closed problem (kind and subject), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
 | `usage` | Complete `usage`, including daily rows, preemptions and production starts |
-| `diagnostics` | `request_latencies`, `fleet_superseded`, `evidence_retention`, and retained `admissions` |
+| `diagnostics` | `request_latencies`, `evidence_retention`, and retained `admissions` |
 
 Current fleet metadata (release, policy, holds, model slots/pins and sync requests)
 keeps its existing fields. The default omits released reservations and inactive

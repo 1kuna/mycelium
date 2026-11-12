@@ -916,9 +916,6 @@ type Snapshot struct {
 	Warning      string        `json:"warning,omitempty"`
 	Jobs         []*Job        `json:"jobs"`
 	Machines     []*Machine    `json:"machines"`
-
-	// Operator-retired fleet operations, oldest first (audit record, #588).
-	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`
 }
 
 // Ages describe observation only; they confer no scheduling or release authority.

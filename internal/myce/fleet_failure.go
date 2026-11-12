@@ -3,31 +3,24 @@ package myce
 import "errors"
 
 // Never project arbitrary receipt text, OS output or queue error messages. This
-// allow-list is shared by live reporting, durable replay and queue status.
+// allow-list is shared by live reporting, durable replay and queue status; each
+// code is one the helper emits (see docs/reference/fleet-upgrades.md).
 func fleetFailureCode(code string) string {
 	switch code {
-	case "fleet_slot_unapproved", "fleet_ack_failed", "fleet_artifact_refused", "fleet_authorization_refused",
-		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed",
-		"fleet_staging_exists", "fleet_staging_write_failed",
-		"fleet_binary_unavailable", "fleet_candidate_invalid", "fleet_config_invalid",
-		"fleet_credentials_unavailable", "fleet_darwin_identity_refused",
-		"fleet_existing_service_unavailable", "fleet_health_failed",
-		"fleet_helper_absence_unproven", "fleet_helper_busy", "fleet_helper_launch_failed",
-		"fleet_install_changed", "fleet_install_invalid", "fleet_instruction_invalid",
-		"fleet_local_file_invalid", "fleet_preflight_failed", "fleet_previous_failure",
-		"fleet_publish_failed", "fleet_publisher_mismatch", "fleet_publisher_unavailable",
-		"fleet_queue_invalid", "fleet_receipt_conflict", "fleet_receipt_invalid",
+	case "fleet_ack_failed", "fleet_authorization_refused", "fleet_instruction_stale", "fleet_ack_stale",
+		"fleet_maintenance_changed",
+		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed", "fleet_artifact_refused",
+		"fleet_staging_write_failed", "fleet_binary_unavailable", "fleet_candidate_invalid",
+		"fleet_config_invalid", "fleet_service_invalid", "fleet_install_invalid", "fleet_state_invalid",
+		"fleet_local_file_invalid", "fleet_credentials_unavailable", "fleet_queue_invalid",
+		"fleet_darwin_identity_refused", "fleet_existing_service_unavailable", "fleet_health_failed",
+		"fleet_helper_busy", "fleet_helper_launch_failed", "fleet_helper_launch_unclassified",
+		"fleet_install_changed", "fleet_instruction_invalid", "fleet_preflight_failed",
+		"fleet_storage_preflight_failed", "fleet_publish_failed", "fleet_publisher_mismatch",
+		"fleet_publisher_unavailable", "fleet_signature_refused", "fleet_target_invalid",
 		"fleet_receipt_write_failed", "fleet_recovery_runtime_changed", "fleet_restart_failed",
-		"fleet_service_invalid", "fleet_signature_refused", "fleet_staging_cleanup_failed",
-		"fleet_state_invalid", "fleet_storage_preflight_failed", "fleet_target_invalid",
-		"fleet_version_invalid", "fleet_version_refused", "fleet_instruction_stale",
-		"fleet_ack_stale", "fleet_maintenance_changed", "fleet_helper_launch_unclassified",
-		"fleet_failure_code_missing", "fleet_failure_code_unrecognized", "fleet_failure_detail_unavailable":
+		"fleet_version_refused", "fleet_failure_code_missing", "fleet_failure_code_unrecognized":
 		return code
-	case "helper_launch_failed": // Older workers use the unprefixed spelling.
-		return "fleet_helper_launch_failed"
-	case "update_failed", "fleet_update_failed":
-		return "fleet_failure_detail_unavailable"
 	case "":
 		return "fleet_failure_code_missing"
 	default:
@@ -46,8 +39,8 @@ func fleetControlFailure(err error, fallback string) error {
 	return errors.New(fallback)
 }
 
-// Launch can yield to the next runtime poll only before manager submission.
-// A pending receipt records that boundary durably.
+// Launch yields to the next runtime poll while a helper still runs or the
+// queue's answer was momentarily stale; the instruction is fetched again.
 type fleetInstructionRefetchError struct{}
 
 func (*fleetInstructionRefetchError) Error() string { return "fleet_instruction_stale" }

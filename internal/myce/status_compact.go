@@ -459,7 +459,6 @@ func trimStatusSections(s *Snapshot, o *statusOptions) {
 	}
 	if !o.includes("diagnostics") {
 		s.RequestLatencies = nil
-		s.FleetSuperseded = nil
 		s.EvidenceRetention = nil
 		s.Admissions = nil
 	}

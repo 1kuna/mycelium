@@ -649,9 +649,6 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.variantParityWait(j); h != nil {
 		return h
 	}
-	if h := q.fleetPauseHold(j); h != nil {
-		return h
-	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
 		for _, target := range q.planningMachines(scans...) {

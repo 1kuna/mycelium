@@ -271,9 +271,6 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
-	if !q.admissionHold(j, m, q.fleetPauseHold(j), predicateProductionPaused) {
-		return false
-	}
 	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot)) {
 		return false
 	}
@@ -395,15 +392,6 @@ func productionBlockerHold(host, text string, class hostBlockerClass) Hold {
 		return scopedHold(class.Kind, host, detail, class.OperatorActionRequired)
 	}
 	return scopedHold("unclassified", host, detail, true)
-}
-
-// A fleet upgrade holds new production starts until queue health is verified.
-// Placement refuses on this hold and the scheduler's wait reports it.
-func (q *Queue) fleetPauseHold(j *Job) *Hold {
-	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
-		return newHold("production_paused", "production starts are paused until the fleet upgrade verifies queue health")
-	}
-	return nil
 }
 
 // Production, disk and Docker fences that hold this job.

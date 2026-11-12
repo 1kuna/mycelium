@@ -7,7 +7,7 @@ its procedure.
 | Page | Covers |
 | --- | --- |
 | [Queue maintenance](queue-maintenance.md) | Exclusions, device maintenance, last-resort placement, drain semantics, control timing, queue diagnostics and profiling, validation reservations |
-| [Fleet upgrades](fleet-upgrades.md) | Host order and idle moments, helper verification, failure codes and repairs, stale and failed operations |
+| [Fleet upgrades](fleet-upgrades.md) | Host order, how a service verifies and installs a release, health checks, failure codes and repairs |
 | [Installer transactions](install.md) | Slot reconciliation, rollback snapshot, service-manager timeouts |
 | [Onboarding and joining](onboarding.md) | Automatic joining, invitation files, NAS selection, build tools, discovery and networking, capability profiles, invite-line upgrades |
 | [NAS mounts](nas-mounts.md) | Linux CIFS boot integration, worker mount fault detection and recovery |

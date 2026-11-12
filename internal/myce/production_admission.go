@@ -133,9 +133,6 @@ func (q *Queue) productionAdmissionHold(j *Job, m *Machine) *Hold {
 	if !known || setup <= 0 {
 		return nil
 	}
-	if q.fleetPausesProduction() {
-		return nil
-	}
 	soonest, id := setup, ""
 	for _, demand := range q.liveJobs() {
 		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 || !q.jobAllowsMachine(demand, m.ID) || !q.reservationAllows(demand, m) || demand.ProductionHost != "" && demand.ProductionHost != host {

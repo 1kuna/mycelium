@@ -16,23 +16,19 @@ import (
 // before a receipt exists. Exercise both live acknowledgements and outage replay.
 func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
 	codes := []string{
-		"fleet_ack_failed", "fleet_artifact_refused", "fleet_authorization_refused",
-		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed",
-		"fleet_staging_exists", "fleet_staging_write_failed",
-		"fleet_binary_unavailable", "fleet_candidate_invalid", "fleet_config_invalid",
-		"fleet_credentials_unavailable", "fleet_darwin_identity_refused",
-		"fleet_existing_service_unavailable", "fleet_health_failed",
-		"fleet_helper_absence_unproven", "fleet_helper_busy", "fleet_helper_launch_failed",
-		"fleet_install_changed", "fleet_install_invalid", "fleet_instruction_invalid",
-		"fleet_local_file_invalid", "fleet_preflight_failed", "fleet_previous_failure",
-		"fleet_publish_failed", "fleet_publisher_mismatch", "fleet_publisher_unavailable",
-		"fleet_queue_invalid", "fleet_receipt_conflict", "fleet_receipt_invalid",
+		"fleet_ack_failed", "fleet_authorization_refused", "fleet_instruction_stale", "fleet_ack_stale",
+		"fleet_maintenance_changed",
+		"fleet_artifact_download_failed", "fleet_artifact_transfer_failed", "fleet_artifact_refused",
+		"fleet_staging_write_failed", "fleet_binary_unavailable", "fleet_candidate_invalid",
+		"fleet_config_invalid", "fleet_service_invalid", "fleet_install_invalid", "fleet_state_invalid",
+		"fleet_local_file_invalid", "fleet_credentials_unavailable", "fleet_queue_invalid",
+		"fleet_darwin_identity_refused", "fleet_existing_service_unavailable", "fleet_health_failed",
+		"fleet_helper_busy", "fleet_helper_launch_failed", "fleet_helper_launch_unclassified",
+		"fleet_install_changed", "fleet_instruction_invalid", "fleet_preflight_failed",
+		"fleet_storage_preflight_failed", "fleet_publish_failed", "fleet_publisher_mismatch",
+		"fleet_publisher_unavailable", "fleet_signature_refused", "fleet_target_invalid",
 		"fleet_receipt_write_failed", "fleet_recovery_runtime_changed", "fleet_restart_failed",
-		"fleet_service_invalid", "fleet_signature_refused", "fleet_staging_cleanup_failed",
-		"fleet_state_invalid", "fleet_storage_preflight_failed", "fleet_target_invalid",
-		"fleet_version_invalid", "fleet_version_refused", "fleet_instruction_stale",
-		"fleet_ack_stale", "fleet_maintenance_changed", "fleet_helper_launch_unclassified",
-		"fleet_failure_code_missing", "fleet_failure_code_unrecognized", "fleet_failure_detail_unavailable",
+		"fleet_version_refused", "fleet_failure_code_missing", "fleet_failure_code_unrecognized",
 	}
 	f := newFleetInstallFixture(t, "darwin")
 	if err := f.launch(); err != nil {
@@ -62,7 +58,7 @@ func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
 				if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: reported}); err != nil {
 					t.Fatal(err)
 				}
-				h := q.fleetUpgradeStatus().Hosts[0]
+				h := fleetHostStatus(t, q, i.Host)
 				want := code
 				if code == "fleet_storage_preflight_failed" {
 					want = "storage_preflight_failed"
@@ -77,9 +73,17 @@ func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
 	}
 }
 
-func TestFleetFailureStaleAuthorizationRefetchesBeforeIntent(t *testing.T) {
+// A momentarily stale authorization (a late proof) is asked again within the
+// launch; a persistent one leaves no receipt and the next poll refetches.
+func TestFleetFailureStaleAuthorizationRetriesThenRefetches(t *testing.T) {
 	f := newFleetInstallFixture(t, "darwin")
 	f.denyAt, f.denyCode = 1, "fleet_instruction_stale"
+	if err := f.launch(); err != nil || f.launches != 1 || f.authorizations != 2 {
+		t.Fatal("transient stale answer not retried", err, f.launches, f.authorizations)
+	}
+
+	f = newFleetInstallFixture(t, "darwin")
+	f.denyAt, f.denyCode = -1, "fleet_instruction_stale"
 	client, err := f.deps.client(f.c)
 	if err != nil {
 		t.Fatal(err)
@@ -92,16 +96,15 @@ func TestFleetFailureStaleAuthorizationRefetchesBeforeIntent(t *testing.T) {
 	}
 	result := pollFleetRuntime(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, "", nil)
 	if result.attempted != "" || result.failed != nil || f.launches != 0 || len(f.acks) != 0 {
-		t.Fatal("stale initial authorization poisoned operation or launched helper", result, f.acks)
+		t.Fatal("stale authorization poisoned the operation or launched a helper", result, f.acks)
 	}
 	if _, err := os.Lstat(filepath.Join(f.c.State, fleetUpdateReceiptFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("stale pre-launch authorization wrote intent", err)
+		t.Fatal("stale authorization wrote a receipt", err)
 	}
-	// The next ordinary poll can use the SAME revision after proof/custody
-	// refreshes; it does not require an operator rerun or repeat a launched helper.
+	f.denyAt = 0
 	result = pollFleetRuntime(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, result.attempted, result.failed)
 	if result.attempted != fleetInstructionKey(f.i) || f.launches != 1 || len(f.failureCodes) != 0 {
-		t.Fatalf("fresh instruction did not recover launch: %+v %v", result, f.failureCodes)
+		t.Fatalf("fresh instruction did not launch: %+v %v", result, f.failureCodes)
 	}
 	_ = pollFleetRuntime(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, result.attempted, result.failed)
 	if f.launches != 1 {
@@ -109,7 +112,7 @@ func TestFleetFailureStaleAuthorizationRefetchesBeforeIntent(t *testing.T) {
 	}
 }
 
-func TestFleetFailureProofExpiryRefusesSameRevision(t *testing.T) {
+func TestFleetFailureProofExpiryRefusesAuthorization(t *testing.T) {
 	q, clock, _ := fleetFixture(t, "queue")
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
@@ -117,14 +120,14 @@ func TestFleetFailureProofExpiryRefusesSameRevision(t *testing.T) {
 	fleetTick(t, q)
 	i := fleetInstructionFor(t, q)
 	clock.Advance(fleetRuntimeFreshFor)
-	err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision)
+	err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session)
 	var rejection *HTTPError
-	if !errors.As(err, &rejection) || rejection.Code != "fleet_instruction_stale" || q.s.FleetUpgrade.State != "running" || q.s.FleetUpgrade.Revision != i.Revision {
-		t.Fatal("expired proof should refuse without changing operation", err)
+	if !errors.As(err, &rejection) || rejection.Code != "fleet_instruction_stale" || q.s.FleetUpgrade.State != "running" {
+		t.Fatal("expired proof should refuse without changing the operation", err)
 	}
 	q.fleetQueue.Proof.ObservedAt = clock.Now()
-	if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision); err != nil {
-		t.Fatal("refreshed proof did not restore same-revision authorization", err)
+	if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session); err != nil {
+		t.Fatal("refreshed proof did not restore authorization", err)
 	}
 }
 
@@ -243,8 +246,8 @@ func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
 // #846 reproduces transient stale proof after intent. Maintenance changes remain
 // terminal at each boundary; only stale control responses may refetch.
 func TestFleetFailureAfterIntentRemainsDurable(t *testing.T) {
-	for _, denyAt := range []int{2, 3, 4} {
-		t.Run(map[int]string{2: "before-fetch", 3: "before-publication", 4: "before-restart"}[denyAt], func(t *testing.T) {
+	for _, denyAt := range []int{2, 3} {
+		t.Run(map[int]string{2: "before-fetch", 3: "before-publication"}[denyAt], func(t *testing.T) {
 			f := newFleetInstallFixture(t, "darwin")
 			if err := f.launch(); err != nil {
 				t.Fatal(err)
@@ -308,7 +311,6 @@ func TestFleetFailureArtifactAndStaging(t *testing.T) {
 		{"truncated", "fleet_artifact_refused"},
 		{"hash", "fleet_artifact_refused"},
 		{"oversize", "fleet_artifact_refused"},
-		{"staging-exists", "fleet_staging_exists"},
 		{"staging-parent-missing", "fleet_staging_write_failed"},
 	} {
 		t.Run(tc.fault, func(t *testing.T) {
@@ -316,11 +318,7 @@ func TestFleetFailureArtifactAndStaging(t *testing.T) {
 			i := FleetUpdateInstruction{Operation: "fixture-operation"}
 			data := "artifact bytes"
 			a := ReleaseArtifact{Size: int64(len(data)), SHA256: fleetBytesHash([]byte(data))}
-			if tc.fault == "staging-exists" {
-				if err := os.WriteFile(fleetStagingPath(c, i), []byte("retain evidence"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			} else if tc.fault == "staging-parent-missing" {
+			if tc.fault == "staging-parent-missing" {
 				c.Binary = filepath.Join(filepath.Dir(c.Binary), "missing", "myce")
 			}
 			client := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
@@ -347,12 +345,7 @@ func TestFleetFailureArtifactAndStaging(t *testing.T) {
 			if err == nil || err.Error() != tc.want || path != "" {
 				t.Fatal("artifact failure lost code", err, path)
 			}
-			if tc.fault == "staging-exists" {
-				got, err := os.ReadFile(fleetStagingPath(c, i))
-				if err != nil || string(got) != "retain evidence" {
-					t.Fatal("refusal changed existing staging", err)
-				}
-			} else if _, err := os.Lstat(fleetStagingPath(c, i)); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Lstat(fleetStagingPath(c, i)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("failed transfer left partial staging", err)
 			}
 		})
@@ -368,9 +361,6 @@ func (fleetFailedArtifactReader) Read([]byte) (int, error) {
 func TestFleetFailureSanitizesMissingLegacyAndUnknownCodes(t *testing.T) {
 	for _, tc := range []struct{ input, want string }{
 		{"", "fleet_failure_code_missing"},
-		{"update_failed", "fleet_failure_detail_unavailable"},
-		{"fleet_update_failed", "fleet_failure_detail_unavailable"},
-		{"helper_launch_failed", "fleet_helper_launch_failed"},
 		{"fleet_private_secret_with_valid_code_shape", "fleet_failure_code_unrecognized"},
 		{"fleet_restart_failed\nprivate diagnostic", "fleet_failure_code_unrecognized"},
 	} {
@@ -384,7 +374,7 @@ func TestFleetFailureSanitizesMissingLegacyAndUnknownCodes(t *testing.T) {
 			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: tc.input}); err != nil {
 				t.Fatal(err)
 			}
-			h := q.fleetUpgradeStatus().Hosts[0]
+			h := fleetHostStatus(t, q, i.Host)
 			if h.Failure != tc.want || h.FailureCode != tc.want {
 				t.Fatalf("unsafe or unactionable failure: %+v", h)
 			}
@@ -394,4 +384,15 @@ func TestFleetFailureSanitizesMissingLegacyAndUnknownCodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func fleetHostStatus(t *testing.T, q *Queue, host string) FleetHostStatus {
+	t.Helper()
+	for _, h := range q.fleetUpgradeStatus().Hosts {
+		if h.Host == host {
+			return h
+		}
+	}
+	t.Fatal("no host", host)
+	return FleetHostStatus{}
 }

@@ -219,9 +219,9 @@ func fleetAckDefinitive(err error) bool {
 }
 
 // deliverFleetAck posts ack unless key is settled or still backing off. Success
-// or a definitive refusal settles it; with resend it is instead offered again
-// after the cap. Any other failure backs off exponentially on the injected clock.
-func deliverFleetAck(ctx context.Context, client Client, clock Clock, acks map[string]fleetAckRetry, key string, ack any, resend bool) bool {
+// or a definitive refusal settles it. Any other failure backs off
+// exponentially on the injected clock.
+func deliverFleetAck(ctx context.Context, client Client, clock Clock, acks map[string]fleetAckRetry, key string, ack any) bool {
 	state := acks[key]
 	if state.settled || clock.Now().Before(state.retryAt) {
 		return state.settled
@@ -230,7 +230,7 @@ func deliverFleetAck(ctx context.Context, client Client, clock Clock, acks map[s
 	err := client.Call(request, "POST", "/api/fleet/ack", ack, nil)
 	cancel()
 	if err == nil || fleetAckDefinitive(err) {
-		acks[key] = fleetAckRetry{settled: !resend, retryAt: clock.Now().Add(fleetAckRetryMax)}
+		acks[key] = fleetAckRetry{settled: true}
 		return true
 	}
 	state.failures++
@@ -344,7 +344,7 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	if receipt != nil {
 		key := receipt.Operation + "/" + strconv.Itoa(receipt.Revision)
 		if result.failureReceipt != key {
-			if deliverFleetAck(ctx, client, clock, result.acks, "receipt/"+key, receipt, false) {
+			if deliverFleetAck(ctx, client, clock, result.acks, "receipt/"+key, receipt) {
 				result.failureReceipt = key
 			} else {
 				receiptPending = true
@@ -353,18 +353,6 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	}
 	proof, err := collect(ctx, config, session)
 	result.proof = proof
-	if proof != nil && proof.Failure == "runner_smoke_failed" {
-		// Bind a definitive startup failure to the receipt and current process,
-		// rather than converting cached smoke failure into an endless wait.
-		if receipt, e := readFleetReceipt(filepath.Join(config.State, fleetUpdateReceiptFile)); e == nil {
-			i := receipt.Instruction
-			if i.Host == host && i.Machine == machine {
-				// Resent at most every cap so an operator rerun still stops on it.
-				ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: host, Machine: machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: proof}
-				deliverFleetAck(ctx, client, clock, result.acks, "smoke/"+fleetInstructionKey(i)+"/"+proof.Session, ack, true)
-			}
-		}
-	}
 	if receiptPending || err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
 		return result
 	}
@@ -375,7 +363,7 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	if failed := result.failed; failed != nil {
 		// A definitive (for example revision-fenced) refusal settles an obsolete
 		// acknowledgement, so its retry never conceals a newer recovery.
-		if deliverFleetAck(ctx, client, clock, result.acks, "launch/"+failed.Operation+"/"+strconv.Itoa(failed.Revision), failed, false) {
+		if deliverFleetAck(ctx, client, clock, result.acks, "launch/"+failed.Operation+"/"+strconv.Itoa(failed.Revision), failed) {
 			result.failed = nil
 		}
 		return result
@@ -433,7 +421,7 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 			code = "fleet_helper_launch_unclassified"
 		}
 		failure := &fleetLaunchFailure{instruction.Operation, instruction.Revision, host, machine, session, "failed", code}
-		if !deliverFleetAck(ctx, client, clock, result.acks, "launch/"+fleetInstructionKey(instruction), failure, false) {
+		if !deliverFleetAck(ctx, client, clock, result.acks, "launch/"+fleetInstructionKey(instruction), failure) {
 			result.failed = failure
 		}
 	}
