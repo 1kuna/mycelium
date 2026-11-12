@@ -36,7 +36,7 @@ func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 	}
 	// Resolve the operator's root (including platform aliases such as /var).
 	// Below it, reject symlinks instead of redirecting staging or publication.
-	if err = fetchMkdir(root, syncDir); err != nil {
+	if err = fetchMkdir(root, root, syncDir); err != nil {
 		return err
 	}
 	root, err = filepath.EvalSymlinks(root)
@@ -49,7 +49,7 @@ func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 	if err = noModelSymlinks(stage, true); err != nil {
 		return err
 	}
-	if err = fetchMkdir(stage, syncDir); err != nil {
+	if err = fetchMkdir(stage, root, syncDir); err != nil {
 		return err
 	}
 	// A permanent regular file coordinates NAS clients too: directory flock
@@ -77,14 +77,14 @@ func fetchModel(ctx context.Context, raw, root, relative string, size int64, sum
 	// Also sync existing directories on entry: a previous invocation may have
 	// created/moved entries and then failed to sync them. Never reuse their names
 	// until both quarantine and staging are durable.
-	if err = fetchMkdir(quarantine, syncDir); err != nil {
+	if err = fetchMkdir(quarantine, root, syncDir); err != nil {
 		return err
 	}
 	dest := filepath.Join(root, relative)
 	if err = noModelSymlinks(dest, true); err != nil {
 		return err
 	}
-	if err = fetchMkdir(filepath.Dir(dest), syncDir); err != nil {
+	if err = fetchMkdir(filepath.Dir(dest), root, syncDir); err != nil {
 		return err
 	}
 	a, err := os.Stat(stage)
@@ -232,18 +232,48 @@ func quarantineModelPartial(partial, quarantine, reason string, syncDir func(str
 	return errors.Join(syncDir(quarantine), syncDir(filepath.Dir(partial)))
 }
 
-// Sync ancestors too, even when they already exist: retry must repair an earlier
-// mkdir whose parent sync failed. Only small directory metadata is involved.
-func fetchMkdir(dir string, syncDir func(string) error) error {
-	dir = filepath.Clean(dir)
+// fetchMkdir creates dir and makes its entry durable. At and below base (the
+// model root), every directory is synced on each call, existing or not, so a
+// retry repairs an earlier failed sync. Above base, only directories this call
+// creates are synced, each with its parent, and one whose sync fails is removed
+// so a retry recreates it. Existing ancestors are never opened: a job's sandbox
+// may deny reading them, and their entries were durable before this fetch (#1471).
+func fetchMkdir(dir, base string, syncDir func(string) error) error {
+	dir, base = filepath.Clean(dir), filepath.Clean(base)
 	parent := filepath.Dir(dir)
-	if parent != dir && dir != "." {
-		if err := fetchMkdir(parent, syncDir); err != nil {
+	rel, err := filepath.Rel(base, dir)
+	below := err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if _, err := os.Stat(dir); err == nil {
+		switch {
+		case below:
+			if err := fetchMkdir(parent, base, syncDir); err != nil {
+				return err
+			}
+			return errors.Join(syncDir(dir), syncDir(parent))
+		case dir == base:
+			return syncDir(dir)
+		default:
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if parent != dir {
+		if err := fetchMkdir(parent, base, syncDir); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.Mkdir(dir, 0700); err != nil {
+		if _, serr := os.Stat(dir); errors.Is(err, os.ErrExist) && serr == nil {
+			return fetchMkdir(dir, base, syncDir) // created concurrently
+		}
 		return err
 	}
-	return errors.Join(syncDir(dir), syncDir(parent))
+	if err := errors.Join(syncDir(dir), syncDir(parent)); err != nil {
+		if !below {
+			_ = os.Remove(dir)
+		}
+		return err
+	}
+	return nil
 }
