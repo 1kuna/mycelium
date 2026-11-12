@@ -433,7 +433,9 @@ func TestHostMemoryGPUGrowthBoundedByAttemptCeiling(t *testing.T) {
 			}
 			next := submit(t, q, s)
 			w := Worker{Machine: busy, Clock: clock, hostMemorySamples: currentHostMemorySamples(reports, clock.Now()), HostMemorySource: func(context.Context) (float64, error) { return busy.HostAvailableMemoryGB, nil }}
-			if err := localAttemptAdmission(w, []Job{*job(t, q, first.ID)}, *job(t, q, next.ID), nil); (err == nil) != enforced {
+			onCard1 := *job(t, q, next.ID)
+			onCard1.AllocatedDevices = []string{"1"}
+			if err := localAttemptAdmission(w, []Job{*job(t, q, first.ID)}, onCard1, nil); (err == nil) != enforced {
 				t.Fatalf("worker admission=%v, containment=%v", err, enforced)
 			}
 			reply, err := q.Checkin(Checkin{Machine: busy, AttemptProtocol: keyedAttemptProtocol, Attempts: reports, period: time.Second})

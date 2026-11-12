@@ -132,9 +132,10 @@ func TestDeclaredHostMemoryCapRequiresNativeCPUContainment(t *testing.T) {
 			}
 			charge, pending := memoryCharge(&job, &machine, 6.125, sample, clock.Now())
 			wantCharge, wantPending := 64.0, 62.0
-			if kind == "auto" {
-				// A cgroup limit contains these CPU attempts, so the
-				// forecast is bounded by that ceiling: charge and growth alike.
+			if kind == "auto" || kind == "GPU" {
+				// A cgroup limit contains these attempts, GPU ones included,
+				// and the forecast is read from it, so it is bounded by that
+				// ceiling: charge and growth alike (#1487).
 				wantCharge, wantPending = 6.125, 4.125
 			}
 			if charge != wantCharge || pending != wantPending {
