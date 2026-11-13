@@ -118,7 +118,8 @@ func TestDevHostHealthReportCadence(t *testing.T) {
 		d.Queue.mu.Lock()
 		defer d.Queue.mu.Unlock()
 		m := d.Queue.s.Machines["fake-1"]
-		if m == nil || m.HostHealth == nil || len(m.HostHealth.History) == 0 || !hostHealthEvidenceValid(m.HostHealth, 0) {
+		// Three samples warm the probe's measured validity before hygiene applies.
+		if m == nil || m.HostHealth == nil || len(m.HostHealth.History) < 3 || !hostHealthEvidenceValid(m.HostHealth, 0) {
 			return false
 		}
 		first = m.HostHealth.History[len(m.HostHealth.History)-1].At
