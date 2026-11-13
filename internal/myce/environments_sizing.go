@@ -68,7 +68,9 @@ func (c *EnvironmentCache) needLimit(limit, need int64) (int64, string, error) {
 		room += int64(min(disk.FreeBytes-floor, math.MaxInt64/2))
 	}
 	host := fmt.Sprintf("; host has %d bytes free with a %d-byte disk floor", disk.FreeBytes, floor)
-	if room <= 0 {
+	// A session starting with its volume already at the floor refuses up front;
+	// a running one keeps what it holds and refuses each new environment.
+	if limit == 0 && disk.FreeBytes <= floor || room <= 0 {
 		return 0, host, fmt.Errorf("environment cache %s has no room%s; free space on that volume", c.Root, host)
 	}
 	return min(max(limit, need, used, devEnvironmentCacheStart), room), host, nil
