@@ -190,3 +190,17 @@ func (q *Queue) recentCheckpointAvailability() bool {
 	}
 	return available
 }
+
+// removeCreatedProbeDir removes a directory a preflight created this run. Its
+// own fixed install probe file (and a rename left by an interrupted probe) is
+// the only content it can hold, so both go first; anything else keeps the
+// directory and reports why (#1545).
+func removeCreatedProbeDir(dir string) error {
+	probe := storageProbePath(dir, ".myce-install-probe-", "install")
+	for _, path := range []string{probe, probe + ".renamed"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return os.Remove(dir)
+}

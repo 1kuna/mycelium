@@ -93,7 +93,7 @@ func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(co
 				return err
 			}
 			if preflight {
-				defer func(path string) { result = errors.Join(result, os.Remove(path)) }(dir)
+				defer func(path string) { result = errors.Join(result, removeCreatedProbeDir(path)) }(dir)
 			}
 		} else if err != nil {
 			return err

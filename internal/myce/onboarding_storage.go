@@ -247,7 +247,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 		for i := len(created) - 1; i >= 0; i-- {
 			// Cleanup stays in the owned sequence, even after caller cancellation.
 			cleanup, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-			result = errors.Join(result, onboardingFSError(cleanup, func(err error) { abort(err); cancel(err) }, func() error { return os.Remove(created[i]) }))
+			result = errors.Join(result, onboardingFSError(cleanup, func(err error) { abort(err); cancel(err) }, func() error { return removeCreatedProbeDir(created[i]) }))
 			cancel(nil)
 		}
 	}()
