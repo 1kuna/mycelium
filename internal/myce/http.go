@@ -53,6 +53,16 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	mux.HandleFunc("GET /api/environments", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, a.Queue.EnvironmentEntries(), nil)
 	})
+	mux.HandleFunc("POST /api/environments/{key}/retry", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Worker string          `json:"worker"`
+			Target ExecutionTarget `json:"target"`
+		}
+		if !decode(w, r, &request) {
+			return
+		}
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.RetryEnvironment(request.Worker, r.PathValue("key"), request.Target, r.Context()), "environment_retry_invalid")
+	})
 	a.registerCacheReferences(mux)
 	mux.HandleFunc("GET /api/environments/{name}", func(w http.ResponseWriter, r *http.Request) {
 		for _, entry := range a.Queue.EnvironmentEntries() {

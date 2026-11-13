@@ -462,6 +462,12 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
+	// Queue-owned failure identity. Additive JSON in the existing machine record;
+	// adjacent-release queues can read it without a SQLite schema migration.
+	Target       *ExecutionTarget `json:"target,omitempty"`
+	Fingerprint  string           `json:"fingerprint,omitempty"`
+	LogReference string           `json:"log_reference,omitempty"`
+
 	FailureKind    string          `json:"failure_kind,omitempty"`
 	RetryAt        *time.Time      `json:"retry_at,omitempty"`
 	Failures       int             `json:"failures,omitempty"`
@@ -631,7 +637,7 @@ func (q *Queue) buildsAhead(j *Job, m *Machine) bool {
 		return false
 	}
 	for _, report := range m.EnvironmentReports {
-		if report.Key == r.Key && (report.State == "building" || q.environmentReportBlocked(report)) {
+		if report.Key == r.Key && environmentReportMatches(report, m) && (report.State == "building" || q.environmentReportBlocked(report)) {
 			return false
 		}
 	}
@@ -1489,7 +1495,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	if wanted == "" {
 		return
 	}
-	if r := rt.reports[wanted]; (r.State == "failed" && (environmentFailureKind(r) != "transient" || r.Attempt == launchAttempt(plan[0].Launch))) || (r.State == "ready" && r.Attempt == launchAttempt(plan[0].Launch)) {
+	if r := rt.reports[wanted]; (r.State == "failed" && (r.Attempt == launchAttempt(plan[0].Launch) || environmentFailureKind(r) != "transient" && rt.authorize == nil)) || (r.State == "ready" && r.Attempt == launchAttempt(plan[0].Launch)) {
 		// Keep an exact completion visible until the queue withdraws its offer.
 		// A stale heartbeat response must not restart completed preparation.
 		return
@@ -1618,45 +1624,23 @@ func (rt *environmentRuntime) report() ([]string, []EnvironmentReport, map[strin
 	return ready, reports, times, sizes
 }
 
+// Keep a small diagnostic tail; chunked build logs are already attached by
+// AppendEnvironmentLog. Never read/copy the full build log under q.mu.
 func (q *Queue) reconcileEnvironments(m *Machine) error {
 	for _, r := range m.EnvironmentReports {
-		// Uploading is already a failed build for admission/status, but keep
-		// its dependents queued until the complete log has been attached.
 		if r.State != "failed" || environmentFailureKind(r) == "transient" {
 			continue
 		}
 		for _, j := range q.liveJobs() {
-			// Discovery failures are cached by exact target/recipe on this worker.
-			// Admission excludes that candidate; other useful work stays queued.
-			if j.State != "queued" || j.CommandDiscovery != nil {
+			if j.State != "queued" || j.Spec.Logs == "none" || j.EnvironmentFailureLog != "" {
 				continue
 			}
 			for _, target := range q.machineTargets(m) {
-				if !q.placementAllowed(j, target) || environmentKey(j, target) != r.Key {
-					continue
+				if environmentReportMatches(r, target) && slices.Contains(environmentFailureKeys(j, target), r.Key) {
+					q.touchJob(j.ID)
+					j.EnvironmentFailureLog = environmentFailureReason(r, true) + "\n"
+					break
 				}
-				matched := false
-				for _, candidate := range q.memoryCandidates(j, target) {
-					if hostFits(target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, target, target.FreeMemoryGB) {
-						matched = true
-						break
-					}
-				}
-				if !matched {
-					continue
-				}
-				q.touchJob(j.ID)
-				j.State = "failed"
-				now := q.clock.Now()
-				j.FinishedAt = &now
-				j.Reason = environmentFailureReason(r, j.Spec.Logs != "none")
-				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {
-					return e
-				}
-				if j.Spec.Logs != "none" {
-					j.EnvironmentFailureLog = r.Log + "\n" + j.Reason + "\n"
-				}
-				break
 			}
 		}
 	}

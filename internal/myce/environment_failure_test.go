@@ -53,7 +53,7 @@ func TestEnvironmentFailureCPUOnAcceleratorDoesNotBlockOtherRecipes(t *testing.T
 	clock.Advance(time.Second)
 	reply := machineCheck(t, q, m)
 	got, err := q.jobSnapshot(j.ID)
-	if err != nil || got.State != "failed" || got.FinishedAt == nil || !strings.Contains(got.Reason, excerpt) || !strings.Contains(got.Reason, "fix the recipe and resubmit") {
+	if err != nil || got.State != "queued" || got.FinishedAt != nil || !strings.Contains(got.Reason, excerpt) || !strings.Contains(got.Reason, "explicitly retry") {
 		t.Fatalf("failure hidden: %+v %v", got, err)
 	}
 	if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != r.Key || reply.EnvironmentPlan[0].Launch.Demand != low.ID {
@@ -81,7 +81,7 @@ func TestEnvironmentFailureCPUOnAcceleratorDoesNotBlockOtherRecipes(t *testing.T
 	again := submit(t, q, j.Spec)
 	clock.Advance(time.Minute)
 	reply = machineCheck(t, q, m)
-	if got := job(t, q, again.ID); got.State != "failed" || !strings.Contains(got.Reason, excerpt) {
+	if got := job(t, q, again.ID); got.State != "queued" || !strings.Contains(got.Reason, excerpt) {
 		t.Fatal(got.State, got.Reason)
 	}
 	if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != r.Key {
@@ -189,8 +189,8 @@ func TestEnvironmentFailedUploadPreservesFullLogAndOtherPreparation(t *testing.T
 	m.EnvironmentReports[0].State = "failed"
 	clock.Advance(time.Second)
 	machineCheck(t, q, m)
-	if got := job(t, q, j.ID); got.State != "failed" {
-		t.Fatal("upload completion did not fail job", got.State)
+	if got := job(t, q, j.ID); got.State != "queued" {
+		t.Fatal("upload completion terminally failed job", got.State)
 	}
 	logs, err := q.Logs(j.ID, 0)
 	if err != nil || len(logs) == 0 || !strings.HasPrefix(logs[0].Text, full) {

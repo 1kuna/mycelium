@@ -51,3 +51,32 @@ func TestEnvironmentCLIReadback(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvironmentCLIRetry(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "POST" || r.URL.Path != "/api/environments/recipe-hash/retry" || r.Header.Get("Authorization") != "Bearer fixture" {
+			t.Errorf("wrong retry request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Worker string               `json:"worker"`
+			Target myce.ExecutionTarget `json:"target"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.Worker != "worker" || body.Target != (myce.ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}) {
+			t.Errorf("wrong retry scope: %+v", body)
+		}
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	if err := environmentCommand(context.Background(), []string{"retry", "--queue", server.URL, "--token", "fixture", "worker", "recipe-hash", "linux", "amd64", "cpu"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !bytes.Contains(out.Bytes(), []byte(`"ok":true`)) {
+		t.Fatal(calls, out.String())
+	}
+}

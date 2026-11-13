@@ -1785,8 +1785,9 @@ Project locks shipped as inline uv and Pixi locks (#1163) and relative lock
 files uploaded by `myce run --entry`/`--profile` (#1297); the named catalog
 remains. [MY-44](DECISIONS.md#my-44) covers project-carried locks
 (agent reading, 2026-11-12, #1434). Items 5 and 6 (worker-specific build
-failure) are open in #1438: today a real build failure still terminally fails
-waiting jobs through `reconcileEnvironments`.
+failure) shipped in #1438 for r6.16: failed worker/target/recipe identities stay
+excluded across queue restarts while compatible workers can prepare and run
+the same queued job.
 
 Reuse `EnvironmentRecipe`, composed extension bundles, the file store and the
 uv/Pixi builders. This adds client-carried finite-command recipes and
@@ -1820,9 +1821,8 @@ worker-specific failure propagation, not another package manager.
    verify its own usable prefix. Cached installation is not native qualification.
 5. A real build failure excludes only that worker/target for that recipe identity.
    Status shows environment hash, worker, target, preparation failure and log
-   reference; another compatible worker can build/run. This changes today's
-   `reconcileEnvironments`, which can terminally fail waiting jobs on a fitting
-   worker's failure. If all known compatible workers fail, keep accepted demand
+   reference; another compatible worker can build/run. The queue retains the failed build
+   evidence without terminally failing waiting jobs. If all known compatible workers fail, keep accepted demand
    queued with an explicit no-buildable-worker reason until repair, cancellation
    or its existing deadline. Unknown/offline capacity is neither success nor a
    proven failure.

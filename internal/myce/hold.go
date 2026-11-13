@@ -114,6 +114,7 @@ var holdKinds = map[string]holdKind{
 	"unprepared":               {ownerQueue, "software is not prepared yet", "the queue prepares the environment", "wait; the queue prepares it before launch"},
 	"waiting_for_builder":      {ownerQueue, "waiting for software preparation", "the named preparation finishes", "wait; ask the queue owner if preparation makes no progress"},
 	"building":                 {ownerBuilder, "software is being prepared", "preparation finishes", "wait; inspect environment logs if progress stalls"},
+	"no_buildable_worker":      {ownerConsumer, "no buildable worker for this environment", "a worker is repaired and its build retried, or new compatible capacity arrives", "repair a worker and run myce env retry WORKER HASH OS ARCH PLATFORM; keep the same queued job"},
 	"deterministically_failed": {ownerConsumer, "software preparation failed", "the recipe is fixed and resubmitted", "fix the recipe and resubmit with changed inputs"},
 
 	// Host and device fences.
@@ -176,7 +177,7 @@ var holdEfficiencyCategories = map[string]string{
 	"pinned_model": "holds", checkpointTargetHold: "holds", "reservation": "holds", "unified_cuda_headroom": "holds",
 	"waiting_for_builder": "preparation", "building": "preparation", "unprepared": "preparation",
 	"shared_input": "preparation", "shared_input_unreported": "preparation",
-	"deterministically_failed": "environment", "extension": "environment",
+	"no_buildable_worker": "environment", "deterministically_failed": "environment", "extension": "environment",
 	"missing_extension": "environment", "execution_coverage": "environment", "native_qualification": "environment",
 	"production_parity": "environment", productionParityHostHold: "environment", "capability": "environment", "log_policy": "environment",
 	"memory": "memory_reservation", "host_memory_headroom": "memory_reservation", memoryEvidenceRecovering: "memory_reservation",

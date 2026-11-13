@@ -690,7 +690,10 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 		}
 	}
 	if reason := q.environmentFailureWaitingReason(j, machines); reason != "" {
-		return newHold("deterministically_failed", reason)
+		if strings.HasPrefix(reason, "no-buildable-worker:") {
+			return newHold("no_buildable_worker", reason)
+		}
+		return newHold("waiting_for_builder", reason)
 	}
 	if reason := q.preparationWaitingReason(j, machines); reason != "" {
 		return newHold("waiting_for_builder", reason)

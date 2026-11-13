@@ -398,7 +398,7 @@ func TestEnvironmentFailedBuildLogs(t *testing.T) {
 	}
 	snap, _ := q.Snapshot()
 	for _, j := range snap.Jobs {
-		if j.State != "failed" {
+		if j.State != "queued" {
 			t.Fatal(j.State)
 		}
 	}
@@ -727,7 +727,7 @@ func TestEnvironmentFailedBuildFloorFreeAutoMemory(t *testing.T) {
 	m.EnvironmentBuilder = true
 	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}
 	check(t, q, m, nil)
-	if got := job(t, q, j.ID); got.State != "failed" || !strings.Contains(got.Reason, "build exit 9") {
+	if got := job(t, q, j.ID); got.State != "queued" || !strings.Contains(got.Reason, "build exit 9") {
 		t.Errorf("failed environment was hidden: state=%s reason=%s", got.State, got.Reason)
 	}
 	logs, err := q.Logs(j.ID, 0)
