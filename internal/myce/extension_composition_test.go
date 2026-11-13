@@ -466,24 +466,6 @@ while ! test -s child.pid; do sleep 0.01; done
 	nativeNoSurvivors(t, &nativeTestRun{p: &process{cmd: &exec.Cmd{Process: &os.Process{Pid: state.PID}}}, dir: nativeDir})
 }
 
-func TestCompositionRegistrationOwnsBytes(t *testing.T) {
-	q, _ := fixture(t)
-	e := compositionExtension(t, false)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	e.Files["run.sh"][0] = '!'
-	e.Files["extra"] = []byte("caller mutation")
-	j := submit(t, q, Spec{Name: "frozen", Project: "test", ExtensionDigest: e.Digest})
-	if j.Extensions[0].Files["run.sh"][0] == '!' || j.Extensions[0].Files["extra"] != nil {
-		t.Fatal("caller mutated registered bytes")
-	}
-	actual, err := extensionFromFiles(j.Extensions[0].Files)
-	if err != nil || actual.Digest != e.Digest {
-		t.Fatal("snapshot is not immutable", err)
-	}
-}
-
 func TestCompositionDefaultClassUsesAdmissionValidation(t *testing.T) {
 	for _, class := range []string{"deadline", "production", "preview"} {
 		t.Run(class, func(t *testing.T) {

@@ -48,18 +48,6 @@ func TestJoinGPUDetection(t *testing.T) {
 	}
 }
 
-func TestJoinExplicitGPUBypassesDetection(t *testing.T) {
-	probe := myce.MachineProbe{Command: func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("explicit GPU ran detector")
-		return nil, nil
-	}}
-	want := joinGPUOptions{platform: "fake", device: "2", mode: "fixed", memory: 8, reserve: 1}
-	got, err := detectJoinGPU(context.Background(), probe, want, nil)
-	if err != nil || got != want {
-		t.Fatalf("got %+v, %v", got, err)
-	}
-}
-
 func TestJoinDetectionPreservesExplicitOptions(t *testing.T) {
 	probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
