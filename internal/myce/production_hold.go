@@ -275,7 +275,7 @@ func (q *Queue) placementDemandPolicy(j *Job, m *Machine, resident bool) bool {
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
-	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot)) {
+	if (j.StartedAt == nil || j.State == "queued") && (!q.admissionHold(j, m, reasonHold("shared_host_backoff", q.sharedHostBackoffReason(j, m)), predicateSharedHostBackoff) || !q.admissionHold(j, m, reasonHold("storage_root", q.storageRootReason(j, m)), predicateStorageRoot) || !q.admissionHold(j, m, reasonHold(stagingHostRetryHold, q.stagingHostRetryReason(j, m)), predicateStagingHostRetry)) {
 		return false
 	}
 	if !q.admissionPass(j, m, dependencyReady(j), predicateDependency) || !q.admissionPass(j, m, !m.Recovering, predicateRecovering) || !q.admissionPass(j, m, !cancelled(j), predicateCancelled) || !q.admissionPass(j, m, !(q.maintenanceBlocked(hostID(m))), predicateMaintenance) || !q.admissionPass(j, m, logPolicyFits(j.Spec.Logs, m), predicateLogPolicy) {

@@ -83,6 +83,7 @@ var holdKinds = map[string]holdKind{
 	checkpointTargetHold:       {ownerQueue, "resuming on the target that wrote its checkpoint", "a host of that target can take it, or none remains in the fleet", "wait; if its checkpoints resume correctly on other targets, declare resume_compatibility for them"},
 	"scarce_host_yield":        {ownerQueue, "waiting for portable work to yield a scarce host", "the yielding attempt saves its checkpoint and releases the host", "wait; nothing to do"},
 	"shared_host_backoff":      {ownerQueue, "backing off a shared host whose owner needed it", "the host's owner pressure stays quiet for the measured recovery span", "wait; another eligible host can still take it"},
+	stagingHostRetryHold:       {ownerQueue, "retrying on another eligible host after input staging failed here", "another eligible host takes it, or no untried eligible host remains", "wait; nothing to do"},
 	"storage_root":             {ownerStorage, "a worker's storage root is unreachable", "the storage root is reachable again", "restore the worker's storage mount"},
 	productionParityHostHold:   {ownerConsumer, "production work is held to the machine kinds its project approved", "the project approves a machine kind that can run it", "compare outputs with the reference on a machine of a kind that can run it, then myce parity add --evidence JOB_ID"},
 	"no_matching_device":       {ownerConsumer, "no selected device is online and compatible", "a selected device is online and compatible", "check the device selector, or bring a selected device online"},

@@ -268,6 +268,8 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 			}
 		}
 		floor, _ := ctx.Value(diskBudgetFloorKey{}).(uint64)
+		// Name disk-budget waits and reclaim as admission, not generic prepare.
+		traceSharedInput(ctx, "admission", "cache")
 		release, err := c.budget.reserve(ctx, c.cache.Root, uint64(max(0, need)), floor)
 		if err != nil {
 			return err
