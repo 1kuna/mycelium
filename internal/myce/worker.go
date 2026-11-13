@@ -99,6 +99,7 @@ type Worker struct {
 	memoryCeilings          *memoryCeilings
 	sharedExecutionCeilings *memoryCeilings
 	sharedCPUDev            bool
+	devEnvironmentSizing    bool // Dev session: size the environment cache from need (#1540).
 	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
 	processMemory           *processMemoryProbe // Without cgroups only.
 	MemorySwapMaxBytes      int64
@@ -1262,7 +1263,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit, growToNeed: w.devEnvironmentSizing}
 	w.environmentCache.budget = w.diskBudget
 	w.environmentCache.references = w.environmentReferenced
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {

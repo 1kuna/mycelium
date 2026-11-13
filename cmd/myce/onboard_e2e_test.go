@@ -263,7 +263,9 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	runCommand := func(command, host string, expectSuccess bool, extra ...string) string {
 		t.Helper()
-		script := command + " --gpu fake --memory-mode fixed --memory-gb 8 --allow-deviceless --nas " + shellQuote(nas) + " --require-mounted-nas=false --enrollment-timeout 80s" + " " + strings.Join(extra, " ")
+		script := command + " --gpu fake --memory-mode fixed --memory-gb 8 --allow-deviceless --nas " + shellQuote(nas) + " --require-mounted-nas=false --enrollment-timeout 80s" +
+			// A fixture limit keeps installed-worker sizing off this host's disk (#1540).
+			" --environment-cache-bytes 1073741824 " + strings.Join(extra, " ")
 		cmd := exec.CommandContext(ctx, "sh", "-c", script)
 		for _, entry := range os.Environ() {
 			k, _, _ := strings.Cut(entry, "=")

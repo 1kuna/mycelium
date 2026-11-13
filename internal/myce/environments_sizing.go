@@ -1,6 +1,10 @@
 package myce
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"math"
+)
 
 // AutoEnvironmentCacheLimit uses the cache filesystem, including its nearest
 // existing ancestor on fresh installs. It reserves 20 GiB and never allocates.
@@ -38,4 +42,34 @@ func resolveEnvironmentCacheSizing(c *ServiceConfig, explicit bool, size func(st
 	}
 	c.EnvironmentCacheBytes = limit
 	return nil
+}
+
+// devEnvironmentCacheStart is a dev cache's first limit before anything is
+// cached: fake and test environments take kilobytes to megabytes.
+const devEnvironmentCacheStart = int64(1 << 30)
+
+// needLimit sizes a dev cache from need: the larger of the current limit, the
+// bytes needed now (cached environments plus the one being admitted) and the
+// small start size, never past the host's room. Room is what the cache already
+// holds plus free space above the volume's disk floor, the same floor that
+// protects every worker's host. host describes that measurement for refusals.
+func (c *EnvironmentCache) needLimit(limit, need int64) (int64, string, error) {
+	used, err := c.DiskUsage()
+	if err != nil {
+		return 0, "", err
+	}
+	disk, err := workerDiskProbe(c.Root)
+	if err != nil {
+		return 0, "", err
+	}
+	floor := diskFreeFloor(disk.TotalBytes)
+	room := used
+	if disk.FreeBytes > floor {
+		room += int64(min(disk.FreeBytes-floor, math.MaxInt64/2))
+	}
+	host := fmt.Sprintf("; host has %d bytes free with a %d-byte disk floor", disk.FreeBytes, floor)
+	if room <= 0 {
+		return 0, host, fmt.Errorf("environment cache %s has no room%s; free space on that volume", c.Root, host)
+	}
+	return min(max(limit, need, used, devEnvironmentCacheStart), room), host, nil
 }

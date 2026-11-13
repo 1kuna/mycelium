@@ -4,7 +4,9 @@ package myce
 
 import (
 	"context"
+	"os"
 	"runtime"
+	"strconv"
 	"testing/fstest"
 
 	"mycelium/internal/probeguard"
@@ -26,8 +28,14 @@ func init() {
 		}}
 	}
 
+	// MYCE_TEST_DISK_FREE_BYTES simulates a low-disk host (e.g. a laptop with
+	// 15 GiB free) for these test binaries only.
+	free := uint64(1 << 39)
+	if v, err := strconv.ParseUint(os.Getenv("MYCE_TEST_DISK_FREE_BYTES"), 10, 64); err == nil {
+		free = v
+	}
 	workerDiskProbe = func(string) (DiskReading, error) {
-		return DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
+		return DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: free}, nil
 	}
 	workerProfileProbe = func() ProfileProbe {
 		return ProfileProbe{Machine: MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: fstest.MapFS{}, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
@@ -35,7 +43,7 @@ func init() {
 				return []byte("137438953472"), nil
 			}
 			return nil, ErrNoGPU
-		}}, ReadFile: func(string) ([]byte, error) { return []byte("MemTotal: 134217728 kB\n"), nil }, CPUs: func() int { return 20 }, Disk: func(string) (uint64, uint64, error) { return 1 << 40, 1 << 39, nil }}
+		}}, ReadFile: func(string) ([]byte, error) { return []byte("MemTotal: 134217728 kB\n"), nil }, CPUs: func() int { return 20 }, Disk: func(string) (uint64, uint64, error) { return 1 << 40, free, nil }}
 	}
 	workerHostMemorySource = func(reserve float64) (MemorySource, error) {
 		return func(context.Context) (float64, error) { return max(0, 128-reserve), nil }, nil

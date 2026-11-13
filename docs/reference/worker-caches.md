@@ -257,6 +257,13 @@ other saved limits stay unchanged. A historical explicitly selected 20 GiB
 cannot be distinguished from that former default; pass it explicitly again to
 retain it during an upgrade.
 
+A `myce dev` session sizes from need instead: its cache starts at 1 GiB, or at
+what it already holds, and grows to each environment's measured size while the
+cache volume keeps its disk floor (1% of the volume, at least 256 MiB). A
+laptop with a few GiB free runs dev and the quick start. When an environment
+does not fit, the refusal names it, the bytes it is short, and the measured
+free space and floor.
+
 After a cache-capacity refusal, reconfigure the idle worker with the supported
 `myce install worker --config CONFIG --environment-cache-bytes BYTES` path.
 The worker reconsiders saved capacity failures when its allowance changes,
