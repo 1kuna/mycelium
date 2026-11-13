@@ -260,7 +260,10 @@ func lendingFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float6
 // guard and footprint samples; CPU work a declared size under a guard. A
 // typed job admitted on its learned charge lends from that charge.
 func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64, bool) {
-	if j == nil || m == nil || j.StartedAt == nil || j.State != "running" && j.State != "stopping" {
+	// Workers retain the original assignment, whose StartedAt is nil even
+	// after main executes. Its exact Started report is the same execution
+	// evidence the queue uses; helper occupancy alone never enables lending.
+	if j == nil || m == nil || j.StartedAt == nil && !s.started || j.State != "running" && j.State != "stopping" {
 		return 0, false
 	}
 	n, e := j.Spec.Needs, j.MemoryEnvelope
