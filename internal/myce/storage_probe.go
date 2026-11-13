@@ -2,10 +2,13 @@ package myce
 
 import (
 	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -64,7 +67,13 @@ func openStorageProbe(path string) (*os.File, error) {
 // closes it and reads it back. Any failed step reports the store unavailable.
 // Content is not compared: probes of the same purpose on one host may overlap,
 // and a concurrent truncate must not read as an outage.
-func probeStorageFile(path string, syncFile bool, ops storageProbeOps) error {
+func probeStorageFile(path string, syncFile bool, ops storageProbeOps) (err error) {
+	operation := "open"
+	defer func() {
+		if err != nil {
+			logStorageProbeFailure(operation, err)
+		}
+	}()
 	f, err := ops.open(path)
 	ops.report()
 	if err != nil {
@@ -73,15 +82,20 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) error {
 		}
 		return err
 	}
+	operation = "write"
 	err = ops.run("write", func() error { _, err := f.WriteString(storageProbeContent); return err })
 	ops.report()
 	if err == nil && syncFile {
+		operation = "fsync"
 		err = ops.run("fsync", f.Sync)
 		ops.report()
 	}
 	// Close the owned descriptor even after a failed write or a cancelled
 	// bounded sequence that skipped the close operation.
 	closed := false
+	if err == nil {
+		operation = "close"
+	}
 	err = errors.Join(err, ops.run("close", func() error { closed = true; return f.Close() }))
 	if !closed {
 		_ = f.Close()
@@ -90,6 +104,7 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) error {
 	if err != nil {
 		return err
 	}
+	operation = "read"
 	err = ops.run("read", func() error {
 		r, err := os.Open(path)
 		if err != nil {
@@ -97,10 +112,38 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) error {
 		}
 		var buf [len(storageProbeContent)]byte
 		_, err = r.Read(buf[:])
+		// Another probe of this host/purpose can have truncated the fixed
+		// file before its write. EOF proves the read completed; it is not a
+		// storage fault. Keep real read errors and all close errors.
+		if errors.Is(err, io.EOF) {
+			err = nil
+		}
 		return errors.Join(err, r.Close())
 	})
 	ops.report()
 	return err
+}
+
+// Log only fixed operation names and numeric errno, never filesystem error
+// text: PathError contains private mount paths and may contain credentials.
+func storageProbeFailureDetails(operation string, err error) (string, int) {
+	var path *os.PathError
+	if errors.As(err, &path) {
+		operation = path.Op
+	}
+	switch operation {
+	case "open", "stat", "lstat", "write", "fsync", "sync", "close", "read", "rename":
+	default:
+		operation = "unknown"
+	}
+	var errno syscall.Errno
+	errors.As(err, &errno)
+	return operation, int(errno)
+}
+
+func logStorageProbeFailure(operation string, err error) {
+	operation, errno := storageProbeFailureDetails(operation, err)
+	log.Printf("storage probe failed operation=%s errno=%d", operation, errno)
 }
 
 // probeStorageRename proves write, sync and read on the fixed file in place,

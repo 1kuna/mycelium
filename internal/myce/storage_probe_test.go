@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -93,6 +94,27 @@ func TestInstallProbeNeverRenamesTheWrittenFile(t *testing.T) {
 	}
 }
 
+// Health sampling and check-in admission can probe the same fixed file.
+// Hold a second writer after its truncate while the first reads it back.
+func TestStorageProbeConcurrentTruncateIsNotAnOutage(t *testing.T) {
+	path := storageProbePath(t.TempDir(), ".myce-probe-", "worker")
+	ops := plainStorageProbeOps(nil)
+	ops.run = func(operation string, fn func() error) error {
+		if operation == "read" {
+			other, err := openStorageProbe(path)
+			if err != nil {
+				return err
+			}
+			defer other.Close()
+			return fn()
+		}
+		return fn()
+	}
+	if err := probeStorageFile(path, false, ops); err != nil {
+		t.Fatalf("concurrent probe truncate was reported as an outage: %v", err)
+	}
+}
+
 func TestStorageProbeFailuresReportUnavailable(t *testing.T) {
 	root := t.TempDir()
 	// A directory in the probe file's place makes the write open fail.
@@ -160,5 +182,22 @@ func TestQueueTransactionsReuseRecentCheckpointProbe(t *testing.T) {
 	}
 	if q.checkpointsAvailable() {
 		t.Fatal("failed probe after the window did not mark checkpoints unavailable")
+	}
+}
+
+// A probe failure remains attributable without exposing the mount path or
+// trusting arbitrary operation text supplied by an error wrapper.
+func TestStorageProbeFailureDetails(t *testing.T) {
+	for _, tc := range []struct {
+		op   string
+		want string
+	}{
+		{"read", "read"}, {"private mount detail", "unknown"},
+	} {
+		err := &os.PathError{Op: tc.op, Path: "/private-mount/secret", Err: syscall.EIO}
+		op, errno := storageProbeFailureDetails("open", err)
+		if op != tc.want || errno != int(syscall.EIO) {
+			t.Fatalf("failure details = %q/%d, want %q/%d", op, errno, tc.want, syscall.EIO)
+		}
 	}
 }

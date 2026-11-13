@@ -981,6 +981,7 @@ func workerCheckpointAvailable(root string, progress func()) error {
 	info, err := os.Stat(root)
 	progress()
 	if err != nil {
+		logStorageProbeFailure("stat", err)
 		return err
 	}
 	if !info.IsDir() {
