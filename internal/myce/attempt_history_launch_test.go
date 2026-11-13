@@ -100,7 +100,7 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "failed" || got.Losses != 3 || got.Starts != 3 || got.StartedAt != nil || len(got.AttemptHistory) != 3 {
+	if got.State != "queued" || got.Losses != 0 || got.Starts != 3 || got.StartedAt != nil || len(got.AttemptHistory) != 3 {
 		t.Fatalf("changed accounting/history: %+v", got)
 	}
 	for i, a := range got.AttemptHistory {
@@ -141,6 +141,69 @@ func TestAttemptHistoryLaunchRefusal(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "workdir beneath {work}") {
 		t.Fatal("status lost refusal", string(data))
+	}
+}
+
+// #807: storage recovers before a worker delivers its prelaunch refusal. The
+// result describes the refused attempt, not the host's current health.
+func TestLaunchRefusalAfterStorageRecovery(t *testing.T) {
+	for _, prelaunchProof := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prelaunch_proof=%t", prelaunchProof), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			submitted := submit(t, q, spec("experiment"))
+			var first Result
+			for attempt := 1; attempt <= 3; attempt++ {
+				a := check(t, q, m, nil).Job
+				if a == nil || a.Attempt != attempt || a.StartedAt != nil {
+					t.Fatalf("missing unstarted attempt %d: %+v", attempt, a)
+				}
+				m.UnavailableRoots = []UnavailableRoot{{Root: "checkpoint", Reason: "storage temporarily unavailable"}}
+				check(t, q, m, a)
+				if reason := q.storageRootReason(q.s.Jobs[a.ID], q.s.Machines[m.ID]); reason == "" {
+					t.Fatal("storage fault did not withdraw admission")
+				}
+				r := result(a, false)
+				r.Interrupted = true
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: launchRefused, Predicate: "launch_authorization", PrelaunchRefused: prelaunchProof}
+				clock.Advance(time.Second)
+				m.UnavailableRoots = nil
+				check(t, q, m, a)
+				if reason := q.storageRootReason(q.s.Jobs[a.ID], q.s.Machines[m.ID]); reason != "" {
+					t.Fatal("storage did not recover", reason)
+				}
+				if attempt == 1 {
+					first = r
+				} else if err := q.Complete(first); !errors.Is(err, ErrStale) {
+					t.Fatal("stale refusal touched the current attempt", err)
+				}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, submitted.ID)
+				if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("refusal %d charged a loss: state=%s losses=%d retries=%d", attempt, got.State, got.Losses, got.InfrastructureRetries)
+				}
+			}
+			// A later execution really starts; an interruption must still count.
+			a := check(t, q, m, nil).Job
+			if a == nil || a.Attempt != 4 {
+				t.Fatal("no fresh retry after three refusals", a)
+			}
+			if err := q.Started(result(a, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			r := result(a, false)
+			r.Interrupted = true
+			r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: launchRefused, Predicate: "launch_authorization"}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if got := job(t, q, submitted.ID); got.State != "queued" || got.Losses != 1 {
+				t.Fatalf("post-Started interruption not charged: state=%s losses=%d", got.State, got.Losses)
+			}
+		})
 	}
 }
 

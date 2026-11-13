@@ -2299,12 +2299,17 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.waitLaunchCapacity(j, r)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.storageRootReason(j, q.s.Machines[j.Machine]) != "" {
-		q.requeue(j, q.storageRootReason(j, q.s.Machines[j.Machine]), false)
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
-		// A changed disk sample can withdraw an offer before exec. This is the
-		// same temporary hold as dispatch, including for production stage failures.
-		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
+	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused {
+		// A prelaunch refusal is not a lost execution, even if host health
+		// recovered before its result arrived. Preserve any current hold reason.
+		reason := q.storageRootReason(j, q.s.Machines[j.Machine])
+		if reason == "" {
+			reason = q.diskHeadroomReason(j, q.s.Machines[j.Machine])
+		}
+		if reason == "" {
+			reason = "requeued: launch refused before command start: " + j.ExecutionCause.String()
+		}
+		q.requeue(j, reason, false)
 	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && startRefusalBeforeMain(j, r) {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.

@@ -198,6 +198,11 @@ SIGKILL, so also save periodically. Checkpoints are kept 72 hours after the job
 ends; declare outputs for anything you need
 ([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
 
+If Mycelium refuses launch before the command starts, the job requeues without
+spending its infrastructure-loss budget, even if the host has recovered before
+the refusal is reported. Three such refusals do not exhaust that budget. Real
+lost executions still count; keep the same job and submission key while it retries.
+
 A resume stays on the target (OS/arch/platform) that wrote the newest
 checkpoint, waiting for a host of that target even while it is busy or in
 maintenance; status shows the wait as `checkpoint_target`. It moves to another
