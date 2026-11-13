@@ -20,6 +20,16 @@ from mycelium import (APIError, Checkpoint, Client, EntryFailedError, EntryInter
 
 ROOT = Path(__file__).resolve().parents[3]
 
+# #1557: a default `myce run` wakes the agent whose harness variables it sees
+# (cmd/myce/harness_wake.go). Every myce these tests start inherits os.environ,
+# so drop those variables or a finished test job wakes the agent running them.
+HARNESS_WAKE_ENV = sorted({name for block in re.findall(r"env:\s*\[\]string\{([^}]*)\}",
+                                                         (ROOT / "cmd/myce/harness_wake.go").read_text())
+                           for name in re.findall(r'"([A-Z0-9_]+)"', block)})
+assert HARNESS_WAKE_ENV, "harness wake variables moved; update this parser"
+for _name in HARNESS_WAKE_ENV:
+    os.environ.pop(_name, None)
+
 
 class Reply(io.BytesIO):
     def __init__(self, body=b"", length=None):
@@ -575,6 +585,33 @@ class DevTests(unittest.TestCase):
             self.client.cancel(job)
             self.client.wait(job, timeout=30)
             self.wait_observers(root)
+
+    def test_harness_wake_never_reaches_runner(self):
+        # #1557: a myce run started by these tests, under a parent whose harness
+        # variables name a reachable agent, must deliver no wake to that agent.
+        home = self.root / "wake-home"
+        project = home / "project"
+        project.mkdir(parents=True)
+        woken = home / "woken"
+        cli = home / "fake-harness-cli"
+        cli.write_text(f"#!/bin/sh\necho \"$@\" >> '{woken}'\ncat >> '{woken}'\n")
+        cli.chmod(0o755)
+        parent = {**os.environ, "HOME": str(home), "XDG_CACHE_HOME": str(home / ".cache"),
+                  "MYCE_TOKEN": "dev-token", "PYTHONPATH": str(ROOT / "clients/python/src")}
+        parent.update({"T3CODE_THREAD_ID": "fixture-thread", "T3CODE_CLI_PATH": str(cli)})
+        child = ("import subprocess, sys\n"
+                 f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+                 "import test_client\n"
+                 f"r = subprocess.run([{str(self.root / 'myce')!r}, 'run', '--queue', {self.client.url!r}, "
+                 "'--key', 'harness-wake', '--', 'sh', '-c', 'true'], capture_output=True, text=True, timeout=60)\n"
+                 "sys.stdout.write(r.stdout + r.stderr)\nsys.exit(r.returncode)\n")
+        result = subprocess.run([sys.executable, "-c", child], cwd=project, env=parent,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
+        self.assertEqual(self.client.wait(job, timeout=30)["state"], "succeeded")
+        self.wait_observers(home)
+        self.assertFalse(woken.exists(), woken.read_text() if woken.exists() else "")
 
     def test_run_entry_matches_cli_trip(self):
         # #1341: run_entry submits through myce run --entry (same source, key and
