@@ -18,6 +18,9 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	s.Run.Command = []string{"/bin/sh", "-c", `echo ran > "$MYCE_CHECKPOINT_DIR/command-ran"`}
 	submit(t, q, s)
 	assigned := check(t, q, machine("worker", "fake"), nil).Job
+	// The queue reply carries a relative checkpoint; the worker loop joins its
+	// root, and a relative path is refused (#1537).
+	assigned.Checkpoint = filepath.Join(t.TempDir(), "job")
 	ready, release := make(chan struct{}), make(chan struct{})
 	var readyOnce, releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }

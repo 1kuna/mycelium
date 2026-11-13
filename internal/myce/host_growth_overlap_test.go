@@ -15,17 +15,21 @@ func TestHostGrowthEnvelopeOverlapQueueAndLaunch(t *testing.T) {
 		name                         string
 		envelope, resident, forecast float64
 		rate, age                    float64
-		want                         bool
+		unenforced, want             bool
 	}{
 		{name: "two envelopes fit", envelope: 11, resident: 8, forecast: 4, want: true},
 		{name: "two envelopes exceed capacity", envelope: 13, resident: 8, forecast: 4},
-		{name: "aged growth exceeds envelope", envelope: 11, resident: 10, forecast: 1, rate: 2, age: 2},
+		// Growth past the envelope needs a host without enforced limits: a cgroup
+		// v2 memory.max is the envelope and bounds the forecast (#1487).
+		{name: "aged growth exceeds envelope", envelope: 11, resident: 10, forecast: 1, rate: 2, age: 2, unenforced: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := m3Machine()
 			m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 24
-			m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+			if !tc.unenforced {
+				m.MemoryEnforcement = cgroupMemoryEnforcement
+			}
 			s := spec("production")
 			s.Needs.HostMemoryGB = tc.envelope
 			first := submit(t, q, s)
