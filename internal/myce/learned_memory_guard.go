@@ -21,6 +21,10 @@ func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
 	if e.Basis != "learned" && e.Basis != "exploratory" {
 		return 0
 	}
+	return memoryGuardCapacityGB(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
+}
+
+func memoryGuardCapacityGB(m *Machine, limit float64) float64 {
 	cap := m.HostMemoryBudgetGB
 	if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 {
 		physical := float64(p.SystemMemoryBytes) / (1 << 30)
@@ -28,7 +32,7 @@ func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
 			cap = physical
 		}
 	}
-	if !validMemoryValue(cap) || cap <= hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) {
+	if !validMemoryValue(cap) || cap <= limit {
 		return 0
 	}
 	return cap
@@ -36,16 +40,23 @@ func adaptiveMemoryCeilingGB(j *Job, m *Machine) float64 {
 
 // Metal buffers are invisible to RSS but charged to phys_footprint (#1044), so
 // Metal work gets the same sampled guard over the owned tree's footprint. The
-// limit is the whole declared envelope in unified memory: device plus host plus
-// slack. Auto-sized Metal envelopes were learned from RSS, which never saw
-// the buffers, so only declared sizes are enforced.
+// limit is the whole resolved envelope in unified memory: device plus host plus
+// slack. Auto work learns the same RSS/footprint split as declared work. Its
+// prediction may grow in measured room, but pressure activates the guard.
 const footprintGuardQuality = "owned_session_footprint"
 const metalFootprintGuardCapability = "metal_footprint_guard_v1"
 
 func (w Worker) footprintGuarded(j Job) bool {
 	n := j.Spec.Needs
 	return w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint &&
-		!n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0
+		!n.cpuOnly() && n.HostMemoryGB > 0
+}
+
+func adaptiveFootprintCeilingGB(j *Job, m *Machine) float64 {
+	if j == nil || m == nil || j.Spec.Needs.Memory != "auto" || !m.UnifiedMemory || m.MemoryEnforcement != darwinRSSGuardStatus || !metalFootprintWork(j, m) {
+		return 0
+	}
+	return memoryGuardCapacityGB(m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB))
 }
 
 func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
@@ -55,7 +66,33 @@ func (w Worker) footprintGuard(j Job) learnedMemoryGuard {
 	if err != nil {
 		limit = 0
 	}
-	return learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, reserve: w.HostMemoryReserveGB}
+	g := learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, reserve: w.HostMemoryReserveGB}
+	if j.Spec.Needs.Memory == "auto" {
+		// The probe establishes worker support; capabilities are added to
+		// check-in copies and need not exist in w.Machine itself.
+		g.ceiling, _ = memoryBytes(memoryGuardCapacityGB(&m, float64(limit)/(1<<30)))
+		g.hard = g.ceiling
+	}
+	return g
+}
+
+// A stopped footprint is a lower bound, never a successful sizing sample.
+// Keep both measured shares: growing only the old RSS-sized host prediction
+// would retry below the Metal buffers that caused the stop.
+func footprintOOMFloor(j *Job) *SizeHint {
+	for _, f := range j.MemoryAttempts {
+		p := f.MemoryPeak
+		if f.Attempt != j.Attempt || f.Machine != j.Machine || f.Session != j.Session || f.LearningReason != "oom" ||
+			p == nil || p.DeviceSource != deviceFootprintSource || p.HostGB == nil || p.DeviceGB == nil ||
+			!validMemoryValue(*p.HostGB) || !validMemoryValue(*p.DeviceGB) {
+			continue
+		}
+		return &SizeHint{
+			MemoryGB:     max(j.Spec.Needs.MemoryGB, *p.DeviceGB),
+			HostMemoryGB: max(j.Spec.Needs.HostMemoryGB, *p.HostGB) + max(memoryGrowthGB(p), minimumHostMemoryGB),
+		}
+	}
+	return nil
 }
 
 // Without a cgroup, the sampled guard's own measurement is the attempt's

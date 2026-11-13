@@ -62,7 +62,6 @@ func TestMetalUsedMemoryCharge(t *testing.T) {
 	}{
 		{"worker without footprint guard", func(_ *Job, m *Machine, _ *hostMemorySample) { m.Capabilities = nil }},
 		{"no accepted footprint peak", func(j *Job, _ *Machine, _ *hostMemorySample) { j.MemoryEnvelope.Learned.PeakDeviceGB = 0 }},
-		{"auto sizing", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Needs.Memory = "auto" }},
 		{"no host declaration", func(j *Job, _ *Machine, _ *hostMemorySample) { j.Spec.Needs.HostMemoryGB = 0 }},
 		{"unmeasured host", func(_ *Job, m *Machine, _ *hostMemorySample) { m.HostMemoryMeasured = false }},
 		{"unguarded host", func(_ *Job, m *Machine, _ *hostMemorySample) {

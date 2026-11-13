@@ -159,7 +159,7 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 		overshoot = s.rateGB * darwinGuardReaction.Seconds()
 	}
 	margin := drift + overshoot
-	adaptive := adaptiveMemoryCeilingGB(j, m)
+	adaptive := max(adaptiveMemoryCeilingGB(j, m), adaptiveFootprintCeilingGB(j, m))
 	ceiling := enforcedCeiling(j, m, envelope, adaptive, lend == lendByUse || below) + overshoot
 	// Measured use carries the snapshot-to-launch margin wherever the charge
 	// can sit below what the attempt reaches: lent memory, adaptive estimates
@@ -282,7 +282,7 @@ func byUseFloor(j *Job, m *Machine, s hostMemorySample, now time.Time) (float64,
 		device := s.source == "" && sharedDeviceSampleReady(s, now) && validMemoryValue(s.deviceGB) && validMemoryValue(s.deviceGrowthGB) && validMemoryValue(s.deviceRateGB)
 		return 0, cgroup && peaks && n.MemoryGB > 0 && device // Both peaks are in the forecast.
 	case metalFootprintWork(j, m):
-		return l.PeakHostGB + l.PeakDeviceGB, m.MemoryEnforcement == darwinRSSGuardStatus && m.UnifiedMemory && peaks && n.Memory != "auto" && s.footprintGB > 0
+		return l.PeakHostGB + l.PeakDeviceGB, m.MemoryEnforcement == darwinRSSGuardStatus && m.UnifiedMemory && peaks && s.footprintGB > 0
 	}
 	return hostNeed(m, 0, l.HostGB), guarded && n.cpuOnly() && n.Memory != "auto" && n.HostMemoryGB > 0 && validMemoryValue(l.HostGB) && l.HostGB > 0 && max(s.gb, s.footprintGB) > 0
 }

@@ -189,6 +189,9 @@ func (q *Queue) retryOOM(j *Job) {
 			growth = 1.25
 		}
 		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB * growth}
+		if floor := footprintOOMFloor(j); floor != nil {
+			j.MemoryOOMFloor = floor
+		}
 		j.OOMCapacity = nil
 		probe := cloneJob(j)
 		probe.State, probe.MemoryEnvelope = "queued", nil
