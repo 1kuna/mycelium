@@ -615,6 +615,8 @@ func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
+	// The queue reply carries a relative checkpoint; the worker loop joins its root.
+	j.Checkpoint = filepath.Join(t.TempDir(), "job")
 	var p *process
 	await(t, func() bool {
 		p, err = w.start(store, *j)
@@ -666,6 +668,8 @@ func TestMemoryEnvelopeUnifiedExploratoryGPUDrift(t *testing.T) {
 	payload := *j
 	payload.Spec = Spec{Run: RunSpec{Command: []string{"true"}}, Needs: j.Spec.Needs}
 	payload.Extensions, payload.Extension = nil, nil
+	// The queue reply carries a relative path; the worker loop joins its root.
+	payload.Checkpoint = filepath.Join(t.TempDir(), "job")
 	p, err := startAfterFixtureInputs(t, w, store, payload)
 	if err != nil {
 		t.Fatalf("small GPU drift refused exploratory launch: %v", err)
@@ -944,6 +948,8 @@ func TestMemoryEnvelopeOOMIsJobCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.state.Session = j.Session
+	// The queue reply carries a relative checkpoint; the worker loop joins its root.
+	j.Checkpoint = filepath.Join(t.TempDir(), "job")
 	var p *process
 	await(t, func() bool {
 		p, err = w.start(store, *j)
