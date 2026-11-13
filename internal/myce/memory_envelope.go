@@ -328,6 +328,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	} else {
 		// Explicit optional member caps remain declarations to preserve.
 		hostFloor := memberHostFloor(&copy, m)
+		floorRun := q.chargesFirstRunFloor(j, m)
 		estimate := q.memoryEstimate(j, m)
 		refusal = estimate.refusal
 		if estimate.source == spentMemoryExploration {
@@ -475,7 +476,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			} else if bound, bounded, similar, peak, ok := q.coldMemoryBoundOrProbe(j, m, estimate, hostFloor); ok {
 				host, source, evidence = bound, bounded, similar
 			} else {
-				host, why = q.exploratoryMemory(j, probeMachine)
+				if !floorRun {
+					host, why = q.exploratoryMemory(j, probeMachine)
+				}
 				if q.learnedMemory() && n.cpuOnly() {
 					probeFloor = hostFloor
 				}
@@ -513,6 +516,15 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			probeFloor = max(probeFloor, q.constrainedMemoryLowerFor(j, estimate, false))
 			if j.MemoryOOMFloor != nil {
 				probeFloor = max(probeFloor, j.MemoryOOMFloor.HostMemoryGB)
+			}
+			if floorRun {
+				// The floor is the charge; the run grows into the room it
+				// measures, and the ledger charges what it uses (lendProbe).
+				// A refusal of the whole-room offer does not apply to it.
+				n.HostMemoryGB, source = probeFloor, source+"; "+firstRunFloorSource
+				if roomOfferRefusal(refusal) {
+					refusal = ""
+				}
 			}
 		}
 		if floor := j.MemoryOOMFloor; floor != nil {
@@ -853,6 +865,15 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 // The cold-probe drift margin's refusal; exploratoryMemoryStatus alone writes it.
 const coldProbeMarginRefusal = "exploratory first run needs physical headroom above launch slack"
 
+// The whole-room offer's wait for a release to confirm; exploratoryMemoryStatus alone writes it.
+const unconfirmedReleaseRefusal = "exploratory first run blocked by an unconfirmed memory-heavy release"
+
+// roomOfferRefusal says why is a temporary refusal of the whole-room offer,
+// which a first run charged its floor does not wait for.
+func roomOfferRefusal(why string) bool {
+	return strings.HasPrefix(why, coldProbeMarginRefusal) || why == unconfirmedReleaseRefusal
+}
+
 // The hold kind of a resolved envelope's refusal: the cold-probe drift margin
 // is its own kind, every other refusal is ordinary memory.
 func memoryRefusalKind(e *JobMemoryEnvelope, fallback string) string {
@@ -883,7 +904,7 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 		}
 		live := q.s.Jobs[release.Job]
 		if live == nil || live.Machine != release.Machine || live.Session != release.Session || live.Attempt != release.Attempt || (live.State != "running" && live.State != "stopping") {
-			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release", true
+			return 0, unconfirmedReleaseRefusal, true
 		}
 	}
 	var jobs []*Job

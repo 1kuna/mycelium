@@ -141,6 +141,7 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		"shared GPU measured growth floor": true, "from qualification checks": true,
 		"exploratory shared physical headroom": true, "exclusive device": true,
 		"GPU recipe default with host estimate floor": true, "GPU recipe default": true, "OOM retry floor": true,
+		firstRunFloorSource: true,
 	}
 	out.EnvelopeSource = ""
 	if len(parts) <= 5 {

@@ -40,7 +40,14 @@ retain local results; their typed cause clears after successful publication.
 
 Cold CPU probes report their initial reservation
 in `memory_envelope.host_gb`, with known need and member/retry floors in
-`probe_floor_gb`. A running probe's host admission charge can follow its fresh
+`probe_floor_gb`. A first run charged its floor (a non-production guarded CPU
+first run on a worker advertising `first_run_floor_v1`; see
+[scheduling](scheduling.md#first-runs-start-at-their-floor)) reserves only
+that floor: its source ends `charged its floor, grows into measured room`,
+`host_gb` equals `probe_floor_gb`, and it never waits on `cold_probe_margin`.
+If it outgrows the room its worker's ledger leaves it, its
+`execution_cause.rss_limit` limit is that room, and it requeues with
+`memory_oom_floor` at its measured peak. A running probe's host admission charge can follow its fresh
 complete cgroup footprint plus observed growth and launch drift instead of
 reserving all initial headroom. Machine `host_memory.charged_gb` sums those
 charges. A typed CPU job charged its learned figure (`charge_host_gb`) is
@@ -1274,7 +1281,8 @@ CPU memory estimates prefer accepted same-OS evidence. A peak measured on
 another OS is a floor, not a bound: with no measured transfer error between
 the two targets, the run is that OS's ordinary first run (`exploratory
 (transfer error unavailable)`), offered the room and floored at the foreign
-peak, any hint and any constrained lower bound (#1486). Once works have run on
+peak, any hint and any constrained lower bound (#1486); where first runs are
+charged their floor, it is charged that floor instead of the room. Once works have run on
 both targets, their measured transfer factor sizes it instead (`accepted
 transfer + measured error`). If no qualified target-OS allowance fits that
 floor, fresh comparable same-OS constrained evidence and a fitting hint may
@@ -2651,8 +2659,8 @@ that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage
 (a unified-memory host's headroom kept for expected production),
 `pinned_model`, `disk_headroom`,
 `reservation`, `capacity` (mixed or card/CPU causes),
-`memory`, `host_memory_headroom`, `cold_probe_margin` (a first run needs host
-memory above its launch margin), `host_backfill`, `host_unavailable`,
+`memory`, `host_memory_headroom`, `cold_probe_margin` (a whole-room first run
+needs host memory above its launch margin), `host_backfill`, `host_unavailable`,
 `capability`, `shared_input`, `extension`, `no_eligible_host`,
 `waiting_for_worker`, `model_engine` (a model call waits for its engine to
 recover) and the preparation and coverage kinds below. A queued model call's

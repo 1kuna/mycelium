@@ -94,13 +94,24 @@ type learnedMemoryGuard struct {
 	lastObservation time.Time
 	lastBytes       uint64
 	lastMembers     int
+	room            *firstRunFloorRoom
 }
 
 func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
 	limit, _ := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	cap, _ := memoryBytes(adaptiveMemoryCeilingGB(&j, &w.Machine))
 	hard, _ := memoryBytes(w.Machine.HostMemoryBudgetGB)
-	return learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, ceiling: cap, hard: hard, reserve: w.HostMemoryReserveGB}
+	g := learnedMemoryGuard{rssGuard: rssGuard{limit: limit}, ceiling: cap, hard: hard, reserve: w.HostMemoryReserveGB}
+	if cap > 0 && floorCharged(j.MemoryEnvelope) {
+		key, others := jobKey(j), w.hostChargesExcept
+		g.room = &firstRunFloorRoom{others: func() (float64, float64) {
+			if others == nil {
+				return 0, 0
+			}
+			return others(key)
+		}}
+	}
+	return g
 }
 
 // Use current pressure, rather than latching unrelated pressure for the rest of
@@ -114,6 +125,7 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	}
 	if !valid {
 		g.growth, g.previous = memoryGrowth{}, nil
+		g.room.reset()
 		g.lastBytes, g.lastMembers = 0, 0
 		return g.observe(now, roots, bytes, members, err)
 	}
@@ -122,6 +134,7 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	// still evidence, and the sampler runs late precisely when the host thrashes.
 	if !maps.Equal(roots, g.identity) || now.Before(g.lastObservation) {
 		g.growth, g.previous = memoryGrowth{}, nil
+		g.room.reset()
 		g.identity = maps.Clone(roots)
 	}
 	// A fork/growth burst cannot safely spend the ordinary spike-filter grace
@@ -155,6 +168,9 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	defer func() { g.limit = limit }()
 	if g.hard > 0 && bytes > uint64(g.hard) {
 		g.limit = g.hard
+	} else if g.room != nil {
+		// The floor is charged and never a stop; the room is the limit.
+		g.limit = max(limit, g.room.limitBytes(now, bytes, host, g.reserve, float64(g.ceiling)/(1<<30)))
 	} else {
 		pressure := false
 		if host != nil && validMemoryValue(host.available) {

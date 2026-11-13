@@ -194,7 +194,9 @@ Each host keeps one memory ledger and one rule: room = capacity − Σ charge.
   unless it may lend the unused part: it is started, contained by a guard,
   freshly sampled and has accepted history for this work and target (or is a
   cold probe with complete evidence), and it is not on the shared interactive
-  host. A lender that grows back is stopped before the kernel would.
+  host. A lender that grows back is stopped before the kernel would. A first
+  run charged its floor is charged by use from its floor; its own guard stops
+  it once it outgrows the room the worker's ledger leaves it.
 
 Placement, release planning, exploratory sizing, fairness and backfill all read
 room after the releases they plan: each released owner returns its charge. A

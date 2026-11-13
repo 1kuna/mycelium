@@ -113,13 +113,15 @@ type Worker struct {
 
 	SuperviseProcess bool
 
-	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
-	control               *processControl
-	cancelStart           context.CancelFunc
-	controlLatency        *workerControlLatency
-	launchCtx             context.Context // Exact attempt/preparation owner; cancels handshake waits.
-	serviceStop           context.Context // Installed TERM cancels observation/I/O, not durable cleanup.
-	batchAdmission        func(context.Context, HostLaunch) error
+	checkpointPrepare func(Job) (string, error) // Filesystem fault seam.
+	control           *processControl
+	cancelStart       context.CancelFunc
+	controlLatency    *workerControlLatency
+	launchCtx         context.Context // Exact attempt/preparation owner; cancels handshake waits.
+	serviceStop       context.Context // Installed TERM cancels observation/I/O, not durable cleanup.
+	batchAdmission    func(context.Context, HostLaunch) error
+	// The worker ledger without one attempt: others' charges and pending growth.
+	hostChargesExcept     func(attemptKey) (charge, pending float64)
 	stopAdmission         func()
 	DeviceBinding         string
 	EnvironmentSourceRoot string

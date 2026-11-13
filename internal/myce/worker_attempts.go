@@ -890,6 +890,7 @@ func firstDevice(j Job, m Machine) string {
 
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	w.batchAdmission = rt.checkBatchLaunchMemory
+	w.hostChargesExcept = rt.hostChargesExcept
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Interactive leave can finish work. Installed TERM must not depend on a
@@ -960,6 +961,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		// Publish reservations before the actor can reach its final launch gate.
 		rt.mu.Lock()
 		rt.batchJobs, rt.batchSupervisors = activeJobs(), maps.Clone(actors)
+		rt.publishHostLedgerLocked()
 		rt.mu.Unlock()
 		if p != nil {
 			p.stopAdmission = a.stopAdmission
@@ -1246,7 +1248,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
 			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
-				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability, firstRunFloorCapability)
 			}
 			m.Capabilities = append(m.Capabilities, measuredMemoryChargeCapability)
 			if w.processMemory != nil && w.processMemory.OwnedFootprint != nil && backendFor(w.Machine.GPU).processFootprint {
@@ -1284,6 +1286,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Replaced, never mutated: model loads share this exact-attempt
 			// snapshot and age it with their own launch-time clock read.
 			rt.batchHostMemorySamples = w.hostMemorySamples
+			rt.publishHostLedgerLocked()
 			rt.mu.Unlock()
 			probeClock := w.Clock
 			m.IOPressure, _ = ioProbe.run("host-io-pressure", func() (*IOPressure, error) {
@@ -1454,6 +1457,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				rt.batchJobs = currentJobs
 				rt.batchSupervisors = maps.Clone(actors)
 				rt.admissionBlocked = reply.AdmissionBlocked
+				rt.publishHostLedgerLocked()
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)
 				if leaving && !leaveSent {

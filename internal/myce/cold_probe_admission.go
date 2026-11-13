@@ -66,7 +66,8 @@ func (q *Queue) recordColdProbeAssignment(j *Job, m *Machine) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
+	// A first run charged its floor is offered no room, so no launch margin.
+	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" || floorCharged(j.MemoryEnvelope) {
 		return
 	}
 	// Check-in already sampled this inventory before sizing the offer. Do not
@@ -102,7 +103,7 @@ func (q *Queue) recordColdProbeRefusal(j *Job, r Result) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	if j.StartedAt != nil || r.OutOfMemory || r.ReleaseOnly || !provenPrelaunchRefusal(j, r) || j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" {
+	if j.StartedAt != nil || r.OutOfMemory || r.ReleaseOnly || !provenPrelaunchRefusal(j, r) || j.MemoryEnvelope == nil || j.MemoryEnvelope.Basis != "exploratory" || floorCharged(j.MemoryEnvelope) {
 		return
 	}
 	m := q.s.Machines[r.Machine]
