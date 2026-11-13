@@ -139,12 +139,14 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 			if e := candidate.MemoryEnvelope; e.Source != "accepted transfer + measured error" || e.Basis != "learned" || math.Abs(e.HostGB-want) > 1e-8 {
 				t.Fatalf("did not use measured transfer errors: %+v want %v", e, want)
 			}
-			// Unknown identities and expired pairs cannot inherit calibration.
+			// Unknown identities and expired pairs cannot inherit calibration. The
+			// source's peak was measured on another OS, so it floors this first run
+			// instead of a whole-host probe (#1527).
 			changed := destination
 			changed.ExtensionFingerprint = "changed"
 			q.s.Machines[destination.ID].ExtensionFingerprint = "changed"
-			if e := q.memoryCandidate(queued, &changed).MemoryEnvelope; e.Basis != "exploratory" || e.HostGB != tc.ram-minimumHostMemoryGB {
-				t.Fatal("unknown transfer lost its physical probe", e)
+			if e := q.memoryCandidate(queued, &changed).MemoryEnvelope; e.Basis != "exploratory" || math.Abs(e.HostGB-3*unit) > 1e-8 {
+				t.Fatal("unknown transfer did not explore from the foreign peak floor", e)
 			}
 			// A constrained target observation is a requirement even if foreign
 			// accepted evidence exists. It cannot be hidden by the probe budget.
