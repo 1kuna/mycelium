@@ -679,6 +679,9 @@ type EnvironmentCache struct {
 	// DownloadLimit overrides the measured download-cache limit
 	// (downloadLimit); zero derives it from builds on this host.
 	DownloadLimit int64
+	// growToNeed sizes a dev session's cache from what its environments
+	// measure, bounded by the host's room above the disk floor (#1540).
+	growToNeed bool
 }
 
 const environmentRecentWindow = 24 * time.Hour
@@ -693,6 +696,12 @@ func (c *EnvironmentCache) init() error {
 		return err
 	}
 	c.once.Do(func() {
+		if c.Limit == 0 && c.Root != "" && c.growToNeed {
+			c.Limit, _, c.initErr = c.needLimit(0, 0)
+			if c.initErr != nil {
+				return
+			}
+		}
 		if c.Limit == 0 && c.Root != "" {
 			size := c.sizeLimit
 			if size == nil {
@@ -997,8 +1006,14 @@ func (c *EnvironmentCache) admit(key string, size int64, contexts ...context.Con
 		return e
 	}
 	total += size
+	limit, host := c.Limit, ""
+	if c.growToNeed {
+		if limit, host, e = c.needLimit(limit, total); e != nil {
+			return e
+		}
+	}
 	for _, v := range candidates {
-		if total <= c.Limit {
+		if total <= limit {
 			break
 		}
 		var check func() (bool, error)
@@ -1024,8 +1039,9 @@ func (c *EnvironmentCache) admit(key string, size int64, contexts ...context.Con
 			total += size
 		}
 	}
-	if total > c.Limit {
-		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, c.Limit)
+	if total > limit {
+		// Restart recovery parses the first clause; keep it stable.
+		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected); environment %s is %d bytes short%s", total, limit, key, total-limit, host)
 	}
 	return nil
 }
