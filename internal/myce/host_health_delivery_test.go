@@ -87,9 +87,10 @@ func TestHostHealthReportDeliveryAndFrozenExpiry(t *testing.T) {
 // A real dev worker's health reports reach the queue over the real listener,
 // keep advancing for one cadence cycle, and keep the host admitting work.
 // Cadence timing and queue-delay validity are covered on a fake clock in
-// host_health_queue_delay_test.go; 100ms is the probe control floor.
+// host_health_queue_delay_test.go. Keep the production 1s cadence: shorter
+// intervals shrink frozen validity below race-build check-in latency.
 func TestDevHostHealthReportCadence(t *testing.T) {
-	const interval = 100 * time.Millisecond
+	const interval = time.Second
 	// Exercise the actual asynchronous health lane, report preparation, HTTP
 	// check-in and launch fences. Other dev fixtures leave this sensor disabled.
 	previous := workerHostHealthSource
