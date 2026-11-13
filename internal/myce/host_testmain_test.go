@@ -52,12 +52,15 @@ func coreTestMain(m *testing.M) int {
 	if err = os.Setenv("MYCE_TEST_ROOT", dir); err != nil {
 		panic(err)
 	}
+	// Native helpers rerun this binary in a job work directory and write their
+	// outputs there; only a run started in the package directory checks it.
+	_, inPackage := os.Stat("host_testmain_test.go")
 	before := packageDirEntries()
 	code := m.Run()
 	// A test must never write into the package directory (a stray lock there
 	// dirtied checkouts). Any entry the run added fails the binary.
 	for name := range packageDirEntries() {
-		if !before[name] {
+		if inPackage == nil && !before[name] {
 			fmt.Fprintf(os.Stderr, "test run left %s in the package directory\n", name)
 			code = 1
 		}

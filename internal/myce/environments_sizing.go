@@ -1,31 +1,19 @@
 package myce
 
-import (
-	"errors"
-	"os"
-	"path/filepath"
-)
+import "errors"
 
 // AutoEnvironmentCacheLimit uses the cache filesystem, including its nearest
 // existing ancestor on fresh installs. It reserves 20 GiB and never allocates.
+// It reads through the worker disk probe so synthetic test hosts cover it.
 func AutoEnvironmentCacheLimit(root string) (int64, error) {
 	if root == "" {
 		return 0, errors.New("environment cache root is required")
 	}
-	for {
-		free, err := diskFree(root)
-		if err == nil {
-			return environmentCacheSize(free)
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return 0, err
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return 0, err
-		}
-		root = parent
+	reading, err := workerDiskProbe(root)
+	if err != nil {
+		return 0, err
 	}
+	return environmentCacheSize(int64(reading.FreeBytes))
 }
 func environmentCacheSize(free int64) (int64, error) {
 	const floor, ceiling, reserve = int64(4 << 30), int64(80 << 30), int64(20 << 30)
