@@ -182,7 +182,9 @@ func (q *Queue) maintainDeadEndWaits() {
 	q.releaseUnusedMemoryExplorations()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
-		if j.State != "queued" || cancelled(j) || j.Spec.ExtensionCheck != nil || j.Spec.FanOut != nil || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
+		// A fan-out parent is the placement unit until its first piece exists.
+		started := j.Spec.FanOut != nil && j.FanOut != nil && len(j.FanOut.Children) > 0
+		if j.State != "queued" || cancelled(j) || j.Spec.ExtensionCheck != nil || started || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
 			continue
 		}
 		reason := q.deadEndReason(j)

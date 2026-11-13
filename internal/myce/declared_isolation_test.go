@@ -57,8 +57,8 @@ func isolationObserve(t *testing.T, q *Queue, client Client, id, state, reason s
 		t.Fatal(err)
 	}
 	want := "unsandboxed: " + reason
-	if j.State != state || j.Isolation != want || !strings.Contains(JobReason(&j), want) {
-		t.Fatalf("GET state=%s isolation=%q reason=%q", j.State, j.Isolation, JobReason(&j))
+	if j.State != state || j.Isolation != want || !strings.Contains(JobReasonDetail(&j), want) {
+		t.Fatalf("GET state=%s isolation=%q reason=%q", j.State, j.Isolation, JobReasonDetail(&j))
 	}
 	if len(j.Extensions) != 0 || j.Spec.Reason != "" || len(j.Spec.Run.Env) != 0 || len(j.Spec.Run.Command) != 0 {
 		t.Fatal("isolation observation exposed execution payload")
@@ -69,7 +69,7 @@ func isolationObserve(t *testing.T, q *Queue, client Client, id, state, reason s
 	}
 	for _, entry := range status.Jobs {
 		if entry.ID == id {
-			if entry.Isolation != want || !strings.Contains(JobReason(entry), want) {
+			if entry.Isolation != want || !strings.Contains(JobReasonDetail(entry), want) {
 				t.Fatalf("status lost isolation: %+v", entry)
 			}
 			return
@@ -129,9 +129,14 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 	previousLog := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previousLog)
+	// The worker joins the reply's relative checkpoint onto its checkpoint
+	// root before starting; starting directly must too, or the attempt's
+	// checkpoint lands in the package directory.
+	assigned := *reply.Job
+	assigned.Checkpoint = filepath.Join(t.TempDir(), assigned.Checkpoint)
 	var p *process
 	await(t, func() bool {
-		p, err = w.start(root, *reply.Job)
+		p, err = w.start(root, assigned)
 		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
 	})
 	if err != nil {
@@ -450,8 +455,8 @@ func TestNativeIsolationObservationPreservesPolicy(t *testing.T) {
 				if err := json.Unmarshal(data, &j); err != nil {
 					t.Fatal(err)
 				}
-				if j.Isolation != tc.want || JobReason(&j) != tc.want {
-					t.Fatalf("pass %d: isolation=%q reason=%q want=%q", pass, j.Isolation, JobReason(&j), tc.want)
+				if j.Isolation != tc.want || JobReasonDetail(&j) != tc.want {
+					t.Fatalf("pass %d: isolation=%q reason=%q want=%q", pass, j.Isolation, JobReasonDetail(&j), tc.want)
 				}
 				if len(j.Spec.Run.Command) != 0 || j.Spec.Isolation != "" || j.Spec.Reason != "" {
 					t.Fatal("public observation retained execution policy payload")

@@ -882,8 +882,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if *statusJSON {
 				return json.NewEncoder(os.Stdout).Encode(j)
 			}
-			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
-			fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
+			// One reason and its next action; --history adds the evidence,
+			// variant rows and the priority advisory.
+			printStatusDetail(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full, *statusHistory)
+			if *statusHistory {
+				fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
+			}
 			printCancellationScope(os.Stdout, j)
 			if l := j.EnvironmentLock; l != nil {
 				fmt.Print("  environment lock")
@@ -1050,6 +1054,11 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	printStatusDetail(s, full, true)
+}
+
+// detail adds each job's hold evidence, isolation note and variant rows.
+func printStatusDetail(s myce.Snapshot, full, detail bool) {
 	if s.Summary != nil {
 		printCompactStatus(os.Stdout, s, full)
 		return
@@ -1237,6 +1246,10 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		fmt.Printf("model %s on %s: %s, idle %.1fs, calls in flight %d %s\n", m.Model, m.Machine, m.State, m.IdleSeconds, m.InFlight, m.Error)
 	}
+	reason := myce.JobReason
+	if detail {
+		reason = myce.JobReasonDetail
+	}
 	for _, j := range s.Jobs {
 		id := myce.ShortID(j.ID)
 		if full {
@@ -1256,8 +1269,11 @@ func printStatus(s myce.Snapshot, full bool) {
 			policy = "keep"
 		}
 		fmt.Printf("tier=%s selector=%s policy_revision=%d ", j.PriorityPolicy.Tier, j.PriorityPolicy.Selector, j.PriorityPolicy.Revision)
-		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
+		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, reason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
 		fmt.Printf("  authoring origin: %s\n", j.Spec.Origin())
+		if !detail {
+			continue
+		}
 		for _, variant := range j.VariantEligibility {
 			fmt.Printf("  variant: %s\n", variant.Summary())
 		}

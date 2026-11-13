@@ -321,7 +321,10 @@ snapshot for every read; the CLI projects that snapshot itself.
   when not `healthy`, a completed fleet upgrade is omitted, and a worker release
   prints only when it differs from the queue's. Estimates that are unknown,
   capability profiles, caches and devices stay in `--sections jobs,machines`.
-  `myce status JOB_ID` still prints one job in full.
+  `myce status JOB_ID` prints the job's one current reason and `next:` action
+  on its line, plus attempt history; `myce status --history JOB_ID` adds the
+  hold's evidence, the isolation note, per-host variant rows and the priority
+  advisory.
 - Default `myce status --json` is that compact view as one object. Text and
   JSON come from the same projection; JSON keeps reasons whole and full IDs:
 
@@ -2128,7 +2131,8 @@ holds. They do not change the accepted class or submission key.
 `myce wait` prints one short line per state change: progress on stderr and
 terminal states on stdout. `myce wait --json JOB` emits JSON lines on state or
 reason changes, retaining full reasons and initial placement/deadline diagnostics;
-`myce status JOB` shows the current details.
+`myce status --history JOB` shows the current advisory; default status leaves
+it out so a job reads as one reason and one action.
 
 For deadline work, author a **new submission** with, for example:
 
@@ -2623,8 +2627,8 @@ paused job's `hold`, resolve's `hold`, and each entry of snapshot `holds`. It ha
 `kind` (the mechanism, a stable code), `owner` (who clears it), `reason` (one
 plain sentence), `clears` (the condition), optional `expires`, `next` (one
 action) and `detail` (the producing mechanism's evidence). Default and compact
-status show `reason` and a `next:` line; `myce status JOB_ID`, `--full`, resolve
-and JSON add `detail`. The scheduler tags the kind where it decides the wait, so
+status, `myce status JOB_ID`, `myce wait` and `myce run --wait` show `reason`
+and its `next:` action; `myce status --history`, resolve and JSON add `detail`. The scheduler tags the kind where it decides the wait, so
 no view infers the mechanism from reason text. The record changes no admission
 decision.
 
@@ -2652,7 +2656,11 @@ one; its detail stays on the job's own hold.
 
 `unprepared` means no builder has started; `waiting_for_builder` distinguishes
 an unstarted offer or unavailable preparation core; `building` requires a fresh
-builder report. `deterministically_failed` retains the failed immutable recipe's
+builder report. The queue builds a missing plain environment on every
+eligible host with a free builder core, for queued work that could use that
+host once it has room, not only for the job admissible now; such a build runs
+beside device commands. Extension setup and command discovery keep their
+admission-bound offers. `deterministically_failed` retains the failed immutable recipe's
 cause and log excerpt: the consumer must fix its inputs. Transient failures retain
 the existing retry evidence. `unknown_observation` asks the queue owner to restore
 missing/stale observations; it never claims preparation is progressing.
@@ -2661,7 +2669,16 @@ A ready alternative takes precedence over preparation on another target.
 Queue builds with placement coverage diagnostics distinguish `missing_extension`
 (register an implementation), `execution_coverage` (no compatible implementation
 on observed targets), `native_qualification` (a declared implementation needs its
-exact native check), and `production_parity` (reference-output parity required).
+exact native check, which the queue runs itself), and `production_parity`
+(reference-output parity required). A `native_qualification` reason names the
+check job and what it waits on, or says the queue submits it at the host's next
+check-in. The queue offers that check whenever the job could use the host once
+it has room, not only while the host is free, so a busy host cannot starve it;
+the check then waits in ordinary admission. A worker restart does not cancel a
+pending check before the host reports its identity again, and a cancelled
+check is resubmitted under the next key in its chain. A failed check, or no
+compatible host, fails the job at once as a `dead_end_wait`, including a
+fan-out parent before its first piece starts.
 An explicit machine-kind approval hold is `production_parity_kind`. Each names
 the next owner/action rather than presenting the missing software or approval as
 ordinary capacity pressure. Extension coverage advice includes declared targets,

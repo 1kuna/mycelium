@@ -200,7 +200,9 @@ func TestBlockedPreparationDemandDoesNotWithholdReadyCPU(t *testing.T) {
 				}
 			}
 			got := check(t, q, m, nil)
-			if got.Job == nil || got.Job.ID != low.ID || len(got.EnvironmentPlan) != 0 {
+			// A build may go ahead for the waiting job beside the ready work
+			// (#1486); it must never take the ready work's place.
+			if got.Job == nil || got.Job.ID != low.ID || len(got.EnvironmentPlan) != 0 && (got.EnvironmentPlan[0].Launch == nil || got.EnvironmentPlan[0].Launch.Demand != high.ID) {
 				t.Fatalf("ineligible preparation demand withheld fitting ready work: job=%v offers=%d high-reason=%s", got.Job, len(got.EnvironmentPlan), q.capReason(q.s.Jobs[high.ID]))
 			}
 			if q.s.Jobs[high.ID].PreemptionPlacement == nil {

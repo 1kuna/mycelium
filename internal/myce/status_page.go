@@ -248,7 +248,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"extensionStatus":    ExtensionStatus,
 	"jobWork":            JobWork,
 	"jobTiming":          JobTiming,
-	"jobReason":          JobReason,
+	"jobReason":          JobReasonDetail,
 	"shortID":            ShortID,
 	"jobState":           JobState,
 	"jobAge":             JobAge,

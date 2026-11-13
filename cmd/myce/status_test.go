@@ -154,3 +154,58 @@ func TestStatusUsabilityStructuredFieldsAndInternalLabel(t *testing.T) {
 		t.Fatal("raw map in status", output)
 	}
 }
+
+// Default status for one job has one reason line: its binding reason and next action.
+// Evidence, the isolation note, variant rows and the priority advisory once
+// filled a dozen lines and 700 characters per read (gap 3); --history keeps them.
+func TestStatusJobShowsOneReasonLine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"waiting-job-0123456789","state":"queued","queued":"2026-11-12T00:00:00Z","isolation":"unsandboxed: evidence-isolation",
+"hold":{"kind":"native_qualification","owner":"queue","reason":"its native check abc on host-a is queued","clears":"the native check passes","next":"wait; nothing to do","detail":"evidence-detail"},
+"variant_eligibility":[{"extension":"x@1","host":"host-b","reasons":["evidence-variant"]}],
+"priority_policy":{"tier":"experiment","selector":"*/*","revision":1},
+"deadline_guidance":{"deadline_policy":{"tier":"deadline"},"eta":"unknown","message":"evidence-advisory"},
+"spec":{"name":"waiting sample","project":"p","class":"experiment"}}`)
+	}))
+	defer server.Close()
+	read := func(args ...string) string {
+		t.Helper()
+		saved := os.Stdout
+		defer func() { os.Stdout = saved }()
+		f, err := os.CreateTemp(t.TempDir(), "status")
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = f
+		if err = run(append([]string{"status", "--queue", server.URL, "--token", "test-only"}, args...)); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		data, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	out := read("waiting-job-0123456789")
+	reasons := 0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.Contains(line, "its native check abc on host-a is queued; next: wait; nothing to do") {
+			reasons++
+		} else if !strings.HasPrefix(line, "  authoring origin:") {
+			t.Errorf("default status printed more than the job's reason line: %q", line)
+		}
+	}
+	if reasons != 1 {
+		t.Fatalf("want one reason line, got:\n%s", out)
+	}
+	if strings.Contains(out, "evidence-") {
+		t.Fatalf("default status printed detail:\n%s", out)
+	}
+	detail := read("--history", "waiting-job-0123456789")
+	for _, want := range []string{"evidence-detail", "evidence-isolation", "evidence-variant", "evidence-advisory"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("--history lost %q", want)
+		}
+	}
+}

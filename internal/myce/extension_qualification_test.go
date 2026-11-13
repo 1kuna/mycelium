@@ -246,11 +246,16 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					if successor != nil {
 						t.Fatal("failed verdict was rerun automatically", successor.Report.CheckID)
 					}
+					// A fan-out parent with no piece started is the same wait.
+					parent := submit(t, q, Spec{Name: "fanned", Project: "test", Extension: extensionKey(e), Workload: &Workload{InputShape: "tiny", Units: 1},
+						FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first"}, {Key: "second"}}}})
 					if err := q.Tick(); err != nil {
 						t.Fatal(err)
 					}
-					if got := job(t, q, demand.ID); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
-						t.Fatal("failed check left its useful job waiting", got.State, got.Reason)
+					for _, id := range []string{demand.ID, parent.ID} {
+						if got := job(t, q, id); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
+							t.Fatal("failed check left its useful job waiting", got.Spec.Name, got.State, got.Reason)
+						}
 					}
 				} else {
 					// A cancelled check has no verdict. The queue reruns it under
@@ -442,4 +447,105 @@ func BenchmarkExtensionQualificationPlainBacklog(b *testing.B) {
 			b.Fatal("plain commands manufactured qualification demand", plans)
 		}
 	}
+}
+
+// The live gap-3 job: its base check was cancelled, the host stayed busy, the
+// worker restarted while the successor check was queued, and a cancelled
+// successor was never retried because the queue re-offered the base key. The
+// job waited 114 hours on a check the queue said it ran itself. Each step must
+// now keep the check moving, and the check starts once the host has room.
+func TestExtensionQualificationProgressesThroughRestartAndBusyHost(t *testing.T) {
+	q, w, _, demand, _, plans := qualificationFixture(t)
+	clock := q.clock.(*fakeClock)
+	plan := plans[0]
+	for _, p := range plans {
+		if p.Report.Work == demand.Spec.workType() {
+			plan = p
+		}
+	}
+	reconcileQualification(t, w, plan)
+	if err := q.Cancel(qualificationJob(t, q, plan.Report.CheckID).ID); err != nil {
+		t.Fatal(err)
+	}
+	// Another project's job fills the host's one slot.
+	w.Machine.MaxJobs = 1
+	submit(t, q, Spec{Name: "busy", Project: "other", Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{MemoryGB: 1, Platform: Platform{Any: true}}})
+	busy := check(t, q, w.Machine, nil).Job
+	if busy == nil || busy.Spec.Name != "busy" {
+		t.Fatal("fixture did not fill the host", busy)
+	}
+	if err := q.Started(result(busy, false)); err != nil {
+		t.Fatal(err)
+	}
+	pendingCheck := func(running *Job) *Job {
+		t.Helper()
+		for range 3 { // bounded: each offer is one check-in
+			w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+			reply := check(t, q, w.Machine, running)
+			if reply.Job != nil && reply.Job.Spec.ExtensionCheck != nil && reply.Job.Spec.ExtensionCheck.Work == plan.Report.Work {
+				return reply.Job
+			}
+			for _, p := range reply.ExtensionQualificationPlan {
+				reconcileQualification(t, w, p)
+			}
+			clock.Advance(time.Second)
+		}
+		s, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, j := range s.Jobs {
+			if c := j.Spec.ExtensionCheck; c != nil && c.Work == plan.Report.Work && !terminal(j.State) {
+				return j
+			}
+		}
+		t.Fatal("the queue did not resubmit its own check")
+		return nil
+	}
+	successor := pendingCheck(busy)
+	if successor.State != "queued" {
+		t.Fatal("check on a busy host did not wait in the queue", successor.State, successor.Reason)
+	}
+	// Status names the check that exists and what it waits on, not a promise.
+	if got, err := q.jobSnapshot(demand.ID); err != nil || got.Hold == nil || got.Hold.Kind != "native_qualification" || !strings.Contains(got.Hold.Reason, "native check "+ShortID(successor.ID)) {
+		t.Fatalf("hold does not name the pending check: %v %+v", err, got.Hold)
+	}
+	// The worker restarts; its first check-in has no extension identity yet.
+	previous := w.Machine.Session
+	restarted := w.Machine
+	restarted.Session, restarted.ExtensionFingerprint, restarted.ExtensionReports = "restarted", "", nil
+	if _, err := q.Checkin(Checkin{Machine: restarted, Fresh: true, PreviousSession: previous, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	w.Machine.Session = "restarted"
+	if got := job(t, q, successor.ID); cancelled(got) || terminal(got.State) {
+		t.Fatal("restart before identity report cancelled the queue's check", got.State, got.Reason)
+	}
+	// Any other loss of the successor is retried under the next key in its chain.
+	if err := q.Cancel(successor.ID); err != nil {
+		t.Fatal(err)
+	}
+	retried := pendingCheck(nil)
+	if retried.ID == successor.ID {
+		t.Fatal("cancelled successor was not retried")
+	}
+	// The restart requeued the other job; it ran again and now finishes.
+	if err := q.Complete(result(job(t, q, busy.ID), true)); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded: other queued work may take the freed card first and finish.
+	for range 6 {
+		w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+		assigned := check(t, q, w.Machine, nil).Job
+		if assigned != nil && assigned.ID == retried.ID {
+			return
+		}
+		if assigned != nil {
+			clock.Advance(time.Second)
+			finish(t, q, assigned, true)
+		}
+		clock.Advance(time.Second)
+	}
+	got := job(t, q, retried.ID)
+	t.Fatal("check did not start once the host had room", got.State, got.Reason)
 }
