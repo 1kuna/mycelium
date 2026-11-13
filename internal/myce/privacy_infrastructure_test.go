@@ -36,7 +36,7 @@ func TestPrivacyInfrastructureExhaustionExplainsRetryEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "stopped after 3 infrastructure interruptions (Mycelium-side, not a command failure); last: start_authorization: io_error; launch_authorization: queue launch authorization or assignment was refused; refresh job and host status; next: check saved progress and resubmit"
+	want := "stopped after 3 infrastructure interruptions (Mycelium-side, not a command failure); last: start_authorization: io_error; launch_authorization: queue launch authorization or assignment was refused; refresh job and host status; next: resubmit with a new submission key"
 	if got.State != "failed" || got.Losses != 3 || got.Attempt != 3 || got.StartedAt != nil || !got.ReleaseConfirmed || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) {
 		t.Fatalf("infrastructure charging or terminal state changed: %+v", got)
 	}

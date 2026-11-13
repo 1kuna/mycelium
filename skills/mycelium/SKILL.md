@@ -259,7 +259,9 @@ can't submit ahead.
 - **Failed:** read its `finding` (printed by `myce wait`, shown by status and
   `myce result`): `owner` is `job`, `mycelium` or `unknown`, and `action` is the
   one thing to do. A `dead_end_wait` names what waiting can't fix; do it, then
-  submit again.
+  submit again. A failed job stays bound to its submission key: submitting the
+  same key returns that failed job (`submission_reused`), and `myce resume` only
+  resumes paused jobs, so submit the repeat with a new `--key`.
 - **Waiting:** read `myce status JOB_ID` once. Its line gives one reason and one
   `next:` action (`--history` adds the evidence). Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,

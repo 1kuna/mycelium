@@ -184,7 +184,7 @@ func statusJobValue(job *Job) Job {
 			if j.ExecutionCause != nil {
 				j.Reason += "; last: " + j.ExecutionCause.String()
 			}
-			j.Reason += "; next: check saved progress and resubmit"
+			j.Reason += "; next: resubmit with a new submission key"
 		case j.Spec.ExtensionCheck != nil && strings.HasPrefix(j.Reason, "never started: "):
 			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
 		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":

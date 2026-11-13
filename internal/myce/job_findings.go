@@ -132,7 +132,7 @@ func infrastructureExhaustedFinding(j *Job, raw string) *JobFinding {
 		what = strings.TrimSuffix(what, ".") + fmt.Sprintf(" (last: %s).", j.ExecutionCause.String())
 	}
 	return &JobFinding{"infrastructure_retries_exhausted", findingOwnerMycelium, what,
-		"resubmit; resumable jobs keep their saved progress."}
+		"resubmit with a new submission key; reusing this key returns this failed job."}
 }
 
 // Output-contract errors that only the job can fix. Every other finalization

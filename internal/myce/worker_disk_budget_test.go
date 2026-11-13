@@ -293,6 +293,60 @@ func TestWorkerDiskBudgetDetachedBuilderKeepsReservation(t *testing.T) {
 	}
 }
 
+// A shared input on a nearly full host first reclaims local caches. That
+// reclaim outlasted the 30s staging stall budget and timed out every retry with
+// zero bytes copied. Slow reclaim is progress; it must not trip the detector.
+func TestWorkerDiskBudgetSlowReclaimDoesNotStallSharedInput(t *testing.T) {
+	defer func(d time.Duration) { ioProgressKeepalive = d }(ioProgressKeepalive)
+	ioProgressKeepalive = time.Millisecond
+	clock := &workerFakeClock{now: time.Date(2026, 11, 13, 4, 58, 0, 0, time.UTC)}
+	nas := t.TempDir()
+	ref := sharedFixtureFile(t, nas, "vod.mp4", strings.Repeat("v", 16384))
+	input := SharedInput{NAS: "vod.mp4", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	const total = uint64(100 << 30)
+	var mu sync.Mutex
+	freed := false
+	b := newWorkerDiskBudget(clock, func(string) (DiskReading, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		free := diskFreeFloor(total)
+		if freed {
+			free += 1 << 20
+		}
+		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
+	})
+	evicted := false
+	b.add(diskBudgetRoot{name: "environments", path: t.TempDir(), candidates: func(context.Context) ([]diskBudgetCandidate, error) {
+		return []diskBudgetCandidate{{path: "slow-environment", evict: func(ctx context.Context) (bool, error) {
+			// A long local tree delete: more than the stall budget passes.
+			for step := time.Duration(0); step < checkpointAvailabilityStallBudget+15*time.Second; step += time.Second {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+				clock.Advance(time.Second)
+				time.Sleep(5 * time.Millisecond)
+			}
+			mu.Lock()
+			freed, evicted = true, true
+			mu.Unlock()
+			return true, nil
+		}}}, nil
+	}})
+	c := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Clock: clock, Limit: 1 << 20}, budget: b}
+	t.Cleanup(func() { _ = removeSharedEntry(c.cache.Root) })
+	b.add(diskBudgetRoot{name: "shared_inputs", path: c.cache.Root, candidates: c.budgetCandidates})
+	path, done, err := c.Acquire(context.Background(), input, nas)
+	if done != nil {
+		defer done()
+	}
+	if err != nil || !evicted {
+		t.Fatal("slow reclaim timed out staging", err, evicted)
+	}
+	if got, err := os.ReadFile(path); err != nil || len(got) != 16384 {
+		t.Fatal("input not staged after reclaim", err)
+	}
+}
+
 func TestWorkerDiskBudgetSnapshotReaderQueuePinAndCustody(t *testing.T) {
 	q, clock := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())

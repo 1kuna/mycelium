@@ -146,6 +146,12 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Waiting for the ledger and reclaiming local caches is admission work, not a
+	// stalled transfer. A staging caller's 30s stall budget (#306/#308) watches
+	// storage I/O; one environment tree or compiler cache delete can take longer,
+	// and an unrenewed pulse here timed out a 9.3 GB input with no byte copied
+	// on every retry. Cancellation still stops reclaim between candidates.
+	defer keepIOProgress(ctx)()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	r, err := b.probe(root)
@@ -171,6 +177,37 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 			b.mu.Unlock()
 		})
 	}, nil
+}
+
+// The pulse cadence is well inside the stall budget so a watcher sampling at any
+// moment sees a recent renewal. Tests shorten it.
+var ioProgressKeepalive = time.Second
+
+// keepIOProgress renews a staging caller's progress until the returned stop runs.
+// Without a progress hook in ctx it does nothing.
+func keepIOProgress(ctx context.Context) func() {
+	progress, ok := ctx.Value(ioProgressKey{}).(func())
+	if !ok {
+		return func() {}
+	}
+	progress()
+	done, joined := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		tick := time.NewTicker(ioProgressKeepalive)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				progress()
+			}
+		}
+	}()
+	return func() { close(done); <-joined; progress() }
 }
 
 func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, need, floor uint64) error {
