@@ -80,6 +80,7 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 	j := submit(t, q, s)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
+	checkpoint := filepath.Join(t.TempDir(), "job")
 	for attempt := 1; attempt <= 5; attempt++ {
 		offer := check(t, q, m, nil).Job
 		if offer == nil || offer.ID != j.ID || offer.Attempt != attempt {
@@ -104,7 +105,7 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 		}
 		store.state.Session = m.Session
 		// The queue reply carries a relative checkpoint; the worker loop joins its root.
-		offer.Checkpoint = filepath.Join(t.TempDir(), "job")
+		offer.Checkpoint = checkpoint
 		p, err := startAfterFixtureInputs(t, w, store, *offer)
 		if err != nil || p == nil {
 			store.close()
