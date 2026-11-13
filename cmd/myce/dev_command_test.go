@@ -32,7 +32,7 @@ func TestDevCommandQuickstart(t *testing.T) {
 	if err := os.MkdirAll(origin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"go.mod", "go.sum", "cmd", "internal", "examples", ".mycelium/profiles/quickstart.yaml"} {
+	for _, name := range []string{"go.mod", "go.sum", "cmd", "internal", "skills", "examples", ".mycelium/profiles/quickstart.yaml"} {
 		err := filepath.WalkDir(filepath.Join(source, name), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
