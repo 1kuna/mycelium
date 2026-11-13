@@ -37,7 +37,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	deadline := f.String("deadline", "", "RFC3339 deadline (required for deadline priority/class)")
 	name := f.String("name", "", "job name (default: command basename)")
 	detach := f.Bool("detach", false, "print job ID and return without waiting")
-	wait := f.Bool("wait", false, "with an adapter entry or profile: wait, stream logs and return the command's exit code (125: Mycelium/run failure)")
+	wait := f.Bool("wait", false, "with an adapter entry or profile: wait, stream logs and return the command's exit code (125: Mycelium/run failure; 126: detached, job continues)")
 	outDir := f.String("out", "", "download verified outputs into DIR after success; implies --wait")
 	var outputs []string
 	f.Func("output", "inline command output NAME to return with --out (repeatable)", func(value string) error {
@@ -47,7 +47,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	adapter := f.String("adapter", "", "project adapter YAML (default: .mycelium/adapter.yaml)")
 	entry := f.String("entry", "", "named adapter entry (default: adapter default)")
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
-	key := f.String("key", "", "profile submission key (default: content-derived; reuse to recover)")
+	key := f.String("key", "", "submission key (entries default to content-derived; reuse to recover)")
 	var inputFlags []string
 	f.Func("input", "per-submission file DEST=PATH (repeatable; requires --profile or an adapter entry)", func(value string) error {
 		inputFlags = append(inputFlags, value)
@@ -128,8 +128,8 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if explicitPlatform {
 		return errors.New("--platform requires an adapter entry")
 	}
-	if *key != "" || explicitNotify || len(itemInputs) > 0 {
-		return errors.New("--key, --notify and --input require --profile or an adapter entry")
+	if explicitNotify || len(itemInputs) > 0 {
+		return errors.New("--notify and --input require --profile or an adapter entry")
 	}
 	if f.NArg() == 0 {
 		return errors.New("usage: myce run [flags] -- <command> [args]")
@@ -163,6 +163,9 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	s := myce.Spec{AuthoringOrigin: myce.OriginCommand, Name: *name, Project: *project, Class: *class, Priority: *priority,
 		SubmissionKey: "run-" + rand.Text(), Run: myce.RunSpec{Command: f.Args()},
 		Needs: myce.ResourceNeeds{CPUCores: *cpu, MemoryGB: memory, Platform: myce.Platform{Required: []string{platform}}}}
+	if *key != "" {
+		s.SubmissionKey = *key
+	}
 	var manifest string
 	if len(outputs) > 0 {
 		var cleanup func()
@@ -206,7 +209,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	j, err := client.Submit(ctx, s)
 	if err != nil {
 		if ctx.Err() != nil {
-			return cancelRunJob(client, s.Project, s.SubmissionKey, waitMode)
+			return detachRunJob("", s.Project, s.SubmissionKey)
 		}
 		return fmt.Errorf("submit failed (project %s, submission key %s): %w", s.Project, s.SubmissionKey, err)
 	}

@@ -118,9 +118,11 @@ it failed with one, otherwise 1. A failed or cancelled job raises
 `EntryFailedError` (with `outcome` and `exit_code`) unless `check=False`.
 `EntryPreparationError` keeps the CLI's exit code, reason and any receipt (64
 invalid entry or input, 65 changed intent, 69 queue unavailable, 75 busy).
-`timeout` raises `TimeoutError` and leaves the job running. Ctrl-C during the wait
-cancels the job by key and raises `EntryInterrupted` (`cancelled` is True when
-the queue acknowledged it). `wait=False` returns the receipt after submission.
+`timeout` raises `TimeoutError` and leaves the job running. Ctrl-C or SIGTERM during waiting or output download
+detaches and raises `EntryInterrupted` (`exit_code=126`, `job_id`, `project`,
+`key`, and `cancelled=False`). Killing a waiter never cancels its job. Repeat
+`run_entry` with the same key to re-attach and fetch outputs. Cancel only
+explicitly with `client.cancel(job_id)` or `client.cancel_submission(project, key)`. `wait=False` returns the receipt after submission.
 
 `client.download_results(job, DIR)` fetches every accepted output of a succeeded
 job (an ID or a Job reply) the same way and returns `{name: path}`.

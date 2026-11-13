@@ -187,24 +187,30 @@ check: [test, -s, result]
 	_ = running.Process.Signal(os.Interrupt)
 	select {
 	case err = <-runDone:
-		if !errors.As(err, &exit) || exit.ExitCode() != 130 {
+		if !errors.As(err, &exit) || exit.ExitCode() != runDetachedExit {
 			t.Fatalf("interrupt: %v %s", err, logs.String())
 		}
 	case <-ctx.Done():
 		t.Fatal("run cancellation deadline")
 	}
-	wait(t, ctx, func() bool {
-		var s myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &s); err != nil {
-			t.Fatal(err)
-		}
-		for _, j := range s.Jobs {
-			if j.Spec.Name == "sh" && j.CancelledAt != nil {
-				return j.State == "cancelled" && j.ReleaseConfirmed
-			}
-		}
-		return false
-	})
+	// Interrupt only detached the waiter. Explicit cancellation still stops and
+	// releases the running command.
+	// State lines start with the exact job ID; do not search status projections
+	// for command text, which they intentionally omit.
+	interruptedID := strings.Fields(logs.String())[0]
+	j, err := client.GetJob(ctx, interruptedID)
+	if err != nil || j.State != "running" || j.CancelledAt != nil {
+		t.Fatalf("interrupt cancelled: %+v %v", j, err)
+	}
+	c := exec.CommandContext(ctx, binary, "cancel", "--wait", "--queue", client.URL, interruptedID)
+	c.Env = environment
+	if output, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("explicit cancel: %v %s", err, output)
+	}
+	stopped, err := client.GetJob(ctx, interruptedID)
+	if err != nil || stopped.State != "cancelled" || !stopped.ReleaseConfirmed {
+		t.Fatalf("explicit release: %+v %v", stopped, err)
+	}
 	t.Run("wait-out", func(t *testing.T) {
 		exitOf := func(err error) int {
 			var exit *exec.ExitError
@@ -287,7 +293,7 @@ entries:
 		if output, err := command("--entry", "absent", "--wait").CombinedOutput(); exitOf(err) != 64 || !strings.Contains(string(output), "adapter_invalid") {
 			t.Fatalf("typed refusal exit: %v %s", err, output)
 		}
-		// SIGTERM cancels the entry's job and waits for confirmed release.
+		// SIGTERM detaches the entry waiter; explicit cancel stops the job.
 		running := command("--entry", "work", "--wait", "--", "sleep")
 		var logs enrollmentLogBuffer
 		running.Stdout, running.Stderr = &logs, &logs
@@ -300,7 +306,7 @@ entries:
 		_ = running.Process.Signal(syscall.SIGTERM)
 		select {
 		case err := <-done:
-			if exitOf(err) != 130 || !strings.Contains(logs.String(), "cancellation confirmed (release confirmed)") {
+			if exitOf(err) != runDetachedExit || !strings.Contains(logs.String(), "continues") {
 				t.Fatalf("entry interrupt: %v %s", err, logs.String())
 			}
 		case <-ctx.Done():
@@ -308,15 +314,27 @@ entries:
 			<-done
 			t.Fatal("entry cancellation deadline")
 		}
-		var s myce.Snapshot
-		if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &s); err != nil {
-			t.Fatal(err)
-		}
-		for _, j := range s.Jobs {
-			if j.Spec.Project == "demo" && strings.Contains(strings.Join(j.Spec.Run.Command, " "), "sleep") && j.State != "cancelled" {
-				t.Fatalf("entry job not cancelled: %s %s", j.ID, j.State)
+		var interruptedID string
+		for _, line := range strings.Split(logs.String(), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 1 && fields[1] == "submitted:" {
+				interruptedID = fields[0]
+				break
 			}
 		}
+		if interruptedID == "" {
+			t.Fatal("entry job ID missing", logs.String())
+		}
+		j, err := client.GetJob(ctx, interruptedID)
+		if err != nil || j.State != "running" || j.CancelledAt != nil {
+			t.Fatalf("entry interrupt cancelled: %+v %v", j, err)
+		}
+		c := exec.CommandContext(ctx, binary, "cancel", "--wait", "--queue", client.URL, interruptedID)
+		c.Env = environment
+		if output, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("explicit entry cancel: %v %s", err, output)
+		}
+
 	})
-	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C cancellation and exact release, --wait/--out entry and inline outputs, exit 9 and typed refusal 64, SIGTERM confirmed cancel; owned dev joined and listener closed")
+	t.Log("real dev: CPU command effect/logs, NAS-mode profile source/input upload and verified output, no inherited token, exit 7, detach, Ctrl-C detach and explicit cancellation/release, --wait/--out entry and inline outputs, exit 9 and typed refusal 64, SIGTERM detach; owned dev joined and listener closed")
 }

@@ -33,11 +33,13 @@ cover common scheduling declarations. Deadline priority requires a deadline.
 
 Status changes go to stderr; command logs go to stdout. A successful command
 exits zero; a recorded positive command exit code is propagated, and other
-failures or cancelled jobs exit 1. Ctrl-C requests durable cancellation by
-submission key and exits 130; the acknowledgement does not prove a running
-process has finished cleanup. An unconfirmed cancellation prints the exact
-project/key for recovery through the cancellation API. `--detach` prints only
-the job ID and leaves the job running.
+failures or cancelled jobs exit 1. Killing a waiter never cancels its job.
+Ctrl-C, SIGTERM or parent exit detaches with code 126 and prints the job ID and
+submission key. Re-attach by rerunning the same command with the same `--key`;
+inline commands create a fresh key by default, so supply `--key NAME` when you
+want to recover by rerunning. Stop work only explicitly with `myce cancel --wait
+JOB_ID` (or `--project PROJECT --key KEY`). `--detach` prints only the job ID
+and leaves the job running.
 
 An installed worker's private joining authority supplies the queue credential
 and TLS certificate pin automatically, with the installed queue config as a

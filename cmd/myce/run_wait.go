@@ -17,21 +17,21 @@ import (
 	"mycelium/internal/myce"
 )
 
-// Exit codes under --wait/--out match the Python client's run_entry (#1341 F):
-// 0 success with outputs verified, the command's own code when it failed with
-// one, otherwise 1 for a failed or cancelled job, and 130 for an interrupt whose
-// cancellation the queue confirmed. Submission refusals keep their typed codes
-// (64, 65, 69, 74, 75, 78) and usage errors exit 64. runInfraExit is reserved
-// for a trip that failed after the queue accepted the job, where the Python
-// client raises instead: waiting/transport failure, output download or
-// verification failure, an unconfirmed cancellation, or parent exit. 125 follows
-// the container-runner convention (docker/podman run) for "the runner failed".
+// Exit codes under --wait/--out match the Python client's run_entry:
+// 0 success, the command's own code on command failure, otherwise 1 for a
+// failed/cancelled job. Submission refusals keep 64, 65, 69, 74, 75, 78.
+// 125 means the runner failed; 126 means the waiter detached and the job
+// continues. This reverses #1341 F: signals never request cancellation.
 const runInfraExit = 125
+const runDetachedExit = 126
 
-// runCancelBudget bounds interrupt cleanup. It matches the usual grace between
-// SIGTERM and SIGKILL in container runtimes and CI, so the confirmation can be
-// printed before a supervisor kills this process.
-const runCancelBudget = 10 * time.Second
+// detachRunJob performs no queue mutation, including after an uncertain submit.
+func detachRunJob(id, project, key string) error {
+	if id == "" {
+		id = "ID unknown (submission reply interrupted)"
+	}
+	return waitError(runDetachedExit, fmt.Sprintf("detached; job %s continues; re-attach: rerun the same command with the same --key %q (project %q); cancel explicitly: myce cancel --project %q --key %q", id, key, project, project, key))
+}
 
 // redactRunError never repeats credentials from transport/remote diagnostic
 // text, preserving the exit code.
@@ -96,10 +96,13 @@ func runReceiptWait(ctx context.Context, submit func(io.Writer) error, parentPID
 		return submitErr
 	}
 	if ctx.Err() != nil && !parsed {
-		return waitError(runInfraExit, "run interrupted before a receipt was written; rerun the same command to recover or cancel it")
+		return waitError(runDetachedExit, "detached before a receipt was written; submission may have been accepted; rerun the same command with the same key to recover its job ID; cancel explicitly with myce cancel --project PROJECT --key KEY")
 	}
 	if ctx.Err() == nil && (!parsed || r.JobID == "") {
 		return waitError(runInfraExit, "submission returned no job receipt")
+	}
+	if ctx.Err() != nil {
+		return detachRunJob(r.JobID, r.Project, r.Key)
 	}
 	c, err := runClient(config, joining, address, token)
 	if err != nil {
@@ -109,10 +112,6 @@ func runReceiptWait(ctx context.Context, submit func(io.Writer) error, parentPID
 		defer c.HTTP.CloseIdleConnections()
 	}
 	defer func() { resultErr = redactRunError(resultErr, c.Token) }()
-	if ctx.Err() != nil {
-		// Cancel the intent by key even when the job was not yet submitted.
-		return cancelRunJob(c, r.Project, r.Key, true)
-	}
 	if submitErr != nil {
 		// Only the optional detached observer failed; this foreground wait replaces it.
 		fmt.Fprintln(errOut, "run: "+submitErr.Error()+"; waiting in the foreground")
@@ -126,8 +125,9 @@ func runReceiptWait(ctx context.Context, submit func(io.Writer) error, parentPID
 }
 
 // followRunJob waits for an accepted job, printing state changes to errOut and
-// command logs to out, cancels it on interrupt and settles its exit code.
+// command logs to out, detaches on interrupt and settles its exit code.
 func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key string, parentPID int, contract bool, outDir string, out, errOut io.Writer) error {
+	id := j.ID
 	observerCtx, stopObserver := waitParentContext(ctx, parentPID, time.Second, os.Getppid)
 	defer stopObserver()
 	var after int64
@@ -142,15 +142,8 @@ func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key 
 		}
 		return drainJobLogs(observerCtx, c, j.ID, &after, out)
 	})
-	if ctx.Err() != nil {
-		return cancelRunJob(c, project, key, contract)
-	}
-	if observerCtx.Err() != nil {
-		code := 4
-		if contract {
-			code = runInfraExit
-		}
-		return waitError(code, "run observer parent exited; job continues")
+	if ctx.Err() != nil || observerCtx.Err() != nil {
+		return detachRunJob(id, project, key)
 	}
 	if err != nil {
 		if contract {
@@ -167,6 +160,9 @@ func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key 
 			return nil
 		}
 		if err = fetchAcceptedResult(ctx, c, j.ID, outDir, errOut); err != nil {
+			if ctx.Err() != nil {
+				return detachRunJob(id, project, key)
+			}
 			return waitError(runInfraExit, err.Error())
 		}
 		fmt.Fprintf(errOut, "%s outputs verified: %d file(s) in %s\n", j.ID, len(j.OutputRefs), outDir)
@@ -177,43 +173,4 @@ func followRunJob(ctx context.Context, c myce.Client, j *myce.Job, project, key 
 		return waitError(*cause.ExitCode, message)
 	}
 	return waitError(1, message)
-}
-
-// cancelRunJob requests durable cancellation by submission key after an
-// interrupt. Under the --wait contract it exits 130 only when the queue confirms
-// the job will not run, and polls the idempotent cancel until a running
-// process's release is confirmed or the cleanup budget ends.
-func cancelRunJob(c myce.Client, project, key string, contract bool) error {
-	cleanup, stop := context.WithTimeout(context.Background(), runCancelBudget)
-	defer stop()
-	unconfirmed := "run interrupted; cancellation unconfirmed; cancel via /api/jobs/cancel with project " + project + " and submission_key " + key
-	ack, err := c.CancelSubmission(cleanup, project, key)
-	if !contract {
-		if err != nil || !ack.WillNotRun {
-			return waitError(130, unconfirmed)
-		}
-		return waitError(130, "run interrupted; cancellation acknowledged (running cleanup may still be pending)")
-	}
-	if err != nil || !ack.WillNotRun || ack.State == "unknown" {
-		return waitError(runInfraExit, unconfirmed)
-	}
-	for ack.Release != nil && *ack.Release == "pending" {
-		// A short poll keeps the confirmation inside the budget; each call is one
-		// small idempotent control request.
-		timer := time.NewTimer(250 * time.Millisecond)
-		select {
-		case <-cleanup.Done():
-			timer.Stop()
-			return waitError(130, "run interrupted; cancellation confirmed (job will not run); process release still pending after "+runCancelBudget.String())
-		case <-timer.C:
-		}
-		if next, e := c.CancelSubmission(cleanup, project, key); e == nil && next.WillNotRun {
-			ack = next
-		}
-	}
-	release := "not_applicable"
-	if ack.Release != nil {
-		release = *ack.Release
-	}
-	return waitError(130, "run interrupted; cancellation confirmed (release "+release+")")
 }

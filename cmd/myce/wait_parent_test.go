@@ -106,8 +106,12 @@ func testObserverParentExit(t *testing.T, command string) {
 	deadline := time.Now().Add(7 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(filepath.Join(dir, "exit")); err == nil {
-			if string(data) != "4" {
-				t.Fatalf("orphan exit code %s", data)
+			expected := 4
+			if command == "run" {
+				expected = runDetachedExit
+			}
+			if string(data) != strconv.Itoa(expected) {
+				t.Fatalf("orphan exit code %s, want %d", data, expected)
 			}
 			return
 		}
