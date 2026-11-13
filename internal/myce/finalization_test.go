@@ -12,7 +12,89 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
+
+// A busy queue can spend the old whole-finalization budget before PATCH even
+// starts. Advance the client/queue clock while holding the real queue mutex;
+// ownerError checks that clock against the context deadline, without sleeping.
+func TestFinalizationUploadBusyQueue(t *testing.T) {
+	q, clock := fixture(t)
+	// Go contexts use wall-clock deadlines. Align the injected clock once, then
+	// advance only the fake clock to model service time.
+	clock.Advance(time.Since(clock.Now()))
+	c := retentionClient(t, q)
+	_, ref := retentionUpload(t, c, "input")
+	s := spec("experiment")
+	s.Resumable = false
+	s.Files = FileManifest{"input": ref}
+	s.Outputs = map[string]string{"short.mp4": "results"}
+	submitted := submit(t, q, s)
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	j := check(t, q, m, nil).Job
+	if j == nil || j.ID != submitted.ID {
+		t.Fatal("no assignment")
+	}
+	j.Spec.Run.Workdir = t.TempDir()
+	path := filepath.Join(j.Spec.Run.Workdir, "short.mp4")
+	if err := os.WriteFile(path, []byte("finished output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	blocked, patches := false, 0
+	c.Clock = clock
+	c.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		if !blocked && r.Method == "HEAD" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
+			blocked = true
+			q.mu.Lock()
+			type response struct {
+				res *http.Response
+				err error
+			}
+			done := make(chan response, 1)
+			go func() {
+				res, err := http.DefaultTransport.RoundTrip(r)
+				done <- response{res, err}
+			}()
+			func() {
+				defer q.mu.Unlock()
+				await(t, func() bool { return q.mu.waiting.Load() > 0 })
+				clock.Advance(time.Minute)
+			}()
+			got := <-done
+			return got.res, got.err
+		}
+		if r.Method == "PATCH" {
+			patches++
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	w := Worker{Client: c, Clock: clock}
+	finished, err := w.finishFileResultContext(context.Background(), *j, result(j, true), t.TempDir())
+	if err != nil || !finished.Success || finished.ExecutionCause != nil {
+		t.Fatalf("busy queue interrupted finalization: %+v %v", finished, err)
+	}
+	if !blocked || patches != 1 {
+		t.Fatalf("want one publication after queue service, blocked=%t patches=%d", blocked, patches)
+	}
+	if err := q.Complete(finished); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.GetJob(context.Background(), j.ID)
+	if err != nil || got.State != "succeeded" || got.OutputRefs["short.mp4"].SizeBytes != int64(len("finished output")) {
+		t.Fatalf("output not accepted: %+v %v", got, err)
+	}
+	// Losing the attempt owner still ends publication and retains its bytes.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	finished, err = w.finishFileResultContext(ctx, *j, result(j, true), t.TempDir())
+	if !errors.Is(err, context.Canceled) || !finished.Success {
+		t.Fatalf("owner cancellation lost: %+v %v", finished, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "finished output" {
+		t.Fatal("owner cancellation lost local output", err)
+	}
+}
 
 // Exercise the shared publication boundary after an actual exit-zero command.
 // The queue must retain it without requiring optional diagnostic artifact I/O.

@@ -468,7 +468,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							logPath = filepath.Join(s.dir, s.state.Log)
 						}
 						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) {
-							finished, err := w.finishFileResult(value, result, s.dir, metadata...)
+							finished, err := w.finishFileResultContext(ioCtx, value, result, s.dir, metadata...)
 							if err != nil {
 								return finished, err
 							}
