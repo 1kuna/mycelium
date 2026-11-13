@@ -467,7 +467,6 @@ func TestPriorityPreemptionCheckpointQueueRestart(t *testing.T) {
 	if err := q.Started(result(batch, false)); err != nil {
 		t.Fatal(err)
 	}
-	batch.Checkpoint = filepath.Join(q.root, batch.Checkpoint)
 	checkpoint := attemptCheckpoint(*batch)
 	if err := os.MkdirAll(checkpoint, 0700); err != nil {
 		t.Fatal(err)
@@ -518,7 +517,6 @@ func TestPriorityPreemptionCheckpointQueueRestart(t *testing.T) {
 	if resumed == nil || resumed.ID != victim.ID || resumed.Attempt != 2 || resumed.Spec.SubmissionKey != s.SubmissionKey || resumed.InfrastructureRetries != 0 {
 		t.Fatal("logical identity lost", resumed)
 	}
-	resumed.Checkpoint = filepath.Join(q.root, resumed.Checkpoint)
 	dest, err := prepareCheckpoint(*resumed)
 	if err != nil {
 		t.Fatal(err)

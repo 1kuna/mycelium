@@ -94,7 +94,6 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if resumed == nil || resumed.ID != j.ID || resumed.Attempt != 2 || q.s.FleetUpgrade.State != "complete" {
 				t.Fatal("updated host did not resume the same job", q.fleetUpgradeStatus())
 			}
-			resumed.Checkpoint = filepath.Join(q.root, resumed.Checkpoint)
 			prepared, err := prepareCheckpoint(*resumed)
 			if err != nil {
 				t.Fatal(err)

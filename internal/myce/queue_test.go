@@ -115,7 +115,27 @@ func check(t testing.TB, q *Queue, m Machine, r *Job) Reply {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Resolve checkpoints as a worker does against the queue's root, so tests
+	// that hand the job to worker internals never write into the package
+	// directory. Use checkRelative to see the wire's relative paths.
+	if v.Job != nil {
+		v.Job.Checkpoint = filepath.Join(q.root, v.Job.Checkpoint)
+	}
+	for i := range v.Attempts {
+		if j := v.Attempts[i].Job; j != nil {
+			j.Checkpoint = filepath.Join(q.root, j.Checkpoint)
+		}
+	}
 	return v
+}
+
+func checkRelative(t testing.TB, q *Queue, m Machine) *Job {
+	t.Helper()
+	v, err := q.Checkin(Checkin{Machine: m, period: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.Job
 }
 func finish(t *testing.T, q *Queue, j *Job, success bool) {
 	t.Helper()

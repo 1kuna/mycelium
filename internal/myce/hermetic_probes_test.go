@@ -27,6 +27,11 @@ func installSyntheticWorkerHost() {
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
 	workerCheckpointPrepare = func(j Job) (string, error) {
 		dir := attemptCheckpoint(j)
+		if !filepath.IsAbs(dir) {
+			// Without a checkpoint root the path resolves against the package
+			// directory; fail the test that caused it, not the whole binary.
+			return "", fmt.Errorf("test worker has no checkpoint root: relative checkpoint %s", dir)
+		}
 		return dir, os.MkdirAll(dir, 0700)
 	}
 	extensionIdentityProbe = syntheticIdentityProbe
