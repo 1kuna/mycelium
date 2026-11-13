@@ -604,12 +604,12 @@ class DevTests(unittest.TestCase):
                      f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
                      + ("import test_client\n" if strip else "") +
                      f"r = subprocess.run([{str(self.root / 'myce')!r}, 'run', '--queue', {self.client.url!r}, "
-                     "'--', 'sh', '-c', 'true'], capture_output=True, text=True, timeout=60)\n"
+                     "'--detach', '--', 'sh', '-c', 'true'], capture_output=True, text=True, timeout=60)\n"
                      "sys.stdout.write(r.stdout + r.stderr)\nsys.exit(r.returncode)\n")
             result = subprocess.run([sys.executable, "-c", child], cwd=project, env=parent,
                                     capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
+            job = re.search(r"[0-9a-f]{32}", result.stdout)[0]
             self.assertEqual(self.client.wait(job, timeout=30)["state"], "succeeded")
             self.wait_observers(home)
 
