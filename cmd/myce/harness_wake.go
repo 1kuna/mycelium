@@ -30,8 +30,9 @@ const harnessWakePrefix = harnessWakeDefault + "/"
 
 type harnessWake struct {
 	name string
-	// env lists the variables detect reads; CLI tests clear them so a test
-	// submit never wakes the agent running the suite.
+	// env lists the variables detect reads; CLI tests (TestMain) and the Python
+	// client tests (which parse this list) clear them so a test submit never
+	// wakes the agent running the suite (#1557).
 	env []string
 	// detect returns the receiving agent in env, or "" when env is not this
 	// harness's shell.
