@@ -398,6 +398,7 @@ type hostMemorySample struct {
 	retainedGB               float64
 	peakGB                   float64
 	growthObserved           bool
+	started                  bool // Exact attempt's report, including worker-local main execution.
 	footprintGB              float64
 	source                   string
 	exclusive                bool
@@ -426,7 +427,7 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 	for _, r := range reports {
 		key := attemptKey{r.ID, r.Attempt, r.Session}
 		old := previous[key]
-		sample, s := r.CurrentHostMemory, hostMemorySample{}
+		sample, s := r.CurrentHostMemory, hostMemorySample{started: r.Started}
 		// Native helpers acquire physical custody before main Starts. Their
 		// exact-attempt memory is occupancy evidence, never main-start evidence.
 		if sample == nil || !validMemoryValue(sample.GrowthGB) || !validMemoryValue(sample.GrowthRateGB) || !validMemoryValue(sample.DeviceGrowthGB) || !validMemoryValue(sample.DeviceGrowthRateGB) {

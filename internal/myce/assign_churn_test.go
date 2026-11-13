@@ -3,9 +3,133 @@ package myce
 import (
 	"context"
 	"errors"
+	"math"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+// #1565: the queue has accepted Started while the worker still owns the
+// original assignment. Replay the retained envelope/credit and comparison;
+// the sensor sequence before that comparison was not retained.
+func TestAssignChurnRetainedUnifiedMemory(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	m.MemoryEnforcement = cgroupMemoryEnforcement
+	m.MemoryCeilingSlackGB = .125
+	m.HostAvailableMemoryGB, m.HostMemoryBudgetGB = 88.79421997070312, 113.85746002197266
+	m.Devices[0].ReserveMemoryGB = 4
+	m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 96, 96
+	machineCheck(t, q, m)
+	co := Job{ID: "co-tenant", Machine: m.ID, Session: m.Session, Attempt: 2, State: "running", AllocatedDevices: []string{"0"}, Spec: spec("production")}
+	co.Spec.Needs.Memory, co.Spec.Needs.HostMemoryGB, co.Spec.Needs.MemoryGB = "auto", 38.73198699951172, 44.519424227328635
+	co.MemoryEnvelope = &JobMemoryEnvelope{HostGB: 83.37641122684036, DeviceGB: co.Spec.Needs.MemoryGB, Basis: "learned", Learned: &LearnedMemory{Evidence: 184, HostGB: co.Spec.Needs.HostMemoryGB, PeakHostGB: 20.391857147216797, PeakDeviceGB: 22.318359375}}
+	other := Job{ID: "other", Machine: m.ID, Session: m.Session, Attempt: 13, State: "running", Spec: cpuSpec(1, 6)}
+	if err := normalizeResources(&other.Spec); err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range []*Job{&co, &other} {
+		copy := *j
+		now := clock.Now()
+		copy.StartedAt = &now
+		q.s.Jobs[j.ID] = &copy
+	}
+	device, footprint := 22.318359375, .329437255859375
+	reports := []AttemptReport{
+		{Execution: Execution{ID: co.ID, Attempt: co.Attempt}, Session: co.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: footprint, FootprintGB: &footprint, GrowthObserved: true, DeviceGB: &device, AgeSeconds: .04776011}},
+		{Execution: Execution{ID: other.ID, Attempt: other.Attempt}, Session: other.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: .9172134399414062, AgeSeconds: .075639487}},
+	}
+	next := submit(t, q, cpuSpec(2, 10))
+	reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer := assignedJob(reply)
+	if offer == nil || offer.ID != next.ID {
+		t.Fatal("fitting consumer was not assigned", job(t, q, next.ID).Reason)
+	}
+	samples := currentHostMemorySamples(reports, clock.Now())
+	// The assignment has no StartedAt. Without the accepted report, its full
+	// envelope reproduces the historical refusing worker comparison exactly.
+	helper := reports[0]
+	helper.Started = false
+	unstarted := currentHostMemorySamples([]AttemptReport{helper}, clock.Now())[jobKey(co)]
+	_, pending := memoryCharge(&co, allocationMachine(&m, co.AllocatedDevices), co.MemoryEnvelope.HostGB, unstarted, clock.Now())
+	if math.Abs(pending-83.04697397098099) > 1e-9 {
+		t.Fatalf("retained pending growth changed: %g", pending)
+	}
+	rt := modelRuntime{clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{co, other, *offer}, batchHostMemorySamples: samples,
+		hostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}
+	rt.batchSupervisors = map[attemptKey]*attemptSupervisor{}
+	for _, j := range rt.batchJobs {
+		rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, admissionMu: &rt.admissionMu}
+	}
+	launch := HostLaunch{Machine: m.ID, Session: offer.Session, Key: offer.ID, Attempt: "1"}
+	if err := rt.checkBatchLaunchMemory(t.Context(), launch); err != nil {
+		d := admissionDetail(err, *offer)
+		if d != nil && (d.Subcheck != "live_host_growth" || math.Abs(d.Required-98.37976053103958) > 1e-9) {
+			t.Fatalf("unexpected comparison: %+v", d)
+		}
+		t.Fatal("placement and prelaunch disagree on identical inputs:", err)
+	}
+	// Initial local admission and the final exec gate must use the same rule.
+	w := Worker{Machine: m, Clock: clock, hostMemorySamples: samples, HostMemorySource: rt.hostMemorySource}
+	if err := localAttemptAdmission(w, []Job{co, other}, *offer, nil); err != nil {
+		t.Fatal("local admission disagreed:", err)
+	}
+	charge, growth := memoryCharge(&co, allocationMachine(&m, co.AllocatedDevices), co.MemoryEnvelope.HostGB, samples[jobKey(co)], clock.Now())
+	queueCharge, queueGrowth := q.hostJobChargeGrowth(q.s.Jobs[co.ID])
+	if charge != queueCharge || growth != queueGrowth {
+		t.Fatalf("different co-tenant figures: worker %g/%g queue %g/%g", charge, growth, queueCharge, queueGrowth)
+	}
+}
+
+// A positive preflight refusal must reach the real queue immediately, without
+// waiting for an experiment's start window or a simulated hour to elapse.
+func TestAssignChurnPreflightRefusalReturnsPromptly(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("worker", "host", "cpu", 8, 16)
+	next := submit(t, q, cpuSpec(1, 4.125))
+	offer := assignedJob(machineCheck(t, q, m))
+	if offer == nil || offer.ID != next.ID {
+		t.Fatal("missing initial assignment")
+	}
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	w := recoveryWorker(t)
+	w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
+	probe := syntheticProfileProbe().Machine
+	w.cpuRuntimeProbe, w.control = &probe, &processControl{clock: clock}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 3.2438201904296875, nil }
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	root.state.Session = offer.Session
+	store, err := newAttemptStore(root, *offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &attemptSupervisor{store: store, job: *offer, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go a.run(ctx)
+	select {
+	case <-a.done:
+	case <-time.After(testWaitTimeout):
+		cancel()
+		<-a.done
+		t.Fatal("refused assignment was retained")
+	}
+	got := job(t, q, next.ID)
+	if got.State != "queued" || got.Losses != 0 || !got.Copies[0].ReleaseConfirmed || got.Copies[0].ReleasedAt == nil || !clock.Now().Equal(*got.Copies[0].ReleasedAt) {
+		t.Fatalf("refusal did not promptly release and requeue: %+v", got)
+	}
+	if len(got.LaunchCapacityWait) == 0 || got.Attempt != 1 {
+		t.Fatal("refusal lost its typed wait or changed attempt", got.Attempt)
+	}
+}
 
 // The retained incident has the worker comparison but not its matching queue
 // snapshot. Replay both numbers without attributing the difference to a sensor,
