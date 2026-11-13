@@ -354,10 +354,10 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, dir := range []string{"checkpoints", "models", "environments"} {
-				// Probes keep one fixed per-host file and never delete (#1545).
+				// Probes keep one fixed per-host file and its rename marker, and never delete (#1545).
 				entries, err := os.ReadDir(filepath.Join(nas, "mycelium", dir))
 				want := filepath.Base(storageProbePath(dir, ".myce-install-probe-", "install"))
-				if err != nil || len(entries) != 1 || entries[0].Name() != want {
+				if err != nil || len(entries) != 2 || entries[0].Name() != want || entries[1].Name() != want+".rename" {
 					t.Fatal("NAS probe left more than its fixed file", entries, err)
 				}
 			}
