@@ -139,7 +139,7 @@ func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
-	for _, want := range []string{j.ID, "still queued", "no hypha has a qualified extension"} {
+	for _, want := range []string{j.ID, "still queued", "no registered implementation covers an eligible target"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("missing %s: %v", want, err)
 		}
