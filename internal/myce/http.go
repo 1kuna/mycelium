@@ -345,11 +345,16 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 				return
 			}
 		}
+		if span := spanFrom(r.Context()); span != nil && span.submit != nil {
+			span.submit.Name = request.Spec.Name
+		}
 		j, err := a.Queue.submitWithDeadlineGuidance(r.Context(), request.Spec)
 		if j != nil {
 			j.LedgerEntries = nil
 		}
+		finishResponse := submitPhase(r.Context(), "response")
 		respondOperation(w, j, err, "job_submit_failed")
+		finishResponse()
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/pause", func(w http.ResponseWriter, r *http.Request) {
 		var request PauseJobRequest
@@ -527,7 +532,9 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		}
 		var finishBudget func()
 		var budgetErr error
+		finishAdmission := submitPhase(r.Context(), "admission")
 		r, finishBudget, budgetErr = a.Queue.withRequestBudget(w, r)
+		finishAdmission()
 		if budgetErr != nil {
 			respond(w, nil, budgetErr)
 			return
@@ -554,6 +561,8 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	}), mux.patterns))
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	finishDecode := submitPhase(r.Context(), "decode")
+	defer finishDecode()
 	err := decodeBudget(w, r, v)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
