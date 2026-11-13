@@ -1821,8 +1821,9 @@ worker-specific failure propagation, not another package manager.
    verify its own usable prefix. Cached installation is not native qualification.
 5. A real build failure excludes only that worker/target for that recipe identity.
    Status shows environment hash, worker, target, preparation failure and log
-   reference; another compatible worker can build/run. The queue retains the failed build
-   evidence without terminally failing waiting jobs. If all known compatible workers fail, keep accepted demand
+   reference; another compatible worker can build/run. The queue retains the
+   failed build evidence without terminally failing waiting jobs. If all known
+   compatible workers fail, keep accepted demand
    queued with an explicit no-buildable-worker reason until repair, cancellation
    or its existing deadline. Unknown/offline capacity is neither success nor a
    proven failure.

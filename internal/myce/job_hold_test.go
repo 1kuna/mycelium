@@ -154,7 +154,7 @@ func TestActionableBlockerPreparationObservationsAgree(t *testing.T) {
 					if state == "uploading" {
 						live.EnvironmentReports[0].State = "uploading"
 					}
-					want = "deterministically_failed"
+					want = "no_buildable_worker"
 				case "busy":
 					live.CPUCapacityReason = "no preparation core available"
 					want = "waiting_for_builder"

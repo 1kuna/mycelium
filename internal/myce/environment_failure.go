@@ -279,11 +279,24 @@ func (q *Queue) environmentReportBlocked(r EnvironmentReport) bool {
 func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Machine) string {
 	reason := ""
 	allFailed := true
-	for _, m := range machines {
+	retryReason := ""
+	for _, id := range sortedPortabilityKeys(machines) {
+		m := machines[id]
 		if !q.placementAllowed(j, m) || !executionTargetMatches(j.Spec, m) || !environmentCanRun(j, m) || j.Spec.Needs.cpuOnly() != (m.GPU == "cpu") {
 			continue
 		}
 		if !q.inventoryFresh(q.s.Machines[m.ID]) {
+			continue
+		}
+		capacity := q.qualificationCapacity(m)
+		compatible := false
+		for _, candidate := range q.memoryCandidates(j, m) {
+			if hostFits(&capacity, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, &capacity, capacity.TotalMemoryGB) {
+				compatible = true
+				break
+			}
+		}
+		if !compatible {
 			continue
 		}
 		if !q.environmentFailureBlocked(j, m) {
@@ -294,6 +307,7 @@ func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Mac
 			if environmentReportMatches(r, m) && slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
 				if environmentFailureKind(r) == "transient" {
 					allFailed = false
+					retryReason = environmentFailureReason(r, j.Spec.Logs != "none")
 				}
 				reason = environmentFailureReason(r, j.Spec.Logs != "none")
 			}
@@ -301,6 +315,9 @@ func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Mac
 	}
 	if reason != "" && allFailed {
 		return "no-buildable-worker: every freshly observed compatible worker failed; " + reason
+	}
+	if retryReason != "" {
+		return retryReason
 	}
 	return reason
 }

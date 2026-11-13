@@ -72,6 +72,10 @@ func TestEnvironmentExclusionAllFailedUntilCancellationOrDeadline(t *testing.T) 
 			b := a
 			b.ID, b.HostID, b.Session, b.EnvironmentReports = "peer", "peer", "peer-session", nil
 			failEnvironmentBuild(t, q, &b)
+			// An undersized fresh worker is not a compatible unfailed candidate.
+			tiny := cpuMachine("tiny", "tiny", "cpu", 1, 32)
+			tiny.CPUReserveCores, tiny.EnvironmentBuilder = 1, true
+			machineCheck(t, q, tiny)
 			// An offline, never-built worker is neither positive nor negative evidence.
 			offline := b
 			offline.ID, offline.HostID, offline.EnvironmentReports = "offline", "offline", nil
@@ -108,7 +112,7 @@ func TestEnvironmentExclusionAllFailedUntilCancellationOrDeadline(t *testing.T) 
 }
 
 func TestEnvironmentExclusionRestartAndRecovery(t *testing.T) {
-	for _, repair := range []string{"retry", "recipe", "fingerprint", "host", "session"} {
+	for _, repair := range []string{"retry", "recipe", "fingerprint", "host", "target", "session"} {
 		t.Run(repair, func(t *testing.T) {
 			clock := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 			db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
@@ -154,6 +158,8 @@ func TestEnvironmentExclusionRestartAndRecovery(t *testing.T) {
 				j = submit(t, q, s)
 			case "fingerprint":
 				a.CPUExtensionFingerprint = "changed-toolchain"
+			case "target":
+				a.CapabilityProfile.OS, a.CapabilityProfile.Arch = "darwin", "arm64"
 			case "host":
 				a.ID, a.HostID = "replacement-worker", "replacement-host"
 			case "session":
