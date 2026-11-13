@@ -148,42 +148,40 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 }
 
 func TestBatchLogsDefaultCapture(t *testing.T) {
-	for _, policy := range []string{"", "keep"} {
-		t.Run(policy, func(t *testing.T) {
-			q, _ := fixture(t)
-			q.clock = &workerFakeClock{now: q.clock.Now()}
-			s := spec("experiment")
-			s.Resumable = false
-			s.Logs = policy
-			s.Run.Command = []string{"sh", "-c", "echo synthetic-stdout; echo synthetic-stderr >&2"}
-			j := submit(t, q, s)
-			run := workerFixture(t, q)
-			await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
-			logs, err := q.Logs(j.ID, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var text strings.Builder
-			for _, chunk := range logs {
-				text.WriteString(chunk.Text)
-			}
-			if text.String() != "synthetic-stdout\nsynthetic-stderr\n" {
-				t.Fatal("default queue capture changed")
-			}
-			files, err := filepath.Glob(filepath.Join(run.state, "*.log"))
-			if err != nil || len(files) != 1 {
-				t.Fatalf("default attempt log missing: %v", err)
-			}
-			data, err := os.ReadFile(files[0])
-			if err != nil || string(data) != text.String() {
-				t.Fatal("default worker capture changed")
-			}
-		})
+	// Explicit "keep" is distinguished only by validation (TestBatchLogPolicyValidation);
+	// the worker and queue branch only on "none", so the default covers it.
+	q, _ := fixture(t)
+	q.clock = &workerFakeClock{now: q.clock.Now()}
+	s := spec("experiment")
+	s.Resumable = false
+	s.Run.Command = []string{"sh", "-c", "echo synthetic-stdout; echo synthetic-stderr >&2"}
+	j := submit(t, q, s)
+	run := workerFixture(t, q)
+	await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
+	logs, err := q.Logs(j.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for _, chunk := range logs {
+		text.WriteString(chunk.Text)
+	}
+	if text.String() != "synthetic-stdout\nsynthetic-stderr\n" {
+		t.Fatal("default queue capture changed")
+	}
+	files, err := filepath.Glob(filepath.Join(run.state, "*.log"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("default attempt log missing: %v", err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil || string(data) != text.String() {
+		t.Fatal("default worker capture changed")
 	}
 }
 
 func TestServerLogPolicyOutput(t *testing.T) {
-	for _, policy := range []string{"none", "", "keep"} {
+	// Engine and log output branch only on "none"; explicit "keep" takes the default path.
+	for _, policy := range []string{"none", ""} {
 		t.Run(policy, func(t *testing.T) {
 			m := serverTestModel(t, "ready")
 			m.Logs = policy
