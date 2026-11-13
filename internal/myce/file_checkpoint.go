@@ -298,6 +298,10 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	return dest, syncWorkerDir(j.Checkpoint)
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
+	return w.finishFileResultContext(context.Background(), j, result, parent, metadata...)
+}
+
+func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
 	step, outputName := "checkpoint_publication", ""
 	// Surface retryable publication errors without changing custody or Success.
 	defer func() {
@@ -343,8 +347,6 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 		if err != nil {
 			return result, err
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		ctx = withFileStoreAttempt(ctx, j)
 		if j.Spec.OutputDelivery == asyncNAS {
 			step = "output_reservation"
@@ -374,8 +376,9 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 		result.OutputRefs = files
 		return result, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Queue service and output size are not bounded by elapsed wall time. Keep
+	// the attempt owner's cancellation; the transfer client detects stalled
+	// sockets and reconciles accepted offsets without restarting finalization.
 	ctx = withFileStoreAttempt(ctx, j)
 	output, terminal, err := w.publishOutputFiles(ctx, j, &step, &outputName)
 	if terminal {

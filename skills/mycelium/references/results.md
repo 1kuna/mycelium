@@ -31,6 +31,11 @@ publication-pending job is not accepted success. Keep its identity and resolve
 the reported storage or permission problem. Details:
 [folder and glob outputs](https://github.com/1kuna/mycelium/blob/main/docs/files.md#folder-and-glob-outputs-1341).
 
+Output publication has no fixed elapsed-time budget: a busy queue or a large
+output can take longer while the attempt remains owned. Transfers detect socket
+stalls and resume from the queue's accepted offset; cancelling the attempt owner
+ends publication and retains local bytes. Keep the job and key while it finishes.
+
 ## Keep files on failure
 
 Do not exit 0 just to return logs. Declare `advanced: {keep_on_failure: [logs/, {path:
