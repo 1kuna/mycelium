@@ -103,34 +103,42 @@ func probeStorageFile(path string, syncFile bool, ops storageProbeOps) error {
 	return err
 }
 
-// probeStorageRename additionally proves rename by moving the fixed file to a
-// fixed alternate name and back. Neither name is ever deleted. A probe
-// interrupted between the renames leaves only the alternate name, which the
-// next probe moves back first.
+// probeStorageRename proves write, sync and read on the fixed file in place,
+// then proves rename on a separate fixed marker by moving it to an alternate
+// name and back. The written file is never renamed: on a Linux CIFS mount of
+// the fleet NAS, a file that was renamed and renamed back refuses write opens
+// for minutes, so the installer's second probe of the same root failed with
+// EACCES. The marker is created once and never reopened. Neither name is ever
+// deleted (#1545). A probe interrupted between the renames leaves only the
+// alternate name, which the next probe moves back first.
 func probeStorageRename(path string, ops storageProbeOps) error {
-	renamed := path + ".renamed"
+	if err := probeStorageFile(path, true, ops); err != nil {
+		return err
+	}
+	marker := path + ".rename"
+	renamed := marker + "d"
 	err := ops.run("stat", func() error {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if _, err := os.Lstat(renamed); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
+		if _, err := os.Lstat(renamed); err == nil {
+			return os.Rename(renamed, marker)
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return os.Rename(renamed, path)
+		f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		return f.Close()
 	})
 	if err != nil {
 		return err
 	}
-	if err := probeStorageFile(path, true, ops); err != nil {
+	if err := ops.run("rename", func() error { return os.Rename(marker, renamed) }); err != nil {
 		return err
 	}
-	if err := ops.run("rename", func() error { return os.Rename(path, renamed) }); err != nil {
-		return err
-	}
-	return ops.run("rename", func() error { return os.Rename(renamed, path) })
+	return ops.run("rename", func() error { return os.Rename(renamed, marker) })
 }
 
 // recentAvailability holds the queue's last completed checkpoint-root probe.
@@ -192,12 +200,12 @@ func (q *Queue) recentCheckpointAvailability() bool {
 }
 
 // removeCreatedProbeDir removes a directory a preflight created this run. Its
-// own fixed install probe file (and a rename left by an interrupted probe) is
-// the only content it can hold, so both go first; anything else keeps the
-// directory and reports why (#1545).
+// own fixed install probe file and rename marker (at either name, if a probe
+// was interrupted) are the only content it can hold, so they go first;
+// anything else keeps the directory and reports why (#1545).
 func removeCreatedProbeDir(dir string) error {
 	probe := storageProbePath(dir, ".myce-install-probe-", "install")
-	for _, path := range []string{probe, probe + ".renamed"} {
+	for _, path := range []string{probe, probe + ".rename", probe + ".renamed"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

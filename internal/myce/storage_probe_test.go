@@ -40,7 +40,8 @@ func TestStorageProbesReuseFixedEntries(t *testing.T) {
 	}
 	probe()
 	first := probeEntries(t, root)
-	if len(first) != 3 {
+	// One fixed file per purpose, plus the install probe's rename marker.
+	if len(first) != 4 {
 		t.Fatalf("one fixed probe file per purpose, got %v", first)
 	}
 	for i := 0; i < 5; i++ {
@@ -52,7 +53,7 @@ func TestStorageProbesReuseFixedEntries(t *testing.T) {
 
 	// An install probe interrupted between its renames resumes without a delete.
 	install := storageProbePath(root, ".myce-install-probe-", "install")
-	if err := os.Rename(install, install+".renamed"); err != nil {
+	if err := os.Rename(install+".rename", install+".renamed"); err != nil {
 		t.Fatal(err)
 	}
 	if err := probeNASDirectory(root); err != nil {
@@ -60,6 +61,35 @@ func TestStorageProbesReuseFixedEntries(t *testing.T) {
 	}
 	if got := probeEntries(t, root); !slices.Equal(got, first) {
 		t.Fatalf("interrupted rename was not restored: %v", got)
+	}
+}
+
+// On a Linux CIFS mount of the fleet NAS, a file renamed and renamed back
+// refuses write opens for minutes, so the installer's second probe of a root
+// failed with EACCES. The install probe proves rename on its marker only; the
+// file it writes keeps its name throughout.
+func TestInstallProbeNeverRenamesTheWrittenFile(t *testing.T) {
+	root := t.TempDir()
+	path := storageProbePath(root, ".myce-install-probe-", "install")
+	ops := plainStorageProbeOps(nil)
+	renames := 0
+	ops.run = func(operation string, fn func() error) error {
+		err := fn()
+		if operation == "rename" {
+			renames++
+			if _, statErr := os.Stat(path); statErr != nil {
+				t.Fatalf("written probe file left its name during rename: %v", statErr)
+			}
+		}
+		return err
+	}
+	for i := 0; i < 3; i++ {
+		if err := probeStorageRename(path, ops); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if renames != 6 {
+		t.Fatalf("rename was not exercised on every probe: %d renames", renames)
 	}
 }
 
