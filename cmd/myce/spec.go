@@ -65,7 +65,7 @@ func foldAuthoredAdvanced(source string, s *myce.Spec) error {
 }
 
 func specCommand(args []string, out, errOut io.Writer) error {
-	const usage = "usage: myce spec check [--resolve [--files-from DIR] [--inspect-nas] [--entry NAME] [--json]] FILE|PROFILE"
+	const usage = "usage: myce spec check [--resolve [--files-from DIR] [--inspect-nas] [--entry NAME] [--platform P] [--json]] FILE|PROFILE"
 	const scope = "Checks static validity only (YAML or JSON); does not check live eligibility, admission or qualification."
 	help := func() {
 		fmt.Fprintln(errOut, usage)
@@ -88,6 +88,7 @@ func specCommand(args []string, out, errOut io.Writer) error {
 	inspectNAS := f.Bool("inspect-nas", false, "request cached worker NAS existence checks; repeat after a heartbeat for results")
 	filesFrom := f.String("files-from", "", "local folder the job's inputs are submitted from")
 	entry := f.String("entry", "", "adapter entry (default: adapter default)")
+	platform := f.String("platform", "", "narrow an adapter entry to one allowed platform (requires --resolve)")
 	asJSON := f.Bool("json", false, "structured resolve report")
 	authority := installedClientFlags(f)
 	if err := f.Parse(args[1:]); err != nil {
@@ -96,11 +97,17 @@ func specCommand(args []string, out, errOut io.Writer) error {
 		}
 		return waitError(2, err.Error())
 	}
-	if f.NArg() != 1 || !*resolve && (*entry != "" || *asJSON || *filesFrom != "" || *inspectNAS) {
+	var narrowing []string
+	f.Visit(func(v *flag.Flag) {
+		if v.Name == "platform" {
+			narrowing = []string{*platform}
+		}
+	})
+	if f.NArg() != 1 || !*resolve && (*entry != "" || len(narrowing) > 0 || *asJSON || *filesFrom != "" || *inspectNAS) {
 		return waitError(2, usage)
 	}
 	path := f.Arg(0)
-	request, findings, err := resolveInput(path, *filesFrom, *entry, *resolve)
+	request, findings, err := resolveInput(path, *filesFrom, *entry, *resolve, narrowing...)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
@@ -173,10 +180,13 @@ func placeholderRef(name string, size int64) myce.FileRef {
 
 // resolveInput reads a job spec, or for --resolve a profile or adapter entry,
 // and checks submitter-side paths; declared local shared input hashes are verified.
-func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest, submitterFindings, error) {
+func resolveInput(path, filesFrom, entry string, live bool, platform ...string) (myce.ResolveRequest, submitterFindings, error) {
 	var found submitterFindings
 	s, err := readJobSpec(path)
 	if err == nil {
+		if len(platform) > 0 {
+			return myce.ResolveRequest{}, found, errors.New("--platform requires an adapter entry")
+		}
 		if filesFrom != "" {
 			lowerInputs(&s, filesFrom, "files-from", &found)
 		} else if live && len(s.Inputs) > 0 && s.Kind == "" && s.Program == nil {
@@ -192,13 +202,16 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 	}
 	specErr := err
 	p, root, _, err := readProfile(path)
+	if err == nil && len(platform) > 0 {
+		return myce.ResolveRequest{}, found, errors.New("--platform requires an adapter entry")
+	}
 	if err != nil {
 		data, readErr := os.ReadFile(path)
 		a, adapterErr := decodeAdapter(data)
 		if readErr != nil || adapterErr != nil {
 			return myce.ResolveRequest{}, found, specErr
 		}
-		if p, _, err = adapterProfile(a, entry); err != nil {
+		if p, _, err = adapterProfile(a, entry, platform...); err != nil {
 			return myce.ResolveRequest{}, found, err
 		}
 		if root, err = os.Getwd(); err != nil {

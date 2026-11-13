@@ -87,7 +87,14 @@ The same entry, source and arguments make the same job, so rerunning after a
 lost reply adopts it and fetches again; pass a new `--key NAME` to run again on
 purpose. Arguments after `--` are appended to the command. `myce spec check
 --resolve --entry hello .mycelium/adapter.yaml` previews placement without
-submitting. Only production entries need a target list; every field is in
+submitting. To test the same entry on each platform, use `myce run --entry
+hello --platform metal --wait` (or `cuda`, `xpu`, `cpu`); preview with `myce spec
+check --resolve --entry hello --platform metal .mycelium/adapter.yaml`. The flag
+only narrows platforms the entry allows; a refusal names the allowed set.
+GPU work allows CPU only through `advanced: {allow_cpu_fallback: true}`; the
+flag does not opt in. Each explicit platform gets a different submission key
+from the unrestricted run and other platforms. `--gpu` and `--cpu` remain
+unsupported with entries. Only production entries need a target list; every field is in
 [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
 
 ## 4. Environment

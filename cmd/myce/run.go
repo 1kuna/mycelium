@@ -26,6 +26,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	token := f.String("token", "", "fleet token (prefer installed config or MYCE_TOKEN)")
 	config := f.String("config", "", "installed queue/worker config (default: installed worker, then queue)")
 	joining := f.String("joining-file", os.Getenv("MYCE_JOINING_FILE"), "private pinned joining authority")
+	entryPlatform := f.String("platform", "", "narrow an adapter entry to one allowed platform")
 	gpu := f.String("gpu", "", "required accelerator: cuda, xpu or metal (default: CPU only)")
 	cpu := f.Int("cpu", 1, "logical CPU cores to reserve")
 	mem := f.String("mem", "", "host RAM for CPU jobs; accelerator RAM with --gpu (G/GiB or M/MiB); omit to let Mycelium learn it")
@@ -81,6 +82,12 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		var unsupported string
 		f.Visit(func(v *flag.Flag) {
 			switch v.Name {
+			case "platform":
+				if *profile != "" {
+					unsupported = v.Name
+				} else {
+					overrides.Platform = entryPlatform
+				}
 			case "class":
 				overrides.Class = class
 			case "deadline":
@@ -112,10 +119,15 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		return submit(out)
 	}
 	explicitNotify, explicitHostMem := false, false
+	var explicitPlatform bool
 	f.Visit(func(v *flag.Flag) {
+		explicitPlatform = explicitPlatform || v.Name == "platform"
 		explicitNotify = explicitNotify || v.Name == "notify"
 		explicitHostMem = explicitHostMem || v.Name == "host-mem"
 	})
+	if explicitPlatform {
+		return errors.New("--platform requires an adapter entry")
+	}
 	if *key != "" || explicitNotify || len(itemInputs) > 0 {
 		return errors.New("--key, --notify and --input require --profile or an adapter entry")
 	}

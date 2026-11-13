@@ -222,7 +222,7 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 	return waitError(code, reason)
 }
 
-type profileOverrides struct{ Class, Deadline *string }
+type profileOverrides struct{ Class, Deadline, Platform *string }
 
 func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
 	p, root, data, err := readProfile(name)
