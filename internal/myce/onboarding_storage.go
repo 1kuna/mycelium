@@ -327,34 +327,13 @@ func probeNASDirectory(dir string) error {
 	return probeNASDirectoryContext(ctx, abort, dir)
 }
 func probeNASDirectoryContext(ctx context.Context, abort context.CancelCauseFunc, dir string) error {
-	f, err := onboardingFSOperation(ctx, abort, func() (*os.File, error) { return os.CreateTemp(dir, ".myce-install-probe-") }, "create")
-	if f != nil && err != nil {
-		_ = f.Close()
-	}
-	if err != nil {
-		return err
-	}
-	path := f.Name()
-	renamed := path + ".renamed"
-	// Cleanup also gets a bound. If cancellation prevents cleanup, retain the
-	// disposable probe for operator recovery rather than launching more NAS I/O.
-	defer func() {
-		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(path) }, "delete")
-		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) }, "delete")
-	}()
-	writeErr := onboardingFSError(ctx, abort, func() error { _, err := f.WriteString("myce NAS write and rename probe\n"); return err }, "write")
-	syncErr := onboardingFSError(ctx, abort, f.Sync, "fsync")
-	// Close the owned descriptor even on timeout; it remains inside the single
-	// outstanding sequence and cannot cause a second probe to be launched.
-	closeErr := onboardingFSError(ctx, abort, f.Close, "close")
-	if ctx.Err() != nil {
-		_ = f.Close()
-	}
-	if err = errors.Join(writeErr, syncErr, closeErr); err != nil {
-		return err
-	}
-	if err = onboardingFSError(ctx, abort, func() error { return os.Rename(path, renamed) }, "rename"); err != nil {
-		return err
-	}
-	return onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) }, "delete")
+	// Each operation keeps its own stall bound. The fixed per-host file is
+	// rewritten, renamed and renamed back, never deleted (#1545).
+	return probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), storageProbeOps{
+		open: func(path string) (*os.File, error) {
+			return onboardingFSOperation(ctx, abort, func() (*os.File, error) { return openStorageProbe(path) }, "create")
+		},
+		run:    func(operation string, fn func() error) error { return onboardingFSError(ctx, abort, fn, operation) },
+		report: func() {},
+	})
 }

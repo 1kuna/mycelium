@@ -206,6 +206,8 @@ type Queue struct {
 	fileCheckpoints            bool
 	submitVerificationSlot     chan struct{}
 	nasProbe                   checkpointAvailability
+	nasRecent                  recentAvailability
+	nasProbeIO                 func(root string, progress func()) bool // Test seam; checkpointAvailable by default.
 	nasProgress                checkpointIO[int64]
 	shards                     checkpointShards
 	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
@@ -544,25 +546,16 @@ func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvaila
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
 	return !needsCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
 }
-func checkpointAvailable(root string, progress func()) bool {
+
+// checkpointAvailable proves root is a directory whose fixed per-host probe
+// file can be rewritten, synced and read back (#1545).
+func checkpointAvailable(root, purpose string, progress func()) bool {
 	info, err := os.Stat(root)
 	progress()
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	f, err := os.CreateTemp(root, ".myce-probe-")
-	progress()
-	if err != nil {
-		return false
-	}
-	name := f.Name()
-	err = f.Sync()
-	progress()
-	closeErr := f.Close()
-	progress()
-	removeErr := os.Remove(name)
-	progress()
-	return err == nil && closeErr == nil && removeErr == nil
+	return probeStorageFile(storageProbePath(root, ".myce-probe-", purpose), true, plainStorageProbeOps(progress)) == nil
 }
 
 // BeginShutdown fences maintenance and in-flight mutations before API shutdown.
@@ -637,9 +630,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		if q.checkpointProbe != nil {
 			available = q.checkpointProbe()
 		} else {
-			available, _ = q.nasProbe.runProgress(q.root, func(progress func()) (bool, error) {
-				return checkpointAvailable(q.root, progress), nil
-			})
+			available = q.recentCheckpointAvailability()
 		}
 	}
 	if timing == nil {
@@ -1453,7 +1444,9 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	requestUnlock1()
 	fileAvailable := true
 	if !q.simulation && files != nil {
-		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) { return checkpointAvailable(files.root, progress), nil })
+		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) {
+			return checkpointAvailable(files.root, "queue-files", progress), nil
+		})
 	}
 	if err := q.updateRequest(requestCtx, func() error {
 		delay := q.healthStorageDelay

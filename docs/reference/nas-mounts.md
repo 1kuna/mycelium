@@ -39,13 +39,20 @@ is separate from the laptop fixture and requires an authorized test window.
 
 Workers reuse the host-hygiene mount probe for each configured checkpoint/NAS
 root. Checkpoint health reuses the existing admission access check: stat the
-root, exclusively create one empty `.myce-probe-*.tmp` file, close it and remove
-it. It does not enumerate checkpoint entries or retain a directory stream.
+root, rewrite one fixed per-host `.myce-probe-<host>-worker` file in place,
+close it and read it back. Probes never delete files: a NAS recycle bin keeps
+every SMB delete, and a create-then-remove probe filled one bin folder until
+listing it stalled the share (#1545). The queue's probe works the same way and
+reuses a completed result for one measured worker check-in period; install
+probes also rename their fixed file and back. Leftover randomly named
+`.myce-probe-*` or `.myce-install-probe-*` files from older versions can be
+removed from the live share normally. It does not enumerate checkpoint entries
+or retain a directory stream.
 NAS-root health stats the root and reads one directory entry, preserving
 read-only access checks. On macOS SMB, opening a directory stream can enumerate
 the directory even when the caller requests one entry. Avoiding that work
 removes unnecessary load and long directory-handle lifetimes; it does not make
-slow checkpoint create/remove operations fast. Their measured latency still
+slow checkpoint write operations fast. Their measured latency still
 uses the unchanged host-relative advisory thresholds. Access
 re-triggers an existing Linux systemd/autofs or macOS autofs mount through the
 OS; no separate repair daemon or privileged command is installed. Cached mount
