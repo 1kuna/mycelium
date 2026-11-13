@@ -354,9 +354,11 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, dir := range []string{"checkpoints", "models", "environments"} {
+				// Probes keep one fixed per-host file and never delete (#1545).
 				entries, err := os.ReadDir(filepath.Join(nas, "mycelium", dir))
-				if err != nil || len(entries) != 0 {
-					t.Fatal("NAS probe not removed", entries, err)
+				want := filepath.Base(storageProbePath(dir, ".myce-install-probe-", "install"))
+				if err != nil || len(entries) != 1 || entries[0].Name() != want {
+					t.Fatal("NAS probe left more than its fixed file", entries, err)
 				}
 			}
 			for _, p := range []string{c.Service, c.Config, c.GPUEnvironmentFile()} {
