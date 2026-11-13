@@ -146,7 +146,7 @@ func TestLateReturnCheckpointWinner(t *testing.T) {
 				if next == nil {
 					t.Fatal("lost job not reassigned")
 				}
-				dir := filepath.Join(q.root, next.Checkpoint, "attempt-2")
+				dir := filepath.Join(next.Checkpoint, "attempt-2")
 				if err := os.MkdirAll(dir, 0700); err != nil {
 					t.Fatal(err)
 				}

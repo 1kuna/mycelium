@@ -314,7 +314,7 @@ func TestSharedHostDoesNotRebuildMainEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	j := Job{ID: "cold-main", Attempt: 1, Spec: cpuSpec(1, 1), EnvironmentRecipes: map[string]EnvironmentRecipe{"cpu": r}}
+	j := Job{ID: "cold-main", Attempt: 1, Checkpoint: filepath.Join(t.TempDir(), "cold-main"), Spec: cpuSpec(1, 1), EnvironmentRecipes: map[string]EnvironmentRecipe{"cpu": r}}
 	if err := normalizeResources(&j.Spec); err != nil {
 		t.Fatal(err)
 	}

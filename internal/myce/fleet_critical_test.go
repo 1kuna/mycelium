@@ -53,7 +53,7 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if err != nil || !reply.Stop || reply.Kill || reply.GraceSeconds != StopGrace.Seconds() {
 				t.Fatal("checkpoint grace not delivered through the stop protocol", reply, err)
 			}
-			dir := filepath.Join(q.root, run.Checkpoint, "attempt-1")
+			dir := filepath.Join(run.Checkpoint, "attempt-1")
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				t.Fatal(err)
 			}

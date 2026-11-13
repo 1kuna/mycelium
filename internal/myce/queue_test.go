@@ -118,13 +118,15 @@ func check(t testing.TB, q *Queue, m Machine, r *Job) Reply {
 	// Resolve checkpoints as a worker does against the queue's root, so tests
 	// that hand the job to worker internals never write into the package
 	// directory. Use checkRelative to see the wire's relative paths.
-	if v.Job != nil {
-		v.Job.Checkpoint = filepath.Join(q.root, v.Job.Checkpoint)
-	}
-	for i := range v.Attempts {
-		if j := v.Attempts[i].Job; j != nil {
+	// Job and Attempts may share one record; resolve each path once.
+	resolve := func(j *Job) {
+		if j != nil && j.Checkpoint != "" && !filepath.IsAbs(j.Checkpoint) {
 			j.Checkpoint = filepath.Join(q.root, j.Checkpoint)
 		}
+	}
+	resolve(v.Job)
+	for i := range v.Attempts {
+		resolve(v.Attempts[i].Job)
 	}
 	return v
 }
