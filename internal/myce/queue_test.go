@@ -819,6 +819,9 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 		if r == nil {
 			t.Fatal("no assignment")
 		}
+		if err := q.Started(result(r, false)); err != nil {
+			t.Fatal(err)
+		}
 		advanceReportingPeer(t, q, c, observer(), LossAfter)
 		// Reusing the same worker requires cleanup of its exact lost copy.
 		released := result(r, false)
