@@ -57,6 +57,44 @@ Mutable state and WAL checkpointing can cause sustained write amplification
 without database growth. Process counters do not distinguish database, WAL,
 logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.
 
+## Slow check-in body attribution (#1568)
+
+The existing `slow_queue_mutex_hold` event logs body phase totals for check-in
+transactions, after releasing the mutex. `fn_body_ms` includes both the check-in
+callback and shared transaction work that follows it. The non-overlapping
+`body_checkin_inventory_ms`, `body_checkin_memory_ms`,
+`body_checkin_reconcile_ms`, `body_checkin_maintain_ms`,
+`body_checkin_attempts_ms`, `body_checkin_plans_ms` and
+`body_transaction_tail_ms` attribute that time. Inventory includes accepted
+health/inventory and session/release handling; reconcile includes preparation,
+checkpoint-expiry, model and environment reports. Plans includes deferred reply
+construction, including admission budgets and preparation plans.
+
+Additional `body_maintain_ms`, `body_placement_ms`, `body_environment_plan_ms`,
+`body_qualification_plan_ms`, `body_model_plan_ms`, `body_copy_plan_ms`,
+`body_health_ms`, `body_efficiency_ms` and `body_retained_index_ms` are inclusive
+helper timings: do not add them to the enclosing phases. For example, health
+detection is inside the transaction tail. All timings use an observational clock
+and never affect scheduling. The logger's existing adaptive admission remains
+unchanged; timestamps and fixed counters are collected without per-job logs.
+
+Reproduce the incident shape on a laptop with
+`go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinProductionScale$'
+-benchtime=20x -cpuprofile=checkin.cpu -mutexprofile=checkin.mutex`. The synthetic
+fixture has 10,200 retained executions and submission bindings, 75 current jobs,
+five occupied workers, a 29-piece production fan-out, 40 waiting production
+stages and 1,400 learned curves. It advances the injected decision clock through
+worker rounds, measures body/all holds and their maxima, and verifies running
+custody and dependency waits survive. CPU samples labelled `work=checkin-body`
+include post-unlock diagnostics; a CPU hotspot alone does not prove mutex hold
+time. Compare it with the measured locked phases.
+
+The multi-second live body cause remains unknown until reproduced or attributed
+by a representative live slow hold. Release acceptance must identify the
+dominating body phase, measure submission p90 from all submissions (target under
+one second), and inspect wait errors and 429/503 rates separately from normal
+long-poll duration. Synthetic laptop results alone cannot establish that proof.
+
 ## Standard systemd policy
 
 The installer accepts `--io-weight=1..10000` for Linux queue and worker services,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -60,6 +61,27 @@ func recordHealthSample(i int) HostHealthSample {
 	return HostHealthSample{HostHealthReading: HostHealthReading{Load: 3 + float64(i%5)/10, Pressure: 0.2, SwapBytes: 1 << 20, WakeSeconds: 0.001}, At: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Second), HeartbeatSeconds: 1, DiskFree: map[string]float64{"cache": 0.5, "checkpoint": 0.6, "scratch": 0.7}, Mounts: []HostMountHealth{{Root: "nas", LatencySeconds: 0.004}, {Root: "checkpoint", LatencySeconds: 0.003}, {Root: "job-files", LatencySeconds: 0.002}}}
 }
 
+// Current environment receipts identify a queue-issued preparation. Unscoped
+// invented receipts fall back to legacy target inference, which is not a
+// steady-worker report and may legitimately change the durable record.
+func offerMachineRecordEnvironments(t testing.TB, q *Queue, m *Machine) {
+	t.Helper()
+	if err := q.update(func() error {
+		if q.s.PreparationPlans == nil {
+			q.s.PreparationPlans = map[string]HostLaunch{}
+		}
+		for i := range m.EnvironmentReports {
+			r := &m.EnvironmentReports[i]
+			r.Attempt = m.ID + "-" + r.Key
+			q.s.PreparationPlans[r.Attempt] = HostLaunch{Machine: m.ID, Session: m.Session,
+				Kind: "environment", Key: r.Key, Attempt: r.Attempt}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // heartbeat changes only what a steady worker refreshes on each check-in.
 func heartbeat(m *Machine, i int) {
 	m.HostHealth.History = append(m.HostHealth.History[1:len(m.HostHealth.History):len(m.HostHealth.History)], recordHealthSample(hostHealthHistorySize+i))
@@ -109,6 +131,7 @@ func BenchmarkCheckinMachineRecord(b *testing.B) {
 	workers := make([]Machine, 5)
 	for i := range workers {
 		workers[i] = realisticMachine(fmt.Sprintf("worker-%d", i))
+		offerMachineRecordEnvironments(b, q, &workers[i])
 		if _, err := q.Checkin(Checkin{Machine: workers[i], period: time.Second}); err != nil {
 			b.Fatal(err)
 		}
@@ -204,6 +227,7 @@ func storedMachine(t *testing.T, q *Queue, id string) ([]byte, Machine) {
 func TestSteadyHeartbeatRewritesNoMachineRecord(t *testing.T) {
 	q, clock := fixture(t)
 	w := realisticMachine("worker")
+	offerMachineRecordEnvironments(t, q, &w)
 	machineCheck(t, q, w)
 	before, _ := storedMachine(t, q, "worker")
 	for i := range 10 {
@@ -228,6 +252,7 @@ func TestSteadyHeartbeatRewritesNoMachineRecord(t *testing.T) {
 func TestMachineRecordRestartRelearnsOnFirstCheckin(t *testing.T) {
 	q, clock := fixture(t)
 	w := realisticMachine("worker")
+	offerMachineRecordEnvironments(t, q, &w)
 	running := submit(t, q, cpuSpec(2, 2))
 	a := assignedJob(machineCheck(t, q, w))
 	if a == nil || a.ID != running.ID {
@@ -238,6 +263,7 @@ func TestMachineRecordRestartRelearnsOnFirstCheckin(t *testing.T) {
 	requireState(t, q, a.ID, "running")
 	q.mu.RLock()
 	seen := q.s.Machines["worker"].LastSeen
+	acceptedReports := slices.Clone(q.s.Machines["worker"].EnvironmentReports)
 	q.mu.RUnlock()
 	_, stored := storedMachine(t, q, "worker")
 	if stored.HostHealth != nil || stored.DiskVolumes != nil || !stored.LastSeen.IsZero() || stored.CapabilityProfile.Availability != nil || stored.Devices[0].Telemetry != nil {
@@ -245,6 +271,11 @@ func TestMachineRecordRestartRelearnsOnFirstCheckin(t *testing.T) {
 	}
 	if stored.Session != w.Session || len(stored.Devices) != 2 || len(stored.ExtensionReports) != 60 || len(stored.EnvironmentReports) != 25 {
 		t.Fatal("durable half not stored")
+	}
+	for _, want := range acceptedReports {
+		if !slices.ContainsFunc(stored.EnvironmentReports, func(got EnvironmentReport) bool { return reflect.DeepEqual(got, want) }) {
+			t.Fatalf("accepted environment report %q not stored", want.Key)
+		}
 	}
 
 	clock.Advance(5 * time.Second)

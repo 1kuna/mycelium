@@ -7,6 +7,7 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,11 @@ func logQueueHold(duration time.Duration, operation string, fn func() error, pha
 		p := phases[0]
 		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
 		detail += fmt.Sprintf(" persist_marshal_ms=%.3f persist_sql_ms=%.3f persist_sync_commit_ms=%.3f persist_payload_bytes=%d persist_records=%d", holdMS(p.persistence.Marshal), holdMS(p.persistence.SQL), holdMS(p.persistence.Commit), p.persistence.Bytes, p.persistence.Records)
+		if p.checkinBody {
+			for i, name := range queueBodyPhaseNames {
+				detail += fmt.Sprintf(" body_%s_ms=%.3f", name, holdMS(p.body[i]))
+			}
+		}
 	}
 	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=1%s", operation, holdMS(duration), detail)
 }
@@ -169,6 +175,19 @@ type queueHoldPhases struct {
 	started, last time.Time
 	active        int
 	phases        [5]time.Duration
+	checkinBody   bool
+	body          [len(queueBodyPhaseNames)]time.Duration
+}
+
+// Fixed names only: no request data or per-job allocations. The checkin_*
+// phases partition the callback, and transaction_tail covers shared work after
+// it returns. The remaining helper timings are inclusive children; do not sum
+// them with their parents (e.g. health is inside transaction_tail).
+var queueBodyPhaseNames = [...]string{
+	"checkin_inventory", "checkin_memory", "checkin_reconcile",
+	"checkin_maintain", "checkin_attempts", "checkin_plans", "transaction_tail",
+	"maintain", "placement", "environment_plan", "qualification_plan",
+	"model_plan", "copy_plan", "health", "efficiency", "retained_index",
 }
 
 func holdNow(clock Clock) time.Time {
@@ -248,15 +267,49 @@ func (p *queueHoldPhases) finish() time.Duration {
 	return p.last.Sub(p.started)
 }
 
-// Body timers are opt-in diagnostics. Their wall clock never controls scheduling.
+// Body timers run inside a transaction or an explicitly observed diagnostic
+// fixture. Only the existing slow-hold logger emits them, after unlocking.
+// Their wall clock never controls scheduling.
 func (q *Queue) bodyPhaseStart() time.Time {
-	if q.observeBodyPhase == nil {
+	if q.activeHold == nil && q.observeBodyPhase == nil {
 		return time.Time{}
 	}
 	return holdNow(q.holdClock)
 }
 func (q *Queue) bodyPhaseFinish(name string, started time.Time) {
 	if !started.IsZero() {
-		q.observeBodyPhase(name, holdNow(q.holdClock).Sub(started))
+		elapsed := holdNow(q.holdClock).Sub(started)
+		if p := q.activeHold; p != nil {
+			for i, candidate := range queueBodyPhaseNames {
+				if candidate == name {
+					p.body[i] += elapsed
+					p.checkinBody = p.checkinBody || strings.HasPrefix(name, "checkin_")
+					break
+				}
+			}
+		}
+		if q.observeBodyPhase != nil {
+			q.observeBodyPhase(name, elapsed)
+		}
 	}
+}
+
+type queueBodyTimer struct {
+	q       *Queue
+	name    string
+	started time.Time
+}
+
+func (q *Queue) startBodyPhase(name string) queueBodyTimer {
+	return queueBodyTimer{q: q, name: name, started: q.bodyPhaseStart()}
+}
+
+func (t *queueBodyTimer) next(name string) {
+	t.finish()
+	t.name, t.started = name, t.q.bodyPhaseStart()
+}
+
+func (t *queueBodyTimer) finish() {
+	t.q.bodyPhaseFinish(t.name, t.started)
+	t.started = time.Time{}
 }

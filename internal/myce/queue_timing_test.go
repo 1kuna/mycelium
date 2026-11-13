@@ -206,3 +206,68 @@ func seedHoldTelemetry(operation func() error) {
 	queueHoldTelemetry.Store(name, &telemetryBudget{})
 	holdTelemetry(name).admit(time.Millisecond)
 }
+
+func TestCheckinBodyPhaseTelemetry(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("private-machine", "fake")
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	decisionTime := clock.Now()
+	observational := &fakeClock{now: clock.Now()}
+	q.holdClock = observational
+	// Advance only telemetry time, leaving every scheduling decision unchanged.
+	// Inclusive helpers finish before these advances; their enclosing phases
+	// must attribute the delay, including the deferred reply plans and tail.
+	q.observeBodyPhase = func(name string, _ time.Duration) {
+		switch name {
+		case "maintain":
+			observational.Advance(300 * time.Millisecond)
+		case "environment_plan":
+			observational.Advance(200 * time.Millisecond)
+		case "health":
+			observational.Advance(100 * time.Millisecond)
+		}
+	}
+	var measured queueHoldPhases
+	q.observePersistenceHold = func(p queueHoldPhases) {
+		if p.checkinBody {
+			measured = p
+		}
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if q.activeHold != nil || !clock.Now().Equal(decisionTime) {
+		t.Fatal("telemetry leaked transaction state or changed the decision clock")
+	}
+	logs := &launchLogWriter{q: q, t: t}
+	old := log.Writer()
+	log.SetOutput(logs)
+	defer log.SetOutput(old)
+	const operation = "checkin_phase_test"
+	queueHoldTelemetry.Store(operation, &telemetryBudget{})
+	holdTelemetry(operation).admit(time.Millisecond)
+	logQueueHold(measured.last.Sub(measured.started), operation, nil, &measured)
+	line := logs.String()
+	for _, field := range []string{
+		"fn_body_ms=600.000", "body_checkin_inventory_ms=0.000",
+		"body_checkin_memory_ms=0.000", "body_checkin_reconcile_ms=0.000",
+		"body_checkin_maintain_ms=300.000", "body_checkin_attempts_ms=0.000",
+		"body_checkin_plans_ms=200.000", "body_transaction_tail_ms=100.000",
+		"body_environment_plan_ms=0.000", "body_model_plan_ms=0.000",
+		"body_copy_plan_ms=0.000", "body_health_ms=0.000",
+	} {
+		if !strings.Contains(line, field) {
+			t.Errorf("missing %s in %s", field, line)
+		}
+	}
+	if strings.Contains(line, "private-machine") {
+		t.Fatal("check-in telemetry disclosed request data", line)
+	}
+	// A failed callback still ends its last phase and clears the timer.
+	m.Session = "other-session"
+	if _, err := q.Checkin(Checkin{Machine: m}); err == nil || q.activeHold != nil {
+		t.Fatal("failed check-in lost its error or retained an active hold", err)
+	}
+}
