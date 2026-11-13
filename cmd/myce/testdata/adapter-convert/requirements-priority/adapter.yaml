@@ -1,5 +1,7 @@
 entries:
     legacy-suite:
+        advanced:
+            resumable: true
         checks:
             result:
                 - test
@@ -16,7 +18,6 @@ entries:
             memory_gb: 1
             platform: cpu
         priority: experiment
-        resumable: true
         run:
             command:
                 - python

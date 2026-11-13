@@ -130,6 +130,10 @@ func decodeAdapter(data []byte) (projectAdapter, error) {
 		if !adapterName.MatchString(name) {
 			return a, fmt.Errorf("invalid entry name %q", name)
 		}
+		if err := foldAuthoredAdvanced("adapter entry "+name, &e.Spec); err != nil {
+			return a, fmt.Errorf("entry %s: %w", name, err)
+		}
+		a.Entries[name] = e
 		if err := validateAdapterEntry(e); err != nil {
 			return a, fmt.Errorf("entry %s: %w", name, err)
 		}

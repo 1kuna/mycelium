@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 	"mycelium/internal/myce"
@@ -38,8 +39,29 @@ func readJobSpec(path string) (myce.Spec, error) {
 	if d.Decode(&extra) != io.EOF {
 		return s, errors.New("expected one YAML job")
 	}
+	if err := foldAuthoredAdvanced(path, &s); err != nil {
+		return s, err
+	}
 	s.AuthoringOrigin = myce.OriginJobSpec
 	return s, nil
+}
+
+var advancedNoted sync.Map
+
+// foldAuthoredAdvanced applies the MY-54 advanced section to an authored spec
+// and notes deprecated top-level placement on stderr, once per source.
+// Top-level placement is accepted for one release.
+func foldAuthoredAdvanced(source string, s *myce.Spec) error {
+	deprecated, err := s.FoldAdvanced()
+	if err != nil {
+		return err
+	}
+	if len(deprecated) > 0 {
+		if _, seen := advancedNoted.LoadOrStore(source, true); !seen {
+			fmt.Fprintf(os.Stderr, "myce: %s: top-level %s is deprecated; move it under advanced: (accepted for one release, MY-54)\n", source, strings.Join(deprecated, ", "))
+		}
+	}
+	return nil
 }
 
 func specCommand(args []string, out, errOut io.Writer) error {

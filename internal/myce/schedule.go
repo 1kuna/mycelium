@@ -31,7 +31,7 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 // eligibility predicates are identical before and after it.
 func memorySizingTargetFits(j *Job, m *Machine) bool {
 	return executionTargetMatches(j.Spec, m) && deviceAllowed(j, m) &&
-		(j.Spec.Needs.cpuOnly() || m.GPU != "cpu" && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)))
+		j.Spec.platformFits(m.GPU)
 }
 
 // A nil report retains short-circuit dispatch/launch evaluation. Qualification
@@ -53,7 +53,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
 		report.check(!m.Recovering, "recovering") &&
 		report.check(deviceAllowed(j, m), "device") &&
-		report.check(j.Spec.Needs.cpuOnly() || m.GPU != "cpu", "platform") &&
+		report.check(j.Spec.Needs.cpuOnly() || m.GPU != "cpu" || j.Spec.cpuFallback(), "platform") &&
 		report.check(cpuFits(j, m), "cores") &&
 		report.check(!cancelled(j), "cancelled") &&
 		report.check(logPolicyFits(j.Spec.Logs, m), "log policy") &&
@@ -66,7 +66,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
 		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
 		report.check(!contains(j.Spec.ExcludedMachines, m.ID), "excluded_machines") &&
-		report.check(j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU), "platform") &&
+		report.check(j.Spec.platformFits(m.GPU), "platform") &&
 		report.check(environmentCanRun(j, m), "environment")
 }
 
@@ -184,7 +184,7 @@ func waitingHold(j *Job, machines map[string]*Machine, jobs map[string]*Job) *Ho
 	unknownCapacity := []string{}
 	knownCapacity := false
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) || !j.Spec.backendAllows(m.GPU) {
 			continue
 		}
 		if reason := capabilityUnavailableReason(m); reason != "" {

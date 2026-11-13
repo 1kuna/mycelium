@@ -395,6 +395,112 @@
       ],
       "type": "object"
     },
+    "Advanced": {
+      "properties": {
+        "allow_cpu_fallback": {
+          "type": "boolean"
+        },
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/DiagnosticSpec"
+        },
+        "disk": {
+          "$ref": "#/$defs/DiskNeeds"
+        },
+        "excluded_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "expected_minutes": {
+          "type": "number"
+        },
+        "give_up_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "isolation": {
+          "type": "string"
+        },
+        "keep_on_failure": {
+          "items": {
+            "$ref": "#/$defs/KeepFile"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "logs": {
+          "type": "string"
+        },
+        "output_delivery": {
+          "type": "string"
+        },
+        "portable": {
+          "type": "boolean"
+        },
+        "preemptible": {
+          "type": "boolean"
+        },
+        "quality_tolerance": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "require_target": {
+          "type": "boolean"
+        },
+        "requirement_reasons": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "resume_compatibility": {
+          "$ref": "#/$defs/ResumeCompatibility"
+        },
+        "size_hint": {
+          "$ref": "#/$defs/SizeHint"
+        },
+        "start_by": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "start_window": {
+          "type": "string"
+        },
+        "wall_time": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "AlertRecovery": {
       "properties": {
         "action": {
@@ -3007,6 +3113,11 @@
           "$ref": "#/$defs/AdmissionWaitEvidence",
           "x-contract": "diagnostic"
         },
+        "advanced": {
+          "$ref": "#/$defs/Advanced",
+          "description": "Read-only MY-54 view: the advanced settings this job changed from their defaults; absent when all keep their defaults. Never persisted. Disk, size, resume, failure-evidence and requirement-reason payloads keep their own fields.",
+          "x-contract": "diagnostic"
+        },
         "allocated_devices": {
           "items": {
             "type": "string"
@@ -3095,6 +3206,11 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "cpu_fallback_from": {
+          "$ref": "#/$defs/ResourceNeeds",
+          "description": "Authored GPU needs kept while an attempt of opted-in work (advanced.allow_cpu_fallback) runs on a CPU target; spec.needs then shows the CPU reservation. A requeue restores them.",
           "x-contract": "diagnostic"
         },
         "cpu_observation": {
@@ -5703,9 +5819,19 @@
     },
     "Spec": {
       "properties": {
+        "advanced": {
+          "$ref": "#/$defs/Advanced",
+          "description": "Authoring section (MY-54). Stored and replied specs carry these values in their flat fields for one release, so this is absent from replies; read job.advanced instead.",
+          "x-contract": "diagnostic"
+        },
         "after": {
           "$ref": "#/$defs/PieceDependency",
           "x-contract": "stable"
+        },
+        "allow_cpu_fallback": {
+          "description": "Wire form of advanced.allow_cpu_fallback. Default false: GPU work waits for a GPU target. True lets it run on a CPU target when no GPU target fits at placement time.",
+          "type": "boolean",
+          "x-contract": "diagnostic"
         },
         "allowed_machines": {
           "items": {

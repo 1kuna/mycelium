@@ -270,6 +270,9 @@ func readProfile(name string) (executionProfile, string, []byte, error) {
 	if d.Decode(&extra) != io.EOF {
 		return p, "", nil, waitError(64, "profile_invalid: expected one YAML profile")
 	}
+	if err = foldAuthoredAdvanced(path, &p.Spec); err != nil {
+		return p, "", nil, waitError(64, "profile_invalid: "+err.Error())
+	}
 	if len(p.Check) > 0 && p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" {
 		return p, "", nil, waitError(64, "profile_invalid: declare run.command and project; check, class, needs and targets are optional")
 	}

@@ -280,6 +280,10 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if j.State != "queued" || len(m.groupMembers) > 0 && !q.admissionPass(j, m, q.mayNeedCards(j, m), predicateCardGroup) || !q.placementAllowed(j, m) || !q.admissionPass(j, m, q.checkpointReady(j, m), predicateCheckpoint) {
 		return nil
 	}
+	// Opted-in GPU work takes a CPU target only while no GPU target fits it (MY-54).
+	if m.GPU == "cpu" && j.Spec.cpuFallback() && !q.admissionPass(j, m, !q.gpuTargetFits(j, scans...), predicateCPUFallback) {
+		return nil
+	}
 	variants := extensionJobs(j, m, true)
 	q.admissionPass(j, m, len(variants) > 0, predicateExtensionCandidates)
 	for _, candidate := range variants {
