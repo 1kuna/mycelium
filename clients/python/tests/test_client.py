@@ -591,7 +591,10 @@ class DevTests(unittest.TestCase):
         # variables name a reachable agent, must deliver no wake to that agent.
         home = self.root / "wake-home"
         project = home / "project"
-        project.mkdir(parents=True)
+        # Only a profile or adapter submit arms the default wake (cmd/myce/run.go).
+        for name in (".mycelium/profiles/quickstart.yaml", "examples/quickstart-input/hello.txt"):
+            (project / name).parent.mkdir(parents=True, exist_ok=True)
+            (project / name).write_bytes((ROOT / name).read_bytes())
         woken = home / "woken"
         cli = home / "fake-harness-cli"
         cli.write_text(f"#!/bin/sh\necho \"$@\" >> '{woken}'\ncat >> '{woken}'\n")
@@ -599,25 +602,25 @@ class DevTests(unittest.TestCase):
         parent = {**os.environ, "HOME": str(home), "XDG_CACHE_HOME": str(home / ".cache"),
                   "MYCE_TOKEN": "dev-token", "PYTHONPATH": str(ROOT / "clients/python/src")}
         parent.update({"T3CODE_THREAD_ID": "fixture-thread", "T3CODE_CLI_PATH": str(cli)})
-        def submit(strip):
+        def submit(strip, key):
             child = ("import subprocess, sys\n"
                      f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
                      + ("import test_client\n" if strip else "") +
                      f"r = subprocess.run([{str(self.root / 'myce')!r}, 'run', '--queue', {self.client.url!r}, "
-                     "'--detach', '--', 'sh', '-c', 'true'], capture_output=True, text=True, timeout=60)\n"
+                     "'--profile', '.mycelium/profiles/quickstart.yaml', '--key', " + repr(key) + "], capture_output=True, text=True, timeout=60)\n"
                      "sys.stdout.write(r.stdout + r.stderr)\nsys.exit(r.returncode)\n")
             result = subprocess.run([sys.executable, "-c", child], cwd=project, env=parent,
                                     capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            job = re.search(r"[0-9a-f]{32}", result.stdout)[0]
+            job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
             self.assertEqual(self.client.wait(job, timeout=30)["state"], "succeeded")
             self.wait_observers(home)
 
-        submit(strip=True)
+        submit(strip=True, key="wake-stripped")
         self.assertFalse(woken.exists(), woken.read_text() if woken.exists() else "")
         # Control: without this module's cleanup the same run does wake the
         # fake harness, so the assertion above can fail.
-        submit(strip=False)
+        submit(strip=False, key="wake-control")
         self.assertIn("thread send fixture-thread -", woken.read_text())
 
     def test_run_entry_matches_cli_trip(self):
