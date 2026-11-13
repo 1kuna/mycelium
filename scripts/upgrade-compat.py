@@ -18,12 +18,15 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.13 must interoperate with the live r6.12 release.
+# MY-42: candidate r6.15 must interoperate with the live r6.14.1 release.
 # Advance this pair together at each release.
-PREVIOUS = "5066f17f8a49f933180e3eb9b815ceab29635892"
-OLD_VERSION = "v3.1.0-rc.20261112.s076r6.12"
-VERSION = "v3.1.0-rc.20261113.s076r6.13"
+PREVIOUS = "58abfa91698b50cdfd249340a8a9fbe8607ec98f"
+OLD_VERSION = "v3.1.0-rc.20261112.s076r6.14.1"
+VERSION = "v3.1.0-rc.20261113.s076r6.15"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
+# Top-level source the build needs; `skills` is the consumer skill embedded in
+# cmd/myce since #1474. Releases without it simply have no such directory.
+SOURCE = ("go.mod", "go.sum", "internal", "cmd", "skills")
 
 
 def command(args, *, cwd=REPO, timeout=180, env=None):
@@ -81,7 +84,7 @@ def extract(source, destination):
         destination = Path(destination)
         for member in tar:
             parts = Path(member.name).parts
-            if not parts or parts[0] not in ("go.mod", "go.sum", "internal", "cmd"):
+            if not parts or parts[0] not in SOURCE:
                 continue
             if member.name.startswith("/") or ".." in parts or not (member.isfile() or member.isdir()):
                 raise RuntimeError("unsafe source archive member")
@@ -112,8 +115,10 @@ def binaries(source, identity, version, scratch):
         extract(source, tree)
     else:
         tree.mkdir()
-        for name in ("go.mod", "go.sum", "internal", "cmd"):
+        for name in SOURCE:
             src = Path(source) / name
+            if not src.exists():
+                continue
             if src.is_dir():
                 shutil.copytree(src, tree / name)
             else:
@@ -137,7 +142,7 @@ def candidate_identity(source):
     # have no Git metadata. Build constraints are handled by Go, never rewritten.
     digest = hashlib.sha256()
     files = [source / "go.mod", source / "go.sum"]
-    for name in ("internal", "cmd"):
+    for name in ("internal", "cmd", "skills"):
         files.extend(sorted((source / name).rglob("*")))
     for path in files:
         if path.is_file() and not path.name.endswith("_test.go"):
