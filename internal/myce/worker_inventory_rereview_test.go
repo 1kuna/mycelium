@@ -42,12 +42,16 @@ func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
 			spec.Run.Command = []string{"sh", "-c", "exit 0"}
 			submitted := submit(t, q, spec)
 			devices := inventoryReviewDevices()[:1]
+			// The queue reply carries a relative checkpoint; the worker loop
+			// joins its root. Both attempts share one directory, as there.
+			checkpoint := filepath.Join(t.TempDir(), "job")
 			for attempt := 1; attempt <= 2; attempt++ {
 				reply := check(t, q, w.Machine, nil)
 				if reply.Job == nil {
 					t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
 				}
 				j := *reply.Job
+				j.Checkpoint = checkpoint
 				store, err := newAttemptStore(root, j)
 				if err != nil {
 					t.Fatal(err)
@@ -287,12 +291,16 @@ func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
 			spec.Needs.HostMemoryGB = 2
 			submitted := submit(t, q, spec)
 			devices := inventoryReviewDevices()[:1]
+			// The queue reply carries a relative checkpoint; the worker loop
+			// joins its root. Both attempts share one directory, as there.
+			checkpoint := filepath.Join(t.TempDir(), "job")
 			for attempt := 1; attempt <= 2; attempt++ {
 				reply := check(t, q, w.Machine, nil)
 				if reply.Job == nil {
 					t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
 				}
 				j := *reply.Job
+				j.Checkpoint = checkpoint
 				store, err := newAttemptStore(root, j)
 				if err != nil {
 					t.Fatal(err)
