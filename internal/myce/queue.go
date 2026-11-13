@@ -278,6 +278,7 @@ type Queue struct {
 	observePersistenceHold  func(queueHoldPhases)
 	maintenance             *queueMaintenance
 	observeBodyPhase        func(string, time.Duration) // Optional diagnostic observer; never changes decisions.
+	activeHold              *queueHoldPhases            // Accessed only while holding q.mu.
 	observeUpdatePhases     func([5]time.Duration)      // Optional transaction phase observer.
 	observeSubmissionAdvice func(submissionAdviceTiming)
 	observeMemoryHistory    func(int, bool) // Test observer: jobs visited by a full evidence scan.
@@ -648,6 +649,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		timing.lock(writer)
 	}
 	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
+	q.activeHold = &hold
 	q.nasAvailable = available
 	defer func() {
 		duration := hold.finish()
@@ -659,6 +661,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		}
 		hold.persistence = timing.persistence
 		timing.observe(q.observeUpdate)
+		q.activeHold = nil
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 		if waitCapture != nil {
@@ -719,6 +722,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	q.accountUsage(q.clock.Now())
 	hold.next(holdBody)
 	err = fn()
+	tail := q.startBodyPhase("transaction_tail")
 	// A request that loses the shutdown race retries from durable worker state.
 	// Do not publish its speculative loss/maintenance decisions after the fence.
 	if err == nil && q.stopping.Load() {
@@ -739,6 +743,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		q.closeChangedAdmissionWaits()
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
+		tail.finish()
 		hold.next(holdPersist)
 		if audit != nil {
 			err = audit()
@@ -746,6 +751,9 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		if err == nil {
 			err = q.persistUsage(timing)
 		}
+	}
+	if err != nil {
+		tail.finish()
 	}
 	if err == nil {
 		q.fileReferenceRevision++
@@ -1560,6 +1568,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	identities := q.snapshotCheckinMemoryIdentities(ctx)
 	var releaseStops []AttemptDirective
 	err = q.updateRequest(ctx, func() error {
+		body := q.startBodyPhase("checkin_inventory")
+		defer body.finish()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1753,6 +1763,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			q.discontinueContactCadence(m.ID)
 		}
 		q.acceptContactPeriod(&m, c.period, c.contact)
+		body.next("checkin_memory")
 		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		if q.hostMemorySamples == nil {
@@ -1762,6 +1773,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.hostMemorySamples[m.ID] = updateHostMemorySamples(reports, memoryReceivedAt, q.hostMemorySamples[m.ID])
 		q.retainHostMemoryCharges(m.ID, q.clock.Now())
 		q.refreshHostMemory()
+		body.next("checkin_reconcile")
 		q.reconcilePreparationPlans(c)
 		q.checkinCheckpointExpiry(c, &m, &reply)
 		q.s.LastWorkerContact = m.LastSeen
@@ -1779,10 +1791,13 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.withdrawUnavailable(&m)
 		q.acceptFaultEvidence(&m)
 		q.quarantineDeviceAttempts(&m)
+		body.next("checkin_maintain")
 		q.maintain()
+		body.next("checkin_attempts")
 		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))
 		q.guardSharedGPU(&m)
 		defer func() {
+			body.next("checkin_plans")
 			budget, _ := q.measuredHostMemoryBudget(&m, *q.s.HostMaintenance[hostID(&m)].MemoryBudget)
 			reply.HostMemoryBudget = &budget
 			m.AdmissionReason = q.machineLimitReason(&m)
