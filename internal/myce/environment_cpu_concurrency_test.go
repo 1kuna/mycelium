@@ -195,3 +195,83 @@ func TestEnvironmentAndCopyCoreAccountingIsOrderIndependent(t *testing.T) {
 		}
 	}
 }
+
+// #1486: a GPU job whose environment is missing on a busy GPU host. The build
+// was offered only to the job admissible right now, and neither queue nor worker
+// let a device-target build run beside a device command, so the environment was
+// never prepared there and the job could never become admissible: CUDA-only
+// work waited on "no builder has started" while any-accelerator work ran
+// elsewhere. A plain build now starts beside the device command, for the job
+// that cannot fit yet, through the real worker runtime.
+func TestEnvironmentPreparesAheadBesideRunningDeviceCommand(t *testing.T) {
+	q, _ := fixture(t)
+	clock := &devClock{}
+	q.clock = clock
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	longSpec := spec("experiment")
+	longSpec.Needs.MemoryGB, longSpec.Needs.Platform = 6, Platform{Required: []string{"fake"}}
+	commandRelease := filepath.Join(t.TempDir(), "command-release")
+	longSpec.Run.Command = []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep .05; done`, "fixture", commandRelease}
+	long := submit(t, q, longSpec)
+	r, err := snapshotEnvironment(EnvironmentRecipe{Build: []string{"prepare-fixture"}}, "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"new": {"fake": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: newTestStateRoot(t), Client: Client{URL: testServerForEnvironments(t, q), Token: "test"}, Machine: m, Clock: clock, Interval: time.Millisecond,
+		CPUIsolationProbe: func(context.Context) error { return nil },
+		InventoryProbe:    func(context.Context) ([]MachineDevice, error) { return slices.Clone(m.Devices), nil },
+		environmentRun: func(ctx context.Context, _ []string, _ string, _ []string, _, _ io.Writer) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		_ = os.WriteFile(commandRelease, nil, 0600)
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	await(t, func() bool {
+		j, _ := q.jobSnapshot(long.ID)
+		return j.StartedAt != nil
+	})
+	waitingSpec := spec("experiment")
+	waitingSpec.Needs.MemoryGB, waitingSpec.Needs.Platform = 6, Platform{Required: []string{"fake"}}
+	waitingSpec.Environment.Name = "new"
+	waiting := submit(t, q, waitingSpec)
+	select {
+	case <-started:
+	case <-time.After(testWaitTimeout):
+		j, _ := q.jobSnapshot(waiting.ID)
+		t.Fatalf("no build started for the GPU job while the card was busy: %q", j.Reason)
+	}
+	await(t, func() bool {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for _, p := range q.s.PreparationPlans {
+			if p.Demand == waiting.ID && p.Started {
+				return true
+			}
+		}
+		return false
+	})
+	if got, _ := q.jobSnapshot(long.ID); got.State != "running" || got.Attempt != 1 {
+		t.Fatalf("preparation disturbed the device command: %+v", got)
+	}
+	if got, _ := q.jobSnapshot(waiting.ID); got.State != "queued" || got.Attempt != 0 {
+		t.Fatalf("job started before its card was free: %+v", got)
+	}
+}
