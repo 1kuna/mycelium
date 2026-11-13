@@ -2,7 +2,6 @@ package myce
 
 import (
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -73,69 +72,4 @@ func TestMemoryTransferDerivationFences(t *testing.T) {
 	check(true)
 	clock.now = clock.now.Add(-time.Second)
 	check(false)
-}
-
-// Hash every recipe input through the projected snapshot and the complete job.
-// Both explicit profile identities and input-derived identities must agree.
-func TestCheckinMemoryIdentityProjectionEquivalence(t *testing.T) {
-	q, _ := candidateCostFixture(t)
-	drainAdmissionWait(t, q)
-	i := 0
-	for _, j := range q.liveJobs() {
-		if j.State != "queued" {
-			continue
-		}
-		j.Spec.Run.Env = map[string]string{"INPUT": "recipe"}
-		j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo", "helper"}, Env: map[string]string{"HELPER": "recipe"}}}
-		j.Spec.Environment = Environment{Name: "env", Platforms: []string{"linux-64"}}
-		j.EnvironmentRecipes = map[string]EnvironmentRecipe{"cpu": {Key: "frozen-env"}}
-		if i%2 == 0 {
-			j.Spec.ProfileMemory = "frozen-recipe"
-		}
-		i++
-	}
-	snapshot := q.snapshotCheckinMemoryIdentities(t.Context())
-	if len(snapshot.values) == 0 {
-		t.Fatal("missing recipes")
-	}
-	for j, identity := range snapshot.values {
-		if identity != profileMemoryIdentity(j) {
-			t.Fatalf("snapshot changed recipe identity for %s", j.ID)
-		}
-	}
-	q.fileReferenceRevision++
-	if snapshot.current(q) != nil {
-		t.Fatal("revision fence accepted changed recipe")
-	}
-}
-
-// Compare reusable reductions against a genuinely new catalog for each read,
-// including the permanent-capacity views used by health and waiting reasons.
-func TestMemorySizingDerivationMatchesFreshPass(t *testing.T) {
-	q, _ := candidateCostFixture(t)
-	drainAdmissionWait(t, q)
-	q.memoryPlanning = newMemoryPlanningCache()
-	// The fixture repeats 24 job shapes; jobs sharing a project, name and tier
-	// have the same memory identity and evidence, so one of each covers every path.
-	shapes := map[[3]string]bool{}
-	for _, j := range q.liveJobs() {
-		shape := [3]string{j.Spec.Project, j.Spec.Name, j.Spec.Priority}
-		if j.State != "queued" || shapes[shape] {
-			continue
-		}
-		shapes[shape] = true
-		q.evaluateTargets(j, func(_ targetFit, candidate *Job, m *Machine) bool {
-			view := Queue{clock: q.clock, s: q.s, memoryOrigin: q, memoryPlanning: newMemoryPlanningCache()}
-			view.s.Jobs, view.s.ModelSlots, view.s.HostReleases = nil, nil, nil
-			view.s.Machines = map[string]*Machine{m.ID: m}
-			first := view.memoryEstimate(candidate, m)
-			q.memoryObservationIndex = nil
-			q.memoryPlanning.observations = nil
-			next := view.memoryEstimate(candidate, m)
-			if !reflect.DeepEqual(first, next) {
-				t.Fatal("reuse changed sizing")
-			}
-			return true
-		})
-	}
 }

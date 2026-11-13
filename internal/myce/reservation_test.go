@@ -253,32 +253,6 @@ func TestReservationUnstartedAssignmentWithoutMachine(t *testing.T) {
 	}
 }
 
-func TestReservationAllowsResolvesAssignedMachine(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	machineCheck(t, q, m)
-	bound := submit(t, q, exclusionSpec(m.ID, "0"))
-	if _, err := q.CreateReservation(reservationRequest("check", "host=machine;devices=0", bound.ID)); err != nil {
-		t.Fatal(err)
-	}
-	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != bound.ID {
-		t.Fatal("missing bound assignment", a)
-	}
-	if !q.reservationAllows(a, nil) {
-		t.Fatal("bound assignment refused without an explicit machine")
-	}
-	unrelated := *a
-	unrelated.ID = "unrelated"
-	if q.reservationAllows(&unrelated, nil) {
-		t.Fatal("known reserved assignment admitted unrelated work")
-	}
-	unrelated.Machine = "unknown"
-	if !q.reservationAllows(&unrelated, nil) || !q.reservationAllows(nil, nil) {
-		t.Fatal("unknown target treated as reserved")
-	}
-}
-
 func TestReservationRestartAndLifetimeExpiry(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
 	db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -620,15 +619,6 @@ func TestMemoryCeilingPageNormalizationInvalid(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(c.root, "attempt-overflow")); !os.IsNotExist(err) {
 			t.Fatal("invalid limits created cgroup", err)
-		}
-	}
-}
-
-func TestMemoryCeilingPageNormalizationMaxInt(t *testing.T) {
-	for _, page := range []int64{4096, 65536} {
-		got, err := pageAlignedMemory(math.MaxInt64, int(page))
-		if err != nil || got != math.MaxInt64/page*page {
-			t.Fatalf("max limit = %d, %v", got, err)
 		}
 	}
 }

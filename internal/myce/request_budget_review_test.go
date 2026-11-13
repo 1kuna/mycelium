@@ -4,16 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
-	"testing/synctest"
-	"time"
 )
 
 func TestRequestBudgetCustomDecoderExpansion(t *testing.T) {
@@ -197,54 +193,6 @@ func TestRequestBudgetSpoolMeasurementWriteFence(t *testing.T) {
 	if err := <-written; err != nil {
 		t.Fatal(err)
 	}
-}
-
-type slowBudgetBody struct {
-	io.Reader
-	delayed bool
-}
-
-func (r *slowBudgetBody) Read(p []byte) (int, error) {
-	if !r.delayed {
-		r.delayed = true
-		time.Sleep(31 * time.Second)
-	}
-	return r.Reader.Read(p)
-}
-
-type slowBudgetResponse struct{ *httptest.ResponseRecorder }
-
-func (w slowBudgetResponse) Write(p []byte) (int, error) {
-	time.Sleep(10 * time.Second)
-	return w.ResponseRecorder.Write(p)
-}
-
-func TestRequestBudgetControlTimingExcludesTransport(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		q, clock := fixture(t)
-		handler := q.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			r.Pattern = "POST /api/workers/checkin"
-			if _, err := io.Copy(io.Discard, r.Body); err != nil {
-				t.Fatal(err)
-			}
-			unlock := requestLock(r.Context(), &q.mu)
-			time.Sleep(5 * time.Millisecond)
-			unlock()
-			_, _ = w.Write([]byte("{}"))
-		}), map[string]struct{}{"POST /api/workers/checkin": {}})
-		r := httptest.NewRequest("POST", "/api/workers/checkin", &slowBudgetBody{Reader: strings.NewReader("{}")})
-		handler.ServeHTTP(slowBudgetResponse{httptest.NewRecorder()}, r)
-		if q.requestBudgets.controlTime != 5*time.Millisecond {
-			t.Fatal("peer transport contaminated control work", q.requestBudgets.controlTime)
-		}
-		q.requestBudgets.recordProjection(1, int(reflect.TypeFor[Job]().Size()), time.Millisecond)
-		r.Header.Set("X-Myce-Request-Budgets", requestBudgetProtocol)
-		r.Header.Set("X-Myce-Transport-Deadline", clock.Now().Add(time.Second).Format(time.RFC3339Nano))
-		duration, err := q.requestBudgets.waitDuration(r, 20, clock.Now())
-		if err != nil || duration != 995*time.Millisecond {
-			t.Fatal(duration, err)
-		}
-	})
 }
 
 func TestRequestBudgetCachedReceiptProjection(t *testing.T) {

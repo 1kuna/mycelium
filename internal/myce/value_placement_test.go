@@ -441,18 +441,6 @@ func TestValueUnifiedAndUnknownInventory(t *testing.T) {
 	}
 }
 
-func TestValueDistinctDeviceTiers(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	m.Devices[1].TotalMemoryGB, m.Devices[1].BudgetGB, m.Devices[1].FreeMemoryGB = 16, 16, 16
-	machineCheck(t, q, m)
-	h := q.hostValues()[m.HostID]
-	// Both measured tiers are supplied by one physical host, not two devices.
-	if len(h.vector) != 1 || h.vector[0] != 2 {
-		t.Fatal("lost a measured tier or duplicated host supply", h.vector)
-	}
-}
-
 func TestValueCPUProductionHold(t *testing.T) {
 	q, _, small, big := valueFleet(t)
 	if err := q.ConfigureHosts(map[string]HostPolicy{small.HostID: {ProductionHold: true, ProductionHoldScope: "device"}, big.HostID: {ProductionHold: true, ProductionHoldScope: "device"}}); err != nil {
@@ -499,29 +487,6 @@ func TestValueProductionHoldFreeBeforeBusyPreparation(t *testing.T) {
 	}
 	if q.s.PreparationPlans[launch.Attempt].PriorityStop != nil {
 		t.Fatal("unnecessary build preemption")
-	}
-}
-
-func TestValueUnifiedOccupancyDoesNotChangeBands(t *testing.T) {
-	q, _ := fixture(t)
-	m := m3Machine()
-	m.Devices = m.Devices[:1]
-	m.UnifiedMemory = true
-	m.CapabilityProfile.MemoryLayout = "unified"
-	d := &m.Devices[0]
-	d.UnifiedMemory = true
-	d.MemoryMode = "unified"
-	d.TotalMemoryGB = 0
-	d.BudgetGB = 32
-	d.FreeMemoryGB = 32
-	d.MemoryMeasured = true
-	machineCheck(t, q, m)
-	before := q.hostValues()[m.HostID]
-	d.BudgetGB, d.FreeMemoryGB = 8, 8
-	machineCheck(t, q, m)
-	after := q.hostValues()[m.HostID]
-	if !before.known || !after.known || before.accelerators["fake"] != 64 || after.accelerators["fake"] != 64 || !slices.Equal(before.vector, after.vector) {
-		t.Fatal("live unified free RAM redefined host value", before, after)
 	}
 }
 

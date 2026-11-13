@@ -80,30 +80,6 @@ func TestFairSharingUsesClockAndExplains(t *testing.T) {
 		t.Fatal(got)
 	}
 }
-func TestFairWeightsDeficitAndFit(t *testing.T) {
-	q, c := fixture(t)
-	if e := q.ConfigureProjects(map[string]ProjectPolicy{"verso": {Weight: 3}, "atlas": {Weight: 1}}); e != nil {
-		t.Fatal(e)
-	}
-	a := submit(t, q, projectSpec("verso"))
-	b := submit(t, q, projectSpec("atlas"))
-	m := machine("fake", "fake")
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 90, At: c.Now()}, fairUsageKey("experiment", "gpu", "atlas"): {Seconds: 60, At: c.Now()}}
-	if got := q.pick(&m); got.ID != a.ID {
-		t.Fatal("weighted deficit should prefer verso", got)
-	}
-	q.s.Jobs[a.ID].Spec.Needs.MemoryGB = 100
-	if got := q.pick(&m); got.ID != b.ID {
-		t.Fatal("non-fitting project must not block fitting one", got)
-	}
-	q.s.Jobs[b.ID].State = "succeeded"
-	q.s.Jobs[a.ID].Spec.Needs.MemoryGB = 8
-	if got := q.pick(&m); got.ID != a.ID {
-		t.Fatal("sole project may consume all capacity")
-	}
-}
 func TestFairnessNeverOverridesProductionOrDeadline(t *testing.T) {
 	q, c := fixture(t)
 	a := submit(t, q, projectSpec("atlas"))

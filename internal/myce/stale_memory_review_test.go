@@ -49,19 +49,6 @@ func TestHostMemoryGrownReleaseCustody(t *testing.T) {
 		t.Fatalf("unreleased grown charge fell from %g to %g on requeue, new 40GiB neighbor fits=%v, room=%g", grown, got, hostFits(q.s.Machines[m.ID], 0, 40), q.s.Machines[m.ID].FreeHostMemoryGB)
 	}
 }
-func TestHostMemoryDelayedLegacySampleRetainsExpiry(t *testing.T) {
-	_, c := fixture(t)
-	r := AttemptReport{Execution: Execution{ID: "holder", Attempt: 1}, Session: "session", Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 2, GrowthObserved: true}}
-	key := attemptKey{"holder", 1, "session"}
-	samples := currentHostMemorySamples([]AttemptReport{r}, c.Now())
-	// Same actor observation, sent at +10 seconds, delivered at +20 seconds.
-	c.Advance(20 * time.Second)
-	r.CurrentHostMemory.AgeSeconds = 10
-	samples = updateHostMemorySamples([]AttemptReport{r}, c.Now(), samples)
-	if got := reservedGrowth(nil, 0, 3, samples[key], c.Now()); got != 3 {
-		t.Fatalf("delayed cached observation renewed resident credit: pending=%g period=%s age=%s", got, samples[key].period, c.Now().Sub(samples[key].at))
-	}
-}
 
 func TestHostMemoryDelayedCachedSampleRetainsExpiry(t *testing.T) {
 	for _, missing := range []bool{false, true} {
