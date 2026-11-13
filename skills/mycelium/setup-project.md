@@ -40,8 +40,9 @@ command's success.
 
 Production entries keep explicit targets until exact target and recipe output
 parity is accepted under MY-19: native variants with recorded baselines and
-parity acceptance, or the project's own `production_parity_hosts` list, widened
-with `myce parity add` after a passing output comparison. Plain-command
+parity acceptance, or the project's own approval of a kind of machine (for
+example `cuda`, `mac` or `linux/amd64/cuda`, never a host; MY-51), added with
+`myce parity add` after a passing output comparison on a machine of that kind. Plain-command
 admission, preparation and exit-zero smoke checks do not establish parity.
 
 ## Install the agent skill

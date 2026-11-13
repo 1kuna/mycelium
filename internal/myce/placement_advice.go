@@ -11,7 +11,7 @@ func PlacementAdvisories(s Spec, reasons map[string]string, variants ...Extensio
 	}
 	var advice []string
 	if len(s.AllowedMachines) > 0 && strings.TrimSpace(reasons["host"]) == "" {
-		advice = append(advice, "Host pin has no declared host requirement. If the software only needs a platform, accelerator, memory or environment, omit allowed_machines and declare needs, compatible targets and environment coverage; Mycelium chooses the host, even if only one host currently fits. Retain a pin for an explicit owner restriction, specific physical hardware or hardware qualification. The project's production_parity_hosts list is already enforced and needs no matching job pin.")
+		advice = append(advice, "Host pin has no declared host requirement. If the software only needs a platform, accelerator, memory or environment, omit allowed_machines and declare needs, compatible targets and environment coverage; Mycelium chooses the host, even if only one host currently fits. Retain a pin for an explicit owner restriction, specific physical hardware or hardware qualification. The project's machine-kind production approval is already enforced and needs no matching job pin.")
 	}
 	devicePinned := s.Needs.GPU != nil && len(s.Needs.GPU.Devices) > 0
 	for _, v := range variants {

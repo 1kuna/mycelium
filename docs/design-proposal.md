@@ -2052,8 +2052,9 @@ New multi-variant registrations carry server-owned registration metadata
 requiring measured MY-19 parity or explicit approval before production
 placement. Native checks and experiments remain admissible to obtain evidence.
 After comparing outputs to the reference within the project's accuracy
-criteria, the project adds the candidate physical host to its own project/work
-`production_parity_hosts` list with that comparison as evidence. A native
+criteria on a machine of the candidate's kind, the project approves that kind
+of machine (OS, architecture, accelerator platform; never a host, MY-51) for
+its own project/work with that comparison as evidence. A native
 baseline proves execution, not cross-variant parity. Historical registrations,
 identical replays and their frozen accepted jobs retain their admission
 contract. Each variant may publish `quality[WORK][METRIC]` with a frozen
@@ -2071,12 +2072,12 @@ persists a positive-parity requirement across later candidate changes and
 restart, so one measured digest cannot authorize an unmeasured alternative.
 Evidence is immutable recipe metadata, not an evaluation runner or native
 qualification. The hold and owner action appear in eligibility/status. Approval
-is eligibility, not a job host pin. When the project's list contains an exact
-work entry, its `production_parity_hosts` list constrains every production
+is eligibility, not a job host pin. When the project's approvals contain an
+exact work entry, its approved machine kinds constrain every production
 assignment and retarget, including historical registrations and measured
-variants. Measurements cannot authorize an unlisted host; the project must
-explicitly add it with passing comparison evidence. An empty list admits no
-host for that production work. Checks and experiments remain available for
+variants; every host of an approved kind is admitted. Measurements cannot
+authorize an unapproved kind; the project must approve it with passing
+comparison evidence. An empty list admits no machine for that production work. Checks and experiments remain available for
 gathering evidence.
 
 Host-pin adoption is measured read-only over retained jobs submitted in an

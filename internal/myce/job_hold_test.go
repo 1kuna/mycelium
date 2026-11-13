@@ -112,7 +112,7 @@ func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 			if unique != (restriction != "authored") {
 				t.Fatal("confused authored pin with observed coverage", got.Hold)
 			}
-			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "list approves 1 physical hosts") {
+			if restriction == "parity" && !strings.Contains(got.Hold.Detail, "approves these machine kinds for this work's production: "+targetLabel(machineTarget(&a))+";") {
 				t.Fatal("project's parity restriction not explained", got.Hold)
 			}
 			after := storedTestJob(t, q, j.ID)

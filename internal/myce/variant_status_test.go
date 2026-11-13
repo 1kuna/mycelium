@@ -151,7 +151,7 @@ func TestVariantStatusParityApproval(t *testing.T) {
 		t.Fatal("parity hold unexplained", got, err)
 	}
 	for _, r := range got.VariantEligibility {
-		if r.Variant == r.Target && (!r.Qualified || r.Eligible || len(r.Reasons) != 1 || !strings.Contains(r.Reasons[0], "production_parity_hosts")) {
+		if r.Variant == r.Target && (!r.Qualified || r.Eligible || len(r.Reasons) != 1 || !strings.Contains(r.Reasons[0], "myce parity add")) {
 			t.Fatal("parity-only blocker not explicit", r)
 		}
 	}

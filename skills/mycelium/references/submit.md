@@ -312,10 +312,13 @@ of accepted or unconfirmed submissions. If a consumer put a host list in its key
 or environment identity, removing it needs a deliberate migration of future
 operations; rewriting an accepted operation can duplicate work.
 
-A configured project `production_parity_hosts` list restricts every production
-placement, including pieces and recovery, without a matching job pin. An empty
-list holds production; only the owner can widen it after output comparison.
-Checks and experiments can collect that evidence.
+A project's production approval names kinds of machine (OS, architecture,
+accelerator platform), never hosts (MY-51). It restricts every production
+placement, including pieces and recovery, to hosts of an approved kind, without
+a matching job pin; every host of that kind qualifies. An empty list holds
+production; the project approves another kind with `myce parity add` after an
+output comparison on a machine of that kind. Checks and experiments can collect
+that evidence.
 
 For throughput comparisons, declare the implementations and a comparable
 workload identity so Mycelium learns placement from accepted measurements. Use

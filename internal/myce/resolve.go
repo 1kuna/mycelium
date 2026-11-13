@@ -204,7 +204,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 			}
 		}
 		if len(extra) > 0 {
-			r.Findings = append(r.Findings, ResolveFinding{Field: "allowed_machines", Side: "submitter", Problem: fmt.Sprintf("host pin limits this job to %d eligible target(s); without it %s could also run it", eligible, strings.Join(extra, ", ")), Fix: "If the pin exists only because the data is on that host, drop allowed_machines. " + StagingFix + " Keep the pin, with requirement_reasons.host, for an explicit owner restriction, specific physical hardware or qualification. The project's production_parity_hosts list needs no matching job pin."})
+			r.Findings = append(r.Findings, ResolveFinding{Field: "allowed_machines", Side: "submitter", Problem: fmt.Sprintf("host pin limits this job to %d eligible target(s); without it %s could also run it", eligible, strings.Join(extra, ", ")), Fix: "If the pin exists only because the data is on that host, drop allowed_machines. " + StagingFix + " Keep the pin, with requirement_reasons.host, for an explicit owner restriction, specific physical hardware or qualification. The project's machine-kind production approval needs no matching job pin."})
 		}
 	}
 	if eligible == 0 && len(r.Targets) > 0 {
