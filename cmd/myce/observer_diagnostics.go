@@ -103,6 +103,42 @@ func newObserverDiagnostics(root string, clock myce.Clock) *observerDiagnostics 
 	return &observerDiagnostics{root: root, clock: clock, log: observerLogWriter{root: root}, state: observerDiagnostic{PID: os.Getpid(), Version: myce.BuildVersion, Commit: myce.BuildCommit, StartedAt: clock.Now()}}
 }
 
+// observerErrorCause refines the shared client cause for this local log only.
+// A replacement observer once failed every read for eight hours as plain
+// io_error, while the queue logged none of those requests (#919). Unreachable
+// routes, local-network denial and TLS failures need distinct names to be
+// attributed. A remaining unknown keeps the Go error type, never its text.
+func observerErrorCause(err error) string {
+	cause := myce.ClientErrorCause(err)
+	if cause != "io_error" {
+		return cause
+	}
+	for _, item := range []struct {
+		err  error
+		name string
+	}{
+		{myce.ErrLocalNetworkAccess, "local_network_access"},
+		{syscall.EHOSTUNREACH, "EHOSTUNREACH"}, {syscall.ENETUNREACH, "ENETUNREACH"},
+		{syscall.EHOSTDOWN, "EHOSTDOWN"}, {syscall.ENETDOWN, "ENETDOWN"}, {syscall.ETIMEDOUT, "ETIMEDOUT"},
+	} {
+		if errors.Is(err, item.err) {
+			return item.name
+		}
+	}
+	if myce.IsTLSIdentityError(err) {
+		return "tls_identity"
+	}
+	inner := err
+	for {
+		next := errors.Unwrap(inner)
+		if next == nil {
+			break
+		}
+		inner = next
+	}
+	return fmt.Sprintf("io_error type=%T", inner)
+}
+
 func (d *observerDiagnostics) save() error {
 	return saveAtomicProfileJSON(filepath.Join(d.root, "observer.status"), d.state, false)
 }
@@ -112,7 +148,7 @@ func (d *observerDiagnostics) record(phase, job string, cause error, event bool)
 	defer d.mu.Unlock()
 	d.state.Phase, d.state.JobID, d.state.CapturedAt = phase, job, d.clock.Now()
 	if cause != nil {
-		d.state.LastError = myce.ClientErrorCause(cause)
+		d.state.LastError = observerErrorCause(cause)
 		d.state.LastErrorAt = d.clock.Now()
 	}
 	if err := d.save(); err != nil {
@@ -193,7 +229,7 @@ func (r *observerReadTrace) phase(phase, job string, cause error) {
 	d.state.Readers[r.id] = entry
 	d.state.CapturedAt = d.clock.Now()
 	if cause != nil && !errors.Is(cause, context.Canceled) {
-		d.state.LastError = myce.ClientErrorCause(cause)
+		d.state.LastError = observerErrorCause(cause)
 		d.state.LastErrorAt = d.clock.Now()
 		_ = d.log.event(struct {
 			At    time.Time `json:"at"`

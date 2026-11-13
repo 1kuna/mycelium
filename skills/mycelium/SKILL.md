@@ -250,11 +250,14 @@ can't submit ahead.
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
-- **Long waits:** one foreground `myce wait JOB_A JOB_B` covers up to 256 jobs,
-  and a timeout leaves them running. `queue_stalled` means the queue stopped
-  making progress: read status once, then repeat the same command
-  ([wait and status](references/wait-and-status.md)). For a wake while you're
-  away, bind a notifier ([T3 binding](t3-binding.md)).
+- **Long waits:** submit without `--wait` and you are woken once when the job
+  finishes. From a shell whose harness exports a wake channel (T3 today), that
+  needs no setup ([T3 binding](t3-binding.md)). Otherwise `myce run` prints a
+  `wake:` line: run that one `myce wait JOB_ID` as a background task, and its
+  exit wakes you. Never loop short `--timeout` waits. One `myce wait JOB_A JOB_B`
+  covers up to 256 jobs, and a timeout leaves them running. `queue_stalled`
+  means the queue stopped making progress: read status once, then repeat the
+  same command ([wait and status](references/wait-and-status.md)).
 - **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
   its resources are released (75 while release is pending); `command_started:
   false` means no command began. `myce pause JOB_ID --reason TEXT` holds your

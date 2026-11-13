@@ -710,7 +710,14 @@ recipe, with its `bin` first on PATH. Recipes never substitute CPU/GPU implicitl
 
 ## Completion notification
 
-Set `MYCE_NOTIFY` or pass `--notify /path/to/executable`. This is one local
+By default, a `myce run` that doesn't wait wakes its submitter once when the job
+finishes. Mycelium delivers through the submitting harness's wake channel when
+the shell exports one (T3: `t3 thread send`), with no setup. Otherwise
+`myce run` prints a `wake:` line naming the single background `myce wait JOB_ID`
+to hold. `--notify=` opts out, and a foreground `--wait` adds no wake.
+
+To route the wake elsewhere, set `MYCE_NOTIFY` or pass
+`--notify /path/to/executable`. This is one local
 executable, not shell text. It must:
 
 1. Exit nonzero from `--check` when its receiver/configuration is missing.

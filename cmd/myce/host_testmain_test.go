@@ -30,6 +30,14 @@ func cliTestMain(m *testing.M) int {
 	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
 		panic(err)
 	}
+	// Test submits must never wake the agent that runs this suite.
+	for _, wake := range harnessWakes {
+		for _, key := range wake.env {
+			if err := os.Unsetenv(key); err != nil {
+				panic(err)
+			}
+		}
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
 			return 125
