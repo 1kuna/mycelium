@@ -498,7 +498,29 @@ is one build per hash per local cache at a time, including across processes.
 Published cache entries use least-recently-used eviction. A shared use lease
 protects builds and running jobs against eviction.
 
-A failed builder fails affected waiting jobs with a clear reason. Its full log
+From r6.16, a non-transient build failure excludes only that worker, target and
+recipe hash. The same job stays queued and runs on another compatible worker.
+When every freshly observed compatible worker has failed, status reports
+`no_buildable_worker`; unknown/offline capacity is not a proven failure. The job
+stays queued until repaired, cancelled, or an existing `give_up_at`/production
+start deadline expires (`deadline` remains an ordering hint).
+
+`myce status --sections machines` shows each failed hash, worker, exact
+OS/architecture/platform target, failure and `log_reference` (`myce logs ID`).
+Exclusions survive queue and worker process restarts and omitted reports.
+Changed immutable recipe bytes or a changed relevant host/toolchain fingerprint
+permit another build. After repairing a worker, explicitly request a fresh build:
+
+```sh
+myce env retry WORKER HASH OS ARCH PLATFORM
+```
+
+The retry is scoped to that worker and target, retains the queued job/key, and
+never resets native qualification. Old attempt receipts cannot undo it. Transient
+network failures and disk-headroom refusals retain their recorded retry holds;
+planned stops pause preparation and resume through normal admission.
+
+The full build log
 is uploaded in bounded, deduplicated chunks and is readable with `myce logs ID`;
 local `HASH.build.log` and worker report/upload offsets survive restart. Cache
 publication follows file sync and an atomic ready-marker rename. Job environment variables

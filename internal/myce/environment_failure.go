@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -110,12 +111,31 @@ func environmentFailureReason(r EnvironmentReport, includeLog bool) string {
 		}
 		return fmt.Sprintf("environment retry pending: %s; retry after %s", cause, when)
 	}
-	return "environment failed: " + cause + "; fix the recipe and resubmit with changed inputs"
+	return "environment failed: " + cause + "; repair this worker and explicitly retry its build, or submit changed recipe inputs"
+}
+
+func environmentFingerprint(m *Machine) string {
+	return identityHash(struct{ Host, Fingerprint string }{hostID(m), m.ExtensionFingerprint})
+}
+
+func environmentReportMatches(r EnvironmentReport, m *Machine) bool {
+	return r.Target == nil || *r.Target == machineTarget(m) && r.Fingerprint == environmentFingerprint(m)
 }
 
 func (q *Queue) acceptEnvironmentFailures(m, old *Machine) {
-	for i := range m.EnvironmentReports {
-		r := &m.EnvironmentReports[i]
+	incoming := slices.Clone(m.EnvironmentReports)
+	m.EnvironmentReports = nil
+	// Reports are a worker map, not a complete ledger. Omission and worker
+	// restarts must not erase deterministic evidence or a requested retry.
+	if old != nil {
+		for _, p := range old.EnvironmentReports {
+			if p.State == "retry" || (p.State == "failed" || p.State == "uploading") && environmentFailureKind(p) != "transient" {
+				m.EnvironmentReports = append(m.EnvironmentReports, p)
+			}
+		}
+	}
+	for _, r := range incoming {
+		r.Target, r.Fingerprint, r.LogReference = nil, "", ""
 		var previous EnvironmentReport
 		if old != nil {
 			for _, p := range old.EnvironmentReports {
@@ -125,28 +145,99 @@ func (q *Queue) acceptEnvironmentFailures(m, old *Machine) {
 				}
 			}
 		}
+		var target *Machine
+		launch, offered := q.s.PreparationPlans[r.Attempt]
+		if offered && (launch.Machine != m.ID || launch.Session != m.Session || launch.Kind != "environment" || launch.Key != r.Key) {
+			continue
+		}
+		for _, view := range q.machineTargets(m) {
+			if offered && targetDevice(view) == launch.Device || !offered && previous.Target != nil && *previous.Target == machineTarget(view) {
+				target = view
+				break
+			}
+		}
+		if target == nil {
+			// Untyped retained receipts predate target metadata. Recover their
+			// scope from frozen demand, rather than the machine's primary GPU.
+			for _, view := range q.machineTargets(m) {
+				for _, j := range q.liveJobs() {
+					if slices.Contains(environmentFailureKeys(j, view), r.Key) {
+						target = view
+						if r.LogReference == "" {
+							r.LogReference = "myce logs " + j.ID
+						}
+						break
+					}
+				}
+				if target != nil {
+					break
+				}
+			}
+			if target == nil {
+				target = m
+			}
+		}
+		// A cached completion cannot undo a retry or follow an identity change.
+		// Only a newly issued exact preparation attempt supplies new evidence.
+		if previous.Key != "" && (!environmentReportMatches(previous, target) || previous.State == "retry" || previous.Attempt != r.Attempt) && !offered {
+			continue
+		}
+		if !offered && previous.Attempt == r.Attempt && (previous.State == "ready" && r.State != "ready" || (previous.State == "failed" || previous.State == "uploading") && environmentFailureKind(previous) != "transient" && r.State != "failed" && r.State != "uploading") {
+			continue
+		}
+		t := machineTarget(target)
+		r.Target, r.Fingerprint = &t, environmentFingerprint(target)
+		if previous.LogReference != "" {
+			r.LogReference = previous.LogReference
+		}
+		if offered && launch.Demand != "" {
+			r.LogReference = "myce logs " + launch.Demand
+		}
 		r.RetryAt, r.Failures = nil, previous.Failures
 		if r.State == "ready" {
 			r.Failures = 0
 		}
-		if r.State != "failed" && r.State != "uploading" {
-			continue
+		if r.State == "failed" || r.State == "uploading" {
+			r.FailureKind = environmentFailureKind(r)
+			if r.FailureKind == "transient" {
+				if previous.Attempt == r.Attempt && previous.RetryAt != nil {
+					r.RetryAt = previous.RetryAt
+				} else {
+					r.Failures = min(r.Failures+1, 5)
+					// Existing network/disk backoff avoids retrying every heartbeat.
+					delay := min(30*time.Second*time.Duration(1<<(r.Failures-1)), 5*time.Minute)
+					at := q.clock.Now().Add(delay)
+					r.RetryAt = &at
+				}
+			}
 		}
-		r.FailureKind = environmentFailureKind(*r)
-		if r.FailureKind != "transient" {
-			continue
-		}
-		if previous.Attempt == r.Attempt && previous.RetryAt != nil {
-			r.RetryAt = previous.RetryAt
-			continue
-		}
-		r.Failures = min(r.Failures+1, 5)
-		// 30s avoids retrying every heartbeat; a five-minute ceiling keeps a
-		// recovered network or disk usable without manual cache clearing.
-		delay := min(30*time.Second*time.Duration(1<<(r.Failures-1)), 5*time.Minute)
-		at := q.clock.Now().Add(delay)
-		r.RetryAt = &at
+		m.EnvironmentReports = slices.DeleteFunc(m.EnvironmentReports, func(p EnvironmentReport) bool { return p.Key == r.Key })
+		m.EnvironmentReports = append(m.EnvironmentReports, r)
 	}
+}
+
+// RetryEnvironment clears only one worker/key/target exclusion. Retaining the
+// old attempt as a tombstone fences delayed worker receipts across restart.
+func (q *Queue) RetryEnvironment(worker, key string, target ExecutionTarget, contexts ...context.Context) error {
+	return q.updateRequest(requestContext(contexts), func() error {
+		m := q.s.Machines[worker]
+		if m == nil {
+			return errors.New("unknown environment worker")
+		}
+		for i, r := range m.EnvironmentReports {
+			if r.Key != key || r.Target == nil || *r.Target != target || (r.State != "failed" && r.State != "uploading" && r.State != "retry") {
+				continue
+			}
+			if r.State == "retry" {
+				return nil
+			}
+			m = q.touchMachine(worker)
+			m.EnvironmentReports = slices.Clone(m.EnvironmentReports)
+			m.EnvironmentReports[i].State = "retry"
+			return nil
+		}
+		return errors.New("no failed environment build for worker, key and target")
+	}, nil)
 }
 
 func (q *Queue) environmentFailureBlocked(j *Job, m *Machine) bool {
@@ -155,7 +246,7 @@ func (q *Queue) environmentFailureBlocked(j *Job, m *Machine) bool {
 	}
 	keys := environmentFailureKeys(j, m)
 	for _, r := range m.EnvironmentReports {
-		if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+		if environmentReportMatches(r, m) && slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
 			return true
 		}
 	}
@@ -187,8 +278,25 @@ func (q *Queue) environmentReportBlocked(r EnvironmentReport) bool {
 
 func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Machine) string {
 	reason := ""
-	for _, m := range machines {
+	allFailed := true
+	retryReason := ""
+	for _, id := range sortedPortabilityKeys(machines) {
+		m := machines[id]
 		if !q.placementAllowed(j, m) || !executionTargetMatches(j.Spec, m) || !environmentCanRun(j, m) || j.Spec.Needs.cpuOnly() != (m.GPU == "cpu") {
+			continue
+		}
+		if !q.inventoryFresh(q.s.Machines[m.ID]) {
+			continue
+		}
+		capacity := q.qualificationCapacity(m)
+		compatible := false
+		for _, candidate := range q.memoryCandidates(j, m) {
+			if hostFits(&capacity, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, &capacity, capacity.TotalMemoryGB) {
+				compatible = true
+				break
+			}
+		}
+		if !compatible {
 			continue
 		}
 		if !q.environmentFailureBlocked(j, m) {
@@ -196,10 +304,20 @@ func (q *Queue) environmentFailureWaitingReason(j *Job, machines map[string]*Mac
 		}
 		keys := environmentFailureKeys(j, m)
 		for _, r := range m.EnvironmentReports {
-			if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+			if environmentReportMatches(r, m) && slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+				if environmentFailureKind(r) == "transient" {
+					allFailed = false
+					retryReason = environmentFailureReason(r, j.Spec.Logs != "none")
+				}
 				reason = environmentFailureReason(r, j.Spec.Logs != "none")
 			}
 		}
+	}
+	if reason != "" && allFailed {
+		return "no-buildable-worker: every freshly observed compatible worker failed; " + reason
+	}
+	if retryReason != "" {
+		return retryReason
 	}
 	return reason
 }

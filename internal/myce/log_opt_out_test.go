@@ -386,7 +386,7 @@ func TestLogsNoneEnvironmentOutput(t *testing.T) {
 	assertNoBatchLogs(t, q, j.ID, "")
 	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "synthetic-failure-output"}}
 	check(t, q, m, nil)
-	if got := job(t, q, j.ID); got.State != "failed" || got.EnvironmentFailureLog != "" {
+	if got := job(t, q, j.ID); got.State != "queued" || got.EnvironmentFailureLog != "" {
 		t.Fatal("failure retained job output or lost lifecycle")
 	}
 	// Old persisted fallback text must not escape through Logs either.

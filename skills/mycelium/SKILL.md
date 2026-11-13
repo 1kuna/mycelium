@@ -275,6 +275,13 @@ can't submit ahead.
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
+- **Environment builds (r6.16+):** one worker's package failure excludes only
+  that worker/target/hash; keep the same queued job for another compatible worker.
+  `no_buildable_worker` means every freshly observed compatible worker failed.
+  Read `myce status --sections machines` for its hash, target, failure and log
+  reference. Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
+  or submit changed recipe inputs. Process restarts and idle polling do not
+  clear failures; transient network/disk failures and planned stops remain holds.
 - **Long waits:** submit without `--wait` and you are woken once when the job
   finishes. From a shell whose harness exports a wake channel (T3 today), that
   needs no setup ([T3 binding](t3-binding.md)). Otherwise `myce run` prints a

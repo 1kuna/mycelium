@@ -12,8 +12,8 @@ import (
 )
 
 func environmentCommand(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) == 0 || args[0] != "list" && args[0] != "get" {
-		return errors.New("usage: myce env list | get [options] NAME")
+	if len(args) == 0 || args[0] != "list" && args[0] != "get" && args[0] != "retry" {
+		return errors.New("usage: myce env list | get [options] NAME | retry [options] WORKER HASH OS ARCH PLATFORM")
 	}
 	f := flag.NewFlagSet("env "+args[0], flag.ContinueOnError)
 	config := f.String("config", "", "installed config")
@@ -24,12 +24,23 @@ func environmentCommand(ctx context.Context, args []string, out io.Writer) error
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
-	if args[0] == "list" && f.NArg() != 0 || args[0] == "get" && f.NArg() != 1 {
-		return errors.New("usage: myce env list | get [options] NAME")
+	if args[0] == "list" && f.NArg() != 0 || args[0] == "get" && f.NArg() != 1 || args[0] == "retry" && f.NArg() != 5 {
+		return errors.New("usage: myce env list | get [options] NAME | retry [options] WORKER HASH OS ARCH PLATFORM")
 	}
 	client, err := runClient(*config, *joining, *queue, *token)
 	if err != nil {
 		return err
+	}
+	if args[0] == "retry" {
+		request := struct {
+			Worker string               `json:"worker"`
+			Target myce.ExecutionTarget `json:"target"`
+		}{f.Arg(0), myce.ExecutionTarget{OS: f.Arg(2), Arch: f.Arg(3), Platform: f.Arg(4)}}
+		var reply map[string]bool
+		if err := client.Call(ctx, "POST", "/api/environments/"+url.PathEscape(f.Arg(1))+"/retry", request, &reply); err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(reply)
 	}
 	if args[0] == "get" {
 		var entry myce.EnvironmentEntry

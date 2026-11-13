@@ -86,7 +86,7 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 			key := extensionPreparationKey(*e, m)
 			failed := false
 			for _, r := range m.EnvironmentReports {
-				if r.Key == key && q.environmentReportBlocked(r) {
+				if r.Key == key && environmentReportMatches(r, m) && q.environmentReportBlocked(r) {
 					failed = true
 				}
 			}
@@ -107,7 +107,7 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 func (q *Queue) extensionPreparationOffer(e Extension, m *Machine) []EnvironmentRecipe {
 	key := extensionPreparationKey(e, m)
 	for _, r := range m.EnvironmentReports {
-		if r.Key == key && q.environmentReportBlocked(r) {
+		if r.Key == key && environmentReportMatches(r, m) && q.environmentReportBlocked(r) {
 			return nil
 		}
 	}

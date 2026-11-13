@@ -1213,7 +1213,14 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 			if r.Kind == "extension-setup" {
 				label = "extension preparation"
 			}
-			fmt.Printf("%s %s/%s: %s %s\n", label, m.ID, r.Key, r.State, r.Error)
+			fmt.Printf("%s %s/%s: %s %s", label, m.ID, r.Key, r.State, r.Error)
+			if r.Target != nil {
+				fmt.Printf(" target=%s/%s/%s", r.Target.OS, r.Target.Arch, r.Target.Platform)
+			}
+			if r.LogReference != "" {
+				fmt.Printf(" logs=%s", r.LogReference)
+			}
+			fmt.Println()
 		}
 		for _, r := range m.CopyReports {
 			fmt.Printf("copy %s/%s: %s %d/%d bytes %s\n", m.ID, r.Model, r.State, r.Bytes, r.Total, r.Error)

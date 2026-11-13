@@ -126,6 +126,9 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 		}
 		return 0
 	})
+	if wait.Kind == "no_buildable_worker" {
+		return wait
+	}
 	var environment *Hold
 	for _, t := range targets {
 		if t.fit.excluded || t.fit.ineligible > 0 && t.fit.first != "environment" {
@@ -322,7 +325,7 @@ func (q *Queue) environmentHold(j *Job, m *Machine) *Hold {
 	if j.CommandDiscovery != nil {
 		keys := environmentFailureKeys(j, m)
 		for _, r := range m.EnvironmentReports {
-			if slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
+			if environmentReportMatches(r, m) && slices.Contains(keys, r.Key) && q.environmentReportBlocked(r) {
 				key = r.Key
 				break
 			}
@@ -359,7 +362,7 @@ func (q *Queue) environmentHold(j *Job, m *Machine) *Hold {
 		}
 	}
 	for _, r := range live.EnvironmentReports {
-		if r.Key != key {
+		if r.Key != key || !environmentReportMatches(r, m) {
 			continue
 		}
 		switch r.State {
@@ -367,7 +370,7 @@ func (q *Queue) environmentHold(j *Job, m *Machine) *Hold {
 			b.retag("building", "builder", "wait for preparation to finish; inspect environment logs if progress stalls")
 			b.Detail = "builder reports " + r.State
 		case "failed", "uploading":
-			b.retag("deterministically_failed", "consumer", "fix the recipe and resubmit with changed immutable inputs")
+			b.retag("deterministically_failed", "consumer", "repair this worker and retry its build, or submit changed immutable inputs")
 			b.Detail = environmentFailureReason(r, j.Spec.Logs != "none")
 			if environmentFailureKind(r) == "transient" {
 				b.retag("waiting_for_builder", "queue", "wait for the recorded retry; ask the queue owner if infrastructure remains unavailable")

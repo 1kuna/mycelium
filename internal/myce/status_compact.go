@@ -250,7 +250,11 @@ func compactStatusMachine(m *Machine) Machine {
 	c.ModelSnapshots, c.ModelSnapshotBytes = nil, nil
 	c.ExtensionReports, c.EnvironmentReports, c.CopyReports = nil, nil, nil
 	for _, r := range m.EnvironmentReports {
-		if r.State == "building" {
+		if r.State == "failed" || r.State == "uploading" || r.State == "retry" {
+			copy := r
+			copy.Log = ""
+			c.EnvironmentReports = append(c.EnvironmentReports, copy)
+		} else if r.State == "building" {
 			c.EnvironmentReports = append(c.EnvironmentReports, EnvironmentReport{Key: r.Key, State: r.State, Attempt: r.Attempt, Kind: r.Kind})
 		}
 	}
