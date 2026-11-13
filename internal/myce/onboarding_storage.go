@@ -328,7 +328,7 @@ func probeNASDirectory(dir string) error {
 }
 func probeNASDirectoryContext(ctx context.Context, abort context.CancelCauseFunc, dir string) error {
 	// Each operation keeps its own stall bound. The fixed per-host file is
-	// rewritten, renamed and renamed back, never deleted (#1545).
+	// rewritten in place and its marker renamed and back; neither is deleted (#1545).
 	return probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), storageProbeOps{
 		open: func(path string) (*os.File, error) {
 			return onboardingFSOperation(ctx, abort, func() (*os.File, error) { return openStorageProbe(path) }, "create")

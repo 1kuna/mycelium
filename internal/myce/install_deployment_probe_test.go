@@ -17,7 +17,8 @@ func TestInstallNASProbeReusesFixedEntries(t *testing.T) {
 	}
 	for _, name := range []string{"checkpoints", "models", "environments"} {
 		got := probeEntries(t, filepath.Join(c.NAS, "mycelium", name))
-		if want := []string{filepath.Base(storageProbePath("", ".myce-install-probe-", "install"))}; !slices.Equal(got, want) {
+		base := filepath.Base(storageProbePath("", ".myce-install-probe-", "install"))
+		if want := []string{base, base + ".rename"}; !slices.Equal(got, want) {
 			t.Fatalf("%s entries after repeated install probes = %v, want %v", name, got, want)
 		}
 	}

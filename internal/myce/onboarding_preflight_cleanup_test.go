@@ -34,8 +34,8 @@ func TestStoragePreflightRemovesOnlyItsNewDirectories(t *testing.T) {
 				if mode == "probe-failure" {
 					return errors.New("injected write refusal")
 				}
-				// The real probe leaves its fixed file behind (#1545).
-				return os.WriteFile(storageProbePath(dir, ".myce-install-probe-", "install"), []byte("probe\n"), 0600)
+				// The real probe leaves its fixed file and rename marker behind (#1545).
+				return probeNASDirectory(dir)
 			}}
 			_, err = prepareOnboardingStorageFS(ctx, c, false, func(context.Context, string, ...string) ([]byte, error) {
 				return []byte("fixture " + mount + " nfs rw 0 0\n"), nil
