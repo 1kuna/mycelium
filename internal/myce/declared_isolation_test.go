@@ -129,9 +129,14 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 	previousLog := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(previousLog)
+	// The worker joins the reply's relative checkpoint onto its checkpoint
+	// root before starting; starting directly must too, or the attempt's
+	// checkpoint lands in the package directory.
+	assigned := *reply.Job
+	assigned.Checkpoint = filepath.Join(t.TempDir(), assigned.Checkpoint)
 	var p *process
 	await(t, func() bool {
-		p, err = w.start(root, *reply.Job)
+		p, err = w.start(root, assigned)
 		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
 	})
 	if err != nil {
