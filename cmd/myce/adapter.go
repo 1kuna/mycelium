@@ -216,7 +216,7 @@ func validateAdapterEntry(e adapterEntry) error {
 	}
 	return nil
 }
-func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, error) {
+func adapterProfile(a projectAdapter, name string, platform ...string) (executionProfile, []byte, error) {
 	if name == "" {
 		name = a.Default
 	}
@@ -302,12 +302,23 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if err := lowerAdapterPieces(&p, e.Pieces); err != nil {
 		return p, nil, err
 	}
+	if len(platform) > 0 {
+		if err := narrowEntryPlatform(&p, platform[0]); err != nil {
+			return p, nil, err
+		}
+	}
 	// Canonical selected source authoring is separate from its frozen bytes.
 	b, err := yaml.Marshal(struct {
 		Project string       `yaml:"project"`
 		Name    string       `yaml:"entry"`
 		Value   adapterEntry `yaml:"value"`
 	}{a.Project, name, e})
+	if err == nil && len(platform) > 0 {
+		b, err = yaml.Marshal(struct {
+			Entry    string `yaml:"entry"`
+			Platform string `yaml:"platform"`
+		}{string(b), platform[0]})
+	}
 	return p, b, err
 }
 
@@ -431,8 +442,16 @@ func runAdapter(ctx context.Context, file, entry string, args []string, inputs m
 	if err != nil {
 		return waitError(64, "adapter_invalid: "+err.Error())
 	}
-	p, selected, err := adapterProfile(a, entry)
+	var platform []string
+	if len(overrides) > 0 && overrides[0].Platform != nil {
+		platform = []string{*overrides[0].Platform}
+	}
+	p, selected, err := adapterProfile(a, entry, platform...)
 	if err != nil {
+		var platformErr *entryPlatformError
+		if errors.As(err, &platformErr) {
+			return &exitError{64, err}
+		}
 		return waitError(64, "adapter_invalid: "+err.Error())
 	}
 	if rel, e := filepath.Rel(root, abs); e == nil && profileRelative(rel) {
