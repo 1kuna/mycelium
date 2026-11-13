@@ -84,7 +84,7 @@ func TestDifferentWorkerCheckpointRoots(t *testing.T) {
 		}
 	}
 	j := submit(t, q, spec("experiment"))
-	first := check(t, q, machine("linux", "fake"), nil).Job
+	first := checkRelative(t, q, machine("linux", "fake"))
 	if filepath.IsAbs(first.Checkpoint) {
 		t.Fatal("assignment leaked queue mount path")
 	}
@@ -104,7 +104,7 @@ func TestDifferentWorkerCheckpointRoots(t *testing.T) {
 	if e = q.Complete(r); e != nil {
 		t.Fatal(e)
 	}
-	second := check(t, q, machine("mac", "fake"), nil).Job
+	second := checkRelative(t, q, machine("mac", "fake"))
 	second.Checkpoint = filepath.Join(aliases[1], second.Checkpoint)
 	dir, e = prepareCheckpoint(*second)
 	if e != nil {

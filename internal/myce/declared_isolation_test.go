@@ -133,7 +133,6 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 	// root before starting; starting directly must too, or the attempt's
 	// checkpoint lands in the package directory.
 	assigned := *reply.Job
-	assigned.Checkpoint = filepath.Join(t.TempDir(), assigned.Checkpoint)
 	var p *process
 	await(t, func() bool {
 		p, err = w.start(root, assigned)

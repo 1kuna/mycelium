@@ -139,7 +139,15 @@ func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
-	for _, want := range []string{j.ID, "still queued", "no registered implementation covers an eligible target"} {
+	// The reason depends on whether the queue's own native check is pending
+	// (#990, e74cbc53e); require the reason the queue currently reports.
+	q.mu.Lock()
+	hold := q.jobHold(q.s.Jobs[j.ID])
+	q.mu.Unlock()
+	if hold == nil || hold.Reason == "" {
+		t.Fatal("queued job has no hold reason")
+	}
+	for _, want := range []string{j.ID, "still queued", hold.Reason} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("missing %s: %v", want, err)
 		}

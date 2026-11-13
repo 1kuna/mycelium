@@ -257,7 +257,7 @@ func TestReconciliationUsesDurableGeneration(t *testing.T) {
 	check(t, q, observer(), nil)
 	n := machine("current", "fake")
 	current := check(t, q, n, nil).Job
-	dir := filepath.Join(q.root, current.Checkpoint, fmt.Sprintf("attempt-%d", current.Attempt))
+	dir := filepath.Join(current.Checkpoint, fmt.Sprintf("attempt-%d", current.Attempt))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestLegacyCachedTimestampCannotOverrideGeneration(t *testing.T) {
 	check(t, q, observer(), nil)
 	n := machine("current", "fake")
 	current := check(t, q, n, nil).Job
-	dir := filepath.Join(q.root, current.Checkpoint, fmt.Sprintf("attempt-%d", current.Attempt))
+	dir := filepath.Join(current.Checkpoint, fmt.Sprintf("attempt-%d", current.Attempt))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}

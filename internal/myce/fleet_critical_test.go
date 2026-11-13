@@ -53,7 +53,7 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if err != nil || !reply.Stop || reply.Kill || reply.GraceSeconds != StopGrace.Seconds() {
 				t.Fatal("checkpoint grace not delivered through the stop protocol", reply, err)
 			}
-			dir := filepath.Join(q.root, run.Checkpoint, "attempt-1")
+			dir := filepath.Join(run.Checkpoint, "attempt-1")
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +94,6 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if resumed == nil || resumed.ID != j.ID || resumed.Attempt != 2 || q.s.FleetUpgrade.State != "complete" {
 				t.Fatal("updated host did not resume the same job", q.fleetUpgradeStatus())
 			}
-			resumed.Checkpoint = filepath.Join(q.root, resumed.Checkpoint)
 			prepared, err := prepareCheckpoint(*resumed)
 			if err != nil {
 				t.Fatal(err)
