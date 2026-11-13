@@ -84,18 +84,12 @@ func TestHostHealthReportDeliveryAndFrozenExpiry(t *testing.T) {
 	}
 }
 
-// Independent roots preserve the production-scale cadences and allow the
-// gate to overlap their real sensor/report waits. Do not shorten freshness.
-// The one-second cadence runs inside SlowCheckins, which adds delayed
-// check-ins before the same delivery and admission checks.
-func TestDevHostHealthReportCadenceTwoSeconds(t *testing.T) {
-	testDevHostHealthReportCadence(t, 2*time.Second, false)
-}
-func TestDevHostHealthReportCadenceSlowCheckins(t *testing.T) {
-	testDevHostHealthReportCadence(t, time.Second, true)
-}
-
-func testDevHostHealthReportCadence(t *testing.T, interval time.Duration, slow bool) {
+// A real dev worker's health reports reach the queue over the real listener,
+// keep advancing for one cadence cycle, and keep the host admitting work.
+// Cadence timing and queue-delay validity are covered on a fake clock in
+// host_health_queue_delay_test.go; 100ms is the probe control floor.
+func TestDevHostHealthReportCadence(t *testing.T) {
+	const interval = 100 * time.Millisecond
 	// Exercise the actual asynchronous health lane, report preparation, HTTP
 	// check-in and launch fences. Other dev fixtures leave this sensor disabled.
 	previous := workerHostHealthSource
@@ -118,48 +112,17 @@ func testDevHostHealthReportCadence(t *testing.T, interval time.Duration, slow b
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	var first time.Time
 	probeWait(t, ctx, func() bool {
 		d.Queue.mu.Lock()
 		defer d.Queue.mu.Unlock()
 		m := d.Queue.s.Machines["fake-1"]
-		return m != nil && m.HostHealth != nil && len(m.HostHealth.History) >= 3 && hostHealthEvidenceValid(m.HostHealth, 0)
-	})
-	if slow {
-		// Force actual HTTP check-ins to wait behind the real queue
-		// mutex longer than the sensor's frozen validity. Independent
-		// health probes continue while the request is blocked.
-		for range 2 {
-			d.Queue.mu.Lock()
-			before := d.Queue.s.Machines["fake-1"]
-			accepted, sensor := before.LastSeen, before.HostHealth.History[len(before.HostHealth.History)-1].At
-			delay := before.HostHealth.Probe.freshness() + interval
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				d.Queue.mu.Unlock()
-				t.Fatal(ctx.Err())
-			}
-			reason := d.Queue.hostHygieneReason(before)
-			d.Queue.mu.Unlock()
-			if reason != "" {
-				t.Fatal("queue wait invalidated healthy dev sensor", reason)
-			}
-			probeWait(t, ctx, func() bool {
-				d.Queue.mu.Lock()
-				defer d.Queue.mu.Unlock()
-				m := d.Queue.s.Machines["fake-1"]
-				if !m.LastSeen.After(accepted) {
-					return false
-				}
-				if reason := d.Queue.hostHygieneReason(m); reason != "" {
-					t.Fatal("delayed check-in invalidated healthy dev sensor", reason)
-				}
-				return m.HostHealth.History[len(m.HostHealth.History)-1].At.After(sensor)
-			})
+		if m == nil || m.HostHealth == nil || len(m.HostHealth.History) == 0 || !hostHealthEvidenceValid(m.HostHealth, 0) {
+			return false
 		}
-	}
+		first = m.HostHealth.History[len(m.HostHealth.History)-1].At
+		return true
+	})
 	s := cpuSpec(1, 1)
 	s.Resumable = false
 	s.Run.Command = []string{"sh", "-c", "printf healthy"}
@@ -167,9 +130,6 @@ func testDevHostHealthReportCadence(t *testing.T, interval time.Duration, slow b
 	if err := d.Client().Call(ctx, "POST", "/api/jobs", s, &job); err != nil {
 		t.Fatal(err)
 	}
-	until := time.Now().Add(3 * interval)
-	completed := false
-	var first, last time.Time
 	probeWait(t, ctx, func() bool {
 		d.Queue.mu.Lock()
 		defer d.Queue.mu.Unlock()
@@ -177,18 +137,8 @@ func testDevHostHealthReportCadence(t *testing.T, interval time.Duration, slow b
 		if reason := d.Queue.hostHygieneReason(m); reason != "" {
 			t.Fatal("reporting dev worker became unhealthy", reason)
 		}
-		last = m.HostHealth.History[len(m.HostHealth.History)-1].At
-		if first.IsZero() {
-			first = last
-		}
 		j := d.Queue.s.Jobs[job.ID]
-		completed = j != nil && j.State == "succeeded" && j.Attempt == 1 && j.Losses == 0 && j.ReleaseConfirmed
-		// Three reporting intervals prove continuing sensor delivery;
-		// process launch/finalization must also finish within the outer
-		// context, rather than an unrelated three-heartbeat deadline.
-		return time.Now().After(until) && completed && last.After(first)
+		completed := j != nil && j.State == "succeeded" && j.Attempt == 1 && j.Losses == 0 && j.ReleaseConfirmed
+		return completed && m.HostHealth.History[len(m.HostHealth.History)-1].At.After(first)
 	})
-	if !completed || !last.After(first) {
-		t.Fatalf("healthy admission/completion=%v, sensor advanced=%v", completed, last.After(first))
-	}
 }
