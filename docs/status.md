@@ -2980,6 +2980,14 @@ admission, placement, authored intent or retry decisions.
 `--config`, then the installed worker, then the installed queue configuration.
 They no longer require `MYCE_TOKEN`, which consumers must not export.
 
+`myce usage --by machine` reports GPU-hours and idle hours summed over physical
+cards, followed by each card's figures. A containing multi-card target makes
+its participating cards busy; it is never an extra card. Usage JSON exposes
+these rows in `cards` (`machine`, `device`, and the summary fields). Busy
+percent divides busy card-hours by observed card-hours, excluding unknown
+outages. Historical synthetic group samples are normalized on read; retained
+minute/hour bucket boundaries remain proportional estimates.
+
 - `hosts` compares instantaneous reservations with measured Mycelium RAM and
   independent physical used/total RAM. `programs` groups reservation-time and
   measured-use integrals by host, opaque work identity and sizing basis. These

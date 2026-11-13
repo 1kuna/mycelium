@@ -13,7 +13,7 @@ import (
 
 func TestUsageOutput(t *testing.T) {
 	var b bytes.Buffer
-	r := myce.UsageReport{Projects: []myce.UsageSummary{{Name: "atlas", GPUHours: 2}}, Machines: []myce.UsageSummary{{Name: "fake", GPUHours: 2, IdleHours: 3, BusyPercent: 40}}, Preemptions: []myce.Preemption{{Project: "atlas", Job: "job", For: "production"}}, ProductionStarts: []myce.ProductionStart{{Job: "prod", Seconds: 1.2}}}
+	r := myce.UsageReport{Cards: []myce.CardUsage{{Machine: "fake", Device: "0", UsageSummary: myce.UsageSummary{GPUHours: 2, IdleHours: 3, BusyPercent: 40}}}, Projects: []myce.UsageSummary{{Name: "atlas", GPUHours: 2}}, Machines: []myce.UsageSummary{{Name: "fake", GPUHours: 2, IdleHours: 3, BusyPercent: 40}}, Preemptions: []myce.Preemption{{Project: "atlas", Job: "job", For: "production"}}, ProductionStarts: []myce.ProductionStart{{Job: "prod", Seconds: 1.2}}}
 	if e := printUsage(&b, r, "project"); e != nil {
 		t.Fatal(e)
 	}
@@ -21,6 +21,13 @@ func TestUsageOutput(t *testing.T) {
 		if !strings.Contains(b.String(), want) {
 			t.Fatal(want, b.String())
 		}
+	}
+	b.Reset()
+	if e := printUsage(&b, r, "machine"); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(b.String(), "card 0: 2.000 GPU-hours; 40.0% busy; 3.000 idle hours") {
+		t.Fatal(b.String())
 	}
 	if e := printUsage(&b, r, "bogus"); e == nil {
 		t.Fatal("invalid grouping accepted")

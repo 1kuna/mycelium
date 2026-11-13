@@ -223,3 +223,109 @@ func TestUsageAndFairnessPersistAcrossRestart(t *testing.T) {
 		t.Fatal("restart unknown time counted", r, e)
 	}
 }
+
+func TestUsagePhysicalCardsAndCombinedTarget(t *testing.T) {
+	q, c := fixture(t)
+	m := machine("dual", "fake")
+	m.Devices = fakeMachineDevices()
+	for i := range m.Devices {
+		m.Devices[i].Platform = "fake"
+	}
+	check(t, q, m, nil)
+	start := c.Now()
+	j := submit(t, q, projectSpec("atlas"))
+	job := q.s.Jobs[j.ID]
+	now := c.Now()
+	job.State, job.Machine, job.StartedAt = "running", m.ID, &now
+	job.AllocatedDevices = []string{"0"}
+	advance := func(minutes int) {
+		t.Helper()
+		for range minutes * 4 {
+			c.Advance(15 * time.Second)
+			q.s.Machines[m.ID].LastSeen = c.Now()
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	advance(2) // Half of the four-minute window uses card 0.
+	job.AllocatedDevices = []string{"0", "1"}
+	advance(1) // A quarter uses both cards.
+	job.State = "completed"
+	advance(1)
+	r, err := q.Usage(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Machines) != 1 || len(r.Cards) != 2 {
+		t.Fatalf("missing physical totals: %+v", r)
+	}
+	assertHours := func(label string, got, want float64) {
+		t.Helper()
+		if math.Abs(got-want/60) > 1e-9 {
+			t.Fatalf("%s: got %g hours, want %g", label, got, want/60)
+		}
+	}
+	assertHours("machine busy", r.Machines[0].GPUHours, 4)
+	assertHours("machine idle", r.Machines[0].IdleHours, 4)
+	assertHours("card 0 busy", r.Cards[0].GPUHours, 3)
+	assertHours("card 0 idle", r.Cards[0].IdleHours, 1)
+	assertHours("card 1 busy", r.Cards[1].GPUHours, 1)
+	assertHours("card 1 idle", r.Cards[1].IdleHours, 3)
+	if r.Machines[0].BusyPercent != 50 || r.Machines[0].GPUHours+r.Machines[0].IdleHours > 2*r.Until.Sub(r.Since).Hours()+1e-9 {
+		t.Fatalf("exceeded physical capacity: %+v", r)
+	}
+	assertHours("project busy", r.Projects[0].GPUHours, 4)
+	var groups int
+	if err := q.db.QueryRow("SELECT COUNT(*) FROM usage_samples WHERE device LIKE '%,%'").Scan(&groups); err != nil || groups != 0 {
+		t.Fatalf("synthetic groups recorded: %d, %v", groups, err)
+	}
+}
+
+func TestUsageLegacyGroupsAndModelCalls(t *testing.T) {
+	q, c := fixture(t)
+	start := c.Now().Truncate(time.Minute)
+	c.Advance(time.Minute)
+	// Historical batch rows already charged physical cards; the group batch
+	// row duplicates card 0. The group model then serves both cards for 15s.
+	for _, row := range []usageSample{
+		{Device: "0", Job: "batch", Project: "atlas", Busy: 30, Observed: 30},
+		{Device: "0", Idle: 30, Observed: 30},
+		{Device: "1", Idle: 60, Observed: 60},
+		{Device: "0,1", Job: "batch", Project: "atlas", Busy: 30, Observed: 30},
+		{Device: "0,1", Model: "model", Project: "atlas", Busy: 15, Observed: 15},
+		{Device: "0,1", Idle: 15, Observed: 15},
+	} {
+		_, err := q.db.Exec("INSERT INTO usage_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", start.Unix(), 60, "dual", row.Device, row.Project, row.Job, row.Model, row.Busy, row.Idle, row.Pinned, 0, row.Observed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := q.readUsage(q.usageReader, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Cards) != 2 || math.Abs(r.Machines[0].GPUHours-1.0/60) > 1e-9 || math.Abs(r.Machines[0].IdleHours-1.0/60) > 1e-9 || math.Abs(r.Projects[0].GPUHours-1.0/60) > 1e-9 {
+		t.Fatalf("legacy group double count: %+v", r)
+	}
+}
+
+func TestUsagePhysicalGroupModelServing(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("dual", "fake")
+	m.Devices = fakeMachineDevices()
+	q.calls = map[string]*ModelCall{"call": {ID: "call", Machine: m.ID, Device: "0,1", Project: "atlas", Model: "model"}}
+	for _, card := range q.machineTargets(&m) {
+		if card.GPU == "cpu" {
+			continue
+		}
+		var busy, idle float64
+		for _, row := range q.targetUsage(card, true) {
+			busy += row.Busy
+			idle += row.Idle
+		}
+		if busy != 1 || idle != 0 {
+			t.Fatalf("card %s group call: busy=%g idle=%g", card.Device, busy, idle)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,12 @@ type UsageSummary struct {
 	IdleHours   float64 `json:"idle_hours"`
 	PinnedHours float64 `json:"pinned_hours"`
 }
+type CardUsage struct {
+	Machine string `json:"machine"`
+	Device  string `json:"device"`
+	UsageSummary
+}
+
 type DailyUsage struct {
 	Date        string  `json:"date"`
 	Project     string  `json:"project,omitempty"`
@@ -39,6 +46,7 @@ type UsageReport struct {
 	Until            time.Time         `json:"until"`
 	Projects         []UsageSummary    `json:"projects"`
 	Machines         []UsageSummary    `json:"machines"`
+	Cards            []CardUsage       `json:"cards"`
 	Daily            []DailyUsage      `json:"daily"`
 	Preemptions      []Preemption      `json:"preemptions"`
 	ProductionStarts []ProductionStart `json:"production_starts"`
@@ -58,6 +66,15 @@ type usageSample struct {
 // Attribute simultaneous work equally: one device never contributes more than
 // one GPU-second per second. Pins reserve memory, but are idle unless serving.
 func (q *Queue) deviceUsage(m *Machine) []usageSample {
+	return q.targetUsage(m, false)
+}
+
+// Physical recording includes model reservations/calls on a containing group.
+// Planner fairness continues to consume its original target views.
+func (q *Queue) targetUsage(m *Machine, physical bool) []usageSample {
+	onDevice := func(device string) bool {
+		return device == m.Device || physical && slices.Contains(strings.Split(device, ","), m.Device)
+	}
 	rows := []usageSample{}
 	active, allocated := 0, 0
 	for _, j := range q.liveJobs() {
@@ -78,7 +95,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	}
 	seen := map[string]bool{}
 	for _, c := range q.calls {
-		if c.Machine == m.ID && (m.Devices == nil || c.Device == m.Device && m.GPU != "cpu") && c.Error == "" {
+		if c.Machine == m.ID && (m.Devices == nil || onDevice(c.Device) && m.GPU != "cpu") && c.Error == "" {
 			key := fairUsageKey(q.priorityMatch(callJob(c).Spec).Tier, c.Project, c.Model)
 			if seen[key] {
 				continue
@@ -99,7 +116,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	// A pin is a separate reservation, never added to busy/observed totals.
 	reserved := map[string]bool{}
 	for _, p := range q.s.Pins {
-		if p.Assigned == m.ID && (m.Devices == nil || p.AssignedDevice == m.Device && m.GPU != "cpu") {
+		if p.Assigned == m.ID && (m.Devices == nil || onDevice(p.AssignedDevice) && m.GPU != "cpu") {
 			if s := q.s.ModelSlots[slotKey(m.ID, p.Model, p.AssignedDevice)]; s != nil && q.slotPinned(s) {
 				model, _ := q.model(p.Model)
 				reserved[p.Model] = true
@@ -108,7 +125,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
-		if slotOnTarget(slot, m) && slot.State != "unloaded" && !reserved[slot.Model] {
+		if (slotOnTarget(slot, m) || physical && slot.Machine == m.ID && m.GPU != "cpu" && onDevice(slot.Device)) && slot.State != "unloaded" && !reserved[slot.Model] {
 			found := false
 			for _, r := range rows {
 				if r.Model == slot.Model {
@@ -155,7 +172,12 @@ func (q *Queue) accountUsage(now time.Time) {
 	if !now.After(from) {
 		return
 	}
-	for _, m := range q.plannerMachines() {
+	// Record physical cards, never synthetic placement groups.
+	var targets []*Machine
+	for _, m := range q.s.Machines {
+		targets = append(targets, q.machineTargets(m)...)
+	}
+	for _, m := range targets {
 		if m.Gone || q.unreported[m.ID] || m.MemoryError != "" {
 			continue
 		}
@@ -164,7 +186,7 @@ func (q *Queue) accountUsage(now time.Time) {
 		if !end.After(from) {
 			continue
 		}
-		rows := q.deviceUsage(m)
+		rows := q.targetUsage(m, true)
 		for start := from; start.Before(end); {
 			stop := minTime(end, start.Truncate(time.Minute).Add(time.Minute))
 			seconds := stop.Sub(start).Seconds()
@@ -301,7 +323,7 @@ func (q *Queue) usageSnapshot(since time.Time, requestContexts ...context.Contex
 
 func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Context) (UsageReport, error) {
 	now := q.clock.Now()
-	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
+	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Cards: []CardUsage{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
 	if since.After(now) {
 		return out, fmt.Errorf("since must precede current time")
 	}
@@ -315,6 +337,17 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 	days := map[string]*DailyUsage{}
 	coverage := map[string]float64{}
 	dayCoverage := map[string]float64{}
+	// Old queues also recorded synthetic group rows. Single-card batch rows
+	// already include attempts on containing groups; only group model rows
+	// need expansion. Normalize observation coverage per bucket/physical card.
+	type bucketKey struct {
+		at              int64
+		span            int
+		machine, device string
+	}
+	targets := map[bucketKey]usageSample{}
+	cards := map[string]*CardUsage{}
+	cardCoverage := map[string]float64{}
 	for rows.Next() {
 		var r usageSample
 		if e = rows.Scan(&r.At, &r.Span, &r.Machine, &r.Device, &r.Project, &r.Job, &r.Model, &r.Busy, &r.Idle, &r.Pinned, &r.Memory, &r.Observed); e != nil {
@@ -331,24 +364,22 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 		r.Idle *= factor
 		r.Pinned *= factor
 		r.Observed *= factor
-		m := machines[r.Machine]
-		if m == nil {
-			m = &UsageSummary{Name: r.Machine}
-			machines[r.Machine] = m
+		key := bucketKey{r.At, r.Span, r.Machine, r.Device}
+		target := targets[key]
+		target.Observed += r.Observed
+		// A group batch row duplicates the physical-card batch rows.
+		if !strings.Contains(r.Device, ",") || r.Job == "" {
+			target.Busy += r.Busy
+			target.Pinned += r.Pinned
+		} else {
+			r.Busy, r.Pinned = 0, 0
 		}
-		m.GPUHours += r.Busy / 3600
-		m.IdleHours += r.Idle / 3600
-		m.PinnedHours += r.Pinned / 3600
-		coverage[r.Machine] += r.Observed
+		targets[key] = target
+		// GPU-hours attribute each card used by a model group to its project.
+		r.Busy *= float64(len(strings.Split(r.Device, ",")))
+		r.Pinned *= float64(len(strings.Split(r.Device, ",")))
 		date := time.Unix(r.At, 0).UTC().Format("2006-01-02")
-		mk := date + "/machine/" + r.Machine
-		d := days[mk]
-		if d == nil {
-			d = &DailyUsage{Date: date, Machine: r.Machine}
-			days[mk] = d
-		}
-		d.GPUHours += r.Busy / 3600
-		dayCoverage[mk] += r.Observed
+		var d *DailyUsage
 		if r.Project != "" {
 			p := projects[r.Project]
 			if p == nil {
@@ -369,6 +400,64 @@ func (q *Queue) readUsage(db *sql.DB, since time.Time, contexts ...context.Conte
 	if e = rows.Err(); e != nil {
 		return out, e
 	}
+	physical := map[bucketKey]usageSample{}
+	for key, target := range targets {
+		for _, device := range strings.Split(key.device, ",") {
+			cardKey := key
+			cardKey.device = device
+			card := physical[cardKey]
+			card.Busy += target.Busy
+			card.Pinned += target.Pinned
+			card.Observed = max(card.Observed, target.Observed)
+			physical[cardKey] = card
+		}
+	}
+	for key, sample := range physical {
+		if sample.Observed == 0 && sample.Busy == 0 && sample.Pinned == 0 {
+			continue
+		} // CPU rows.
+		busy := min(sample.Busy, sample.Observed)
+		idle := max(0, sample.Observed-busy)
+		cardKey := key.machine + "/" + key.device
+		card := cards[cardKey]
+		if card == nil {
+			card = &CardUsage{Machine: key.machine, Device: key.device, UsageSummary: UsageSummary{Name: key.device}}
+			cards[cardKey] = card
+		}
+		card.GPUHours += busy / 3600
+		card.IdleHours += idle / 3600
+		card.PinnedHours += sample.Pinned / 3600
+		cardCoverage[cardKey] += sample.Observed
+		m := machines[key.machine]
+		if m == nil {
+			m = &UsageSummary{Name: key.machine}
+			machines[key.machine] = m
+		}
+		m.GPUHours += busy / 3600
+		m.IdleHours += idle / 3600
+		m.PinnedHours += sample.Pinned / 3600
+		coverage[key.machine] += sample.Observed
+		date := time.Unix(key.at, 0).UTC().Format("2006-01-02")
+		mk := date + "/machine/" + key.machine
+		d := days[mk]
+		if d == nil {
+			d = &DailyUsage{Date: date, Machine: key.machine}
+			days[mk] = d
+		}
+		d.GPUHours += busy / 3600
+		dayCoverage[mk] += sample.Observed
+	}
+	for key, card := range cards {
+		if cardCoverage[key] > 0 {
+			card.BusyPercent = card.GPUHours * 3600 / cardCoverage[key] * 100
+		}
+		out.Cards = append(out.Cards, *card)
+	}
+	sort.Slice(out.Cards, func(i, j int) bool {
+		a, b := out.Cards[i], out.Cards[j]
+		return a.Machine < b.Machine || a.Machine == b.Machine && a.Device < b.Device
+	})
+
 	for _, m := range machines {
 		if coverage[m.Name] > 0 {
 			m.BusyPercent = m.GPUHours * 3600 / coverage[m.Name] * 100
