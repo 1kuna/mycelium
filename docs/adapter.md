@@ -305,17 +305,20 @@ Exit codes with `--wait` or `--out` match the Python client's `run_entry`:
 | `0` | The job succeeded and every output was verified into `DIR` |
 | the command's own | The job failed with the command's exit code (`1`–`255`) |
 | `1` | The job failed or was cancelled without a command exit code (lost machine, signal, cancelled elsewhere) |
-| `130` | Interrupted (Ctrl-C or SIGTERM); cancellation confirmed, job will not run |
+| `126` | Detached (Ctrl-C, SIGTERM or parent exit); the job continues |
 | `64`, `65`, `69`, `74`, `75`, `78` | Submission refused, with the typed codes in [project profiles](#project-profiles); `64` also covers flag misuse |
-| `125` | The job was accepted but `myce run` could not finish the trip: waiting or transport failure, output download/verification failure, an unconfirmed cancellation, or parent exit |
+| `125` | The job was accepted but `myce run` could not finish the trip: waiting or transport failure, output download/verification failure |
 
-The stderr reason names the cause. On Ctrl-C or SIGTERM the run cancels by project and
-submission key, then repeats the idempotent cancel for up to 10 seconds until
-a running process's release is confirmed and says so (`release confirmed`, or
-`release still pending`). An unconfirmed cancellation exits `125` and prints the
-project and key to cancel through the cancellation API. Submission refusals
-print the retained receipt to stderr; stdout carries only command logs. If the
-parent process exits, the job continues and the run exits `125`. Without these
+The stderr reason names the cause. Killing a waiter never cancels the job.
+Ctrl-C, SIGTERM or parent exit detaches with code `126`, printing the job ID,
+project and submission key. Rerun the same command with the same `--key` to
+re-attach and fetch outputs; entries also retain their generated key for the
+same intent. For inline commands, supply an explicit `--key` to reuse the job
+(the default creates a fresh key per invocation). To cancel explicitly, use
+`myce cancel --wait JOB_ID` or `myce cancel --wait --project PROJECT --key KEY`.
+This deliberately reverses the interrupt-cancels contract from #1341 F.
+Submission refusals print the retained receipt to stderr; stdout carries only
+command logs. Without these
 flags, the receipt output and exit codes below are unchanged.
 
 ### Separate steps

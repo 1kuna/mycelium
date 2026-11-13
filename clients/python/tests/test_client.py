@@ -461,8 +461,11 @@ class DevTests(unittest.TestCase):
                 match = re.search(r"Mycelium dev: (http://\S+)", text)
                 if match:
                     cls.client = Client(match[1], "dev-token", poll_interval=0.05)
-                    cls.client.status()
-                    return
+                    # Listening precedes the fake worker's first check-in.
+                    # Entry resolution needs a known target even when this is
+                    # the first test selected in the class.
+                    if cls.client.status(snapshot=True)["machines"]:
+                        return
                 if cls.process.poll() is not None:
                     raise RuntimeError(text)
                 time.sleep(0.05)
@@ -625,7 +628,7 @@ class DevTests(unittest.TestCase):
 
     def test_run_entry_matches_cli_trip(self):
         # #1341: run_entry submits through myce run --entry (same source, key and
-        # receipt), then waits, downloads, verifies and cancels on Ctrl-C itself.
+        # receipt), then waits, downloads, verifies and detaches on signals.
         project = self.root / "entry-project"
         (project / "source").mkdir(parents=True)
         (project / ".mycelium").mkdir()
@@ -675,11 +678,35 @@ entries:
                                          check=False, myce=myce)
             self.assertEqual((unchecked.exit_code, unchecked.files), (7, {}))
 
-            with patch.object(client, "wait", side_effect=KeyboardInterrupt):
-                with self.assertRaises(EntryInterrupted) as interrupted:
-                    client.run_entry("sleep", out=project / "slept", root=project, key="entry-sleep", myce=myce)
-            self.assertTrue(interrupted.exception.cancelled)
-            self.assertEqual(client.wait(interrupted.exception.job_id, timeout=30)["state"], "cancelled")
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                with self.subTest(signal=signum):
+                    previous = signal.getsignal(signal.SIGTERM)
+                    def interrupted_wait(job_id, **kwargs):
+                        os.kill(os.getpid(), signum)
+                        self.fail("signal did not interrupt wait")
+                    with patch.object(client, "wait", side_effect=interrupted_wait):
+                        with self.assertRaises(EntryInterrupted) as interrupted:
+                            client.run_entry("sleep", out=project / "slept", root=project,
+                                             key=f"entry-sleep-{signum}", myce=myce)
+                    detached = interrupted.exception
+                    self.assertFalse(detached.cancelled)
+                    self.assertEqual(detached.exit_code, 126)
+                    self.assertIn(detached.job_id, str(detached))
+                    self.assertIn("same key=", str(detached))
+                    self.assertIn("myce cancel", str(detached))
+                    self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+                    job = client.get(detached.job_id)
+                    self.assertIn(job["state"], ("queued", "running"))
+                    self.assertIsNone(job.get("cancelled_at"))
+                    # A second waiter's death must also leave the same job alive.
+                    with patch.object(client, "wait", side_effect=interrupted_wait):
+                        with self.assertRaises(EntryInterrupted) as again:
+                            client.run_entry("sleep", out=project / "slept", root=project,
+                                             key=detached.key, myce=myce)
+                    self.assertEqual(again.exception.job_id, detached.job_id)
+                    self.assertNotEqual(client.get(detached.job_id)["state"], "cancelled")
+                    client.cancel(detached.job_id)
+                    self.assertEqual(client.wait(detached.job_id, timeout=30)["state"], "cancelled")
 
             with self.assertRaises(EntryPreparationError) as refused:
                 client.run_entry("absent", out=project / "x", root=project, myce=myce)

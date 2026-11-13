@@ -48,6 +48,13 @@ finish: rerun the same command to pick it back up
 ([all exit codes](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#run-wait-and-fetch-in-one-command)).
 Then check the files yourself; exit zero doesn't prove they're right.
 
+Killing a waiter never cancels its job. Ctrl-C, SIGTERM or parent exit detaches
+`myce run` with code `126` (job continues), printing the job ID and key. Re-attach
+by rerunning the same command with the same `--key`; entries retain their generated
+key when intent is unchanged. Inline commands need an explicit `--key` to re-attach
+by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
+
+
 ## 3. A reusable entry
 
 To send your project's code, its inputs and environment, give the work an entry.
@@ -316,7 +323,9 @@ assert Path("accepted/result.txt").read_bytes() == b"mycelium-ease-audit-ok\n"
 ```
 
 `run_entry` is `myce run --entry ... --wait --out` (same key, same job) and
-raises `EntryFailedError` on failure. For specs built in code, use
+raises `EntryFailedError` on failure. Ctrl-C or SIGTERM raises `EntryInterrupted`
+with `exit_code=126`, the job ID and key; repeat `run_entry` with that same key
+to re-attach. Only `client.cancel` or `client.cancel_submission` cancels. For specs built in code, use
 `client.submit`, `client.wait_many` and `client.download_results`
 ([Python client](https://github.com/1kuna/mycelium/blob/main/clients/python/README.md)).
 

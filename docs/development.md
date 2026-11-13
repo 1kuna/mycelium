@@ -1000,7 +1000,7 @@ The CLI handles immutable source uploads, idempotent submission and reconnects;
 there is no custom watcher, cursor or status publisher.
 
 On SIGINT or SIGTERM the step forwards SIGTERM to each `myce run` by PID; `myce
-run` cancels its key and exits 130 once the queue confirms. When the step fails
+run` detaches with exit 126 and leaves its job running. When the step fails
 or is cancelled, a final step runs `myce cancel --wait --project mycelium --key
 KEY` for both keys. This also fences a submission whose receipt was lost or which
 reaches the queue after cancellation. Terminal suite results are preserved by the queue's existing

@@ -85,7 +85,7 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 			}
 			args = append(args, "--", "printf", "%s", "two words", "--flag")
 			err := runCommand(ctx, args, &out, &diagnostics)
-			want := map[string]int{"succeeded": 0, "failed": 7, "cancelled": 1, "interrupt": 130, "detach": 0}[outcome]
+			want := map[string]int{"succeeded": 0, "failed": 7, "cancelled": 1, "interrupt": runDetachedExit, "detach": 0}[outcome]
 			if exitCode(err) != want {
 				t.Fatalf("code=%d want=%d err=%v", exitCode(err), want, err)
 			}
@@ -97,8 +97,8 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 			if j.Spec.Needs.CPUCores != 2 || j.Spec.Needs.HostMemoryGB != .5 || !reflect.DeepEqual(j.Spec.Run.Command, []string{"printf", "%s", "two words", "--flag"}) {
 				t.Fatalf("spec: %+v", j.Spec)
 			}
-			if outcome == "interrupt" && (j.State != "cancelled" || j.CancelledAt == nil) {
-				t.Fatalf("not durably cancelled: %+v", j)
+			if outcome == "interrupt" && (j.State == "cancelled" || j.CancelledAt != nil) {
+				t.Fatalf("interrupt cancelled job: %+v", j)
 			}
 			if outcome == "detach" && out.String() != j.ID+"\n" {
 				t.Fatal("detach did not print exact ID")

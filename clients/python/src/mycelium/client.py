@@ -14,6 +14,9 @@ import json
 import os
 import ssl
 import shutil
+import signal
+import sys
+from contextlib import contextmanager
 import socket
 import subprocess
 import threading
@@ -145,16 +148,31 @@ class EntryFailedError(RuntimeError):
 
 
 class EntryInterrupted(KeyboardInterrupt):
-    """Ctrl-C during run_entry's wait; the job was asked to cancel by key.
+    """The waiter detached; the job continues. exit_code matches CLI code 126."""
 
-    cancelled is True when the queue acknowledged that the job will not run
-    again (running cleanup may still be pending), False when unconfirmed.
-    """
+    exit_code = 126
 
-    def __init__(self, job_id: str, project: str, key: str, cancelled: bool):
-        state = "acknowledged" if cancelled else "unconfirmed; cancel with myce cancel " + job_id
-        super().__init__(f"run_entry interrupted; cancellation {state}")
-        self.job_id, self.project, self.key, self.cancelled = job_id, project, key, cancelled
+    def __init__(self, job_id: str, project: str, key: str):
+        super().__init__(f"detached; job {job_id} continues; re-attach: repeat run_entry with "
+                         f"the same key={key!r} (project {project!r}); cancel explicitly: myce cancel {job_id}")
+        self.job_id, self.project, self.key = job_id, project, key
+        self.cancelled = False
+
+
+@contextmanager
+def _entry_signals():
+    # Python only permits signal handlers on the main thread. Other threads
+    # retain their owner's signal policy; neither path cancels the job.
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    previous = signal.signal(signal.SIGTERM, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _exit_code(job: Mapping[str, Any]) -> int:
@@ -571,9 +589,9 @@ class Client:
         wait=False returns the receipt (job_id, key, project). Otherwise it waits,
         downloads every accepted output into out and returns an EntryOutcome. A
         failed or cancelled job raises EntryFailedError unless check=False. A
-        timeout raises TimeoutError and leaves the job running. Ctrl-C cancels
-        the job by key and raises EntryInterrupted. The CLI (myce on PATH, or
-        myce=) uses this client's authority: from_installed() or MYCE_TOKEN.
+        timeout raises TimeoutError and leaves the job running. Ctrl-C or SIGTERM
+        detaches and raises EntryInterrupted (exit_code=126); the job continues.
+        The CLI (myce on PATH, or myce=) uses this client's authority: from_installed() or MYCE_TOKEN.
         """
         if wait and out is None:
             raise ValueError("run_entry needs out=DIR when wait=True")
@@ -614,20 +632,19 @@ class Client:
             raise EntryPreparationError(prepared.returncode, reason, receipt if isinstance(receipt, dict) else None)
         if not wait:
             return receipt
-        try:
-            job = self.wait(receipt["job_id"], timeout=timeout)
-        except KeyboardInterrupt:
+        with _entry_signals():
             try:
-                cancelled = bool(self.cancel_submission(receipt["project"], receipt["key"]).get("will_not_run"))
-            except REQUEST_ERRORS:
-                cancelled = False
-            raise EntryInterrupted(receipt["job_id"], receipt["project"], receipt["key"], cancelled) from None
-        outcome = EntryOutcome(job=job, receipt=receipt, exit_code=_exit_code(job))
-        if outcome.ok:
-            outcome.files = self.download_results(job, out)
-        elif check:
-            raise EntryFailedError(outcome)
-        return outcome
+                job = self.wait(receipt["job_id"], timeout=timeout)
+                outcome = EntryOutcome(job=job, receipt=receipt, exit_code=_exit_code(job))
+                if outcome.ok:
+                    outcome.files = self.download_results(job, out)
+                elif check:
+                    raise EntryFailedError(outcome)
+                return outcome
+            except KeyboardInterrupt:
+                detached = EntryInterrupted(receipt["job_id"], receipt["project"], receipt["key"])
+                print(str(detached), file=sys.stderr)
+                raise detached from None
 
     def _file_request(self, method, path, data=None, headers=None, size=0, *, timing=None, deadline=None, retry=True):
         end = deadline if deadline is not None else (None if self.transfer_timeout is None else self._clock.monotonic() + self.transfer_timeout)
