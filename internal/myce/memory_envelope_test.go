@@ -615,6 +615,8 @@ func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
+	// The queue reply carries a relative checkpoint; the worker loop joins its root.
+	j.Checkpoint = filepath.Join(t.TempDir(), "job")
 	var p *process
 	await(t, func() bool {
 		p, err = w.start(store, *j)
@@ -946,6 +948,8 @@ func TestMemoryEnvelopeOOMIsJobCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.state.Session = j.Session
+	// The queue reply carries a relative checkpoint; the worker loop joins its root.
+	j.Checkpoint = filepath.Join(t.TempDir(), "job")
 	var p *process
 	await(t, func() bool {
 		p, err = w.start(store, *j)

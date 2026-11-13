@@ -103,6 +103,8 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 			t.Fatal(err)
 		}
 		store.state.Session = m.Session
+		// The queue reply carries a relative checkpoint; the worker loop joins its root.
+		offer.Checkpoint = filepath.Join(t.TempDir(), "job")
 		p, err := startAfterFixtureInputs(t, w, store, *offer)
 		if err != nil || p == nil {
 			store.close()

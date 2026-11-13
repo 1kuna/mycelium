@@ -274,6 +274,8 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 			}
 			defer store.close()
 			store.state.Session = assigned.Session
+			// The queue reply carries a relative checkpoint; the worker loop joins its root.
+			assigned.Checkpoint = filepath.Join(t.TempDir(), "job")
 			// Managed input/work preparation is bounded per heartbeat. Consume a
 			// pending observation as the worker loop does before checking cancellation.
 			var p *process
