@@ -81,7 +81,7 @@ func TestAdvancedSectionParsingDefaultsAndDeprecation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deprecated, err := s.FoldAdvanced(); err != nil || len(deprecated) != 0 || s.AllowCPUFallback || s.Resumable || s.Isolation != "" || AdvancedStatus(s) != nil {
+	if deprecated, err := s.FoldAdvanced(); err != nil || len(deprecated) != 0 || s.AllowCPUFallback || s.Resumable || s.Isolation != "" || AdvancedStatus(&s) != nil {
 		t.Fatalf("defaults: %v %v %+v", deprecated, err, s)
 	}
 
@@ -96,7 +96,7 @@ func TestAdvancedSectionParsingDefaultsAndDeprecation(t *testing.T) {
 	if !s.AllowCPUFallback || !s.Resumable || s.WallTime != "2h" || s.Isolation != "sandboxed" || s.Advanced != nil || s.Validate() != nil {
 		t.Fatalf("folded: %+v", s)
 	}
-	if a := AdvancedStatus(s); a == nil || !a.AllowCPUFallback || a.WallTime != "2h" || a.Preemptible {
+	if a := AdvancedStatus(&s); a == nil || !a.AllowCPUFallback || a.WallTime != "2h" || a.Preemptible {
 		t.Fatalf("status view: %+v", a)
 	}
 

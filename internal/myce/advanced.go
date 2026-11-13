@@ -106,24 +106,17 @@ func (s *Spec) FoldAdvanced() ([]string, error) {
 // AdvancedStatus is the read-side view: the advanced values this job sets,
 // or nil when every one keeps its default. Bulky diagnostic payloads and raw
 // requirement text keep their existing status fields and redaction.
-func AdvancedStatus(s Spec) *Advanced {
-	a := &Advanced{}
-	value, flat := reflect.ValueOf(a).Elem(), reflect.ValueOf(s)
-	t := value.Type()
-	for i := range t.NumField() {
-		switch t.Field(i).Name {
-		case "RequirementReasons", "KeepOnFailure", "Diagnostics", "ResumeCompatibility", "Disk", "SizeHint":
-			continue
-		}
-		value.Field(i).Set(flat.FieldByName(t.Field(i).Name))
+// Status reads run for every listed job, so this copies fields directly and
+// allocates only for a job that changed a setting.
+func AdvancedStatus(s *Spec) *Advanced {
+	logs := s.Logs
+	if logs == "keep" {
+		logs = "" // The default.
 	}
-	if a.Logs == "keep" {
-		a.Logs = "" // The default.
-	}
-	if value.IsZero() {
+	if !s.AllowCPUFallback && !s.Resumable && !s.Preemptible && s.Isolation == "" && s.Reason == "" && s.WallTime == "" && s.GiveUpAt == nil && s.ExpectedMinutes == 0 && s.StartBy == nil && s.StartWindow == "" && len(s.AllowedMachines) == 0 && len(s.ExcludedMachines) == 0 && !s.Portable && !s.RequireTarget && s.OutputDelivery == "" && len(s.QualityTolerance) == 0 && logs == "" {
 		return nil
 	}
-	return a
+	return &Advanced{AllowCPUFallback: s.AllowCPUFallback, Resumable: s.Resumable, Preemptible: s.Preemptible, Isolation: s.Isolation, Reason: s.Reason, WallTime: s.WallTime, GiveUpAt: s.GiveUpAt, ExpectedMinutes: s.ExpectedMinutes, StartBy: s.StartBy, StartWindow: s.StartWindow, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines, Portable: s.Portable, RequireTarget: s.RequireTarget, OutputDelivery: s.OutputDelivery, QualityTolerance: s.QualityTolerance, Logs: logs}
 }
 
 // cpuFallback reports the MY-54 opt-in for plain GPU work. Extension work runs
