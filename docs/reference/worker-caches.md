@@ -324,13 +324,18 @@ Apply appends synced retirement intents and a final timestamped report to
 
 Package downloads use persistent worker-wide `.downloads/uv` and
 `.downloads/pixi` caches under the configured environment-cache root. These bytes
-are excluded from the prepared-environment budget and have a separate 16 GiB
-combined high-water limit. Before and after builds, excess downloads are pruned
-with `uv cache prune --ci` and `pixi clean cache --yes`, while no Mycelium
-installer uses the shared cache. If standard pruning cannot bring the cache
-under budget, preparation fails with the remaining byte count. Active builds
-can temporarily exceed this waterline; the existing free-disk guard still
-applies. Pruning can require a future wheel download; installed environments
+are excluded from the prepared-environment budget and have a separate combined
+high-water limit measured on each worker: twice the largest growth one build
+caused (`download-need.json` in the cache root), which holds the largest
+environment's downloads plus one more build of that size, such as its next lock
+revision. A build records its growth before its own post-install prune, so it
+never prunes what it just fetched; before any measurement there is no separate
+limit. Before and after builds, excess downloads are pruned with
+`uv cache prune --ci` and `pixi clean cache --yes`, run from the download cache
+itself (pixi reads a project manifest from its working directory), while no
+Mycelium installer uses the shared cache. A failed prune is logged in the build
+log and never fails a build. Real disk pressure still prunes downloads through
+the worker's free-disk floor. Pruning can require a future wheel download; installed environments
 are preserved. uv retains its default clone/hardlink mode (an explicit
 `UV_LINK_MODE` remains available); avoid symlink mode because pruning would break
 installed environments. Existing per-environment caches are not migrated or
