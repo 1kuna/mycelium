@@ -986,20 +986,8 @@ func workerCheckpointAvailable(root string, progress func()) error {
 	if !info.IsDir() {
 		return errors.New("checkpoint root is not a directory")
 	}
-	f, err := os.CreateTemp(root, ".myce-probe-*.tmp")
-	progress()
-	if err != nil {
-		return err
-	}
-	name := f.Name()
-	err = f.Close()
-	progress()
-	// Probe files are worker-owned transient output, not user data.
-	if removeErr := os.Remove(name); err == nil {
-		err = removeErr
-	}
-	progress()
-	return err
+	// One fixed per-host file, rewritten in place and never removed (#1545).
+	return probeStorageFile(storageProbePath(root, ".myce-probe-", "worker"), false, plainStorageProbeOps(progress))
 }
 
 func syncWorkerDir(dir string) error {

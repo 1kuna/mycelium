@@ -103,23 +103,7 @@ func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(co
 	}
 	for _, name := range []string{"checkpoints", "models", "environments"} {
 		dir := filepath.Join(c.NAS, "mycelium", name)
-		f, err := os.CreateTemp(dir, ".myce-install-probe-")
-		if err != nil {
-			return err
-		}
-		path := f.Name()
-		renamed := path + ".renamed"
-		_, writeErr := f.WriteString("myce NAS write and rename probe\n")
-		err = errors.Join(writeErr, f.Sync(), f.Close())
-		if err != nil {
-			_ = os.Remove(path)
-			return err
-		}
-		if err = os.Rename(path, renamed); err != nil {
-			_ = os.Remove(path)
-			return err
-		}
-		if err = os.Remove(renamed); err != nil {
+		if err := probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), plainStorageProbeOps(nil)); err != nil {
 			return err
 		}
 	}
