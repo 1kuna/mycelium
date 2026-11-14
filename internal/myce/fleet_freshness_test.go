@@ -117,11 +117,24 @@ func (f *slowProofFleet) restartDue(t *testing.T, target bool, dies bool) {
 }
 
 func TestFleetProofFreshnessFollowsMeasuredCadence(t *testing.T) {
-	start := func(t *testing.T, f *slowProofFleet) *FleetUpgradeStatus {
+	learn := func(t *testing.T, f *slowProofFleet) {
 		t.Helper()
-		for n := 0; n < 60; n++ {
+		// Observe every slow interval and its replacement proof, not sixty
+		// identical rounds of already learned cadence.
+		for {
+			ready := true
+			for _, w := range f.workers {
+				ready = ready && w.renewals > len(slowProofIntervals)
+			}
+			if ready {
+				return
+			}
 			f.second(t)
 		}
+	}
+	start := func(t *testing.T, f *slowProofFleet) *FleetUpgradeStatus {
+		t.Helper()
+		learn(t, f)
 		// Start at a moment the fixed 5 s bound would have refused.
 		for f.oldestProofAge() < 6*time.Second {
 			f.second(t)
@@ -136,6 +149,20 @@ func TestFleetProofFreshnessFollowsMeasuredCadence(t *testing.T) {
 		t.Helper()
 		for n := 0; n < int((fleetStepTimeout+time.Minute)/time.Second) && f.q.s.FleetUpgrade.State == "running"; n++ {
 			f.restartDue(t, target, dies)
+			if dies {
+				// A dead replacement produces no more proof. Sample just
+				// before and at its deadline instead of hundreds of commits.
+				if h := f.q.fleetActiveHost(); h != nil && h.Before != nil {
+					if w := f.workers[h.Machine]; w != nil && !w.alive {
+						deadline := h.StepAt.Add(fleetStepTimeout)
+						f.c.Advance(deadline.Sub(f.c.Now()) - time.Second)
+						fleetTick(t, f.q)
+						if f.q.s.FleetUpgrade.State != "running" {
+							t.Fatal("dead replacement stopped before its deadline")
+						}
+					}
+				}
+			}
 			f.second(t)
 		}
 		return f.q.fleetUpgradeStatus()
@@ -181,13 +208,10 @@ func TestFleetProofFreshnessFollowsMeasuredCadence(t *testing.T) {
 	})
 	t.Run("silent worker refuses start", func(t *testing.T) {
 		f := newSlowProofFleet(t)
-		for n := 0; n < 60; n++ {
-			f.second(t)
-		}
+		learn(t, f)
 		f.workers["worker-b"].alive = false
-		for n := 0; n <= int(fleetProofMaxAge/time.Second); n++ {
-			f.second(t)
-		}
+		f.c.Advance(fleetProofMaxAge)
+		f.second(t)
 		_, err := f.q.StartFleetUpgrade(FleetUpgradeRequest{})
 		var refusal *HTTPError
 		if !errors.As(err, &refusal) || refusal.Code != "fleet_worker_unmanaged" {

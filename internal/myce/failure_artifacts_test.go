@@ -30,14 +30,17 @@ func TestFailureArtifactsWorker(t *testing.T) {
 		module := filepath.ToSlash(filepath.Join(filepath.Dir(os.Getenv("MYCE_VITEST_CLI")), "dist", "index.js"))
 		cases = append(cases, struct{ name, format, report, id string }{"real-vitest", "vitest-junit", "import {test, expect} from 'file://" + module + "';\ntest('deliberate frontend failure', () => expect(1).toBe(2));\n", "deliberate frontend failure"})
 	}
+	// Each row still executes its real command, upload and diagnostic download.
+	// They can share an enrolled worker; only their job/input/output state differs.
+	state := t.TempDir()
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "q.db"), FileStore: filepath.Join(state, "files"), Checkpoints: filepath.Join(state, "checkpoints"), Token: "fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "q.db"), FileStore: filepath.Join(root, "files"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer d.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			c := d.Client()

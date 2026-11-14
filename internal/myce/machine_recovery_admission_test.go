@@ -92,7 +92,8 @@ func TestMachineRecoveryDoesNotSpendQueuedAttempts(t *testing.T) {
 				before := job(t, q, waiting.ID)
 				report := AttemptReport{Execution: Execution{ID: owned.ID, Attempt: owned.Attempt}, Session: owned.Session, Started: true}
 				offers := 0
-				for i := 0; i < 100; i++ {
+				// Four check-ins exceed the two-requeue budget even with no prior retry.
+				for range 4 {
 					r := recoveringCheck(t, q, m, report)
 					for _, d := range r.Attempts {
 						if d.ID == owned.ID && (d.Stop != (phase != "running") || d.Kill != (phase == "kill")) {
@@ -148,7 +149,8 @@ func TestMachineRecoveryDoesNotRedeliverOmittedAssignment(t *testing.T) {
 	submit(t, q, m3Spec("experiment", "0", 8, 1))
 	owned := assignedJob(machineCheck(t, q, m))
 	before := job(t, q, owned.ID)
-	for i := 0; i < 100; i++ {
+	// Repeated omission must remain idempotent.
+	for range 3 {
 		if got := assignedJob(recoveringCheck(t, q, m)); got != nil {
 			t.Fatal("recovery redelivered an unheld assignment", got.ID)
 		}
