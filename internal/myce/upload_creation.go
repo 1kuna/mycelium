@@ -99,7 +99,7 @@ func (s creationDataStore) NewUpload(ctx context.Context, info tus.FileInfo) (tu
 	if err == nil {
 		s.store.noteAllocation(info.ID, uint64(info.Size))
 	}
-	return upload, err
+	return upload, uploadFailure(ctx, "upload_create", err)
 }
 
 func uploadCancelled(w http.ResponseWriter, ctx context.Context) bool {

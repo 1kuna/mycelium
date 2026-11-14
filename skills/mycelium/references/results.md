@@ -36,6 +36,15 @@ output can take longer while the attempt remains owned. Transfers detect socket
 stalls and resume from the queue's accepted offset; cancelling the attempt owner
 ends publication and retains local bytes. Keep the job and key while it finishes.
 
+Go clients and workers negotiate HTTP 102 progress during the final PATCH's
+full-blob verification. Reports follow actual verification reads; a stalled
+read still trips socket-idle detection. Retries use the accepted tus offset,
+including an empty PATCH at the accepted end to finish failed publication.
+An HTTP 500 is not evidence of a capacity refusal: the queue's `file_upload`
+events identify method, digest, attempt, requested/accepted offsets, length,
+publication operation and error class, without private paths or credentials.
+Ask the queue owner for that evidence; preserve the receipt, key and local bytes.
+
 Startup replay of released results does not withhold otherwise available host
 capacity. The worker keeps the original session until pending publication and
 any new work finish; it never reruns a saved completed command. Status machine
