@@ -200,6 +200,12 @@ func jobReason(j *Job, detail bool) string {
 		text = (*Hold).FullText
 	}
 	reason := jobReasonWith(j, text)
+	if c := j.WorkerDataCleanup; c != nil {
+		if reason != "" {
+			reason += "; "
+		}
+		reason += "worker data cleanup: " + c.State
+	}
 	if isolation := jobNativeIsolationStatus(j); detail && isolation != "" {
 		if reason != "" {
 			reason += "; "

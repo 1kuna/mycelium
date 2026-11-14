@@ -119,6 +119,12 @@ func (s *waitStateIndex) set(id string, j *Job) {
 	} else {
 		s.setIntent(id, j)
 		next := WaitState{ID: id, State: j.State, Reason: j.Reason, StartedAt: waitTimestamp(j.StartedAt)}
+		if c := j.WorkerDataCleanup; c != nil {
+			if next.Reason != "" {
+				next.Reason += "; "
+			}
+			next.Reason += "worker data cleanup: " + c.State
+		}
 		if j.State == "failed" && (!exists || old.State != "failed") {
 			next.Finding = terminalJobFinding(j)
 		} else if exists && old.State == "failed" {

@@ -20,6 +20,7 @@ import (
 )
 
 type nativeLinuxPolicy struct {
+	Ephemeral                      bool
 	MetricCgroups                  []string // Trusted attempt member leaves, never payload env.
 	Read, ReadOnly, Write, Devices []string
 	Env                            []string
@@ -135,7 +136,7 @@ func nativeCanonical(path string) (string, error) {
 }
 
 func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string) (nativeLinuxPolicy, error) {
-	p := nativeLinuxPolicy{Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
+	p := nativeLinuxPolicy{Ephemeral: w.nativeEphemeral, Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
 	work, err := nativeCanonical(work)
 	if err != nil {
 		return p, err
@@ -401,6 +402,9 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		return err
 	}
 	p.Namespace = s.mode == "namespace"
+	if p.Ephemeral && !p.Namespace {
+		return errors.New("ephemeral worker data requires PID/mount namespaces")
+	}
 	if !p.Namespace && len(p.Ports) > 0 {
 		log.Printf("native isolation: mode=landlock network=partial reserved_tcp_ports=%d", len(p.Ports))
 	}

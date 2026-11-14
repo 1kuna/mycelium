@@ -425,11 +425,28 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		a.mu.Lock()
 		a.report, a.diagnostics = report, diagnostics
-		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending
+		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending && (!a.job.Spec.ephemeral() || s.state.WorkerDataCleanup != nil && s.state.WorkerDataCleanup.State == "complete")
 		releasedLocally := a.released
 		a.mu.Unlock()
 		if releasedLocally {
 			a.releaseAdmission()
+		}
+		if a.job.Spec.ephemeral() && s.state.Result != nil && !s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
+			done, err := w.finishEphemeralAttempt(ioCtx, s, connected)
+			if err != nil {
+				s.fileError = "ephemeral data cleanup or result transfer pending"
+			}
+			if done {
+				a.releaseAdmission()
+				finish(nil)
+				return
+			}
+			select {
+			case <-ctx.Done():
+			case <-a.wake:
+			case <-tick.C:
+			}
+			continue
 		}
 		if connected && !d.Hold {
 			var err error
@@ -628,6 +645,10 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 	}
 	s.state.Result = &released
 	s.state.PID = 0
+	if s.state.Job.Spec.ephemeral() && (!released.Success || released.Interrupted || s.state.WorkerDataAccepted) {
+		// Failed cleanup remains a saved, visible pending attempt, retried by the actor.
+		_ = w.removeEphemeralPaths(s, s.state.WorkerDataAccepted)
+	}
 	return nil, s.save()
 }
 
@@ -1249,9 +1270,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
 			}
 			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
-				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
+				return c == ephemeralCapability || c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
+			if w.checkEphemeralSupport() == nil {
+				m.Capabilities = append(m.Capabilities, ephemeralCapability)
+			}
 			if w.memoryCeilings != nil || w.processMemory != nil && w.processMemory.OwnedResident != nil {
 				m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability, firstRunFloorCapability)
 			}

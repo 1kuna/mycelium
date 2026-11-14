@@ -259,7 +259,7 @@ func sampleLivenessCPU(ctx context.Context, root int, ownedBirth string, birth f
 func startAttemptLiveness(parent context.Context, clock Clock, interval time.Duration, p *process, spool string) *attemptLivenessSampler {
 	ctx, cancel := context.WithCancel(parent)
 	s := &attemptLivenessSampler{cancel: cancel, done: make(chan struct{})}
-	root := filepath.Join(spool, "job-files", p.job.ID, strconv.Itoa(p.job.Attempt))
+	root := attemptStorageRoot(p.job, spool)
 	source := workerLivenessCPU
 	go func() {
 		defer close(s.done)

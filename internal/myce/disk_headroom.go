@@ -125,7 +125,7 @@ func diskInputOutput(j *Job) (input, output uint64) {
 func diskInputCacheBytes(j *Job) uint64 {
 	// NAS/path inputs are staged directly. Only immutable manifest inputs use
 	// the file cache; a hint alone does not create a second physical copy.
-	if len(jobInputFiles(j)) == 0 {
+	if j.Spec.ephemeral() || len(jobInputFiles(j)) == 0 {
 		return 0
 	}
 	input, _ := diskInputOutput(j)
@@ -156,7 +156,21 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 		case "data":
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
+			if j.Spec.ephemeral() {
+				for _, private := range j.Spec.SharedInputs {
+					need = addDiskBytes(need, uint64(private.bytes()))
+					if private.Archive != "" {
+						need = addDiskBytes(need, uint64(private.SizeBytes))
+					}
+				}
+				if j.Spec.Disk != nil {
+					need = addDiskBytes(need, j.Spec.Disk.CheckpointBytes)
+				}
+			}
 		case "file-cache":
+			if j.Spec.ephemeral() {
+				continue
+			}
 			cache := diskInputCacheBytes(j)
 			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0 || work.modelSnapshots > 0
 			need = addDiskBytes(addDiskBytes(need, cache), work.modelSnapshots)
@@ -172,6 +186,9 @@ func diskVolumeNeedWith(j *Job, v DiskVolume, work diskWork, machines ...*Machin
 				}
 			}
 		case "checkpoint":
+			if j.Spec.ephemeral() {
+				continue
+			}
 			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
 				relevant = true
 				checkpoint := uint64(0)

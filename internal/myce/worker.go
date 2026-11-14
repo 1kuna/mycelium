@@ -27,6 +27,8 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	cleanupFS            workerDataFS // nil uses the real filesystem; tests inject unlink/sync faults.
+	ephemeralProbe       func() error // test-only capability seam; production always probes the kernel.
 	storageHealth        *hostHealthMonitor
 	hygieneCollector     *workerHygieneCollector
 	HostHealthSource     func(context.Context) (HostHealthReading, error)
@@ -141,7 +143,8 @@ type Worker struct {
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
 	nativeSharedInputs          []string // Verified executable shared inputs, never authored paths.
 	nativeModelInputs           []string // Verified model data: reads only, including custom-code sources.
-	nativeCI                    bool     // Current attempt declared isolation: ci (#1298).
+	nativeEphemeral             bool
+	nativeCI                    bool // Current attempt declared isolation: ci (#1298).
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -438,6 +441,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if j.Spec.ephemeral() {
+		if err := w.checkEphemeralSupport(); err != nil {
+			return nil, s.startFailure(j, launchRefused, err)
+		}
+	}
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
@@ -607,7 +615,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		prepare = w.checkpointPrepare
 	}
 	var checkpoint string
-	if needsCheckpoint(&j) {
+	if j.Spec.ephemeral() {
+		checkpoint = filepath.Join(ephemeralRoot(s.dir, j), "checkpoint")
+		err = os.MkdirAll(checkpoint, 0700)
+		if err != nil {
+			return nil, err
+		}
+	} else if needsCheckpoint(&j) {
 		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) {
 			path, err := prepare(j)
 			w.observeStorageError(err)
@@ -803,7 +817,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	jobCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
 	// TMPDIR is worker-owned, even when run.env or activation supplied one.
 	// Keep it with the managed attempt files so existing custody/retention owns it.
-	tmp, err := attemptTempDir(s.dir, executionWork)
+	tempSpool := s.dir
+	if j.Spec.ephemeral() {
+		tempSpool = ""
+	} // No untracked short-path aliases.
+	tmp, err := attemptTempDir(tempSpool, executionWork)
 	if err != nil {
 		return nil, err
 	}
@@ -859,6 +877,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	cmd.SysProcAttr = commandProcessAttributes()
 	logName := identity + ".log"
+	if j.Spec.ephemeral() {
+		logName = ephemeralLogName(j)
+		if err := os.MkdirAll(filepath.Join(s.dir, filepath.Dir(logName)), 0700); err != nil {
+			return nil, err
+		}
+	}
 	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
 		return nil, err

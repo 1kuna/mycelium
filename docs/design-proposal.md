@@ -1519,6 +1519,33 @@ SQLite queue, plain commands, injected scheduling clock and attempt ownership
 remain. Explicit NAS configuration remains supported. One store is not a backup.
 See [files without a NAS](files.md) for configuration and retention limits.
 
+### Ephemeral execution-worker data (#1585)
+
+`advanced: {worker_data: ephemeral}` opts a non-resumable plain command with
+managed inputs and declared outputs into synchronous local removal. The worker
+bypasses persistent input caches, confines payload writes to private work,
+temp, home and checkpoint paths, stops and reaps its processes, and preserves
+successful result bytes until exact durable queue acceptance. It then unlinks
+all local payload and delivered log copies, syncs the parent directories and
+verifies absence before acknowledging release. Each attempt retains a cleanup
+receipt (relative roots, logical bytes, timestamp and success/failure); failed
+removal stays visible and holds release. Retry attempts restage authoritative
+inputs. Startup recovery reconciles process custody and repeats cleanup;
+offline/crashed workers remain pending, never presumed clean.
+
+Initial support requires installed tools, offline execution and Linux PID/mount
+namespaces with a qualified non-piped core route. Other combinations receive
+`job_worker_data_unsupported`; older workers cannot receive these jobs. The
+worker sets soft and hard `RLIMIT_CORE` to zero in the disposable exec helper.
+Linux piped core handlers ignore that limit, so those hosts refuse this policy
+without changing global configuration. Failed/interrupted attempts discard
+private payload after process cleanup and retain logs until queue delivery.
+This is an explicit local-data exception to MY-47's finished-file retention;
+queue/NAS retention is unchanged. Unlink is **not secure erasure on SSDs**;
+full-disk encryption is the at-rest control. RAM, VRAM, swap, snapshots, prior
+jobs' copies and privileged/operator processes are outside this guarantee.
+See [the file contract](files.md#ephemeral-worker-data).
+
 ### Shared read-only inputs
 <a id="shared-read-only-inputs-221"></a>
 

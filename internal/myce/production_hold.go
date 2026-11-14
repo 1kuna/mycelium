@@ -201,6 +201,9 @@ func (q *Queue) retainRelease(j *Job) {
 	q.s.HostReleases[releaseKey(r)] = r
 }
 func (q *Queue) settleRelease(r Result, exact bool) bool {
+	if j := q.retainedJob(r.ID); j != nil && j.Spec.ephemeral() && !cleanupComplete(r.WorkerDataCleanup) {
+		return false
+	}
 	// Superseded copy custody is authoritative without an aggregate host charge.
 	// Its stale payload must still commit the exact cleanup acknowledgement.
 	// A current terminal result must reach complete's diagnostic publication path.
@@ -222,6 +225,9 @@ func (q *Queue) settleRelease(r Result, exact bool) bool {
 func (q *Queue) reconcileHostReleases(c Checkin) {
 	q.confirmPreviousCopies(c)
 	for key, r := range q.s.HostReleases {
+		if j := q.retainedJob(r.Job); j != nil && j.Spec.ephemeral() {
+			continue
+		}
 		if r.Machine != c.Machine.ID {
 			continue
 		}

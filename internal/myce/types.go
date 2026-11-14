@@ -210,7 +210,8 @@ type Spec struct {
 	Preemptible         bool                 `json:"preemptible,omitempty" yaml:"preemptible,omitempty"`
 
 	// AllowCPUFallback is the wire form of advanced.allow_cpu_fallback (MY-54).
-	AllowCPUFallback bool `json:"allow_cpu_fallback,omitempty" yaml:"-"`
+	WorkerData       string `json:"worker_data,omitempty" yaml:"-"`
+	AllowCPUFallback bool   `json:"allow_cpu_fallback,omitempty" yaml:"-"`
 	// Advanced is the authoring section for settings with good defaults.
 	// FoldAdvanced moves it onto the flat fields; stored specs never carry it.
 	Advanced *Advanced `json:"advanced,omitempty" yaml:"advanced,omitempty"`
@@ -227,6 +228,9 @@ func (s Spec) Validate() error {
 		if _, err := s.FoldAdvanced(); err != nil {
 			return err
 		}
+	}
+	if err := validateWorkerData(s); err != nil {
+		return reject("job_worker_data_unsupported", err)
 	}
 	if err := validateCPUFallback(s); err != nil {
 		return rejectFieldRule("job_platform_invalid", err)
@@ -341,7 +345,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && !s.ephemeral() && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	// A missing figure is the queue's call (learned_memory policy), not a
@@ -444,7 +448,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	AdmissionWait *AdmissionWaitEvidence `json:"admission_wait,omitempty"`
+	WorkerDataCleanup *WorkerDataCleanup     `json:"worker_data_cleanup,omitempty"`
+	AdmissionWait     *AdmissionWaitEvidence `json:"admission_wait,omitempty"`
 
 	DeviceFaultStartWait *DeviceFaultStartWait `json:"device_fault_start_wait,omitempty"`
 	StartCapacityWaiting bool                  `json:"start_capacity_waiting,omitempty"`
@@ -861,6 +866,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	WorkerDataCleanup         *WorkerDataCleanup  `json:"worker_data_cleanup,omitempty"`
 	ExecutionEvidence         *ExecutionEvidence  `json:"execution_evidence,omitempty"`
 	Resources                 *AttemptResources   `json:"resources,omitempty"`
 	SignalEvidence            *SignalEvidence     `json:"signal_evidence,omitempty"`

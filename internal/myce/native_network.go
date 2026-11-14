@@ -3,6 +3,9 @@ package myce
 // Sandboxed native execution requires an advertised kernel boundary. Only the
 // frozen stage policy can waive that requirement, including legacy registrations.
 func nativeNetworkFits(j *Job, m *Machine) bool {
+	if j.Spec.ephemeral() && !contains(m.Capabilities, ephemeralCapability) {
+		return false
+	}
 	if nativeUnsandboxed(j) {
 		return true
 	}

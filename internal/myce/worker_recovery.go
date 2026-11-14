@@ -45,11 +45,13 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
-	StorageDirectory   string     `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
-	Preparation        string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
-	CustodyID          string     `json:"custody_id,omitempty"`
-	InputWriterPending bool       `json:"input_writer_pending,omitempty"` // In-process staging only; never process/container custody.
-	IsolationWarning   *Execution `json:"isolation_warning,omitempty"`
+	WorkerDataAccepted bool               `json:"worker_data_accepted,omitempty"`
+	WorkerDataCleanup  *WorkerDataCleanup `json:"worker_data_cleanup,omitempty"`
+	StorageDirectory   string             `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
+	Preparation        string             `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
+	CustodyID          string             `json:"custody_id,omitempty"`
+	InputWriterPending bool               `json:"input_writer_pending,omitempty"` // In-process staging only; never process/container custody.
+	IsolationWarning   *Execution         `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
 	// released publication. Survives a restart before scratch retention runs.
 	PublishedAttempt *Execution `json:"published_attempt,omitempty"`

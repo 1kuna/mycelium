@@ -52,6 +52,8 @@ var rejectionMessages = map[string]string{
 	"job_fields_required":                   "name, project and run.command are required",
 	"job_project_invalid":                   "project cannot contain slash",
 	"job_class_invalid":                     "class must be valid and agree with legacy priority",
+	"job_worker_data_unsupported":           "ephemeral worker data requires a supported non-resumable managed command and capable worker",
+	"worker_data_cleanup_pending":           "ephemeral attempt release requires verified data cleanup",
 	"job_execution_invalid":                 "run or execution must describe valid managed execution",
 	"job_logs_invalid":                      "logs must be keep or none",
 	"job_priority_invalid":                  "priority must be production, deadline or experiment",

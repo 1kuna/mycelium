@@ -173,6 +173,21 @@ processing never runs at network speed (MY-36):
 The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
 relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
+For data that must leave the execution worker, set
+`advanced: {worker_data: ephemeral}` on an offline, non-resumable command with
+managed inputs and declared outputs, using installed tools. It stages privately
+without persistent payload caches, retains successful output bytes until durable
+queue acceptance, then verifies removal of local inputs, extracted/shared data,
+scratch/temp/private home, checkpoints, outputs and delivered logs before release.
+Check job `worker_data_cleanup` and the attempt-history receipt: `failed` or
+pending cleanup is not a satisfied policy, even if the result succeeded. Retries
+restage inputs; startup recovers process custody and cleanup. Supporting Linux
+namespace workers with non-piped core routing are required; other combinations
+are refused with `job_worker_data_unsupported`. Piped core handlers ignore
+`RLIMIT_CORE`; these hosts refuse the policy. Unlink is not secure SSD erasure;
+use full-disk encryption for at-rest protection. Queue/NAS retention is unchanged
+([scope and limits](https://github.com/1kuna/mycelium/blob/main/docs/files.md#ephemeral-worker-data)).
+
 ## 7. Many pieces
 
 To run one command over many inputs, add `pieces:` to the entry. One run and one

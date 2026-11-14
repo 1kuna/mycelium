@@ -11,6 +11,7 @@ import (
 // DeviceFault is queue-owned retry eligibility evidence. Other fields remain
 // diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	WorkerDataCleanup *WorkerDataCleanup      `json:"worker_data_cleanup,omitempty"`
 	FaultEvidence     []*FaultEvidence        `json:"fault_evidence,omitempty"`
 	SignalEvidence    *SignalEvidence         `json:"signal_evidence,omitempty"`
 	DeviceFault       *DeviceFaultLoss        `json:"device_fault,omitempty"`
@@ -45,8 +46,12 @@ func historyPlannedStop(j *Job) bool {
 }
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
+	if r.WorkerDataCleanup == nil && j.Spec.ephemeral() {
+		r.WorkerDataCleanup = j.WorkerDataCleanup
+	}
 	return AttemptOutcome{
-		FaultEvidence: j.FaultEvidence, SignalEvidence: r.SignalEvidence,
+		WorkerDataCleanup: r.WorkerDataCleanup,
+		FaultEvidence:     j.FaultEvidence, SignalEvidence: r.SignalEvidence,
 		ExecutionEvidence: safeExecutionEvidence(r.ExecutionEvidence, j.Attempt),
 		inputsStaged:      r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
 		StagingTimings:    j.StagingTimings,
@@ -80,6 +85,9 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	outcome.StopObservation = q.attemptStopObservation(outcome.Machine, outcome.Session)
 	for _, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
+			if outcome.WorkerDataCleanup == nil {
+				outcome.WorkerDataCleanup = old.WorkerDataCleanup
+			}
 			outcome.StopObservation = old.StopObservation
 			outcome.DeviceFault = old.DeviceFault
 			if outcome.StagingTimings == nil {

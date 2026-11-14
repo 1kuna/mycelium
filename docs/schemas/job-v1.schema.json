@@ -497,6 +497,9 @@
         },
         "wall_time": {
           "type": "string"
+        },
+        "worker_data": {
+          "type": "string"
         }
       },
       "type": "object"
@@ -928,6 +931,9 @@
         },
         "stop_observation": {
           "$ref": "#/$defs/AttemptStopObservation"
+        },
+        "worker_data_cleanup": {
+          "$ref": "#/$defs/WorkerDataCleanup"
         }
       },
       "required": [
@@ -3872,6 +3878,10 @@
           "description": "Execution allowance, distinct from runtime estimates. Expiry/remaining appear after Started; elapsed grace or terminal state does not prove release.",
           "x-contract": "diagnostic"
         },
+        "worker_data_cleanup": {
+          "$ref": "#/$defs/WorkerDataCleanup",
+          "x-contract": "diagnostic"
+        },
         "yield_generation": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -6192,6 +6202,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "worker_data": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "workload": {
           "$ref": "#/$defs/Workload",
           "x-contract": "diagnostic"
@@ -6749,6 +6763,76 @@
         "machine",
         "session",
         "samples"
+      ],
+      "type": "object"
+    },
+    "WorkerDataCleanup": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "checked_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "paths": {
+          "items": {
+            "$ref": "#/$defs/WorkerDataRemoval"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "result_accepted": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "state",
+        "result_accepted",
+        "checked_at"
+      ],
+      "type": "object"
+    },
+    "WorkerDataRemoval": {
+      "properties": {
+        "bytes": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "bytes",
+        "removed"
       ],
       "type": "object"
     },

@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 )
 
 var errRequiredDeliveryOutput = errors.New("required output missing or invalid")
 
 func deliverySpoolPath(j Job, workerRoot string) string {
-	return filepath.Join(workerRoot, "job-files", j.ID, strconv.Itoa(j.Attempt), ".myce-result-spool")
+	return filepath.Join(attemptStorageRoot(j, workerRoot), ".myce-result-spool")
 }
 
 // Retained until exact queue acceptance, including upload/capacity failures.
