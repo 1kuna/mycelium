@@ -303,8 +303,8 @@ func TestTypedMemoryChargeWorkerLaunchesOnCharge(t *testing.T) {
 	}
 }
 
-// Per-item work never repeats exactly; with two accepted runs its family's
-// peak plus spread is the charge, as for a hint (#1466).
+// Per-item work never repeats exactly; accepted family rows forecast their
+// own peak plus measured growth (#1466, #1580), not a spread across key maxima.
 func TestTypedMemoryChargeFamilyEvidence(t *testing.T) {
 	q, clock, m := typedChargeFixture(t)
 	item := func(n string) Spec {
@@ -319,8 +319,8 @@ func TestTypedMemoryChargeFamilyEvidence(t *testing.T) {
 	}
 	learnTyped(t, q, clock, m, item("c"), 4)
 	fourth := learnTyped(t, q, clock, m, item("d"), 4)
-	if e := fourth.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 3 || e.ChargeHostGB != 6 || e.LimitHostGB != 20 || !strings.Contains(e.Source, "family") {
-		t.Fatalf("family peaks plus spread not the charge: %+v", e)
+	if e := fourth.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 3 || e.ChargeHostGB != 4+.25 || e.LimitHostGB != 20 || !strings.Contains(e.Source, "family") {
+		t.Fatalf("per-row family forecast not the charge: %+v", e)
 	}
 }
 

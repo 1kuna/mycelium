@@ -8,7 +8,7 @@ import (
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
 // file cache. NonreclaimableGB additionally includes unevictable and dirty/
-// writeback pages. GPUHost adds complete xe host-object and host-wide evidence;
+// writeback pages. GPUHost adds complete driver/proc and host-wide evidence;
 // these cgroup counters alone do not bound driver pins. CgroupGB retains the
 // kernel's total high-water mark and sizes incomplete/legacy/transfer estimates.
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
@@ -25,6 +25,7 @@ type AttemptMemoryPeak struct {
 	// horizon. It is measured by the attempt's injected clock, never inferred
 	// from a universal percentage. Nil means the worker predates this sensor.
 	DeviceGrowthGB      *float64                `json:"device_growth_gb,omitempty"`
+	DeviceSampling      *DeviceMemorySampling   `json:"device_sampling,omitempty"`
 	GrowthGB            *float64                `json:"growth_gb,omitempty"`
 	CombinedHostGB      *float64                `json:"combined_host_gb,omitempty"`
 	GPUHost             *GPUHostMemory          `json:"gpu_host,omitempty"`
@@ -260,6 +261,11 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if next.Source != "" {
 		out.Source = next.Source
 	}
+	out.DeviceSampling = nil // A new row without coverage cannot inherit an old window.
+	if next.DeviceSampling != nil {
+		s := *next.DeviceSampling
+		out.DeviceSampling = &s // Latest attempt's coverage, never a merged window.
+	}
 	if out.DeviceGB != nil {
 		out.DeviceUnavailable = ""
 	} else {
@@ -279,7 +285,10 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 		if out.GPUHost == nil {
 			p.SiblingAdjusted = next.GPUHost.SiblingAdjusted
 		}
-		for _, pair := range [][2]**float64{{&p.DriverGB, &next.GPUHost.DriverGB}, {&p.HostDropGB, &next.GPUHost.HostDropGB}, {&p.OutsideGB, &next.GPUHost.OutsideGB}} {
+		if next.GPUHost.Source == cudaHostMemorySource {
+			p.Source = cudaHostMemorySource
+		}
+		for _, pair := range [][2]**float64{{&p.PinnedGB, &next.GPUHost.PinnedGB}, {&p.PhysicalGB, &next.GPUHost.PhysicalGB}, {&p.DriverGB, &next.GPUHost.DriverGB}, {&p.HostDropGB, &next.GPUHost.HostDropGB}, {&p.OutsideGB, &next.GPUHost.OutsideGB}} {
 			if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 				gb := **pair[1]
 				*pair[0] = &gb

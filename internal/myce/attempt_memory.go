@@ -49,7 +49,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 				// locked file pages. Dirty/writeback pages need I/O before reclaim;
 				// sum them conservatively even where the counters overlap.
 				// This is not a driver pin counter; GPU reduction also needs
-				// complete independent xe host-object/whole-host evidence.
+				// complete independent driver/proc and whole-host evidence.
 				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
 				p.nonreclaimableSampleGB = &nonreclaimable
 			}
@@ -430,7 +430,8 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
-	gpuHost := backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
+	cudaHost := unifiedCUDA(&w.Machine) && deviceTelemetry && len(w.selectedDevices) <= 1
+	gpuHost := cudaHost || backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
 	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
@@ -497,7 +498,11 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	sampleHost(peak)
 	var driver <-chan gpuHostCollection
 	if completeGPUHost {
-		driver = a.collectGPUHost(ctx, clock, w.GPUTelemetryHelper, w.selectedDevice.pciAddress)
+		pci := ""
+		if w.selectedDevice != nil {
+			pci = w.selectedDevice.pciAddress
+		}
+		driver = a.collectGPUHost(ctx, clock, w.GPUTelemetryHelper, pci, cudaHost)
 	}
 	var samplers sync.WaitGroup
 	var growth memoryGrowth
@@ -640,6 +645,10 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				if gpuHost {
 					outsideGB = max(outsideGB, collected.driverGB)
 					peak.GPUHost = &GPUHostMemory{SiblingAdjusted: true, DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+					if cudaHost {
+						peak.GPUHost.Source = cudaHostMemorySource
+						peak.GPUHost.PinnedGB, peak.GPUHost.PhysicalGB = &collected.pinnedGB, &collected.physicalGB
+					}
 					combined, _ := peak.gpuHostPeakGB()
 					peak.CombinedHostGB = &combined
 				}
@@ -881,11 +890,14 @@ type deviceMemoryResult struct {
 // the former contribute to the peak. The latter are not foreign workload.
 func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt, ticks ...<-chan time.Time) <-chan deviceMemoryResult {
 	result := make(chan deviceMemoryResult, 1)
+	started := clock.Now()
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 		unreported, shared, incompleteFallback := false, false, false
 		var growth memoryGrowth
+		sampling := deviceSampling{start: started}
 		defer func() {
+			peak.DeviceSampling = sampling.finish(clock.Now(), period)
 			if incompleteFallback {
 				peak.DeviceGB, peak.DeviceGrowthGB, peak.DeviceSource = nil, nil, ""
 				peak.DeviceUnavailable = deviceUnifiedUncertain
@@ -908,6 +920,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 			case <-sampleTick:
 				ids, known, err := inventory()
 				if err != nil {
+					sampling.incomplete = true
 					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
 					continue
 				}
@@ -920,6 +933,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 				shared = shared || foreign || len(known) > 0
 				source, exclusive := "", false
 				if errors.Is(err, errDeviceMemoryNotReported) {
+					sampling.incomplete = true // Reconciliation is not a driver counter.
 					unreported = true
 					if !unifiedCUDA(&w.Machine) || a == nil {
 						continue
@@ -934,13 +948,16 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 					}
 				}
 				if err != nil {
+					sampling.incomplete = true
 					if !errors.Is(err, errAttemptMemoryPending) {
 						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 						return
 					}
 					continue
 				}
-				margin := growth.observe(clock.Now(), gb)
+				now := clock.Now()
+				sampling.observe(now, gb, period)
+				margin := growth.observe(now, gb)
 				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb, DeviceGrowthGB: &margin, DeviceSource: source})
 				if a != nil {
 					a.device.Store(&hostMemorySample{gb: gb, residentGB: resident, at: clock.Now(), growthGB: margin, source: source, exclusive: exclusive, rateGB: growth.rate})

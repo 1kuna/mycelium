@@ -977,8 +977,8 @@ resumable.
 
 **Local host calibration (#1044).** Each comparable observation retains its
 own physical-demand floor and measured range. With complete non-reclaimable
-CPU or xe host evidence, its forecast is range maximum plus the larger of
-that range's spread, measured sampling growth and launch drift. Keep the
+CPU, xe or unified CUDA host evidence, its forecast is range maximum plus the
+larger of that range's spread, measured sampling growth and launch drift. Keep the
 cumulative resident/driver peak plus launch drift as another floor, including
 when the range restarted after incomplete coverage. Take the largest of these
 per-observation bounds. Do not add a newer range's variation to an older,
@@ -990,9 +990,14 @@ growth before the next sample and snapshot-to-launch drift, respectively.
 They are empirical bounds, not guarantees about an unseen tail; pressure,
 OOM recovery, physical admission and release custody still bind.
 
-Unified CUDA host observations without complete pin/driver attribution retain
-total-cgroup sizing. Device peaks and their conservative growth margins remain
-separate and are added once to the host charge. Retained independent maxima
+Unified CUDA complete evidence includes the cgroup non-reclaimable counters,
+exact-attempt proc pin/lock readings and a conservative absolute whole-host
+physical residual for uncharged driver allocations. Missing or interrupted
+coverage retains total-cgroup sizing. The residual keeps unrelated occupancy
+and possible device overlap; it is an upper bound, not a per-client NVIDIA
+host-allocation counter. Device sample coverage, extrema and step variation are
+retained per attempt for native qualification. Device peaks and their conservative
+growth margins remain separate and are added once to the host charge. Retained independent maxima
 cannot establish a physical union or justify subtracting cache or device
 overlap. Native coexistence and output proof remain separate from calibration.
 

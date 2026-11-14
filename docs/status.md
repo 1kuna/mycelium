@@ -92,6 +92,21 @@ ceilings, physical-memory rechecks and exact release remain independent.
 RAM wait text labels `live available` as available RAM after operator reserve,
 not memory in use. Linux reads `MemAvailable`, which includes reclaimable cache.
 
+Unified CUDA attempt `memory_peak.gpu_host` can report
+`source: CUDA proc physical upper bound`: `pinned_gb` retains exact-attempt
+`VmPin`/`VmLck` plus outstanding whole-host GUP pins, and `physical_gb` retains
+whole-host non-cache occupancy (with locked/dirty pages kept). `driver_gb`
+keeps that absolute occupancy outside root-cgroup anon/shmem plus pins;
+`outside_gb` also covers the sibling-adjusted host drop. These are conservative
+upper bounds and can overlap device allocations, never evidence of a unique
+physical union. The 200 ms collector must have complete, fresh cgroup/proc
+coverage before `nonreclaimable_gb` and the GPU host range can calibrate an
+envelope; missing fields retain total-cgroup sizing.
+`memory_peak.device_sampling` records one exact attempt's driver sample count,
+extrema, final reading, largest/last step, first/peak timing and maximum gap.
+`complete: false` identifies missing, late or fallback coverage. These diagnostics
+do not reduce `device_growth_gb`, relax fresh sharing guards or qualify coexistence.
+
 `diagnostic_code: memory_evidence_recovering` (#850)
 means declared requirements have an eligible target but the learned/exploratory
 envelope does not. The durable queued job re-evaluates on evidence and capacity
