@@ -202,7 +202,7 @@ func TestMachineKillPhaseCapacitySparesNeighbor(t *testing.T) {
 	}
 }
 
-func TestMachineWorkerReportsRecoveryUntilBufferedResultDrains(t *testing.T) {
+func TestMachineWorkerRetainsSessionUntilBufferedResultDrains(t *testing.T) {
 	h := &machineHarness{issued: true, controls: map[string]AttemptDirective{}}
 	w := harnessWorker(t, h)
 	root, err := w.openStore()
@@ -266,15 +266,21 @@ func TestMachineWorkerReportsRecoveryUntilBufferedResultDrains(t *testing.T) {
 			close(drain)
 		}
 	})
+	admissionReleased := false
 	for i := 0; i < 20; i++ {
 		select {
 		case c := <-observed:
-			if !c.Recovering || c.Machine.Session != j.Session || c.Fresh || len(c.Attempts) != 1 || c.Attempts[0].ID != j.ID {
-				t.Fatalf("startup custody not marked recovering: recovering=%t session=%s fresh=%t attempts=%d", c.Recovering, c.Machine.Session, c.Fresh, len(c.Attempts))
+			// #1609 releases local capacity while retaining publication custody.
+			admissionReleased = admissionReleased || !c.Recovering
+			if c.Machine.Session != j.Session || c.Fresh || len(c.Attempts) != 1 || c.Attempts[0].ID != j.ID {
+				t.Fatalf("startup publication custody changed: recovering=%t session=%s fresh=%t attempts=%d", c.Recovering, c.Machine.Session, c.Fresh, len(c.Attempts))
 			}
 		case <-time.After(testWaitTimeout):
 			t.Fatal("recovery blocked heartbeat")
 		}
+	}
+	if !admissionReleased {
+		t.Fatal("released result publication still fenced local admission")
 	}
 	close(drain)
 	released = true

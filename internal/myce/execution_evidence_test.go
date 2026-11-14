@@ -96,6 +96,7 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			w.environmentCache = &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}}
 			calls := 0
+			var store *workerStore
 			proceed := make(chan struct{})
 			defer func() {
 				select {
@@ -112,7 +113,9 @@ func TestExecutionEvidenceMemoryRefusal(t *testing.T) {
 					}
 				} else if phase == "before_helpers" && calls == 2 {
 					return errWorkerMemory
-				} else if phase == "after_helper" && calls == 4 {
+				} else if phase == "after_helper" && store.startExecutionEvidence(*offer).Sidecars == executionMayHaveRun {
+					// Refuse after the helper's execution boundary, independent
+					// of how many authorization gates precede materialization.
 					<-proceed
 					return errWorkerMemory
 				}

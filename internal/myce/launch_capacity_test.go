@@ -90,11 +90,11 @@ func TestLaunchCapacityNativeHelperRepeated(t *testing.T) {
 		w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
 		w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 		w.nativeListenerProbe = func(string, int) error { return nil }
-		calls := 0
+		var store *workerStore
 		w.batchAdmission = func(context.Context, HostLaunch) error {
-			calls++
 			// Alternate refusal before and after durable Started authorization.
-			if attempt <= 4 && calls == 4+attempt%2 {
+			// Both cases require an executed helper, independent of earlier gates.
+			if attempt <= 4 && store.startExecutionEvidence(*offer).Sidecars == executionMayHaveRun && (attempt%2 == 0 || job(t, q, j.ID).StartedAt != nil) {
 				return refuseAdmission("live_host_growth", "GiB", 4, 3, false)
 			}
 			return nil

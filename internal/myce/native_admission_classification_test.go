@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -12,8 +13,8 @@ import (
 // A real ready helper has custody before either final main launch gate. A local
 // capacity refusal remains typed even if durable Started authorization won.
 func TestNativeMemberAdmissionClassification(t *testing.T) {
-	for _, refuseAt := range []int{3, 4, 5} {
-		t.Run(map[int]string{3: "helper-final-gate", 4: "before-started", 5: "after-started"}[refuseAt], func(t *testing.T) {
+	for _, phase := range []string{"helper-final-gate", "before-started", "after-started"} {
+		t.Run(phase, func(t *testing.T) {
 			q, clock := fixture(t)
 			s := nativeSpec(t)
 			s.Priority = "production"
@@ -31,10 +32,18 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 			w.Clock, w.Machine, w.Client = clock, m, Client{URL: server.URL, Token: "test"}
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			w.nativeListenerProbe = func(string, int) error { return nil }
-			calls := 0
+			var store *workerStore
 			w.batchAdmission = func(context.Context, HostLaunch) error {
-				calls++
-				if calls == refuseAt {
+				refuse := false
+				if phase == "helper-final-gate" {
+					data, _ := os.ReadFile(filepath.Join(store.dir, "native-"+store.state.Identity+".json"))
+					var state struct{ Members []nativeMember }
+					_ = json.Unmarshal(data, &state)
+					refuse = len(state.Members) > 0 && state.Members[0].Phase == "gated"
+				} else if store.startExecutionEvidence(*offer).Sidecars == executionMayHaveRun {
+					refuse = phase == "before-started" || job(t, q, offer.ID).StartedAt != nil
+				}
+				if refuse {
 					return refuseAdmission("live_host_growth", "GiB", 4, 3, false)
 				}
 				return nil
@@ -63,14 +72,14 @@ func TestNativeMemberAdmissionClassification(t *testing.T) {
 				if d == nil || d.Subcheck != "live_host_growth" || d.Unit != "GiB" || d.Required != 4 || d.Available == nil || *d.Available != 3 || d.Unavailable {
 					t.Fatalf("member comparison lost: %+v", d)
 				}
-				if started := job(t, q, offer.ID).StartedAt != nil; started != (refuseAt == 5) {
-					t.Fatal("Started race not exercised", started, refuseAt)
+				if started := job(t, q, offer.ID).StartedAt != nil; started != (phase == "after-started") {
+					t.Fatal("Started race not exercised", started, phase)
 				}
 				if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main.json")); !os.IsNotExist(err) {
 					t.Fatal("main ran after refusal", err)
 				}
 				_, helperErr := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "side.json"))
-				if refuseAt == 3 {
+				if phase == "helper-final-gate" {
 					if !os.IsNotExist(helperErr) {
 						t.Fatal("helper payload ran through closed gate", helperErr)
 					}

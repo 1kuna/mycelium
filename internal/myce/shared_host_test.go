@@ -2,11 +2,13 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -309,6 +311,13 @@ func TestSharedHostDoesNotRebuildMainEnvironment(t *testing.T) {
 	r := binaryRecipe(t, "cpu")
 	m.Environments = []string{r.Key} // Readiness reported before the cache disappeared.
 	w := Worker{Machine: m, Clock: clock, StateDir: t.TempDir(), HostMemorySource: func(context.Context) (float64, error) { return 12, nil }, environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
+	// Isolate the cache-readiness decision after successful queue fencing.
+	w.Client = nativeFixtureClient(http.HandlerFunc(func(out http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/workers/launch" {
+			t.Errorf("unexpected request %s", req.URL.Path)
+		}
+		_ = json.NewEncoder(out).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
+	}))
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

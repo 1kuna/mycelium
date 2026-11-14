@@ -41,6 +41,7 @@ func TestStaleStagingReplayRetainsSenderUntilReleaseAcknowledged(t *testing.T) {
 	if assigned == nil || assigned.ID != victim.ID {
 		t.Fatal("staging attempt not assigned")
 	}
+	assigned.Checkpoint = filepath.Join(nas, assigned.Checkpoint)
 	store, err := newAttemptStore(root, *assigned)
 	if err != nil {
 		t.Fatal(err)
@@ -112,15 +113,21 @@ func TestStaleStagingReplayRetainsSenderUntilReleaseAcknowledged(t *testing.T) {
 		t.Fatalf("loss did not retain exact copy custody: %+v", before)
 	}
 	for range 2 {
-		select {
-		case release := <-releases:
-			if release.Execution != (Execution{ID: assigned.ID, Attempt: assigned.Attempt}) || release.Machine != assigned.Machine || release.Session != assigned.Session || !release.ReleaseOnly || release.ReleasePending {
-				t.Fatalf("not an exact confirmed release: %+v", release)
+		var release Result
+		await(t, func() bool {
+			// Publication failures are paced by the injected queue clock.
+			clock.Advance(time.Millisecond)
+			select {
+			case release = <-releases:
+				return true
+			case <-a.done:
+				t.Fatal("stale replay retired the only release sender")
+			default:
 			}
-		case <-a.done:
-			t.Fatal("stale replay retired the only release sender")
-		case <-time.After(testWaitTimeout):
-			t.Fatal("stale replay did not send/retry release")
+			return false
+		})
+		if release.Execution != (Execution{ID: assigned.ID, Attempt: assigned.Attempt}) || release.Machine != assigned.Machine || release.Session != assigned.Session || !release.ReleaseOnly || release.ReleasePending {
+			t.Fatalf("not an exact confirmed release: %+v", release)
 		}
 	}
 	data, err := os.ReadFile(filepath.Join(store.dir, store.stateName))
