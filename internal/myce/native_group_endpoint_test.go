@@ -48,7 +48,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 			b, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 			var st workerState
 			_ = json.Unmarshal(b, &st)
-			if oldGroup != 0 && st.PID != 0 && st.PID != oldGroup && !cleanupChecked {
+			if stolen != nil && !cleanupChecked {
 				left, err := workerGroupMembers(oldGroup)
 				if err != nil || len(left) != 0 {
 					t.Errorf("relaunch before old group cleanup: %v %v", left, err)
