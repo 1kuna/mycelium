@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -231,7 +232,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
 			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, ctx); err != nil {
-				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, uploadFailure(ctx, "upload_creation_commit", err)
 			}
 			if err := ctx.Err(); err != nil {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
@@ -240,16 +241,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ctx := creationContext(e.Context)
-			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
-			if err := s.publish(ctx, ref); err != nil {
-				return tus.HTTPResponse{}, err
-			}
-			// An internal writer may have created the same blob after this
-			// upload's POST. Publication must still honor the import's custody.
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, ctx); err != nil {
-				return tus.HTTPResponse{}, err
-			}
-			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256, ctx)
+			return tus.HTTPResponse{}, s.finishUpload(ctx, e.Upload)
 		},
 	})
 	if err != nil {
@@ -295,45 +287,48 @@ func (s *FileStore) refreshBlob(path string) error {
 }
 func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err := ref.validate(); err != nil {
-		return err
+		return uploadFailure(ctx, "upload_verify", err)
 	}
 	source := filepath.Join(s.root, "uploads", ref.SHA256)
 	if err := verifyFile(ctx, source, ref); err != nil {
-		return errors.New("uploaded file size or SHA-256 mismatch")
+		return uploadFailure(ctx, "upload_verify", err)
 	}
 	f, err := os.OpenFile(source, os.O_RDWR, 0600)
 	if err != nil {
-		return err
+		return uploadFailure(ctx, "upload_open", err)
 	}
 	if err = errors.Join(f.Sync(), f.Close()); err != nil {
-		return err
+		return uploadFailure(ctx, "upload_sync", err)
 	}
 	if err = os.Link(source, s.blob(ref)); err != nil && !os.IsExist(err) {
-		return err
+		return uploadFailure(ctx, "blob_link", err)
 	}
 	if err = s.verify(ctx, ref); err != nil {
-		return err
+		return uploadFailure(ctx, "blob_verify", err)
 	}
 	if err = s.refreshBlob(s.blob(ref)); err != nil {
-		return err
+		return uploadFailure(ctx, "blob_refresh", err)
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
-		return err
+		return uploadFailure(ctx, "blob_directory_sync", err)
 	}
 	// Keep only the authoritative link after publication. A later tus creation
 	// must never truncate a surviving hard link to the immutable blob.
 	if err = os.Remove(source); err != nil && !os.IsNotExist(err) {
-		return err
+		return uploadFailure(ctx, "upload_unlink", err)
 	}
 	if err = os.Remove(source + ".info"); err != nil && !os.IsNotExist(err) {
-		return err
+		return uploadFailure(ctx, "upload_metadata_unlink", err)
 	}
-	return s.syncDir(filepath.Join(s.root, "uploads"))
+	return uploadFailure(ctx, "upload_directory_sync", s.syncDir(filepath.Join(s.root, "uploads")))
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
+	r, diagnostic := uploadRequestDiagnostic(r)
 	response := &uploadResponse{ResponseWriter: w}
 	w = response
+	r = s.uploadVerificationProgress(w, r)
 	defer response.finish()
+	defer func() { diagnostic.log(r, response.status, response.Header(), response.body.Bytes()) }()
 	var err error
 	r, err = fileStoreSubmissionRequest(r)
 	if err != nil {
@@ -358,20 +353,30 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), id)
 		if err != nil {
+			if !errors.Is(err, tus.ErrNotFound) {
+				uploadFailure(r.Context(), "upload_metadata", err)
+			}
 			s.handler.ServeHTTP(w, r)
 			return
 		}
 		info, err := upload.GetInfo(r.Context())
 		if err != nil {
+			uploadFailure(r.Context(), "upload_metadata", err)
 			http.Error(w, "upload metadata unavailable", 503)
 			return
 		}
+		diagnostic.length, diagnostic.accepted = info.Size, info.Offset
 		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: info.Size}, true)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
 		r = r.WithContext(claimCtx)
+		if r.Method == "PATCH" && info.Offset == info.Size && r.Header.Get("Tus-Resumable") == "1.0.0" &&
+			r.Header.Get("Content-Type") == "application/offset+octet-stream" && r.Header.Get("Upload-Offset") == strconv.FormatInt(info.Size, 10) {
+			s.resumeUploadPublication(w, r, id)
+			return
+		}
 		s.handler.ServeHTTP(w, r)
 		if response.status >= 400 {
 			return
@@ -402,6 +407,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ref := FileRef{hash, length}
+	diagnostic.hash, diagnostic.length = hash, length
 	if err != nil || ref.validate() != nil || r.Header.Get("Upload-Defer-Length") != "" || r.Header.Get("Upload-Concat") != "" {
 		http.Error(w, "invalid upload identity", 400)
 		return
@@ -978,7 +984,22 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	}
 	var reading, writing, awaiting atomic.Bool
 	var progressConn atomic.Pointer[fileTransferConn]
+	var verificationReads uint64
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
+			if code != http.StatusProcessing || header.Get("X-Myce-Verification-Reads") == "" {
+				return nil
+			}
+			reads, err := strconv.ParseUint(header.Get("X-Myce-Verification-Reads"), 10, 64)
+			if err != nil || reads <= verificationReads {
+				return errors.New("invalid upload verification progress")
+			}
+			verificationReads = reads
+			if conn := progressConn.Load(); conn != nil && conn.timing != nil {
+				conn.awaitResponse()
+			}
+			return nil
+		},
 		WroteHeaders: func() { writing.Store(true) },
 		WroteRequest: func(httptrace.WroteRequestInfo) {
 			writing.Store(false)
@@ -995,6 +1016,11 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if method == "PATCH" && c.uploadTiming != nil {
+		// Four actual-read reports fit inside the learned idle window. This
+		// keeps full-blob verification distinct from a stalled network peer.
+		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window()) / 4).String())
 	}
 	hc := c.HTTP
 	if hc == nil {
@@ -1183,6 +1209,11 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 
 func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
 	c.uploadTiming = &uploadTiming{}
+	if c.publication != nil {
+		// Every file in one result sees the same contended queue. Keep its
+		// measured service/pressure instead of relearning from zero per file.
+		c.uploadTiming = &c.publication.timing
+	}
 	pace := ClientPace{}
 	for {
 		if err := c.ownerError(ctx); err != nil {
