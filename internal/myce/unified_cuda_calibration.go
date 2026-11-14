@@ -52,7 +52,7 @@ func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, dev
 		}
 		hostMargin := max(memoryGrowthGB(p), drift)
 		combined, valid := p.gpuHostPeakGB()
-		if valid && p.GPUHost.Source == cudaHostMemorySource && p.GPUHost.SiblingAdjusted {
+		if valid && p.GPUHost.Source == cudaHostMemorySource && p.GPUHost.SiblingAdjusted && point.GPUHostRange.valid() {
 			if r := point.MemoryRange; r.valid() {
 				hostMargin = max(hostMargin, r.MaxGB-r.MinGB)
 			}
@@ -64,6 +64,7 @@ func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, dev
 		} else {
 			// Missing counters retain the complete old total/device floor and
 			// measured host growth. This can dominate otherwise small new runs.
+			// Cleared coverage also wins over cached aggregate GPU-host fields.
 			physical = max(physical, hostMemoryPeakGB(p)+hostMargin+*p.DeviceGB+deviceMargin)
 			incomplete = append(incomplete, point)
 			incompleteDevice = max(incompleteDevice, *p.DeviceGB)

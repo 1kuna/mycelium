@@ -145,6 +145,17 @@ func TestUnifiedCUDACalibrationPeakVariation(t *testing.T) {
 	if !ok || d != 24 || h+d < 30 {
 		t.Fatalf("lost device variation or combined floor: %v %v %v", h, d, ok)
 	}
+	// An incomplete completion clears the coverage range, but its aggregate
+	// can still retain older GPU-host counters. Those counters cannot discount
+	// this row's larger, undecomposed total-cgroup peak.
+	gap, gapPeak := *p, *p.MemoryPeak
+	total := 80.0
+	gapPeak.CgroupGB = &total
+	gap.MemoryPeak, gap.MemoryRange, gap.GPUHostRange = &gapPeak, nil, nil
+	h, d, _, ok = unifiedCUDACalibration([]*WorkObservation{p, &gap}, .125)
+	if !ok || h+d < total+device {
+		t.Fatalf("cached counters discounted incomplete coverage: %v %v %v", h, d, ok)
+	}
 	// An accepted larger device peak raises the reservation without waiting
 	// for another complete host range or silently discounting a legacy row.
 	spike := *p
