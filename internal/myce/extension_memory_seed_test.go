@@ -47,8 +47,11 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			candidate := seedMemoryCandidate(t, q, queued, q.s.Machines[m.ID])
 			want := 2.25
 			if mode == "same model command" {
-				want = 6
-			} // 4 GiB peak + the measured 4-2 GiB range.
+				// Each accepted row is bounded on its own (#1580): the 4 GiB
+				// peak plus its measured 0.5 GiB growth, the larger of the
+				// two rows. The spread between rows is not added on top.
+				want = 4.5
+			}
 			if e := candidate.MemoryEnvelope; e.Source != priorVersionMemorySource || e.Basis != "exploratory" || candidate.Spec.Needs.HostMemoryGB != want {
 				t.Fatalf("new version lost accepted predecessor evidence: %+v needs=%+v want=%g", e, candidate.Spec.Needs, want)
 			}
