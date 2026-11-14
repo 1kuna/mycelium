@@ -166,6 +166,7 @@ type hostMountProbe struct {
 	pending     chan hostMountResult
 	started     time.Time
 	last        HostMountHealth
+	failure     *CheckpointStorageEvidence
 	candidate   string
 	consecutive int
 	reason      string
@@ -220,6 +221,9 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 			}
 			p.last = HostMountHealth{Root: p.root, LatencySeconds: r.latency.Seconds()}
 			if r.err != nil {
+				if p.root == "checkpoint" {
+					p.failure = checkpointProbeFailure(r.err, now)
+				}
 				p.last.Reason = "mount_probe_failed"
 				var recovery mountRecoveryError
 				if errors.As(r.err, &recovery) {
@@ -230,6 +234,7 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				p.retryDelay = max(limit, max(r.latency, p.retryDelay*2))
 				p.nextProbe = now.Add(p.retryDelay)
 			} else {
+				p.failure = nil
 				p.retryDelay, p.nextProbe = 0, time.Time{}
 			}
 		default:

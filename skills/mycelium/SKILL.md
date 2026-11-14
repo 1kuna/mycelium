@@ -292,6 +292,14 @@ spending losses or infrastructure retries, preferring another eligible host.
 Status names the staging cause. A completed read with a wrong snapshot hash
 still fails as `model_snapshot_mismatch`; repair the source or declaration.
 
+A command failure concurrent with a recorded checkpoint-root stall or failure
+also requeues without spending losses or infrastructure retries, preferring
+another eligible host. Its `checkpoint_storage_interrupted` finding names the
+storage evidence (timestamp, no-progress age and available operation/errno).
+Keep the job and key while it retries. Healthy storage or merely slow probes
+leave command failures owned by the job; exit codes alone never establish a
+storage fault.
+
 A resume stays on the target (OS/arch/platform) that wrote the newest
 checkpoint, waiting for a host of that target even while it is busy or in
 maintenance; status shows the wait as `checkpoint_target`. It moves to another

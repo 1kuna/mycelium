@@ -2257,7 +2257,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
 	r.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
 	q.recordColdProbeRefusal(j, r)
-	if r.ExecutionCause != nil && (r.ExecutionCause.Operation == "input_staging" || r.ExecutionCause.Finalization != nil) {
+	if r.ExecutionCause != nil && (r.ExecutionCause.Operation == "input_staging" || checkpointStorageInterruption(r.ExecutionCause) || r.ExecutionCause.Finalization != nil) {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
 		r.Error = r.ExecutionCause.String()
@@ -2380,6 +2380,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
 	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "resource_limit" {
 		q.requeue(j, "waiting for memory after prelaunch admission changed", false)
+	} else if r.Interrupted && !oomFailure && checkpointStorageInterruption(j.ExecutionCause) {
+		q.requeue(j, "requeued: storage infrastructure interrupted command: "+j.ExecutionCause.String(), false)
 	} else if r.Interrupted && r.PoliteStop {
 		q.retry(j, "requeued: hypha availability withdrawn")
 	} else if r.Interrupted && r.OperatorStop {
