@@ -18,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.15 must interoperate with the live r6.14.1 release.
+# MY-42: candidate r6.16 must interoperate with the live r6.15.3 release.
 # Advance this pair together at each release.
-PREVIOUS = "58abfa91698b50cdfd249340a8a9fbe8607ec98f"
-OLD_VERSION = "v3.1.0-rc.20261112.s076r6.14.1"
-VERSION = "v3.1.0-rc.20261113.s076r6.15"
+PREVIOUS = "f3623562c14e645f46de61ce87bc1f5e3bc7c321"
+OLD_VERSION = "v3.1.0-rc.20261113.s076r6.15.3"
+VERSION = "v3.1.0-rc.20261114.s076r6.16"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 # Top-level source the build needs; `skills` is the consumer skill embedded in
 # cmd/myce since #1474. Releases without it simply have no such directory.
