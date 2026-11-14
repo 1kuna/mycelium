@@ -117,10 +117,11 @@ func TestExtensionPrepareCustodyAndQualificationIdentity(t *testing.T) {
 	r.Qualified = true
 	r.CheckID = "exact-check"
 	w.Machine.ExtensionReports = []ExtensionReport{r}
+	w.Machine.qualificationMemo = map[extensionQualificationKey]string{}
 	if qualifiedExtension(j, &w.Machine) == nil {
 		t.Fatal("exact qualification excluded")
 	}
-	for _, field := range []string{"host", "fingerprint", "environment", "check", "invocation", "setup"} {
+	for _, field := range []string{"host", "fingerprint", "environment", "check", "invocation", "setup", "target", "digest", "platform", "work", "qualified"} {
 		changed := r
 		switch field {
 		case "host":
@@ -135,12 +136,58 @@ func TestExtensionPrepareCustodyAndQualificationIdentity(t *testing.T) {
 			changed.CheckID = ""
 		case "setup":
 			changed.Setup = false
+		case "target":
+			target := *changed.Target
+			target.Arch = "other"
+			changed.Target = &target
+		case "digest":
+			changed.Digest = "other"
+		case "platform":
+			changed.Platform = "other"
+		case "work":
+			changed.Work = "other"
+		case "qualified":
+			changed.Qualified = false
 		}
 		w.Machine.ExtensionReports = []ExtensionReport{changed}
 		if qualifiedExtension(j, &w.Machine) != nil {
 			t.Fatal("stale qualification placed", field)
 		}
 	}
+	// Inventory copies used by capacity projection share the pass memo, but
+	// a different host, target or device must still require its own check.
+	w.Machine.ExtensionReports = []ExtensionReport{r}
+	for _, field := range []string{"host", "fingerprint", "target", "device"} {
+		changed := w.Machine
+		switch field {
+		case "host":
+			changed.HostID = "other"
+		case "fingerprint":
+			changed.ExtensionFingerprint = "other"
+		case "target":
+			profile := *changed.CapabilityProfile
+			profile.Arch = "other"
+			changed.CapabilityProfile = &profile
+		case "device":
+			changed.Device = "other"
+			changed.Devices = []MachineDevice{}
+		}
+		if qualifiedExtension(j, &changed) != nil {
+			t.Fatal("qualification reused across inventory identity", field)
+		}
+	}
+	// Report targets are compared by value, including an in-place change.
+	target := *r.Target
+	r.Target = &target
+	w.Machine.ExtensionReports = []ExtensionReport{r}
+	if qualifiedExtension(j, &w.Machine) == nil {
+		t.Fatal("unchanged target excluded")
+	}
+	target.Arch = "other"
+	if qualifiedExtension(j, &w.Machine) != nil {
+		t.Fatal("mutated report target reused")
+	}
+	w.Machine.qualificationMemo = nil
 	// Drain invalidates an unstarted delayed offer through the same launch gate.
 	w.Machine.ExtensionReports = nil
 	if _, err := q.ChangeHostMaintenance(hostID(&w.Machine), HostMaintenanceRequest{Action: "drain"}); err != nil {

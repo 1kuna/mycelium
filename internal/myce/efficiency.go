@@ -563,6 +563,9 @@ func efficiencyHostIdentity(machines []*Machine) string {
 // are author intent; this report neither changes them nor asserts output parity.
 func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 	var rows []StrandedDemand
+	if len(j.Spec.AllowedMachines)+len(j.Spec.ExcludedMachines)+len(j.Spec.Targets)+len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
+		return rows // Nothing authored can be relaxed to reveal stranded room.
+	}
 	// Called on a detached maintenance observation. Replace only this map;
 	// restore it before returning, and never mutate its shared policy values.
 	policies := q.s.Policies
@@ -573,7 +576,6 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 	}
 	defer func() { q.s.Policies = policies }()
 	scan := q.placementScan()
-	fences := q.hostBackfillFences(scan)
 	seenHosts := map[string]bool{}
 	for _, m := range q.plannerMachines() {
 		if seenHosts[hostID(m)] || !q.inventoryFresh(q.s.Machines[m.ID]) {
@@ -603,7 +605,10 @@ func (q *Queue) strandedDemand(j *Job) []StrandedDemand {
 		probe := *j
 		probe.Spec.AllowedMachines, probe.Spec.ExcludedMachines, probe.Spec.Targets = nil, nil, nil
 		candidate := q.batchCandidateWithResources(&probe, m, nil)
-		if candidate == nil || q.immediateCandidate(candidate, m) == nil || !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || !q.batchSlotFreeForEfficiency(candidate, m) || !q.hostBackfillAllows(candidate, m, fences[hostID(m)]) {
+		// Build the backlog-wide capacity fence only for an otherwise usable,
+		// authored exclusion. Unrestricted jobs cannot be stranded, and sizing
+		// the whole backlog for each one makes this diagnostic quadratic.
+		if candidate == nil || q.immediateCandidate(candidate, m) == nil || !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || !q.batchSlotFreeForEfficiency(candidate, m) || !q.hostBackfillAllows(candidate, m, q.hostBackfillFences(scan)[hostID(m)]) {
 			continue
 		}
 		seenHosts[hostID(m)] = true
@@ -646,12 +651,17 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	if err != nil {
 		return nil, err
 	}
+	defer v.memoizeExtensionQualifications(nil)()
 	d := &efficiencyDiagnostics{blockers: map[string]efficiencyBlockerObservation{}}
 	v.memoryPlanning = newMemoryPlanningCache()
+	// All blocker observations use the same detached scheduling inputs. Share
+	// their backlog/target projections, as the aggregate status path does.
+	// strandedDemand keeps a separate scan because it relaxes project policy.
+	scan := v.placementScan()
 	for _, j := range v.liveJobs() {
 		if j.State == "queued" && !cancelled(j) {
 			stranded := v.strandedDemand(j)
-			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j).efficiencyCategory(), Stranded: len(stranded) > 0, Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
+			d.blockers[j.ID] = efficiencyBlockerObservation{Category: v.waitHold(j, scan).efficiencyCategory(), Stranded: len(stranded) > 0, Attempt: j.Attempt, Session: j.Session, Queued: j.Queued}
 			if j.Efficiency != nil {
 				j.Efficiency.advance(v.clock.Now())
 				j.Efficiency.Blocker, j.Efficiency.Stranded = d.blockers[j.ID].Category, len(stranded) > 0

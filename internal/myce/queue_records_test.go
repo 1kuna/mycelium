@@ -14,6 +14,7 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 				q, _ := fixture(t)
 				s := spec("production")
 				s.SubmissionKey = "undo"
+				s.Run.Env = map[string]string{"INPUT": "original"}
 				j := submit(t, q, s)
 				if cold {
 					run := check(t, q, machine("worker", "fake"), nil).Job
@@ -33,6 +34,7 @@ func TestQueueRecordsKeyedRollback(t *testing.T) {
 						live = q.touchJob(j.ID)
 					}
 					live.Spec.Run.Command[0] = "mutated"
+					live.Spec.Run.Env["INPUT"] = "mutated"
 					live.Reason = "mutated"
 					return rejected
 				}); !errors.Is(err, rejected) {

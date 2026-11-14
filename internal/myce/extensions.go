@@ -475,13 +475,27 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 }
 
 func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, string) {
+	return extensionCandidates(j, m, qualified, false)
+}
+
+// A serial piece clears parent metadata on the candidate already being built,
+// rather than allocating an intermediate full Job before lowering it.
+func extensionCandidates(j *Job, m *Machine, qualified, piece bool) ([]*Job, string) {
 	if m.GPU == "cpu" && j.State == "queued" && j.Spec.cpuFallback() {
 		if c := cpuFallbackCandidate(j, m); c != nil {
+			if piece {
+				c.Spec.FanOut, c.FanOut = nil, nil
+			}
 			return []*Job{c}, ""
 		}
 		return nil, "platform"
 	}
 	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" || j.MemoryEnvelope != nil && j.MemoryEnvelope.Machine == m.ID && j.MemoryEnvelope.Device == m.Device {
+		if piece {
+			copy := *j
+			copy.Spec.FanOut, copy.FanOut = nil, nil
+			return []*Job{&copy}, ""
+		}
 		return []*Job{j}, ""
 	}
 	if !deviceAllowed(j, m) {
@@ -495,11 +509,17 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 		}
 		if len(j.Spec.SharedInputs) > 0 {
 			candidate := j.Spec
+			if piece {
+				candidate.FanOut = nil
+			}
 			if err := e.lower(&candidate, m); err != nil {
 				continue
 			}
 		}
 		copy := *j
+		if piece {
+			copy.Spec.FanOut, copy.FanOut = nil, nil
+		}
 		copy.Extensions = []Extension{e}
 		if qualified && qualifiedExtension(&copy, m) == nil {
 			continue

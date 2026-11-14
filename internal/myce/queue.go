@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -1306,6 +1307,7 @@ func (q *Queue) maintain() {
 	if q.maintenance == nil {
 		defer func() { q.maintenance = nil }()
 	}
+	defer q.memoizeExtensionQualifications(nil)()
 	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	q.beginMaintenance()
 	q.expireInventoryObservations()
@@ -2936,9 +2938,9 @@ func cloneJob(j *Job) Job {
 	// FileRef is a value of strings and an integer. Copy the manifest directly
 	// rather than encoding and decoding every input in each transaction undo.
 	value.Spec.Files = nil
-	data, _ := json.Marshal(&value)
-	var out Job
-	_ = json.Unmarshal(data, &out)
+	// Use the same detached, JSON-owned copy as observation and retained
+	// records. A transaction undo needs memory ownership, not wire encoding.
+	out := copyObservationValue(reflect.ValueOf(value)).Interface().(Job)
 	if len(j.Spec.Files) > 0 {
 		out.Spec.Files = maps.Clone(j.Spec.Files)
 	}

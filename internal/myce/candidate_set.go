@@ -34,6 +34,7 @@ func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
 
 func (q *Queue) buildCandidates(m *Machine, scans ...*placementScan) *candidateSet {
 	scan := q.placementScan(scans...)
+	defer q.memoizeExtensionQualifications(append([]*Machine{m}, scan.machines...))()
 	if scan.memory == nil {
 		scan.memory = newMemoryPlanningCache()
 	}

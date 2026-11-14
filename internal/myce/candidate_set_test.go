@@ -23,6 +23,9 @@ func TestCandidateSetExclusionsKeepFairCompetitors(t *testing.T) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	set := q.candidates(&m)
+	if m.qualificationMemo != nil {
+		t.Fatal("candidate pass retained qualification memo on inventory")
+	}
 	excluded := map[string]bool{}
 	for range 9 {
 		got := set.pick(excluded)
