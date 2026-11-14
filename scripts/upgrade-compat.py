@@ -18,11 +18,11 @@ import urllib.request
 import urllib.parse
 
 REPO = Path(__file__).resolve().parent.parent
-# MY-42: candidate r6.16 must interoperate with the live r6.15.3 release.
+# MY-42: candidate r6.17 must interoperate with the live r6.16.5 release.
 # Advance this pair together at each release.
-PREVIOUS = "f3623562c14e645f46de61ce87bc1f5e3bc7c321"
-OLD_VERSION = "v3.1.0-rc.20261113.s076r6.15.3"
-VERSION = "v3.1.0-rc.20261114.s076r6.16"
+PREVIOUS = "c11385f17c0d0a3b30972b8a95451f1cbffcf81b"
+OLD_VERSION = "v3.1.0-rc.20261114.s076r6.16.5"
+VERSION = "v3.1.0-rc.20261114.s076r6.17"
 FIXTURE = REPO / "scripts/testdata/upgrade_compat_test.go.txt"
 # Top-level source the build needs; `skills` is the consumer skill embedded in
 # cmd/myce since #1474. Releases without it simply have no such directory.
@@ -361,6 +361,18 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
     refused = [i for i, row in enumerate(rows) if row["status"] != 200]
     if not refused:
         return
+    # A worker that negotiated inventory observations with the candidate may
+    # retain that field across rollback. The strict predecessor rejects it once;
+    # the retry must remove only that field and preserve the complete baseline.
+    if allow_additive_retry and refused == [0] and rows[0]["status"] == 400 and rows[0].get("inventory_probe_fields"):
+        error = json.loads(rows[0].get("error", "{}"))
+        assert error.get("code") == "request_invalid", error
+        assert error.get("error") in ("body must be one JSON object with known fields and valid field types", 'json: unknown field "inventory_probe"'), error
+        if len(rows) > 1:
+            assert not rows[1].get("inventory_probe_fields"), "inventory retry retained rejected field"
+            for key in ("session", "attempt_protocol", "hash", "rollback_baseline_sha256", "disk_budget_fields", "checkpoint_expiry_fields"):
+                assert rows[1][key] == rows[0][key], "inventory-only retry changed " + key
+        return
     # The worker keeps its candidate negotiation across queue replacement. The
     # previous queue strictly rejects newer additive disk-budget/checkpoint-expiry
     # fields; the narrow compatibility path retries once without them. All other
@@ -516,7 +528,13 @@ if __name__ == "__main__":
     parser.add_argument("action", choices=["prepare", "run"])
     parser.add_argument("--candidate", help="Git revision for incident reproduction; default actual checkout bytes")
     parser.add_argument("--case", help="run only cases whose names contain this text")
+    parser.add_argument("--previous", help="exact additional live predecessor commit (requires --old-version)")
+    parser.add_argument("--old-version", help="version compiled into --previous")
     args = parser.parse_args()
+    if bool(args.previous) != bool(args.old_version):
+        parser.error("--previous and --old-version must be supplied together")
+    if args.previous:
+        PREVIOUS, OLD_VERSION = args.previous, args.old_version
     install_signal_handlers()
     signal.alarm(600)
     try:
