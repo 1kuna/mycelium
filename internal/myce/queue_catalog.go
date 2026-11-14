@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 )
@@ -147,8 +148,9 @@ func queueBase(s state, machines bool) state {
 }
 
 type recordUndo struct {
-	base     state
-	catalogs state // Borrow map containers; touched entries have detached undo.
-	machines map[string]*Machine
-	health   []HealthAlert
+	base           state
+	catalogs       state // Borrow map containers; touched entries have detached undo.
+	machines       map[string]*Machine
+	health         []HealthAlert
+	efficiencyJSON json.RawMessage
 }

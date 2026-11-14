@@ -272,8 +272,9 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		q.persisted = map[string][]byte{}
 	}
 	q.commitHistories()
+	q.persistedStateFields = next.stateFields
 	changedJobs := false
-	for key, value := range next {
+	for key, value := range next.records {
 		q.noteEvidenceRecord(key, q.persisted[key], value)
 		// persistState reuses the immutable byte slice for unchanged records.
 		// Invalidate only after SQLite commit, including removal, and never on
@@ -296,7 +297,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if q.readRoot == nil {
 		q.publishReadRecords(q.persisted)
 	} else {
-		q.publishReadRecords(next)
+		q.publishReadRecords(next.records)
 	}
 	return nil
 }

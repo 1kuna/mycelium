@@ -296,7 +296,7 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 			continue
 		}
 		if key == "state" {
-			data, _ = json.Marshal(queueBase(q.s, true))
+			data, _, _ = q.marshalQueueBase(queueBase(q.s, true), false)
 		}
 
 		// Read snapshots include recomputable diagnostics; SQLite keeps decisions.

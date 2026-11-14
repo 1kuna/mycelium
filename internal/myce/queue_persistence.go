@@ -110,13 +110,21 @@ func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 	return json.Marshal(base)
 }
 
+// Logical records and prepared root fragments advance together only after a
+// successful SQLite commit. A failed write never replaces the comparison base.
+type queuePersistenceUpdate struct {
+	records     map[string][]byte
+	stateFields map[string]json.RawMessage
+}
+
 // Immutable history stays in SQLite but is not rewritten by each heartbeat.
 // Encode only journaled decisions; SQLite sees only changed logical records.
-func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[string][]byte, error) {
+func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*queuePersistenceUpdate, error) {
 	if q.persistencePageBytes <= 0 {
 		return nil, fmt.Errorf("queue persistence page size is not initialized")
 	}
-	next := map[string][]byte{}
+	update := &queuePersistenceUpdate{records: map[string][]byte{}}
+	next := update.records
 	exec := func(query string, args ...any) (sql.Result, error) {
 		started := holdNow(q.holdClock)
 		result, err := tx.Exec(query, args...)
@@ -124,6 +132,9 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 		return result, err
 	}
 	putData := func(key string, data []byte, fields ...map[string]json.RawMessage) error {
+		if key == "state" && len(fields) > 0 {
+			update.stateFields = fields[0]
+		}
 		next[key] = data
 		if bytes.Equal(data, q.persisted[key]) {
 			next[key] = q.persisted[key]
@@ -289,7 +300,7 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (map[
 			return nil, err
 		}
 	}
-	return next, nil
+	return update, nil
 }
 
 func (q *Queue) loadPersistedState() error {
@@ -307,6 +318,14 @@ func (q *Queue) loadPersistedState() error {
 		return err
 	}
 	q.persisted = records
+	q.persistedStateFields, err = persistenceFields(records["state"], q.persistencePageBytes)
+	if err != nil {
+		return err
+	}
+	q.efficiencyHealthJSON, err = json.Marshal(q.s.EfficiencyHealth)
+	if err != nil {
+		return err
+	}
 	q.evidenceBytes = 0
 	for key, data := range q.persisted {
 		q.noteEvidenceRecord(key, nil, data)
@@ -454,7 +473,11 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 	}
 	var before map[string]json.RawMessage
 	if old != nil {
-		before, err = persistenceFields(old, q.persistencePageBytes)
+		if key == "state" && q.persistedStateFields != nil {
+			before = q.persistedStateFields
+		} else {
+			before, err = persistenceFields(old, q.persistencePageBytes)
+		}
 	}
 
 	measured.Marshal += holdNow(q.holdClock).Sub(started)
@@ -593,6 +616,9 @@ func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, 
 
 // Dirty records are encoded exactly once. No whole-state comparison caches.
 func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[string]json.RawMessage, error) {
+	if s, ok := value.(state); key == "state" && ok {
+		return q.marshalQueueBase(s, true)
+	}
 	if j, ok := value.(*Job); ok && j != nil && (q.startupPending(j) || q.startCapacityPaused(j)) {
 		copy := *j
 		copy.Reason = "recomputing admission diagnostics"
@@ -603,4 +629,49 @@ func (q *Queue) marshalPersistenceValue(key string, value any) ([]byte, map[stri
 		data = slimJobRecord(data)
 	}
 	return data, nil, err
+}
+
+// Keep the existing logical JSON and physical field layout, including rollback
+// compatibility with the previous release. The large, immutable diagnostic
+// generation has already been encoded outside q.mu. Do not run it through
+// json.Marshal/Unmarshal again merely to compare unchanged physical fragments.
+func (q *Queue) marshalQueueBase(s state, prepareFields bool) ([]byte, map[string]json.RawMessage, error) {
+	var efficiency json.RawMessage
+	if len(s.EfficiencyHealth) > 0 {
+		if q.efficiencyHealthJSON == nil {
+			// Initial/imported state without a prepared diagnostic generation.
+			var err error
+			q.efficiencyHealthJSON, err = json.Marshal(s.EfficiencyHealth)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		efficiency = q.efficiencyHealthJSON
+	}
+	s.EfficiencyHealth = nil
+	data, err := json.Marshal(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	var object map[string]json.RawMessage
+	if prepareFields {
+		if err := json.Unmarshal(data, &object); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(efficiency) > 0 {
+		if prepareFields {
+			object["efficiency_health"] = efficiency
+		}
+		// Only copy already validated bytes. RawMessage in json.Marshal would
+		// scan/compact the entire history again while holding the queue lock.
+		data = append(data[:len(data)-1], `,"efficiency_health":`...)
+		data = append(data, efficiency...)
+		data = append(data, '}')
+	}
+	if !prepareFields {
+		return data, nil, nil
+	}
+	fields, err := splitPersistenceFields(object, q.persistencePageBytes)
+	return data, fields, err
 }
