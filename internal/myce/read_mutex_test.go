@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-func readMutexFixture(t testing.TB) *Queue {
+func readMutexFixture(t testing.TB, retained int) *Queue {
 	t.Helper()
 	q, _ := candidateCostFixture(t)
 	q.mu.Lock()
-	for i := 160; len(q.s.Jobs) < 8000; i++ {
+	for i := 160; len(q.s.Jobs) < retained; i++ {
 		source := q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
 		j := cloneJob(source)
 		j.ID = fmt.Sprintf("retained-%04d", i)
@@ -39,7 +39,9 @@ var readMutexPaths = []string{"/api/status", "/api/status?jobs=active", "/api/st
 // own the queue mutex. Unlike elapsed time, these checks are independent of
 // descheduling and race-instrumentation overhead on a busy shared host.
 func TestReadHandlersQueueMutexBound(t *testing.T) {
-	q := readMutexFixture(t)
+	// Lock turns and response ownership do not depend on the incident scale.
+	// The benchmark retains the full 8k history.
+	q := readMutexFixture(t, 480)
 	handler := (API{Queue: q, Token: "test"}).Handler()
 	for _, path := range readMutexPaths {
 		t.Run(path, func(t *testing.T) {
@@ -83,7 +85,7 @@ func (w *readMutexResponse) Write(data []byte) (int, error) {
 // suite fail when the OS deschedules its lock holder. Bulk-decode/control
 // exclusion remains covered by TestReadSnapshotBulkWorkDoesNotHoldQueue.
 func BenchmarkReadHandlersQueueMutexBound(b *testing.B) {
-	q := readMutexFixture(b)
+	q := readMutexFixture(b, 8000)
 	handler := (API{Queue: q, Token: "test"}).Handler()
 	for _, path := range readMutexPaths {
 		b.Run(path, func(b *testing.B) {

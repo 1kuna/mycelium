@@ -19,13 +19,15 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			complete(s, 4, .5)
+			workPeak, workGrowth := 4.0, .5
+			checkPeak, checkGrowth := 2.0, .25
+			complete(s, workPeak, workGrowth)
 			check := s
 			check.AllowedMachines = []string{m.ID}
 			check.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
 			check.Workload = nil
 			check.ExtensionCheck = &ExtensionCheckRequest{Work: s.workType(), Directory: t.TempDir()}
-			complete(check, 2, .25)
+			complete(check, checkPeak, checkGrowth)
 			old := registeredExtension(t, q, s.Extension)
 			next := old
 			next.Version = "2"
@@ -45,12 +47,12 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			check.Extension, check.ExtensionDigest = extensionKey(next), next.Digest
 			queued := submit(t, q, check)
 			candidate := seedMemoryCandidate(t, q, queued, q.s.Machines[m.ID])
-			want := 2.25
+			// The seed must cover every comparable accepted row, without
+			// adding between-row spread a second time (#1580). Derive the
+			// envelope from the authored peaks rather than pinning a stale sum.
+			want := checkPeak + checkGrowth
 			if mode == "same model command" {
-				// Each accepted row is bounded on its own (#1580): the 4 GiB
-				// peak plus its measured 0.5 GiB growth, the larger of the
-				// two rows. The spread between rows is not added on top.
-				want = 4.5
+				want = max(want, workPeak+workGrowth)
 			}
 			if e := candidate.MemoryEnvelope; e.Source != priorVersionMemorySource || e.Basis != "exploratory" || candidate.Spec.Needs.HostMemoryGB != want {
 				t.Fatalf("new version lost accepted predecessor evidence: %+v needs=%+v want=%g", e, candidate.Spec.Needs, want)
@@ -79,7 +81,7 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			work := s
 			work.Extension = extensionKey(next)
 			firstWork := submit(t, q, work)
-			if got := seedMemoryCandidate(t, q, firstWork, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != 1.1 {
+			if got := seedMemoryCandidate(t, q, firstWork, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != peak+growth {
 				t.Fatalf("historical workload hid fresh current-version check: %g", got)
 			}
 			next.Version = "3"
@@ -89,7 +91,7 @@ func TestNewVersionSeedsFromPriorAcceptedMemory(t *testing.T) {
 			}
 			check.Extension, check.ExtensionDigest = extensionKey(next), next.Digest
 			third := submit(t, q, check)
-			if got := seedMemoryCandidate(t, q, third, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != 1.1 {
+			if got := seedMemoryCandidate(t, q, third, q.s.Machines[m.ID]).Spec.Needs.HostMemoryGB; got != peak+growth {
 				t.Fatalf("nearest accepted predecessor not selected: %g", got)
 			}
 		})

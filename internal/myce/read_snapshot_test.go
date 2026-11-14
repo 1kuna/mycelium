@@ -114,7 +114,8 @@ func TestReadSnapshotBulkWorkDoesNotHoldQueue(t *testing.T) {
 	for _, id := range []string{"", "retained-000"} {
 		t.Run(fmt.Sprintf("job=%s", id), func(t *testing.T) {
 			q, clock := fixture(t)
-			for i := range 8000 {
+			// One blocked record proves exclusion; extra records add no interleaving.
+			for i := range 4 {
 				key := fmt.Sprintf("retained-%03d", i)
 				q.s.Jobs[key] = &Job{ID: key, State: "succeeded", ReleaseConfirmed: true, Queued: clock.Now(), Spec: spec("experiment")}
 			}

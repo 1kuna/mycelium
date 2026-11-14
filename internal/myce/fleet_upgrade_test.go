@@ -88,8 +88,17 @@ func fleetActivate(t *testing.T, q *Queue, c *fakeClock) string {
 	}
 	fleetRestart(t, q, c, i, true)
 	fleetTick(t, q)
-	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
-		fleetHeartbeatAdvance(t, q, c)
+	// Deliver proofs often enough to preserve other hosts' running attempts,
+	// rather than committing every second or jumping past their loss deadlines.
+	remaining := fleetStableFor + time.Second
+	for remaining > 0 {
+		step := min(remaining, fleetRuntimeFreshFor/2)
+		for id := range q.s.Machines {
+			step = min(step, q.machineLossTimeout(id)/2)
+		}
+		c.Advance(step)
+		fleetRefresh(t, q, c)
+		remaining -= step
 	}
 	return i.Host + "/" + i.Machine
 }
