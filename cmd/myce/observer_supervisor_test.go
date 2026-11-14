@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"mycelium/internal/myce"
 )
 
 func TestObserverSupervisorRecovery(t *testing.T) {
@@ -245,8 +248,12 @@ func TestObserverSupervisorAdaptiveWindow(t *testing.T) {
 
 func TestObserverSupervisorPendingDelivery(t *testing.T) {
 	root := t.TempDir()
-	clock := &waitClock{now: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}
-	dir, entry, lock := sharedWatchFixture(t, root, "http://unused.invalid", clock)
+	q, clock, _, _ := waitQueue(t)
+	j := waitSubmit(t, q)
+	waitFinish(t, q, clock, true)
+	server := httptest.NewServer(myce.API{Queue: q, Token: "fixture"}.Handler())
+	defer server.Close()
+	dir, entry, lock := sharedWatchFixture(t, root, server.URL, clock)
 	var reg sharedProfileRegistration
 	if err := readProfileJSON(entry, &reg); err != nil {
 		t.Fatal(err)
@@ -264,9 +271,15 @@ func TestObserverSupervisorPendingDelivery(t *testing.T) {
 	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &r); err != nil {
 		t.Fatal(err)
 	}
+	r.JobID = j.ID
 	// Simulate death after delivery intent was synced but before its local ack.
 	// This exact payload, including the original delivery ID, must be replayed.
 	pending := profileNotification{JobID: r.JobID, Key: r.Key, Status: "succeeded", DeliveryID: "original-delivery"}
+	c := myce.Client{URL: server.URL, Token: "fixture", Clock: clock}
+	claim, err := c.ChangeCompletion(context.Background(), j.ID, myce.CompletionRequest{Operation: "claim", DeliveryID: pending.DeliveryID})
+	if err != nil || !claim.Allowed {
+		t.Fatal("pending delivery was not claimed", claim, err)
+	}
 	r.Observation = "not_armed"
 	r.Status = "succeeded"
 	r.DeliveryStatus = "pending"
@@ -291,5 +304,9 @@ func TestObserverSupervisorPendingDelivery(t *testing.T) {
 	}
 	if _, err := os.Stat(entry); !os.IsNotExist(err) {
 		t.Fatal("settled registration retained", err)
+	}
+	current, err := c.GetJob(context.Background(), j.ID)
+	if err != nil || current.Completion == nil || current.Completion.DeliveredAt == nil || current.Completion.DeliveryID != pending.DeliveryID {
+		t.Fatal("queue delivery acknowledgement not retained", current, err)
 	}
 }
