@@ -327,7 +327,7 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 	})
 	store.nasPrepare.timeout = budget
 	close(release)
-	if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {
+	if process != nil || !errors.Is(err, errWorkerCheckpoint) || store.checkpointUnavailable {
 		t.Fatalf("blocked preparation must defer startup: process=%v err=%v unavailable=%v", process, err, store.checkpointUnavailable)
 	}
 	pending := store.nasPrepare.pending

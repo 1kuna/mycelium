@@ -29,6 +29,12 @@ work continues. `myce status --sections machines --json` exposes
 queue owner. Worker contact alone does not prove usable accelerator inventory;
 resubmitting the job does not repair that evidence. Report a persistent wait to the queue owner with those fields.
 
+A maintenance-interrupted resumable job keeps its job ID. Leave it queued while
+Mycelium restores its checkpoint; a slow copy retains that same attempt and
+writer. Refused copies with proof no payload ran are reclaimed after release.
+Older orphan copies under a cancelled job expire with its whole checkpoint
+folder, normally 72 hours after the job ends, once every attempt is released.
+
 ## 1. One command
 
 ```sh

@@ -1060,6 +1060,14 @@ mounted NAS before starting the queue. Dev creates a local root.
 The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
 to the current attempt's folder. Before starting, the worker copies checkpoints
 from the attempt with the highest durable checkpoint generation.
+The worker checks exact-attempt launch authorization before materializing that
+copy. If preparation outlives an observation budget, the same attempt waits for
+its existing writer before repeating admission or device probes; it does not
+start another copy. A refused attempt's copy is removed after exact release is
+acknowledged and positive execution evidence proves neither main nor sidecars
+ran. Pending writers retain release custody until they finish. Unknown or
+possibly executed attempts keep their checkpoints under settled expiry below.
+
 Temporary files and directories ending in `.tmp` never count as complete and are never copied.
 Workers stage a complete attempt copy in an ignored temporary directory, then
 rename it into place, so a failed copy cannot publish a manifest without its payloads.
@@ -1106,8 +1114,11 @@ unless the root contains the queue's marker, so an empty local mountpoint never
 counts as the share. It refuses any path other than the job's own flat or
 sharded folder and never follows a symlinked shard. A failed or unfinished
 removal is reissued after 30 minutes, or sooner if that worker restarts or
-leaves. Jobs that never started, and file-store checkpoints, which file retention
-already governs, are not touched.
+leaves. Jobs never assigned an attempt, and file-store checkpoints, which file retention
+already governs, are not touched. The whole settled job folder is removed,
+including orphaned `attempt-N` copies and unpublished preparation `.tmp` folders;
+their own timestamps, generations and presence in attempt history do not extend
+the 72-hour window.
 
 **Every save must be atomic:** write to a temporary file in the same directory,
 flush and fsync it, rename it into place, then fsync the directory (except the

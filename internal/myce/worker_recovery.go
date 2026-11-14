@@ -107,6 +107,7 @@ type workerStore struct {
 	nasProbe              checkpointAvailability
 	nasProgress           checkpointIO[int64]
 	nasPrepare            checkpointIO[string]
+	nasCleanup            checkpointIO[bool]
 	dir                   string
 	lock                  *os.File
 	state                 workerState
@@ -555,6 +556,9 @@ func (s *workerStore) inputWriterOnly() bool {
 // an unrelated reused PID in ordinary orphan discovery, a live unidentifiable
 // helper group cannot be treated as proof of exit.
 func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
+	if s.nasPrepare.inFlight() {
+		return errWorkerReleasePending
+	}
 	defer func() {
 		if cleanupErr == nil {
 			s.releaseSharedInputs()
@@ -562,7 +566,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 		}
 	}()
 	if s.inputWriterOnly() {
-		if s.extensionFiles.inFlight() {
+		if s.extensionFiles.inFlight() || s.nasPrepare.inFlight() {
 			return errWorkerReleasePending
 		}
 		// The live actor witnessed its writer finish, or this store was

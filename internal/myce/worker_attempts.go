@@ -291,7 +291,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			// loss. An unstarted assignment must also remain replayable.
 			connected = false
 			if p == nil && s.state.Result == nil {
-				s.state.InputWriterPending = s.extensionFiles.inFlight()
+				s.state.InputWriterPending = s.extensionFiles.inFlight() || s.nasPrepare.inFlight()
 				cause := s.startFailureAt(a.job, launchRefused, context.Canceled, now)
 				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: s.state.InputWriterPending, Error: "worker service stopping before command started"}, cause)
 				s.state.Result = &result
@@ -309,14 +309,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
 				} else if !d.Hold && !admissionBlocked {
-					probeWorker := w
-					probeWorker.launchCtx = prepareCtx
-					bound, err := probeWorker.forAttempt(a.job)
-					if err == nil {
-						p, err = bound.startContext(prepareCtx, s, a.job)
-					} else {
-						err = s.startFailure(a.job, launchRefused, err)
-					}
+					var err error
+					p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
 					a.mu.Lock()
 					d = a.directive
 					a.mu.Unlock()
@@ -334,12 +328,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							// shutdown, not a payload failure. Preserve exact helper
 							// and detached-writer custody until cleanup is confirmed.
 							err = s.startFailureAt(a.job, launchRefused, err, now)
-							if s.extensionFiles.inFlight() {
+							if s.extensionFiles.inFlight() || s.nasPrepare.inFlight() {
 								s.state.InputWriterPending = true
 								err = errors.Join(err, errWorkerReleasePending)
 							}
 						}
 						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+						if s.nasPrepare.inFlight() {
+							s.state.InputWriterPending, r.ReleasePending = true, true
+						}
 						r = withStopProvenance(r, d.PriorityStop)
 						s.state.Result = &r
 					}
@@ -367,6 +364,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			return
 		}
 		if s.state.Result != nil {
+			if p == nil && s.nasPrepare.inFlight() {
+				s.state.InputWriterPending, s.state.Result.ReleasePending = true, true
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
+			}
+			if s.state.Result.ExecutionEvidence == nil {
+				s.state.Result.ExecutionEvidence = safeExecutionEvidence(s.startExecutionEvidence(a.job), a.job.Attempt)
+			}
 			r, err := applyWorkerWallTime(s.dir, a.job, *s.state.Result)
 			if err != nil {
 				finish(err)
@@ -574,6 +581,17 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 			}
 			if s.state.Result != nil && releaseAcknowledged && !s.state.Result.ReleasePending {
+				if e := w.cleanupRefusedCheckpoint(ioCtx, s); e != nil {
+					s.fileError = "refused checkpoint cleanup pending; attempt custody retained"
+					publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
+					publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(e, w.Client.Jitter))
+					select {
+					case <-ctx.Done():
+					case <-a.wake:
+					case <-tick.C:
+					}
+					continue
+				}
 				// Release callbacks are best effort and may race result delivery.
 				// Never retire the durable owner until every cache pin is removed.
 				if e := s.releaseSharedInputPins(); e != nil {

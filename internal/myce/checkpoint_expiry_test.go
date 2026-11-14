@@ -305,3 +305,60 @@ func TestCheckpointExpiryDatesLegacyRecords(t *testing.T) {
 		}
 	}
 }
+
+// Refused attempts may have left completed copies or unpublished .tmp copies
+// before #1607. Expiry removes the entire settled job root, independent of an
+// attempt having a save, a history entry, or a successful Started hand-off.
+func TestCheckpointExpiryReclaimsOrphanedAttemptCopies(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)}
+	root := t.TempDir()
+	q := openShardQueue(t, filepath.Join(t.TempDir(), "queue.db"), root, clock)
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
+	j := submit(t, q, spec("experiment"))
+	ended := clock.Now()
+	if err := q.update(func() error {
+		live := q.touchJob(j.ID)
+		live.State, live.Attempt, live.ReleaseConfirmed, live.FinishedAt = "cancelled", 4, true, &ended
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"attempt-1", "attempt-2", "attempt-99", ".myce-prepare-orphan.tmp"} {
+		path := filepath.Join(j.Checkpoint, name)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "pool.bin"), []byte("fake checkpoint payload"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worker := machine("expiry", "fake")
+	clock.Advance(DefaultCheckpointExpiryGrace - time.Nanosecond)
+	if got := expiryCheckin(t, q, worker); len(got) != 0 {
+		t.Fatal("expired early", got)
+	}
+	clock.Advance(time.Nanosecond)
+	tasks := expiryCheckin(t, q, worker)
+	if len(tasks) != 1 || tasks[0].ID != j.ID {
+		t.Fatal("orphan copies omitted from retention", tasks)
+	}
+	removed := 0
+	report := expireCheckpoint(root, tasks[0], func(path string) error {
+		removed++
+		if path != j.Checkpoint {
+			t.Fatal("not the whole owned job root", path)
+		}
+		return os.RemoveAll(path)
+	})
+	if !report.Removed || removed != 1 {
+		t.Fatal("orphan copies not reclaimed", report)
+	}
+	if _, err := os.Stat(j.Checkpoint); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("orphan copy survived retention", err)
+	}
+	expiryCheckin(t, q, worker, report)
+	if job(t, q, j.ID).CheckpointExpired == nil {
+		t.Fatal("expiry not acknowledged")
+	}
+}

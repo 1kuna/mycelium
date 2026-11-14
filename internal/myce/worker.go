@@ -116,6 +116,7 @@ type Worker struct {
 	SuperviseProcess bool
 
 	checkpointPrepare func(Job) (string, error) // Filesystem fault seam.
+	checkpointRemove  func(string) error        // Refused-copy cleanup fault seam.
 	control           *processControl
 	cancelStart       context.CancelFunc
 	controlLatency    *workerControlLatency
@@ -441,6 +442,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := s.waitCheckpointPreparation(ctx); err != nil {
+		return nil, err
+	}
 	if j.Spec.ephemeral() {
 		if err := w.checkEphemeralSupport(); err != nil {
 			return nil, s.startFailure(j, launchRefused, err)
@@ -607,6 +611,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, refuseAdmission("live_gpu_memory", "GiB", j.Spec.Needs.MemoryGB, free, e != nil)
 		}
 	}
+	// An assignment is only an offer. Fence the exact attempt before creating
+	// a writable checkpoint copy; keep the final exec/Started gates as well.
+	if err := w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)}); err != nil {
+		return nil, s.startFailure(j, launchRefused, err)
+	}
 	prepare := workerCheckpointPrepare
 	if j.FileTransport {
 		prepare = func(value Job) (string, error) { return w.prepareFileCheckpoint(value, s.dir) }
@@ -630,7 +639,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		if err == nil {
 			err = ctx.Err()
 		}
-		s.checkpointUnavailable = err != nil
+		// A still-running copy is preparation, not evidence of a failed NAS.
+		// The independent root probe fences actual storage stalls.
+		s.checkpointUnavailable = err != nil && !errors.Is(err, errCheckpointIOPending) && !errors.Is(err, context.Canceled)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
 		}
