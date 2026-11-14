@@ -809,9 +809,15 @@ path-free reasons and never starts its command:
 
 A fault that belongs to the host, such as a disk without room above its floor,
 a network failure or a hub server error, does not fail the job. The attempt is
-requeued as infrastructure loss (`input_staging: storage_full`,
-`connection_refused` or `io_error`), and disk admission keeps it off hosts
-without room.
+requeued as an infrastructure interruption (`input_staging: storage_full`,
+`connection_refused`, `timeout` or `io_error`). A read I/O error or no-progress
+timeout does not establish a content mismatch. Before command start, these
+interruptions spend neither losses nor infrastructure retries, even if storage
+recovers before the result arrives. Status names the cause; placement prefers
+another eligible host and storage/disk admission withholds unhealthy roots or
+hosts without room. A completed read whose hash differs still fails with
+`model_snapshot_mismatch` (`invalid_input`) and requires source or declaration
+repair.
 
 From the release implementing [MY-44](DECISIONS.md#my-44), every repository is
 permitted by default. No `models` policy or `models.sources` entry is needed.

@@ -37,6 +37,9 @@ func TestStagingFailureRetriesOnAnotherHost(t *testing.T) {
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
+		if got := job(t, q, j.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+			t.Fatal("staging retry spent a command budget", got)
+		}
 	}
 	fail(a, 1)
 	if got := check(t, q, a, nil).Job; got != nil {

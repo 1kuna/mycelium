@@ -105,7 +105,7 @@ func TestInputStagingOutageSurvivesAcknowledgementAndReopen(t *testing.T) {
 	}
 	// #1045: the idle stall resumes within the attempt; a subsequent completed
 	// dial failure still ends it as infrastructure and retains its exact cause.
-	if got.Attempt != j.Attempt || got.State != "queued" || got.Losses != 1 || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=storage_unreachable") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
+	if got.Attempt != j.Attempt || got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != 1 || !strings.Contains(got.AttemptHistory[0].Reason, "operation=cache_download error=storage_unreachable") || got.StartedAt != nil || got.ExecutionCause == nil || got.ExecutionCause.Operation != "input_staging" || got.ExecutionCause.ExitCode != nil || got.ExecutionCause.Staging == nil {
 		t.Fatalf("GET lost exact prelaunch diagnosis: %+v", got)
 	}
 	data, _ := json.Marshal(got)

@@ -253,7 +253,7 @@ func runtimeErrorFor(operation string, err error) error {
 		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
 		c.Class = cpuIsolationUnavailable
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, exec.ErrWaitDelay), errors.Is(err, errFileTransferStalled), errors.Is(err, errCheckpointIOTimeout):
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, exec.ErrWaitDelay), errors.Is(err, errFileTransferStalled), errors.Is(err, errCheckpointIOTimeout), errors.Is(err, syscall.ETIMEDOUT):
 		c.Class = "timeout"
 	case errors.Is(err, context.Canceled):
 		c.Class = "cancelled"
@@ -284,6 +284,8 @@ func runtimeErrorFor(operation string, err error) error {
 	}
 	if c.Staging != nil {
 		switch c.Staging.Error {
+		case "timeout":
+			c.Class = "timeout"
 		case "cache_space", "cache_limit":
 			c.Class = "resource_limit"
 		case "blob_missing", "blob_expired":

@@ -2318,15 +2318,18 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.waitLaunchCapacity(j, r)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused {
-		// A prelaunch refusal is not a lost execution, even if host health
-		// recovered before its result arrived. Preserve any current hold reason.
+	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused || r.Interrupted && j.ExecutionCause.Operation == "input_staging") {
+		// A prelaunch refusal or staging interruption is not a lost execution,
+		// even if host health recovered before its result arrived. Preserve holds.
 		reason := q.storageRootReason(j, q.s.Machines[j.Machine])
 		if reason == "" {
 			reason = q.diskHeadroomReason(j, q.s.Machines[j.Machine])
 		}
 		if reason == "" {
 			reason = "requeued: launch refused before command start: " + j.ExecutionCause.String()
+			if j.ExecutionCause.Operation == "input_staging" {
+				reason = "requeued: input staging interrupted before command start: " + j.ExecutionCause.String()
+			}
 		}
 		q.requeue(j, reason, false)
 	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && startRefusalBeforeMain(j, r) {

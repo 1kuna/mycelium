@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// Prelaunch infrastructure consumes the existing bounded production budget;
-// unavailable referenced bytes and invalid archives need consumer action.
+// Prelaunch infrastructure never spends a command/loss budget (#1576);
+// unavailable referenced bytes and invalid archives still need consumer action.
 func TestStagingCauseClassificationAndRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
@@ -85,7 +85,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 			if tc.retry {
 				want = "queued"
 			}
-			if got.State != want || got.InfrastructureRetries != map[bool]int{false: 0, true: 1}[tc.retry] || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].ExecutionCause.Staging == nil {
+			if got.State != want || got.InfrastructureRetries != 0 || got.Losses != 0 || len(got.AttemptHistory) != 1 || got.AttemptHistory[0].ExecutionCause.Staging == nil {
 				t.Fatalf("wrong durable decision: %+v", got)
 			}
 			wire, _ := json.Marshal(got)
@@ -111,8 +111,8 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 					}
 				}
 				got = job(t, q, submitted.ID)
-				if got.State != "failed" || got.Reason != "infrastructure_retries_exhausted" || got.InfrastructureRetries != DefaultProductionInfrastructureRetries {
-					t.Fatal("unbounded staging retries", got)
+				if got.State != "queued" || got.InfrastructureRetries != 0 || got.Losses != 0 {
+					t.Fatal("pre-command staging spent retry budget", got)
 				}
 			}
 		})
@@ -120,7 +120,7 @@ func TestStagingCauseClassificationAndRetry(t *testing.T) {
 }
 
 // A high attempt number includes planned stops, not just infrastructure losses.
-// Reproduce the retained ninth-attempt ending without changing either budget.
+// The retained ninth-attempt staging timeout must also preserve both budgets.
 func TestStagingSharedInputTimeoutAfterPreemptions(t *testing.T) {
 	q, clock := fixture(t)
 	s := submitVerificationInput(t, q)
@@ -170,17 +170,13 @@ func TestStagingSharedInputTimeoutAfterPreemptions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		losses := 1
-		if attempt >= 8 {
-			losses = attempt - 6
-		}
-		if got.Losses != losses || got.InfrastructureRetries != 0 || got.State != map[bool]string{false: "queued", true: "failed"}[attempt == 9] {
+		if got.Losses != 0 || got.InfrastructureRetries != 0 || got.State != "queued" {
 			t.Fatalf("attempt %d retry accounting: %+v", attempt, got)
 		}
 		if attempt == 9 {
 			last := got.AttemptHistory[len(got.AttemptHistory)-1]
-			if !strings.HasPrefix(got.Reason, "stopped after 3 infrastructure interruptions") || last.Reason != got.Reason || !last.Interrupted || last.ExecutionCause.Staging.Input != "shared_inputs/source" || last.ExecutionCause.Staging.Blob != ref.SHA256 || got.FinishedAt == nil || !got.FinishedAt.Equal(clock.Now()) {
-				t.Fatalf("terminal staging explanation lost: %+v", got)
+			if !strings.Contains(last.Reason, "input_staging: timeout") || last.State != "queued" || !last.Interrupted || last.ExecutionCause.Staging.Input != "shared_inputs/source" || last.ExecutionCause.Staging.Blob != ref.SHA256 || got.FinishedAt != nil || !last.EndedAt.Equal(clock.Now()) {
+				t.Fatalf("staging explanation lost: %+v", got)
 			}
 		}
 	}
@@ -333,8 +329,8 @@ func TestStagingLogFailureDoesNotBlockCompletion(t *testing.T) {
 	if err := q.Complete(startFailureOutcome(result(assigned, false), failure)); err != nil {
 		t.Fatal(err)
 	}
-	if got := job(t, q, j.ID); got.State != "queued" || got.InfrastructureRetries != 1 {
-		t.Fatal("bounded infrastructure retry stranded", got)
+	if got := job(t, q, j.ID); got.State != "queued" || got.InfrastructureRetries != 0 || got.Losses != 0 {
+		t.Fatal("pre-command infrastructure retry stranded", got)
 	}
 }
 

@@ -377,6 +377,9 @@ func (h *modelHub) fetchVerified(ctx context.Context, raw, target string, ref Fi
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
+		if modelSnapshotIOFailure(err) {
+			return modelSnapshotError("model_snapshot_mismatch", "io_error", err)
+		}
 		if err := os.Remove(target); err != nil {
 			return modelHubHostFault(diskClass(err), err)
 		}

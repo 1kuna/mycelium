@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
@@ -70,10 +71,31 @@ var modelSnapshotMessages = map[string]string{
 }
 
 func modelSnapshotError(predicate, class string, cause error) error {
+	// A failed filesystem operation says nothing about content identity. Keep
+	// its errno/deadline and staging trace instead of manufacturing a mismatch.
+	if modelSnapshotIOFailure(cause) {
+		return runtimeErrorFor("input_staging", withStagingCause("", FileRef{}, "model_snapshot", cause))
+	}
 	if cause == nil {
 		cause = errors.New(modelSnapshotMessages[predicate])
 	}
+	if predicate == "model_snapshot_mismatch" {
+		class = "invalid_input"
+	}
 	return &runtimeError{diagnostic: RuntimeCause{Operation: "input_staging", Class: class, Predicate: predicate}, cause: cause}
+}
+
+func modelSnapshotIOFailure(err error) bool {
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	var errno syscall.Errno
+	var network net.Error
+	return errors.As(err, &errno) || errors.As(err, &network) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, errCheckpointIOTimeout) || errors.Is(err, errFileTransferStalled) ||
+		errors.Is(err, errInputTransferUnreachable)
 }
 
 func sharedReaders(s Spec) bool { return len(s.SharedInputs)+len(s.ModelSnapshots) > 0 }
