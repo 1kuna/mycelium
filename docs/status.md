@@ -11,6 +11,18 @@ Unreleased startup executions still gate recovery; released publication does
 not. The original session stays until its actors finish, preserving result
 fences while new work uses the remaining capacity.
 
+Accelerator discovery has independent freshness. `machines[].inventory_probe`
+reports `state` (`pending`, `ready`, `partial`, `failed`, `stale`), original scan
+`at`, send-time `age_seconds`, and measured `probe` validity. While a scan is
+pending, `operation` and `pending_seconds` identify the current fixed operation
+class; `error_class` distinguishes cancellation, deadline and driver/inventory
+failure without publishing subprocess text. A restart or expired scan holds
+new accelerator assignments with `waiting for fresh accelerator inventory`;
+CPU work continues. A fresh partial scan keeps healthy device families usable.
+A failed launch probe fences its affected card until a successful scan begun
+after that refusal arrives. Contact and replaying cached healthy inventory do
+not clear that fence. Queue reopen requires fresh discovery again.
+
 ## Reading `myce status`
 
 `myce status` prints current work, machines, holds and active health conditions.

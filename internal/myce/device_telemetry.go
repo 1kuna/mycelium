@@ -31,6 +31,16 @@ func (w Worker) deviceTelemetryCheckin(c Checkin) Checkin {
 	if clock == nil {
 		clock = RealClock{}
 	}
+	if p := c.Machine.InventoryProbe; p != nil {
+		copy := *safeInventoryObservation(p)
+		if !copy.At.IsZero() {
+			copy.AgeSeconds = clock.Now().Sub(copy.At).Seconds()
+		}
+		if !inventoryObservationFresh(&copy, clock.Now()) && (copy.State == "ready" || copy.State == "partial") {
+			copy.State = "stale"
+		}
+		c.Machine.InventoryProbe = &copy
+	}
 	for i := range c.Machine.Devices {
 		if s := c.Machine.Devices[i].Telemetry; s != nil {
 			copy := *s
@@ -44,6 +54,16 @@ func (w Worker) deviceTelemetryCheckin(c Checkin) Checkin {
 // Rebase sensor ages onto queue time, as with exact-attempt memory counters.
 // Worker clock skew cannot refresh a stale inventory-cache observation.
 func receivedDeviceTelemetry(c Checkin, now time.Time) Checkin {
+	if p := c.Machine.InventoryProbe; p != nil {
+		copy := *safeInventoryObservation(p)
+		copy.ScanAt = copy.At // Stable token: receipt delay cannot turn a cached scan into new evidence.
+		if validMemoryValue(copy.AgeSeconds) && copy.AgeSeconds < float64(time.Duration(1<<63-1))/float64(time.Second) {
+			copy.At = now.Add(-time.Duration(copy.AgeSeconds * float64(time.Second)))
+		} else {
+			copy.At, copy.State = now, "stale"
+		}
+		c.Machine.InventoryProbe = &copy
+	}
 	c.Machine.Devices = slices.Clone(c.Machine.Devices)
 	for i := range c.Machine.Devices {
 		if s := c.Machine.Devices[i].Telemetry; s != nil && validDeviceTelemetry(s) {

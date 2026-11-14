@@ -17,6 +17,7 @@ func (w Worker) inventorySource() func(context.Context) ([]MachineDevice, error)
 	// while still probing fresh identity on each scan, without rereading defaults.
 	identity := extensionIdentityProbe
 	return func(ctx context.Context) ([]MachineDevice, error) {
+		noteInventoryOperation(ctx, "", nil)
 		devices, err := probeInventory(ctx)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -98,6 +99,7 @@ func hostInventorySnapshot(lane *hostProbeLane[[]MachineDevice]) ([]MachineDevic
 
 // Inventory progresses independently of check-in duration and control ticks.
 type hostInventoryObserver struct {
+	progress        inventoryProgress
 	mu              sync.Mutex
 	lane            hostProbeLane[[]MachineDevice]
 	telemetry       hostProbeLane[[]MachineDevice]
@@ -144,6 +146,18 @@ func (m *hostInventoryObserver) stepTelemetry(ctx context.Context) {
 func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.snapshotLocked()
+}
+
+func (m *hostInventoryObserver) snapshotWithObservation() ([]MachineDevice, error, *InventoryObservation) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lane.timing.noteReport(m.lane.clock.Now())
+	devices, err := m.snapshotLocked()
+	return devices, err, m.observationLocked()
+}
+
+func (m *hostInventoryObserver) snapshotLocked() ([]MachineDevice, error) {
 	devices, err := hostInventorySnapshot(&m.lane)
 	if m.telemetry.fresh(m.lane.clock.Now()) {
 		for i := range devices {
@@ -160,6 +174,8 @@ func (m *hostInventoryObserver) snapshot() ([]MachineDevice, error) {
 	return devices, err
 }
 func (m *hostInventoryObserver) run(ctx context.Context, source func(context.Context) ([]MachineDevice, error)) {
+	m.progress.clock = m.lane.clock
+	ctx = context.WithValue(ctx, inventoryProgressKey{}, &m.progress)
 	m.lane.equal = sameInventoryObservation
 	m.telemetry.clock = m.lane.clock
 	// Reuse the wire contract's freshness window. The measured lane may slow

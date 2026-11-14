@@ -14,9 +14,11 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
-	FaultEvidence       []*FaultEvidence     `json:"fault_evidence,omitempty"`
-	RecoveryBlocked     *DeviceHealthFailure `json:"quarantine_recovery_blocked,omitempty"`
-	UnsupportedOnDevice []string             `json:"unsupported_on_device,omitempty"`
+	InventoryProbeFailedScan *time.Time           `json:"inventory_probe_failed_scan,omitempty"`
+	InventoryProbeAfter      *time.Time           `json:"inventory_probe_after,omitempty"` // Queue-owned launch failure fence.
+	FaultEvidence            []*FaultEvidence     `json:"fault_evidence,omitempty"`
+	RecoveryBlocked          *DeviceHealthFailure `json:"quarantine_recovery_blocked,omitempty"`
+	UnsupportedOnDevice      []string             `json:"unsupported_on_device,omitempty"`
 
 	Recovery              *DeviceRecovery    `json:"quarantine_recovery,omitempty"`
 	Telemetry             *DeviceTelemetry   `json:"telemetry,omitempty"`
@@ -83,6 +85,9 @@ func (d MachineDevice) machine(base Machine) Machine {
 	// the inventory; neither telemetry nor scalar compatibility adds allowance.
 	base.FreeMemoryGB, base.TotalMemoryGB, base.ReservedMemoryGB = min(d.FreeMemoryGB, d.BudgetGB), d.BudgetGB, d.ReserveMemoryGB
 	base.UnifiedMemory, base.MemoryMeasured, base.MemoryError = d.UnifiedMemory, d.MemoryMeasured, d.Reason
+	if inventoryWaitingReason(&base) != "" {
+		base.MemoryError, base.FreeMemoryGB = "device_probe_unavailable", 0
+	}
 	if d.CapabilityProfile != nil {
 		profile := *d.CapabilityProfile
 		if shared := base.CapabilityProfile; shared != nil {
@@ -294,8 +299,12 @@ func (w Worker) verifyDevice() error {
 	if w.selectedDevice == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// The exact attempt owns cancellation. A fixed discovery deadline turns
+	// slow post-restart driver calls into repeated assign/refuse cycles.
+	ctx := w.launchCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	devices, err := w.InventoryProbe(ctx)
 	expected := *w.selectedDevice
 	matches := 0

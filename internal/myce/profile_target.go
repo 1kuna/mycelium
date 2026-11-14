@@ -77,6 +77,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		return strings.Join(parts, "/")
 	}
 	switch dimension {
+	case "device inventory":
+		return inventoryWaitingReason(m)
 	case "tools":
 		return missingToolsReason(m.ID, missingTools(j, m))
 	case "production parity":
@@ -373,6 +375,7 @@ func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	}
 	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 	copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
+	copy.InventoryProbe = nil // Permanent capacity ignores transient discovery.
 	copy.HostMemoryPolicyMismatch = false
 	// Owner pressure is temporary; busy qualified targets queue (#605).
 	// Structural shared-host reasons are checked first and still refuse.

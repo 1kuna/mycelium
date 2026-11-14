@@ -88,3 +88,40 @@ func TestHostInventoryObserverSlowPartialAndStale(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestInventoryObservationProbeDiagnosticsAndCancellation(t *testing.T) {
+	clock := &workerFakeClock{now: time.Unix(1000, 0)}
+	lane := hostProbeLane[[]MachineDevice]{clock: clock, timing: probeTiming{base: time.Second}}
+	observer := hostInventoryObserver{lane: lane}
+	observer.progress = inventoryProgress{clock: clock}
+	ctx := context.WithValue(t.Context(), inventoryProgressKey{}, &observer.progress)
+	noteInventoryOperation(ctx, "nvidia-smi", []string{"--query-gpu=uuid,driver_version,pci.bus_id"})
+	observer.lane.pending = make(chan hostProbeResult[[]MachineDevice])
+	clock.Advance(16 * time.Minute)
+	p := observer.observation()
+	if p.State != "pending" || p.Operation != "nvidia_identity" || p.PendingSeconds != 960 {
+		t.Fatal("lost precise pending operation", p)
+	}
+	observer.lane.pending = nil
+	observer.lane.at = clock.Now()
+	observer.lane.err = errors.Join(errors.New("private path and secret"), context.DeadlineExceeded)
+	p = observer.observation()
+	if p.State != "failed" || p.ErrorClass != "deadline" {
+		t.Fatal("lost failed probe classification", p)
+	}
+
+	w := Worker{Machine: Machine{Devices: inventoryReviewDevices()[:1]}}
+	ctx, cancel := context.WithCancel(t.Context())
+	w.launchCtx = ctx
+	w.InventoryProbe = func(got context.Context) ([]MachineDevice, error) {
+		if _, ok := got.Deadline(); ok {
+			t.Error("fixed launch probe deadline still installed")
+		}
+		cancel()
+		<-got.Done()
+		return nil, got.Err()
+	}
+	if _, err := w.forAttempt(Job{AllocatedDevices: []string{"0"}}); err == nil {
+		t.Fatal("cancelled probe authorized launch")
+	}
+}

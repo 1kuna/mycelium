@@ -345,6 +345,9 @@ func durableMachine(m *Machine) *Machine {
 	d := *m
 	d.LastSeen = time.Time{} // Contact evidence keeps it (restoreLastSeen).
 	d.DiskReceivedAt, d.DiskVolumes = time.Time{}, nil
+	if d.InventoryProbe != nil {
+		d.InventoryProbe = &InventoryObservation{State: "stale"}
+	}
 	if d.HostHealth != nil && d.HostHealth.Probe != nil {
 		// Keep only that this worker sends timed evidence. The empty probe
 		// is invalid, so a restored record reads as expired evidence (unknown
