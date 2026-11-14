@@ -85,9 +85,6 @@ func devFanOutBurst62(t testing.TB, window bool) devFanOutBurstResult {
 		t.Fatal(err)
 	}
 	d, err := startTestDev(t, c, func(q *Queue) {
-		// Use the production background builder. Unit fixtures synchronize
-		// evidence publication, which adds a global barrier to concurrent ACKs.
-		asynchronousAdmissionWait(t, q)
 		// Match incident retained-history cardinality. These are cold fixture records;
 		// new parents and all running executions below use the ordinary API.
 		now := q.clock.Now()

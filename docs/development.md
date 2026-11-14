@@ -832,8 +832,7 @@ Run the real `myce dev` runtime burst separately from race instrumentation:
 GOMAXPROCS=4 go test ./internal/myce -run '^$' -bench '^BenchmarkDevFanOutBurst62$' -benchtime=1x -v
 ```
 
-This laptop test uses the production asynchronous admission-wait builder, real
-HTTP, SQLite, CPU commands and heartbeats, with
+This laptop test uses real HTTP, SQLite, CPU commands and heartbeats, with
 3,000 retained jobs (400 fan-out parents), concurrent status reads, and 62
 simultaneous keyed parent submissions. Nearest-rank p99 is the maximum of 62
 samples; all acknowledgements must be below 500ms. A running production command
