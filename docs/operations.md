@@ -51,6 +51,118 @@ differed. Use the supported client version for these commands.
   jobs retain the v1 unsandboxed default; new adapters/extensions default to the
   native sandbox. See [isolation](native-isolation.md) for exceptions and limits.
 
+## Linux core routing for ephemeral attempts
+
+Ephemeral execution needs qualified Linux PID/mount namespaces and either a
+file `kernel.core_pattern` (the helper sets both core limits to zero) or the
+Mycelium router below. A pipe to apport, systemd-coredump or an older Mycelium
+router is refused. A router filename alone does not qualify it: the worker
+checks the exact pattern, root ownership/write permissions and the suppression
+protocol, including its own cgroup/state-directory mapping, at inventory and
+launch. `core_pipe_limit` must be nonzero so Linux keeps the dumping process's
+`/proc` entries available until routing finishes.
+
+There is no crash-router option in `myce install`. This is a separate,
+privileged operator action using `/usr/local/libexec/myce-core-router` and
+`myce-crash-router.service`. It changes **host-wide** routing. The service runs
+after apport and sysctl startup; it refuses to replace a pattern another owner
+changed. Non-Mycelium crashes still exec the saved apport handler with original
+arguments, stdin and pidfd. Ordinary identified attempts retain bounded private
+core capture and 72-hour expiry. Missing/corrupt config, unreadable membership
+or unmatched attempt custody discard unread rather than forward private memory.
+Ephemeral streams are closed before capture, expiration, locks or store-file
+creation; only PID, signal, time and cgroup/attempt identity reach the journal.
+
+Before changing routing, inspect `myce host status HOST`. Preserve existing
+maintenance policy; otherwise take `myce host drain HOST --wait` and retain
+ownership of that drain. Confirm quiescence and no pending ephemeral custody.
+Use a release containing this router and worker code, and run these commands
+on the Linux worker from its verified source checkout. Substitute the actual
+user service and canonical worker state directory (not a payload directory):
+
+```sh
+WORKER_UNIT=myce-worker.service
+WORKER_STATE=ABSOLUTE_WORKER_STATE_DIRECTORY
+WORKER_CGROUP=$(systemctl --user show "$WORKER_UNIT" -p ControlGroup --value)
+test -n "$WORKER_CGROUP"
+cat /proc/sys/kernel/core_pattern
+cat /proc/sys/kernel/core_pipe_limit
+sudo install -d -m 0755 /usr/local/libexec
+sudo install -d -m 0700 /var/lib/myce-crash /var/lib/myce-crash/keep
+# Back up existing operator files before replacing them; retain these for undo.
+sudo cp -an /etc/myce-crash.json /etc/myce-crash.json.before-ephemeral 2>/dev/null || test ! -e /etc/myce-crash.json
+sudo cp -an /usr/local/libexec/myce-core-router /usr/local/libexec/myce-core-router.before-ephemeral 2>/dev/null || test ! -e /usr/local/libexec/myce-core-router
+sudo cp -an /etc/systemd/system/myce-crash-router.service /etc/systemd/system/myce-crash-router.service.before-ephemeral 2>/dev/null || test ! -e /etc/systemd/system/myce-crash-router.service
+sudo python3 - "$WORKER_CGROUP" "$WORKER_STATE" <<'PY'
+import json, os, pathlib, sys
+p = pathlib.Path('/etc/myce-crash.json')
+cfg = json.loads(p.read_text()) if p.exists() else {
+    'previous_core_pattern': pathlib.Path('/proc/sys/kernel/core_pattern').read_text().strip(),
+    'budget_bytes': 1024 * 1024 * 1024,
+}
+if not cfg['previous_core_pattern'].startswith('|/usr/share/apport/apport '):
+    raise SystemExit('This procedure supports a saved apport route only')
+cfg.setdefault('previous_core_pipe_limit', int(pathlib.Path('/proc/sys/kernel/core_pipe_limit').read_text()))
+workers = [w for w in cfg.get('workers', []) if w['cgroup'] != sys.argv[1]]
+workers.append({'cgroup': sys.argv[1], 'state_dir': os.path.realpath(sys.argv[2])})
+cfg['workers'] = workers  # Include every worker service on this host.
+p.write_text(json.dumps(cfg) + '\n')
+os.chmod(p, 0o644)  # Qualification reads routing metadata; this file has no credentials.
+PY
+sudo install -m 0755 deploy/myce-core-router /usr/local/libexec/myce-core-router
+sudo install -m 0644 deploy/myce-crash-router.service /etc/systemd/system/myce-crash-router.service
+# Preserve any positive operator limit. If zero, one handler is the minimum
+# needed to keep /proc available; concurrent excess dumps are skipped by Linux.
+test "$(cat /proc/sys/kernel/core_pipe_limit)" -gt 0 || sudo sysctl -w kernel.core_pipe_limit=1
+sudo systemctl daemon-reload
+sudo systemctl enable myce-crash-router.service
+sudo systemctl restart myce-crash-router.service
+cat /proc/sys/kernel/core_pattern
+```
+
+Repeat the config step for every worker service before activation. The store's
+1 GiB budget above is an operator example; preserve an existing budget or choose
+one for available space. It includes allocated blocks and pinned `keep/core-*`
+files. Run `sudo /usr/local/libexec/myce-core-router --expire` to expire ordinary
+cores without waiting for another ordinary crash. Payload bytes never enter
+this store for an ephemeral attempt.
+
+For persistence when the original pipe limit was zero, save the selected
+positive `kernel.core_pipe_limit` in an operator-owned sysctl file, recording
+its prior contents for undo. The service intentionally does not overwrite
+sysctl policy. Verify the exact pattern and pipe limit after reboot, and
+recheck fresh worker capability after upgrading/resuming the worker. A shell
+outside the worker service fails `--qualify` by design; the installed worker
+performs this probe from its actual cgroup. Router and config upgrades alone
+do not upgrade the worker binary.
+
+Before accepting the release, use harmless fixtures on each Linux execution
+host: an ephemeral managed-I/O success plus a fatal-signal attempt, including
+a descendant inside its PID namespace. Check output hashes, logs, exact-attempt
+cleanup receipts and release, absence of all private payload/log/cache copies,
+and journal `MYCE_CORE_CAPTURE=suppressed_ephemeral` with matching
+`COREDUMP_CGROUP`, `MYCE_ATTEMPT`, signal and timestamp. Compare read-only core
+store listings before/after: no ephemeral core or partial file may appear.
+Verify an ordinary crash still captures within budget and a concurrent ordinary
+consumer retains its cache/pins. Retry/requeue and restart recovery must also
+pass. Record running release/SHA and sanitized evidence in #1585; laptop tests
+do not qualify either Linux host. Resume only maintenance you own.
+
+To undo, drain and confirm no pending ephemeral custody first. Run
+`sudo systemctl disable --now myce-crash-router.service`: `ExecStop` restores
+the saved apport pattern, refusing if another owner changed it. Restore the
+recorded `previous_core_pipe_limit` with `sudo sysctl -w
+kernel.core_pipe_limit=PREVIOUS_VALUE` and restore/remove only the sysctl file
+you changed. If the service was not active, run
+`sudo /usr/local/libexec/myce-core-router --deactivate` explicitly. Restore the
+three `.before-ephemeral` files if they existed, or remove only the router,
+config and unit installed by this procedure; then `sudo systemctl daemon-reload`.
+Keep existing core-store data. If restoring a previously active legacy router,
+restart its restored unit only after restoring its original config. Verify
+`core_pattern`, pipe limit and fresh worker inventory: apport and the legacy
+router must withhold ephemeral capability. Do not resume opted-in jobs on an
+unsupported route.
+
 ## 0. Ask the user
 
 1. Which computer is the **hub**? Pick one that stays on, running Linux or an

@@ -1534,12 +1534,16 @@ inputs. Startup recovery reconciles process custody and repeats cleanup;
 offline/crashed workers remain pending, never presumed clean.
 
 Initial support requires installed tools, offline execution and Linux PID/mount
-namespaces with a qualified non-piped core route. Other combinations receive
+namespaces with a qualified file core route or Mycelium core router. Other
+combinations receive
 `job_worker_data_unsupported`; older workers cannot receive these jobs. The
 worker sets soft and hard `RLIMIT_CORE` to zero in the disposable exec helper.
-Linux piped core handlers ignore that limit, so those hosts refuse this policy
-without changing global configuration. Failed/interrupted attempts discard
-private payload after process cleanup and retain logs until queue delivery.
+Linux piped core handlers ignore that limit. The qualified Mycelium router
+matches the dumping PID's cgroup to exact attempt custody and closes ephemeral
+core streams unread, recording only signal/time/attempt metadata. Other piped
+handlers and legacy routers are refused, without changing global configuration.
+Failed/interrupted attempts discard private payload after process cleanup and
+retain logs until queue delivery.
 This is an explicit local-data exception to MY-47's finished-file retention;
 queue/NAS retention is unchanged. Unlink is **not secure erasure on SSDs**;
 full-disk encryption is the at-rest control. RAM, VRAM, swap, snapshots, prior
