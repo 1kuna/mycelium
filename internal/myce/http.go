@@ -110,6 +110,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
+	a.registerCompletions(mux)
 	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
 	a.registerMeasurementSafety(mux)
@@ -309,10 +310,15 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		// Freshness is the age of the committed state this receipt projects.
 		reply := struct {
 			*Job
-			Spec      replySpec          `json:"spec"`
-			Freshness *SnapshotFreshness `json:"freshness,omitempty"`
+			Spec       replySpec          `json:"spec"`
+			Completion *CompletionState   `json:"completion"`
+			Freshness  *SnapshotFreshness `json:"freshness,omitempty"`
 		}{Job: j, Freshness: freshness}
 		if j != nil {
+			reply.Completion = j.Completion
+			if reply.Completion == nil {
+				reply.Completion = &CompletionState{}
+			}
 			reply.Spec.Spec = j.Spec
 		}
 		respondOperation(w, reply, err, "status_unavailable")

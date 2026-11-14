@@ -145,6 +145,8 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	// Supersedes explicitly replaces this same-project job for completion delivery.
+	Supersedes       string `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
 	CheckpointPolicy string `json:"checkpoint_policy,omitempty" yaml:"-"`
 	// Diagnostic only: assigned by readers, excluded from submission identity.
 	AuthoringOrigin string `json:"authoring_origin,omitempty" yaml:"-"`
@@ -452,6 +454,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	Completion        *CompletionState       `json:"completion,omitempty"`
 	WorkerDataCleanup *WorkerDataCleanup     `json:"worker_data_cleanup,omitempty"`
 	AdmissionWait     *AdmissionWaitEvidence `json:"admission_wait,omitempty"`
 

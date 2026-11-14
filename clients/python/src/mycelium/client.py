@@ -886,6 +886,8 @@ class Client:
                 if parent.is_symlink():
                     raise ValueError("result parent must be a directory, not a symlink")
             files[name] = self._download_ref(ref, target)
+        if "completion" in job:
+            self._call("POST", f"/api/jobs/{quote(job['id'], safe='')}/completion", {"operation": "collect"})
         return files
 
     def _download_ref(self, ref: Mapping[str, Any], destination: str | Path) -> Path:
@@ -1050,7 +1052,7 @@ class Client:
     def _wait_batch(self, job_ids, after, seconds, timeout):
         try:
             reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
-                               "seconds": seconds}, timeout=timeout, retry=False, raw=True)
+                               "seconds": seconds, "collect": True}, timeout=timeout, retry=False, raw=True)
         except APIError as error:
             if error.status == 404 and not error.code or error.status == 405:
                 raise APIError(error.status, json.dumps({

@@ -22,6 +22,7 @@ class BatchWaitTests(unittest.TestCase):
                     if request.selector == "/api/wait":
                         body = json.loads(request.data)
                         self.assertEqual(body["ids"], ids)
+                        self.assertTrue(body["collect"])
                         self.assertEqual(body["after"], {} if not batches else dict.fromkeys(ids, 1))
                         batches.append(body)
                         state = "succeeded" if len(batches) == 6 else "running"

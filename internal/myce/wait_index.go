@@ -50,6 +50,7 @@ func (state WaitState) Job() *Job {
 }
 
 type WaitRequest struct {
+	Collect bool              `json:"collect,omitempty"`
 	IDs     []string          `json:"ids"`
 	After   map[string]uint64 `json:"after,omitempty"`
 	Seconds int               `json:"seconds,omitempty"`
@@ -302,6 +303,9 @@ func (a API) registerWait(mux *requestMux) {
 			return
 		}
 		result, err := index.waitFor(r.Context(), request, duration)
+		if err == nil && request.Collect {
+			err = a.Queue.collectCompletions(r.Context(), result.Jobs)
+		}
 		respondOperation(w, result, err, "status_unavailable")
 	})
 }

@@ -96,7 +96,7 @@ func (c Client) getJob(ctx context.Context, id, query string) (*Job, error) {
 // read includes diagnostics; later pending updates carry only state and reason. Transient
 // read errors from an update use the same retry policy as status reads.
 func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
-	return c.wait(ctx, id, nil, updates)
+	return c.wait(ctx, id, nil, updates, true)
 }
 
 // WaitSubmitted uses the accepted receipt to tolerate transient visibility
@@ -105,7 +105,7 @@ func (c Client) WaitSubmitted(ctx context.Context, receipt *Job, updates ...func
 	if receipt == nil || receipt.ID == "" {
 		return nil, errors.New("wait-submitted requires an accepted job receipt")
 	}
-	return c.wait(ctx, receipt.ID, receipt, updates)
+	return c.wait(ctx, receipt.ID, receipt, updates, true)
 }
 
 func waitStatusPause(ctx context.Context, delay time.Duration) error {
@@ -166,7 +166,15 @@ func RetryStatusRead(err error) bool {
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
 
-func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []func(*Job) error) (*Job, error) {
+// ObserveSubmitted is a read-only wait for a detached completion observer.
+func (c Client) ObserveSubmitted(ctx context.Context, receipt *Job) (*Job, error) {
+	if receipt == nil || receipt.ID == "" {
+		return nil, errors.New("observe-submitted requires an accepted job receipt")
+	}
+	return c.wait(ctx, receipt.ID, receipt, nil, false)
+}
+
+func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []func(*Job) error, collect bool) (*Job, error) {
 	pace := ClientPace{}
 	c = c.WithoutRetries()
 	last := receipt
@@ -258,7 +266,12 @@ func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []fun
 				}
 			}
 			if err == nil && terminal(j.State) {
-				return j, nil
+				if collect {
+					err = c.CollectCompletion(ctx, j)
+				}
+				if err == nil {
+					return j, nil
+				}
 			}
 
 		}
@@ -306,7 +319,10 @@ func (c Client) DownloadResult(ctx context.Context, id, name, dest string) error
 	if !ok {
 		return &HTTPError{Status: 404, Code: "artifact_unknown", Message: "accepted artifact not found"}
 	}
-	return c.downloadResultFile(ctx, ref, dest)
+	if err := c.downloadResultFile(ctx, ref, dest); err != nil {
+		return err
+	}
+	return c.CollectCompletion(ctx, j)
 }
 
 func (c Client) downloadResultFile(ctx context.Context, ref FileRef, dest string) error {
