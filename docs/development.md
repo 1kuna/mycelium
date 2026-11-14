@@ -599,11 +599,10 @@ verification belongs to the separately authorized release after deployment.
 ### Release upgrade compatibility
 
 The full gate runs `scripts/upgrade-compat.py` against the current sources and
-one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.17 candidate
-pairs with r6.16.5 (`c11385f17c0d0a3b30972b8a95451f1cbffcf81b`).
+one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.18 candidate
+pairs with r6.17.1 (`706b5bec9f823da1ab8093b417cb9b8033b9b3f7`).
 For an additional live patch predecessor, pass its exact commit and version to
-both `prepare` and `run` with `--previous SHA --old-version VERSION`; r6.17
-also checks r6.16.3 (`5399c61ad63d381f69752ac71e0e5830aba651c4`). Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
+both `prepare` and `run` with `--previous SHA --old-version VERSION`. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
 release. `internal/myce/testdata/r6.10-queue.sql` and its generator still pin
 r6.10; they prove main opens an older database.
 `prepare` fetches that exact public source before the offline gate; local gate
