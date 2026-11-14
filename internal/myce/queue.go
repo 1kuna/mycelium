@@ -677,6 +677,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if q.stopping.Load() {
 		return queueStopping()
 	}
+	// All qualification consumers in this writer share the same frozen
+	// extension/report predicates, including projection and persistence tails.
+	// The complete inventory/report key fences changes during maintenance.
+	defer q.memoizeExtensionQualifications(nil)()
 	previousMaintenance := q.maintenance
 	q.maintenance = &queueMaintenance{}
 	defer func() { q.maintenance = previousMaintenance }()
@@ -2458,6 +2462,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
+	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()

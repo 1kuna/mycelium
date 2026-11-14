@@ -9,6 +9,27 @@ package myce
 // spread between items; with fewer, the declared hint stands.
 const storageFamilyMinRuns = 2
 
+// Both exact keys and families retain the program. During an immutable
+// planning pass, unrelated entries cannot supply scratch evidence: avoid
+// deriving full configuration/input identities just to discover that miss.
+func (q *Queue) hasStorageProgram(j *Job) bool {
+	c := q.memoryPlanning
+	if c == nil {
+		return len(q.s.StorageObservations) > 0
+	}
+	if c.storagePrograms == nil {
+		c.storagePrograms = map[string]bool{}
+		for _, p := range q.s.StorageObservations {
+			c.storagePrograms[p.Key.Program] = true
+		}
+	}
+	program := j.Spec.workType()
+	if !j.Spec.extensionJob() {
+		program = "profile:" + j.Spec.Name
+	}
+	return c.storagePrograms[program]
+}
+
 func storageFamily(project string, k StorageKey) string {
 	return identityHash(struct {
 		Project, Program, Shape, Environment string
