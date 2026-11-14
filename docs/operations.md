@@ -708,7 +708,11 @@ hand, one host at a time with the queue's host last:
    its SHA-256 against the signed `release.json`.
 2. `myce host drain HOST --wait --timeout 2h` returns once the host is
    quiescent. `--timeout` defaults to 30 seconds; a timeout keeps the drain and
-   changes nothing else, so rerun it. If running work will not finish soon and
+   changes nothing else, so rerun it. With r6.16+ on the queue, production
+   submitted during this manual drain waits for the host to return, with its
+   relative start window paused for capacity, just as during a fleet upgrade.
+   Explicit `start_by` and `give_up_at` still bind. A deliberately disabled
+   host still fails new production work promptly. If running work will not finish soon and
    its owner agrees, `myce host disable HOST --stop --wait --timeout 10m` stops it as planned
    maintenance instead (step 3 of the run above).
 3. Run the verified binary's `myce install ROLE --config CONFIG` (add

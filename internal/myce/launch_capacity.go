@@ -166,10 +166,16 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 		return false, false
 	}
 	for _, m := range q.plannerMachines() {
-		if m.Gone || m.Leaving || q.maintenanceBlocked(hostID(m)) || !q.jobAllowsMachine(j, m.ID) {
+		drained := q.s.HostMaintenance[hostID(m)].Mode == "drained"
+		if !q.jobAllowsMachine(j, m.ID) || q.s.HostMaintenance[hostID(m)].Mode == "disabled" || !drained && (m.Gone || m.Leaving) {
 			continue
 		}
 		room := *m
+		if drained {
+			// Maintenance may restart the worker; its absence is part of the
+			// drain, not evidence that this qualified route stopped existing.
+			room.Gone, room.Leaving = false, false
+		}
 		room.FreeCPUCores, room.CPUInUseCores = room.EffectiveCPUCores, 0
 		for _, c := range q.memoryCandidates(j, m) {
 			temporary := false
@@ -188,7 +194,7 @@ func (q *Queue) queuedCapacityStatus(j *Job) (waiting, ready bool) {
 			if !fitsResources(c, &room, room.TotalMemoryGB) {
 				continue
 			}
-			if temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
+			if drained || temporary || !hostFits(m, c.Spec.Needs.MemoryGB, c.Spec.Needs.HostMemoryGB) || !cpuFits(c, m) || !q.batchSlotFree(m, c) || m.FreeMemoryGB < c.Spec.Needs.MemoryGB {
 				waiting = true
 			} else {
 				ready = true
