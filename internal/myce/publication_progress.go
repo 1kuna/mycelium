@@ -12,6 +12,7 @@ import (
 // Count only server-confirmed blob bytes, once per digest, including dedup hits.
 // Never put local paths, blob digests, URLs or transport error text in reports.
 type publicationProgress struct {
+	timing    uploadTiming // Measured queue service shared by this result's files.
 	mu        sync.Mutex
 	sequence  uint64
 	active    map[uint64]publicationOperation

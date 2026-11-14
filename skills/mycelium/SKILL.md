@@ -462,6 +462,9 @@ hours they waited while an excluded host had room, and how far typed
 - [Results](references/results.md): output failures, diagnostics, large outputs,
   and startup publication progress. Released results replay without withholding
   the host's free compute; retain their original job and attempt identity.
+  Upload retries use the accepted offset, including a fully received upload
+  whose publication must finish. A 500 needs the queue's `file_upload` event
+  (operation/error class and offsets); retain the same receipt and bytes.
 - This guide ships with the `myce` binary: `myce skill install` installs it and
   upgrades refresh it ([setup](setup-project.md#install-the-agent-skill)).
 - [Setup](setup-project.md), [harness](harness-binding.md) and
