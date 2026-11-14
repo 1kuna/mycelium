@@ -50,6 +50,9 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 				blocked = append(blocked, why)
 				kinds[kind] = true
 			}
+			if why := inventoryWaitingReason(m); !candidate.Spec.Needs.cpuOnly() && why != "" {
+				block("unknown_observation", why)
+			}
 			if !toolsFit(candidate, m) {
 				block("capability", targetFitReason("tools", candidate, m))
 			}
