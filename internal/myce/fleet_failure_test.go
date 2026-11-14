@@ -212,9 +212,9 @@ func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
 			if err := f.launch(); err != nil {
 				t.Fatal(err)
 			}
-			command := f.deps.command
-			f.deps.command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				data, err := command(ctx, name, args...)
+			versionCommand := f.deps.versionCommand
+			f.deps.versionCommand = func(ctx context.Context, name string) ([]byte, []byte, error) {
+				data, diagnostic, err := versionCommand(ctx, name)
 				if name == fleetStagingPath(f.c, f.i) {
 					path := filepath.Join(f.c.State, "fleet-publisher.pub")
 					if fault == "missing" {
@@ -225,7 +225,7 @@ func TestFleetFailureFinalPublisherRecheckPreservesCode(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				return data, err
+				return data, diagnostic, err
 			}
 			want := "fleet_publisher_unavailable"
 			if fault == "mismatch" {
@@ -276,10 +276,15 @@ func TestFleetFailureDarwinInstalledIdentity(t *testing.T) {
 				if fault == "old-adhoc" && name == "codesign" && args[0] == "-dv" && args[len(args)-1] == f.c.Binary {
 					return []byte("Identifier=io.github.1kuna.mycelium\nSignature=adhoc\n"), nil
 				}
-				if fault == "candidate-probe" && name == fleetStagingPath(f.c, f.i) || fault == "helper-launch" && name == "launchctl" && args[0] == "submit" {
+				if fault == "helper-launch" && name == "launchctl" && args[0] == "submit" {
 					return nil, errors.New("private OS diagnostic")
 				}
 				return command(ctx, name, args...)
+			}
+			if fault == "candidate-probe" {
+				f.deps.versionCommand = func(context.Context, string) ([]byte, []byte, error) {
+					return nil, []byte("private OS diagnostic"), errors.New("candidate version failed")
+				}
 			}
 			f.changeDR = fault == "different-requirement"
 			err := f.launch()
