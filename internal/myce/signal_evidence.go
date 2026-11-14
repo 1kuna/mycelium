@@ -206,7 +206,7 @@ func collectSignalJournal(ctx context.Context, e *SignalEvidence, request Signal
 	}
 	// Request only specific metadata: COREDUMP_ENVIRON, CMDLINE, stack text and
 	// memory bytes are deliberately excluded. PID + boot + event time fence reuse.
-	coreArgs := []string{"-b", "--reverse", "--all", "--no-pager", "--quiet", "--output=json", since, until, "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS,COREDUMP_CGROUP"}
+	coreArgs := []string{"-b", "--reverse", "--all", "--no-pager", "--quiet", "--output=json", since, until, "--output-fields=COREDUMP_PID,COREDUMP_SIGNAL,COREDUMP_TIMESTAMP,COREDUMP_FILENAME,COREDUMP_TRUNCATED,COREDUMP_PROC_MAPS,COREDUMP_CGROUP,MYCE_CORE_CAPTURE,MYCE_ATTEMPT"}
 	if pid > 0 {
 		coreArgs = append(coreArgs, "COREDUMP_PID="+strconv.Itoa(pid))
 	} else if request.Cgroup != "" {
@@ -283,6 +283,8 @@ func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture)
 			Truncated string `json:"COREDUMP_TRUNCATED"`
 			Maps      string `json:"COREDUMP_PROC_MAPS"`
 			Cgroup    string `json:"COREDUMP_CGROUP"`
+			Capture   string `json:"MYCE_CORE_CAPTURE"`
+			Attempt   string `json:"MYCE_ATTEMPT"`
 		}
 		if json.Unmarshal(line, &entry) != nil || request.PID > 0 && entry.PID != strconv.Itoa(request.PID) || request.PID == 0 && (request.Cgroup == "" || entry.Cgroup != request.Cgroup) {
 			continue
@@ -313,6 +315,11 @@ func applyCoreMetadataFor(e *SignalEvidence, data []byte, request SignalCapture)
 			e.Attribution = "attempt_cgroup"
 		}
 		e.Signal = crashSignal(syscall.Signal(signal))
+		if entry.Capture == "suppressed_ephemeral" && regexp.MustCompile(`^attempt-[0-9a-f]{32}$`).MatchString(entry.Attempt) && strings.Contains(entry.Cgroup+"/", "/"+entry.Attempt+"/") {
+			e.CoreCapture = "suppressed_ephemeral"
+			e.CorePointer, e.CoreBytes, e.CoreTruncated, e.Libraries = "", 0, false, nil
+			return
+		}
 		e.Libraries = parseFaultMaps(entry.Maps)
 		if filepath.IsAbs(entry.Filename) && !strings.ContainsAny(entry.Filename, "\n\x00") {
 			e.CorePointer, e.CoreCapture, e.CoreTruncated = entry.Filename, "systemd_core_recorded", entry.Truncated == "1"

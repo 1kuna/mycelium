@@ -215,12 +215,17 @@ servers/snapshots, sidecars/member limits, custom workdirs, resumability,
 fan-out/dependencies, diagnostics/`keep_on_failure`, alternate output delivery,
 and fleets with no supporting worker, with `job_worker_data_unsupported`.
 Execution requires `worker_data_ephemeral_v1`: Linux PID/mount namespaces and
-a readable non-piped core route whose exec helper passed a core-limit probe.
+a readable file core route, or the qualified Mycelium core router, and an exec
+helper that passed a core-limit probe.
 macOS, unsupported workers and the Linux fallback boundary cannot silently run
 these jobs. The worker rechecks core routing at launch and sets both soft and
 hard `RLIMIT_CORE` to zero in the payload helper, without changing the worker
-or host limits. **Linux piped core handlers ignore RLIMIT_CORE**; those hosts
-refuse the policy and require operator qualification/configuration separately.
+or host limits. **Linux piped core handlers ignore RLIMIT_CORE**. Mycelium's
+qualified router instead matches the dumping PID's cgroup to exact attempt
+custody and discards ephemeral cores unread, retaining only signal/time/attempt
+metadata in the journal. Other piped handlers (including apport and
+systemd-coredump) and older Mycelium routers remain refused. See the
+[operator switch and rollback](operations.md#linux-core-routing-for-ephemeral-attempts).
 Do not downgrade queue or workers while ephemeral attempts retain custody.
 
 Removal means unlink, **not secure erasure on SSDs**. Full-disk encryption is the

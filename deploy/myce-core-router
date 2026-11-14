@@ -1,0 +1,221 @@
+#!/usr/bin/python3
+"""Operator-installed core routing. Ephemeral attempt streams are never read."""
+import fcntl
+import json
+import os
+import re
+import shlex
+import stat
+import socket
+import sys
+import syslog
+import time
+from pathlib import Path
+
+CONFIG = '/etc/myce-crash.json'
+ROOT = '/var/lib/myce-crash'
+PROTOCOL = 'myce-core-router ephemeral-v1'
+PATTERN = '|/usr/local/libexec/myce-core-router -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E'
+TTL = 72 * 60 * 60
+
+def event(message):
+    syslog.openlog('myce-core-router')
+    syslog.syslog(syslog.LOG_NOTICE, message)
+
+def suppression_evidence(pid, signal, cgroup, attempt):
+    fields = {'SYSLOG_IDENTIFIER': 'myce-core-router', 'MESSAGE': 'Ephemeral core discarded unread',
+              'COREDUMP_PID': str(pid), 'COREDUMP_SIGNAL': signal,
+              'COREDUMP_TIMESTAMP': str(time.time_ns() // 1000),
+              'COREDUMP_CGROUP': cgroup, 'MYCE_ATTEMPT': attempt,
+              'MYCE_CORE_CAPTURE': 'suppressed_ephemeral'}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as journal:
+        journal.connect('/run/systemd/journal/socket')
+        journal.send('\n'.join(k + '=' + v for k, v in fields.items()).encode())
+
+def files():
+    for directory in (ROOT, ROOT + '/keep'):
+        for entry in os.scandir(directory):
+            st = entry.stat(follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and entry.name.startswith('core-'):
+                yield entry.path, st, directory.endswith('/keep')
+
+def expire():
+    now = time.time()
+    for path, st, keep in list(files()):
+        if not keep and now - st.st_mtime >= TTL:
+            os.unlink(path)
+            event('expired ' + os.path.basename(path))
+
+def allocated():
+    return sum(st.st_blocks * 512 for _, st, _ in files())
+
+def capture(cfg, pid):
+    # Kernel core_pipe_limit already bounds total handlers. Serialize only
+    # Mycelium stores so concurrent dumps cannot exceed the shared byte budget.
+    lock = os.open(ROOT + '/.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    expire()
+    budget = int(cfg['budget_bytes'])
+    # Filesystem block allocation may round each final write up to one block;
+    # leave one block plus store directory/control-file metadata in the budget.
+    overhead = sum(os.stat(p).st_blocks * 512 for p in (ROOT, ROOT + '/keep', ROOT + '/.lock'))
+    block = os.statvfs(ROOT).f_frsize
+    available = budget - allocated() - overhead - block
+    if available <= 0:
+        event('budget_full pid=' + str(pid))
+        return 0
+    path = ROOT + '/core-' + str(time.time_ns()) + '-' + str(pid)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    complete = False
+    total = 0
+    try:
+        while True:
+            data = os.read(0, min(1024 * 1024, available - total + 1))
+            if not data:
+                break
+            if total + len(data) > available:
+                event('core_exceeds_remaining_budget pid=' + str(pid))
+                return 0
+            view = memoryview(data)
+            while view:
+                n = os.write(fd, view)
+                view = view[n:]
+            total += len(data)
+            # Extent preallocation can exceed logical bytes. Account actual
+            # allocated blocks after each write and roll back the partial core.
+            if allocated() + overhead > budget:
+                event('allocated_budget_refused pid=' + str(pid))
+                return 0
+        os.fsync(fd)
+        complete = True
+        event('stored pid=' + str(pid) + ' bytes=' + str(total))
+    finally:
+        os.close(fd)
+        if not complete:
+            os.unlink(path)
+        os.close(lock)
+    return 0
+
+def membership(pid):
+    with open('/proc/' + str(pid) + '/cgroup') as source:
+        for line in source.read(16384).splitlines():
+            if line.startswith('0::/'):
+                return line[3:]
+    raise ValueError('cgroup v2 membership unavailable')
+
+def worker_route(cfg, cgroup):
+    matches = [w for w in cfg['workers']
+               if cgroup == w['cgroup'] or cgroup.startswith(w['cgroup'] + '/')]
+    if len(matches) != 1:
+        raise ValueError('worker routing is absent or ambiguous')
+    return matches[0]
+
+def attempt_policy(worker, cgroup):
+    relative = cgroup[len(worker['cgroup']) + 1:]
+    identity = relative.split('/')[0]
+    if not re.fullmatch(r'attempt-[0-9a-f]{32}', identity):
+        raise ValueError('attempt membership unavailable')
+    expected = '/sys/fs/cgroup' + worker['cgroup'] + '/' + identity
+    # The worker publishes this state before releasing the payload exec gate.
+    # Never read process environment, command line, maps or memory for routing.
+    for path in Path(worker['state_dir']).glob('state-attempt-*.json'):
+        try:
+            with path.open() as source:
+                state = json.loads(source.read(4 * 1024 * 1024))
+            job = state.get('job') or {}
+            if (state.get('identity') == identity[8:] and state.get('cgroup') == expected
+                    and job.get('session') == state.get('session') and job.get('id')
+                    and job.get('attempt', 0) > 0):
+                policy = job['spec'].get('worker_data', '')
+                if policy not in ('', 'ephemeral'):
+                    raise ValueError('unknown attempt policy')
+                return policy == 'ephemeral', identity
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    raise ValueError('exact attempt policy unavailable')
+
+def route(cfg, args):
+    pid = next((int(a[2:]) for a in args if re.fullmatch(r'-P[0-9]+', a)), None)
+    signal = next((a[2:] for a in args if re.fullmatch(r'-s[0-9]+', a)), '0')
+    # Failure to identify a process must never send its memory to another handler.
+    cgroup = membership(pid)
+    roots = [w['cgroup'] for w in cfg['workers']]
+    if not any(cgroup == root or cgroup.startswith(root + '/') for root in roots):
+        old = shlex.split(cfg['previous_core_pattern'][1:])
+        os.execv(old[0], [old[0]] + args)  # Preserve stdin and the kernel's %F pidfd.
+        return 0
+    worker = worker_route(cfg, cgroup)
+    ephemeral, attempt = attempt_policy(worker, cgroup)
+    if ephemeral:
+        os.close(0)  # Do not read, drain, spool, hash or forward even one core byte.
+        suppression_evidence(pid, signal, cgroup, attempt)
+        return 0
+    return capture(cfg, pid)
+
+def qualify(cfg, state_dir=None):
+    worker = worker_route(cfg, membership('self'))
+    if state_dir is not None and os.path.realpath(state_dir) != os.path.realpath(worker['state_dir']):
+        raise ValueError('worker state directory differs')
+    if not os.path.isdir(worker['state_dir']):
+        raise ValueError('worker state directory unavailable')
+    if not stat.S_ISSOCK(os.stat('/run/systemd/journal/socket').st_mode):
+        raise ValueError('crash metadata journal unavailable')
+    # Nonzero pipe limit keeps /proc/PID available until the handler exits.
+    if int(Path('/proc/sys/kernel/core_pipe_limit').read_text()) <= 0:
+        raise ValueError('core_pipe_limit must be nonzero')
+    print(PROTOCOL)
+
+def configuration():
+    cfg = json.loads(Path(CONFIG).read_text())
+    workers = cfg['workers']
+    if not workers:
+        raise ValueError('no worker routes')
+    for worker in workers:
+        for key in ('cgroup', 'state_dir'):
+            path = worker[key]
+            if not path.startswith('/') or path == '/' or os.path.normpath(path) != path or '\n' in path:
+                raise ValueError('invalid worker route')
+    return cfg
+
+def main():
+    os.umask(0o077)
+    try:
+        cfg = configuration()
+    except (OSError, ValueError, KeyError, TypeError):
+        # Unknown routing fails closed, including missing/corrupt configuration.
+        event('routing_unavailable core_discarded_unread')
+        return 1
+    if sys.argv[1:2] == ['--qualify']:
+        qualify(cfg, *sys.argv[2:])
+        return 0
+    if sys.argv[1:] == ['--activate']:
+        previous = cfg['previous_core_pattern'].strip()
+        routed = previous.replace('|/usr/share/apport/apport ', '|/usr/local/libexec/myce-core-router ', 1)
+        if routed != PATTERN:
+            raise ValueError('unsupported saved pattern')
+        current = open('/proc/sys/kernel/core_pattern').read().strip()
+        if current not in (previous, routed):
+            raise ValueError('core pattern changed by another owner')
+        with open('/proc/sys/kernel/core_pattern', 'w') as output:
+            output.write(routed + '\n')
+        return 0
+    if sys.argv[1:] == ['--deactivate']:
+        current = Path('/proc/sys/kernel/core_pattern').read_text().strip()
+        if current not in (PATTERN, cfg['previous_core_pattern'].strip()):
+            raise ValueError('core pattern changed by another owner')
+        Path('/proc/sys/kernel/core_pattern').write_text(cfg['previous_core_pattern'].strip() + '\n')
+        return 0
+    if sys.argv[1:] == ['--expire']:
+        lock = os.open(ROOT + '/.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        expire()
+        return 0
+    try:
+        return route(cfg, sys.argv[1:])
+    except Exception as error:
+        # Do not send private attempt memory to apport on a capture failure.
+        event('core_discarded_unread_or_capture_failed error=' + type(error).__name__)
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())

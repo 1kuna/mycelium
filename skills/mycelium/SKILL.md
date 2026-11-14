@@ -182,10 +182,14 @@ scratch/temp/private home, checkpoints, outputs and delivered logs before releas
 Check job `worker_data_cleanup` and the attempt-history receipt: `failed` or
 pending cleanup is not a satisfied policy, even if the result succeeded. Retries
 restage inputs; startup recovers process custody and cleanup. Supporting Linux
-namespace workers with non-piped core routing are required; other combinations
-are refused with `job_worker_data_unsupported`. Piped core handlers ignore
-`RLIMIT_CORE`; these hosts refuse the policy. Unlink is not secure SSD erasure;
-use full-disk encryption for at-rest protection. Queue/NAS retention is unchanged
+namespace workers with file core routing or the qualified Mycelium core router
+are required; other combinations are refused with `job_worker_data_unsupported`.
+Piped core handlers ignore
+`RLIMIT_CORE`; only Mycelium's qualified router discards ephemeral cores unread
+and records signal/time/attempt metadata. Other piped handlers and older routers
+remain refused. Operators can [switch routing and undo it](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#linux-core-routing-for-ephemeral-attempts).
+Unlink is not secure SSD erasure; use full-disk encryption for at-rest protection.
+Queue/NAS retention is unchanged
 ([scope and limits](https://github.com/1kuna/mycelium/blob/main/docs/files.md#ephemeral-worker-data)).
 
 ## 7. Many pieces

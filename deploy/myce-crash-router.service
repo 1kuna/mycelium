@@ -1,0 +1,15 @@
+[Unit]
+Description=Route Mycelium attempt cores with ephemeral suppression
+After=apport.service systemd-sysctl.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/myce-core-router --activate
+ExecStop=/usr/local/libexec/myce-core-router --deactivate
+
+[Install]
+WantedBy=multi-user.target

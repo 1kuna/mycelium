@@ -12,18 +12,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Piped Linux core handlers ignore RLIMIT_CORE. They are not qualified for
-// this policy, and the worker never changes the host's global routing.
-func ephemeralCoreRoute() error {
+// Recheck at inventory and launch; never change the host's global routing.
+func ephemeralCoreRoute(stateDirs ...string) error {
 	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
-	return ephemeralCorePattern(pattern, err)
-}
-
-func ephemeralCorePattern(pattern []byte, err error) error {
-	if err != nil || strings.TrimSpace(string(pattern)) == "" || strings.HasPrefix(strings.TrimSpace(string(pattern)), "|") {
-		return errors.New("ephemeral worker data requires a readable non-piped core_pattern; piped core handlers ignore RLIMIT_CORE")
+	state := ""
+	if len(stateDirs) > 0 {
+		state = stateDirs[0]
 	}
-	return nil
+	return checkEphemeralCoreRoute(pattern, err, state, qualifyCoreRouter)
 }
 
 var ephemeralCoreProbe = sync.OnceValue(func() error {
@@ -45,14 +41,30 @@ var ephemeralCoreProbe = sync.OnceValue(func() error {
 	return nil
 })
 
-func ephemeralSupport() error {
-	if err := ephemeralCoreRoute(); err != nil {
+func ephemeralSupport(stateDirs ...string) error {
+	if err := ephemeralCoreRoute(stateDirs...); err != nil {
 		return err
 	}
 	return ephemeralCoreProbe()
 }
+
+func (w Worker) ephemeralWorkerSupport() error {
+	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
+	if err := checkEphemeralCoreRoute(pattern, err, w.StateDir, qualifyCoreRouter); err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(pattern)) == myceCorePattern && w.memoryCeilings == nil {
+		return errors.New("ephemeral core routing requires delegated attempt cgroups")
+	}
+	return ephemeralCoreProbe()
+}
+
 func suppressEphemeralCores() error {
-	if err := ephemeralCoreRoute(); err != nil {
+	// Root ownership and the handler protocol were checked by the worker at
+	// launch, outside the rootless user namespace. Host root may be unmapped
+	// here; repeating host-UID checks would reject the already-qualified route.
+	pattern, err := os.ReadFile("/proc/sys/kernel/core_pattern")
+	if err := ephemeralCorePattern(pattern, err); err != nil {
 		return err
 	}
 	return unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0})

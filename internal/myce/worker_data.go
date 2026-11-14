@@ -91,7 +91,7 @@ func (w Worker) checkEphemeralSupport() error {
 	if w.ephemeralProbe != nil {
 		return w.ephemeralProbe()
 	}
-	return ephemeralSupport()
+	return w.ephemeralWorkerSupport()
 }
 
 // No lookup, pin or insertion in either persistent payload cache, even on a
