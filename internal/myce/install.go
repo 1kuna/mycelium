@@ -606,6 +606,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			}
 		}
 		_, err = command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+		if err == nil {
+			err = tx.manager.waitActivity(ctx, tx.units[0], true)
+		}
 	}
 	if err == nil && files.retain != nil {
 		files.retain(tx)

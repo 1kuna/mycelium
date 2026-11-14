@@ -64,18 +64,33 @@ func TestInstallSystemdUnavailableTimeout(t *testing.T) {
 	}
 }
 
-func TestInstallLaunchdSkipsSystemdTimeout(t *testing.T) {
-	command := BoundSetupCommand(func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if name != "launchctl" || args[0] != "bootstrap" {
-			t.Fatalf("unexpected service timeout query: %s %v", name, args)
-		}
-		if _, ok := ctx.Deadline(); !ok {
-			t.Fatal("launchd lost ordinary setup bound")
-		}
-		return nil, nil
-	})
-	if _, err := command(context.Background(), "launchctl", "bootstrap", "gui/fixture", "fixture.plist"); err != nil {
-		t.Fatal(err)
+func TestInstallLaunchdLifecycleWait(t *testing.T) {
+	for _, action := range []string{"bootout", "bootstrap", "kickstart", "kill", "print"} {
+		t.Run(action, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+				defer cancel()
+				if action == "print" {
+					ctx = context.WithValue(ctx, launchdLifecycleKey{}, true)
+				}
+				command := BoundSetupCommand(func(got context.Context, name string, args ...string) ([]byte, error) {
+					if name != "launchctl" || args[0] != action {
+						t.Fatalf("unexpected timeout query: %s %v", name, args)
+					}
+					select {
+					case <-time.After(20 * time.Second):
+					case <-got.Done():
+						t.Fatalf("lifecycle killed by setup deadline: %v", got.Err())
+					}
+					cancel()
+					<-got.Done()
+					return nil, got.Err()
+				})
+				if _, err := command(ctx, "launchctl", action, "fixture"); !errors.Is(err, context.Canceled) {
+					t.Fatalf("caller cancellation lost: %v", err)
+				}
+			})
+		})
 	}
 }
 
