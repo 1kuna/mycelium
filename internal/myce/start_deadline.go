@@ -115,6 +115,9 @@ func (q *Queue) startWaitingReason(j *Job, scans ...*placementScan) string {
 			return h.Detail
 		}
 		if q.maintenanceBlocked(host) {
+			if q.s.HostMaintenance[host].Mode == "drained" {
+				return "waiting for drained host " + host + " to return"
+			}
 			return "host " + host + " in planned maintenance"
 		}
 		if j.State == "queued" {
@@ -273,13 +276,12 @@ func (q *Queue) startStatusReason(j *Job, scans ...*placementScan) string {
 }
 
 // An unknown fleet may still join; an explicit operator disable is not incoming room.
-// A drain owned by the running fleet upgrade is temporary: the host returns
-// when its step verifies, so production waits under its ordinary start deadline
-// instead of failing. A stopped operation's retained drain is not temporary.
+// Drains are temporary capacity waits, regardless of who owns them. Taking a
+// host out of service indefinitely requires an explicit disable.
 func (q *Queue) allStartHostsDisabled(j *Job) bool {
 	hosts := q.startEligibleHosts(j)
 	for _, host := range hosts {
-		if !q.maintenanceBlocked(host) || q.fleetDrainTemporary(host) {
+		if q.s.HostMaintenance[host].Mode != "disabled" {
 			return false
 		}
 	}

@@ -209,8 +209,8 @@ func TestQueuedProductionRefusesDrainOfItsOnlyHost(t *testing.T) {
 
 // Without a lease, a stage submitted while the running upgrade holds its only
 // host waits for the host to return instead of failing. A stopped operation's
-// retained drain is not temporary, so the ordinary fail-fast applies.
-func TestFleetOwnedDrainMakesProductionWaitThenStoppedDrainFails(t *testing.T) {
+// retained drain also waits until the operator resumes or disables the host.
+func TestFleetOwnedDrainMakesProductionWaitIncludingStoppedDrain(t *testing.T) {
 	q, c, gpu, _ := productionLeaseFleet(t)
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestFleetOwnedDrainMakesProductionWaitThenStoppedDrainFails(t *testing.T) {
 		t.Fatal("waiting stage did not start after the host returned", job(t, q, waiting.ID))
 	}
 
-	// A stopped operation keeps its drain; that is not a returning host.
+	// A stopped operation keeps its drain without discarding queued work.
 	q2, c2, _, _ := productionLeaseFleet(t)
 	if _, err := q2.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
@@ -262,8 +262,8 @@ func TestFleetOwnedDrainMakesProductionWaitThenStoppedDrainFails(t *testing.T) {
 	}
 	stranded := submit(t, q2, cudaProductionSpec())
 	fleetTick(t, q2)
-	if got := job(t, q2, stranded.ID); got.State != "failed" || !strings.Contains(got.Reason, "no eligible host is enabled") {
-		t.Fatal("retained drain did not fail fast", got.State, got.Reason)
+	if got := job(t, q2, stranded.ID); got.State != "queued" || !got.StartCapacityWaiting {
+		t.Fatal("retained drain discarded waiting work", got.State, got.Reason)
 	}
 }
 

@@ -2676,8 +2676,11 @@ operator or fleet-owned, keep at least one enabled host able to start each open
 lease stage and each queued production job; the operator drain refuses with
 `production_work_open`, and the fleet upgrade leaves the host pending with
 admission open. `disable` stays the explicit override. A running upgrade's own
-drain counts as temporary, so production waits for the host under its start
-deadline instead of failing. Leases expire on their own, carry no project names
+drain, an operator drain and a stopped upgrade's retained drain all count as
+temporary capacity waits: production keeps its relative start window paused
+until capacity returns. Explicit `start_by` and `give_up_at` still bind;
+deliberately disabled hosts still fail new production promptly (#1573).
+Leases expire on their own, carry no project names
 in code or configuration, and grant no priority or capacity.
 
 ## Shared interactive host profile

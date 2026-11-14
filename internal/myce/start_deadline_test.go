@@ -436,6 +436,128 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 	}
 }
 
+func TestProductionStartDeadlineManualDrainWaitsForReturn(t *testing.T) {
+	for _, mode := range []string{"idle", "capacity", "capacity-before-drain", "departed"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
+			capacity := strings.HasPrefix(mode, "capacity")
+			if capacity {
+				m.HostAvailableMemoryGB = 1
+			}
+			check(t, q, m, nil)
+			s := spec("production")
+			s.Needs.HostMemoryGB = 4
+			var j *Job
+			drain := HostMaintenanceRequest{Action: "drain"}
+			if mode == "capacity-before-drain" {
+				j = submit(t, q, s)
+				if !job(t, q, j.ID).StartCapacityWaiting {
+					t.Fatal("fixture was not waiting for capacity")
+				}
+				// An owner-tagged rollout can drain open work. The ordinary
+				// operator drain's production_work_open refusal still applies.
+				drain.DrainOwner = "maintenance-test"
+			}
+			if _, err := q.ChangeHostMaintenance(m.ID, drain); err != nil {
+				t.Fatal(err)
+			}
+			if j == nil {
+				j = submit(t, q, s)
+			}
+			if mode == "departed" {
+				if err := q.Leave(m.ID, false); err != nil {
+					t.Fatal(err)
+				}
+				if reply := check(t, q, m, nil); !reply.Leave || !qcMachineGone(t, q, m.ID) {
+					t.Fatal("worker did not leave during maintenance", reply)
+				}
+			}
+			clock.Advance(2 * ProductionStartTimeout)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			waiting := job(t, q, j.ID)
+			if waiting.State != "queued" || waiting.Attempt != 0 || !waiting.StartCapacityWaiting || !strings.Contains(waiting.Reason, "waiting for drained host worker to return") || !strings.Contains(waiting.Reason, "paused for capacity") {
+				t.Fatalf("manual drain discarded work or its budget: %+v", waiting)
+			}
+			if detail := JobReasonDetail(waiting); !strings.Contains(detail, "waiting for drained host worker to return") {
+				t.Fatal("consumer status hid the drain wait", detail)
+			}
+			if offered := check(t, q, m, nil).Job; offered != nil {
+				t.Fatal("drained host accepted work", offered.ID)
+			}
+			if mode == "departed" {
+				// The rollout verifies the replacement worker before undrain.
+				m.Session = "returned-worker"
+				check(t, q, m, nil)
+			}
+			if err := setMaintenance(t, q, m.ID, "resume"); err != nil {
+				t.Fatal(err)
+			}
+			if capacity {
+				if got := job(t, q, j.ID); got.State != "queued" || !got.StartCapacityWaiting {
+					t.Fatal("undrain lost the remaining RAM wait", got.State, got.Reason)
+				}
+			}
+			m.HostAvailableMemoryGB = 64
+			assigned := check(t, q, m, nil).Job
+			if assigned == nil || assigned.ID != j.ID || assigned.Spec.StartBy.Sub(clock.Now()) != ProductionStartTimeout {
+				t.Fatal("return did not restore the original job and budget", assigned)
+			}
+			if err := q.Started(result(assigned, true)); err != nil {
+				t.Fatal(err)
+			}
+			finish(t, q, assigned, true)
+			requireState(t, q, j.ID, "succeeded")
+		})
+	}
+}
+
+func TestProductionStartDeadlineDisabledDepartedHostFailsPromptly(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	if err := setMaintenance(t, q, m.ID, "disable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Leave(m.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if reply := check(t, q, m, nil); !reply.Leave || !qcMachineGone(t, q, m.ID) {
+		t.Fatal("disabled worker did not leave", reply)
+	}
+	j := submit(t, q, spec("production"))
+	if got := job(t, q, j.ID); got.State != "failed" || got.Attempt != 0 || !strings.Contains(got.Reason, "no eligible host is enabled") {
+		t.Fatal("removed disabled host did not fail fast", got.State, got.Reason)
+	}
+}
+
+func TestProductionStartDeadlineDrainAbsoluteCutoffs(t *testing.T) {
+	for _, kind := range []string{"start_by", "give_up_at"} {
+		t.Run(kind, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			check(t, q, m, nil)
+			if err := setMaintenance(t, q, m.ID, "drain"); err != nil {
+				t.Fatal(err)
+			}
+			s := spec("production")
+			cutoff := clock.Now().Add(time.Minute)
+			if kind == "start_by" {
+				s.StartBy = &cutoff
+			} else {
+				s.GiveUpAt = &cutoff
+			}
+			j := submit(t, q, s)
+			requireState(t, q, j.ID, "queued")
+			clock.Advance(time.Minute)
+			requireState(t, q, j.ID, "failed")
+		})
+	}
+}
+
 func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	w := recoveryWorker(t)
 
