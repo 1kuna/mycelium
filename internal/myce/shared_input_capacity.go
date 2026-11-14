@@ -207,7 +207,7 @@ func sharedInputRequired(s Spec, m *Machine) uint64 {
 }
 
 func sharedInputCacheReason(s Spec, m *Machine, capacityOnly bool) string {
-	if len(s.SharedInputs) == 0 {
+	if s.ephemeral() || len(s.SharedInputs) == 0 {
 		return ""
 	}
 	required := sharedInputRequired(s, m)
@@ -257,7 +257,7 @@ func sharedInputCacheReason(s Spec, m *Machine, capacityOnly bool) string {
 }
 
 func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
-	if len(j.Spec.SharedInputs) == 0 {
+	if j.Spec.ephemeral() || len(j.Spec.SharedInputs) == 0 {
 		return nil
 	}
 	var largest uint64
@@ -292,7 +292,7 @@ func (q *Queue) sharedInputCapacityRefusal(j *Job) error {
 // Shared-input cache space that holds this job on every allowed host, or the
 // missing capacity reports that keep the queue from knowing.
 func sharedInputWait(j *Job, machines map[string]*Machine) *Hold {
-	if len(j.Spec.SharedInputs) == 0 {
+	if j.Spec.ephemeral() || len(j.Spec.SharedInputs) == 0 {
 		return nil
 	}
 	var reasons []string

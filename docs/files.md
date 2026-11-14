@@ -149,6 +149,88 @@ is preflighted like outputs: if the store cannot admit it, none is kept and
 `keep_on_failure` needs a plain command with stored input `files`, like
 `diagnostics`.
 
+## Ephemeral worker data
+
+For payload that must leave the execution worker after processing and result
+transfer, opt in per job or adapter entry:
+
+```yaml
+name: private-transform
+project: example
+run: {command: [sh, -c, 'cat input.txt > output.txt']}
+files:
+  input.txt: {sha256: INPUT_SHA256, size_bytes: 12}
+outputs: {output.txt: results}
+needs: {platform: cpu, cpu_cores: 1}
+advanced: {worker_data: ephemeral}
+```
+
+Upload inputs normally; their authoritative queue copies keep their existing
+retention. `files`, source archives and declared `shared_inputs` (stored or NAS,
+including extracted trees) stage privately, bypassing both cold and warm
+persistent payload caches. No cache entries or pins belonging to ordinary jobs
+are removed. Processing uses the staged local paths. `TMPDIR`, scratch, private
+`HOME` and non-resumable local checkpoints belong to the same attempt. No
+short-path temp alias is created. Declared outputs return through the queue file
+store even when checkpoint storage uses a NAS.
+
+Supply payload through declared managed files. Command text, authored settings,
+logical filenames, hashes and numeric/control evidence are retained metadata;
+do not embed file payload in command text or environment values.
+
+After successful processing, all successful result bytes stay local through
+transfer outages and lost replies. The worker verifies exact attempt/manifest
+acceptance in durable queue state, records it locally, then synchronously
+unlinks the entire private data tree and the delivered stdout/stderr log file,
+syncs their parent directories, and verifies the paths are absent before it
+reports release. This includes input/extraction staging leftovers, outputs and
+any spool below the attempt root. `worker_data_cleanup` in job status and
+`attempt_history` separates `pending`, `transfer_pending`, `cleanup_pending`,
+`failed` and `complete`. A receipt identifies the attempt, relative worker-state
+roots, logical file bytes removed, verification time and per-root errors. Bytes
+are not a free-space measurement. Result success with cleanup still pending is
+not a satisfied ephemeral policy; inspect the receipt and `release_confirmed`.
+`wait` still observes the compute outcome; its reason exposes cleanup state,
+and its terminal job includes the full receipt. A terminal result alone is
+not proof of removal, including when an older attempt still awaits cleanup.
+If the queue has already abandoned the exact attempt through a terminal or
+requeue decision, that durable disposition permits discarding its outputs;
+it does not certify those outputs as accepted results.
+A failed unlink, inventory or directory sync cannot produce `complete` or
+release the attempt. Cleanup is retried idempotently, without a retention timer.
+
+Failure, cancellation and requeue discard private payload after physical
+process/writer cleanup; logs remain until delivered, including late logs for the
+exact unreleased copy. Every retry starts with fresh private inputs. After a
+worker crash, startup first kills/reaps its recorded process custody, then
+cleans failed/interrupted attempt data and reconciles pending successful result
+transfer before removing its bytes. An offline worker remains cleanup-unknown
+or pending until it returns; queue timeout or a fresh session does not certify
+removal. Failed ephemeral output copies are not retained for manual recovery.
+
+Initial scope: offline non-resumable plain commands, installed tools, managed
+`{work}` and declared outputs. The policy automatically selects `ci` isolation.
+Submission refuses environments/builders, extensions/program jobs, model
+servers/snapshots, sidecars/member limits, custom workdirs, resumability,
+fan-out/dependencies, diagnostics/`keep_on_failure`, alternate output delivery,
+and fleets with no supporting worker, with `job_worker_data_unsupported`.
+Execution requires `worker_data_ephemeral_v1`: Linux PID/mount namespaces and
+a readable non-piped core route whose exec helper passed a core-limit probe.
+macOS, unsupported workers and the Linux fallback boundary cannot silently run
+these jobs. The worker rechecks core routing at launch and sets both soft and
+hard `RLIMIT_CORE` to zero in the payload helper, without changing the worker
+or host limits. **Linux piped core handlers ignore RLIMIT_CORE**; those hosts
+refuse the policy and require operator qualification/configuration separately.
+Do not downgrade queue or workers while ephemeral attempts retain custody.
+
+Removal means unlink, **not secure erasure on SSDs**. Full-disk encryption is the
+real at-rest control. This guarantee covers managed worker-local filesystem
+copies under the supported confinement boundary, not RAM/VRAM, swap, snapshots,
+backups, copies retained by earlier ordinary jobs, or privileged/operator
+processes. Queue- and NAS-side retention is unchanged and out of scope. The
+three-day default still applies there; ephemeral local copies are an explicit
+exception to the ordinary worker retention policy.
+
 ## Transfer behavior
 
 ### Project input attribution and capacity reservations (#464)

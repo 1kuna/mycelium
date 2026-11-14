@@ -48,6 +48,9 @@ func (e Extension) unsandboxedReason() string {
 // Frozen registrations, never a caller's job override, own extension policy.
 // Placement evaluates one candidate; queued status may describe alternatives.
 func nativeUnsandboxedReasons(j *Job) []string {
+	if j.Spec.ephemeral() {
+		return nil
+	}
 	var reasons []string
 	if j.Spec.extensionJob() {
 		for _, e := range j.Extensions {
@@ -72,6 +75,9 @@ func nativeUnsandboxed(j *Job) bool { return len(nativeUnsandboxedReasons(j)) > 
 // Placement evaluates every queued candidate registration; a started attempt
 // follows its selected one.
 func nativeCIRequired(j *Job) bool {
+	if j.Spec.ephemeral() {
+		return true
+	}
 	if !j.Spec.extensionJob() {
 		return j.Spec.Isolation == nativeIsolationCI
 	}
@@ -123,6 +129,7 @@ func (s *workerStore) warnNativeIsolation(j *Job) error {
 func (w Worker) isolateNativeAttempt(j *Job, namespace *nativeNamespace, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, main bool) error {
 	if !nativeUnsandboxed(j) {
 		w.nativeCI = nativeCIRequired(j)
+		w.nativeEphemeral = j.Spec.ephemeral()
 		return namespace.isolate(w, cmd, spool, work, env, ports, j.Spec.Needs.Network, main)
 	}
 	root, err := filepath.EvalSymlinks(work)

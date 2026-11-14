@@ -261,6 +261,12 @@ func (w Worker) stagingFailure(s *workerStore, j Job, err error) error {
 		name := s.state.Log
 		if name == "" {
 			name = fmt.Sprintf("staging-%s-%d.log", j.ID, j.Attempt)
+			if j.Spec.ephemeral() {
+				name = ephemeralLogName(j)
+				if err := os.MkdirAll(filepath.Join(s.dir, filepath.Dir(name)), 0700); err != nil {
+					return errors.Join(wrapped, err)
+				}
+			}
 		}
 		f, e := os.OpenFile(filepath.Join(s.dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if e == nil {

@@ -296,6 +296,9 @@ func (q *Queue) confirmCopyRelease(r Result, exact bool) {
 	if j == nil {
 		return
 	}
+	if j.Spec.ephemeral() && !cleanupComplete(r.WorkerDataCleanup) {
+		return
+	}
 	for i := range j.Copies {
 		c := &j.Copies[i]
 		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
@@ -371,6 +374,9 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 		return
 	}
 	confirm := func(j *Job) {
+		if j.Spec.ephemeral() {
+			return
+		}
 		for _, copy := range j.Copies {
 			if copy.Machine == c.Machine.ID && copy.Session == c.PreviousSession {
 				q.confirmCopyRelease(Result{Execution: Execution{ID: j.ID, Attempt: copy.Attempt}, Machine: copy.Machine, Session: copy.Session}, true)

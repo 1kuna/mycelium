@@ -166,6 +166,9 @@ func (o *storageObserver) snapshot() *AttemptStoragePeak {
 }
 
 func attemptStorageRoot(j Job, state string) string {
+	if j.Spec.ephemeral() {
+		return filepath.Join(ephemeralRoot(state, j), "work")
+	}
 	return filepath.Join(state, "job-files", j.ID, strconv.Itoa(j.Attempt))
 }
 
@@ -177,10 +180,13 @@ func attemptPublicationRoot(j Job, state string) string {
 
 func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string, metadata ...string) *storageObserver {
 	root := attemptStorageRoot(j, state)
+	if j.Spec.ephemeral() {
+		root = ephemeralRoot(state, j)
+	}
 	o := &storageObserver{root: root, publication: attemptPublicationRoot(j, state), state: state, identity: identity, metadata: metadata, peak: AttemptStoragePeak{Complete: true, Source: managedStorageSource}, stop: make(chan struct{}), done: make(chan struct{})}
 	// Only known managed roots can claim complete sampling. External
 	// checkpoint/work paths need #506 accounting before they can learn.
-	if filepath.Clean(j.Spec.Run.Workdir) != filepath.Clean(root) {
+	if filepath.Clean(j.Spec.Run.Workdir) != filepath.Clean(attemptStorageRoot(j, state)) {
 		o.peak.Complete = false
 	}
 	if checkpoint != "" {

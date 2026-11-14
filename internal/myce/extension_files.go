@@ -93,7 +93,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
-	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
+	dir := attemptStorageRoot(*j, stateDir)
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
 			return errors.New("attempt input folder is not a directory")
@@ -153,7 +153,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 			return errors.New("missing frozen source archive")
 		}
 		input = ".myce-source.tar"
-		err = w.fileCache.copyTo(ctx, ref, filepath.Join(staged, ".myce-source.tar"))
+		err = w.copyAttemptInput(ctx, *j, ref, filepath.Join(staged, ".myce-source.tar"))
 		if err != nil {
 			return withStagingCause(input, ref, "copy", err)
 		}
@@ -175,7 +175,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 				return err
 			}
 		}
-		err := w.fileCache.copyTo(ctx, ref, filepath.Join(inputRoot, name))
+		err := w.copyAttemptInput(ctx, *j, ref, filepath.Join(inputRoot, name))
 		if err != nil {
 			return err
 		}

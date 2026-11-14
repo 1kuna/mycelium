@@ -47,6 +47,11 @@ func NativeExec(args []string) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("native no_new_privs: %w", err)
 	}
+	if p.Ephemeral {
+		if err := suppressEphemeralCores(); err != nil {
+			return err
+		}
+	}
 	if p.Plain {
 		// An unsandboxed job loses only reads of the worker's credentials.
 		if err := nativeApplyCredentialDeny(p.Deny, p.Read); err != nil {

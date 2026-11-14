@@ -132,6 +132,9 @@ func validateSharedInputs(s Spec) error {
 	return nil
 }
 func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
+	if j.Spec.ephemeral() {
+		return w.acquireEphemeralInputs(ctx, j)
+	}
 	ctx = w.storageIOContext(ctx)
 	env := map[string]string{}
 	releases := []func(){}

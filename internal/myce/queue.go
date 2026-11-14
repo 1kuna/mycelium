@@ -995,6 +995,18 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		if err := validationErr; err != nil {
 			return specRejection(err)
 		}
+		if s.ephemeral() {
+			if store == nil {
+				return reject("job_worker_data_unsupported", errors.New("ephemeral worker data requires a queue file store"))
+			}
+			capable := false
+			for _, m := range q.s.Machines {
+				capable = capable || !m.Gone && contains(m.Capabilities, ephemeralCapability)
+			}
+			if !capable {
+				return reject("job_worker_data_unsupported", errors.New("no worker advertises worker_data_ephemeral_v1; qualify Linux namespaces and non-piped core routing first"))
+			}
+		}
 		if s.OutputDelivery == asyncNAS {
 			if q.deliveryRoot == "" {
 				return &HTTPError{Status: 409, Code: "output_delivery_unavailable", Message: "async_nas requires queue --output-delivery-root"}
@@ -2116,6 +2128,9 @@ func (q *Queue) retainLaunchCapacityRefusal(r Result) {
 }
 
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	if err := q.retainWorkerDataCleanup(r); err != nil {
+		return err
+	}
 	q.retainLaunchCapacityRefusal(r)
 	q.maintainWallTimeLimits()
 	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
@@ -2793,7 +2808,18 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 	defer requestUnlock1()
 	j, err := q.current(l.Result)
 	if err != nil {
-		return err
+		// Late ephemeral logs still need durable delivery before local unlink.
+		// Accept only an exact retained, unreleased copy, never a newer attempt.
+		j = q.s.Jobs[l.ID]
+		known := false
+		if j != nil && j.Spec.ephemeral() {
+			for _, c := range j.Copies {
+				known = known || c.Attempt == l.Attempt && c.Machine == l.Machine && c.Session == l.Session && !c.ReleaseConfirmed
+			}
+		}
+		if !known {
+			return err
+		}
 	}
 	if j.Spec.Logs == "none" {
 		return nil
@@ -3252,6 +3278,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
+	if j.Spec.ephemeral() {
+		j.WorkerDataCleanup = &WorkerDataCleanup{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: "pending", CheckedAt: q.clock.Now()}
+	}
 	q.claimMemoryExploration(j, m)
 	q.recordColdProbeAssignment(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)

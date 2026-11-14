@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -52,7 +51,7 @@ func (p *ProgressReport) valid() bool {
 // Reuse the attempt's existing local input-directory retention and custody.
 // Session is in the file name so a replacement worker cannot read its predecessor.
 func applicationProgressFile(spool string, j Job) string {
-	dir := filepath.Join(spool, "job-files", j.ID, strconv.Itoa(j.Attempt))
+	dir := attemptStorageRoot(j, spool)
 	return filepath.Join(dir, ".myce-progress-"+identityHash(j.Session)+".json")
 }
 
