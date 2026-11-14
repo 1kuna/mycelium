@@ -70,11 +70,12 @@ const (
 )
 
 type memberOutcome struct {
-	RSSLimit        *RSSLimitEvidence    `json:"rss_limit,omitempty"`
-	Infrastructure  []infrastructureFact `json:"infrastructure_facts,omitempty"`
-	Signals         []deliveredSignal    `json:"delivered_signals,omitempty"`
-	Exit            *memberExit          `json:"exit,omitempty"`
-	ObservationLost bool                 `json:"observation_lost,omitempty"`
+	CheckpointStorage *CheckpointStorageEvidence `json:"checkpoint_storage,omitempty"`
+	RSSLimit          *RSSLimitEvidence          `json:"rss_limit,omitempty"`
+	Infrastructure    []infrastructureFact       `json:"infrastructure_facts,omitempty"`
+	Signals           []deliveredSignal          `json:"delivered_signals,omitempty"`
+	Exit              *memberExit                `json:"exit,omitempty"`
+	ObservationLost   bool                       `json:"observation_lost,omitempty"`
 }
 type attemptCause struct {
 	PriorityStop *PriorityPreemption
@@ -215,6 +216,18 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	}
 	if !result.Success && !result.OutOfMemory && !diskFailure {
 		result.Interrupted = facts.ObservationLost || facts.deliveredBeforeExit() || facts.recordedInfrastructure()
+		// Native members wrap their exit as a stage/io error. The recorded
+		// nonzero exit plus storage evidence establishes the interruption; the
+		// wrapper's error class must not hide it. Resource/finalization causes
+		// remain independent outcomes.
+		commandFailure := result.ExecutionCause == nil || result.ExecutionCause.Class == "command_exit" || result.ExecutionCause.Operation == "command" && (result.ExecutionCause.Class == "io_error" || result.ExecutionCause.Class == "stage_failed")
+		if facts.Exit != nil && facts.Exit.Status != 0 && commandFailure {
+			if evidence := safeCheckpointStorage(facts.CheckpointStorage); evidence != nil {
+				result.Interrupted = true
+				result.ExecutionCause = &RuntimeCause{Operation: "checkpoint", Class: "storage_interrupted", CheckpointStorage: evidence}
+				result.Error = result.ExecutionCause.String()
+			}
+		}
 	}
 	if !result.Interrupted {
 		result.Forced = false

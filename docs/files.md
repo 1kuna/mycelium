@@ -1210,7 +1210,18 @@ unavailable. One-shot onboarding allows ten seconds per filesystem operation
 and has a cancellable 15-second total validation limit, including mount inventory.
 Standalone mount selection retains its five-second limit, including dry runs.
 Probe failures and recovery are logged on state changes. Worker
-attempt preparation also allows 250 ms for network-filesystem metadata and cold
+command exits also retain the checkpoint-root evidence observed at exit. A
+failed command whose NAS checkpoint root has a recorded failure or per-operation
+no-progress stall is requeued as `checkpoint: storage_interrupted`, without
+spending losses or infrastructure retries, preferring another eligible host.
+The finding includes the probe timestamp, no-progress age and available syscall
+operation/errno. Healthy storage, advisory slow probes, unrelated roots and
+faults observed only after exit do not establish this attribution. Resource
+limits, successful commands and exact-attempt fences retain their own outcomes.
+This is evidence of a concurrent storage interruption, not proof of which
+syscall the command itself was executing.
+
+Worker attempt preparation also allows 250 ms for network-filesystem metadata and cold
 automount access. Queue I/O and checkpoint progress reads retain their 25 ms
 waits; the queue performs them outside its lock. An outstanding filesystem
 operation is reused on retry rather than duplicated. A blocked filesystem syscall

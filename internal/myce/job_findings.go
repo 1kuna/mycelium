@@ -47,6 +47,9 @@ func jobFinding(j *Job, rawReason string) *JobFinding {
 	case "failed":
 		return failedJobFinding(j, rawReason)
 	case "queued", "running", "stopping", "paused":
+		if f := checkpointStorageFinding(j); f != nil {
+			return f
+		}
 		if j.Losses == 0 && j.InfrastructureRetries == 0 && j.ExecutionCause != nil && j.ExecutionCause.Operation == "input_staging" && j.ExecutionCause.Predicate == "" {
 			return stagingInfrastructureFinding(j.ExecutionCause, true)
 		}
@@ -75,6 +78,9 @@ func terminalJobFinding(stored *Job) *JobFinding {
 
 func failedJobFinding(j *Job, raw string) *JobFinding {
 	cause := j.ExecutionCause
+	if f := checkpointStorageFinding(j); f != nil {
+		return f
+	}
 	if f := infrastructureExhaustedFinding(j, raw); f != nil {
 		return f
 	}
@@ -124,6 +130,20 @@ func failedJobFinding(j *Job, raw string) *JobFinding {
 	return &JobFinding{"cause_unknown", findingOwnerUnknown,
 		"The attempt failed, but Mycelium recorded no exit code, signal, guard stop or infrastructure fault for it.",
 		"read the job's log (`myce logs`); to keep reports from the next failure, resubmit with `diagnostics` declared."}
+}
+
+func checkpointStorageFinding(j *Job) *JobFinding {
+	c := j.ExecutionCause
+	if !checkpointStorageInterruption(c) {
+		return nil
+	}
+	what := "The command failed while Mycelium recorded " + safeCheckpointStorage(c.CheckpointStorage).String() + "."
+	action := "resubmit; if it repeats, report the job ID to the queue owner."
+	if j.State != "failed" {
+		what += " The attempt was requeued without spending its loss budget."
+		action = "none needed; Mycelium retries automatically, preferring another eligible host."
+	}
+	return &JobFinding{"checkpoint_storage_interrupted", findingOwnerMycelium, what, action}
 }
 
 func infrastructureExhaustedFinding(j *Job, raw string) *JobFinding {

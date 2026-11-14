@@ -804,14 +804,20 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	m.Phase = "gated"
 	m.done = make(chan struct{})
 	m.exitObservation = new(nativeExitObservation)
+	commandStartedAt := m.PayloadStartedAt
 	go func() {
 		waitErr := cmd.Wait()
 		observed := m.exitObservation.observe(cmd)
+		var checkpointStorage *CheckpointStorageEvidence
+		if observed.Status != 0 {
+			checkpointStorage = g.worker.checkpointFailure(env["MYCE_CHECKPOINT_DIR"], commandStartedAt, g.worker.Clock.Now())
+		}
 		saveErr := collectPublishedExit(observed, func(exit *memberExit) error {
 			g.p.mu.Lock()
 			defer g.p.mu.Unlock()
 			m.err = waitErr
 			m.Exit = exit
+			m.CheckpointStorage = checkpointStorage
 			return g.saveLocked()
 		}, func(exit *memberExit) {
 			g.p.mu.Lock()

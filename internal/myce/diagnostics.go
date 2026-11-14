@@ -144,24 +144,28 @@ func specRejection(err error) error {
 // command arguments, environment values, endpoint URLs, or worker filesystem paths.
 // Linkage explicitly retains install names from payload load commands.
 type RuntimeCause struct {
-	Finalization     *FinalizationDetail `json:"finalization,omitempty"`
-	Linkage          *MachOLinkage       `json:"linkage,omitempty"`
-	RSSLimit         *RSSLimitEvidence   `json:"rss_limit,omitempty"`
-	MissingTools     []string            `json:"missing_tools,omitempty"`
-	Host             string              `json:"host,omitempty"`
-	Staging          *StagingCause       `json:"staging,omitempty"`
-	PathDiagnostic   *PathDiagnostic     `json:"path_diagnostic,omitempty"`
-	Admission        *AdmissionDetail    `json:"admission,omitempty"`
-	PrelaunchRefused bool                `json:"prelaunch_refused,omitempty"`
-	Operation        string              `json:"operation"`
-	Class            string              `json:"class"`
-	ExitCode         *int                `json:"exit_code,omitempty"`
-	Predicate        string              `json:"predicate,omitempty"`
-	Reason           string              `json:"reason,omitempty"`
+	CheckpointStorage *CheckpointStorageEvidence `json:"checkpoint_storage,omitempty"`
+	Finalization      *FinalizationDetail        `json:"finalization,omitempty"`
+	Linkage           *MachOLinkage              `json:"linkage,omitempty"`
+	RSSLimit          *RSSLimitEvidence          `json:"rss_limit,omitempty"`
+	MissingTools      []string                   `json:"missing_tools,omitempty"`
+	Host              string                     `json:"host,omitempty"`
+	Staging           *StagingCause              `json:"staging,omitempty"`
+	PathDiagnostic    *PathDiagnostic            `json:"path_diagnostic,omitempty"`
+	Admission         *AdmissionDetail           `json:"admission,omitempty"`
+	PrelaunchRefused  bool                       `json:"prelaunch_refused,omitempty"`
+	Operation         string                     `json:"operation"`
+	Class             string                     `json:"class"`
+	ExitCode          *int                       `json:"exit_code,omitempty"`
+	Predicate         string                     `json:"predicate,omitempty"`
+	Reason            string                     `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	if e := safeCheckpointStorage(c.CheckpointStorage); c.Operation == "checkpoint" && e != nil {
+		text += "; " + e.String()
+	}
 	if d := safeFinalization(c.Finalization); d != nil {
 		text += "; " + d.String()
 	}
@@ -328,12 +332,18 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true
+	operations["checkpoint"] = true
+	classes["storage_interrupted"] = c.Operation == "checkpoint" && safeCheckpointStorage(c.CheckpointStorage) != nil
 	if !operations[c.Operation] || !classes[c.Class] {
 		if c.Operation != "launch" || (c.Class != launchRefused && c.Class != launchFailed && c.Class != environmentFailed) {
 			return nil
 		}
 	}
 	out := *c
+	out.CheckpointStorage = nil
+	if c.Operation == "checkpoint" && c.Class == "storage_interrupted" {
+		out.CheckpointStorage = safeCheckpointStorage(c.CheckpointStorage)
+	}
 	out.Finalization = nil
 	if c.Operation == "outputs" {
 		out.Finalization = safeFinalization(c.Finalization)

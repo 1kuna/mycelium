@@ -1064,6 +1064,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
+	commandStartedAt := w.Clock.Now()
 	payloadPossible = true
 	if readyReader == nil {
 		j.ExecutionEvidence.Main = executionMayHaveRun
@@ -1136,10 +1137,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 		waitErr := cmd.Wait()
 		observed := p.exitObservation.observe(cmd)
+		var checkpointStorage *CheckpointStorageEvidence
+		if observed.Status != 0 {
+			checkpointStorage = w.checkpointFailure(checkpoint, commandStartedAt, w.Clock.Now())
+		}
 		observationErr := collectPublishedExit(observed, func(exit *memberExit) error {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			p.outcome.Exit = exit
+			p.outcome.CheckpointStorage = checkpointStorage
 			return p.saveOutcome(p.outcome)
 		}, func(exit *memberExit) { w.captureSignalEvidencePID(childPID, cmd.Dir, exit, true, signalScope) })
 		if !j.Spec.Needs.cpuOnly() {

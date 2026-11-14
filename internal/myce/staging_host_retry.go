@@ -4,13 +4,13 @@ import "slices"
 
 const stagingHostRetryHold = "staging_host_retry"
 
-// Hosts where this job lost an attempt to input staging. Retained attempt
+// Hosts where this job lost an attempt to input staging or checkpoint storage. Retained attempt
 // history is the evidence, so the preference survives a queue restart without
 // new state.
 func (q *Queue) stagingFailedHosts(j *Job) []string {
 	var hosts []string
 	for _, h := range j.AttemptHistory {
-		if !h.Interrupted || h.ExecutionCause == nil || h.ExecutionCause.Operation != "input_staging" {
+		if !h.Interrupted || h.ExecutionCause == nil || (h.ExecutionCause.Operation != "input_staging" && !checkpointStorageInterruption(h.ExecutionCause)) {
 			continue
 		}
 		host := h.Machine
@@ -24,7 +24,7 @@ func (q *Queue) stagingFailedHosts(j *Job) []string {
 	return hosts
 }
 
-// A staging failure is host-local evidence (its disk, cache or mount). Retry
+// A storage/staging failure is host-local evidence (its disk, cache or mount). Retry
 // first on another host that could run the job, instead of spending every
 // infrastructure retry where staging already failed. A host is held only
 // while some untried compatible host exists, so a job with one possible host
@@ -44,7 +44,7 @@ func (q *Queue) stagingHostRetryReason(j *Job, m *Machine) string {
 			continue
 		}
 		if fits(j, other, max(other.TotalMemoryGB, other.FreeMemoryGB)) {
-			return "input staging failed on this host; retrying on another eligible host"
+			return "storage or input staging failed on this host; retrying on another eligible host"
 		}
 	}
 	return ""
