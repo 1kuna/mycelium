@@ -310,11 +310,18 @@ func (q *Queue) memoryCandidates(j *Job, m *Machine) []*Job {
 			continue
 		}
 		if candidate.Spec.Program != nil {
-			copy := *candidate
-			q.applyLearnedNeeds(&copy)
-			candidate = &copy
+			if candidate == j {
+				copy := *candidate
+				candidate = &copy
+			}
+			q.applyLearnedNeeds(candidate)
 		}
-		candidates[i] = q.memoryCandidate(candidate, m)
+		if candidate == j {
+			candidates[i] = q.memoryCandidate(candidate, m)
+		} else {
+			// Extension lowering already owns a target-specific Job copy.
+			candidates[i] = q.memoryCandidateOwned(candidate, m)
+		}
 	}
 	return candidates
 }
