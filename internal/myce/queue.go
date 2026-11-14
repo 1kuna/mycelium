@@ -1222,6 +1222,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
+	j.StagingTimings = nil
 	j.InputsStagedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
@@ -2234,6 +2235,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	q.retainAttemptResources(j, r.Resources)
 	retainInputsStagedAt(j, r.InputsStagedAt)
+	retainStagingTimings(j, r.StagingTimings)
 	if m := q.s.Machines[r.Machine]; m != nil {
 		// Contact, but not a report: only a check-in rebuilds the reported
 		// half after restart, so it alone clears unreported.
@@ -2985,6 +2987,7 @@ func (q *Queue) startedWithWallTime(r Result, requestContexts ...context.Context
 		q.clearStartRefusal(j)
 		q.retainAttemptResources(j, r.Resources)
 		retainInputsStagedAt(j, r.InputsStagedAt)
+		retainStagingTimings(j, r.StagingTimings)
 		q.markStarted(j)
 		if at := wallTimeDeadline(j); at != nil {
 			left := max(0, at.Sub(q.clock.Now()).Seconds())
@@ -3037,6 +3040,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}
+				j.StagingTimings = nil
 				j.InputsStagedAt = nil // Recovery adopts a different execution.
 				j.Attempt = copy.Attempt
 				j.Machine = m.ID
@@ -3071,6 +3075,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	}
 	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)
+	retainStagingTimings(j, report.StagingTimings)
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
@@ -3200,6 +3205,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil
+	j.StagingTimings = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
 	j.ApplicationProgress = nil

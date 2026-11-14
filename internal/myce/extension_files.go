@@ -181,16 +181,21 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		}
 	}
 	input, ref, operation = "", FileRef{}, "nas_read"
-	if err := stageJobFilesContext(ctx, jobInputPaths(j), func(name, source string) error {
+	nasDone := stagingMeasure(ctx, stageNasInputs)
+	nasErr := stageJobFilesContext(ctx, jobInputPaths(j), func(name, source string) error {
 		p, err := sharedInputPath(ctx, w.JobFileRoot, source)
 		if err != nil {
 			return withStagingCause(name, FileRef{}, "nas_read", err)
 		}
 		return withStagingCause(name, FileRef{}, "copy", copyNASInput(ctx, w.Client, p, filepath.Join(staged, name), nil, nil))
-	}); err != nil {
-		return err
+	})
+	nasDone(nasErr)
+	if nasErr != nil {
+		return nasErr
 	}
 	input, ref = "", FileRef{}
+	publishDone := stagingMeasure(ctx, stageWorkPublish)
+	defer func() { publishDone(stageErr) }()
 	operation = "sync"
 	if err := syncModelDirectoryContext(ctx, staged); err != nil {
 		return err

@@ -27,6 +27,8 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := ref.validate(); err != nil {
 		return err
 	}
+	finish := stagingMeasure(ctx, stageDiskBudget)
+	defer func() { finish(stageErr) }()
 	operation := "cache_admission"
 	defer func() { stageErr = withStagingCause("", ref, operation, stageErr) }()
 	// Reserve before any cache mutex: pressure collection only tries cache locks.
@@ -41,7 +43,11 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	}
 	defer releaseCopy()
 	operation = "cache_init"
+	finish(nil)
+	finish = stagingMeasure(ctx, stageCacheLock)
 	c.mu.Lock()
+	finish(nil)
+	finish = stagingMeasure(ctx, stageCacheLookup)
 	defer c.mu.Unlock()
 	if err := ref.validate(); err != nil {
 		return err
@@ -52,30 +58,41 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
 	}
+	finish(nil)
+	finish = stagingMeasure(ctx, stageCollectionLock)
 	lock, err := c.collectionLock(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlockEnvironment(lock)
+	finish(nil)
+	finish = stagingMeasure(ctx, stageCacheLookup)
 	root, err := filepath.EvalSymlinks(c.Root)
 	if err != nil {
 		return err
 	}
 	p := filepath.Join(root, ref.SHA256)
 	if verifyFile(ctx, p, ref) == nil {
+		stagingCount(ctx, "hit")
 		now := c.Clock.Now()
 		if err = os.Chtimes(p, now, now); err != nil {
 			return err
 		}
+		finish(nil)
+		finish = stagingMeasure(ctx, stagePlacement)
 		operation = "copy"
 		return copyJobFileContext(ctx, p, dest)
 	}
+	stagingCount(ctx, "miss")
+	finish(nil)
+	finish = func(error) {}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
 	operation = "cache_verify"
 	if err = c.Client.recoverInputTransfer(ctx, ref, operation, func(one Client) error { return one.HasFile(ctx, ref) }); err != nil {
 		return err
 	}
+	finish = stagingMeasure(ctx, stageCacheEviction)
 	if _, err = os.Lstat(p); err == nil {
 		if err = os.Remove(p); err != nil {
 			return err
@@ -148,13 +165,17 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 			if strings.HasSuffix(v.name, ".partial") {
 				continue
 			}
-			if err := c.Client.HasFile(ctx, FileRef{SHA256: hash, SizeBytes: v.size}); err != nil {
+			checkDone := stagingMeasure(ctx, stageEvictionCheck)
+			checkErr := c.Client.HasFile(ctx, FileRef{SHA256: hash, SizeBytes: v.size})
+			checkDone(checkErr)
+			if checkErr != nil {
 				continue
 			}
 		}
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}
+		stagingCount(ctx, "evicted")
 		used -= v.size
 		limit, free, err = inputCacheBudget(root, used, explicit, c.diskProbe, c.budget.foreignHeadroom(root))
 		if err != nil {
@@ -165,10 +186,13 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if used+need > limit || free < need {
 		return &stagingCapacityError{required: need, available: max(0, min(limit-used, free)), limit: limit, capacity: "file_cache"}
 	}
+	finish(nil)
+	finish = func(error) {}
 	operation = "cache_download"
 	if err = c.Client.recoverInputTransfer(ctx, ref, operation, func(one Client) error { return one.DownloadFile(ctx, ref, partial) }); err != nil {
 		return err
 	}
+	finish = stagingMeasure(ctx, stageCachePublish)
 	operation = "cache_publish"
 	if err = os.Rename(partial, p); err != nil {
 		return err
@@ -180,6 +204,8 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 	if err = os.Chtimes(p, now, now); err != nil {
 		return err
 	}
+	finish(nil)
+	finish = stagingMeasure(ctx, stagePlacement)
 	operation = "copy"
 	return copyJobFileContext(ctx, p, dest)
 }

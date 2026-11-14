@@ -389,8 +389,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
+			report.StagingTimings = s.staging.snapshot()
+			if report.StagingTimings == nil {
+				report.StagingTimings = s.state.Job.StagingTimings
+			}
 			if s.state.Result != nil {
 				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
+				s.state.Result.StagingTimings = report.StagingTimings
 			}
 		}
 		if p != nil {

@@ -88,6 +88,12 @@ func TestInputStagingTimestampPrecedesMemoryAndLaunch(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
+	if got.StagingTimings == nil || got.StagingTimings.CompletedAt == nil || !got.StagingTimings.CompletedAt.Equal(want) || got.StagingTimings.Phases[stageFiles].Calls != 1 {
+		t.Fatal("worker did not send staging phases before launch", got.StagingTimings)
+	}
+	if saved.Job == nil || saved.Job.StagingTimings == nil {
+		t.Fatal("worker recovery lost staging phases")
+	}
 	if saved.Job == nil || saved.Job.InputsStagedAt == nil || !saved.Job.InputsStagedAt.Equal(want) {
 		t.Fatal("worker recovery lost staging completion")
 	}
