@@ -1668,9 +1668,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("machine physical host identity changed")
 		}
 		retainInventoryRefusals(&m, old)
-		if err := inventoryTarget(&m); err != nil {
-			return err
-		}
+		projectInventoryTarget(&m)
 		if err := q.registerMaintenanceHost(&m); err != nil {
 			return err
 		}

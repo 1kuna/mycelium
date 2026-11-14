@@ -573,18 +573,26 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 // M2 projects exactly one inventory component into the existing planner. M3
 // enumerates targets; scalar diagnostics never add another allocation pool.
 func inventoryTarget(m *Machine) error {
+	if err := validateInventory(m.Devices); err != nil {
+		return err
+	}
+	projectInventoryTarget(m)
+	return nil
+}
+
+// Incoming inventory is validated before merging retained, unavailable device
+// identities. Re-project after applying queue-owned fences without treating old
+// ordinals retained for custody as an ambiguous worker report.
+func projectInventoryTarget(m *Machine) {
 	fingerprint, reports := m.ExtensionFingerprint, m.ExtensionReports
 	defer func() { m.ExtensionFingerprint, m.ExtensionReports = fingerprint, reports }()
 	if m.Devices == nil {
-		return nil
-	}
-	if err := validateInventory(m.Devices); err != nil {
-		return err
+		return
 	}
 	for _, d := range m.Devices {
 		if d.Reason == "" {
 			*m = d.machine(*m)
-			return nil
+			return
 		}
 	}
 	// Preserve a CPU worker's diagnostic selector for qualification matching;
@@ -596,7 +604,6 @@ func inventoryTarget(m *Machine) error {
 		m.MemoryError = m.Devices[0].Reason
 	}
 	m.GPU, m.TotalMemoryGB, m.FreeMemoryGB = "cpu", 0, 0
-	return nil
 }
 
 func (w Worker) deviceEnvironment() (map[string]string, error) {
