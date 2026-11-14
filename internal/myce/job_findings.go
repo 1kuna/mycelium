@@ -47,6 +47,9 @@ func jobFinding(j *Job, rawReason string) *JobFinding {
 	case "failed":
 		return failedJobFinding(j, rawReason)
 	case "queued", "running", "stopping", "paused":
+		if j.Losses == 0 && j.InfrastructureRetries == 0 && j.ExecutionCause != nil && j.ExecutionCause.Operation == "input_staging" && j.ExecutionCause.Predicate == "" {
+			return stagingInfrastructureFinding(j.ExecutionCause, true)
+		}
 		if j.Losses > 0 {
 			return &JobFinding{"infrastructure_retry", findingOwnerMycelium,
 				fmt.Sprintf("Mycelium lost %s to a host or worker interruption, not to your command, and requeued the job automatically.", plural(j.Losses, "attempt")),
@@ -226,6 +229,16 @@ func memoryExhaustedFinding(j *Job, raw string) *JobFinding {
 
 func launchFinding(c *RuntimeCause) *JobFinding {
 	switch {
+	case c.Operation == "input_staging" && c.Predicate == "model_snapshot_mismatch":
+		return &JobFinding{"model_snapshot_mismatch", findingOwnerJob,
+			"The declared model snapshot is missing files or its content failed size, hash or format verification; your command never started.",
+			"repair the source snapshot or its declaration, then resubmit."}
+	case c.Operation == "input_staging" && c.Predicate != "" && modelSnapshotMessages[c.Predicate] != "":
+		return &JobFinding{c.Predicate, findingOwnerJob,
+			"Your command never started: " + modelSnapshotMessages[c.Predicate] + ".",
+			"correct the snapshot declaration or source access, then resubmit."}
+	case c.Operation == "input_staging" && c.Predicate == "" && (c.Class == "io_error" || c.Class == "timeout" || c.Class == "storage_full" || c.Class == "connection_refused"):
+		return stagingInfrastructureFinding(c, false)
 	case c.Class == machoLibraryMissing:
 		what := "Your binary needs a non-system library the host does not have, so it never started."
 		if l := c.Linkage; l != nil {
@@ -246,6 +259,16 @@ func launchFinding(c *RuntimeCause) *JobFinding {
 			"fix the command or environment declaration, then resubmit."}
 	}
 	return nil
+}
+
+func stagingInfrastructureFinding(c *RuntimeCause, retrying bool) *JobFinding {
+	what := fmt.Sprintf("Mycelium could not prepare an input because storage or transfer infrastructure failed before your command started (%s).", c.String())
+	action := "resubmit; if it repeats, report the job ID to the queue owner."
+	if retrying {
+		what += " The job requeued automatically without charging a command failure or infrastructure loss."
+		action = "none needed; Mycelium retries on its own, preferring another eligible host."
+	}
+	return &JobFinding{"input_staging_infrastructure", findingOwnerMycelium, what, action}
 }
 
 func dependencyFinding(j *Job) *JobFinding {
