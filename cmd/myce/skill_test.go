@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"maps"
+	"mycelium/internal/myce"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -134,4 +137,49 @@ func mustReadSkill(t *testing.T, dir string) map[string][]byte {
 		t.Fatal(err)
 	}
 	return files
+}
+
+// Older fleet helpers parse combined output, so a candidate version probe must
+// neither refresh the installed guide nor print the refresh notice (#1450).
+func TestSkillVersionProbeIsReadOnly(t *testing.T) {
+	if alias := os.Getenv("MYCE_TEST_VERSION_PROBE"); alias != "" {
+		if err := os.Setenv("HOME", os.Getenv("MYCE_TEST_VERSION_HOME")); err != nil {
+			t.Fatal(err)
+		}
+		myce.BuildVersion = "v3.2.0"
+		os.Args = []string{"myce", alias, "--json"}
+		main()
+		os.Exit(0)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range []string{"version", "--version", "-v"} {
+		t.Run(alias, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+			t.Setenv("MYCE_TEST_VERSION_PROBE", alias)
+			t.Setenv("MYCE_TEST_VERSION_HOME", home)
+			dir := filepath.Join(home, ".agents", "skills", "mycelium")
+			if err := (skillInstaller{Version: "v3.1.0", Out: io.Discard}).install([]string{dir}, false, false); err != nil {
+				t.Fatal(err)
+			}
+			before := mustReadSkill(t, dir)
+			marker, err := os.ReadFile(filepath.Join(dir, skillMarker))
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(binary, "-test.run=^TestSkillVersionProbeIsReadOnly$").CombinedOutput()
+			var info myce.VersionInfo
+			if err != nil || json.Unmarshal(output, &info) != nil || info.Version != "v3.2.0" {
+				t.Fatalf("old helper cannot decode candidate version: %v: %s", err, output)
+			}
+			afterMarker, err := os.ReadFile(filepath.Join(dir, skillMarker))
+			if err != nil || string(afterMarker) != string(marker) || !maps.EqualFunc(before, mustReadSkill(t, dir), func(a, b []byte) bool { return string(a) == string(b) }) {
+				t.Fatal("version probe changed installed guide", err)
+			}
+		})
+	}
 }

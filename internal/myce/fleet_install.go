@@ -40,6 +40,7 @@ type FleetUpdateInstruction struct {
 const fleetUpdateReceiptFile = "fleet-update.json"
 
 type fleetInstallReceipt struct {
+	VersionStderr  string                   `json:"version_stderr,omitempty"` // Local diagnostics only; never included in fleet acknowledgements.
 	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
 	Instruction    FleetUpdateInstruction   `json:"instruction"`
 	ConfigSHA256   string                   `json:"config_sha256"`
@@ -53,10 +54,11 @@ type fleetInstallReceipt struct {
 }
 
 type fleetInstallDeps struct {
-	storageFS *onboardingStorageFS
-	command   func(context.Context, string, ...string) ([]byte, error)
-	client    func(ServiceConfig) (Client, error)
-	health    EnrollmentWait
+	versionCommand func(context.Context, string) ([]byte, []byte, error)
+	storageFS      *onboardingStorageFS
+	command        func(context.Context, string, ...string) ([]byte, error)
+	client         func(ServiceConfig) (Client, error)
+	health         EnrollmentWait
 }
 
 func fleetCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -239,7 +241,7 @@ func fleetHelperLabel(c ServiceConfig, i FleetUpdateInstruction) string {
 // finite transient manager job outside the service's kill group, so the
 // service restart cannot kill it. One operation launches once per host.
 func LaunchFleetUpdate(ctx context.Context, c ServiceConfig, i FleetUpdateInstruction) error {
-	return launchFleetUpdate(ctx, c, i, fleetInstallDeps{command: fleetCommand, client: fleetClient})
+	return launchFleetUpdate(ctx, c, i, fleetInstallDeps{command: fleetCommand, versionCommand: fleetVersionCommand, client: fleetClient})
 }
 
 func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpdateInstruction, d fleetInstallDeps) error {
@@ -316,13 +318,29 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 	return nil
 }
 
-func fleetVersion(ctx context.Context, path string, command func(context.Context, string, ...string) ([]byte, error)) (VersionInfo, error) {
+// fleetVersionCommand keeps machine-readable stdout separate from diagnostics.
+// Retain at most 4 KiB of stderr in the local receipt: enough for a startup
+// diagnostic without letting a noisy candidate grow durable state unboundedly.
+func fleetVersionCommand(ctx context.Context, path string) ([]byte, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "version", "--json")
+	cmd.Env = withoutMyceToken(os.Environ())
+	cmd.WaitDelay = time.Second
+	var stdout, stderr boundedProbeOutput
+	stdout.limit, stderr.limit = 1<<20, 4<<10
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func fleetVersion(ctx context.Context, path string, command func(context.Context, string) ([]byte, []byte, error)) (VersionInfo, string, error) {
 	var info VersionInfo
-	data, err := command(ctx, path, "version", "--json")
+	data, diagnostic, err := command(ctx, path)
 	if err != nil || json.Unmarshal(data, &info) != nil {
-		return info, errors.New("fleet_version_invalid")
+		return info, string(diagnostic), errors.New("fleet_version_invalid")
 	}
-	return info, nil
+	return info, string(diagnostic), nil
 }
 
 // ApplyFleetUpdate is the hidden finite helper: fetch and verify the release,
@@ -330,7 +348,7 @@ func fleetVersion(ctx context.Context, path string, command func(context.Context
 // wait for the manager to report the new process. It never restores old
 // bytes, retries the restart or resumes maintenance; the queue checks health.
 func ApplyFleetUpdate(ctx context.Context, configPath, receiptPath string) error {
-	return applyFleetUpdate(ctx, configPath, receiptPath, fleetInstallDeps{command: fleetCommand, client: fleetClient})
+	return applyFleetUpdate(ctx, configPath, receiptPath, fleetInstallDeps{command: fleetCommand, versionCommand: fleetVersionCommand, client: fleetClient})
 }
 
 func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fleetInstallDeps) error {
@@ -412,7 +430,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 		if before != r.BeforeSHA256 {
 			return fail("fleet_install_changed")
 		}
-		if err := swapFleetBinary(ctx, c, client, r, a, d); err != nil {
+		if err := swapFleetBinary(ctx, c, client, &r, a, d); err != nil {
 			return fail(err.Error())
 		}
 		r.Phase = "installed"
@@ -448,7 +466,7 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 // hash, signature identity and reported version, asks the queue once more,
 // then publishes it over the installed binary with the installer's atomic
 // same-directory write. The restart follows immediately.
-func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r fleetInstallReceipt, a ReleaseArtifact, d fleetInstallDeps) error {
+func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r *fleetInstallReceipt, a ReleaseArtifact, d fleetInstallDeps) error {
 	staged, err := fetchFleetArtifact(ctx, c, client, r.Instruction, a)
 	if err != nil {
 		return err
@@ -457,7 +475,8 @@ func swapFleetBinary(ctx context.Context, c ServiceConfig, client Client, r flee
 	if c.Detection.OS == "darwin" && (!nativeMachO(c.Binary) || !nativeMachO(staged) || validateDarwinUpgradeIdentity(ctx, c.Binary, staged, d.command) != nil) {
 		return errors.New("fleet_darwin_identity_refused")
 	}
-	info, err := fleetVersion(ctx, staged, d.command)
+	info, diagnostic, err := fleetVersion(ctx, staged, d.versionCommand)
+	r.VersionStderr = diagnostic
 	m := r.Instruction.Release.Manifest
 	if err != nil || info.Version != m.Version || info.OS != a.OS || info.Arch != a.Arch || info.StartGate != m.StartGate || info.AttemptProtocol != m.AttemptProtocol || a.NativeSensing && !info.NativeSensing {
 		return errors.New("fleet_candidate_invalid")

@@ -160,7 +160,10 @@ func newFleetInstallFixture(t *testing.T, goos string) *fleetInstallFixture {
 		}
 	}
 	clock := &fakeClock{now: time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)}
-	f.deps = fleetInstallDeps{command: f.command, client: fleetClient, health: EnrollmentWait{Clock: clock, Wait: func(_ context.Context, duration time.Duration) error { clock.Advance(duration); return nil }}}
+	f.deps = fleetInstallDeps{command: f.command, versionCommand: func(ctx context.Context, path string) ([]byte, []byte, error) {
+		data, err := f.command(ctx, path, "version", "--json")
+		return data, nil, err
+	}, client: fleetClient, health: EnrollmentWait{Clock: clock, Wait: func(_ context.Context, duration time.Duration) error { clock.Advance(duration); return nil }}}
 	return f
 }
 
@@ -694,6 +697,51 @@ func TestFleetInstallFileCacheCapacity(t *testing.T) {
 			unit, err := os.ReadFile(c.Service)
 			if err != nil || string(unit) != c.ServiceText() {
 				t.Fatal("fleet upgrade changed installed service configuration", err)
+			}
+		})
+	}
+}
+
+func TestFleetInstallVersionStdoutAndReceiptDiagnostics(t *testing.T) {
+	for _, scenario := range []string{"valid", "invalid-json", "nonzero-exit"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newFleetInstallFixture(t, "linux")
+			info, _ := json.Marshal(VersionInfo{Version: f.i.Release.Manifest.Version, OS: "linux", Arch: "arm64", StartGate: StartGateProtocol, AttemptProtocol: AttemptProtocol})
+			if scenario == "invalid-json" {
+				info = []byte("invalid JSON")
+			}
+			exit := "0"
+			if scenario == "nonzero-exit" {
+				exit = "1"
+			}
+			probe := filepath.Join(t.TempDir(), "probe")
+			script := "#!/bin/sh\nprintf '%s\\n' '" + string(info) + "'\nprintf '%s\\n' 'harmless startup diagnostic' >&2\nexit " + exit + "\n"
+			if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.deps.versionCommand = func(ctx context.Context, _ string) ([]byte, []byte, error) { return fleetVersionCommand(ctx, probe) }
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			err := f.apply()
+			if scenario == "valid" {
+				if err != nil || f.restarts != 1 {
+					t.Fatal("stderr broke upgrade", err)
+				}
+			} else if err == nil || err.Error() != "fleet_candidate_invalid" || f.restarts != 0 {
+				t.Fatal("invalid version accepted", err)
+			}
+			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+			if err != nil || r.VersionStderr != "harmless startup diagnostic\n" {
+				t.Fatalf("lost receipt stderr: %q %v", r.VersionStderr, err)
+			}
+			ack, err := ReadFleetUpdateFailure(f.c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(ack)
+			if bytes.Contains(raw, []byte("harmless startup diagnostic")) {
+				t.Fatal("local diagnostic leaked into acknowledgement")
 			}
 		})
 	}
