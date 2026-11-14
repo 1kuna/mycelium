@@ -24,3 +24,12 @@ func TestHealthAlertDeliveryStatusExplanation(t *testing.T) {
 		t.Fatal(legacy)
 	}
 }
+
+func TestStatusAlertSectionText(t *testing.T) {
+	output := captureStdout(t, func() {
+		printStatus(myce.Snapshot{HealthAlerts: []myce.HealthAlert{{Kind: "efficiency_regression", State: "open", Reason: "reservation_gap_gb", Host: "h", Count: 3}}}, false)
+	})
+	if !strings.Contains(output, "alert efficiency_regression: open host=h job= reason=reservation_gap_gb count=3 since=") {
+		t.Fatal(output)
+	}
+}

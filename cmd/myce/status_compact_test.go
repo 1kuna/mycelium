@@ -20,7 +20,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	release := myce.RunningRelease{Version: "v3.1.0-test.2"}
 	s := myce.Snapshot{Now: now, QueueRelease: release,
 		Summary: &myce.StatusSummary{RetainedJobs: 8600, Alerts: []myce.StatusAlertGroup{
-			{Kind: "efficiency/memory_prediction_relative_error", Count: 18, Since: now.Add(-72 * time.Hour)},
+			{Kind: "efficiency/reservation_gap_gb", Count: 18, Since: now.Add(-72 * time.Hour)},
 			{Kind: "recipe", Count: 17, Since: now.Add(-time.Hour), Scopes: map[string]int{"gpu-a": 8, "gpu-b": 5, "mac-a": 3, "mac-b": 1}},
 			{Kind: "efficiency/wait_holds_seconds", Count: 3, Since: now, Scopes: map[string]int{"project:a": 1, "project:b": 1, "project:c": 1}},
 		}},
@@ -60,8 +60,6 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	for _, want := range []string{
 		"jobs: 67 current / 8600 retained · 3 running · 2 waiting · 62 paused",
 		"alerts: 38 active in 3 kinds",
-		"efficiency/memory_prediction_relative_error ×18 since",
-		"recipe ×17 (gpu-a 8, gpu-b 5, mac-a 3, mac-b) since",
 		"health notifier is not configured; 22415 alert openings or closings have no delivery acknowledgement",
 		"host gpu-b: degraded",
 		`hold host=mac-c: components are excluded from placement (set by operator; reason="storage faults"); next: myce exclude remove host=mac-c when the components should run work`,
@@ -77,10 +75,19 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	for _, unwanted := range []string{"unknown", "done-upgrade", "host gpu-a:", "pause000", "full-id", strings.Repeat("x", 200)} {
+	for _, unwanted := range []string{"efficiency/reservation_gap_gb", "recipe ×", "unknown", "done-upgrade", "host gpu-a:", "pause000", "full-id", strings.Repeat("x", 200)} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("default printed %q:\n%s", unwanted, text)
 		}
+	}
+	// Actionable hosts/holds/jobs precede diagnostics, telemetry and releases.
+	last := -1
+	for _, want := range []string{"host gpu-b: degraded", "hold host=mac-c:", "wait0000 viewer", "hypha gpu-a:", "health notifier", "alerts: 38", "queue release:"} {
+		at := strings.Index(text, want)
+		if at < 0 || at <= last {
+			t.Fatalf("status order at %q:\n%s", want, text)
+		}
+		last = at
 	}
 	// Default --json is the same projection: full IDs for every job, no full
 	// job or machine objects.

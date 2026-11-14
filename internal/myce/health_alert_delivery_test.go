@@ -192,3 +192,55 @@ func TestHealthAlertDeliverySendsOneNotificationPerRecord(t *testing.T) {
 		t.Fatal("records", len(q.s.Health.Events))
 	}
 }
+
+// Exercise the actual executable hook: one opening, one closing, and no
+// delivery of efficiency/recipe findings sharing the same host.
+func TestHealthAlertDeliveryHostOpeningAndClosing(t *testing.T) {
+	q, clock := fixture(t)
+	dir := t.TempDir()
+	hook, out := filepath.Join(dir, "notify"), filepath.Join(dir, "payloads")
+	script := "#!/bin/sh\n[ \"$1\" = --check ] && exit 0\ncat >> '" + out + "'\necho >> '" + out + "'\n"
+	if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureHealthNotifier(context.Background(), hook); err != nil {
+		t.Fatal(err)
+	}
+	host := HealthAlert{Kind: "host_degraded", Host: "h", Reason: "host_memory_pressure"}
+	flapHealth(t, q, clock, "test/host", host, true)
+	for _, kind := range []string{"efficiency_regression", "environment_recipe_failed"} {
+		flapHealth(t, q, clock, "test/"+kind, HealthAlert{Kind: kind, Host: "h"}, true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); q.runHealthNotifier(ctx) }()
+	defer func() { cancel(); <-done }()
+	delivered := func() bool {
+		q.mu.RLock()
+		defer q.mu.RUnlock()
+		return len(pendingHealthDeliveries(q.s.Health.Events)) == 0
+	}
+	await(t, delivered)
+	flapHealth(t, q, clock, "test/host", host, true)
+	flapHealth(t, q, clock, "test/host", host, false)
+	clock.Advance(time.Second)
+	await(t, delivered)
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(data))
+	if len(lines) != 2 {
+		t.Fatalf("wanted opening and closing only: %s", data)
+	}
+	var opening, closing HealthAlert
+	if err := json.Unmarshal([]byte(lines[0]), &opening); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &closing); err != nil {
+		t.Fatal(err)
+	}
+	if opening.Kind != host.Kind || opening.State != "open" || closing.State != "closed" || closing.DeliveryID != opening.DeliveryID+"/closed" || !closing.Delivered {
+		t.Fatalf("episode delivery: %s", data)
+	}
+}
