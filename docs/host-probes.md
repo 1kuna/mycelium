@@ -5,6 +5,22 @@ requires measurements from the running host; a canary on one machine does not
 establish a public default. This implementation separates host observation from
 per-attempt resource sampling and from execution/readiness lifecycle policy.
 
+## Restart and launch diagnostics
+
+Worker inventory reports its observation age independently of check-in contact.
+Pending, failed and stale discovery cannot admit device work; CPU admission
+continues. After a launch inventory refusal, cached discovery cannot re-admit
+that card: a completed fresh scan must have started after the refusal. Healthy
+families in a fresh partial scan remain eligible.
+
+`inventory_probe.operation` names `nvidia_identity`, `nvidia_memory`,
+`runtime_topology`, `kernel_identity` or `runtime_inventory`, with the elapsed
+`pending_seconds`. `error_class` preserves deadline/cancellation and typed
+runtime failures. Operation names contain no command arguments or private paths.
+The direct prelaunch inventory probe uses exact-attempt cancellation rather than
+a fixed five-second timeout; stop/release custody remains unchanged. Discovery
+still retains only one outstanding scan and never stalls check-in/control.
+
 ## Timing and freshness
 
 Owner, shared-pressure, host-health, foreign-consumer and accelerator-inventory

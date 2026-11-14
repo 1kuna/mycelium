@@ -38,6 +38,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}
 	for _, m := range s.Machines {
+		m.InventoryProbe = safeInventoryObservation(m.InventoryProbe)
 		publicWorkerCollection(m)
 		m.Disabled = diagnostic(m.Disabled, "disabled by operator")
 		if m.AdmissionReason != "" {

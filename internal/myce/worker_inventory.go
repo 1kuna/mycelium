@@ -14,9 +14,11 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
-	FaultEvidence       []*FaultEvidence     `json:"fault_evidence,omitempty"`
-	RecoveryBlocked     *DeviceHealthFailure `json:"quarantine_recovery_blocked,omitempty"`
-	UnsupportedOnDevice []string             `json:"unsupported_on_device,omitempty"`
+	InventoryProbeFailedScan *time.Time           `json:"inventory_probe_failed_scan,omitempty"`
+	InventoryProbeAfter      *time.Time           `json:"inventory_probe_after,omitempty"` // Queue-owned launch failure fence.
+	FaultEvidence            []*FaultEvidence     `json:"fault_evidence,omitempty"`
+	RecoveryBlocked          *DeviceHealthFailure `json:"quarantine_recovery_blocked,omitempty"`
+	UnsupportedOnDevice      []string             `json:"unsupported_on_device,omitempty"`
 
 	Recovery              *DeviceRecovery    `json:"quarantine_recovery,omitempty"`
 	Telemetry             *DeviceTelemetry   `json:"telemetry,omitempty"`
@@ -83,6 +85,9 @@ func (d MachineDevice) machine(base Machine) Machine {
 	// the inventory; neither telemetry nor scalar compatibility adds allowance.
 	base.FreeMemoryGB, base.TotalMemoryGB, base.ReservedMemoryGB = min(d.FreeMemoryGB, d.BudgetGB), d.BudgetGB, d.ReserveMemoryGB
 	base.UnifiedMemory, base.MemoryMeasured, base.MemoryError = d.UnifiedMemory, d.MemoryMeasured, d.Reason
+	if inventoryWaitingReason(&base) != "" {
+		base.MemoryError, base.FreeMemoryGB = "device_probe_unavailable", 0
+	}
 	if d.CapabilityProfile != nil {
 		profile := *d.CapabilityProfile
 		if shared := base.CapabilityProfile; shared != nil {
@@ -294,8 +299,12 @@ func (w Worker) verifyDevice() error {
 	if w.selectedDevice == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// The exact attempt owns cancellation. A fixed discovery deadline turns
+	// slow post-restart driver calls into repeated assign/refuse cycles.
+	ctx := w.launchCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	devices, err := w.InventoryProbe(ctx)
 	expected := *w.selectedDevice
 	matches := 0
@@ -564,18 +573,26 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 // M2 projects exactly one inventory component into the existing planner. M3
 // enumerates targets; scalar diagnostics never add another allocation pool.
 func inventoryTarget(m *Machine) error {
+	if err := validateInventory(m.Devices); err != nil {
+		return err
+	}
+	projectInventoryTarget(m)
+	return nil
+}
+
+// Incoming inventory is validated before merging retained, unavailable device
+// identities. Re-project after applying queue-owned fences without treating old
+// ordinals retained for custody as an ambiguous worker report.
+func projectInventoryTarget(m *Machine) {
 	fingerprint, reports := m.ExtensionFingerprint, m.ExtensionReports
 	defer func() { m.ExtensionFingerprint, m.ExtensionReports = fingerprint, reports }()
 	if m.Devices == nil {
-		return nil
-	}
-	if err := validateInventory(m.Devices); err != nil {
-		return err
+		return
 	}
 	for _, d := range m.Devices {
 		if d.Reason == "" {
 			*m = d.machine(*m)
-			return nil
+			return
 		}
 	}
 	// Preserve a CPU worker's diagnostic selector for qualification matching;
@@ -587,7 +604,6 @@ func inventoryTarget(m *Machine) error {
 		m.MemoryError = m.Devices[0].Reason
 	}
 	m.GPU, m.TotalMemoryGB, m.FreeMemoryGB = "cpu", 0, 0
-	return nil
 }
 
 func (w Worker) deviceEnvironment() (map[string]string, error) {

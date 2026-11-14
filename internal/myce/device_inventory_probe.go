@@ -215,7 +215,7 @@ func cudaAccelerators(p MachineProbe, ctx context.Context, pci []pciAccelerator)
 			if probeAbsent(err) {
 				code = "gpu_driver_missing"
 			}
-			causes = append(causes, preflightError(code, "cuda", "NVIDIA runtime unavailable; install or repair the driver and re-detect"))
+			causes = append(causes, errors.Join(preflightError(code, "cuda", "NVIDIA runtime unavailable; install or repair the driver and re-detect"), err, ctx.Err()))
 		} else if !probeAbsent(err) && p.Info != nil {
 			p.Info("nvidia-smi failed without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
 		}

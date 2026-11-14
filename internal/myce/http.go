@@ -688,6 +688,7 @@ var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 type Client struct {
 	publication     *publicationProgress
 	publicationWire *atomic.Bool
+	inventoryWire   *atomic.Bool
 	stagingWire     *atomic.Bool
 	faultWire       *atomic.Bool
 	URL             string

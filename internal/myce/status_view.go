@@ -36,6 +36,9 @@ func HyphaAvailability(m *Machine) string {
 	if m.CPUCapacityReason != "" && m.GPU == "cpu" {
 		return m.CPUCapacityReason
 	}
+	if why := inventoryWaitingReason(m); why != "" {
+		return why
+	}
 	if reason := capabilityUnavailableReason(m); reason != "" {
 		return reason
 	}

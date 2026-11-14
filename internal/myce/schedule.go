@@ -60,6 +60,7 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(!availabilityBlocked(m), "availability") &&
 		report.check(capabilityFits(j, m), "hardware capacity") &&
 		report.check(extensionCanRun(j, m), "extension") &&
+		report.check(j.Spec.Needs.cpuOnly() || inventoryWaitingReason(m) == "", "device inventory") &&
 		report.check(j.Spec.Needs.cpuOnly() || m.MemoryError == "", "GPU memory telemetry") &&
 		report.check(!m.Gone, "gone") && report.check(!m.Leaving, "leaving") &&
 		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&

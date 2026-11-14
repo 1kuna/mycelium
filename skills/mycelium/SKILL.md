@@ -22,6 +22,13 @@ hands back verified files. Climb the ladder only as far as your work needs.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 
+When status says `waiting for fresh accelerator inventory`, leave the existing
+job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
+work continues. `myce status --sections machines --json` exposes
+`inventory_probe.state`, `operation`, `pending_seconds` and `error_class` for the
+queue owner. Worker contact alone does not prove usable accelerator inventory;
+resubmitting the job does not repair that evidence. Report a persistent wait to the queue owner with those fields.
+
 ## 1. One command
 
 ```sh

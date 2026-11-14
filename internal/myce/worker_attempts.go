@@ -308,7 +308,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
 				} else if !d.Hold && !admissionBlocked {
-					bound, err := w.forAttempt(a.job)
+					probeWorker := w
+					probeWorker.launchCtx = prepareCtx
+					bound, err := probeWorker.forAttempt(a.job)
 					if err == nil {
 						p, err = bound.startContext(prepareCtx, s, a.job)
 					} else {
@@ -1148,7 +1150,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.FileTransferError = diagnostics.FileTransferError
 			m.ResultPublications = diagnostics.ResultPublications
-			observed, probeErr := inventory.snapshot()
+			observed, probeErr, observation := inventory.snapshotWithObservation()
+			m.InventoryProbe = observation
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
 			}

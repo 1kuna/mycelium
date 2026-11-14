@@ -51,6 +51,8 @@ type MachineProbe struct {
 
 func LocalMachineProbe() MachineProbe {
 	run := func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
+		noteInventoryOperation(ctx, n, args)
+		defer noteInventoryOperation(ctx, "", nil)
 		// This runner also serves installer service managers and lazy tool
 		// version checks. Those are not hardware probes; test CLI processes
 		// supply their ordinary fake managers through PATH.

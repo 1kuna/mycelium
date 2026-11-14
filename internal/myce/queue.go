@@ -1293,6 +1293,7 @@ func (q *Queue) maintain() {
 	}
 	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	q.beginMaintenance()
+	q.expireInventoryObservations()
 	previousCapture := q.memoryAdmissionCapture
 	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
 	defer func() {
@@ -1651,6 +1652,8 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		if old != nil && hostID(old) != hostID(&m) {
 			return errors.New("machine physical host identity changed")
 		}
+		retainInventoryRefusals(&m, old)
+		projectInventoryTarget(&m)
 		if err := q.registerMaintenanceHost(&m); err != nil {
 			return err
 		}
@@ -2304,6 +2307,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused {
+		q.noteInventoryRefusal(j)
 		// A prelaunch refusal is not a lost execution, even if host health
 		// recovered before its result arrived. Preserve any current hold reason.
 		reason := q.storageRootReason(j, q.s.Machines[j.Machine])
