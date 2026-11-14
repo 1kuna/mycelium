@@ -42,9 +42,10 @@ type CompactHypha struct {
 	CPU          *int     `json:"cpu_cores,omitempty"`
 	Running      int      `json:"running,omitempty"`
 	// Release is set only when it differs from the queue's, or is "unknown".
-	Release   string   `json:"release,omitempty"`
-	Preparing []string `json:"preparing,omitempty"`
-	Copying   []string `json:"copying,omitempty"`
+	Release            string              `json:"release,omitempty"`
+	Preparing          []string            `json:"preparing,omitempty"`
+	Copying            []string            `json:"copying,omitempty"`
+	ResultPublications []ResultPublication `json:"result_publications,omitempty"`
 }
 type CompactJob struct {
 	ID      string     `json:"id"`
@@ -122,6 +123,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 	}
 	for _, m := range s.Machines {
 		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID]}
+		h.ResultPublications = m.ResultPublications
 		if m.HostMemoryMeasured {
 			ram := m.FreeHostMemoryGB
 			h.HostRAMGB = &ram
@@ -276,6 +278,9 @@ func (c CompactStatus) Lines(full bool) []string {
 			line += "; release " + h.Release
 		}
 		out = append(out, line)
+		for _, p := range h.ResultPublications {
+			out = append(out, "  "+p.String())
+		}
 		for _, p := range h.Preparing {
 			out = append(out, "  preparing "+p)
 		}

@@ -1245,6 +1245,9 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 		if m.FileTransferError != "" {
 			fmt.Printf("files %s: %s\n", m.ID, m.FileTransferError)
 		}
+		for _, p := range m.ResultPublications {
+			fmt.Println(p.String())
+		}
 		if m.FaultMonitorError != "" {
 			fmt.Printf("fault monitor %s: %s; device quarantine is off\n", m.ID, m.FaultMonitorError)
 		}
