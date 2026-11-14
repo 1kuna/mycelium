@@ -26,6 +26,7 @@ type FleetUpgradeStatus struct {
 	Hosts     []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
+	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
 	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
 	StopRequests   []FleetStopRequest       `json:"stop_requests,omitempty"`
 	Host           string                   `json:"host"`
@@ -82,6 +83,7 @@ type FleetUpgradeRequest struct {
 	Release string `json:"release,omitempty"`
 }
 type FleetUpgradeAck struct {
+	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
 	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
 	Runtime        *FleetRuntimeProof       `json:"runtime,omitempty"`
 	Revision       int                      `json:"revision"`
@@ -615,7 +617,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 	if !ok || !q.fleetHostQuiet(h) {
 		return FleetUpdateInstruction{}, nil
 	}
-	return FleetUpdateInstruction{StorageDiagnostics: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
+	return FleetUpdateInstruction{StorageDiagnostics: true, StorageWarnings: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
 }
 
 func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string) error {
@@ -645,6 +647,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 		switch ack.Phase {
 		case "prepared", "installed":
 		case "restarting":
+			h.StorageWarning = sanitizeStorageFailure(ack.StorageWarning)
 			h.Phase = strings.Replace(h.Phase, "_update", "_health", 1)
 			h.ProgressAt = q.clock.Now()
 		case "failed":

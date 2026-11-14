@@ -143,13 +143,15 @@ func joinOnboardingNASSequence() {
 	onboardingNASIO.mu.Unlock()
 }
 
-func TestOnboardingMountTimeoutKeepsTypedRefusal(t *testing.T) {
+func TestOnboardingMountTimeoutRecordsWarning(t *testing.T) {
 	c, _ := onboardingNAS(t, "darwin")
-	_, err := PrepareOnboardingStorage(context.Background(), c, false, func(context.Context, string, ...string) ([]byte, error) {
+	got, err := PrepareOnboardingStorage(context.Background(), c, false, func(context.Context, string, ...string) ([]byte, error) {
 		// A command may report its own deadline before the parent expires.
 		return nil, context.DeadlineExceeded
 	})
-	requirePreflightCode(t, err, "nas_unresponsive")
+	if err != nil || got.storageWarning == nil || !got.storageWarning.TimedOut {
+		t.Fatalf("missing inventory warning: %+v %v", got.storageWarning, err)
+	}
 }
 
 // Replay the #289 delete tail without spending real time or using a NAS. The

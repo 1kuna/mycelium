@@ -82,49 +82,69 @@ func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(contex
 }
 
 func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool) (result error) {
-	root, operation := "", "filesystem"
-	started := time.Now()
-	defer func() { result = storageCheckError(root, operation, time.Since(started), result) }()
 	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
 		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: preflight})
 		return err
 	}
+	started := time.Now()
+	ioCtx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
+	_, err := onboardingNASIO.runContext(ioCtx, c.NAS, func() (bool, error) {
+		return false, prepareInstallLocalNAS(ioCtx, abort, c, preflight)
+	})
+	return storageCheckError("nas", "filesystem", time.Since(started), err)
+}
+
+func prepareInstallLocalNAS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, preflight bool) (result error) {
+	root, operation := "", "filesystem"
+	started := time.Now()
+	defer func() { result = storageCheckError(root, operation, time.Since(started), result) }()
 	// Refuse symlinks so creation and probes cannot escape the Mycelium namespace.
 	for i, dir := range []string{c.NAS, filepath.Join(c.NAS, "mycelium"), filepath.Join(c.NAS, "mycelium", "checkpoints"), filepath.Join(c.NAS, "mycelium", "models"), filepath.Join(c.NAS, "mycelium", "environments")} {
 		root, operation = []string{"nas", "nas", "checkpoint", "model", "environment"}[i], "lstat"
 		started = time.Now()
-		st, err := os.Lstat(dir)
+		ctx := storageRootContext(ctx, root)
+		st, err := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return os.Lstat(dir) }, "lstat")
 		if errors.Is(err, os.ErrNotExist) {
 			operation = "mkdir"
-			if err = os.Mkdir(dir, 0700); err != nil {
-				return err
-			}
+			created := false
 			if preflight {
 				defer func(path, root string) {
+					if !created {
+						return
+					}
 					started := time.Now()
-					err := removeCreatedProbeDir(path)
+					cleanup, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+					err := onboardingFSError(cleanup, func(err error) { abort(err); cancel(err) }, func() error { return removeCreatedProbeDir(path) }, "remove")
+					cancel(nil)
 					result = errors.Join(result, storageCheckError(root, "remove", time.Since(started), err))
 				}(dir, root)
+			}
+			if err = onboardingFSError(ctx, abort, func() error {
+				err := os.Mkdir(dir, 0700)
+				created = err == nil
+				return err
+			}, "mkdir"); err != nil {
+				return err
 			}
 		} else if err != nil {
 			return err
 		} else if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-			return errors.New("NAS namespace must contain real directories, not symlinks")
+			return preflightError("nas_root_invalid", "storage", "NAS namespace must contain real directories, not symlinks")
 		}
 	}
 	for _, name := range []string{"checkpoints", "models", "environments"} {
 		dir := filepath.Join(c.NAS, "mycelium", name)
 		root = map[string]string{"checkpoints": "checkpoint", "models": "model", "environments": "environment"}[name]
-		ops := plainStorageProbeOps(nil)
-		ops.open = func(path string) (*os.File, error) {
-			started := time.Now()
-			f, err := openStorageProbe(path)
-			return f, storageCheckError(root, "open", time.Since(started), err)
-		}
-		ops.run = func(operation string, fn func() error) error {
-			started := time.Now()
-			err := fn()
-			return storageCheckError(root, operation, time.Since(started), err)
+		probeCtx := storageRootContext(ctx, root)
+		ops := storageProbeOps{
+			open: func(path string) (*os.File, error) {
+				return onboardingFSOperation(probeCtx, abort, func() (*os.File, error) { return openStorageProbe(path) }, "open")
+			},
+			run: func(operation string, fn func() error) error {
+				return onboardingFSError(probeCtx, abort, fn, operation)
+			},
+			report: func() {},
 		}
 		if err := probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), ops); err != nil {
 			return err

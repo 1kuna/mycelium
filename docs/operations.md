@@ -5,7 +5,7 @@ recover. Explanations, field semantics and tuning live in
 [reference pages](reference/README.md); finished one-time migrations live in the
 [migration archive](reference/migrations.md).
 
-The automated install/onboarding route requires a verified NAS mount. Standalone
+The automated install/onboarding route requires a configured OS NAS mount. Standalone
 `myce dev` and file-store execution work without a NAS; see [start here](START-HERE.md)
 and [files](files.md). No installer mounts storage, changes drivers or opens firewalls.
 Agent skill/harness installation lives [beside the skill](../skills/mycelium/setup-project.md).
@@ -270,6 +270,30 @@ A pin mismatch refuses the repair without changing installed files; this
 path cannot replace the authority or rotate its pin. Changing an address requires
 the new queue endpoint to be reachable. Preview with `--dry-run` to inspect the
 config change without verification or writes.
+
+Install, onboarding preflight and fleet updates check NAS reachability, but a
+stalled operation or transient I/O/reachability error is a warning. It does not
+prevent binary/config publication or service restart. Warnings report only root
+role, operation, numeric errno, elapsed time and timeout state. Manual install
+saves the last check in `state_dir/install-storage.json` (`storage_warning`);
+a successful later check clears it. Fleet helpers retain `storage_warning` in
+`state_dir/fleet-update.json`; capable queues also show it in the host's fleet
+status. Previous queues receive no unsupported acknowledgement fields.
+
+The measured 30-second no-progress bound (twice the recorded 14.90-second
+contention tail, #289) limits waiting for one probe operation, not installation
+eligibility. Completed operations renew the observation window. A syscall may
+outlive the warning; the process retains single-sequence ownership until it
+returns; no second sequence starts in that process while it is pending. Missing selected mounts,
+invalid directories/symlinks, wrong filesystems and completed permission errors
+still fail with typed errors. An unavailable mount cannot be distinguished from
+a wrong selection when absent from OS mount inventory, so that refusal stays.
+Local state/cache format errors remain fatal.
+
+An installed service can be healthy while storage is unavailable. Current
+runtime mount health, `unavailable_roots` and checkpoint admission continue to
+withhold work requiring those roots until recovery; an install receipt is a
+historical observation, never proof that NAS-dependent work can start.
 
 Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,
@@ -685,7 +709,10 @@ process within 15 minutes (`worker_update_not_verified`,
 `queue_update_not_verified`), or a maintenance change by someone else
 (`maintenance_changed`, keeping their policy). Look the code up in the
 [failure code table](reference/fleet-upgrades.md#failure-codes-and-repairs).
-For a storage preflight failure, retain the host's `storage_failure` from
+For a transient storage warning, retain `storage_warning` from the fleet host
+status or local helper receipt; service health and rollout continue while runtime
+storage admission protects dependent work. For a storage preflight failure, retain
+the host's `storage_failure` from
 `myce status --json` (root role, operation, errno, duration and stall flag).
 Older installed updaters omit this evidence; see the private local receipt.
 Nothing rolls back. Fix forward, then rerun `myce fleet upgrade` (with
@@ -702,7 +729,10 @@ the priority policy is unchanged. Confirm `myce status` lists each worker's
 release and that the default onboarding approval is the new release
 ([advance the default](#advance-the-default-after-a-signed-update)).
 
-**First use.** Each service must run as an installed service on a release with
+**First use.** Storage preflight runs in the installed helper before it downloads
+the candidate. Publishing a candidate with advisory NAS checks cannot change an
+older helper's fatal checks; use the manual first-use steps below to install the
+new helper on an affected host. Each service must run as an installed service on a release with
 this path. `myce fleet upgrade` refuses and names every service without a fresh
 runtime proof. To bring a service onto such a release, do the same steps by
 hand, one host at a time with the queue's host last:
@@ -719,7 +749,9 @@ hand, one host at a time with the queue's host last:
    its owner agrees, `myce host disable HOST --stop --wait --timeout 10m` stops it as planned
    maintenance instead (step 3 of the run above).
 3. Run the verified binary's `myce install ROLE --config CONFIG` (add
-   `--dry-run` first to see the preserved settings).
+   `--dry-run` first to see the preserved settings). A transient NAS warning
+   does not require a manual workaround; inspect the storage receipt and runtime
+   root health separately.
 4. Check that `myce status` shows the new release and a new session, then run
    `myce host resume HOST`.
 

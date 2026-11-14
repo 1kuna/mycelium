@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"errors"
+	"log"
+	"syscall"
 	"time"
 )
 
@@ -95,11 +97,11 @@ func sanitizeStorageFailure(detail *StoragePreflightFailure) *StoragePreflightFa
 	return &out
 }
 
-func preflightFleetStorage(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), fs *onboardingStorageFS) (*StoragePreflightFailure, error) {
 	started := time.Now()
 	roots, err := c.StateRoots()
 	if err != nil {
-		return storageCheckError("state", "resolve", time.Since(started), err)
+		return nil, storageCheckError("state", "resolve", time.Since(started), err)
 	}
 	for i, root := range roots {
 		name := "queue_state"
@@ -112,14 +114,10 @@ func preflightFleetStorage(ctx context.Context, c ServiceConfig, command func(co
 		}
 		started := time.Now()
 		if err := CheckStateRoots(root); err != nil {
-			return storageCheckError(name, "format", time.Since(started), err)
+			return nil, storageCheckError(name, "format", time.Since(started), err)
 		}
 	}
-	started = time.Now()
-	if err := prepareInstallNASMode(ctx, c, command, true); err != nil {
-		return storageCheckError("nas", "filesystem", time.Since(started), err)
-	}
-	return nil
+	return prepareInstallStorage(ctx, c, command, true, fs)
 }
 
 func fleetStorageFailure(code string, detail *StoragePreflightFailure) *StoragePreflightFailure {
@@ -144,4 +142,61 @@ func fleetReceiptStorageFailure(r fleetInstallReceipt) *StoragePreflightFailure 
 		return nil
 	}
 	return fleetStorageFailure(fleetFailureCode(r.Failure), r.StorageFailure)
+}
+
+// Transient reachability says nothing about the installed binary or service.
+// Keep definitive path, permission, namespace and filesystem errors fatal.
+func installStorageOutcome(ctx context.Context, err error) (*StoragePreflightFailure, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	detail := storageFailureDetail(err)
+	if detail == nil {
+		return nil, err
+	}
+	transient := detail.TimedOut || detail.Operation == "pending"
+	switch syscall.Errno(detail.Errno) {
+	case syscall.EIO, syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH, syscall.ENOTCONN, syscall.ECONNRESET, syscall.ESTALE:
+		transient = true
+	}
+	if !transient {
+		return nil, err
+	}
+	log.Printf("warning: install storage unavailable root=%s operation=%s errno=%d elapsed=%s timed_out=%t; runtime storage admission remains active", detail.Root, detail.Operation, detail.Errno, detail.Elapsed, detail.TimedOut)
+	return detail, nil
+}
+
+const installStorageReceiptFile = "install-storage.json"
+
+type installStorageReceipt struct {
+	Warning *StoragePreflightFailure `json:"storage_warning,omitempty"`
+}
+
+func prepareInstallStorage(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool, fs *onboardingStorageFS) (*StoragePreflightFailure, error) {
+	var err error
+	if fs != nil {
+		copy := *fs
+		copy.removeCreated = preflight
+		_, err = prepareOnboardingStorageFS(ctx, c, false, command, copy)
+	} else {
+		err = prepareInstallNASMode(ctx, c, command, preflight)
+	}
+	warning, err := installStorageOutcome(ctx, err)
+	var typed *PreflightError
+	if err != nil && ctx.Err() == nil && !errors.As(err, &typed) {
+		err = storageRefusal(preflightError("nas_unreachable", "storage", "storage validation failed; check the selected roots and permissions"), err)
+	}
+	// The CLI's first observation may own an outstanding syscall. Retain its
+	// precise diagnostic when the second check can only report "pending".
+	if warning != nil && warning.Operation == "pending" && c.storageWarning != nil {
+		warning = sanitizeStorageFailure(c.storageWarning)
+	}
+	return warning, err
+}
+
+func fleetReceiptStorageWarning(r fleetInstallReceipt) *StoragePreflightFailure {
+	if !r.Instruction.StorageWarnings {
+		return nil
+	}
+	return sanitizeStorageFailure(r.StorageWarning)
 }

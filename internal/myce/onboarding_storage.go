@@ -155,7 +155,8 @@ type onboardingStorageFS struct {
 // completing the operation. This is a conservative measured backstop, not a
 // supported-load percentile. Go filesystem calls expose no in-call progress or
 // cancellation, and CIFS can hang indefinitely. The cost is up to 30s before
-// refusal of a stuck operation; ownership remains held until the syscall returns.
+// returning a storage warning to install/upgrade; this is an observation wait,
+// not an installation gate. Ownership remains held until the syscall returns.
 // Completed operations reset this bound; there is no total validation deadline.
 const onboardingFilesystemStallBudget = 2 * 15 * time.Second
 
@@ -168,7 +169,12 @@ var onboardingNASIO = checkpointIO[bool]{timeout: -1} // Each operation cancels 
 // guards the complete filesystem sequence, including cleanup. A blocked syscall
 // may outlive the caller, but no second sequence is launched while it is pending.
 func PrepareOnboardingStorage(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error)) (ServiceConfig, error) {
-	return prepareOnboardingStorageFS(ctx, c, discover, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext})
+	c, err := prepareOnboardingStorageFS(ctx, c, discover, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext})
+	c.storageWarning, err = installStorageOutcome(ctx, err)
+	if err == nil {
+		c.RequireMountedNAS = true
+	}
+	return c, err
 }
 func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error), fs onboardingStorageFS) (ServiceConfig, error) {
 	if err := ctx.Err(); err != nil {
