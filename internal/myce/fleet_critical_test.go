@@ -7,18 +7,25 @@ import (
 	"time"
 )
 
-// A critical update stops the drained host's work at once: resumable work
-// saves a checkpoint, is requeued without charge, and resumes from it on the
-// updated host (MY-39). Exact release custody still gates the update.
+// Critical stops at once; normal waits before using planned leave. Both save a
+// checkpoint, requeue without charge and resume it on the updated host. Exact
+// release custody still gates the update, including past the stop deadline.
 func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
-	for _, priority := range []string{"experiment", "production"} {
-		t.Run(priority, func(t *testing.T) {
+	for _, tc := range []struct{ urgency, priority, backend string }{
+		{"critical", "experiment", "cpu"}, {"critical", "production", "cpu"},
+		{"normal", "experiment", "cpu"}, {"normal", "experiment", "fake"},
+	} {
+		t.Run(tc.urgency+"/"+tc.priority+"/"+tc.backend, func(t *testing.T) {
+			priority := tc.priority
 			q, c, _ := fleetFixture(t, "host")
-			m := cpuMachine("worker", "host", "cpu", 8, 16)
+			m := cpuMachine("worker", "host", tc.backend, 8, 16)
 			m.Fleet = fleetTestProof(c, m.Session, 200, false)
 			check(t, q, m, nil)
 			s := cpuSpec(1, 1)
 			s.Priority, s.Resumable = priority, true
+			if tc.backend != "cpu" {
+				s = spec(priority)
+			}
 			if priority == "production" {
 				s.StartWindow = "10m" // Covers stop grace and two stability windows.
 			}
@@ -33,15 +40,27 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if _, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: run.ID, Attempt: run.Attempt, Progress: 7}, Started: true}); err != nil {
 				t.Fatal(err)
 			}
-			out, err := q.StartFleetUpgrade(FleetUpgradeRequest{Urgency: "critical"})
-			if err != nil || out.Urgency != "critical" {
+			out, err := q.StartFleetUpgrade(FleetUpgradeRequest{Urgency: tc.urgency})
+			if err != nil || out.Urgency != tc.urgency {
 				t.Fatal(out, err)
 			}
 			fleetTick(t, q)
 			h := q.fleetActiveHost()
+			if tc.urgency == "normal" {
+				if got := job(t, q, j.ID); got.State != "running" || len(h.PlannedStops) != 1 || len(h.StopRequests) != 0 || !h.PlannedStops[0].StopAfter.Equal(c.Now().Add(StopGrace)) || h.PlannedStops[0].Reason == "" {
+					t.Fatal("normal stop was not planned before signalling", h)
+				}
+				c.Advance(StopGrace - time.Nanosecond)
+				fleetRefresh(t, q, c)
+				if job(t, q, j.ID).State != "running" {
+					t.Fatal("normal stop before the bounded wait")
+				}
+				c.Advance(time.Nanosecond)
+				fleetRefresh(t, q, c)
+			}
 			wantDeadline := c.Now().Add(StopGrace)
-			if h == nil || h.Phase != "draining" || h.CriticalStopAt == nil || !h.CriticalStopAt.Equal(wantDeadline) {
-				t.Fatal("critical update did not request an immediate maintenance stop", h)
+			if h == nil || h.Phase != "draining" || tc.urgency == "critical" && (h.CriticalStopAt == nil || !h.CriticalStopAt.Equal(wantDeadline)) {
+				t.Fatal("update did not request the maintenance stop", h)
 			}
 			if got := job(t, q, j.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(wantDeadline) || got.InfrastructureRetries != 0 || got.Losses != 0 {
 				t.Fatalf("wrong stop state: state=%s stop=%v infra=%d loss=%d", got.State, got.StopAt, got.InfrastructureRetries, got.Losses)
@@ -67,10 +86,10 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			}
 			c.Advance(StopGrace + time.Second)
 			fleetRefresh(t, q, c)
-			if got := job(t, q, j.ID); got.State != "queued" || got.Progress != 9 || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Attempt != 1 {
+			if got := job(t, q, j.ID); got.State != "queued" || got.Progress != 9 || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Attempt != 1 || got.MaintenanceResume == nil {
 				t.Fatal("planned checkpoint requeue lost progress or charged a retry", got)
 			}
-			if !h.CriticalStopAt.Equal(wantDeadline) || len(h.StopRequests) != 1 {
+			if tc.urgency == "critical" && !h.CriticalStopAt.Equal(wantDeadline) || len(h.StopRequests) != 1 {
 				t.Fatal("observation renewed grace or duplicated the stop")
 			}
 			if i, err := q.fleetInstruction("host", m.ID, m.Session); err != nil || i.Operation != "" {

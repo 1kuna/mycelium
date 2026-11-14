@@ -113,7 +113,7 @@ func fleetRefresh(t *testing.T, q *Queue, c *fakeClock) {
 		for _, j := range q.liveJobs() {
 			if j.Machine == m.ID && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
 				checkin.AttemptProtocol = keyedAttemptProtocol
-				checkin.Attempts = append(checkin.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: j.StartedAt != nil})
+				checkin.Attempts = append(checkin.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: j.Progress}, Session: j.Session, Started: j.StartedAt != nil})
 			}
 		}
 		if _, err := q.Checkin(checkin); err != nil {
@@ -190,11 +190,13 @@ func TestFleetUpgradeHostOrderQueueHostLast(t *testing.T) {
 	}
 }
 
-// A drained host keeps its running attempt, takes no new work, and gets no
+// Non-resumable work keeps its running attempt, takes no new work, and gets no
 // update instruction until the attempt ends on its own; no deadline applies.
 func TestFleetUpgradeDrainWaitsForRunningWork(t *testing.T) {
 	q, c, w := fleetFixture(t, "q", "a")
-	r := fleetRun(t, q, w[0], spec("experiment"))
+	s := spec("experiment")
+	s.Resumable = false
+	r := fleetRun(t, q, w[0], s)
 	out, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
 	if err != nil {
 		t.Fatal(err)

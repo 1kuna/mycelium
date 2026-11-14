@@ -26,6 +26,7 @@ type FleetUpgradeStatus struct {
 	Hosts     []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
+	PlannedStops   []FleetPlannedStop       `json:"planned_stops,omitempty"`
 	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
 	StopRequests   []FleetStopRequest       `json:"stop_requests,omitempty"`
 	Host           string                   `json:"host"`
@@ -530,11 +531,14 @@ func slicesContainsPhase(hosts []*fleetUpgradeHost, phase string) bool {
 	return false
 }
 
-// fleetDrain waits for the drained host's work to finish (critical: stops it
-// at a checkpoint first), then starts the next service's update: the worker,
-// then the queue. It reports whether the host moved past draining.
+// fleetDrain waits for protected work and custody, checkpoint-stopping eligible
+// normal work after its window (critical: immediately), then starts the worker
+// update followed by the queue. It reports whether draining finished.
 func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	if fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
+		return false
+	}
+	if fleetUrgency(u.Urgency) == "normal" && !q.maintainFleetNormalStops(h) {
 		return false
 	}
 	if !q.fleetHostQuiet(h) {

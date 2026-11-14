@@ -6,6 +6,7 @@ import "time"
 // or physical release. Exact attempt history/checkpoint receipts remain owned
 // by the existing worker/result protocol and lifecycle classifier.
 type FleetStopRequest struct {
+	Reason         string         `json:"reason,omitempty"`
 	Obligation     HostObligation `json:"obligation"`
 	RequestedAt    time.Time      `json:"requested_at"`
 	Resumable      bool           `json:"resumable"`
