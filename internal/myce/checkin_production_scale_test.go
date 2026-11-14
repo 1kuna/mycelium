@@ -2,12 +2,80 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"runtime/pprof"
 	"sync"
 	"testing"
 	"time"
 )
+
+// The earlier production fixture omitted the multi-megabyte diagnostic state
+// found in #1568. These are invented baselines, not captured consumer data.
+func BenchmarkCheckinProductionEfficiency(b *testing.B) {
+	q, workers := productionCheckinFixture(b)
+	q.s.EfficiencyHealth = map[string]efficiencyBaseline{}
+	for i := range 3129 {
+		history := make(alertSeries, alertHistorySize)
+		for n := range history {
+			history[n] = float64(i+n+1) / 3179.0
+		}
+		q.s.EfficiencyHealth[fmt.Sprintf("work:synthetic-%04d/duration_prediction_relative_error", i)] = efficiencyBaseline{
+			Observed: true, At: q.clock.Now(), History: history, Recovering: 100,
+		}
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		b.Fatal(err)
+	}
+	want, err := json.Marshal(q.s.EfficiencyHealth)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var holds, marshals time.Duration
+	var maximum time.Duration
+	capture := false
+	q.observePersistence = func(p queuePersistenceTiming) {
+		if capture {
+			marshals += p.Marshal
+		}
+	}
+	q.observePersistenceHold = func(p queueHoldPhases) {
+		if capture {
+			capture = false
+			d := p.last.Sub(p.started)
+			holds += d
+			maximum = max(maximum, d)
+		}
+	}
+	b.ResetTimer()
+	for n := range b.N {
+		i := n % len(workers)
+		if i == 0 {
+			q.clock.(*fakeClock).Advance(time.Second)
+		}
+		m := workers[i]
+		capture = true
+		_, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol,
+			Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: m.Session, Started: true}}})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(holdMS(holds)/float64(b.N), "hold-ms/checkin")
+	b.ReportMetric(holdMS(marshals)/float64(b.N), "marshal-ms/checkin")
+	b.ReportMetric(holdMS(maximum), "max-hold-ms")
+	b.ReportMetric(float64(len(want)), "baseline-bytes")
+	var stored state
+	if err := json.Unmarshal(q.persisted["state"], &stored); err != nil {
+		b.Fatal(err)
+	}
+	got, _ := json.Marshal(stored.EfficiencyHealth)
+	if string(got) != string(want) {
+		b.Fatal("check-ins changed the diagnostic baseline")
+	}
+	verifyProductionCheckinFixture(b, q, workers)
+}
 
 // Synthetic #1568 workload: 10,200 retained executions, 75 current jobs,
 // five occupied workers, a 29-piece production fan-out and 40 waiting stages.

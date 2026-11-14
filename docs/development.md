@@ -1455,6 +1455,19 @@ planning/health phases. `all_holds-ms/op` includes the check-in's other mutex
 holds, including snapshot preparation; benchmark wall time also includes work
 outside the lock. These opt-in timers never control scheduling.
 
+`GOMAXPROCS=2 go test ./internal/myce -run '^$' -bench '^BenchmarkCheckinProductionEfficiency$' -benchtime=20x`
+extends the production-scale check-in fixture with 3,129 synthetic efficiency
+baselines (4.38 MB), alongside 10,200 retained jobs, 75 current jobs, five workers,
+a 29-piece production fan-out and 40 waiting stages. It checks active custody,
+dependency waits and unchanged stored baselines. The #1568 shared-laptop comparison
+reduced mean transaction hold from 63.73 to 10.78 ms and measured marshal time
+from 41.56 to 0.458 ms; maximum hold was 85.92 versus 22.75 ms. Immutable baseline
+JSON is prepared with the diagnostic generation outside the lock and reused by
+durable and read-snapshot serialization. Committed physical fragments advance
+only after successful commit. The existing JSON layout and FULL synchronous
+commit remain unchanged. These CPU savings do not qualify live submission
+latency or eliminate storage-induced synchronous-commit stalls.
+
 Cold retained execution facts are indexed by full comparable work/configuration
 and OS, reducing only exact-attempt peaks/recovery margins with identical
 provenance and end time. Unchanged cold facts survive planning passes and

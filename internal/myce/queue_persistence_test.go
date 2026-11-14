@@ -177,6 +177,101 @@ func TestQueuePersistenceLargeFieldsRollbackRestart(t *testing.T) {
 	}
 }
 
+func TestQueuePersistenceEfficiencyGenerationRollbackRestart(t *testing.T) {
+	q, clock := fixture(t)
+	diagnostics := func(count int) *efficiencyDiagnostics {
+		t.Helper()
+		baselines := map[string]efficiencyBaseline{}
+		for i := range count {
+			baselines[strings.Repeat("x", i+1)] = efficiencyBaseline{Observed: true, At: clock.Now(), History: alertSeries{1, 2, 3}}
+		}
+		encoded, err := json.Marshal(baselines)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &efficiencyDiagnostics{report: &EfficiencyReport{At: clock.Now()}, baselines: baselines, baselineJSON: encoded}
+	}
+	apply := func(d *efficiencyDiagnostics) error {
+		return q.update(func() error { q.applyEfficiencyDiagnostics(d); return nil })
+	}
+	assertStored := func(want map[string]efficiencyBaseline) {
+		t.Helper()
+		var stored state
+		if err := json.Unmarshal(durableQueueRecord(t, q.db, "state"), &stored); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(stored.EfficiencyHealth, want) || !reflect.DeepEqual(q.s.EfficiencyHealth, want) {
+			t.Fatal("live/durable diagnostic generation diverged")
+		}
+		published, err := readGet(q.readRoot, "state").decode("state")
+		if err != nil || !reflect.DeepEqual(published.(*state).EfficiencyHealth, want) {
+			t.Fatal("published diagnostics diverged from committed generation", err)
+		}
+		// The optimized serializer must produce the same ordinary state JSON
+		// that the previous release reads, including escaping and omission.
+		canonical, err := json.Marshal(q.persistentBase())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a, b any
+		if err := json.Unmarshal(canonical, &a); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(q.persisted["state"], &b); err != nil || !reflect.DeepEqual(a, b) {
+			t.Fatal("state encoding changed", err)
+		}
+	}
+	first := diagnostics(128)
+	if err := apply(first); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(first.baselines)
+	clock.Advance(time.Second)
+	rejected := diagnostics(80)
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_efficiency BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test efficiency failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := apply(rejected); err == nil {
+		t.Fatal("failed SQL accepted a diagnostic generation")
+	}
+	if _, err := q.db.Exec("DROP TRIGGER reject_efficiency"); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(first.baselines)
+	// A subsequent unrelated commit must not publish the aborted encoding or
+	// use its physical fragments as the committed comparison baseline.
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(first.baselines)
+	if err := apply(rejected); err != nil {
+		t.Fatal(err)
+	}
+	assertStored(rejected.baselines)
+	first.applied = false
+	if err := apply(first); err != nil || first.applied {
+		t.Fatal("late preparation crossed the diagnostic time fence", err)
+	}
+	assertStored(rejected.baselines)
+	q = reopenQueue(t, q, clock)
+	assertStored(rejected.baselines)
+	// Exercise the multi-page -> compact -> absent field transitions and the
+	// committed fragment cache after a restart.
+	for _, count := range []int{1, 0} {
+		clock.Advance(time.Second)
+		d := diagnostics(count)
+		if count == 0 {
+			d.baselines, d.baselineJSON = nil, nil
+		}
+		if err := apply(d); err != nil {
+			t.Fatal(err)
+		}
+		assertStored(d.baselines)
+		q = reopenQueue(t, q, clock)
+		assertStored(d.baselines)
+	}
+}
+
 func TestQueuePersistenceRetiredFormatsRefused(t *testing.T) {
 	for _, marker := range []string{`"myce-normalized-state-v2"`, `"myce-normalized-state-v1"`, `{"schema":3,"jobs":{}}`} {
 		t.Run(marker, func(t *testing.T) {

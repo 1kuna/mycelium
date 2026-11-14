@@ -102,7 +102,8 @@ func (q *Queue) flushHistories() error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	for key, value := range next {
+	q.persistedStateFields = next.stateFields
+	for key, value := range next.records {
 		q.noteEvidenceRecord(key, q.persisted[key], value)
 		if value == nil {
 			delete(q.persisted, key)

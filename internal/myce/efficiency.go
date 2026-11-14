@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"reflect"
@@ -629,11 +630,12 @@ type efficiencyBlockerObservation struct {
 type efficiencyDiagnostics struct {
 	blockers map[string]efficiencyBlockerObservation
 
-	report    *EfficiencyReport
-	stranded  []StrandedDemand
-	baselines map[string]efficiencyBaseline
-	signals   []EfficiencySignal
-	applied   bool
+	report       *EfficiencyReport
+	stranded     []StrandedDemand
+	baselines    map[string]efficiencyBaseline
+	baselineJSON json.RawMessage
+	signals      []EfficiencySignal
+	applied      bool
 }
 
 func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDiagnostics, error) {
@@ -660,6 +662,12 @@ func (q *Queue) prepareEfficiencyDiagnostics(ctx context.Context) (*efficiencyDi
 	v.s.StrandedDemand = d.stranded
 	d.report = v.efficiencyReport()
 	d.baselines, d.signals = efficiencySignals(d.report, v.s.EfficiencyHealth)
+	// This generation is immutable after preparation. Encode its retained-sized
+	// history here, before the commit lock, alongside the diagnostic calculation.
+	d.baselineJSON, err = json.Marshal(d.baselines)
+	if err != nil {
+		return nil, err
+	}
 	slices.SortFunc(d.signals, func(a, b EfficiencySignal) int { return strings.Compare(a.Subject+a.Metric, b.Subject+b.Metric) })
 	d.report.Signals = d.signals
 	return d, nil
@@ -680,6 +688,7 @@ func (q *Queue) applyEfficiencyDiagnostics(d *efficiencyDiagnostics) {
 	q.s.EfficiencyAt = d.report.At
 	q.s.StrandedDemand = d.stranded
 	q.s.EfficiencyHealth = d.baselines
+	q.efficiencyHealthJSON = d.baselineJSON
 	d.applied = true
 	seen := map[string]bool{}
 	for _, s := range d.signals {
