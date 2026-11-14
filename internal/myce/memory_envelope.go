@@ -793,20 +793,8 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 			estimate.source += "; same-host RAM peak + measured uncertainty"
 		}
 		if (j.Spec.Needs.cpuOnly() || gpuHost) && key.Target.OS == "linux" && completeHostRange && hostRange.valid() {
-			// Keep all observed resident peaks as a floor, including older
-			// attempts. Reserve the observed spread and sensor growth horizon;
-			// explicit launch slack remains a separately configured floor.
-			peak := max(hostRange.MaxGB, *sameHost.HostGB)
-			if sameHost.NonreclaimableGB != nil && validMemoryValue(*sameHost.NonreclaimableGB) {
-				peak = max(peak, *sameHost.NonreclaimableGB)
-			}
-			if gpuHost {
-				// The range and combined peak contain per-run totals; adding
-				// independently merged components invents an unobserved run.
-				combined, _ := sameHost.gpuHostPeakGB()
-				peak = max(peak, combined)
-			}
-			estimate.measuredHostGB = peak + max(hostRange.MaxGB-hostRange.MinGB, memoryGrowthGB(sameHost), exploratoryDriftMarginGB(m))
+			// The bound below applies each range only to its own peak, retaining
+			// historical resident/driver and incomplete total-cgroup floors.
 			estimate.source = "non-reclaimable peak + measured range (measured growth); CPU only"
 			if gpuHost {
 				estimate.source = "non-reclaimable + xe host memory + measured range (measured growth)"

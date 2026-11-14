@@ -328,16 +328,38 @@ func TestUnifiedUsedMemoryChargeAuditFixture(t *testing.T) {
 		peaks        bool
 		deviceSample bool
 		charge       float64
+		calibrated   bool
 	}{
-		{"before: envelope", false, true, 83.376411},
-		{"no device sample keeps envelope", true, false, 83.376411},
-		{"after: charged by use", true, true, 20.391857 + 22.318359 + .125},
+		{"before: envelope", false, true, 83.376411, false},
+		{"no device sample keeps envelope", true, false, 83.376411, false},
+		{"after: charged by use", true, true, 20.391857 + 22.318359 + .125, false},
+		{"calibrated without device evidence keeps envelope", true, false, 65.37355641978967, true},
+		{"calibrated co-run with fresh guarded evidence", true, true, 20.391857 + 22.318359 + .125, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := unifiedUsedChargeMachine()
+			hostNeedGB := host
+			if tc.calibrated {
+				// Retained conservative host calibration; device accounting is
+				// unchanged. Synthetic available RAM isolates the allowance and
+				// fresh-evidence contract, not native coexistence qualification.
+				hostNeedGB = 20.72913219246103
+				m = sharedUnifiedMachine()
+				m.MemoryEnforcement, m.MemoryCeilingSlackGB = cgroupEnforced, .125
+				m.CapabilityProfile.SystemMemoryBytes = 144 << 30
+				m.MemoryObservation = &HostMemoryObservation{TotalGB: 144, UsedGB: 4}
+				m.HostMemoryBudgetGB, m.HostAvailableMemoryGB, m.ReservedMemoryGB = 112, 140, 4
+				m.Devices[0].ReserveMemoryGB = 0
+				m.Devices[0].BudgetGB, m.Devices[0].TotalMemoryGB, m.Devices[0].FreeMemoryGB = 112, 144, 140
+			}
 			s := spec("experiment")
-			s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, host
+			s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, hostNeedGB
+			if tc.calibrated {
+				// Preserve the exact retained device envelope rather than the
+				// rounded original audit input above.
+				s.Needs.MemoryGB = 44.519424227328635
+			}
 			pending := submit(t, q, s)
 			a := assignedJob(check(t, q, m, nil))
 			if a == nil {
@@ -362,7 +384,10 @@ func TestUnifiedUsedMemoryChargeAuditFixture(t *testing.T) {
 				sample.DeviceGB = &dev
 			}
 			c := Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Session: a.Session, Started: true, CurrentHostMemory: sample}}}
-			c.Machine.HostAvailableMemoryGB = 100 - cgroup - used
+			c.Machine.HostAvailableMemoryGB = m.HostAvailableMemoryGB - cgroup - used
+			if tc.calibrated {
+				c.Machine.MemoryObservation = &HostMemoryObservation{TotalGB: 144, UsedGB: 4 + cgroup + used}
+			}
 			if _, err := q.Checkin(c); err != nil {
 				t.Fatal(err)
 			}
@@ -371,6 +396,20 @@ func TestUnifiedUsedMemoryChargeAuditFixture(t *testing.T) {
 			q.mu.Unlock()
 			if len(l.Owners) != 1 || !near(l.Owners[0].ChargeGB, tc.charge) {
 				t.Fatalf("owners %+v, want charge %g", l.Owners, tc.charge)
+			}
+			if tc.calibrated {
+				second := submit(t, q, s)
+				reply, err := q.Checkin(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := assignedJob(reply)
+				if tc.deviceSample && (next == nil || next.ID != second.ID) {
+					t.Fatal("fresh guarded charge stranded a fitting calibrated co-tenant", job(t, q, second.ID).Reason)
+				}
+				if !tc.deviceSample && next != nil {
+					t.Fatal("missing device evidence authorized an oversubscribed co-tenant")
+				}
 			}
 		})
 	}
