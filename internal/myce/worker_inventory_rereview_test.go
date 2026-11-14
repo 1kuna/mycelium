@@ -137,7 +137,8 @@ func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
 				if attempt == 2 {
 					want = "succeeded"
 				}
-				if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
+				// #1576: a refusal before command start preserves the loss budget.
+				if got.State != want || got.InfrastructureRetries != 0 || got.Attempt != attempt {
 					t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
 				}
 			}

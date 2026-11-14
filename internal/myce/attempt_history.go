@@ -16,6 +16,7 @@ type AttemptOutcome struct {
 	DeviceFault       *DeviceFaultLoss        `json:"device_fault,omitempty"`
 	ExecutionEvidence *ExecutionEvidence      `json:"execution_evidence,omitempty"`
 	StopObservation   *AttemptStopObservation `json:"stop_observation,omitempty"`
+	StagingTimings    *StagingTimings         `json:"staging_timings,omitempty"`
 	inputsStaged      bool                    // transient positive staging evidence; not part of the wire/history shape.
 	Placement         *PlacementDecision      `json:"placement,omitempty"`
 	Diagnostics       *AttemptDiagnostics     `json:"diagnostics,omitempty"`
@@ -48,6 +49,7 @@ func attemptOutcome(j *Job, r Result) AttemptOutcome {
 		FaultEvidence: j.FaultEvidence, SignalEvidence: r.SignalEvidence,
 		ExecutionEvidence: safeExecutionEvidence(r.ExecutionEvidence, j.Attempt),
 		inputsStaged:      r.Success || j.StartedAt != nil || j.InputsStagedAt != nil || r.InputsStagedAt != nil,
+		StagingTimings:    j.StagingTimings,
 		Placement:         j.Placement,
 		Attempt:           j.Attempt, Machine: j.Machine, Session: j.Session,
 		ExecutionCause: safeAttemptRuntimeCause(j, r.ExecutionCause), CleanupCause: safeAttemptRuntimeCause(j, r.CleanupCause),
@@ -72,11 +74,17 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	if j.Placement != nil && j.Placement.Attempt == outcome.Attempt {
 		outcome.Placement = j.Placement
 	}
+	if outcome.StagingTimings == nil && j.Attempt == outcome.Attempt {
+		outcome.StagingTimings = j.StagingTimings
+	}
 	outcome.StopObservation = q.attemptStopObservation(outcome.Machine, outcome.Session)
 	for _, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
 			outcome.StopObservation = old.StopObservation
 			outcome.DeviceFault = old.DeviceFault
+			if outcome.StagingTimings == nil {
+				outcome.StagingTimings = old.StagingTimings
+			}
 			break
 		}
 	}

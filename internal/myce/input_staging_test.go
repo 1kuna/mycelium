@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,7 +46,7 @@ func TestInputStagingTimestampPrecedesMemoryAndLaunch(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	c := Client{URL: server.URL, Token: "test"}
+	c := Client{URL: server.URL, Token: "test", stagingWire: &atomic.Bool{}}
 	w := Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: c, JobFileRoot: q.root, ExtensionRoot: extensionRoot, extensionFingerprint: m.ExtensionFingerprint,
 		HostMemorySource: func(context.Context) (float64, error) { return 64, nil },
 		MemorySource: func(context.Context) (float64, error) {
@@ -87,6 +88,12 @@ func TestInputStagingTimestampPrecedesMemoryAndLaunch(t *testing.T) {
 	}
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
+	}
+	if got.StagingTimings == nil || got.StagingTimings.CompletedAt == nil || !got.StagingTimings.CompletedAt.Equal(want) || got.StagingTimings.Phases[stageFiles].Calls != 1 {
+		t.Fatal("worker did not send staging phases before launch", got.StagingTimings)
+	}
+	if saved.Job == nil || saved.Job.StagingTimings == nil {
+		t.Fatal("worker recovery lost staging phases")
 	}
 	if saved.Job == nil || saved.Job.InputsStagedAt == nil || !saved.Job.InputsStagedAt.Equal(want) {
 		t.Fatal("worker recovery lost staging completion")

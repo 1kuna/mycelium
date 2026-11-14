@@ -917,6 +917,9 @@
         "signal_evidence": {
           "$ref": "#/$defs/SignalEvidence"
         },
+        "staging_timings": {
+          "$ref": "#/$defs/StagingTimings"
+        },
         "state": {
           "type": "string"
         },
@@ -3692,6 +3695,10 @@
           "description": "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted.",
           "x-contract": "stable"
         },
+        "staging_timings": {
+          "$ref": "#/$defs/StagingTimings",
+          "x-contract": "diagnostic"
+        },
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
           "type": "boolean",
@@ -6209,6 +6216,82 @@
       "required": [
         "operation",
         "error"
+      ],
+      "type": "object"
+    },
+    "StagingPhaseTiming": {
+      "properties": {
+        "calls": {
+          "type": "integer"
+        },
+        "expired": {
+          "type": "integer"
+        },
+        "failures": {
+          "type": "integer"
+        },
+        "http_4xx": {
+          "type": "integer"
+        },
+        "http_5xx": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "calls",
+        "seconds",
+        "failures"
+      ],
+      "type": "object"
+    },
+    "StagingTimings": {
+      "properties": {
+        "cache_hits": {
+          "type": "integer"
+        },
+        "cache_misses": {
+          "type": "integer"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "evicted": {
+          "type": "integer"
+        },
+        "phases": {
+          "items": {
+            "$ref": "#/$defs/StagingPhaseTiming"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "started_at",
+        "elapsed_seconds",
+        "cache_hits",
+        "cache_misses",
+        "evicted",
+        "phases"
       ],
       "type": "object"
     },

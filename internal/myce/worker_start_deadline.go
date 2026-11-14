@@ -124,7 +124,7 @@ func (w Worker) authorizeStart(j Job, session string, receiptDirs ...string) err
 		OK                       bool     `json:"ok"`
 		StartGate                string   `json:"start_gate"`
 	}
-	requested, err := w.controlHandshake("/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply)
+	requested, err := w.controlHandshake("/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, StagingTimings: j.StagingTimings, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}

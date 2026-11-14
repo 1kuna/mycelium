@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,9 +73,19 @@ func TestHealthIncidentLaunchRefusalReplay(t *testing.T) {
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
-				// Exact replay must never be a second refusal.
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
+				// Exact replay must never be a second refusal. #1576 keeps
+				// prelaunch capacity refusals queued, so their released copy
+				// is stale rather than a replay of a terminal completion.
+				replayErr := q.Complete(r)
+				if cause != nil && cause.Class == launchRefused && !started {
+					if !errors.Is(replayErr, ErrStale) {
+						t.Fatalf("prelaunch replay: %v; want stale execution", replayErr)
+					}
+					if got := job(t, q, assigned.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+						t.Fatal("prelaunch refusal spent the loss budget", got)
+					}
+				} else if replayErr != nil {
+					t.Fatal(replayErr)
 				}
 			}
 			for range 3 {

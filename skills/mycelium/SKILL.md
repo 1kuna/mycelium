@@ -284,7 +284,10 @@ can't submit ahead.
   same key returns that failed job (`submission_reused`), and `myce resume` only
   resumes paused jobs, so submit the repeat with a new `--key`.
 - **Waiting:** read `myce status JOB_ID` once. Its line gives one reason and one
-  `next:` action (`--history` adds the evidence). Fix what you authored, or record the owner and
+  `next:` action (`--history` adds the evidence). On releases with staging phase
+  telemetry, `myce status JOB_ID --history --json` retains `staging_timings` per
+  attempt: cache hits/misses and phase calls/seconds/failures. Phases nest and
+  can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A hold with `runs_now_on` names platforms that would run the job now: add

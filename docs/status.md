@@ -26,6 +26,36 @@ and `myce logs JOB_ID` prints its output.
   main `execution_evidence` of `may_have_run` or `unknown`). False means no
   attempt's command began, so a resubmission cannot repeat this job's work.
 
+`myce status JOB_ID --history` prints `staging_timings` for the current attempt
+and each retained outcome; `--json` carries the same fixed phase counters.
+The worker's `started_at` is its first preparation call, `completed_at` is the
+actual inputs-staged completion, even when a later retry consumes it. Compare
+with `assigned_at` for dispatch/preparation delay, allowing for queue/worker clock
+skew. Durations use the injected worker clock (monotonic in production).
+
+Phases cover preflight/device checks, root metadata, extension/environment setup,
+shared inputs, compiler acquisition and file preparation. Nested file phases
+separate disk-budget admission/reclaim, cache and collection-lock waits, local
+lookup (including hashing), eviction/space checks, victim presence checks,
+blob HEAD requests, GET response headers (including server authorization,
+queue wait and server verification), body download/local write, verification,
+cache sync/publication, private work-directory placement, NAS inputs and final
+work-directory sync/publication. Cache hits, misses and evicted copies are
+counters; phase `calls`, `seconds` and `failures` include failed operations.
+HTTP failures also count 4xx, 5xx and expired (410) responses.
+They aggregate within an exact attempt, without file names or payload data.
+A failed lookup can be an ordinary cache miss, not a staging failure.
+
+Phases nest: verification is inside cache lookup, victim/HEAD checks inside
+eviction, and all file phases inside `files`. Concurrent work can overlap.
+Do not sum nested counters or call the whole interval network transfer time.
+Unmeasured remainder includes dispatch, retries between preparation calls and
+uninstrumented local setup; headers do not split queue-internal work. Environment
+or checkpoint preparation after inputs-staged belongs to the later launch
+interval. Legacy attempts have no phase evidence; timings never change scheduling. During
+a rolling upgrade, workers retain timings locally and send them only after the
+queue advertises staging phase support on its existing worker replies.
+
 The rest of this page is a field-by-field reference.
 
 With the worker/queue release containing #871's finalization correction, a

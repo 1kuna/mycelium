@@ -109,7 +109,9 @@ func IdentifyOpenFile(ctx context.Context, f *os.File) (FileRef, error) {
 	}
 	return FileRef{hex.EncodeToString(h.Sum(nil)), n}, nil
 }
-func verifyFile(ctx context.Context, path string, ref FileRef) error {
+func verifyFile(ctx context.Context, path string, ref FileRef) (verifyErr error) {
+	done := stagingMeasure(ctx, stageVerify)
+	defer func() { done(verifyErr) }()
 	if err := ref.validate(); err != nil {
 		return err
 	}
@@ -1118,7 +1120,9 @@ func (c Client) HasFile(ctx context.Context, ref FileRef) error {
 	return c.hasFile(ctx, ref, "")
 }
 
-func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error {
+func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) (headErr error) {
+	done := stagingMeasure(ctx, stageBlobHead)
+	defer func() { done(headErr) }()
 	if err := ref.validate(); err != nil {
 		return err
 	}
@@ -1449,7 +1453,13 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (sta
 		headers["Range"] = fmt.Sprintf("bytes=%d-", offset)
 	}
 	traceSharedInput(ctx, "headers", "store")
+	headersDone := stagingMeasure(ctx, stageBlobHeaders)
 	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
+	headerErr := err
+	if headerErr == nil && res.StatusCode != 200 && res.StatusCode != 206 {
+		headerErr = &HTTPError{Status: res.StatusCode}
+	}
+	headersDone(headerErr)
 	if err != nil {
 		return err
 	}
@@ -1487,11 +1497,16 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) (sta
 		t.mu.Unlock()
 		output, input = sharedInputWriter{ctx, f}, sharedInputReader{ctx, res.Body, "store"}
 	}
+	downloadDone := stagingMeasure(ctx, stageDownload)
 	n, copyErr := io.Copy(fileDownloadWriter{output}, io.LimitReader(contextReader{ctx, input}, ref.SizeBytes-offset+1))
+	downloadDone(copyErr)
 	copyErr = tracedSharedCopyError(ctx, copyErr)
 	traceSharedInput(ctx, "sync", "cache")
 	err = copyErr
-	if syncErr := f.Sync(); syncErr != nil {
+	syncDone := stagingMeasure(ctx, stageCachePublish)
+	syncErr := f.Sync()
+	syncDone(syncErr)
+	if syncErr != nil {
 		err = fmt.Errorf("%w: %w", errFileTransferLocal, tracedSharedError(ctx, syncErr))
 	}
 	if err != nil {

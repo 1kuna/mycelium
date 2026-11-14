@@ -444,6 +444,28 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
 	}
+	// Early admission refusals can be checked without an opened attempt store.
+	var recorder *stagingRecorder
+	if s != nil && w.Clock != nil {
+		if s.staging == nil || s.stagingKey != (attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}) {
+			s.stagingKey = attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}
+			value := StagingTimings{StartedAt: w.Clock.Now()}
+			if j.StagingTimings != nil {
+				value = *j.StagingTimings
+			}
+			s.staging = &stagingRecorder{clock: w.Clock, value: value}
+		}
+		recorder = s.staging
+	}
+	ctx = context.WithValue(ctx, stagingRecorderKey{}, recorder)
+	defer func() {
+		snapshot := recorder.snapshot()
+		if s != nil && s.state.Job != nil {
+			s.state.Job.StagingTimings = snapshot
+		}
+	}()
+	phaseDone := stagingMeasure(ctx, stagePreflight)
+	defer func() { phaseDone(startErr) }()
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -461,10 +483,14 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
 		return nil, err
 	}
+	phaseDone(nil)
+	phaseDone = stagingMeasure(ctx, stageRoots)
 	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
 	if reason := w.storageRootReason(&j); reason != "" {
 		return nil, s.startFailure(j, launchRefused, errors.New(reason))
 	}
+	phaseDone(nil)
+	phaseDone = stagingMeasure(ctx, stageExtensionEnvironment)
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -478,6 +504,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := s.warnNativeIsolation(&j); err != nil {
 		return nil, err
 	}
+	phaseDone(nil)
+	phaseDone = stagingMeasure(ctx, stageSharedInputs)
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(context.WithValue(context.WithValue(ctx, sharedInputOwnerKey{}, s), inputTransferRecoveryKey{}, &s.inputTransferRecovering), j)
 	if sharedErr != nil {
 		if errors.Is(sharedErr, errCheckpointIOPending) {
@@ -485,11 +513,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 		return nil, w.stagingFailure(s, j, sharedErr)
 	}
+	phaseDone(nil)
+	phaseDone = stagingMeasure(ctx, stageCompiler)
 	compilerPath, compilerRelease, compilerErr := w.compilerCache.acquire(ctx, s, j)
 	if compilerErr != nil {
 		sharedRelease()
 		return nil, compilerErr
 	}
+	phaseDone(nil)
+	phaseDone = func(error) {}
 	inputRelease := sharedRelease
 	sharedRelease = func() { compilerRelease(); inputRelease() }
 	s.sharedRelease = sharedRelease
@@ -511,11 +543,17 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		if s.inputStaging != nil {
 			defer s.inputStaging.Store(false)
 		}
-		return captureStagedInputs(w.Clock, func() (string, error) {
+		finish := stagingMeasure(ctx, stageFiles)
+		staged, err := captureStagedInputs(w.Clock, func() (string, error) {
 			transferCtx := context.WithValue(ctx, inputTransferRecoveryKey{}, &s.inputTransferRecovering)
 			err := w.prepareExtensionFilesContext(transferCtx, &value, s.dir)
 			return value.Spec.Run.Workdir, err
 		})
+		finish(err)
+		if err == nil {
+			recorder.complete(staged.at)
+		}
+		return staged, err
 	}, false)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -526,6 +564,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		}
 		return nil, w.stagingFailure(s, j, err)
 	}
+	j.StagingTimings = recorder.snapshot()
 	j.Spec.Run.Workdir = staged.directory
 	// Timestamp the actual asynchronous completion, not the retry that
 	// consumes it. Preserve the first completion across later start retries.
@@ -1042,7 +1081,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 			p.mu.Unlock()
 		}
 	}
-	result := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt), InputsStagedAt: j.InputsStagedAt, StagingTimings: s.staging.snapshot(), Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true
@@ -1201,6 +1240,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 }
 func (w Worker) Run(stop context.Context) error {
 	w.Client.faultWire = &atomic.Bool{}
+	w.Client.stagingWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop
