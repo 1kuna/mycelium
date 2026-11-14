@@ -40,13 +40,10 @@ func storageCheckError(root, operation string, elapsed time.Duration, err error)
 		return nil
 	}
 	detail := StoragePreflightFailure{Root: root, Operation: operation, Elapsed: elapsed}
-	if detail.Root == "" {
-		detail.Root = "nas"
-	}
 	var prior *storagePreflightError
 	if errors.As(err, &prior) {
 		detail = prior.detail
-		if root != "" {
+		if detail.Root == "" {
 			detail.Root = root
 		}
 	} else {
@@ -120,7 +117,7 @@ func preflightFleetStorage(ctx context.Context, c ServiceConfig, command func(co
 	}
 	started = time.Now()
 	if err := prepareInstallNASMode(ctx, c, command, true); err != nil {
-		return storageCheckError("", "filesystem", time.Since(started), err)
+		return storageCheckError("nas", "filesystem", time.Since(started), err)
 	}
 	return nil
 }
