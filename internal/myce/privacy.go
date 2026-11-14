@@ -183,6 +183,8 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
+		case j.DiagnosticCode == deadEndWait:
+			j.Reason = j.Finding.What
 		case strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:"):
 			// Queue-owned exhaustion must precede the last attempt's diagnostic.
 			// Never retain its suffix, which may contain private worker errors.

@@ -77,6 +77,9 @@ func terminalJobFinding(stored *Job) *JobFinding {
 }
 
 func failedJobFinding(j *Job, raw string) *JobFinding {
+	if j.DiagnosticCode == deadEndWait {
+		return deadEndFinding(raw)
+	}
 	cause := j.ExecutionCause
 	if f := checkpointStorageFinding(j); f != nil {
 		return f
@@ -130,6 +133,30 @@ func failedJobFinding(j *Job, raw string) *JobFinding {
 	return &JobFinding{"cause_unknown", findingOwnerUnknown,
 		"The attempt failed, but Mycelium recorded no exit code, signal, guard stop or infrastructure fault for it.",
 		"read the job's log (`myce logs`); to keep reports from the next failure, resubmit with `diagnostics` declared."}
+}
+
+// Match only queue-owned categories: raw reasons may include authored names,
+// worker errors and paths. Neither those bytes nor arbitrary remedies escape.
+func deadEndFinding(raw string) *JobFinding {
+	raw = strings.ToLower(raw)
+	what, action := "No known host can run the job's required preparation.", "provide a compatible builder or change the environment recipe, then resubmit."
+	switch {
+	case strings.Contains(raw, "no registered implementation"):
+		what, action = "No registered implementation matches a known host.", "register a variant for a compatible target, then resubmit."
+	case strings.Contains(raw, "declares no native check"), strings.Contains(raw, "declares no native qualification check"):
+		what, action = "The implementation declares no native qualification check.", "add a check command and baseline, register a new version, then resubmit."
+	case strings.Contains(raw, "declares no native baseline"), strings.Contains(raw, "declares no native qualification baseline"):
+		what, action = "The implementation declares no native qualification baseline.", "add the required baseline, register a new version, then resubmit."
+	case strings.Contains(raw, "no known host can fit the native check"):
+		what, action = "No known host can fit the native check's resource requirements.", "reduce its resource requirements or provide a capable host, then resubmit."
+	case strings.Contains(raw, "the native check"), strings.Contains(raw, "native qualification check failed"):
+		what, action = "The implementation's native qualification check failed.", "fix the implementation or its check, register a new version, then resubmit."
+	case strings.Contains(raw, "environment preparation failed"):
+		what, action = "Environment preparation failed on every compatible builder.", "fix the environment recipe or repair a builder, then resubmit."
+	case strings.Contains(raw, "no host can size"), strings.Contains(raw, "out of memory"), strings.Contains(raw, "no known host can fit"):
+		what, action = "No known host can fit the job's memory requirement.", "reduce the workload's memory use or provide a host with enough memory, then resubmit."
+	}
+	return &JobFinding{deadEndWait, findingOwnerJob, what, action}
 }
 
 func checkpointStorageFinding(j *Job) *JobFinding {

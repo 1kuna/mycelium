@@ -500,10 +500,10 @@ protects builds and running jobs against eviction.
 
 From r6.16, a non-transient build failure excludes only that worker, target and
 recipe hash. The same job stays queued and runs on another compatible worker.
-When every freshly observed compatible worker has failed, status reports
-`no_buildable_worker`; unknown/offline capacity is not a proven failure. The job
-stays queued until repaired, cancelled, or an existing `give_up_at`/production
-start deadline expires (`deadline` remains an ordering hint).
+If no known host can prepare the environment, or every compatible builder has
+deterministically failed, the job fails with `dead_end_wait` and one finding/action.
+Unknown/offline capacity is not a proven failure and remains a wait. Repair a
+builder or the recipe, then resubmit with a new key; terminal jobs do not reopen.
 
 `myce status --sections machines` shows each failed hash, worker, exact
 OS/architecture/platform target, failure and `log_reference` (`myce logs ID`).
@@ -515,7 +515,7 @@ permit another build. After repairing a worker, explicitly request a fresh build
 myce env retry WORKER HASH OS ARCH PLATFORM
 ```
 
-The retry is scoped to that worker and target, retains the queued job/key, and
+The retry is scoped to that worker and target, preserves still-queued demand, and
 never resets native qualification. Old attempt receipts cannot undo it. Transient
 network failures and disk-headroom refusals retain their recorded retry holds;
 planned stops pause preparation and resume through normal admission.

@@ -212,5 +212,8 @@ func (q *Queue) deadEndReason(j *Job) string {
 	if why := q.extensionDeadEnd(j); why != "" {
 		return why
 	}
+	if why := q.environmentDeadEnd(j); why != "" {
+		return why
+	}
 	return q.memorySizingDeadEnd(j)
 }

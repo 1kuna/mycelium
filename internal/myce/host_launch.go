@@ -209,7 +209,9 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			if p.Started {
 				allowed = q.placementDemandAllowed(j, target)
 			} else {
-				allowed = q.placementAllowed(j, target)
+				// A locked environment can build before useful work fits RAM.
+				// Host, device, reservation and core launch fences still apply below.
+				allowed = q.structuralDemandPolicy(j, target) && q.diskHeadroomReason(j, target) == ""
 			}
 			// A delayed offer must retain live demand for this exact frozen
 			// target/recipe, even before another heartbeat withdraws it.

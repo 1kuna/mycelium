@@ -150,3 +150,25 @@ func TestDeadlineGuidanceNonResumableSaturatedHost(t *testing.T) {
 		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
 	}
 }
+
+func TestDeadlineGuidanceTextOnlyDeadlineClass(t *testing.T) {
+	q, _ := fixture(t)
+	for _, class := range []string{"experiment", "test", "production", "deadline"} {
+		t.Run(class, func(t *testing.T) {
+			s := spec("experiment")
+			s.Class, s.Priority = class, ""
+			if class == "deadline" {
+				due := q.clock.Now().Add(time.Hour)
+				s.Deadline = &due
+			}
+			j := submit(t, q, s)
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := DeadlineGuidanceText(got); (text != "") != (class == "deadline") {
+				t.Fatalf("class=%s advice=%q", class, text)
+			}
+		})
+	}
+}

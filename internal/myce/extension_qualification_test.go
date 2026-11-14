@@ -549,3 +549,33 @@ func TestExtensionQualificationProgressesThroughRestartAndBusyHost(t *testing.T)
 	got := job(t, q, retried.ID)
 	t.Fatal("check did not start once the host had room", got.State, got.Reason)
 }
+
+func TestExtensionQualificationNoCapableHostFailsFast(t *testing.T) {
+	for _, missing := range []string{"target", "check", "baseline", "capacity"} {
+		t.Run(missing, func(t *testing.T) {
+			e := compositionExtension(t, false)
+			switch missing {
+			case "target":
+				e.Variants[0].Target.OS = "windows"
+			case "check":
+				e.Variants[0].Check, e.Variants[0].Baselines = nil, nil
+			case "baseline":
+				e.Variants[0].Baselines = nil
+			case "capacity":
+				e.Variants[0].Needs.HostMemoryGB = 1e6
+			}
+			e = freezeComposition(t, e)
+			q, w := prepareTestWorker(t, e)
+			j := submit(t, q, Spec{Name: "demand", Project: "test", Extension: extensionKey(e)})
+			check(t, q, w.Machine, nil)
+			q.clock.(*fakeClock).Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil || got.State != "failed" || got.Attempt != 0 || got.Finding == nil || got.Finding.Code != deadEndWait || strings.Count(JobReason(got), "Next:") != 1 {
+				t.Fatalf("missing immediate check finding: state=%s reason=%s err=%v", got.State, got.Reason, err)
+			}
+		})
+	}
+}
