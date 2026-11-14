@@ -395,6 +395,10 @@ func TestLocalFirstPendingMirrorPinsAndCheckpointCollection(t *testing.T) {
 	if err := q.Complete(result(&j, true)); err != nil {
 		t.Fatal(err)
 	}
+	plan, err := q.PlanFileRelease(context.Background(), FileReleaseSelection{Project: j.Spec.Project, Jobs: []string{j.ID}})
+	if err != nil || len(plan.Jobs) != 1 || !contains(plan.Jobs[0].Blockers, "checkpoint_retention") {
+		t.Fatal("early explicit release bypassed checkpoint grace", plan, err)
+	}
 	request := AttemptFilesRequest{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Checkpoint: true}
 	clock.Advance(DefaultCheckpointExpiryGrace + time.Hour)
 	if err := q.update(func() error { q.maintainFileExpiry(); return nil }); err != nil {

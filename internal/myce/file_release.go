@@ -177,8 +177,11 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		if q.jobReleasePending(j) {
 			item.Blockers = append(item.Blockers, "physical_custody")
 		}
-		if deliveryPending(j) || j.Spec.localFirst() {
+		if deliveryPending(j) || checkpointMirrorsPending(j) {
 			item.Blockers = append(item.Blockers, "pending_delivery")
+		}
+		if j.Spec.localFirst() && !j.FilesExpired && (j.FinishedAt == nil || q.clock.Now().Before(j.FinishedAt.Add(q.jobFileRetention(j)))) {
+			item.Blockers = append(item.Blockers, "checkpoint_retention")
 		}
 		if d := j.Delivery; d != nil {
 			item.DeliveryState, item.DeliveryManifest = d.State, d.ManifestSHA256

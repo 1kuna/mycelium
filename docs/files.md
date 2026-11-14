@@ -542,7 +542,8 @@ outside this protocol have **no enforced disk bound**. Pending/failed NAS mirror
 retain queue custody beyond ordinary expiry; they can eventually fill storage
 and backpressure saves. Neither retained history nor in-flight bytes are silently
 pruned. Settled, physically released checkpoints retain the existing 72-hour
-checkpoint grace (and any longer configured queue file retention), then use the
+checkpoint grace (and any longer configured queue file retention); early explicit
+file release reports `checkpoint_retention`. They then use the
 existing collection/expiry paths. Never downgrade with unresolved local-first
 attempts or mirror custody.
 
