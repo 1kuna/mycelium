@@ -150,10 +150,10 @@ func TestEfficiencyPredictionAndSuspectAttempts(t *testing.T) {
 	if len(errors) != 1 || *errors[0].HostErrorGB != 10 || *errors[0].DurationErrorSeconds != 10 || errors[0].Basis != "exploratory" {
 		t.Fatalf("errors=%+v", errors)
 	}
-	// A completed program can teach prediction error without another live job.
+	// Completed comparisons remain diagnostics; the retired predictor creates no alerts.
 	_, signals := efficiencySignals(&EfficiencyReport{At: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC), Predictions: errors}, nil)
-	if len(signals) != 2 || errors[0].Work == "" {
-		t.Fatalf("completed prediction facts did not reach the adaptive path: %+v", signals)
+	if len(signals) != 0 || errors[0].Work == "" {
+		t.Fatalf("diagnostic comparison created retired prediction alerts: %+v", signals)
 	}
 	wasted := efficiencyWasted(j)
 	if len(wasted) != 1 || wasted[0].Suspect == nil || !*wasted[0].Suspect || wasted[0].Kind != "oom" {
