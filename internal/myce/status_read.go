@@ -16,12 +16,62 @@ import (
 
 type jobSnapshotCache struct {
 	hitCost       time.Duration
-	mu            sync.Mutex // Completed response metadata only; never held during projection.
-	refresh       sync.Mutex // Never acquired by a queue writer or a cache hit.
-	data          string     // Immutable public JSON; each caller decodes its own copy.
-	captured      time.Time  // When the committed inputs behind data were published.
+	mu            sync.Mutex        // Completed response metadata only; never held during projection.
+	refresh       sync.Mutex        // Never acquired by a queue writer or a cache hit.
+	data          string            // Immutable public JSON for response allocation accounting.
+	reply         *jobSnapshotReply // JSON-normalized immutable reply and sparse copy plan.
+	captured      time.Time         // When the committed inputs behind data were published.
 	expires       time.Time
 	dependsOnJobs bool // jobSnapshotsMu; queued guidance and descendant custody use other jobs.
+}
+
+// A normalized reply is immutable. Compile its nonempty mutable field paths
+// once, so hits neither decode JSON nor inspect every nil field in Job/Spec.
+// Nested pointers, maps and slices use the existing detached observation copy.
+// Value structs can be copied in place, without allocating another whole Spec.
+type jobSnapshotReply struct {
+	data   string
+	once   sync.Once
+	job    *Job
+	fields [][]int
+	err    error
+}
+
+func (r *jobSnapshotReply) clone() (*Job, error) {
+	r.once.Do(func() {
+		// Decode only after the caller has passed response allocation checks.
+		// Preserve the existing wire normalization and cache even a cold refusal.
+		r.job = &Job{}
+		r.err = json.Unmarshal([]byte(r.data), r.job)
+		if r.err != nil {
+			return
+		}
+		var visit func(reflect.Value, []int)
+		visit = func(v reflect.Value, path []int) {
+			for _, i := range observationPlan(v.Type()).fields {
+				field := v.Field(i)
+				if field.IsZero() {
+					continue
+				}
+				next := append(append([]int(nil), path...), i)
+				if field.Kind() == reflect.Struct {
+					visit(field, next)
+				} else {
+					r.fields = append(r.fields, next)
+				}
+			}
+		}
+		visit(reflect.ValueOf(r.job).Elem(), nil)
+	})
+	if r.err != nil {
+		return nil, r.err
+	}
+	out := *r.job
+	source, target := reflect.ValueOf(r.job).Elem(), reflect.ValueOf(&out).Elem()
+	for _, path := range r.fields {
+		target.FieldByIndex(path).Set(copyObservationValue(source.FieldByIndex(path)))
+	}
+	return &out, nil
 }
 
 // q.mu is held. Defer cache removal until the matching immutable capture is
@@ -635,7 +685,7 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 	}
 	q.jobSnapshotsMu.Unlock()
 	entry.mu.Lock()
-	data, captured, hit := entry.data, entry.captured, entry.data != "" && q.clock.Now().Before(entry.expires)
+	data, cached, captured, hit := entry.data, entry.reply, entry.captured, entry.reply != nil && q.clock.Now().Before(entry.expires)
 	entry.mu.Unlock()
 	if !hit {
 		// Published job captures own no live queue work. Physical allocation
@@ -650,7 +700,7 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 			return nil, time.Time{}, false, lockErr
 		}
 		entry.mu.Lock()
-		data, captured, hit = entry.data, entry.captured, entry.data != "" && q.clock.Now().Before(entry.expires)
+		data, cached, captured, hit = entry.data, entry.reply, entry.captured, entry.reply != nil && q.clock.Now().Before(entry.expires)
 		entry.mu.Unlock()
 		if !hit {
 			now := q.clock.Now()
@@ -659,16 +709,17 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 			if captureErr == nil {
 				encoded, captureErr = json.Marshal(out)
 			}
+
 			q.jobSnapshotsMu.Lock()
 			valid := q.jobSnapshots[id] == entry
 			if captureErr == nil {
 				data, captured = string(encoded), at
+				cached = &jobSnapshotReply{data: data}
 			}
 			if valid && captureErr == nil {
 				entry.dependsOnJobs = out.State == "queued" || out.FanOut != nil || out.CancelledAt != nil
 				entry.mu.Lock()
-				data = string(encoded)
-				entry.data, entry.captured, entry.expires = data, captured, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
+				entry.data, entry.reply, entry.captured, entry.expires = data, cached, captured, q.clock.Now().Add(q.observationCacheBudget.lease(q.clock.Now().Sub(now), entry.hitCost))
 				entry.mu.Unlock()
 			}
 			q.jobSnapshotsMu.Unlock()
@@ -692,8 +743,10 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 		}
 	}
 	started := q.clock.Now()
-	var out Job
-	err = json.Unmarshal([]byte(data), &out)
+	// The resident reply is immutable. Copy only mutable memory; strings and
+	// other values can be reused without validating and decoding JSON on every
+	// cache hit. The copy runs outside all cache and queue locks.
+	out, err := cached.clone()
 	// This response belongs to its captured committed generation. A later
 	// commit invalidates future cache lookups, never restarts this request.
 	if hit {
@@ -701,7 +754,7 @@ func (q *Queue) jobSnapshotReceipt(id string, contexts ...context.Context) (*Job
 		entry.hitCost = q.clock.Now().Sub(started)
 		entry.mu.Unlock()
 	}
-	return &out, captured, hit, err
+	return out, captured, hit, err
 }
 
 func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
