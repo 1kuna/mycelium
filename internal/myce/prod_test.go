@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -543,4 +545,51 @@ func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireState(t, q, second.ID, "running")
+}
+
+// Start latency is the nanosecond wall-time difference exposed over JSON,
+// including when the injected clock also carries a monotonic reading.
+func TestProductionStartLatencyTimestampPrecision(t *testing.T) {
+	for _, dependency := range []bool{false, true} {
+		t.Run(fmt.Sprint("dependency=", dependency), func(t *testing.T) {
+			q, c := fixture(t)
+			// Capture once; all subsequent time is injected and advanced exactly.
+			c.now = time.Now()
+			if c.now == c.now.Round(0) {
+				t.Fatal("fixture requires a monotonic clock reading")
+			}
+			j := submit(t, q, spec("production"))
+			assigned := check(t, q, machine("one", "fake"), nil).Job
+			const elapsed = 2203448292 * time.Nanosecond
+			if dependency {
+				ready := c.now.Add(123456789 * time.Nanosecond)
+				q.s.Jobs[j.ID].Dependency = &PieceBinding{ReadyAt: &ready}
+			}
+			c.Advance(elapsed)
+			if err := q.Started(result(assigned, true)); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, j.ID)
+			if got.StartedAt == nil || *got.StartedAt != got.StartedAt.Round(0) {
+				t.Fatal("start timestamp must use wall time without a monotonic reading")
+			}
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire Job
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatal(err)
+			}
+			since := wire.Queued
+			want := elapsed
+			if dependency {
+				since = *wire.Dependency.ReadyAt
+				want -= 123456789 * time.Nanosecond
+			}
+			if wire.StartedAt.Sub(since) != want || wire.StartLatencySeconds != want.Seconds() {
+				t.Fatalf("wire timestamp/latency precision disagrees: %s; want %s", data, want)
+			}
+		})
+	}
 }

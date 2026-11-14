@@ -2967,7 +2967,9 @@ func cloneMachine(m *Machine) Machine {
 func (q *Queue) markStarted(j *Job) {
 	q.touchJob(j.ID)
 	if j.StartedAt == nil {
-		now := q.clock.Now()
+		// API timestamps carry wall time at nanosecond precision, but no
+		// monotonic reading. Use that same clock domain for start latency.
+		now := q.clock.Now().Round(0)
 		j.StartedAt = &now
 		// The resume has its place back. An assignment refused before it
 		// started keeps it.
@@ -2989,7 +2991,7 @@ func (q *Queue) markStarted(j *Job) {
 		if j.Dependency != nil && j.Dependency.ReadyAt != nil {
 			since = *j.Dependency.ReadyAt
 		}
-		j.StartLatencySeconds = now.Sub(since).Seconds()
+		j.StartLatencySeconds = now.Sub(since.Round(0)).Seconds()
 		if j.Spec.Priority == "production" {
 			q.s.ProductionStarts = append(q.s.ProductionStarts, ProductionStart{At: now, Job: j.ID, Seconds: j.StartLatencySeconds})
 		}
