@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// Opt in through a header so previous queues keep accepting batch-v1 JSON.
+const completionCollectHeader = "X-Myce-Collect-Completion"
+
 // CompletionState is persisted with the job in the queue's SQLite transaction.
 // DeliveryID is frozen before invoking a receiver: interrupted delivery always
 // reuses it, including from a different local receipt or observer process.

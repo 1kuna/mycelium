@@ -777,6 +777,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	fileStoreSubmissionHeaders(ctx, req)
+	if wait, ok := in.(WaitRequest); ok && wait.Collect {
+		req.Header.Set(completionCollectHeader, "1")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
 	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" && checkin.period > 0 {

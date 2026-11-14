@@ -404,11 +404,14 @@ class Client:
             raise failure from None
 
     def _call(self, method: str, path: str, body: Any = None,
-              *, timeout: float | None = None, raw: bool = False, retry: bool = True) -> Any:
+              *, timeout: float | None = None, raw: bool = False, retry: bool = True,
+              collect_completion: bool = False) -> Any:
         data = None if body is None else json.dumps(body, default=_json_default, allow_nan=False).encode()
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json",
             "User-Agent": USER_AGENT})
+        if collect_completion:
+            request.add_header("X-Myce-Collect-Completion", "1")
         budget = self.timeout if timeout is None else timeout
         end = None if budget is None else self._clock.monotonic() + budget
         def attempt(remaining: float | None) -> Any:
@@ -857,7 +860,10 @@ class Client:
             ref = (job.get("output_refs") or {}).get(artifact)
         if ref is None:
             raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
-        return self._download_ref(ref, destination)
+        result = self._download_ref(ref, destination)
+        if recovered_result_id is None and "completion" in job:
+            self._call("POST", f"/api/jobs/{quote(job['id'], safe='')}/completion", {"operation": "collect"})
+        return result
 
     def download_results(self, job: str | Mapping[str, Any], destination: str | Path) -> dict[str, Path]:
         """Download every accepted output of a succeeded job into a directory.
@@ -1052,7 +1058,7 @@ class Client:
     def _wait_batch(self, job_ids, after, seconds, timeout):
         try:
             reply = self._call("POST", "/api/wait", {"ids": job_ids, "after": after,
-                               "seconds": seconds, "collect": True}, timeout=timeout, retry=False, raw=True)
+                               "seconds": seconds}, timeout=timeout, retry=False, raw=True, collect_completion=True)
         except APIError as error:
             if error.status == 404 and not error.code or error.status == 405:
                 raise APIError(error.status, json.dumps({

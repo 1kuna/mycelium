@@ -317,7 +317,7 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	adoptedReceipt := filepath.Join(other, ".mycelium", "receipts", profileHash([]string{"test", "missing"}), "receipt.json")
 	wait(t, ctx, func() bool {
 		var saved profileReceipt
-		return readProfileJSON(adoptedReceipt, &saved) == nil && saved.DeliveryStatus == "delivered" && saved.SubmissionReused
+		return readProfileJSON(adoptedReceipt, &saved) == nil && saved.DeliveryStatus == "suppressed" && saved.SubmissionReused
 	})
 	notifications, err = os.ReadFile(notificationFile)
 	if err != nil {
@@ -331,8 +331,10 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		}
 		events = append(events, event)
 	}
-	if len(events) != 2 || events[0].DeliveryID == events[1].DeliveryID || events[0].JobID != events[1].JobID {
-		t.Fatal("per-receipt delivery identity", events)
+	// Completion belongs to the queue job, not each checkout's receipt. This
+	// job was already delivered and collected before cross-root adoption.
+	if len(events) != 1 || events[0].DeliveryID != n.DeliveryID || events[0].JobID != r.JobID {
+		t.Fatal("cross-root replay repeated a collected completion", events)
 	}
 	unconfigured, err := invoke("--key", "no-notifier", "--", "literal")
 	if err != nil || unconfigured.Delivery != "not_configured" {
@@ -406,7 +408,13 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		receipt := profileReceipt{Key: "key", Project: "test", JobID: r.JobID, Status: "running", Observation: "armed", Delivery: "armed"}
+		// Rejection needs a fresh, unobserved job; the earlier job was already
+		// delivered and collected, so its notifier must no longer run.
+		fresh, err := d.Client().Submit(context.Background(), myce.Spec{Name: "unobserved", Project: "test", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: myce.Platform{Required: []string{"cpu"}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt := profileReceipt{Key: "key", Project: "test", JobID: fresh.ID, Status: "running", Observation: "armed", Delivery: "armed"}
 		if err := observeProfile(context.Background(), d.Client(), dir, receipt, profileObserver{Notify: hook}); err == nil {
 			t.Fatal("delivery rejection hidden")
 		}

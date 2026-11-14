@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -158,5 +160,33 @@ func TestCompletionCollectionRollbackAndPendingWait(t *testing.T) {
 	clock.Advance(time.Second)
 	if !completionChange(t, q, j.ID, "claim", "after-rollback").Allowed {
 		t.Fatal("failed collection lost completion")
+	}
+}
+
+func TestCompletionForegroundWaitKeepsPreviousWire(t *testing.T) {
+	// Previous queues reject unknown JSON fields. Collection opts in through
+	// a header they can ignore, without an extra request or per-job read loop.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var legacy struct {
+			IDs     []string          `json:"ids"`
+			After   map[string]uint64 `json:"after,omitempty"`
+			Seconds int               `json:"seconds,omitempty"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&legacy); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if r.Header.Get(completionCollectHeader) != "1" {
+			t.Error("foreground collection header missing")
+		}
+		_ = json.NewEncoder(w).Encode(WaitReply{Jobs: []WaitState{{ID: legacy.IDs[0], State: "succeeded", Revision: 1}}})
+	}))
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "fixture"}
+	if _, err := c.WaitBatchCollected(context.Background(), []string{"job"}, nil, 0); err != nil {
+		t.Fatal(err)
 	}
 }
