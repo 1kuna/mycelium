@@ -25,6 +25,37 @@ type requestSpan struct {
 	writerWait time.Duration
 	lastUnlock time.Time
 	measured   bool
+	submit     *submitRequestTiming
+}
+
+// Opt-in burst attribution. Wall timestamps are observations, never inputs to
+// admission or scheduling. Durations are disjoint; work is the remainder.
+type submitRequestTiming struct {
+	Name                                                                string
+	Started, Finished                                                   time.Time
+	Admission, Decode, Wait, Hold, SQLiteCommit, Response, EvidenceWait time.Duration
+}
+
+func submitPhase(ctx context.Context, phase string) func() {
+	s := spanFrom(ctx)
+	if s == nil || s.submit == nil {
+		return func() {}
+	}
+	started := time.Now()
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch phase {
+		case "admission":
+			s.submit.Admission += time.Since(started)
+		case "decode":
+			s.submit.Decode += time.Since(started)
+		case "response":
+			s.submit.Response += time.Since(started)
+		case "evidence":
+			s.submit.EvidenceWait += time.Since(started)
+		}
+	}
 }
 
 func spanFrom(ctx context.Context) *requestSpan {
@@ -197,6 +228,9 @@ func (w *requestResponse) Flush() {
 func (q *Queue) measureRequests(next http.Handler, registered ...map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := &requestSpan{started: time.Now()}
+		if q.observeSubmit != nil && r.Method == http.MethodPost && r.URL.Path == "/api/jobs" {
+			s.submit = &submitRequestTiming{Started: s.started}
+		}
 		r = r.WithContext(context.WithValue(r.Context(), requestSpanKey{}, s))
 		response := &requestResponse{ResponseWriter: w}
 		defer func() {
@@ -205,7 +239,15 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			s.finished = true
 			wait, hold, lastUnlock, measured := s.wait, s.hold, s.lastUnlock, s.measured
 			writerWait := s.writerWait
+			var submit submitRequestTiming
+			if s.submit != nil {
+				submit = *s.submit
+				submit.Finished, submit.Wait, submit.Hold = ended, wait, hold
+			}
 			s.mu.Unlock()
+			if s.submit != nil {
+				q.observeSubmit(submit)
+			}
 			duration := ended.Sub(s.started)
 			route := "unmatched"
 			if len(registered) > 0 {
@@ -264,6 +306,11 @@ func unlockTimedRequest(ctx context.Context, mu sync.Locker, timing *queueUpdate
 	end := time.Now()
 	mu.Unlock()
 	s.observe(timing.mutexWait, end.Sub(timing.lockedAt), end)
+	if s.submit != nil {
+		s.mu.Lock()
+		s.submit.SQLiteCommit += timing.sqlCommit
+		s.mu.Unlock()
+	}
 	if timing.measureWriter {
 		s.mu.Lock()
 		if !s.finished {

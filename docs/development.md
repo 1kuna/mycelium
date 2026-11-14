@@ -836,6 +836,15 @@ simultaneous keyed parent submissions. Nearest-rank p99 is the maximum of 62
 samples; all acknowledgements must be below 500ms. A running production command
 spans the burst and six subsequent seconds; no attempt may incur a loss and
 sampled accepted-heartbeat age must stay below the normal 5s quiet threshold.
+The fixture explicitly selects production's asynchronous admission-wait evidence
+builder. The package's synchronous test default waits for concurrent captures
+to drain before returning, creating an acknowledgement barrier absent from the
+production runtime. Each `submit_phase` row attributes one request's admission
+(physical-memory budget), decode, queue lock wait, SQLite commit, response encode,
+post-commit evidence wait and remaining work. These durations partition server
+time; `lock_hold_ms` overlaps commit and work and must not be added again.
+Start/end offsets share the client's burst origin; transport and client decode
+are outside server time. Timing observers never drive scheduling decisions.
 The synthetic extension explicitly uses the supported unsandboxed mode; native
 sandbox qualification remains separate. No fleet connection or GPU is needed.
 The latency, heartbeat-age and loss thresholds live in the benchmark;
