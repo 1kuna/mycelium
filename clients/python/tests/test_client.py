@@ -692,8 +692,10 @@ print('queue accepted local generation', flush=True)
                                     capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             job = re.search(r'"job_id":"([^"]+)"', result.stdout)[1]
-            self.assertEqual(self.client.wait(job, timeout=30)["state"], "succeeded")
+            # Let the detached control deliver before foreground collection,
+            # which intentionally suppresses an automatic wake (#1630).
             self.wait_observers(home)
+            self.assertEqual(self.client.wait(job, timeout=30)["state"], "succeeded")
 
         submit(strip=True, key="wake-stripped")
         self.assertFalse(woken.exists(), woken.read_text() if woken.exists() else "")
