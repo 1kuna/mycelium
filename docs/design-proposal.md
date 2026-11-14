@@ -728,7 +728,10 @@ Shared-card memory growth uses fresh per-process device samples from check-ins
 (younger than ten seconds, using the injected clock). If the sum of each
 tenant's larger measured use or reservation, plus resident model charges,
 exceeds the card budget, stop the lowest tier; among equals choose the tenant
-most over its reservation. This safety stop may displace an equal tier. It
+most over its reservation. If unified-memory attribution instead becomes
+uncertain, prefer an unobservable tenant within the lowest tier, so another
+tenant's measured growth does not make it the victim of missing evidence.
+This safety stop may displace an equal tier. It
 retains normal checkpoint grace and exact-release custody and requeues without
 spending a failure budget. Each grower's measured peak × 1.25 becomes a durable
 device-memory floor for its next placement; running reservations stay fixed.
@@ -741,6 +744,12 @@ counter independently of cached actor reports. Slow actor log/result I/O must
 not hide fresh device evidence. This refresh retains the sensor's original
 timestamp; it cannot make a stalled sensor fresh or renew old host-memory
 credit.
+
+A successful complete CUDA process enumeration with no context belonging to
+the attempt reports zero device use, including during CPU-side imports and
+model preparation. Its full declared or learned device vector remains charged.
+Failed queries, listed N/A counters and missing PID inventory remain unknown;
+they do not become zero or extend the sensor freshness allowance.
 
 **Cards per job (MY-30).**
 `memory_gb` (declared or learned) decides the cards. Work one card of its host

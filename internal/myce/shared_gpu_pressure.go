@@ -44,6 +44,7 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			fanOut = fanOut || fanOutDeviceSharing(j)
 		}
 		used, over := 0.0, map[string]float64{}
+		unobserved := map[string]bool{}
 		growth := false
 		measured := true
 		uncertain, forecast := false, 0.0
@@ -53,7 +54,8 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			s, now := q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()
 			fresh := !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
 			measured = measured && fresh
-			uncertain = uncertain || unifiedCUDA(&card) && (!fresh && !unifiedDeviceSampleStarting(j, s, now) || s.exclusive)
+			unobserved[j.ID] = unifiedCUDA(&card) && (!fresh && !unifiedDeviceSampleStarting(j, s, now) || s.exclusive)
+			uncertain = uncertain || unobserved[j.ID]
 			peak := 0.0 // Stale or missing device samples contribute no growth.
 			if fresh {
 				peak = s.deviceGB
@@ -74,7 +76,22 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 			used += max(reservation, peak)
 			over[j.ID] = peak - reservation
 			growth = growth || over[j.ID] > 0
-			if victim == nil || q.comparePriority(j.Spec, victim.Spec) > 0 || q.comparePriority(j.Spec, victim.Spec) == 0 && (over[j.ID] > over[victim.ID] || over[j.ID] == over[victim.ID] && j.ID < victim.ID) {
+			prefer := victim == nil
+			if victim != nil {
+				tier := q.comparePriority(j.Spec, victim.Spec)
+				switch {
+				case tier != 0:
+					prefer = tier > 0
+				case unobserved[j.ID] != unobserved[victim.ID]:
+					// Unknown evidence requires exclusivity, not evidence that a
+					// measurable co-tenant caused pressure. Shed the unknown
+					// tenant first within the lowest tier.
+					prefer = unobserved[j.ID]
+				default:
+					prefer = over[j.ID] > over[victim.ID] || over[j.ID] == over[victim.ID] && j.ID < victim.ID
+				}
+			}
+			if prefer {
 				victim = j
 			}
 		}

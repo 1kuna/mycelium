@@ -171,6 +171,12 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	if _, _, err := cudaAttemptMemoryReading([]byte("GPU-one, 7, N/A\n"), "GPU-one", map[int]bool{7: true}, nil); err != errDeviceMemoryNotReported {
 		t.Fatal("N/A became zero")
 	}
+	for _, inventory := range []string{"", "GPU-one, 9, 4096\n", "GPU-two, 7, 8192\n"} {
+		gb, _, err := cudaAttemptMemoryReading([]byte(inventory), "GPU-one", map[int]bool{7: true}, nil)
+		if err != nil || gb != 0 {
+			t.Fatal("successful inventory without an attempt CUDA context is not a zero sample", gb, err)
+		}
+	}
 	client, peak, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2048 MiB\n"), "0000:03:00.0")
 	if err != nil || peak != 2 || client != "0000:03:00.0/7" {
 		t.Fatal("bad DRM client memory", client, peak, err)

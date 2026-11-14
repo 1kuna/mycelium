@@ -273,6 +273,14 @@ spending its infrastructure-loss budget, even if the host has recovered before
 the refusal is reported. Three such refusals do not exhaust that budget. Real
 lost executions still count; keep the same job and submission key while it retries.
 
+A `shared_gpu_pressure` stop also requeues the same logical job without spending
+failure budgets. Keep its job and key while the queue retries. A stopped copy's
+`recoverable: false` prevents re-adopting that execution; it does not make the
+logical job terminal. CUDA startup before the attempt creates a context reports
+zero use only after a successful process enumeration; its declared or learned
+device vector remains charged. Failed or N/A probes remain unknown, and uncertain
+unified-memory sharing still sheds to exclusive execution.
+
 The same rule covers input staging before command start. A snapshot or NAS read
 I/O error or no-progress timeout requeues as Mycelium infrastructure without
 spending losses or infrastructure retries, preferring another eligible host.
