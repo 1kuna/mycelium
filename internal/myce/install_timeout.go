@@ -11,12 +11,23 @@ import (
 )
 
 // BoundSetupCommand retains the setup probe allowance for ordinary commands.
-// Lifecycle jobs instead belong to the manager: killing its client before the
-// service timeout leaves a job still changing manager state during rollback.
+// Lifecycle jobs instead belong to the manager: killing its client before
+// completion leaves a job still changing manager state during rollback.
 func BoundSetupCommand(command func(context.Context, string, ...string) ([]byte, error)) func(context.Context, string, ...string) ([]byte, error) {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		if filepath.Base(name) == "launchctl" && len(args) > 0 && args[0] == "bootout" && ctx.Value(launchdStopWaitKey{}) == true {
-			return command(ctx, name, args...)
+		if filepath.Base(name) == "launchctl" && len(args) > 0 {
+			// ExitTimeOut bounds the worker's TERM grace, not launchd's
+			// transaction, disk I/O, label removal or subsequent activation.
+			// launchd exposes no deadline for those operations. Let the manager
+			// finish, retaining explicit caller cancellation rather than killing
+			// its client on an unrelated setup-probe deadline.
+			switch args[0] {
+			case "bootout", "bootstrap", "kickstart", "kill":
+				return command(ctx, name, args...)
+			}
+			if ctx.Value(launchdLifecycleKey{}) == true {
+				return command(ctx, name, args...)
+			}
 		}
 		stop, start := false, false
 		if filepath.Base(name) == "systemctl" {
@@ -137,43 +148,8 @@ func systemdTimeout(value string) (time.Duration, error) {
 	return total, nil
 }
 
-// A bootout may acknowledge before the label disappears. Its command and the
-// subsequent observation share the manager's stop budget, not a setup probe.
-type launchdStopWaitKey struct{}
+// Lifecycle observations share caller cancellation with their manager operation;
+// an ordinary setup-probe timeout must not interrupt label or activation proof.
+type launchdLifecycleKey struct{}
 
 const launchdStopPoll = 20 * time.Millisecond
-
-func (m installManager) launchdStopContext(ctx context.Context, u installUnit) (context.Context, context.CancelFunc) {
-	query, cancel := SetupTimeout(ctx)
-	began := time.Now()
-	data, err := m.command(query, "launchctl", "print", u.target())
-	elapsed := time.Since(began)
-	cancel()
-	// The loaded definition is authoritative: the plist may already have been
-	// replaced on disk, and an absent ExitTimeOut uses a system-defined default.
-	var seconds int64
-	found := false
-	if err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			key, value, ok := strings.Cut(strings.TrimSpace(line), " = ")
-			if ok && key == "exit timeout" {
-				seconds, err = strconv.ParseInt(value, 10, 64)
-				found = err == nil && seconds >= 0
-				break
-			}
-		}
-	}
-	ctx = context.WithValue(ctx, launchdStopWaitKey{}, true)
-	// Two measured manager round trips cover dispatch/completion, plus one
-	// observation tick to see asynchronous label removal after the exit bound.
-	margin := 2*elapsed + launchdStopPoll
-	if found && seconds > 0 && seconds <= int64((time.Duration(1<<63-1)-margin)/time.Second) {
-		return context.WithTimeout(ctx, time.Duration(seconds)*time.Second+margin)
-	}
-	if !found || seconds != 0 {
-		log.Print("warning: effective launchd exit timeout unavailable or invalid; waiting for launchd completion with caller cancellation and no additional client deadline")
-	}
-	// ExitTimeOut=0 is infinity. Unknown deadlines also belong to the manager;
-	// guessing a client cutoff can abandon an active job and race recovery.
-	return context.WithCancel(ctx)
-}

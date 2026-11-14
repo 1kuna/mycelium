@@ -119,6 +119,12 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/xe_activity_other.go'] = (
     'xe_activity_linux_test.go', 'device_telemetry_test.go', 'discrete_fanout_sharing_test.go')
 
 
+# Installer manager helpers are private; exercise transaction restoration and
+# launchd lifecycle behavior through the existing injected-manager fixtures.
+SUPPLEMENTAL_CONSUMERS['internal/myce/install_manager.go'] = (
+    'install_matrix_test.go', 'install_launchd_wait_test.go')
+
+
 PYTHON_CLIENT = ('@python-client', 'test_client.DevTests.test_consumer_skill_examples')
 
 
