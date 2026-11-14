@@ -299,11 +299,11 @@ printf '\n' >> ` + shellArg(payload) + "\n"
 	})
 	submitted := invoke()
 	receiptPath := filepath.Join(dir, "receipt.json")
-	delivered := func() profileReceipt {
+	settled := func(expected string) profileReceipt {
 		t.Helper()
 		var receipt profileReceipt
 		wait(t, ctx, func() bool {
-			if readProfileJSON(receiptPath, &receipt) != nil || receipt.DeliveryStatus != "delivered" {
+			if readProfileJSON(receiptPath, &receipt) != nil || receipt.DeliveryStatus != expected {
 				return false
 			}
 			lock, err := profileLock(filepath.Join(dir, "watch.lock"))
@@ -323,9 +323,10 @@ printf '\n' >> ` + shellArg(payload) + "\n"
 		}
 		return receipt
 	}
-	current := delivered()
+	current := settled("delivered")
 	// Model a legacy stuck receipt after its owning session has stopped the
-	// old waiter and released the lock. The same key must re-arm this job.
+	// old waiter and released the lock. Recovery must consult the durable queue
+	// acknowledgement instead of delivering this completion again.
 	current.Status, current.Observation, current.Delivery, current.DeliveryStatus = "queued", "armed", "armed", ""
 	if err := saveProfileJSON(receiptPath, current); err != nil {
 		t.Fatal(err)
@@ -336,14 +337,14 @@ printf '\n' >> ` + shellArg(payload) + "\n"
 	if recovered := invoke(); recovered.JobID != submitted.JobID {
 		t.Fatal("recovery resubmitted job", recovered)
 	}
-	delivered()
+	settled("suppressed")
 	data, err := os.ReadFile(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("notifier not invoked for initial and recovered observation: %s", data)
+	if len(lines) != 1 {
+		t.Fatalf("recovered observation repeated an acknowledged completion: %s", data)
 	}
 	var terminalID string
 	for _, line := range lines {

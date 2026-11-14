@@ -15,6 +15,15 @@ const WaitBatchMaxSeconds = 20
 // WaitBatch observes up to 256 IDs using the batch-v1 contract shared by
 // current and previous releases. Terminal payloads are fetched separately.
 func (c Client) WaitBatch(ctx context.Context, ids []string, after map[string]uint64, seconds int) (WaitReply, error) {
+	return c.waitBatch(ctx, ids, after, seconds, false)
+}
+
+// WaitBatchCollected durably collects terminal results for a foreground waiter.
+func (c Client) WaitBatchCollected(ctx context.Context, ids []string, after map[string]uint64, seconds int) (WaitReply, error) {
+	return c.waitBatch(ctx, ids, after, seconds, true)
+}
+
+func (c Client) waitBatch(ctx context.Context, ids []string, after map[string]uint64, seconds int, collect bool) (WaitReply, error) {
 	// batch-v1 defines a maximum 20-second hold. Caller budgets reserve a
 	// proportional share for transit rather than a fixed one-second margin.
 	seconds = min(WaitBatchMaxSeconds, max(0, seconds))
@@ -25,7 +34,7 @@ func (c Client) WaitBatch(ctx context.Context, ids []string, after map[string]ui
 		seconds = min(seconds, int(max(0, end.Sub(c.clock().Now()))/2/time.Second))
 	}
 	var reply WaitReply
-	err := c.Call(ctx, "POST", "/api/wait", WaitRequest{IDs: ids, After: after, Seconds: seconds}, &reply)
+	err := c.Call(ctx, "POST", "/api/wait", WaitRequest{IDs: ids, After: after, Seconds: seconds, Collect: collect}, &reply)
 	if err != nil {
 		var syntax *json.SyntaxError
 		var fieldType *json.UnmarshalTypeError

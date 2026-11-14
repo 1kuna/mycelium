@@ -222,7 +222,10 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 	return waitError(code, reason)
 }
 
-type profileOverrides struct{ Class, Deadline, Platform *string }
+type profileOverrides struct {
+	Class, Deadline, Platform, Supersedes *string
+	Foreground                            bool
+}
 
 func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer, overrides ...profileOverrides) error {
 	p, root, data, err := readProfile(name)
@@ -322,6 +325,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 	if len(overrides) > 0 {
 		override = overrides[0]
 	}
+	if override.Supersedes != nil {
+		p.Supersedes = *override.Supersedes
+	}
 	if override.Class != nil {
 		if *override.Class == "" {
 			return waitError(64, "class must not be empty")
@@ -380,6 +386,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			Intent, Class string
 			Deadline      *time.Time
 		}{intent, p.Class, p.Deadline})
+	}
+	if p.Supersedes != "" {
+		intent = profileHash([]string{intent, p.Supersedes})
 	}
 	// Uploaded lock bytes are intent: an in-place edit is a new submission, and
 	// reusing an explicit key with changed bytes conflicts.
@@ -811,6 +820,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			}
 			return profileFailure(out, &r, 65, "result_expired: stored job files exceeded the queue retention window")
 		}
+	}
+	if override.Foreground {
+		return json.NewEncoder(out).Encode(r)
 	}
 	// Observer configuration is private caller state, never part of the job.
 	observer := profileObserver{Queue: c.URL, Config: authority.Config, Joining: authority.Joining, Notify: notify}

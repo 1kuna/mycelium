@@ -106,7 +106,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	if err = readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
 	}
-	if r.DeliveryStatus == "delivered" && r.ObservationError == "" && (r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled") {
+	if (r.DeliveryStatus == "delivered" || r.DeliveryStatus == "suppressed") && r.ObservationError == "" && (r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled") {
 		return nil
 	}
 	if r.PendingNotification != nil {
@@ -217,11 +217,15 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 }
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
-	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status, Spec: r.Spec})
-	return finishProfileObservation(ctx, dir, r, cfg, j, waitErr)
+	j, waitErr := c.ObserveSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status, Spec: r.Spec})
+	return finishProfileObservationUsing(ctx, &c, dir, r, cfg, j, waitErr)
 }
 
 func finishProfileObservation(ctx context.Context, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
+	return finishProfileObservationUsing(ctx, nil, dir, r, cfg, j, waitErr, notifyEnv...)
+}
+
+func finishProfileObservationUsing(ctx context.Context, c *myce.Client, dir string, r profileReceipt, cfg profileObserver, j *myce.Job, waitErr error, notifyEnv ...[]string) error {
 	var notification profileNotification
 	if r.PendingNotification != nil {
 		notification = *r.PendingNotification
@@ -252,6 +256,36 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 			notification.DeliveryID = profileHash([]string{notification.DeliveryID, r.ArmNonce})
 		}
 	}
+	// The queue serializes this claim against cancellation, supersession and
+	// foreground collection. A receiver may already be in flight when collection
+	// wins; recovery must keep the same ID so that receiver can deduplicate it.
+	var completionClient *myce.Client
+	if cfg.Notify != "" && notification.ObservationError == "" {
+		if c != nil && j == nil {
+			var err error
+			j, err = c.GetJobForWait(ctx, r.JobID)
+			if err != nil {
+				return err
+			}
+		}
+		suppressed := notification.Status == "cancelled" || j != nil && j.CancelledAt != nil
+		if c != nil && j != nil && j.Completion != nil {
+			claim, err := c.ChangeCompletion(ctx, r.JobID, myce.CompletionRequest{Operation: "claim", DeliveryID: notification.DeliveryID})
+			if err != nil {
+				return err
+			}
+			suppressed = !claim.Allowed
+			if claim.Allowed {
+				notification.DeliveryID = claim.DeliveryID
+				completionClient = c
+			}
+		}
+		if suppressed {
+			r.Observation, r.ObservationError, r.Delivery = "not_armed", "", "suppressed"
+			r.PendingNotification, r.DeliveryStatus = nil, "suppressed"
+			return saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
+		}
+	}
 	if cfg.Notify != "" {
 		r.PendingNotification = &notification
 		r.DeliveryStatus = "pending"
@@ -277,6 +311,12 @@ func finishProfileObservation(ctx context.Context, dir string, r profileReceipt,
 			cmd.Stdin = strings.NewReader(string(b))
 			cmd.Env = env
 			deliveryErr = cmd.Run()
+		}
+		if deliveryErr == nil && completionClient != nil {
+			if _, err := completionClient.ChangeCompletion(deliveryCtx, r.JobID, myce.CompletionRequest{Operation: "delivered", DeliveryID: notification.DeliveryID}); err != nil {
+				// Keep the frozen pending payload when acknowledgement is uncertain.
+				return err
+			}
 		}
 		r.PendingNotification = nil
 		r.DeliveryStatus = "delivered"

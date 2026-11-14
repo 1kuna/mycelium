@@ -110,6 +110,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
+	a.registerCompletions(mux)
 	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
 	a.registerMeasurementSafety(mux)
@@ -309,10 +310,15 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		// Freshness is the age of the committed state this receipt projects.
 		reply := struct {
 			*Job
-			Spec      replySpec          `json:"spec"`
-			Freshness *SnapshotFreshness `json:"freshness,omitempty"`
+			Spec       replySpec          `json:"spec"`
+			Completion *CompletionState   `json:"completion"`
+			Freshness  *SnapshotFreshness `json:"freshness,omitempty"`
 		}{Job: j, Freshness: freshness}
 		if j != nil {
+			reply.Completion = j.Completion
+			if reply.Completion == nil {
+				reply.Completion = &CompletionState{}
+			}
 			reply.Spec.Spec = j.Spec
 		}
 		respondOperation(w, reply, err, "status_unavailable")
@@ -771,6 +777,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	fileStoreSubmissionHeaders(ctx, req)
+	if wait, ok := in.(WaitRequest); ok && wait.Collect {
+		req.Header.Set(completionCollectHeader, "1")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "myce/"+BuildVersion)
 	if checkin, ok := in.(Checkin); ok && path == "/api/workers/checkin" && checkin.period > 0 {

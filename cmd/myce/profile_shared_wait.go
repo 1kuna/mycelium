@@ -323,17 +323,31 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 		_ = diagnostics.record("notifier", watch.receipt.JobID, nil, false)
 		// A failed registration unlink must not invoke a completed notifier again.
 		var previous profileReceipt
-		alreadyFinished := readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &previous) == nil && previous.ArmNonce == watch.receipt.ArmNonce && previous.Observation == "not_armed" && (binding == "" || previous.DeliveryStatus == "delivered" || previous.DeliveryStatus == "failed")
+		alreadyFinished := readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &previous) == nil && previous.ArmNonce == watch.receipt.ArmNonce && previous.Observation == "not_armed" && (binding == "" || previous.DeliveryStatus == "delivered" || previous.DeliveryStatus == "failed" || previous.DeliveryStatus == "suppressed")
 		var finishErr error
 		if !alreadyFinished {
-			finishErr = finishProfileObservation(ctx, watch.registration.Directory, watch.receipt, watch.registration.Observer, j, cause, watch.registration.NotifyEnv)
+			cfg := watch.registration.Observer
+			var client *myce.Client
+			// Observation-only expiry must settle even when queue authority is
+			// unavailable. Only a terminal notification needs a delivery claim.
+			if cfg.Notify != "" && (cause == nil || watch.receipt.PendingNotification != nil) {
+				resolved, clientErr := runClient(cfg.Config, cfg.Joining, cfg.Queue, watch.registration.Token)
+				if clientErr != nil {
+					return false
+				}
+				client = &resolved
+			}
+			finishErr = finishProfileObservationUsing(ctx, client, watch.registration.Directory, watch.receipt, cfg, j, cause, watch.registration.NotifyEnv)
+			if client != nil && client.HTTP != nil {
+				client.HTTP.CloseIdleConnections()
+			}
 		}
 		var saved profileReceipt
 		if readProfileJSON(filepath.Join(watch.registration.Directory, "receipt.json"), &saved) != nil || saved.ArmNonce != watch.receipt.ArmNonce || saved.Observation != "not_armed" {
 			_ = diagnostics.record("receipt_persistence_failed", watch.receipt.JobID, finishErr, true)
 			return false
 		}
-		if watch.registration.Observer.Notify != "" && saved.DeliveryStatus != "delivered" && saved.DeliveryStatus != "failed" {
+		if watch.registration.Observer.Notify != "" && saved.DeliveryStatus != "delivered" && saved.DeliveryStatus != "failed" && saved.DeliveryStatus != "suppressed" {
 			return false
 		}
 		// Keep ownership until both receipt persistence and registration retirement

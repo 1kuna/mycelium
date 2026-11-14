@@ -47,6 +47,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	adapter := f.String("adapter", "", "project adapter YAML (default: .mycelium/adapter.yaml)")
 	entry := f.String("entry", "", "named adapter entry (default: adapter default)")
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
+	supersedes := f.String("supersedes", "", "replace this same-project job for completion notification (does not cancel execution)")
 	key := f.String("key", "", "submission key (entries default to content-derived; reuse to recover)")
 	var inputFlags []string
 	f.Func("input", "per-submission file DEST=PATH (repeatable; requires --profile or an adapter entry)", func(value string) error {
@@ -78,7 +79,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	}
 	useAdapter := *adapter != "" || *entry != "" || f.NArg() == 0
 	if *profile != "" || useAdapter {
-		var overrides profileOverrides
+		overrides := profileOverrides{Foreground: waitMode}
 		var unsupported string
 		f.Visit(func(v *flag.Flag) {
 			switch v.Name {
@@ -88,6 +89,8 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 				} else {
 					overrides.Platform = entryPlatform
 				}
+			case "supersedes":
+				overrides.Supersedes = supersedes
 			case "class":
 				overrides.Class = class
 			case "deadline":
@@ -160,7 +163,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if *name == "" {
 		*name = filepath.Base(f.Arg(0))
 	}
-	s := myce.Spec{AuthoringOrigin: myce.OriginCommand, Name: *name, Project: *project, Class: *class, Priority: *priority,
+	s := myce.Spec{Supersedes: *supersedes, AuthoringOrigin: myce.OriginCommand, Name: *name, Project: *project, Class: *class, Priority: *priority,
 		SubmissionKey: "run-" + rand.Text(), Run: myce.RunSpec{Command: f.Args()},
 		Needs: myce.ResourceNeeds{CPUCores: *cpu, MemoryGB: memory, Platform: myce.Platform{Required: []string{platform}}}}
 	if *key != "" {

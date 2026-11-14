@@ -22,6 +22,8 @@ class BatchWaitTests(unittest.TestCase):
                     if request.selector == "/api/wait":
                         body = json.loads(request.data)
                         self.assertEqual(body["ids"], ids)
+                        self.assertNotIn("collect", body)  # Previous queues reject unknown JSON fields.
+                        self.assertEqual(request.get_header("X-myce-collect-completion"), "1")
                         self.assertEqual(body["after"], {} if not batches else dict.fromkeys(ids, 1))
                         batches.append(body)
                         state = "succeeded" if len(batches) == 6 else "running"

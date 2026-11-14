@@ -224,7 +224,7 @@ func waitJobsReporting(ctx context.Context, c myce.Client, reconnect func() (myc
 				batchJobs = map[string]*myce.Job{}
 				var reply myce.WaitReply
 				seconds := pace.Seconds(clock.Now(), event)
-				reply, batchErr = c.WaitBatch(requestCtx, ids, revisions, seconds)
+				reply, batchErr = c.WaitBatchCollected(requestCtx, ids, revisions, seconds)
 				diagnosticDeadline = clock.Now().Add(myce.WaitBatchMaxSeconds * time.Second)
 				if batchErr == nil {
 					held = seconds > 0 && len(reply.Jobs) > 0 && reply.Jobs[0].Revision > 0

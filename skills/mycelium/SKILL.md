@@ -423,6 +423,7 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   covers up to 256 jobs, and a timeout leaves them running. `queue_stalled`
   means the queue stopped making progress: read status once, then repeat the
   same command ([wait and status](references/wait-and-status.md)).
+- Foreground wait/result collection and owner cancellation suppress later wakes; `myce run --supersedes JOB` explicitly replaces a same-project job’s wake without cancelling its execution.
 - **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
   its resources are released (75 while release is pending); `command_started:
   false` means no command began. `myce pause JOB_ID --reason TEXT` holds your

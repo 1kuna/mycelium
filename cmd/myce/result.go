@@ -150,5 +150,5 @@ func fetchResult(ctx context.Context, c myce.Client, id, out string, attempt int
 			return failure(err)
 		}
 	}
-	return nil
+	return c.CollectCompletion(ctx, j)
 }
