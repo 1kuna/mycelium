@@ -62,7 +62,7 @@ func BenchmarkStatusRetained(b *testing.B) {
 				if mode != "legacy_refresh" {
 					return q.cachedStatusJSON()
 				}
-				s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", sections: []string{"jobs", "machines", "storage", "work", "health", "efficiency", "usage", "diagnostics"}})
+				s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", sections: []string{"jobs", "machines", "storage", "work", "health", "alerts", "efficiency", "usage", "diagnostics"}})
 				if err != nil {
 					return "", err
 				}
@@ -195,10 +195,10 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	q.s.Health.Conditions = map[string]healthCondition{
 		"recipe/worker/private/path":              {Active: true, Since: since},
 		"recipe/peer/" + strings.Repeat("ab", 16): {Active: true, Since: since},
-		"efficiency/work:profile:" + strings.Repeat("1", 64) + ":declared/memory_prediction_relative_error": {Active: true, Since: since.Add(time.Minute)},
-		"efficiency/work:profile:" + strings.Repeat("2", 64) + ":learned/memory_prediction_relative_error":  {Active: true, Since: since},
-		"efficiency/worker/wasted_attempts":       {Active: true, Since: since},
-		"efficiency/project:p/wait_holds_seconds": {Active: false, Since: since},
+		"efficiency/work:profile:" + strings.Repeat("1", 64) + ":declared/reservation_gap_gb": {Active: true, Since: since.Add(time.Minute)},
+		"efficiency/work:profile:" + strings.Repeat("2", 64) + ":learned/reservation_gap_gb":  {Active: true, Since: since},
+		"efficiency/worker/wasted_attempts":                                                   {Active: true, Since: since},
+		"efficiency/project:p/wait_holds_seconds":                                             {Active: false, Since: since},
 	}
 	q.publishReadRecords(map[string][]byte{"state": nil})
 	q.publishReadRuntime()
@@ -206,7 +206,7 @@ func TestStatusCompactRetainedEvidence(t *testing.T) {
 	current := readStatusOptions(t, q, "")
 	data, _ := json.Marshal(current.Summary)
 	want := []StatusAlertGroup{
-		{Kind: "efficiency/memory_prediction_relative_error", Count: 2, Since: since},
+		{Kind: "efficiency/reservation_gap_gb", Count: 2, Since: since},
 		{Kind: "recipe", Count: 2, Since: since, Scopes: map[string]int{"worker": 1, "peer": 1}},
 		{Kind: "efficiency/wasted_attempts", Count: 1, Since: since, Scopes: map[string]int{"worker": 1}},
 	}
@@ -239,7 +239,7 @@ func TestStatusCompactSectionsAndFull(t *testing.T) {
 	if len(summary.Jobs[0].AttemptHistory) != 0 {
 		t.Fatal("default copied attempt history")
 	}
-	for _, section := range []string{"storage", "work", "health", "efficiency", "usage", "jobs", "machines", "diagnostics"} {
+	for _, section := range []string{"storage", "work", "health", "alerts", "efficiency", "usage", "jobs", "machines", "diagnostics"} {
 		s := readStatusOptions(t, q, "?sections="+section)
 		switch section {
 		case "storage":
@@ -250,7 +250,7 @@ func TestStatusCompactSectionsAndFull(t *testing.T) {
 			if len(s.WorkCurves) != 3 {
 				t.Fatal("work omitted")
 			}
-		case "health":
+		case "health", "alerts":
 			if len(s.HealthAlerts) != 3 {
 				t.Fatal("health omitted")
 			}

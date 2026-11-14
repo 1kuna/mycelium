@@ -11,6 +11,11 @@ Mycelium runs your commands on a fleet of CPU and GPU machines through one
 queue. You say what the work needs; Mycelium picks the machine, runs it and
 hands back verified files. Climb the ladder only as far as your work needs.
 
+Default `myce status` puts unhealthy hosts, holds and waiting work first; alerts
+are one trailing count. Use `myce status --sections alerts` for records or
+`myce efficiency` for sizing and placement findings. Host health openings and
+closings go to the installation owner's Mycelium inbox when its hook is configured.
+
 ## Ground rules
 
 - Use the installed `myce` CLI or Python `Client.from_installed()`; both find

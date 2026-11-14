@@ -265,7 +265,7 @@ func (q *Queue) reconcileHealthRecords() {
 	}
 	for i := len(current) - 1; i >= 0; i-- {
 		r := current[i]
-		if r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && healthAlertNotifies(r) && !(r.Delivered && r.ClosedDelivered) {
+		if !(r.Kind == "efficiency_regression" && retiredPredictionAlert(r.Reason)) && (r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && healthAlertNotifies(r) && !(r.Delivered && r.ClosedDelivered)) {
 			continue
 		}
 		edit()
@@ -341,8 +341,19 @@ func (q *Queue) migrateHealthEvents() {
 	}
 }
 
+// Prediction accuracy no longer drives a corrective action: placement uses the
+// last accepted duration and peak. Remove the old conditions and records too.
+func retiredPredictionAlert(metric string) bool {
+	return metric == "memory_prediction_relative_error" || metric == "duration_prediction_relative_error"
+}
+
 func (q *Queue) detectHealth() {
 	defer q.bodyPhaseFinish("health", q.bodyPhaseStart())
+	for key := range q.s.Health.Conditions {
+		if strings.HasPrefix(key, "efficiency/") && retiredPredictionAlert(key[strings.LastIndex(key, "/")+1:]) {
+			delete(q.s.Health.Conditions, key)
+		}
+	}
 	q.migrateHealthEvents()
 	defer q.reconcileHealthRecords()
 	q.detectHostHygiene()

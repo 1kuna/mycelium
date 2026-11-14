@@ -399,8 +399,7 @@ snapshot for every read; the CLI projects that snapshot itself.
   subjects (work profiles, targets, recipe identities) are counted, not named.
   Members are named by `myce efficiency` (efficiency signals) and by
   `--sections machines,jobs` (recipe, report and target conditions). This
-  replaces the flat `summary.alerts` list: 18 work profiles with one prediction
-  regression were 18 rows.
+  keeps default text to one trailing count line; `--sections alerts` lists records.
 - Replaced per-card worker identities (`replacement` set) are history: only
   `--history` (`detail=full`) lists them; the default and `--sections` omit them.
 - Plain `myce status` prints one line per hypha, one line per running, waiting
@@ -456,7 +455,7 @@ Opt into comma-separated sections with `?sections=work,storage` or
 | `machines` | Complete machine status, health history/baselines, inventories and preparation reports |
 | `storage` | `storage_observations`, `file_store` (including retained-file accounting) and `checkpoint_expiry` (settled NAS checkpoint folders `waiting` for their grace period or a worker, and `undated` ones kept for lack of any timestamp; see [files](files.md#resumable-jobs)) |
 | `work` | `work_curves`: one record per kind of work, with its last accepted duration and accepted peak |
-| `health` | `health_alerts`: one record per open or recently closed problem (kind and subject), independently of current `summary.alert_groups` |
+| `alerts` / `health` | `health_alerts`: one record per open or recently closed problem (kind and subject), independently of current `summary.alert_groups` |
 | `efficiency` | Complete `efficiency`, including retained per-job rows and predictions |
 | `usage` | Complete `usage`, including daily rows, preemptions and production starts |
 | `diagnostics` | `request_latencies`, `evidence_retention`, and retained `admissions` |
@@ -2297,201 +2296,79 @@ remain readable for compatibility. See [owner recovery](host-probes.md).
 
 ## Incident health alerts
 
-`health_alerts` holds one record per problem: a `kind` and its subject (host,
-machine, device, project, client kind, store, reservation, job, reason and
-recipients). A firing of an existing record updates it instead of adding a row:
-`first_at` and `last_at` bound every firing, `count` totals them, `state` is
-`open` or `closed`, and `closed_at` records the latest closing. `at` and
-`delivery_id` identify the current episode; `attempt`, `recovery` and `mount`
-are the latest firing's detail. On 2026-11-11 the live queue had saved 25,818
-per-firing rows in four days (12,531 `host_degraded`), none delivered because
-no notifier was configured; a replay of that mix now keeps 16 records (#1395).
+Default status leads with unhealthy hosts, holds and current work. Statistical
+findings occupy one trailing count line. `myce status --sections alerts` (alias
+`health`) lists all open/recently closed records; `myce efficiency` diagnoses
+reservation gaps, placement restrictions, waits and wasted attempts.
 
-Detectors run on queue mutations and ticks, using the queue clock; no polling
-service or automatic issue filing is added. Each condition has a stable subject
-key and fires once per episode; positive recovery rearms it without a wall-time
-cooldown. A record stays open while any active condition keeps it open, and
-closes when none does. Point events with no clearing condition
-(`production_attempt_lost`) are recorded closed. Closed records expire
-`HealthAlertRetention` (3 days, matching finished-job file retention, MY-47)
-after closing, except that with a notifier configured an unacknowledged
-closing is kept until delivered. Clearing changes no admission, retry or
-release-custody decision.
-
-The optional queue `--health-notify` executable receives openings and closings
-of host-level problems only (MY-49): `host_degraded`,
-`host_unhealthy_or_stale`, `worker_stale_flapping`, `worker_reports_missing`,
-`host_mount_unavailable`, `host_mount_action_required`,
-`host_disk_exhaustion_forecast`, `disk_below_guard`,
-`checkpoint_store_unavailable`, `xpu_repeated_teardown_faults` and
-`repeated_launch_refusals`. Every other kind (efficiency, recipe, job, project
-and queue-load findings, and advisory `host_mount_degraded`, which
-`host_mount_unavailable` escalates when real) stays in status only: it is not
-counted `pending` and expires on retention with or without a hook. An opening uses the record's `delivery_id`; a closing uses
-`delivery_id + "/closed"` with `state: closed`. A record that closed before its
-opening was delivered sends one closing notification carrying its count. A
-record that reopens before its closing was delivered continues the episode the
-receiver already sees open and sends nothing; a reopen after a delivered
-closing is a new episode with a new `delivery_id`. Delivery retries keep the
-same identity. `delivered` acknowledges the opening and `closed_delivered` the
-closing.
-
-`health_alert_delivery` reports `configured` and `pending` in status/inspection
-JSON; CLI and page status explain the same state. `pending` counts openings and
-closings without a durable hook acknowledgement. No hook is a supported
-diagnostic-only mode. It does not prove an attempt or distinguish hook failures
-from queue acknowledgement failures. Restarting without a hook clears its
-historical configuration flag. Successful hook exit does not itself prove
-downstream thread execution. Job completion observers and their thread-bound
-notifiers are independent of this queue-level channel.
+`health_alerts` keeps one record per kind and subject (host, device, job, project,
+store, reason, etc.). Repeated firings update `count` and `last_at`; `first_at`
+bounds the history, `at` starts the current episode, and `state` is `open` or
+`closed`. Conditions use the injected queue clock and clear on positive recovery;
+point events such as `production_attempt_lost` close immediately. Closed records
+expire after three days, except configured, unacknowledged host notifications.
+No detector changes admission, retry, learned sizes or release custody.
 
 ### Health notifier hook contract
 
-- Configured with `myce queue --health-notify EXECUTABLE` or
-  `MYCE_HEALTH_NOTIFY`, on the queue host. The queue resolves it on `PATH`.
-- Check: at startup the queue runs `EXECUTABLE --check` with no stdin. A
-  nonzero exit refuses startup.
-- Delivery: one run per notification, no arguments, one JSON object on stdin
-  (the record's `health_alerts` fields): `kind`, `delivery_id`, `state`
-  (`open` or `closed`), `at` (episode opening), `first_at`, `last_at`,
-  `closed_at` (closings), `count`, `delivered`, and the subject identities that
-  apply (`host`, `machine`, `device`, `store`, `reason`, `mount`, `recovery`).
-  A closing's `delivery_id` ends in `/closed`. Fields are identities and fixed
-  codes, never raw worker text or paths.
-- Exit 0 acknowledges. Any other exit, or no exit within 30 seconds, retries
-  the same `delivery_id` after a minute, so the receiver deduplicates by it.
-  Deliveries are paced one per second, in record order.
-- Environment: the queue's, without `MYCE_TOKEN`. Stdout and stderr are not
-  logged. Keep receiver credentials in the hook's own private configuration.
+MY-49 sends host problems to the **Mycelium inbox**, one opening and one closing
+per problem. Configure the queue service with `--health-notify EXECUTABLE` or
+`MYCE_HEALTH_NOTIFY=EXECUTABLE`, pointing to an inbox adapter, not a job-completion
+notifier. The adapter needs private receiver credentials and durable deduplication
+by `delivery_id`. Deployment-specific inbox identity belongs in private config.
 
-Upgrade from the previous release folds its per-firing rows into records on
-the first queue transaction, closed at their last firing, and rearms active
-conditions so current problems reopen a record at once. Records stay dense
-`health_events/N` rows whose JSON the previous release reads as events, so a
-rollback keeps working; rows it appends fold in again on the next upgrade.
+- Startup runs `EXECUTABLE --check`; failure refuses startup.
+- Each invocation receives one JSON record on stdin, with no arguments.
+  Opening `delivery_id` identifies the episode; closing appends `/closed` and
+  sets `state: closed`. Subject fields contain identities/fixed codes, never
+  raw worker errors or paths. `mount` and `recovery` add typed evidence.
+- Exit 0 acknowledges durably. Failure or a 30-second timeout retries that ID
+  after a minute; deliveries are paced one per second. `MYCE_TOKEN` is removed
+  from the environment; stdout/stderr are not logged.
+- Closing before opening delivery sends one closing carrying the firing count.
+  Reopening before closing delivery continues the episode; reopening after an
+  acknowledged closing gets a new ID. The receiver must deduplicate retries.
+- `health_alert_delivery` reports `configured` and unacknowledged `pending`.
+  Without a hook, status explains missing delivery. Hook acknowledgement proves
+  receiver acceptance, not downstream agent execution. Restart without a hook
+  clears historical configuration. Job completion delivery is independent.
 
-- `queue_overload`: sustained response-cost or mutex-wait regression against
-  this installation's healthy history, separately for each normalized API route.
-  Intentional worker-event and consumer-wait response duration is excluded;
-  their real lock waits still count. Eight completed observation intervals
-  establish a local baseline, and three consecutive adverse intervals confirm
-  a regression. The robust band uses quartiles, adjacent observed variation and
-  Tukey's far-outlier fence. The bounded 64-interval history replaces itself as
-  healthy service cost changes; adverse samples cannot teach degradation as
-  normal. Three healthy intervals, or an interval with no requests, clear it.
-- `client_request_flood`: only while the queue is degraded, one existing client
-  family supplies a strict majority of relative excess GET demand over its own
-  healthy rate band. Relative growth preserves the normal request mix even when
-  one family normally dominates. Healthy high volume, sole-family dominance
-  without degradation and proportional growth of multiple families do not fire.
-  Versions aggregate by kind; `client_kind` is only `cli`, `python` or `unknown`.
-  This attributes a family, not a process, and copies no User-Agent or address.
+Only these host-level kinds enter the inbox: `host_degraded`,
+`host_unhealthy_or_stale`, `worker_stale_flapping`, `worker_reports_missing`,
+`host_mount_unavailable`, `host_mount_action_required`,
+`host_disk_exhaustion_forecast`, `disk_below_guard`,
+`checkpoint_store_unavailable`, `xpu_repeated_teardown_faults`, and
+`repeated_launch_refusals`. Advisory `host_mount_degraded` stays in status until
+an unavailable/action-required escalation. See [host probes](host-probes.md).
 
-The traffic detectors close intervals on maintenance ticks and normalize rates
-by actual elapsed queue-clock time. They contain no request-per-minute, fixed
-latency or fleet-size threshold. Statistical work and aggregation run outside
-`q.mu`; ticks commit fixed booleans. A stopped queue cannot commit or deliver an
-alert until it progresses. Restart requires fresh local traffic history; retained
-delivery events persist. A cold installation has unknown latency, rather than
-an assumed universal healthy speed. The initial observed interval contributes
-cost evidence and its actual duration, never an assumed complete minute.
+Other findings stay in status, never count as pending inbox delivery, and expire
+normally. Their actions are:
 
-- `worker_reports_missing`: an enabled joined worker omitted CPU capacity,
-  required host-memory telemetry, advertised device-memory telemetry or a tool
-  inventory needed by live demand. Optional reports without demand and positive
-  sensor errors already owned by host-health alerts are excluded. Reasons are
-  finite `*_report_missing` codes; supplied reports clear the condition.
-- `environment_recipe_failed`: a current worker environment report is failed
-  and the existing classifier says deterministic. Transient download/storage
-  failures and cold/preparing environments are excluded. Ready/replaced/removed
-  reports clear it; raw recipe errors and logs never enter notifications.
-- `pin_reason_missing`: live frozen host/device restrictions lack the corresponding
-  authored requirement reason. Terminal/cancelled work clears it. Authored prose
-  remains private, and reasons are never treated as qualification evidence.
-- `job_target_unsatisfied`: a queued job has known enabled targets, but none
-  passes resolve's permanent-capacity predicates. Busy or temporarily offline
-  fitting targets exclude it. Missing inventory makes the conclusion unknown;
-  it is owned by the missing-report detector. A fitting target or removal of the
-  live demand clears it. No scheduling decision is changed.
-- `infrastructure_loss_streak`: consecutive infrastructure endings on one worker,
-  across distinct exact executions. Two is a repeated loss, not a timed fleet
-  threshold. Final classification replaces provisional requeue evidence before detection.
-  Replays cannot increment it; planned stops are excluded. Successful
-  or workload-caused endings break the streak. Historical failures interrupted
-  by successful work do not fire. It preserves all existing attempt fences.
-  The episode and affected job retain an
-  `owner_required` decision receipt (#881) in `health_alerts[].recovery` and
-  `health_recovery`. It records the episode, exact execution/session, time,
-  retained cause, sanitized admission comparison when available, plain-language
-  summary and next owner action. `action: none` means no automatic repair was
-  performed. No alert changes capacity, configured allowances, reservations,
-  learned sizes, retry budgets, checkpoints or release obligations.
-  Both direct-RAM and `live_host_growth` refusals need diagnosis. A growth
-  comparison cannot distinguish stale availability from an inflated forecast
-  (#868/#909); the maintenance owner needs forecast bounds and paired
-  queue/worker memory snapshots. A subsequent successful start does not rewrite
-  the receipt or claim a repair. Delivery, restart and repeated handling retain
-  the original decision; newer executions cannot be changed by old evidence.
-  No remediation timer or retry is added; normal scheduling and owner policy
-  still apply. Plain CLI/page job reasons include the summary and next step.
-  Automatic action remains deferred until a recorded incident establishes an
-  existing supported reversible remedy and its fresh evidence prerequisites.
-- `staging_cache_refused`: accepted worker transfer/cache/copy failure reports or
-  an exact attempt's typed input-staging refusal. Cold caches, successful copies
-  and planned stops do not fire. A repaired report or later successful staging
-  clears its corresponding subject; missing staging evidence cannot clear it.
-  Only fixed reason codes enter notifications.
-- `update_failed`: the current update operation has a failed host or recorded
-  failure. It uses #741's sanitized `failure_code` allow-list (including the
-  explicit runner-smoke failure); successful retry/removal clears it. Helper,
-  download, installer and service text is never copied.
+| Finding | Next action |
+|---|---|
+| `queue_overload`, `client_request_flood` | Diagnose route latency and excess client demand against local healthy history. |
+| `environment_recipe_failed` | Repair the deterministic recipe failure; transient preparation is excluded. |
+| `pin_reason_missing`, `job_target_unsatisfied` | Correct authored restrictions or permanent target capacity. |
+| `infrastructure_loss_streak`, `staging_cache_refused` | Inspect exact-attempt cause and repair worker/staging infrastructure. |
+| `update_failed` | Repair the sanitized update failure and retry the rollout. |
+| `reservation_never_ready` | Resolve or release the expired reservation. |
+| `learned_envelope_exceeds_allowances` | Compare accepted peaks and eligible allowances; correct evidence or capacity. |
+| `efficiency_regression` | Inspect measured reservation gaps, live waits, stranded demand, I/O pressure or wasted/suspect endings. |
 
-#834 owns host degradation, silence, mount probes and collector diagnostics;
-these detectors do not create another host-hygiene alert class. All remaining
-checks use already accepted in-memory reports, intent and exact-attempt outcomes,
-with no network, blob/manifest verification or filesystem probes under `q.mu`.
-The older storage persistence delays and launch/flap history windows below are
-unchanged by the adaptive traffic replacement; their broader #803 follow-up is
-separate from the retired #768 thresholds.
+`infrastructure_loss_streak` keeps its immutable `owner_required` recovery receipt
+and next action in `health_recovery`; a later successful start is not proof of a
+repair. Missing evidence never clears a staging fault or establishes spare
+capacity. Detectors use accepted in-memory observations; no external I/O occurs
+under the queue mutex. Traffic/efficiency regressions use local robust history,
+warmup and consecutive confirmations rather than fleet-wide numeric thresholds.
+Previous-release per-firing rows fold into records on the first transaction;
+active conditions rearm, and dense `health_events/N` JSON stays rollback-readable.
 
-- `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
-  unavailable (or `checkpoint_unavailable`) continuously for five minutes by
-  default. Other missing root roles and shorter outages do not trigger this
-  storage alert. A restored checkpoint root clears it. Planned leave and host
-  maintenance suppress it. The existing queue-store detector remains independent.
-- `repeated_launch_refusals`: three distinct unstarted attempts on one physical
-  host report `launch_authorization` refusals or start-fence admission refusals
-  within ten minutes. Duplicate reports, successful starts, planned stops and
-  transport errors without recorded fence evidence do not count. It clears
-  once fewer than three refusals remain in that window.
-- `worker_stale_flapping`: three fresh-to-stale transitions on one worker within
-  an hour, using the same contact/suspicion calculation as maintenance freshness. A
-  continuous outage counts once. Cold restart grace, leave and maintenance do
-  not seed flaps. It clears as the transitions age out, or on planned maintenance.
-- `xpu_repeated_teardown_faults`: the worker's existing quarantine classifier
-  reports three distinct same-card teardown faults in an hour. Isolated teardown
-  faults and unrelated quarantines do not trigger this alert. The optional
-  device `repeated_teardown_fault` fact survives worker restart and clears with
-  the exact quarantine clear or new boot. Alert `device` identifies the card;
-  a sibling's recovery cannot clear it. Upgrade the queue before workers that
-  can publish this new optional field.
-- `reservation_never_ready`: a reservation remains unreleased past its maximum
-  lifetime and has never recorded readiness. Normal draining before expiry,
-  ready/in-use reservations and released records are excluded. Readiness or
-  explicit release clears it; the alert itself does not release anything. The
-  event includes the `reservation` identifier and bound `job_id`.
-- `learned_envelope_exceeds_allowances`: current auto-memory demand has a learned
-  envelope exceeding every otherwise eligible target's permanent allowance.
-  Qualification, recipes, platform and other non-memory requirements still
-  apply. Busy but sufficiently large peers, cold/exploratory estimates and
-  oversized declarations are excluded. Refused submissions retain a private
-  demand probe so new allowances or corrected/expired learning can clear the
-  incident without resubmitting; it is discarded on recovery. Accepted queued
-  demand clears when it fits or leaves the queue. Auto sizing inherited from
-  variants is included; explicit member caps are excluded from the learned
-  comparison. Healthy demand creates no condition history, and recovered
-  envelope conditions are discarded on recovery. Events carry only project/job
-  identities, never commands, mount paths or worker error text.
+Deleted alert metrics: `memory_prediction_relative_error` and
+`duration_prediction_relative_error`. The retired predictor has no corrective
+control to tune; last accepted peak/duration and signed comparisons remain
+available as diagnostics. Old conditions and alert records are removed on the
+next queue transaction, and their baselines disappear on efficiency refresh.
 
 ## Durable model interval API
 
@@ -3175,8 +3052,8 @@ Host `io_pressure` retains nullable PSI dimensions and source age; unavailable o
 stale evidence cannot train a healthy zero. Fresh I/O pressure compares against
 its own learned local baseline. No extra telemetry retention is introduced.
 
-`efficiency_regression` uses the existing adaptive health notification path.
-Reservation gaps, live blocker waits, stranded demand, accepted prediction errors
+`efficiency_regression` is a status-only finding (MY-49).
+Reservation gaps, live blocker waits, stranded demand
 and wasted/suspect endings compare with their own local histories. It reuses the
 host/request statistical model's bounded observation history, warmup, robust
 quartile/observed-resolution band and consecutive confirmations. There are no

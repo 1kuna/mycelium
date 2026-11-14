@@ -357,7 +357,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
 	statusHistory := f.Bool("history", false, "include all retained status detail (jobs, diagnostics and evidence)")
-	statusSections := f.String("sections", "", "status detail sections: jobs,machines,storage,work,health,efficiency,usage,diagnostics")
+	statusSections := f.String("sections", "", "status detail sections: jobs,machines,storage,work,alerts,health,efficiency,usage,diagnostics")
 	statusJobs := f.String("jobs", "", "status jobs: active,recent,all")
 	statusLimit := new(int)
 	if args[0] == "status" {
@@ -1079,6 +1079,9 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 	}
 	if s.HealthAlertDelivery != nil {
 		fmt.Println(s.HealthAlertDelivery.Summary())
+	}
+	for _, alert := range s.HealthAlerts {
+		fmt.Printf("alert %s: %s host=%s job=%s reason=%s count=%d since=%s\n", alert.Kind, alert.State, alert.Host, alert.JobID, alert.Reason, alert.Count, alert.At.UTC().Format(time.RFC3339))
 	}
 	for _, line := range s.Efficiency.Lines() {
 		fmt.Println(line)

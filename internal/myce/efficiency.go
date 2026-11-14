@@ -1025,24 +1025,6 @@ func efficiencySignals(r *EfficiencyReport, old map[string]efficiencyBaseline) (
 			}
 		}
 	}
-	predictionSums := map[string]float64{}
-	predictionCounts := map[string]int{}
-	for _, p := range r.Predictions {
-		subject := "work:" + p.Work + ":" + p.Basis
-		if p.AcceptedHostPeakGB != nil && *p.AcceptedHostPeakGB > 0 && p.HostErrorGB != nil {
-			key := subject + "/memory_prediction_relative_error"
-			predictionSums[key] += absHealth(*p.HostErrorGB / *p.AcceptedHostPeakGB)
-			predictionCounts[key]++
-		}
-		if p.ActualSeconds != nil && *p.ActualSeconds > 0 && p.DurationErrorSeconds != nil {
-			key := subject + "/duration_prediction_relative_error"
-			predictionSums[key] += absHealth(*p.DurationErrorSeconds / *p.ActualSeconds)
-			predictionCounts[key]++
-		}
-	}
-	for key, sum := range predictionSums {
-		values[key] = sum / float64(predictionCounts[key])
-	}
 	for _, h := range r.Hosts {
 		values[h.Host+"/wasted_attempts"] = 0
 		values[h.Host+"/suspect_attempts"] = 0
