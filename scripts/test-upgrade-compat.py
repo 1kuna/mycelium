@@ -53,6 +53,17 @@ class SupervisorTests(unittest.TestCase):
             compat.validate_inventory_receipts([refused, dict(accepted, session="different")], True)
         with self.assertRaises(AssertionError):
             compat.validate_inventory_receipts([refused, dict(accepted, rollback_baseline_sha256="changed-request")], True)
+        probe_refused = dict(refused, disk_budget_fields=False, checkpoint_expiry_fields=False,
+                             inventory_probe_fields=True,
+                             error=json.dumps(dict(code="request_invalid", error='json: unknown field "inventory_probe"')))
+        probe_accepted = dict(accepted, inventory_probe_fields=False)
+        compat.validate_inventory_receipts([probe_refused, probe_accepted], True)
+        for field, value in (("inventory_probe_fields", True), ("session", "changed"),
+                             ("rollback_baseline_sha256", "changed"), ("disk_budget_fields", True)):
+            with self.assertRaises(AssertionError):
+                compat.validate_inventory_receipts([probe_refused, dict(probe_accepted, **{field: value})], True)
+        with self.assertRaises(RuntimeError):
+            compat.validate_inventory_receipts([probe_refused, probe_refused], True)
 
     def test_sigterm_reaps_detached_command_before_scratch_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -224,12 +224,14 @@ func upgradeQueue(t *testing.T, ctx context.Context, root string) {
 			}
 			delete(request, field)
 		}
+		inventoryProbeFields := machine["inventory_probe"] != nil
+		delete(machine, "inventory_probe")
 		baseline, err := json.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		receipts = append(receipts, map[string]any{
-			"error": errorBody,
+			"error": errorBody, "inventory_probe_fields": inventoryProbeFields,
 			"disk_budget_fields": diskFields, "checkpoint_expiry_fields": expiryFields, "rollback_baseline_sha256": fmt.Sprintf("%x", sha256.Sum256(baseline)),
 			"status": capture.status, "bytes": len(body), "inventory_keys": len(inventory),
 			"hash": request["tool_inventory_hash"], "version": request["tool_inventory_version"],
@@ -352,10 +354,24 @@ func upgradeInstall(t *testing.T, ctx context.Context, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loaded, active := false, false
 	manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "launchctl" {
-			if len(args) > 0 && args[0] == "print" {
-				return nil, upgradeInactive(113)
+			switch args[0] {
+			case "print":
+				if !loaded {
+					return nil, upgradeInactive(113)
+				}
+				if active {
+					return []byte("state = running\npid = 42\n"), nil
+				}
+				return []byte("state = waiting\n"), nil
+			case "bootstrap":
+				loaded, active = true, true
+			case "kickstart":
+				active = loaded
+			case "bootout":
+				loaded, active = false, false
 			}
 			return nil, nil
 		}
