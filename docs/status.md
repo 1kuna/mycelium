@@ -2245,12 +2245,14 @@ selector and revision) and `deadline_guidance`. The latter contains advisory
 These are live observations, separate from immutable submission intent and job
 holds. They do not change the accepted class or submission key.
 
-`myce submit` writes this advice to stderr and keeps the job ID on stdout.
+For deadline-class jobs, `myce submit` writes this advice to stderr and keeps
+the job ID on stdout. Other classes retain JSON diagnostics without printing
+the priority advisory.
 `myce wait` prints one short line per state change: progress on stderr and
 terminal states on stdout. `myce wait --json JOB` emits JSON lines on state or
 reason changes, retaining full reasons and initial placement/deadline diagnostics;
-`myce status --history JOB` shows the current advisory; default status leaves
-it out so a job reads as one reason and one action.
+`myce status JOB` (including `--history`) shows the current advisory only for
+deadline-class jobs. Other jobs read as one reason and one action.
 
 For deadline work, author a **new submission** with, for example:
 
@@ -2777,8 +2779,11 @@ an unstarted offer or unavailable preparation core; `building` requires a fresh
 builder report. The queue builds a missing plain environment on every
 eligible host with a free builder core, for queued work that could use that
 host once it has room, not only for the job admissible now; such a build runs
-beside device commands. Extension setup and command discovery keep their
-admission-bound offers. `deterministically_failed` retains the failed immutable recipe's
+beside device commands. Extension setup also precedes useful-job memory
+admission, retaining its device exclusion and exact demand. Locked command
+discovery builds ahead with its exact target/recipe identity. If no known host can prepare the environment,
+or every compatible builder has deterministically failed, the job fails with
+`dead_end_wait` and one safe finding/action; unknown/offline capacity remains a wait. `deterministically_failed` retains the failed immutable recipe's
 cause and log excerpt: the consumer must fix its inputs. Transient failures retain
 the existing retry evidence. `unknown_observation` asks the queue owner to restore
 missing/stale observations; it never claims preparation is progressing.

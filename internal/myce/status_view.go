@@ -198,6 +198,9 @@ func JobReasonDetail(j *Job) string {
 }
 
 func jobReason(j *Job, detail bool) string {
+	if j.DiagnosticCode == deadEndWait && j.Finding != nil {
+		return j.Finding.Text()
+	}
 	text := (*Hold).Text
 	if detail {
 		text = (*Hold).FullText

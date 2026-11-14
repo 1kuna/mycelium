@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func prepareTestWorker(t *testing.T, e Extension) (*Queue, Worker) {
@@ -411,4 +412,30 @@ func runPreparedExtensionJob(t *testing.T, e Extension) (Worker, []Log) {
 		t.Fatal(err)
 	}
 	return w, logs
+}
+
+// Preparation belongs to the queue even before useful work has free RAM.
+func TestExtensionPreparationAheadOfJobMemory(t *testing.T) {
+	e := compositionExtension(t, false)
+	q, w := prepareTestWorker(t, e)
+	j := submit(t, q, Spec{Name: "prepare", Project: "test", Extension: extensionKey(e)})
+	w.Machine.HostMemoryMeasured, w.Machine.HostAvailableMemoryGB = true, 0.01
+	reply := check(t, q, w.Machine, nil)
+	if reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
+		t.Fatal("missing prerequisite offer", reply)
+	}
+	plan := reply.EnvironmentPlan[0]
+	if plan.Preparation == nil || plan.Preparation.Digest != e.Digest || plan.Launch.Demand != j.ID {
+		t.Fatal("offer lost exact demand", plan)
+	}
+	if err := q.AuthorizeLaunch(*plan.Launch); err != nil {
+		t.Fatal("prerequisite depends on useful job admission", err)
+	}
+	q.clock.(*fakeClock).Advance(time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, j.ID); got.State != "queued" {
+		t.Fatal("busy host was treated as incapable", got.State, got.Reason)
+	}
 }

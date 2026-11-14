@@ -405,8 +405,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only
   that worker/target/hash; keep the same queued job for another compatible worker.
-  `no_buildable_worker` means every freshly observed compatible worker failed.
-  Read `myce status --sections machines` for its hash, target, failure and log
+  If no known host can build it, or every compatible builder has deterministically
+  failed, the job ends with `dead_end_wait` and one finding/action. Repair and
+  resubmit with a new key; terminal jobs do not reopen. Unknown/offline inventory
+  remains a wait. Read `myce status --sections machines` for its hash, target, failure and log
   reference. Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
   or submit changed recipe inputs. Process restarts and idle polling do not
   clear failures; transient network/disk failures and planned stops remain holds.

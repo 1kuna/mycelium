@@ -885,11 +885,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if *statusJSON {
 				return json.NewEncoder(os.Stdout).Encode(j)
 			}
-			// One reason and its next action; --history adds the evidence,
-			// variant rows and the priority advisory.
+			// One reason and its next action; --history adds evidence and variants.
 			printStatusDetail(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full, *statusHistory)
-			if *statusHistory {
-				fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
+			if advice := myce.DeadlineGuidanceText(j); advice != "" {
+				fmt.Fprintln(os.Stdout, advice)
 			}
 			printCancellationScope(os.Stdout, j)
 			if l := j.EnvironmentLock; l != nil {

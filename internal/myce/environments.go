@@ -539,7 +539,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {
 			if e := qualifiedExtension(j, m); e != nil {
-				return q.extensionPreparationOffer(*e, m)
+				return q.extensionPreparationOffer(*e, m, j)
 			}
 			r := j.EnvironmentRecipes[m.GPU]
 			if j.CommandDiscovery != nil {
@@ -561,7 +561,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	j := q.candidate(m, nil, scan)
 	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {
 		if e := qualifiedExtension(j, m); e != nil {
-			return q.extensionPreparationOffer(*e, m)
+			return q.extensionPreparationOffer(*e, m, j)
 		}
 	}
 	if j == nil || environmentReady(j, m) {
@@ -597,14 +597,19 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 // ran on Metal while both Linux GPUs sat idle (#1486). Momentary capacity and
 // production holds do not apply to the build; launch authorization still
 // checks the job's production and reservation holds and the build's core.
-// Extension setup and command discovery keep their admission-bound offers.
+// Extension setup keeps its device exclusion; locked command discovery uses
+// the same background builder and target-specific recipe identities.
 func (q *Queue) aheadPreparationPlan(m *Machine) []EnvironmentRecipe {
 	for _, l := range q.s.PreparationPlans {
 		if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || l.Device != targetDevice(m) || !l.Started {
 			continue
 		}
 		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {
-			if r, ok := j.EnvironmentRecipes[m.GPU]; ok && r.Key == l.Key && r.Preparation == nil {
+			r := j.EnvironmentRecipes[m.GPU]
+			if j.CommandDiscovery != nil {
+				r = commandPreparationRecipe(j, m)
+			}
+			if r.Key == l.Key && r.Preparation == nil {
 				copy := l
 				r.Launch = &copy
 				return []EnvironmentRecipe{r}
@@ -623,17 +628,24 @@ func (q *Queue) aheadPreparationPlan(m *Machine) []EnvironmentRecipe {
 		return nil
 	}
 	r := best.EnvironmentRecipes[m.GPU]
+	if best.CommandDiscovery != nil {
+		r = commandPreparationRecipe(best, m)
+	}
 	l := q.issuePreparationFor(m, "environment", r.Key, best)
 	r.Launch = &l
 	return []EnvironmentRecipe{r}
 }
 
 func (q *Queue) buildsAhead(j *Job, m *Machine) bool {
-	if j.State != "queued" || cancelled(j) || j.Pause != nil || j.CommandDiscovery != nil || j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || j.Spec.Needs.cpuOnly() != (m.GPU == "cpu") {
+	if j.State != "queued" || cancelled(j) || j.Pause != nil || j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || j.Spec.Needs.cpuOnly() != (m.GPU == "cpu") {
 		return false
 	}
 	r, ok := j.EnvironmentRecipes[m.GPU]
-	if !ok || r.Key == "" || r.Preparation != nil || environmentReady(j, m) || !environmentCanRun(j, m) {
+	if j.CommandDiscovery != nil {
+		r = commandPreparationRecipe(j, m)
+		ok = r.Key != ""
+	}
+	if !ok || r.Key == "" || r.Preparation != nil || environmentReady(j, m) || !environmentCanRun(j, m) || q.environmentFailureBlocked(j, m) {
 		return false
 	}
 	for _, report := range m.EnvironmentReports {

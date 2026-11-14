@@ -1927,11 +1927,11 @@ worker-specific failure propagation, not another package manager.
 5. A real build failure excludes only that worker/target for that recipe identity.
    Status shows environment hash, worker, target, preparation failure and log
    reference; another compatible worker can build/run. The queue retains the
-   failed build evidence without terminally failing waiting jobs. If all known
-   compatible workers fail, keep accepted demand
-   queued with an explicit no-buildable-worker reason until repair, cancellation
-   or its existing deadline. Unknown/offline capacity is neither success nor a
-   proven failure.
+   failed build evidence and tries other compatible builders. If no known host
+   can perform the preparation, or every compatible builder has deterministically
+   failed, fail accepted demand with one finding and one action. Repair or changed
+   inputs require a new submission; terminal jobs do not reopen.
+   Unknown/offline capacity is neither success nor a proven failure.
 6. Persist failure evidence for the same key/fingerprint across restart. New
    recipe/relevant host identity or an explicit retry of that worker's failed
    preparation permits another build; idle polling does not. Planned stops and
