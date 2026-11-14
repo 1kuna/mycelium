@@ -78,6 +78,22 @@ func TestOutputDeliveryCapacityPreservesSpoolAndReservations(t *testing.T) {
 	if status.UsedBytes != 9 || status.ReclaimableBytes != 0 {
 		t.Fatalf("pending capacity missing: %+v", status)
 	}
+	// A full-status observer uses captured reservation facts, even while a
+	// writer owns q.mu and changes a later generation's estimate (#1440).
+	q.mu.Lock()
+	view := q.captureFileStoreStatus()
+	for _, pending := range q.s.Jobs {
+		if pending.State == "queued" {
+			pending.Spec.Disk.OutputBytes = 24
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	frozen := view.status(ctx)
+	cancel()
+	q.mu.Unlock()
+	if frozen.ReservedOutputBytes != 8 {
+		t.Fatalf("status reservation escaped its snapshot: %+v", frozen)
+	}
 }
 
 func TestOutputDeliveryBundleHonorsReservation(t *testing.T) {

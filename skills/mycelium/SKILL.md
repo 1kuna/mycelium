@@ -296,6 +296,12 @@ can't submit ahead.
 
 ## When a job fails or waits
 
+For a preservation snapshot, `myce status --history --json` streams one complete
+document from a consistent committed publication, with bounded job projection
+on the queue. Save it to a file and check exit status before using it. Python
+`client.status(full=True)` returns the same document and allocates it in client
+memory. Ordinary status stays compact; use one job's status for diagnosis.
+
 - **Failed:** read its `finding` (printed by `myce wait`, shown by status and
   `myce result`): `owner` is `job`, `mycelium` or `unknown`, and `action` is the
   one thing to do. A `dead_end_wait` names what waiting can't fix; do it, then

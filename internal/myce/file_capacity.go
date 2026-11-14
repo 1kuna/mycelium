@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -244,6 +245,12 @@ type fileStoreObservation struct {
 	publicationHorizon        time.Duration
 	expiredGrace              time.Duration
 	projects                  projectFileFacts
+	outputs                   []statusOutputReservation
+}
+
+type statusOutputReservation struct {
+	bytes uint64
+	refs  FileManifest
 }
 
 // The caller holds q.mu. Reference maps are newly allocated and timestamps are
@@ -274,7 +281,14 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, q.expiredFilePublicationGrace(), projects}
+	var outputs []statusOutputReservation
+	for _, j := range q.liveJobs() {
+		if j.OutputAdmissionPending || terminal(j.State) || j.Spec.OutputDelivery != asyncNAS {
+			continue
+		}
+		outputs = append(outputs, statusOutputReservation{j.Spec.Disk.OutputBytes, maps.Clone(j.PendingOutputRefs)})
+	}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.s.PublicationHorizon, q.expiredFilePublicationGrace(), projects, outputs}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -328,7 +342,22 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
-	status.ReservedOutputBytes = store.reservedOutputs(payloads, ctx)
+	seen := map[string]bool{}
+	for _, output := range v.outputs {
+		if output.refs == nil {
+			status.ReservedOutputBytes = addDiskBytes(status.ReservedOutputBytes, output.bytes)
+			continue
+		}
+		for _, ref := range output.refs {
+			if seen[ref.SHA256] {
+				continue
+			}
+			seen[ref.SHA256] = true
+			if p, ok := payloads[ref.SHA256]; !ok || p.length != uint64(ref.SizeBytes) {
+				status.ReservedOutputBytes = addDiskBytes(status.ReservedOutputBytes, uint64(ref.SizeBytes))
+			}
+		}
+	}
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)
 	status.Physical = store.physicalStorageStatus(ctx, status, payloads, now)
 	return &status

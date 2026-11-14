@@ -311,6 +311,20 @@ func (q *Queue) Usage(since time.Time, requestContexts ...context.Context) (Usag
 
 func (q *Queue) usageSnapshot(since time.Time, requestContexts ...context.Context) (UsageReport, error) {
 	requestCtx := requestContext(requestContexts)
+	// The HTTP observer uses the latest committed accounting; the maintenance
+	// tick owns sampling. A report never starts a control transaction or copies
+	// execution history simply to read aggregate usage.
+	if index := q.readIndex(requestCtx); index != nil && !q.unpublishedRecords() {
+		value, err := readGet(index.root, "state").decode("state")
+		if err != nil {
+			return UsageReport{}, err
+		}
+		v := &Queue{clock: observationClock{q.clock.Now()}, s: *value.(*state)}
+		return v.readUsage(q.usageReader, since, requestCtx)
+	}
+	if err := admitObservationProjection(requestCtx); err != nil {
+		return UsageReport{}, err
+	}
 
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	v := &Queue{clock: observationClock{q.clock.Now()}, s: state{

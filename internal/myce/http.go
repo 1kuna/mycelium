@@ -143,7 +143,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			respond(w, nil, reject("usage_invalid", nil))
 			return
 		}
-		report, e := a.Queue.Usage(a.Queue.clock.Now().Add(-d), r.Context())
+		report, e := a.Queue.usageSnapshot(a.Queue.clock.Now().Add(-d), r.Context())
 		respondOperation(w, report, e, "usage_unavailable")
 	})
 	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
@@ -205,6 +205,13 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		view := query.Get("view")
 		if view != "" && view != "snapshot" {
 			respond(w, nil, reject("status_query_invalid", nil))
+			return
+		}
+		// Explicit peer byte ceilings retain the bounded, buffered contract.
+		// Ordinary full-history readers consume a single streamed document.
+		_, peerLimited := r.Context().Value(peerResponseBudgetKey{}).(int64)
+		if options.full && !peerLimited {
+			a.Queue.serveStatusHistory(w, r, options)
 			return
 		}
 		query.Del("view")
@@ -806,10 +813,51 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return e
 	}
 	if out != nil {
+		if stream, ok := out.(io.Writer); ok {
+			return copyJSONDocument(stream, res.Body)
+		}
 		return json.NewDecoder(res.Body).Decode(out)
 	}
 	_, err = io.Copy(io.Discard, res.Body)
 	return err
+}
+
+// Forward a JSON document with bounded decoder scratch. Token validation makes
+// a truncated successful HTTP body an error even after bytes reached stdout.
+func copyJSONDocument(dst io.Writer, src io.Reader) error {
+	decoder := json.NewDecoder(io.TeeReader(src, dst))
+	first, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if first != json.Delim('{') && first != json.Delim('[') {
+		return errors.New("expected a JSON document")
+	}
+	depth := 1
+	for depth > 0 {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return err
+		}
+		if delimiter, ok := token.(json.Delim); ok {
+			switch delimiter {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return errors.New("multiple JSON documents")
+	}
+	return nil
 }
 
 type HTTPError struct {

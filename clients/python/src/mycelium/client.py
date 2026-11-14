@@ -936,7 +936,9 @@ class Client:
         last committed facts; sections="jobs" opts into fresh diagnostic planning.
         sections accepts a comma-separated selection of jobs,machines,storage,
         work,health,efficiency,usage,diagnostics. full=True restores every existing
-        field and all retained jobs. jobs="recent" adds a capacity-sized terminal
+        field and all retained jobs. The queue streams one consistent document;
+        this method materializes the returned dict in client memory.
+        jobs="recent" adds a capacity-sized terminal
         page; jobs="all" pages history; jobs="active" keeps current/cleanup work.
         Absence from status does not prove completion: use get() or wait_many().
         project/since (queued-at RFC3339) filter jobs only.

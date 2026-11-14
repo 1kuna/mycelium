@@ -518,7 +518,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		// mutates it. Share it rather than copying and charging all retained
 		// work to every paged read, which refused pages with
 		// projection_capacity_exceeded once history outgrew a request's share.
-		if v.observationSelection != nil && !v.observationSelection.ids[key] {
+		if options != nil && options.stream || v.observationSelection != nil && !v.observationSelection.ids[key] {
 			detached.State.Jobs[key] = input
 			continue
 		}
@@ -537,7 +537,13 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	if fullCancellation {
 		custody = custody.cancellationObservation()
 	}
+	if options != nil && options.stream {
+		v.observationSelection.custody = custody
+	}
 	for key, job := range detached.State.Jobs {
+		if options != nil && options.stream {
+			continue // Project cancellation into the private row, never borrowed history.
+		}
 		if original := custody.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) && (v.observationSelection == nil || v.observationSelection.ids[key]) {
 			custody.projectCancellation(job, original)
 		}
