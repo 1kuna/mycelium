@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// GPUHostMemory is complete xe host evidence, separate from device VRAM.
+// GPUHostMemory is complete host evidence, separate from device allocations.
 // DriverGB counts per-client system/GTT objects plus the independently read
 // xe GTT managers, even where they overlap each other or cgroup charges.
 // HostDropGB is the MemAvailable drop after subtracting sibling Mycelium
@@ -21,6 +21,11 @@ import (
 // synchronized current nonreclaimable components, zero) across the attempt.
 // Unexplained activity outside Mycelium remains a conservative residual.
 type GPUHostMemory struct {
+	// CUDA has no exhaustive per-client host counter. Its proc upper bound
+	// retains absolute outside-root physical occupancy and all exposed pins.
+	Source     string   `json:"source,omitempty"`
+	PinnedGB   *float64 `json:"pinned_gb,omitempty"`
+	PhysicalGB *float64 `json:"physical_gb,omitempty"`
 	// Identifies samples collected with sibling subtraction. Legacy evidence
 	// is replaced when a corrected accepted sample arrives, including on reopen.
 	SiblingAdjusted bool     `json:"sibling_adjusted,omitempty"`
@@ -167,8 +172,8 @@ func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
 	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out, psi: psi, psiTotalUS: psiTotal}, nil
 }
 
-// Only xe discrete GPUs have been investigated. Missing fields, other drivers,
-// CUDA and unified memory keep the total-cgroup estimator.
+// DRM host objects are supported only for discrete xe GPUs. Unified CUDA uses
+// the separate proc physical upper bound, never a reinterpretation of DRM.
 func drmHostMemory(b []byte) (string, float64, error) {
 	fields := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -380,13 +385,14 @@ func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, 
 const attemptMemorySamplePeriod = 200 * time.Millisecond
 
 type gpuHostCollection struct {
-	driverGB float64
-	seen     bool
-	complete bool
-	last     time.Time
+	driverGB             float64
+	pinnedGB, physicalGB float64
+	seen                 bool
+	complete             bool
+	last                 time.Time
 }
 
-func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper, pci string) <-chan gpuHostCollection {
+func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper, pci string, cuda bool) <-chan gpuHostCollection {
 	result := make(chan gpuHostCollection, 1)
 	go func() {
 		out := gpuHostCollection{complete: true}
@@ -402,13 +408,21 @@ func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper,
 			// The helper keeps its own deadline; cleanup still waits at most
 			// one period and rejects a missing or stale result. Cancellation
 			// stops subsequent collections, not a healthy final invocation.
-			gb, seen, err := a.gpuHostMemory(context.WithoutCancel(ctx), clock, helper, pci)
+			var gb, pinned, physical float64
+			var seen bool
+			var err error
+			if cuda {
+				gb, pinned, physical, seen, err = a.cudaHostMemory()
+			} else {
+				gb, seen, err = a.gpuHostMemory(context.WithoutCancel(ctx), clock, helper, pci)
+			}
 			end := clock.Now()
 			if err != nil || end.Before(start) || end.Sub(start) > attemptMemorySamplePeriod || !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod {
 				out.complete = false
 				return
 			}
 			out.driverGB, out.seen, out.last = max(out.driverGB, gb), out.seen || seen, end
+			out.pinnedGB, out.physicalGB = max(out.pinnedGB, pinned), max(out.physicalGB, physical)
 			select {
 			case <-ctx.Done():
 				return

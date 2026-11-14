@@ -323,6 +323,13 @@ A submission key still replays the same job ID and final state. What the queue
 learned from the job (memory evidence, durations, envelopes) stays. Record any
 detail you need from a job within 14 days.
 
+For memory qualification, retain the exact attempt's `memory_peak`, including
+`gpu_host` pin/physical evidence and `device_sampling` coverage/variation when
+present. A CUDA proc physical upper bound can include unrelated occupancy and
+device overlap; it does not justify an overlap deduction or a smaller device
+growth allowance. Incomplete readings keep conservative sizing. See the
+[memory status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
+
 ## Python
 
 ```python

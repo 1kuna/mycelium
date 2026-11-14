@@ -808,6 +808,9 @@
         "device_growth_gb": {
           "type": "number"
         },
+        "device_sampling": {
+          "$ref": "#/$defs/DeviceMemorySampling"
+        },
         "device_source": {
           "type": "string"
         },
@@ -1569,6 +1572,57 @@
       "required": [
         "since",
         "remaining"
+      ],
+      "type": "object"
+    },
+    "DeviceMemorySampling": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "first_at_seconds": {
+          "type": "number"
+        },
+        "last_gb": {
+          "type": "number"
+        },
+        "last_step_gb": {
+          "type": "number"
+        },
+        "max_gb": {
+          "type": "number"
+        },
+        "max_interval_seconds": {
+          "type": "number"
+        },
+        "max_step_gb": {
+          "type": "number"
+        },
+        "min_gb": {
+          "type": "number"
+        },
+        "peak_at_seconds": {
+          "type": "number"
+        },
+        "samples": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "samples",
+        "complete",
+        "min_gb",
+        "max_gb",
+        "last_gb",
+        "max_step_gb",
+        "last_step_gb",
+        "first_at_seconds",
+        "peak_at_seconds",
+        "elapsed_seconds",
+        "max_interval_seconds"
       ],
       "type": "object"
     },
@@ -2813,8 +2867,17 @@
         "outside_gb": {
           "type": "number"
         },
+        "physical_gb": {
+          "type": "number"
+        },
+        "pinned_gb": {
+          "type": "number"
+        },
         "sibling_adjusted": {
           "type": "boolean"
+        },
+        "source": {
+          "type": "string"
         }
       },
       "required": [
