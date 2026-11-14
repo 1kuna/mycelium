@@ -26,7 +26,7 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 	f := flag.NewFlagSet("fleet upgrade", flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	release := f.String("release", "", "approved signed release (default: current approval)")
-	urgency := f.String("urgency", "normal", "normal: each drained host's running work finishes first; critical: it checkpoints, stops and is requeued")
+	urgency := f.String("urgency", "normal", "normal: wait for work, then checkpoint-stop resumable non-production attempts after a bounded wait; critical: stop work immediately")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}

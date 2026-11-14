@@ -764,14 +764,29 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    drained or disabled keeps the operator's policy: it is updated, never resumed.
    While the operation's drain holds, a production job whose only eligible hosts
    it drained waits for them instead of failing.
-3. **Waits for its running work**, model calls and cleanup to finish on their
-   own, with no deadline. With `--urgency critical` it stops that work at once
-   through the planned-maintenance stop instead: resumable work checkpoints
-   within the stop grace and is requeued without a retry charge, and each
-   host's `stop_requests` lists what was stopped (attempt, whether resumable,
-   accepted progress). Exact release of every attempt is still required; an
-   elapsed grace never proves it. On the queue's host, new model calls wait
-   while it is updated, because the queue restart ends every model stream.
+3. **Waits for its running work.** Normal urgency never stops production or
+   non-resumable work. Once the remaining obligations are all started,
+   resumable non-production attempts with a checkpoint contract (NAS checkpoint
+   directory or file-store transport), it plans a checkpoint stop for each.
+   The natural-completion wait is that job's latest measured planned
+   stop-to-release duration, capped at the existing two-minute checkpoint grace:
+   waiting longer would cost more admission downtime than the stop budget.
+   With no completed measurement it allows one checkpoint grace, preventing an
+   indefinite drain while giving short jobs a chance to finish (MY-34).
+   The fixed plan cannot slide with observations or queue restarts. A remaining
+   non-resumable/production attempt, model obligation or cleanup postpones the
+   plan until it finishes. A job finishing naturally cancels its plan.
+   `planned_stops` shows the exact job/attempt, `reason` (including the wait's
+   basis) and `stop_after`; `stop_requests` records when the stop was requested
+   and its accepted progress. Normal stops use planned-leave SIGTERM with two
+   minutes before SIGKILL, including GPU attempts. They requeue the same job
+   with the completed attempt identity and progress preserved, no loss or retry
+   charge, and `maintenance_resume`; the next execution increments the attempt
+   as usual. With `--urgency critical`, existing immediate stops are unchanged.
+   Exact release of every attempt is still required; an elapsed grace never
+   proves it, and missing release evidence can still delay an update. On the
+   queue's host, new model calls wait while it is updated, because the queue
+   restart ends every model stream.
 4. **Updates each Mycelium service on the host**, the worker first and then, on
    the queue's host, the queue. The service fetches the release through the
    queue's authenticated endpoint and checks it against its locally pinned

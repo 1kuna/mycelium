@@ -2695,11 +2695,24 @@ before its queue. For each host the queue:
 
 1. drains it, as the drain owner; a host an operator drained or disabled keeps
    the operator's policy and is never resumed by the rollout;
-2. waits, with no deadline, for its running attempts, preparations, model calls
-   and streams, engines and cleanup to finish on their own (MY-35). Draining
-   withdraws unstarted work and blocks admission; it never stops started work.
-   A normal update leaves a host enabled while draining it would strand open
-   production work (#1387);
+2. waits for its running work (MY-35). Draining withdraws unstarted work and
+   blocks admission. Normal urgency never stops production or non-resumable
+   work. Once only started resumable non-production attempts with a checkpoint
+   contract remain, each gets a fixed natural-completion window based on its
+   last measured planned stop-to-release duration, capped at the existing
+   two-minute checkpoint grace. Without completed evidence, the window is one
+   checkpoint grace: it prevents indefinite admission downtime, at the cost of
+   up to one grace before signalling (MY-34). Waiting longer would cost more
+   downtime than the stop budget; this is no completion forecast (MY-49).
+   At expiry, planned-leave SIGTERM gives two minutes to checkpoint before
+   SIGKILL, including GPU work. The job requeues with its completed attempt and
+   progress preserved, no loss/retry charge, and `maintenance_resume`. Status
+   lists each exact attempt, deadline and basis in `planned_stops`, then signal
+   intent in `stop_requests`. Plans survive restart without extending the wait;
+   natural completion removes them. Preparations, model calls/streams, engines
+   and cleanup still finish naturally, and exact release custody gates every
+   service update even after grace expiry. A normal update leaves a host enabled
+   while draining it would strand open production work (#1387);
 3. has each service fetch the release through the queue's authenticated
    endpoint and verify it against its pinned publisher key, the signed size and
    SHA-256, version and protocols, and on macOS its code-signing identity; a

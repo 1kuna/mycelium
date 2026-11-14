@@ -297,6 +297,12 @@ func boundStop(at **time.Time, deadline time.Time) {
 }
 
 func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
+	q.maintainHostObligationGrace(p, deadline, false)
+}
+
+// Normal upgrades promise the full planned-leave checkpoint grace, including
+// GPU work. Other maintenance and critical upgrades retain their existing grace.
+func (q *Queue) maintainHostObligationGrace(p HostObligation, deadline *time.Time, plannedLeave bool) {
 	switch {
 	case p.Launch != nil && !p.Launch.Started:
 		delete(q.s.PreparationPlans, p.Launch.Attempt)
@@ -350,7 +356,7 @@ func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 				}
 			}
 			q.stop(j, maintenanceStopCause)
-			if gracefulGPUStop(j) {
+			if !plannedLeave && gracefulGPUStop(j) {
 				boundStop(&j.StopAt, q.clock.Now().Add(q.gpuStopGrace()))
 			}
 			if deadline != nil {
