@@ -21,6 +21,7 @@ type installManager struct {
 type installUnitState struct {
 	enabled        string
 	loaded, active bool
+	exited         bool
 }
 type installUnit struct {
 	path  string
@@ -84,6 +85,9 @@ func (m installManager) inspect(ctx context.Context, u installUnit) (installUnit
 	s.loaded = true
 	for _, line := range strings.Split(string(b), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), " = ")
+		if ok && key == "state" && value == "exited" {
+			s.exited = true
+		}
 		if ok && (key == "state" && value == "running" || key == "pid" && value != "0") {
 			s.active = true
 		}
@@ -110,6 +114,9 @@ func (m installManager) reload(ctx context.Context, units []installUnit) error {
 	return result
 }
 func (m installManager) registration(ctx context.Context, u installUnit, want installUnitState) error {
+	if m.os == "darwin" {
+		ctx = context.WithValue(ctx, launchdLifecycleKey{}, true)
+	}
 	current, err := m.inspect(ctx, u)
 	if err != nil {
 		return err
@@ -148,6 +155,9 @@ func (m installManager) registration(ctx context.Context, u installUnit, want in
 	return err
 }
 func (m installManager) activity(ctx context.Context, u installUnit, active bool, restart bool) error {
+	if m.os == "darwin" {
+		ctx = context.WithValue(ctx, launchdLifecycleKey{}, true)
+	}
 	current, err := m.inspect(ctx, u)
 	if err != nil {
 		return err
@@ -166,7 +176,38 @@ func (m installManager) activity(ctx context.Context, u installUnit, active bool
 	} else if current.loaded && current.active {
 		_, err = m.command(ctx, "launchctl", "kill", "SIGTERM", u.target())
 	}
+	if err == nil && m.os == "darwin" {
+		return m.waitActivity(ctx, u, active)
+	}
 	return err
+}
+
+// bootstrap/kickstart acknowledge a request, not a running process. Observe
+// activation separately; only caller cancellation bounds a pending transition.
+func (m installManager) waitActivity(ctx context.Context, u installUnit, active bool) error {
+	ctx = context.WithValue(ctx, launchdLifecycleKey{}, true)
+	ticker := time.NewTicker(launchdStopPoll)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		state, err := m.inspect(ctx, u)
+		if err != nil {
+			return err
+		}
+		if state.active == active {
+			return nil
+		}
+		if active && (!state.loaded || state.exited) {
+			return errors.New("launchd service exited or unloaded before activation")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func installUnitPaths(c ServiceConfig) []string {
@@ -237,17 +278,25 @@ func (tx *installTransaction) restore(ctx context.Context) error {
 	// lifecycle budgets. A total probe deadline can expire mid-stop and then
 	// poison every subsequent recovery operation and final inspection.
 	recovery := context.WithoutCancel(ctx)
+	if tx.manager.os == "darwin" {
+		recovery = context.WithValue(recovery, launchdLifecycleKey{}, true)
+	}
 	result := tx.restoreFiles()
-	reloadErr := tx.manager.reload(recovery, tx.units)
+	reloadErr := tx.recoverManagerOperation(func() error { return tx.manager.reload(recovery, tx.units) })
 	result = errors.Join(result, reloadErr)
 
 	for _, u := range tx.units {
-		if err := tx.manager.registration(recovery, u, u.state); err != nil {
+		if err := tx.recoverManagerOperation(func() error { return tx.manager.registration(recovery, u, u.state) }); err != nil {
 			result = errors.Join(result, fmt.Errorf("%s registration: %w", u.name(), err))
 		}
 	}
 	for _, u := range tx.units {
-		if err := tx.manager.activity(recovery, u, result == nil && u.state.active, true); err != nil {
+		if err := tx.recoverManagerOperation(func() error {
+			// Darwin reload already removed the cached job, so bootstrap uses
+			// restored bytes. Avoid restarting an activation that an interrupted
+			// kickstart may already have completed.
+			return tx.manager.activity(recovery, u, result == nil && u.state.active, tx.manager.os != "darwin")
+		}); err != nil {
 			result = errors.Join(result, fmt.Errorf("%s activity: %w", u.name(), err))
 		}
 	}
@@ -268,8 +317,25 @@ func (tx *installTransaction) restore(ctx context.Context) error {
 	if len(differences) > 0 {
 		detail = strings.Join(differences, "; ")
 	}
-	return fmt.Errorf("install rollback incomplete; keep affected services stopped; snapshot differences: %s: %w", detail, errors.Join(result, errors.New("snapshot restoration failed")))
+	return fmt.Errorf("install rollback incomplete; affected services requested stopped; snapshot differences: %s: %w", detail, errors.Join(result, errors.New("snapshot restoration failed")))
 }
+
+// An interrupted launchctl client leaves the manager outcome unknown. Re-enter
+// the operation through its state inspection before deciding recovery failed:
+// reload checks loaded state, registration checks the label, activity checks PID.
+// A second interruption is an unresolved manager failure, not a reason to spin
+// or to claim the old service is active.
+func (tx *installTransaction) recoverManagerOperation(operation func() error) error {
+	err := operation()
+	if tx.manager.os == "darwin" && (installExit(err, -1) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		if retryErr := operation(); retryErr != nil {
+			return errors.Join(err, retryErr)
+		}
+		return nil
+	}
+	return err
+}
+
 func (tx *installTransaction) differences(ctx context.Context) []string {
 	var differences []string
 	for _, u := range tx.units {
@@ -329,8 +395,7 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 		}
 		return err
 	}
-	wait, cancel := m.launchdStopContext(ctx, u)
-	defer cancel()
+	wait := context.WithValue(ctx, launchdLifecycleKey{}, true)
 	if err := wait.Err(); err != nil {
 		return err
 	}
