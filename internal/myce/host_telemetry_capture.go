@@ -92,8 +92,8 @@ func (c *HostTelemetryCapture) Init() error {
 	if c.Birth == nil {
 		c.Birth = processBirth
 	}
-	if c.QueuePID <= 0 || c.WorkerPID <= 0 || c.QueuePID == c.WorkerPID || c.RunID == "" || c.HostRef == "" {
-		return errors.New("capture requires distinct queue/worker PIDs and run/host references")
+	if c.QueuePID < 0 || c.WorkerPID <= 0 || c.QueuePID == c.WorkerPID || c.RunID == "" || c.HostRef == "" {
+		return errors.New("capture requires a worker PID, optional distinct queue PID and run/host references")
 	}
 	refs, addresses := map[string]bool{}, map[string]bool{}
 	for _, card := range c.Cards {
@@ -107,7 +107,9 @@ func (c *HostTelemetryCapture) Init() error {
 		c.CaptureID = ID()
 	}
 	// Failed birth reads remain unknown for this capture; never bind a later PID.
-	c.queueBirth, _ = c.Birth(c.QueuePID)
+	if c.QueuePID > 0 {
+		c.queueBirth, _ = c.Birth(c.QueuePID)
+	}
 	c.workerBirth, _ = c.Birth(c.WorkerPID)
 	c.started = c.Clock.Now()
 	return nil
@@ -128,13 +130,23 @@ func (c *HostTelemetryCapture) Sample(ctx context.Context) (HostTelemetrySample,
 	start := c.Clock.Now()
 	r := HostTelemetrySample{Schema: HostTelemetrySchema, RunID: c.RunID, HostRef: c.HostRef, CaptureID: c.CaptureID, Cards: []TelemetryCard{}}
 	// One shared inventory avoids adding independently sampled process trees.
-	qb, qe := c.Birth(c.QueuePID)
+	queueBirth := func() (string, error) {
+		if c.QueuePID == 0 {
+			return "", nil
+		}
+		return c.Birth(c.QueuePID)
+	}
+	qb, qe := queueBirth()
 	wb, we := c.Birth(c.WorkerPID)
 	data, inventoryErr := c.Probe.Command(ctx, "ps", "-ax", "-o", "pid=,ppid=,rss=")
-	qa, qae := c.Birth(c.QueuePID)
+	qa, qae := queueBirth()
 	wa, wae := c.Birth(c.WorkerPID)
 	process := func(pid int, expected, before, after string, beforeErr, afterErr error) (TelemetryProcess, bool) {
 		p := TelemetryProcess{PID: pid}
+		if pid == 0 {
+			p.RSS = c.reading("bytes", "process RSS", start, nil, "not_configured")
+			return p, false
+		}
 		reason := "process_identity_unavailable"
 		changed := expected != "" && (beforeErr == nil && before != expected || afterErr == nil && after != expected)
 		if changed {

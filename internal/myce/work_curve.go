@@ -196,6 +196,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
 				point.MemoryRange, point.MemorySamples = nil, 0
 				point.GPUHostRange = nil
+				point.DeviceRange = nil
 				if !oomFailure && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
 					// Keep the existing diagnostic as invalidation provenance,
 					// never as a learned estimate or a new class-level bound.

@@ -440,9 +440,14 @@ detail you need from a job within 14 days.
 
 For memory qualification, retain the exact attempt's `memory_peak`, including
 `gpu_host` pin/physical evidence and `device_sampling` coverage/variation when
-present. A CUDA proc physical upper bound can include unrelated occupancy and
-device overlap; it does not justify an overlap deduction or a smaller device
-growth allowance. Incomplete readings keep conservative sizing. See the
+present. A CUDA proc physical upper bound includes device and possibly unrelated
+occupancy. With repeated complete accepted local evidence, Mycelium keeps that
+combined bound independently of non-reclaimable host plus device, and uses
+between-attempt device peak variation rather than adding startup allocation twice.
+Incomplete historical readings retain total-cgroup plus device floors; unknown
+or stale live device attribution still requires exclusive execution. For local
+benchmark telemetry on a worker-only host, omit `--queue-pid`; its RSS is marked
+`not_configured`. See the
 [memory status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Python

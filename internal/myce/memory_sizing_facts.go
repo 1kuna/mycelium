@@ -55,6 +55,7 @@ func (q *Queue) memorySizingFacts(j *Job, m *Machine, key *ObservationKey, confi
 			prior := *point
 			prior.MemoryPeak, prior.MemoryRecordedAt = point.MemoryEscalation.Peak, point.MemoryEscalation.RecordedAt
 			prior.MemoryRange, prior.GPUHostRange = nil, nil
+			prior.DeviceRange = nil
 			priors = append(priors, &prior)
 		}
 		points = priors

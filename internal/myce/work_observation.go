@@ -65,6 +65,7 @@ type MemoryEscalationPrior struct {
 type WorkObservation struct {
 	MemoryEscalation    *MemoryEscalationPrior `json:"memory_escalation,omitempty"`
 	GPUHostRange        *MemoryPeakRange       `json:"gpu_host_range,omitempty"`
+	DeviceRange         *MemoryPeakRange       `json:"device_range,omitempty"`
 	MemoryRange         *MemoryPeakRange       `json:"memory_range,omitempty"`
 	MemoryLayout        string                 `json:"memory_layout,omitempty"`
 	MemoryConfiguration string                 `json:"memory_configuration,omitempty"`
