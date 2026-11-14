@@ -205,16 +205,15 @@ def await_file(path, child, predicate=bool, timeout=30):
     raise RuntimeError(f"fixture did not reach {path.name} within {timeout}s")
 
 
-def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, config=None):
+def pairing(name, queue_binary, worker_binary, root, tools, *, large=False, config=None, allow_additive_retry=False):
     with process(queue_binary, "queue", root / "queue") as queue:
         url = await_file(root / "queue/url", queue)
         with process(worker_binary, "worker", root / "worker", queue=url, tools=tools,
                      config=config) as worker:
             def ready(value):
                 rows = json.loads(value)
-                if any(row["status"] != 200 for row in rows):
-                    raise RuntimeError(f"check-in refused: {rows}")
-                return len(rows) >= 2
+                validate_inventory_receipts(rows, allow_additive_retry)
+                return sum(row["status"] == 200 for row in rows) >= 2
             rows = json.loads(await_file(root / "queue/receipts.json", worker, ready))
             # Exercise the bounded history API supported by every predecessor.
             # A full-detail projection of all 6,286 jobs competed with large
@@ -274,9 +273,9 @@ def run(args):
         cases = [
             ("candidate queue + candidate worker", lambda: pairing("same-source suffix", candidate[0], candidate[0], scratch / "same", tools, large=True)),
             ("candidate queue + previous worker", lambda: pairing("previous worker", candidate[0], previous[0], scratch / "old-worker", tools)),
-            ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools)),
+            ("previous queue + candidate worker", lambda: pairing("previous queue", previous[0], candidate[0], scratch / "previous-queue", tools, allow_additive_retry=True)),
             ("previous worker completes current work", lambda: first_work(candidate[0], previous[0], scratch / "previous-work", tools)),
-            ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools)),
+            ("current worker completes previous work", lambda: first_work(previous[0], candidate[0], scratch / "current-work", tools, allow_additive_retry=True)),
             ("saved config downgrade", lambda: downgrade(previous, candidate, scratch, tools)),
             ("worker + current/previous queue restarts", lambda: inventory_restarts(candidate, previous, scratch, tools)),
             ("queue rollback preserves decisions and custody", lambda: queue_rollback(candidate, previous, scratch)),
@@ -361,8 +360,8 @@ def validate_inventory_receipts(rows, allow_additive_retry=False):
     refused = [i for i, row in enumerate(rows) if row["status"] != 200]
     if not refused:
         return
-    # A worker that negotiated inventory observations with the candidate may
-    # retain that field across rollback. The strict predecessor rejects it once;
+    # A candidate worker advertises inventory observations before it knows the
+    # queue version, including after rollback. The strict predecessor rejects it once;
     # the retry must remove only that field and preserve the complete baseline.
     if allow_additive_retry and refused == [0] and rows[0]["status"] == 400 and rows[0].get("inventory_probe_fields"):
         error = json.loads(rows[0].get("error", "{}"))
@@ -420,7 +419,7 @@ def inspect_queue(binary, root):
 
 
 
-def first_work(queue_binary, worker_binary, root, tools):
+def first_work(queue_binary, worker_binary, root, tools, *, allow_additive_retry=False):
     # Status-only workers never needed a process-table tool. Real command
     # completion must verify process-group release, using the host's real ps.
     worker_tools = root / "worker-tools"
@@ -436,8 +435,9 @@ def first_work(queue_binary, worker_binary, root, tools):
             request = urllib.request.Request(url + "/api/jobs/" + job_id, headers={"Authorization": "Bearer upgrade-fixture"})
             def offered(value):
                 rows = json.loads(value)
-                assert all(row["status"] == 200 and row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), rows
-                return any(row["offered"] for row in rows)
+                validate_inventory_receipts(rows, allow_additive_retry)
+                assert all(row["attempt_protocol"] == "keyed-attempt-v1" for row in rows), rows
+                return any(row["status"] == 200 and row["offered"] for row in rows)
             try:
                 rows = json.loads(await_file(root / "queue/receipts.json", worker, offered))
             except RuntimeError as error:
