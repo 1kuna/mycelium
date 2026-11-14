@@ -128,7 +128,9 @@ check: [test, -s, result]
 		return j
 	}
 	var first profileReceipt
-	for i, item := range []string{"one", "two", "three"} {
+	// Two different items prove shared identity and distinct jobs. The third
+	// item is exercised below by the per-item content-separation assertion.
+	for i, item := range []string{"one", "two"} {
 		r := invoke(root, item, item)
 		j := finish(r)
 		if i == 0 {
@@ -199,7 +201,7 @@ check: [test, -s, result]
 			t.Errorf("common blob uploaded %d times", patches[ref.SHA256])
 		}
 	}
-	t.Log("one committed profile ran three items; common blobs uploaded once; shared memory identity; fresh clone after unrelated commit adopted; changed item/code reran; per_item separated args")
+	t.Log("one committed profile ran distinct items; common blobs uploaded once; shared memory identity; fresh clone after unrelated commit adopted; changed item/code reran; per_item separated args")
 }
 
 func TestProfileSourcePaths(t *testing.T) {

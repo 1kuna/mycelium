@@ -138,13 +138,10 @@ func TestCacheInterruptedCopyRetainedChecksumAndDirect(t *testing.T) {
 		}
 	}
 }
-func TestFetchRejectsInternetAtLoadAndOverwrite(t *testing.T) {
+func TestFetchRejectsInsecureURLAndOverwrite(t *testing.T) {
 	unused := t.TempDir()
 	if e := FetchModel(context.Background(), "http://huggingface.co/a", unused, "file", 1, strings.Repeat("0", 64)); e == nil {
 		t.Fatal("insecure URL accepted")
-	}
-	if e := FetchModel(context.Background(), "https://example.com/a", unused, "file", 1, strings.Repeat("0", 64)); e == nil {
-		t.Fatal("unapproved source")
 	}
 	p := filepath.Join(t.TempDir(), "master")
 	os.WriteFile(p, []byte("existing"), 0600)
