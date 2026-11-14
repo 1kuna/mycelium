@@ -975,6 +975,27 @@ resumable.
 ### Job memory envelopes
 <a id="amendment-job-memory-envelopes-146"></a>
 
+**Local host calibration (#1044).** Each comparable observation retains its
+own physical-demand floor and measured range. With complete non-reclaimable
+CPU or xe host evidence, its forecast is range maximum plus the larger of
+that range's spread, measured sampling growth and launch drift. Keep the
+cumulative resident/driver peak plus launch drift as another floor, including
+when the range restarted after incomplete coverage. Take the largest of these
+per-observation bounds. Do not add a newer range's variation to an older,
+already larger cumulative peak, or treat differences between allowance-key
+maxima as another measured range. Incomplete observations independently retain
+their total-cgroup peak plus sampling growth, with launch slack added separately;
+a complete neighbour never discounts them. These margins cover measured between-attempt variation,
+growth before the next sample and snapshot-to-launch drift, respectively.
+They are empirical bounds, not guarantees about an unseen tail; pressure,
+OOM recovery, physical admission and release custody still bind.
+
+Unified CUDA host observations without complete pin/driver attribution retain
+total-cgroup sizing. Device peaks and their conservative growth margins remain
+separate and are added once to the host charge. Retained independent maxima
+cannot establish a physical union or justify subtracting cache or device
+overlap. Native coexistence and output proof remain separate from calibration.
+
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted whole-attempt peaks ([comparable

@@ -48,28 +48,30 @@ func (q *Queue) acceptedMemoryPoint(p *WorkObservation) bool {
 	return memoryIdentityUsable(*p) && !p.MemoryRecordedAt.IsZero() && age >= 0 && peak != nil && !peak.constrained() && !peak.PressureUnavailable && peak.HostGB != nil && validRate(*peak.HostGB) && validRate(hostMemoryPeakGB(peak))
 }
 
-// Retain the conservative total charge until a complete resident range exists.
-// The observed range covers between-attempt variability; sampled growth covers
-// the next observation horizon. Neither is substituted for the other's cost.
+// Complete local host ranges bound non-reclaimable demand; incomplete rows
+// retain total peaks. Variation and sampling growth share the forecast margin.
 func observedMemoryBound(points []*WorkObservation, device bool) (float64, int) {
 	peak, margin, samples := observedMemoryPeakAndMargin(points, device)
 	return peak + margin, samples
 }
 
 func observedMemoryPeakAndMargin(points []*WorkObservation, device bool) (float64, float64, int) {
-	peak, low, growth, samples := 0.0, math.Inf(1), 0.0, 0
-	complete := !device
-	for _, point := range points {
-		p := point.MemoryPeak
-		r := point.MemoryRange
-		if point.Key.Component != "cpu" {
-			r = point.GPUHostRange
-			_, ok := p.gpuHostPeakGB()
-			complete = complete && ok
-		}
-		complete = complete && r.valid() && r.Samples >= 2 && p != nil && p.NonreclaimableGB != nil
-	}
+	return observedMemoryPeakAndMarginWithDrift(points, device, minimumHostMemoryGB)
+}
 
+// A range belongs to the observations that measured it. Its upper forecast is
+// range max + max(range spread, sampled growth, launch drift). Older cumulative
+// peaks remain independent floors: adding the new range's spread to an older
+// maximum counts already-covered variation again. Likewise, differences between
+// allowance-key maxima are not a measured within-key range.
+//
+// Each incomplete row independently keeps its total-cgroup bound. A complete
+// neighbour cannot discount it, nor must its cache force every complete row back
+// to total sizing. Device growth and paired transfer error remain separate.
+func observedMemoryPeakAndMarginWithDrift(points []*WorkObservation, device bool, drift float64) (float64, float64, int) {
+	peak, bound, samples := 0.0, 0.0, 0
+	deviceLow, deviceGrowth := math.Inf(1), 0.0
+	legacyLow, unmeasured := math.Inf(1), true
 	for _, point := range points {
 		p := point.MemoryPeak
 		if p == nil {
@@ -80,7 +82,7 @@ func observedMemoryPeakAndMargin(points []*WorkObservation, device bool) (float6
 		if point.Key.Component != "cpu" {
 			rangePeak = point.GPUHostRange
 		}
-		rangeComplete := complete && rangePeak.valid() && rangePeak.Samples >= 2 && p.NonreclaimableGB != nil
+		rangeComplete := !device && rangePeak.valid() && rangePeak.Samples >= 2 && p.NonreclaimableGB != nil && validMemoryValue(*p.NonreclaimableGB)
 		if point.Key.Component != "cpu" {
 			_, complete := p.gpuHostPeakGB()
 			rangeComplete = rangeComplete && complete
@@ -90,26 +92,41 @@ func observedMemoryPeakAndMargin(points []*WorkObservation, device bool) (float6
 			if combined, ok := p.gpuHostPeakGB(); ok {
 				value = max(value, combined)
 			}
-			low = min(low, rangePeak.MinGB)
 		}
 		if device {
 			if p.DeviceGB == nil || !validRate(*p.DeviceGB) {
 				continue
 			}
 			value = *p.DeviceGB
+			deviceLow = min(deviceLow, value)
+			deviceGrowth = max(deviceGrowth, deviceMemoryGrowthGB(p))
 		}
-		peak, low = max(peak, value), min(low, value)
-		margin := memoryGrowthGB(p)
-		if device {
-			margin = deviceMemoryGrowthGB(p)
+		peak = max(peak, value)
+		legacyLow = min(legacyLow, value)
+		unmeasured = unmeasured && !rangeComplete && (p.GrowthGB == nil || !validMemoryValue(*p.GrowthGB))
+		if rangeComplete {
+			// The cumulative resident/driver floor may predate this range.
+			// Never discard it, including when coverage restarted after a gap.
+			bound = max(bound, value+drift, rangePeak.MaxGB+max(rangePeak.MaxGB-rangePeak.MinGB, memoryGrowthGB(p), drift))
+		} else if !device {
+			// Preserve the legacy fallback margin. Configured ceiling slack is
+			// added separately by hostNeed, not again to this total-cgroup bound.
+			bound = max(bound, value+max(memoryGrowthGB(p), minimumHostMemoryGB))
 		}
-		growth = max(growth, margin)
 		samples += max(1, point.MemorySamples)
 	}
 	if samples == 0 {
 		return 0, 0, 0
 	}
-	return peak, max(peak-low, growth, minimumHostMemoryGB), samples
+	if device {
+		return peak, max(peak-deviceLow, deviceGrowth, minimumHostMemoryGB), samples
+	}
+	if unmeasured {
+		// No measured range or sampling growth yet: preserve legacy uncertainty
+		// until new accepted sensor evidence can calibrate it.
+		bound = max(bound, peak+(peak-legacyLow))
+	}
+	return peak, max(0, bound-peak), samples
 }
 
 func pointsForExact(points []*WorkObservation, key ObservationKey) []*WorkObservation {
@@ -128,7 +145,8 @@ func observedMemoryBoundForHost(points []*WorkObservation, key ObservationKey, m
 			local = append(local, p)
 		}
 	}
-	return observedMemoryBound(local, false)
+	peak, margin, samples := observedMemoryPeakAndMarginWithDrift(local, false, exploratoryDriftMarginGB(m))
+	return peak + margin, samples
 }
 
 type memoryTransferTarget struct {
