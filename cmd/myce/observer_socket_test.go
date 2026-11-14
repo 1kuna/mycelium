@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -128,8 +127,26 @@ func TestObserverStartupWaitsForOldSocketCleanup(t *testing.T) {
 		fmt.Fprint(w, `{"id":"job","state":"running"}`)
 	}))
 	defer server.Close()
-	_, _, prior := sharedWatchFixture(t, root, server.URL, &waitClock{now: time.Now()})
+	receipt, entry, prior := sharedWatchFixture(t, root, server.URL, &waitClock{now: time.Now()})
 	prior.Close() // The idle old owner already released lifetime ownership.
+	defer func() {
+		// Killing only the child lets its supervisor restart and write into a
+		// concurrently removed TempDir. Retire this registration and wait for
+		// both owners to exit before removing the fixture.
+		if err := os.RemoveAll(receipt); err != nil {
+			t.Error(err)
+		}
+		if err := os.Remove(entry); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
+		}
+		if wake, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: path, Net: "unixgram"}); err == nil {
+			_, _ = wake.Write([]byte{1})
+			wake.Close()
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		waitCLIObserverFixture(t, cleanup, root)
+	}()
 	checked, resume := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	release := func() { once.Do(func() { close(resume) }) }
@@ -173,7 +190,6 @@ func TestObserverStartupWaitsForOldSocketCleanup(t *testing.T) {
 	if err := readProfileJSON(filepath.Join(root, "observer.status"), &owner); err != nil {
 		t.Fatal(err)
 	}
-	defer syscall.Kill(owner.PID, syscall.SIGKILL)
 	wake, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: path, Net: "unixgram"})
 	if err != nil {
 		t.Fatal("old cleanup unlinked ordinary replacement", err)
