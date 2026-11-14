@@ -740,8 +740,9 @@ absent or zero `free_floor_bytes` derives the cold-copy reserve from the worker'
 actual cache volume: 1% of total capacity, at least 256 MiB, using the existing
 disk headroom rule. This leaves room for filesystem metadata, control logs and
 other writers without imposing one deployment's disk size on smaller systems.
-A positive value requests an explicit reserve; the ordinary cache disk floor
-still applies. Cache capacity, verified identities and read-only staging remain
+A positive value requests an explicit reserve for that model copy's admission;
+it does not raise the floor for unrelated staging or background collection.
+The ordinary measured cache disk floor still applies. Cache capacity, verified identities and read-only staging remain
 required.
 
 ```yaml

@@ -17,14 +17,22 @@ Admission measures available blocks and reserves pending writes above the
 existing disk floor (1% of the volume, at least 256 MiB), plus measured growth
 of the worker's small control files, plus the volume's measured
 [foreign headroom](#foreign-disk-headroom-1104). A model-copy policy can require a larger
-floor; other concurrent writers honor that floor until its transfer joins.
+floor for its own cold-copy admission. That explicit policy is not physical
+headroom: unrelated writers and background collection use measured headroom,
+without inheriting a model transfer's policy floor. Pending write bytes remain
+shared across all writers on the volume.
 Reservations remain charged through detached cancellation tails. To avoid
 overcommit during concurrent writes, a transfer's full remaining reservation
 stays charged until completion, even as statfs starts reflecting those writes.
 This can temporarily withhold a transfer that would fit after another finishes.
 
 Before refusing capacity, the ledger reclaims inactive entries across cache
-classes, oldest successful use first. Model/snapshot copies require a verified
+classes, oldest successful use first. Private-file cache blobs and partials
+are disposable copies: attempts have private materializations, and eviction
+holds both the in-process mutex and cross-process collection/download lock.
+They do not require a victim HEAD, so queue expiry or an unavailable victim
+does not wedge admission. Unknown files remain protected.
+Model/snapshot copies require a verified
 recoverable source; source loss, unknown provenance, loaded models, queue pins,
 queued snapshot/shared-input references, reader/build locks and durable
 exact-attempt pins preserve them. New local recovery records contain source

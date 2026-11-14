@@ -235,12 +235,8 @@ func (c *FileCache) collect(ctx context.Context) (r CacheCollection) {
 			r.Error = "file_cache_collect_changed"
 			return r
 		}
-		if c.budget != nil {
-			if err := c.Client.HasFile(ctx, FileRef{SHA256: v.name, SizeBytes: info.Size()}); err != nil {
-				r.Protected = true
-				continue
-			}
-		}
+		// As in admission/pressure reclaim, this is a disposable private-file
+		// cache copy. Queue expiry cannot turn it into result custody.
 		if err := os.Remove(path); err != nil {
 			r.Error = "file_cache_collect_failed"
 			return r

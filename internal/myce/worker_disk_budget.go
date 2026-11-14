@@ -25,7 +25,6 @@ type workerDiskBudget struct {
 	roots           []diskBudgetRoot
 	reservations    map[string]uint64
 	previous        map[string]DiskBudgetVolume
-	floors          map[string]map[*byte]uint64
 	controlGrowth   map[string]uint64
 	controlPrevious map[string]uint64
 	declines        map[string]diskDecline
@@ -124,7 +123,7 @@ func newWorkerDiskBudget(clock Clock, probe func(string) (DiskReading, error)) *
 	if probe == nil {
 		probe = workerDiskProbe
 	}
-	return &workerDiskBudget{clock: clock, probe: probe, reservations: map[string]uint64{}, previous: map[string]DiskBudgetVolume{}, floors: map[string]map[*byte]uint64{}, controlGrowth: map[string]uint64{}, controlPrevious: map[string]uint64{}}
+	return &workerDiskBudget{clock: clock, probe: probe, reservations: map[string]uint64{}, previous: map[string]DiskBudgetVolume{}, controlGrowth: map[string]uint64{}, controlPrevious: map[string]uint64{}}
 }
 
 func (b *workerDiskBudget) add(root diskBudgetRoot) {
@@ -158,22 +157,19 @@ func (b *workerDiskBudget) reserve(ctx context.Context, root string, need uint64
 	if err != nil || r.TotalBytes == 0 {
 		return nil, errors.New("disk_headroom: filesystem measurement unavailable")
 	}
+	// A model-copy policy is a condition on this admission, not physical
+	// headroom for every writer on the volume. Share pending bytes, but derive
+	// other admissions and collection floors from their own live measurements.
 	floor = max(floor, addDiskBytes(addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[r.Volume]), b.foreignHeadroomFor(r.Volume)))
 	if err = b.reclaim(ctx, r.Volume, root, need, floor); err != nil {
 		return nil, err
 	}
 	b.reservations[r.Volume] = addDiskBytes(b.reservations[r.Volume], need)
-	token := new(byte)
-	if b.floors[r.Volume] == nil {
-		b.floors[r.Volume] = map[*byte]uint64{}
-	}
-	b.floors[r.Volume][token] = floor
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			b.mu.Lock()
 			b.reservations[r.Volume] -= need
-			delete(b.floors[r.Volume], token)
 			b.mu.Unlock()
 		})
 	}, nil
@@ -211,9 +207,6 @@ func keepIOProgress(ctx context.Context) func() {
 }
 
 func (b *workerDiskBudget) reclaim(ctx context.Context, volume, path string, need, floor uint64) error {
-	for _, active := range b.floors[volume] {
-		floor = max(floor, active)
-	}
 	enough := func() (bool, error) {
 		r, err := b.probe(path)
 		if err != nil {
@@ -298,9 +291,6 @@ func (b *workerDiskBudget) collect(ctx context.Context) []DiskBudgetVolume {
 		before := r.FreeBytes
 		base := addDiskBytes(diskFreeFloor(r.TotalBytes), b.controlGrowth[volume])
 		floor := addDiskBytes(base, b.foreignHeadroomFor(volume))
-		for _, active := range b.floors[volume] {
-			floor = max(floor, active)
-		}
 		_ = b.reclaim(ctx, volume, roots[0].path, 0, floor)
 		r, err = b.probe(roots[0].path)
 		if err != nil {
