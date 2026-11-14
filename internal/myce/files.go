@@ -949,6 +949,8 @@ func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context
 // Retry reads only: PATCH offsets and arbitrary mutations require their
 // caller's reconciliation protocol, never an implicit replay.
 func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
+	done := c.publication.request(c.clock(), method, path)
+	defer done()
 	pace := ClientPace{}
 	for {
 		started := c.clock().Now()
@@ -1141,6 +1143,7 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) (headE
 	if res.ContentLength != ref.SizeBytes || res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("stored file identity mismatch")
 	}
+	c.publication.confirm(ref)
 	return nil
 }
 func (c Client) UploadFile(ctx context.Context, path string, ref FileRef) error {
