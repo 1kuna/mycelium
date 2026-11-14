@@ -208,6 +208,32 @@ per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#pla
 
 ## 8. Checkpoints and resumable work
 
+To keep NAS writes off a resumable payload, opt in with
+`advanced: {resumable: true, checkpoint: local_first}` and use the updated Python
+`Checkpoint.save(value)` default name. This versioned policy uses managed local
+`MYCE_CHECKPOINT_DIR`, captures only an author-published immutable manifest, and
+waits for verified queue acceptance before `save()` returns. Another compatible
+host resumes the newest accepted generation. Existing NAS semantics stay the
+default; cross-target `resume_compatibility` still applies.
+
+V1 supports one self-contained JSON save up to 1 MiB. Binary/multi-file/named
+saves receive `checkpoint_protocol_unsupported`; unsupported job combinations
+receive `checkpoint_policy_unsupported`. Local headroom refusal is
+`CheckpointError.code == "checkpoint_local_capacity"`. Queue congestion applies
+cooperative save backpressure; preserve published bytes and never overwrite the
+marker before its acknowledgement. Arbitrary payload writes have no disk bound.
+
+With a configured NAS checkpoint root, the queue mirrors accepted generations
+using its existing asynchronous publisher. `file_checkpoints`/`job.progress`
+mean queue-portable; `checkpoint_mirrors` separately shows NAS state. A stalled
+NAS does not block payload saves while queue capacity remains, but lag can be
+unbounded and pending mirrors retain their bytes. Consumers needing NAS
+durability wait for verified mirror state. Settled checkpoints retain the
+72-hour grace. Size the recovery budget from save interval, work-unit time and
+measured capture/upload tail; unpublished local work cannot survive disk loss.
+See the [full protocol](https://github.com/1kuna/mycelium/blob/main/docs/files.md#local-first-checkpoints-1600).
+
+
 A stopped job loses everything since its last checkpoint. For anything long,
 save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
 declare `advanced: {resumable: true}`; Python's `mycelium.Checkpoint` and `StopSignal` do

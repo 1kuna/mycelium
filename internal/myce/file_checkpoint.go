@@ -67,6 +67,16 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 	if err := q.verifyManifest(ctx, p.Checkpoint.Files); err != nil {
 		return err
 	}
+	// Resolve the policy without retaining a mutable job across bulk verification.
+	q.mu.RLock()
+	j := q.s.Jobs[p.ID]
+	local := j != nil && j.Spec.localFirst()
+	q.mu.RUnlock()
+	if local {
+		if err := verifyLocalFirstStore(q.files, p.Checkpoint); err != nil {
+			return err
+		}
+	}
 	generation := int64(-1)
 	for name, ref := range p.Checkpoint.Files {
 		generation = max(generation, 0)
@@ -101,6 +111,12 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		if j == nil || !j.FileTransport || !j.Spec.Resumable || terminal(j.State) || cancelled(j) {
 			return ErrStale
 		}
+		if local && (q.s.Machines[p.Machine] == nil || q.s.Machines[p.Machine].Session != p.Session) {
+			return ErrStale
+		}
+		if local && (j.Attempt != p.Attempt || j.Machine != p.Machine || j.Session != p.Session || (j.State != "running" && j.State != "stopping")) {
+			return ErrStale
+		}
 		allowed := false
 		var devices []string
 		for _, copy := range j.Copies {
@@ -120,6 +136,19 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		}
 		if j.FileCheckpoints == nil {
 			j.FileCheckpoints = map[int]FileCheckpoint{}
+		}
+		if local {
+			if best := bestFileCheckpoint(j); best != nil {
+				if p.Checkpoint.Generation < best.Generation {
+					return ErrStale
+				}
+				if p.Checkpoint.Generation == best.Generation && !reflect.DeepEqual(best.Files, p.Checkpoint.Files) {
+					return checkpointRefusal("checkpoint_generation_conflict", "accepted generation cannot change bytes")
+				}
+			}
+			if err := q.acceptCheckpointMirror(j, p); err != nil {
+				return err
+			}
 		}
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
 		noteCheckpointTarget(j, allocationMachine(q.s.Machines[p.Machine], devices), p.Attempt, p.Checkpoint.Generation)
@@ -233,7 +262,11 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	if err := os.MkdirAll(stagingRoot, 0700); err != nil {
 		return 0, err
 	}
-	stage, save, err := captureCheckpoint(attemptCheckpoint(j), stagingRoot, w.storageObserver)
+	capture := captureCheckpoint
+	if j.Spec.localFirst() {
+		capture = captureLocalFirst
+	}
+	stage, save, err := capture(attemptCheckpoint(j), stagingRoot, w.storageObserver)
 	if err != nil {
 		return 0, err
 	}
@@ -256,9 +289,17 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	if err = w.Client.Call(ctx, "POST", "/api/files/checkpoint", p, nil); err != nil {
 		return 0, err
 	}
+	if j.Spec.localFirst() {
+		if err = writeLocalFirstAck(j, save); err != nil {
+			return 0, err
+		}
+	}
 	return save.Generation, nil
 }
 func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
+	if j.Spec.localFirst() && !modelRootLocalFilesystem(stateDir) {
+		return "", checkpointRefusal("checkpoint_storage_unsupported", "local_first requires a supported local worker-state filesystem; network and unknown filesystems are refused")
+	}
 	dest := attemptCheckpoint(j)
 	if _, err := os.Stat(dest); err == nil {
 		return dest, nil
@@ -295,7 +336,15 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	if err = os.Rename(stage, dest); err != nil {
 		return "", err
 	}
-	return dest, syncWorkerDir(j.Checkpoint)
+	if err = syncWorkerDir(j.Checkpoint); err != nil {
+		return "", err
+	}
+	if j.Spec.localFirst() && j.ResumeFiles != nil {
+		if err = writeLocalFirstAck(j, *j.ResumeFiles); err != nil {
+			return "", err
+		}
+	}
+	return dest, nil
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
 	return w.finishFileResultContext(context.Background(), j, result, parent, metadata...)

@@ -14,6 +14,7 @@ import (
 // whose cleared actor no longer records the session. Attempt numbers are unique
 // within a job; neither a job prefix nor a status-page omission is authority.
 type AttemptFilesRequest struct {
+	Checkpoint bool `json:"checkpoint,omitempty"`
 	Execution
 	Machine string `json:"machine"`
 }
@@ -99,6 +100,13 @@ func (q *Queue) attemptFilesDisposition(r AttemptFilesRequest) AttemptFilesDispo
 	}
 	if !released {
 		return keep("unresolved_custody")
+	}
+	if r.Checkpoint {
+		if !j.Spec.localFirst() || !terminal(j.State) || q.jobReleasePending(j) || checkpointMirrorsPending(j) || j.FinishedAt == nil {
+			return keep("checkpoint_custody")
+		}
+		until := j.FinishedAt.Add(q.expiryGrace())
+		return AttemptFilesDisposition{Reclaim: !q.clock.Now().Before(until), Reason: "checkpoint_retention", Until: &until}
 	}
 	if parkedStorageCustody(j) {
 		return keep("parked_storage_custody")
@@ -215,6 +223,15 @@ func (w Worker) retainWorkerFiles(ctx context.Context, dir string, now time.Time
 		return out, nil
 	}
 	err := errors.Join(pruneWorkerLogs(dir, "", now, w.LogRetention), pruneAttemptFiles(dir, now, c), pruneAttemptState(dir, now, w.LogRetention))
+	// Same confined collector, separate authority: checkpoint folders retain the
+	// terminal 72-hour grace and never inherit early scratch/result disposal.
+	c.batch, c.known = nil, nil
+	c.resolve = func(id string, attempt int) (AttemptFilesDisposition, error) {
+		var d AttemptFilesDisposition
+		err := w.Client.Call(ctx, "POST", "/api/workers/attempt-files", AttemptFilesRequest{Execution: Execution{ID: id, Attempt: attempt}, Machine: w.Machine.ID, Checkpoint: true}, &d)
+		return d, err
+	}
+	err = errors.Join(err, pruneAttemptFilesAt(dir, "local-checkpoints", now, c))
 	w.hygieneCollector.recordScratch(c.report)
 	log.Printf("worker scratch retention: retained_bytes=%d reclaimed_bytes=%d retained_bytes_by_reason=%v", c.report.RetainedBytes, c.report.ReclaimedBytes, c.report.Reasons)
 	return err

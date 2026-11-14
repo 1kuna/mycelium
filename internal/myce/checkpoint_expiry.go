@@ -89,7 +89,7 @@ func validCheckpointExpiryPath(id, path string) bool {
 // only recovers queued, running or stopping jobs), and retries, fan-out waves
 // and resubmissions use new job IDs and folders.
 func checkpointExpirable(root string, j *Job) (string, bool) {
-	if j == nil || j.FileTransport || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || mutableJob(j) {
+	if j == nil || j.FileTransport && !j.Spec.localFirst() || j.CheckpointExpired != nil || j.Attempt == 0 || j.Checkpoint == "" || mutableJob(j) {
 		return "", false
 	}
 	rel, err := filepath.Rel(root, j.Checkpoint)
@@ -155,7 +155,7 @@ func (q *Queue) indexCheckpointExpiry(id string, j *Job) {
 	}
 	delete(q.records.checkpointExpiry, id)
 	delete(q.records.checkpointUndated, id)
-	if rel, ok := checkpointExpirable(q.root, j); ok {
+	if rel, ok := checkpointExpirable(q.root, j); ok && !q.fileCheckpoints {
 		if end, dated := checkpointEndTime(j); dated {
 			q.records.checkpointExpiry[id] = checkpointExpiryEntry{path: rel, due: end.Add(q.expiryGrace())}
 		} else {

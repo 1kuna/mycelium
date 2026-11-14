@@ -157,7 +157,7 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "extension":
 			needs = j.Spec.extensionJob() || len(j.Extensions) > 0
 		case "checkpoint":
-			needs = needsCheckpoint(j)
+			needs = needsCheckpoint(j) && !j.Spec.localFirst()
 			for _, input := range j.Spec.SharedInputs {
 				needs = needs || input.NAS != "" && !slices.Contains(m.CachedSharedInputs, input.key())
 			}

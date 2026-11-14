@@ -8,7 +8,7 @@ import (
 )
 
 func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
-	w.fileCheckpoints = s.state.Job != nil && s.state.Job.FileTransport
+	w.fileCheckpoints = s.state.Job != nil && s.state.Job.FileTransport && !s.state.Job.Spec.localFirst()
 	root := w.FileCacheRoot
 	if root == "" {
 		root = filepath.Join(s.dir, "file-cache")

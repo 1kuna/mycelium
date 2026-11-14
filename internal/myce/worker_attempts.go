@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,10 +426,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			path := attemptCheckpoint(a.job)
 			var err error
 			report.Progress, err = s.nasProgress.run(path, func() (int64, error) {
+				if a.job.Spec.localFirst() {
+					return localFirstProgress(path)
+				}
 				progress, err := checkpointProgress(path)
 				w.observeStorageError(err)
 				return progress, err
 			})
+			if a.job.Spec.localFirst() {
+				report.LocalCheckpointGeneration = max(0, report.Progress)
+			}
 			// A scan still waiting on NAS I/O is not a completed storage
 			// failure. The independent root probe fences actual root stalls.
 			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCheckpointIOPending) {
@@ -542,6 +549,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						s.fileGeneration, s.fileError = published, ""
 					} else {
 						s.fileError = "checkpoint transfer pending; only published progress can resume elsewhere"
+						if a.job.Spec.localFirst() && !errors.Is(e, errCheckpointIOPending) {
+							s.fileError += ": " + e.Error()
+						}
 					}
 				}
 			}
@@ -1305,7 +1315,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
 			if w.modelSnapshots != nil {
 				// Any worker with a snapshot cache fetches missing snapshots itself.
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
@@ -1449,7 +1459,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						if !j.Spec.Needs.cpuOnly() && len(j.AllocatedDevices) == 0 {
 							j.AllocatedDevices = []string{firstDevice(j, w.Machine)}
 						}
-						if j.FileTransport {
+						if j.Spec.localFirst() {
+							j.Checkpoint = filepath.Join(root.dir, "local-checkpoints", j.ID, strconv.Itoa(j.Attempt))
+						} else if j.FileTransport {
 							j.Checkpoint = filepath.Join(root.dir, "file-checkpoints", j.ID)
 						} else if !filepath.IsAbs(j.Checkpoint) {
 							rel := filepath.Clean(j.Checkpoint)

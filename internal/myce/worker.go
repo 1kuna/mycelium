@@ -807,6 +807,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	env["MYCE_JOB_ID"] = j.ID
 	env["MYCE_ATTEMPT"] = strconv.Itoa(j.Attempt)
 	env["MYCE_CHECKPOINT_DIR"] = checkpoint
+	delete(env, "MYCE_CHECKPOINT_PROTOCOL")
+	if j.Spec.localFirst() {
+		env["MYCE_CHECKPOINT_PROTOCOL"] = localFirstProtocol
+	}
 	env["MYCE_PROGRESS_FILE"] = applicationProgressFile(s.dir, j)
 	if j.Spec.Program != nil {
 		env["MYCE_USAGE_FILE"] = programUsageFile(s.dir, identity)

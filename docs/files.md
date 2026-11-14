@@ -474,6 +474,87 @@ unsafe paths, overlapping/case-colliding names and changed snapshots are refused
 The initial manifest limit is 1024 files; JSON checkpoint metadata is at most
 1 MiB. Larger binary payloads can be referenced by that metadata.
 
+## Local-first checkpoints (#1600)
+
+Opt in explicitly on an individual resumable plain command:
+
+```yaml
+advanced:
+  resumable: true
+  checkpoint: local_first
+```
+
+This leaves default NAS and existing no-NAS file-store behavior unchanged.
+`MYCE_CHECKPOINT_DIR` is managed local storage on a worker advertising
+`checkpoint-local-first-v1`; `MYCE_CHECKPOINT_PROTOCOL` identifies that contract.
+Use the updated Python `mycelium.Checkpoint` with the default `save(value)` name.
+V1 accepts **one self-contained JSON payload, at most 1 MiB**, per generation.
+Named/multi-file/binary saves refuse with `checkpoint_protocol_unsupported`;
+non-resumable, extension, fan-out, dependency and ephemeral-policy combinations
+refuse with `checkpoint_policy_unsupported`. A worker-state filesystem that cannot be verified local refuses launch with
+`checkpoint_storage_unsupported`. No directory-snapshot fallback is used. A custom writer must implement the entire following cooperative protocol.
+
+1. Write `generation-N.json` to a temporary file, flush/fsync/close, rename and
+   sync its local directory. Its JSON contains
+   `{"myce_checkpoint":{"generation":N},"value":...}`. N is a positive int64,
+   strictly increases from the resumed generation, and published payloads stay
+   immutable until acceptance. Only one writer may publish generations; the Python helper holds an exclusive local writer lock and refuses concurrent writers with `checkpoint_protocol_unsupported`.
+2. Write/fsync/rename/directory-sync `generation.json` **last**. Its immutable
+   manifest is `{"protocol":"checkpoint-local-first-v1","myce_checkpoint":
+   {"generation":N,"files":{"generation-N.json":{"sha256":"...","size_bytes":123}}}}`.
+   A temp, missing, torn, wrong-hash or conflicting generation cannot be committed.
+   Unrelated working files never enter the captured set.
+3. Keep the manifest and named payload unchanged until the worker atomically
+   writes `.myce-accepted.json`. It contains the protocol, generation, and
+   `marker` SHA-256/size identity of these exact `generation.json` bytes.
+   Only that acknowledgement permits a save to return, an older acknowledged
+   local payload to be removed, or the next generation to be published.
+   The file is a local acknowledgement, not an author-supplied queue receipt.
+
+The worker uploads through the existing resumable file transport, verifies size,
+checksum and sync barriers, then commits the manifest under exact job, current
+attempt, machine and session fences. Lost acknowledgements replay idempotently;
+a restarted worker can replay the unchanged published source after an interrupted
+upload. Stale attempts cannot advance portable progress. Another compatible
+worker stages the greatest **accepted** complete generation before launch.
+Existing `resume_compatibility` target restrictions still apply, including when
+moving from macOS to Linux. A lost local disk loses unpublished work.
+
+There are three distinct states: `local_checkpoint_generation` for published local progress; `file_checkpoints`
+for queue-portable progress (and `job.progress`); and `checkpoint_mirrors` with
+per-generation NAS delivery state/receipt identity. Queue acceptance atomically
+creates mirror custody when a NAS checkpoint root is configured. The queue's
+existing single publisher writes under that job's checkpoint folder, using
+immutable generation/attempt paths and verified receipts. Payloads perform no
+NAS checkpoint writes. A blocked syscall retains ownership; restart/lost-ack
+replay verifies receipt and content. No NAS root means queue-portable storage
+alone; a queue file store is not a backup.
+
+`save()` waits cooperatively when queue commits lag. Its measured free-space
+check charges payload plus transfer copy and metadata above the existing
+volume-derived reserve; refusal is `CheckpointError.code ==
+"checkpoint_local_capacity"`. Failed local sync/write raises the real I/O error.
+Queue upload admission accounts for reserved/in-flight and pinned generations;
+capacity refusal retains published local bytes and exposes pending transfer
+status. Only one unacknowledged save is allowed; this bounds cooperative local
+growth. Heartbeats, cancellation and independent work continue. Arbitrary writes
+outside this protocol have **no enforced disk bound**. Pending/failed NAS mirrors
+retain queue custody beyond ordinary expiry; they can eventually fill storage
+and backpressure saves. Neither retained history nor in-flight bytes are silently
+pruned. Settled, physically released checkpoints retain the existing 72-hour
+checkpoint grace (and any longer configured queue file retention); early explicit
+file release reports `checkpoint_retention`. They then use the
+existing collection/expiry paths. Never downgrade with unresolved local-first
+attempts or mirror custody.
+
+Choose the portable recovery budget from acceptable lost work: work-unit time,
+save interval, and measured local capture plus queue upload/acceptance tail.
+Only successful `save()` return promises portability; a planned stop's grace
+cannot promise an arbitrary upload will finish. NAS mirror lag is unbounded
+through outage. Consumers requiring NAS durability must explicitly wait for
+verified mirror state and stop further work cooperatively. Laptop fault tests
+are not native SMB durability or sustained write/flush/close qualification.
+
 ## Diagnosing input staging
 
 Before the command starts, staging failures appear on the exact attempt in

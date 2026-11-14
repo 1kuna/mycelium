@@ -35,6 +35,7 @@ func deliveryRootID(root string) string {
 }
 
 type OutputDelivery struct {
+	Generation         int64  `json:"generation,omitempty"`
 	VerificationRound  uint64 `json:"verification_round,omitempty"`
 	ProgressOperations uint64 `json:"progress_operations,omitempty"`
 	Protocol           string `json:"protocol,omitempty"`
@@ -123,6 +124,7 @@ func sameDelivery(current *Job, snapshot Job) bool {
 		current.Delivery.Execution.ID == current.ID && current.Delivery.Execution.Attempt == current.Attempt &&
 		current.Delivery.Execution == snapshot.Delivery.Execution &&
 		current.Delivery.VerificationRound == snapshot.Delivery.VerificationRound &&
+		current.Delivery.Kind == snapshot.Delivery.Kind && current.Delivery.Generation == snapshot.Delivery.Generation &&
 		current.Delivery.Machine == snapshot.Machine && current.Delivery.Session == snapshot.Session &&
 		current.Delivery.ManifestSHA256 == snapshot.Delivery.ManifestSHA256 &&
 		current.Delivery.DestinationID == snapshot.Delivery.DestinationID &&
@@ -138,7 +140,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 	active := q.deliveryActive
 	eligible := active != nil
 	if !eligible {
-		for _, j := range q.liveJobs() {
+		for _, j := range q.deliveryJobs() {
 			if !parkedStorage(j) && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
 				eligible = true
 				break
@@ -153,7 +155,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 		select {
 		case publishErr := <-active.done:
 			err := q.updateRequest(ctx, func() error {
-				j := q.touchJob(active.job.ID)
+				j := q.touchDelivery(&active.job)
 				if !sameDelivery(j, active.job) {
 					return nil
 				}
@@ -180,16 +182,16 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 		default:
 			progress := active.progress.Load()
 			err := q.updateRequest(ctx, func() error {
-				j := q.s.Jobs[active.job.ID]
+				j := q.deliveryView(&active.job, false)
 				if !sameDelivery(j, active.job) {
 					return nil
 				}
 				if progress != active.observed {
-					j = q.touchJob(j.ID)
+					j = q.touchDelivery(j)
 					now := q.clock.Now()
 					j.Delivery.LastProgressAt, j.Delivery.Cause = &now, ""
 				} else if j.Delivery.Cause == "" && j.Delivery.LastProgressAt != nil && q.clock.Now().Sub(*j.Delivery.LastProgressAt) >= checkpointAvailabilityStallBudget {
-					j = q.touchJob(j.ID)
+					j = q.touchDelivery(j)
 					j.Delivery.Cause = "NAS publication stalled; outstanding operation retained"
 				}
 				return nil
@@ -204,7 +206,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 	err := q.updateRequest(ctx, func() error {
 		// Stable oldest-first ordering, without letting a failed task block others.
 		jobs := []*Job{}
-		for _, j := range q.liveJobs() {
+		for _, j := range q.deliveryJobs() {
 			if !parkedStorage(j) && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
 				jobs = append(jobs, j)
 			}
@@ -216,15 +218,15 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 			return strings.Compare(a.ID, b.ID)
 		})
 		for _, candidate := range jobs {
-			if q.deliveryRoot == "" || candidate.Delivery.DestinationID != deliveryRootID(q.deliveryRoot) {
-				j := q.touchJob(candidate.ID)
+			if q.deliveryPath(candidate) == "" || candidate.Delivery.DestinationID != deliveryRootID(q.deliveryPath(candidate)) {
+				j := q.touchDelivery(candidate)
 				j.Delivery.State, j.Delivery.Cause = "failed", "NAS destination configuration missing or changed; restore the original output-delivery-root"
 				continue
 			}
 			if candidate.State != "succeeded" || candidate.Attempt != candidate.Delivery.Attempt || candidate.ID != candidate.Delivery.ID || candidate.Machine != candidate.Delivery.Machine || candidate.Session != candidate.Delivery.Session || deliveryDigest(*candidate) != candidate.Delivery.ManifestSHA256 {
 				continue
 			}
-			j := q.touchJob(candidate.ID)
+			j := q.touchDelivery(candidate)
 			now := q.clock.Now()
 			j.Delivery.State, j.Delivery.Cause = "publishing", ""
 			j.Delivery.LastAttemptAt, j.Delivery.LastProgressAt = &now, &now
@@ -239,7 +241,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 	}
 	q.mu.Lock()
 	q.deliveryActive = next
-	store, root, publish := q.files, q.deliveryRoot, q.deliveryPublish
+	store, root, publish := q.files, q.deliveryPath(&next.job), q.deliveryPublish
 	q.mu.Unlock()
 	if publish == nil {
 		publish = func(j Job, s *FileStore, root string, progress func()) error {
