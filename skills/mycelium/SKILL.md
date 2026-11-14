@@ -35,6 +35,11 @@ writer. Refused copies with proof no payload ran are reclaimed after release.
 Older orphan copies under a cancelled job expire with its whole checkpoint
 folder, normally 72 hours after the job ends, once every attempt is released.
 
+Job JSON timestamps preserve nanoseconds. `start_latency_seconds` is the wall-time
+difference from `queued` to `started_at`, or from `dependency.ready_at` for a
+dependent job. It uses the timestamps exposed by the API, not process-local
+monotonic clock readings.
+
 ## 1. One command
 
 ```sh
