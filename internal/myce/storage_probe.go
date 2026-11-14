@@ -132,7 +132,10 @@ func storageProbeFailureDetails(operation string, err error) (string, int) {
 		operation = path.Op
 	}
 	switch operation {
-	case "open", "stat", "lstat", "write", "fsync", "sync", "close", "read", "rename":
+	case "open", "stat", "lstat", "write", "fsync", "sync", "close", "read", "rename",
+		"create", "mkdir", "remove", "readdirent", "mount-metadata", "ancestor-metadata",
+		"filesystem", "containment", "format", "resolve", "inventory", "pending",
+		"local-model-ancestor", "local-model-filesystem", "local-model-headroom":
 	default:
 		operation = "unknown"
 	}

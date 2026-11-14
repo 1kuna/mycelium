@@ -63,6 +63,22 @@ It never restores old bytes, repeats a restart or resumes maintenance. A
 failure is saved in the receipt and reported; a restarted service replays a
 report the queue never received.
 
+The **installed** binary runs these storage checks before fetching the candidate.
+Publishing a newer candidate alone cannot change the helper doing this preflight.
+The checks cover local state/cache format roots, cached mount inventory, NAS root
+containment and real-directory metadata, and checkpoint/model/environment
+write, sync, read-back and rename probes. Mount checks probe exact configured
+paths; state-format checks inspect local state roots.
+
+A storage failure records `storage_failure` in the private receipt, its live or
+replayed acknowledgement, and the host entry in `myce status --json`. It contains
+only a root role (`state`, a named cache/queue root, `nas`, `checkpoint`, `model`
+or `environment`), fixed `operation`, numeric `errno`, `elapsed_ns`, and
+`timed_out` when a filesystem call stalls. An unfinished syscall has no errno:
+zero means no OS errno was returned, including logical refusals. The existing
+stall bound and single outstanding sequence remain unchanged. Older installed
+helpers report only the failure code; absent details cannot identify the cause.
+
 ## Health and stopping
 
 A runtime proof is fresh against its own process's measured proof cadence

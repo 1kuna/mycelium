@@ -26,13 +26,14 @@ type FleetUpgradeStatus struct {
 	Hosts     []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
-	StopRequests []FleetStopRequest `json:"stop_requests,omitempty"`
-	Host         string             `json:"host"`
-	Phase        string             `json:"phase"`
-	Wait         string             `json:"wait,omitempty"`
-	Failure      string             `json:"failure,omitempty"`
-	FailureCode  string             `json:"failure_code,omitempty"`
-	ProgressAt   time.Time          `json:"progress_at"`
+	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
+	StopRequests   []FleetStopRequest       `json:"stop_requests,omitempty"`
+	Host           string                   `json:"host"`
+	Phase          string                   `json:"phase"`
+	Wait           string                   `json:"wait,omitempty"`
+	Failure        string                   `json:"failure,omitempty"`
+	FailureCode    string                   `json:"failure_code,omitempty"`
+	ProgressAt     time.Time                `json:"progress_at"`
 }
 type fleetUpgrade struct {
 	Urgency string `json:"urgency,omitempty"`
@@ -81,14 +82,15 @@ type FleetUpgradeRequest struct {
 	Release string `json:"release,omitempty"`
 }
 type FleetUpgradeAck struct {
-	Runtime   *FleetRuntimeProof `json:"runtime,omitempty"`
-	Revision  int                `json:"revision"`
-	Operation string             `json:"operation"`
-	Host      string             `json:"host"`
-	Machine   string             `json:"machine"`
-	Session   string             `json:"session"`
-	Phase     string             `json:"phase"`
-	Failure   string             `json:"failure,omitempty"`
+	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
+	Runtime        *FleetRuntimeProof       `json:"runtime,omitempty"`
+	Revision       int                      `json:"revision"`
+	Operation      string                   `json:"operation"`
+	Host           string                   `json:"host"`
+	Machine        string                   `json:"machine"`
+	Session        string                   `json:"session"`
+	Phase          string                   `json:"phase"`
+	Failure        string                   `json:"failure,omitempty"`
 }
 
 // The longest one service update can take: the helper's 10-minute artifact
@@ -265,6 +267,7 @@ func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) strin
 func fleetProofReady(p *FleetRuntimeProof) bool {
 	return p != nil && p.PID > 0 && p.Session != "" && validPin(p.SHA256) && p.ServiceHealthy && p.RunnerSmoke && p.StartGate == startGateProtocol && p.AttemptProtocol == keyedAttemptProtocol
 }
+
 // fleetStable requires the same healthy process for fleetStableFor, the
 // enrollment stability window, so a service that crash-loops shortly after
 // start stops the rollout instead of passing it. The window runs between the
@@ -646,6 +649,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 			h.ProgressAt = q.clock.Now()
 		case "failed":
 			h.FailureCode = fleetFailureCode(ack.Failure)
+			h.StorageFailure = fleetStorageFailure(h.FailureCode, ack.StorageFailure)
 			reason := h.FailureCode
 			switch h.FailureCode {
 			case "fleet_storage_preflight_failed":

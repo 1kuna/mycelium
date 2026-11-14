@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Fleet files deliberately accept only literal values, never shell expansion.
@@ -81,19 +82,29 @@ func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(contex
 }
 
 func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool) (result error) {
+	root, operation := "", "filesystem"
+	started := time.Now()
+	defer func() { result = storageCheckError(root, operation, time.Since(started), result) }()
 	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
 		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: preflight})
 		return err
 	}
 	// Refuse symlinks so creation and probes cannot escape the Mycelium namespace.
-	for _, dir := range []string{c.NAS, filepath.Join(c.NAS, "mycelium"), filepath.Join(c.NAS, "mycelium", "checkpoints"), filepath.Join(c.NAS, "mycelium", "models"), filepath.Join(c.NAS, "mycelium", "environments")} {
+	for i, dir := range []string{c.NAS, filepath.Join(c.NAS, "mycelium"), filepath.Join(c.NAS, "mycelium", "checkpoints"), filepath.Join(c.NAS, "mycelium", "models"), filepath.Join(c.NAS, "mycelium", "environments")} {
+		root, operation = []string{"nas", "nas", "checkpoint", "model", "environment"}[i], "lstat"
+		started = time.Now()
 		st, err := os.Lstat(dir)
 		if errors.Is(err, os.ErrNotExist) {
+			operation = "mkdir"
 			if err = os.Mkdir(dir, 0700); err != nil {
 				return err
 			}
 			if preflight {
-				defer func(path string) { result = errors.Join(result, removeCreatedProbeDir(path)) }(dir)
+				defer func(path, root string) {
+					started := time.Now()
+					err := removeCreatedProbeDir(path)
+					result = errors.Join(result, storageCheckError(root, "remove", time.Since(started), err))
+				}(dir, root)
 			}
 		} else if err != nil {
 			return err
@@ -103,7 +114,19 @@ func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(co
 	}
 	for _, name := range []string{"checkpoints", "models", "environments"} {
 		dir := filepath.Join(c.NAS, "mycelium", name)
-		if err := probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), plainStorageProbeOps(nil)); err != nil {
+		root = map[string]string{"checkpoints": "checkpoint", "models": "model", "environments": "environment"}[name]
+		ops := plainStorageProbeOps(nil)
+		ops.open = func(path string) (*os.File, error) {
+			started := time.Now()
+			f, err := openStorageProbe(path)
+			return f, storageCheckError(root, "open", time.Since(started), err)
+		}
+		ops.run = func(operation string, fn func() error) error {
+			started := time.Now()
+			err := fn()
+			return storageCheckError(root, operation, time.Since(started), err)
+		}
+		if err := probeStorageRename(storageProbePath(dir, ".myce-install-probe-", "install"), ops); err != nil {
 			return err
 		}
 	}

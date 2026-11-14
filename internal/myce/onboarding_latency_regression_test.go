@@ -85,11 +85,15 @@ func TestOnboardingStalledFsyncIsBounded(t *testing.T) {
 		defer joinOnboardingNASSequence()
 		defer close(release)
 		fs := onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: func(ctx context.Context, abort context.CancelCauseFunc, _ string) error {
-			return onboardingFSError(ctx, abort, func() error { <-release; return nil })
+			return onboardingFSError(ctx, abort, func() error { <-release; return nil }, "fsync")
 		}}
 		start := time.Now()
 		_, err := prepareOnboardingStorageFS(context.Background(), c, false, command, fs)
 		requirePreflightCode(t, err, "nas_unresponsive")
+		detail := storageFailureDetail(err)
+		if detail == nil || detail.Root != "checkpoint" || detail.Operation != "fsync" || detail.Errno != 0 || !detail.TimedOut || detail.Elapsed != onboardingFilesystemStallBudget {
+			t.Errorf("stalled syscall evidence lost before completion: %+v", detail)
+		}
 		if elapsed := time.Since(start); elapsed != onboardingFilesystemStallBudget {
 			t.Errorf("stalled fsync did not use the operation stall bound: %s", elapsed)
 		}

@@ -685,6 +685,9 @@ process within 15 minutes (`worker_update_not_verified`,
 `queue_update_not_verified`), or a maintenance change by someone else
 (`maintenance_changed`, keeping their policy). Look the code up in the
 [failure code table](reference/fleet-upgrades.md#failure-codes-and-repairs).
+For a storage preflight failure, retain the host's `storage_failure` from
+`myce status --json` (root role, operation, errno, duration and stall flag).
+Older installed updaters omit this evidence; see the private local receipt.
 Nothing rolls back. Fix forward, then rerun `myce fleet upgrade` (with
 `--release NEWER` once a fixed release is approved). A rerun is a new operation:
 it takes over the drains the stopped operation left, verifies those hosts and

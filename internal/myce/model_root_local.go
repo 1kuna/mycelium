@@ -20,15 +20,15 @@ func validateLocalModelVolume(ctx context.Context, abort context.CancelCauseFunc
 			}
 		}
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return "", preflightError("model_root_not_local", "storage", "model root outside the selected NAS must use an accessible local filesystem")
+			return "", storageRootRefusal(ctx, "local-model-ancestor", preflightError("model_root_not_local", "storage", "model root outside the selected NAS must use an accessible local filesystem"), err)
 		}
 		local, err := onboardingFSOperation(ctx, abort, func() (bool, error) { return modelRootLocalFilesystem(path), nil }, "local-model-filesystem")
 		if err != nil || !local {
-			return "", preflightError("model_root_not_local", "storage", "model root outside the selected NAS must use an accessible local filesystem")
+			return "", storageRootRefusal(ctx, "local-model-filesystem", preflightError("model_root_not_local", "storage", "model root outside the selected NAS must use an accessible local filesystem"), err)
 		}
 		disk, err := onboardingFSOperation(ctx, abort, func() (DiskReading, error) { return workerDiskProbe(path) }, "local-model-headroom")
 		if err != nil || disk.TotalBytes == 0 || disk.FreeBytes <= diskFreeFloor(disk.TotalBytes) {
-			return "", preflightError("model_root_headroom", "storage", "local model volume lacks measured free space above the disk floor")
+			return "", storageRootRefusal(ctx, "local-model-headroom", preflightError("model_root_headroom", "storage", "local model volume lacks measured free space above the disk floor"), err)
 		}
 		return path, nil
 	}

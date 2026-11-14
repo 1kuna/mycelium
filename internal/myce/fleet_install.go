@@ -38,14 +38,15 @@ type FleetUpdateInstruction struct {
 const fleetUpdateReceiptFile = "fleet-update.json"
 
 type fleetInstallReceipt struct {
-	Instruction   FleetUpdateInstruction `json:"instruction"`
-	ConfigSHA256  string                 `json:"config_sha256"`
-	BeforeSHA256  string                 `json:"before_sha256"`
-	BeforeVersion string                 `json:"before_version"`
-	BeforePID     int                    `json:"before_pid"`
-	BeforeRuntime FleetRuntimeProof      `json:"before_runtime"`
-	Phase         string                 `json:"phase"`
-	Failure       string                 `json:"failure,omitempty"`
+	Instruction    FleetUpdateInstruction   `json:"instruction"`
+	ConfigSHA256   string                   `json:"config_sha256"`
+	BeforeSHA256   string                   `json:"before_sha256"`
+	BeforeVersion  string                   `json:"before_version"`
+	BeforePID      int                      `json:"before_pid"`
+	BeforeRuntime  FleetRuntimeProof        `json:"before_runtime"`
+	Phase          string                   `json:"phase"`
+	Failure        string                   `json:"failure,omitempty"`
+	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
 }
 
 type fleetInstallDeps struct {
@@ -188,7 +189,7 @@ func fleetAck(ctx context.Context, client Client, r fleetInstallReceipt) error {
 	if r.Phase == "failed" {
 		failure = fleetFailureCode(r.Failure)
 	}
-	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure, StorageFailure: fleetStorageFailure(failure, r.StorageFailure)}
 	if err := client.Call(ctx, http.MethodPost, "/api/fleet/ack", ack, nil); err != nil {
 		return fleetControlFailure(err, "fleet_ack_failed")
 	}
@@ -382,8 +383,8 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	if c.ValidateInstall() != nil || c.ValidateInstallPolicies() != nil {
 		return fail("fleet_preflight_failed")
 	}
-	roots, err := c.StateRoots()
-	if err != nil || CheckStateRoots(roots...) != nil || prepareInstallNASMode(ctx, c, d.command, true) != nil {
+	if err := preflightFleetStorage(ctx, c, d.command); err != nil {
+		r.StorageFailure = storageFailureDetail(err)
 		return fail("fleet_storage_preflight_failed")
 	}
 	manager := installManager{c.Detection.OS, d.command}
@@ -590,5 +591,5 @@ func ReadFleetUpdateFailure(c ServiceConfig) (*FleetUpgradeAck, error) {
 		return nil, errors.New("fleet_receipt_invalid")
 	}
 	code := fleetFailureCode(r.Failure)
-	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code}, nil
+	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code, StorageFailure: fleetStorageFailure(code, r.StorageFailure)}, nil
 }

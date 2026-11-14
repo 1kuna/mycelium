@@ -78,7 +78,7 @@ for platform in ('darwin', 'linux', 'other'):
         'model_snapshots_test.go',)
 
 # Local-volume platform probes are exercised through real installer preflight.
-for source in ('model_root_local_darwin', 'model_root_local_linux', 'model_root_local_other'):
+for source in ('model_root_local', 'model_root_local_darwin', 'model_root_local_linux', 'model_root_local_other'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('onboarding_storage_test.go',)
 
 # The shared ledger's pressure tests exercise these private cache adapters.
