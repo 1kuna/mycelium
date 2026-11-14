@@ -418,22 +418,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (startedProcess *process, startErr error) {
-	if s.staging == nil || s.stagingKey != (attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}) {
-		s.stagingKey = attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}
-		value := StagingTimings{StartedAt: w.Clock.Now()}
-		if j.StagingTimings != nil {
-			value = *j.StagingTimings
-		}
-		s.staging = &stagingRecorder{clock: w.Clock, value: value}
-	}
-	recorder := s.staging
-	ctx = context.WithValue(ctx, stagingRecorderKey{}, recorder)
-	defer func() {
-		snapshot := recorder.snapshot()
-		if s.state.Job != nil {
-			s.state.Job.StagingTimings = snapshot
-		}
-	}()
 	launchCtx, cancel := context.WithCancel(ctx)
 	w.launchCtx, w.cancelStart = launchCtx, cancel
 	// Input/checkpoint copies outlive a pending start observation. Their ctx
@@ -460,6 +444,26 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
 	}
+	// Early admission refusals can be checked without an opened attempt store.
+	var recorder *stagingRecorder
+	if s != nil && w.Clock != nil {
+		if s.staging == nil || s.stagingKey != (attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}) {
+			s.stagingKey = attemptKey{job: j.ID, attempt: j.Attempt, session: j.Session}
+			value := StagingTimings{StartedAt: w.Clock.Now()}
+			if j.StagingTimings != nil {
+				value = *j.StagingTimings
+			}
+			s.staging = &stagingRecorder{clock: w.Clock, value: value}
+		}
+		recorder = s.staging
+	}
+	ctx = context.WithValue(ctx, stagingRecorderKey{}, recorder)
+	defer func() {
+		snapshot := recorder.snapshot()
+		if s != nil && s.state.Job != nil {
+			s.state.Job.StagingTimings = snapshot
+		}
+	}()
 	phaseDone := stagingMeasure(ctx, stagePreflight)
 	defer func() { phaseDone(startErr) }()
 	if err := w.verifyDevice(); err != nil {
