@@ -181,6 +181,17 @@ eligibility, qualification and exact release still apply. Equal tiers never
 preempt each other, and messages asking other consumers to stop don't change
 queue order.
 
+Read `copies[].priority_stop.cause` (or the retained attempt's `stop_cause`)
+to distinguish scheduling from memory safety. `priority_preemption` names a
+waiting higher-tier demand. `shared_gpu_pressure` names a device safety stop;
+`memory_overcommit_yield` names lent host RAM. The safety stops use the planned
+checkpoint/requeue path and can stop equal tiers. After a lending yield,
+placement and worker launch checks reserve the surviving lenders' measured
+growth through stop grace and sensor freshness. Keep the original job/key;
+it waits until measured headroom returns or those attempts release, rather
+than repeatedly restarting into the same pressure. A completion-time memory
+sample cannot reconstruct the stop-time forecast.
+
 - **Production** is for work a person or customer is waiting on, as the
   project defines it. When it preempts, resumable work gets 10 seconds to save
   (queue setting `--preemption-stop-grace`) and non-resumable work stops at once

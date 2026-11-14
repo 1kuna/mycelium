@@ -327,7 +327,12 @@ Production approval names a kind of machine, never a host (MY-51). To let produc
 Equal tiers never preempt each other. Within a tier the queue goes by
 readiness, deadline and age, with no ordering hint, so order your own work with
 the right class, `after:` stages and checkpoints rather than pauses or lock
-files. Lost machines and critical Mycelium updates can interrupt any tier; the
+files. Memory safety stops have distinct causes: `shared_gpu_pressure` for
+shared-card growth or uncertain attribution, and `memory_overcommit_yield`
+when running work grows into lent host RAM. These can interrupt equal tiers;
+they are not a waiting job's priority preemption. A lending yield waits on
+measured headroom before readmission; keep the same job and key.
+Lost machines and critical Mycelium updates can interrupt any tier; the
 job requeues on the same key and resumes from its checkpoint. Work that
 Mycelium stopped for its own maintenance or updates resumes ahead of the
 tier's other queued work, and its host drains toward it

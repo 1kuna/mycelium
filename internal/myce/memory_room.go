@@ -13,11 +13,11 @@ import (
 // use is measured. Live availability already lacks resident memory, so each
 // owner's resident part is credited once. Room is the smaller of two arms:
 //
-//	physical: live − margin − Σ(charge − credit)
+//	physical: live − margin − Σ(max(charge − credit, lending stop forecast))
 //	enforced: allowance − Σ charge, and the interactive host's history cap
 //
-// A release returns its charge to both arms, and to the physical arm also any
-// use that earned no credit (unified CUDA device memory, #424). Placement,
+// A release returns its charge to the enforced arm, and its held growth plus
+// resident use to the physical arm (including uncredited CUDA memory, #424). Placement,
 // release planning, exploratory sizing, fairness and backfill all read
 // hostRoomAfter.
 
@@ -127,15 +127,22 @@ func (q *Queue) workerLiveMemory(m, w *Machine) float64 {
 
 // memoryCharge is the charge of one live attempt on target m whose enforced
 // envelope (declared or assigned sizes plus slack) is envelope. growth is the
-// part not yet resident, which live availability does not already exclude.
+// physical headroom still required, including the lending stop horizon. That
+// safety forecast can exceed the charge's shorter sample-age forecast.
 // A typed job charged below its typed limit starts from its learned charge;
 // the typed envelope stays its ceiling.
 func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time) (charge, growth float64) {
+	return memoryChargeForGrace(j, m, envelope, s, now, defaultGPUStopGrace)
+}
+
+func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time, grace time.Duration) (charge, growth float64) {
 	if j == nil || m == nil {
 		return envelope, envelope
 	}
+	if grace <= 0 {
+		grace = defaultGPUStopGrace
+	}
 	drift := exploratoryDriftMarginGB(m)
-	fresh := s.freshAt(now)
 	device := unifiedDeviceWork(j, m)
 	floor, lend := lendingFloor(j, m, s, now)
 	retained, observed := retainedCharge(j, s, now)
@@ -178,15 +185,7 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 	} else {
 		charge = max(base, retained, peak, min(measured, ceiling))
 	}
-	credit := 0.0
-	if fresh {
-		credit = s.gb
-		if rss {
-			// Darwin RSS has no resident field, but this charge is built from
-			// the same RSS, so it is credited once.
-			credit = s.footprintGB
-		}
-	}
+	credit := memoryResidentCredit(s, now, rss)
 	growth = max(0, charge-credit)
 	if lend == lendByUse || below {
 		growth = max(growth, min(margin, charge))
@@ -195,7 +194,38 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 		// to come: no device overlap with the cgroup sample is proved (#424).
 		growth = max(growth, j.Spec.Needs.MemoryGB)
 	}
+	if lend == lendByUse {
+		// Admission must leave the same headroom that the lending safety
+		// stop protects. A shorter sample-age forecast can re-admit the
+		// just-released borrower while that stop's growth is still pending.
+		_, pending := lendingStopGrowth(j, m, s, grace)
+		growth = max(growth, pending+margin)
+	}
 	return charge, growth
+}
+
+func memoryResidentCredit(s hostMemorySample, now time.Time, rss bool) float64 {
+	if !s.freshAt(now) {
+		return 0
+	}
+	if rss {
+		return s.footprintGB
+	}
+	return s.gb
+}
+
+// Growth until a lending stop can release RAM: the measured increment, stop
+// grace and one sensor-validity interval, capped by the enforced envelope.
+// Call only with fresh, guarded by-use evidence (lendingFloor).
+func lendingStopGrowth(j *Job, m *Machine, s hostMemorySample, grace time.Duration) (lent, growth float64) {
+	used := max(s.gb, s.footprintGB)
+	expected := s.growthGB + s.rateGB*(grace+s.freshFor()).Seconds()
+	if unifiedDeviceWork(j, m) {
+		used = max(used, s.deviceGB)
+		expected += s.deviceGrowthGB + s.deviceRateGB*(grace+deviceMemorySampleFreshFor).Seconds()
+	}
+	lent = max(0, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)-used)
+	return lent, min(lent, expected)
 }
 
 func learned(j *Job) *LearnedMemory { return j.MemoryEnvelope.Learned }
@@ -398,8 +428,14 @@ func (q *Queue) jobRelease(m *Machine, j *Job) roomArms {
 	if owner == nil || hostID(owner) != hostID(m) || !batchReservesCapacity(j) {
 		return roomArms{}
 	}
-	charge := q.hostJobCharge(j)
-	return roomArms{charge + uncreditedGB(j, owner, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()), charge}
+	charge, growth := q.hostJobChargeGrowth(j)
+	sample, now := q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now()
+	_, lend := lendingFloor(j, owner, sample, now)
+	rss := owner.MemoryEnforcement == darwinRSSGuardStatus && (lend == lendByUse || chargedBelowLimit(j))
+	// Release also returns the stop-horizon headroom held for this lender,
+	// without treating that headroom as resident or inflating its allowance.
+	physical := max(charge, growth+memoryResidentCredit(sample, now, rss))
+	return roomArms{physical + uncreditedGB(j, owner, sample, now), charge}
 }
 
 func (q *Queue) slotRelease(m *Machine, s *ModelSlot) roomArms {

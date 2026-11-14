@@ -549,7 +549,7 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 			continue
 		}
 		sample := q.hostMemorySamples[machine][jobKey(*j)]
-		charge, _ := memoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now)
+		charge, _ := memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), sample, now, q.preemptionGrace())
 		observed, id := 0.0, int64(0)
 		if old := j.HostMemoryCharge; retainedHostCharge(j) > 0 && old != nil {
 			observed, id = old.GiB, old.SampleID
@@ -575,8 +575,8 @@ func (q *Queue) retainHostMemoryCharges(machine string, now time.Time) {
 	}
 }
 
-// hostJobCharge is the ledger's one charge for a live attempt; growth is the
-// part of it that may still consume live RAM. Every caller uses this.
+// hostJobCharge is the ledger's one charge for a live attempt; growth is its
+// pending physical headroom, including the lending stop horizon.
 func (q *Queue) hostJobCharge(j *Job) float64 {
 	charge, _ := q.hostJobChargeGrowth(j)
 	return charge
@@ -584,5 +584,5 @@ func (q *Queue) hostJobCharge(j *Job) float64 {
 
 func (q *Queue) hostJobChargeGrowth(j *Job) (charge, growth float64) {
 	m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	return memoryCharge(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+	return memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now(), q.preemptionGrace())
 }

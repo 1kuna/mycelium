@@ -1044,6 +1044,13 @@ func (rt *modelRuntime) admissionMemorySnapshot() map[attemptKey]hostMemorySampl
 	return samples
 }
 
+func (rt *modelRuntime) memoryStopGrace() time.Duration {
+	if rt.worker != nil && rt.worker.AcceleratorStopGrace > 0 {
+		return rt.worker.AcceleratorStopGrace
+	}
+	return defaultGPUStopGrace
+}
+
 // All blocking sensors run before this exact-attempt accounting snapshot.
 // Call with rt.mu and rt.admissionMu held. Stop publication shares this ledger;
 // actor reads never acquire process/control locks or perform receipt I/O.
@@ -1069,7 +1076,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		helper := 0.0
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := memoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now)
+		charge, pending := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now, rt.memoryStopGrace())
 		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
 			// This cold command has not executed yet. Its offered reservation
 			// must fit. Bounded estimates already use the offer plus retained
@@ -1171,7 +1178,7 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 			continue
 		}
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		c, p := memoryCharge(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now)
+		c, p := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now, rt.memoryStopGrace())
 		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
 	}
 	for _, other := range rt.models {
