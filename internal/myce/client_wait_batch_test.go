@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -20,6 +21,8 @@ func TestWaitSubmittedOwnerDeadlineAndBackoff(t *testing.T) {
 		deadline, _ := ctx.Deadline()
 		var previousReply time.Time
 		retried := false
+		requests := 0
+		const longRetry = 25 * time.Hour
 		c := Client{URL: "http://fixture.invalid", Jitter: func() float64 { return 0 }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
 			if r.Method != http.MethodGet {
 				t.Fatal("waiting must not resubmit or cancel the job", r.Method)
@@ -29,22 +32,40 @@ func TestWaitSubmittedOwnerDeadlineAndBackoff(t *testing.T) {
 			}
 			if !previousReply.IsZero() {
 				retried = true
-				// No server signal: #1099 uses the RFC 6298 recovery period,
-				// independently of failure history. This fixture has zero jitter.
-				if spacing := time.Since(previousReply); spacing != time.Second {
+				// Fast no-signal failures keep the RFC 6298 recovery period.
+				// The third reply supplies an explicit long Retry-After.
+				want := time.Second
+				if requests == 3 {
+					want = longRetry
+				}
+				if spacing := time.Since(previousReply); spacing != want {
 					t.Fatal("retry recovery spacing", spacing)
 				}
 			}
+			requests++
+			if requests == 4 {
+				if time.Since(started) <= 24*time.Hour {
+					t.Fatal("owner lifetime was not exercised past the old cap")
+				}
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			}
 			time.Sleep(time.Millisecond)
+			header := make(http.Header)
+			if requests == 3 {
+				// Cross the retired cap using the real server-directed pause,
+				// rather than 172,000 identical transient replies.
+				header.Set("Retry-After", strconv.FormatInt(int64(longRetry/time.Second), 10))
+			}
 			previousReply = time.Now()
-			return &http.Response{StatusCode: 503, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
+			return &http.Response{StatusCode: 503, Header: header, Body: io.NopCloser(strings.NewReader(`{"code":"queue_stopping"}`))}, nil
 		})}}
 		_, err := c.WaitSubmitted(ctx, &Job{ID: "job", State: "queued"})
 		if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 48*time.Hour {
 			t.Fatal(err, time.Since(started))
 		}
-		if !retried {
-			t.Fatal("transient failure was not retried")
+		if !retried || requests != 4 {
+			t.Fatal("transient failure was not retried through the owner lifetime", requests)
 		}
 	})
 }

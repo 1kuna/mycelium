@@ -13,6 +13,9 @@ import (
 // project for a fleet-specific number of hours. Rescale the entire workload to
 // prove that the convergence decision follows work, not the wall-time unit.
 func TestAdaptiveFairnessLargeWaitConverges(t *testing.T) {
+	// Keep a large/small service imbalance at all three time scales without
+	// replaying dozens of identical submit/checkin/finish transactions.
+	const largeQuanta = 16
 	var firstTurn int
 	for _, quantum := range []time.Duration{time.Millisecond, time.Second, 3 * time.Hour} {
 		t.Run(quantum.String(), func(t *testing.T) {
@@ -21,11 +24,11 @@ func TestAdaptiveFairnessLargeWaitConverges(t *testing.T) {
 			m := machine("worker", "fake")
 			submit(t, q, projectSpec("large"))
 			run := check(t, q, m, nil).Job
-			clock.Advance(64 * quantum)
+			clock.Advance(largeQuanta * quantum)
 			finish(t, q, run, true)
 			large := submit(t, q, projectSpec("large"))
 			served := 0
-			for ; served < 64; served++ {
+			for ; served < largeQuanta; served++ {
 				small := submit(t, q, projectSpec("small"))
 				run = check(t, q, m, nil).Job
 				if run == nil {
@@ -40,7 +43,7 @@ func TestAdaptiveFairnessLargeWaitConverges(t *testing.T) {
 				clock.Advance(quantum)
 				finish(t, q, run, true)
 			}
-			if served == 0 || served == 64 {
+			if served == 0 || served == largeQuanta {
 				t.Fatalf("large project did not recover a fair turn: tiny jobs served=%d", served)
 			}
 			if firstTurn == 0 {

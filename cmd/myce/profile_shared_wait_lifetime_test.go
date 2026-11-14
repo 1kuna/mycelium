@@ -56,10 +56,12 @@ func TestSharedProfileObserverLifetime(t *testing.T) {
 		}
 		start, pauses := clock.Now(), 0
 		err := runSharedProfileLoop(context.Background(), root, lock, clock, func(_ context.Context, d time.Duration) error {
-			if pauses++; pauses > 1000 { // ≥1 min each: far beyond the 1 h bound
+			if pauses++; pauses > 1000 { // Far beyond the 1 h bound
 				return errors.New("observer never settled")
 			}
-			clock.advance(max(d, time.Minute))
+			// Ten-minute samples still cover both 50-minute outages and the
+			// three-hour live period without hundreds of identical disk/HTTP rounds.
+			clock.advance(max(d, 10*time.Minute))
 			step(clock.Now().Sub(start))
 			return nil
 		})

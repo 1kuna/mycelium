@@ -15,7 +15,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 	for _, tc := range []struct {
 		ram      float64
 		evidence int
-	}{{2, 1}, {2, 41}} { // Host size only scales these values (#1086).
+	}{{2, 1}, {2, 3}} { // Host size only scales these values (#1086).
 		ram := tc.ram
 		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
@@ -140,7 +140,10 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			ocr := cpuSpec(2, 0)
 			ocr.Name, ocr.Run.Command = "ocr", []string{"echo", "ocr"}
 			ocr.AllowedMachines = []string{target.ID}
-			for i := 0; i < 41; i++ {
+			// Repeated accepted peaks establish a learned OCR envelope.
+			// Two distinct acceptances suffice; 41 identical runs add no evidence shape.
+			const ocrEvidence = 2
+			for range ocrEvidence {
 				runMemory(t, q, clock, target, ocr, ram/32, nil)
 			}
 			render := cpuSpec(2, 0)
@@ -212,7 +215,7 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			}
 			for i := 0; i < 5; i++ {
 				j := pull(reports...)
-				if j == nil || j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != 41 {
+				if j == nil || j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != ocrEvidence {
 					t.Fatalf("OCR %d serialized behind probes: %+v", i, j)
 				}
 				reports = append(reports, report(j))
