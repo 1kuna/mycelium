@@ -1267,6 +1267,8 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	w.Client.publicationWire = &atomic.Bool{}
+	w.Client.publicationWire.Store(true)
 	w.Client.faultWire = &atomic.Bool{}
 	w.Client.stagingWire = &atomic.Bool{}
 	w.launchCtx = stop

@@ -85,6 +85,7 @@ func publicStatusValue(s Snapshot) Snapshot {
 			m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
 		}
 		m.FaultMonitorError = diagnostic(m.FaultMonitorError, "kernel log not readable")
+		m.ResultPublications = safeResultPublications(m.ResultPublications)
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
 		for i := range m.CopyReports {
 			m.CopyReports[i].Error = diagnostic(m.CopyReports[i].Error, "model copy failed")

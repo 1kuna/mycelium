@@ -250,8 +250,10 @@ func fileStoreLimitRefusal(err error) bool {
 // manifests are preflighted whole, so an oversized folder or glob is refused
 // once before any upload instead of failing part-way.
 func (w Worker) publishOutputFiles(ctx context.Context, j Job, step, outputName *string) (FileManifest, bool, error) {
+	done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_path")
 	*step, *outputName = "output_path", ""
 	sources, err := collectOutputFiles(j.Spec.Run.Workdir, j.Spec.Outputs, jobInputFiles(&j))
+	done()
 	if err != nil {
 		return nil, true, err
 	}
@@ -260,7 +262,9 @@ func (w Worker) publishOutputFiles(ctx context.Context, j Job, step, outputName 
 	for _, name := range names {
 		decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
 		*step, *outputName = "output_validation", decl
+		done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_validation")
 		ref, err := IdentifyFile(sources[name])
+		done()
 		if err != nil {
 			return nil, true, err
 		}

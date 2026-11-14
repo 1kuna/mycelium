@@ -44,6 +44,7 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 	// Confirmed local cleanup; independent of result delivery.
 	admissionReleased atomic.Bool
+	publication       *publicationProgress
 }
 
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
@@ -76,7 +77,13 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	if a.liveness != nil {
 		r.Liveness = a.liveness.snapshot(a.worker.Clock.Now())
 	}
-	return r, a.diagnostics, a.finished, a.err
+	diagnostics := a.diagnostics
+	if a.released && a.publication != nil {
+		if progress := a.publication.snapshot(a.job, a.worker.Clock.Now()); progress != nil {
+			diagnostics.ResultPublications = []ResultPublication{*progress}
+		}
+	}
+	return r, diagnostics, a.finished, a.err
 }
 
 func (w Worker) sampleHeartbeatMemory(ctx context.Context, m *Machine, jobs []Job, reports []AttemptReport, actors map[attemptKey]*attemptSupervisor) {
@@ -210,10 +217,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	tick := time.NewTicker(min(initial.Interval, 100*time.Millisecond))
 	defer tick.Stop()
 	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
+	var publicationPace ClientPace
+	var publicationRetryAt time.Time
+	var releaseSent bool
 	for ctx.Err() == nil {
 		a.mu.Lock()
 		w, d, connected, admissionBlocked := a.worker, a.directive, a.connected, a.admissionBlocked
 		a.mu.Unlock()
+		w.Client.Clock = w.Clock
+		w.Client = w.Client.WithProgressWatch()
 		now := w.Clock.Now()
 		if p != nil {
 			p.enforceGrace(now)
@@ -437,6 +449,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		if releasedLocally {
 			a.releaseAdmission()
+			w.Client.publication = a.publication
 		}
 		if a.job.Spec.ephemeral() && s.state.Result != nil && !s.state.Result.ReleasePending && !s.extensionFiles.inFlight() {
 			done, err := w.finishEphemeralAttempt(ioCtx, s, connected)
@@ -455,7 +468,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			continue
 		}
-		if connected && !d.Hold {
+		if connected && !d.Hold && !now.Before(publicationRetryAt) {
+			publicationStarted := w.Clock.Now()
 			var err error
 			releaseAcknowledged := false
 			if d.Stop && d.Kill && !scarceYieldStop(s.state.PriorityStop) {
@@ -476,7 +490,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver
 				if s.state.Result != nil {
-					if !s.state.Result.ReleasePending {
+					if !s.state.Result.ReleasePending && !releaseSent {
 						released := *s.state.Result
 						released.ReleaseOnly = true
 						released.OutputRefs = nil
@@ -484,6 +498,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						if stale(err) {
 							err = nil
 						}
+						releaseSent = err == nil
 					}
 					if err == nil && s.fileProgress.inFlight() {
 						err = errCheckpointIOPending
@@ -501,6 +516,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							if err != nil {
 								return finished, err
 							}
+							done := w.Client.publication.begin(w.Clock, "filesystem/failure_diagnostics")
+							defer done()
 							return w.finishFailureDiagnostics(value, finished, s.dir, logPath)
 						})
 						err = e
@@ -600,6 +617,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			if stale(err) && p != nil {
 				p.stop(now, 0, true)
+			}
+			if err != nil && !errors.Is(err, errCheckpointIOPending) {
+				a.publication.failed(err)
+				publicationPace.Observe(w.Clock.Now().Sub(publicationStarted), false)
+				publicationRetryAt = w.Clock.Now().Add(publicationPace.ServiceDelay(err, w.Client.Jitter))
 			}
 		}
 		select {
@@ -988,10 +1010,17 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		return jobs
 	}
-	recovering := len(stores) > 0
+	// Publication custody keeps the old session, but only unreleased startup
+	// executions fence admission. New assignments must not re-arm recovery.
+	recoverySession := len(stores) > 0
+	recovered := map[attemptKey]bool{}
+	for _, s := range stores {
+		recovered[jobKey(*s.state.Job)] = true
+	}
+	recovering := recoverySession
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
-		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
+		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p, publication: &publicationProgress{}}
 		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
 		actors[jobKey(j)] = a
 		// Publish reservations before the actor can reach its final launch gate.
@@ -1081,6 +1110,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			reports = append(reports, report)
 			diagnostics.CheckpointUnavailable = diagnostics.CheckpointUnavailable || status.CheckpointUnavailable
 			diagnostics.FileTransferError = preferTransferError(diagnostics.FileTransferError, status.FileTransferError)
+			diagnostics.ResultPublications = append(diagnostics.ResultPublications, status.ResultPublications...)
 			a.mu.Lock()
 			released := a.released
 			a.mu.Unlock()
@@ -1103,8 +1133,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			continue
 		}
-		if recovering && len(actors) == 0 {
+		recovering = false
+		for key := range recovered {
+			if a := actors[key]; a != nil && !a.admissionReleased.Load() {
+				recovering = true
+			}
+		}
+		if recoverySession && len(actors) == 0 {
 			recovering = false
+			recoverySession = false
 			if w.sharedInputs != nil {
 				w.sharedInputs.refreshCapacity()
 			}
@@ -1118,6 +1155,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			fresh = true
 		}
 		if retry.ready(now) {
+			for _, progress := range diagnostics.ResultPublications {
+				log.Print(progress.String())
+			}
 			ctx := observeCtx
 			inventory.requestTelemetry(slices.ContainsFunc(jobs, func(j Job) bool { return !j.Spec.Needs.cpuOnly() && fanOutDeviceSharing(&j) }))
 			m := cloneMachine(&w.Machine)
@@ -1138,6 +1178,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.FileTransferError = diagnostics.FileTransferError
+			m.ResultPublications = diagnostics.ResultPublications
 			observed, probeErr := inventory.snapshot()
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
@@ -1468,7 +1509,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 				unavailable := leaving || recovering || reply.AdmissionBlocked || w.checkAvailability() != nil
-				busy := len(actors) > 0 || unavailable
+				busy := len(activeJobs()) > 0 || unavailable
 				// A plain build (no extension setup) never touches the device,
 				// so it runs beside device work like a CPU-scoped build (#1486).
 				cpuPreparation := len(reply.EnvironmentPlan) > 0 && (reply.EnvironmentPlan[0].Platform == "cpu" || reply.EnvironmentPlan[0].Preparation == nil)

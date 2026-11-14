@@ -351,6 +351,8 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 }
 
 func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
+	done := w.Client.publication.begin(w.Client.clock(), "filesystem/checkpoint_publication")
+	defer done()
 	step, outputName := "checkpoint_publication", ""
 	// Surface retryable publication errors without changing custody or Success.
 	defer func() {
@@ -367,11 +369,14 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 			w.storageObserver = publicationStorageObserver(j, result, parent, metadata...)
 		}
 		defer func() {
+			done := w.Client.publication.begin(w.Client.clock(), "filesystem/storage_observation")
+			defer done()
 			w.storageObserver.sample()
 			finished.StoragePeak = w.storageObserver.snapshot()
 		}()
 	}
 	generation, err := w.publishFileCheckpoint(j, parent)
+	done()
 	if err != nil && !stale(err) {
 		return result, err
 	}
@@ -388,8 +393,11 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS {
+		done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_spool")
+		defer done()
 		step = "output_spool"
 		root, files, err := captureDeliverySpool(j, parent, w.storageObserver)
+		done()
 		if errors.Is(err, errRequiredDeliveryOutput) {
 			return finalizationResult(result, step, "", err, true), nil
 		}

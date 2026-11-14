@@ -38,6 +38,9 @@ func attemptReply(c Checkin, reply Reply) Reply {
 }
 
 func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
+	if w.Client.publicationWire != nil && !w.Client.publicationWire.Load() {
+		c.Machine.ResultPublications = nil
+	}
 	c.period = checkinPeriod(w.Interval)
 	c.AttemptProtocol = keyedAttemptProtocol
 	c = w.deviceTelemetryCheckin(c)
@@ -49,6 +52,13 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
 	var refusal *HTTPError
+	if len(c.Machine.ResultPublications) > 0 && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
+		c.Machine.ResultPublications = nil
+		if w.Client.publicationWire != nil {
+			w.Client.publicationWire.Store(false)
+		}
+		err = w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply)
+	}
 	if (hasDiskBudgetWireFields(c) || hasForeignDetailFields(c) || c.CheckpointExpiryProtocol != "") && errors.As(err, &refusal) && refusal.Status == 400 && refusal.Code == "request_invalid" {
 		// A strict predecessor queue (for example after a queue rollback)
 		// refuses the additive field sets; retry once with none.
