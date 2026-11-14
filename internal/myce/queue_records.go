@@ -344,7 +344,13 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 		q.rebuildRecords()
 	}
 	base := queueBase(q.s, false)
+	// Diagnostic generations are replaced, never mutated in place. Borrow the
+	// baseline for rollback just as observation capture does; copying thousands
+	// of histories on every unrelated writer only extends the central hold.
+	efficiencyHealth := base.EfficiencyHealth
+	base.EfficiencyHealth = nil
 	old := copyObservationValue(reflect.ValueOf(base)).Interface().(state)
+	old.EfficiencyHealth = efficiencyHealth
 	q.records.healthChanged = map[int]bool{}
 	q.records.updating = true
 	q.records.jobs = map[string]*Job{}
@@ -384,7 +390,7 @@ func (q *Queue) beginRecords() (recordUndo, error) {
 		q.touchSubmission(q.records.bindings[id])
 	}
 	catalogs := state{Extensions: q.s.Extensions, WorkObservations: q.s.WorkObservations, StorageObservations: q.s.StorageObservations, ExternalMemory: q.s.ExternalMemory}
-	return recordUndo{base: old, catalogs: catalogs, machines: q.s.Machines, health: q.s.Health.Events}, nil
+	return recordUndo{base: old, catalogs: catalogs, machines: q.s.Machines, health: q.s.Health.Events, efficiencyJSON: q.efficiencyHealthJSON}, nil
 }
 func (q *Queue) rollbackRecords(old recordUndo) {
 	q.evidenceGeneration++
@@ -397,6 +403,7 @@ func (q *Queue) rollbackRecords(old recordUndo) {
 	base.Health.Events = old.health
 	base.Jobs, base.Submissions = jobs, submissions
 	q.s = base
+	q.efficiencyHealthJSON = old.efficiencyJSON
 	q.s.Machines = old.machines
 	for id, m := range q.records.machines {
 		if m == nil {
