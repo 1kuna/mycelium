@@ -116,29 +116,32 @@ func TestExtensionPrepareCustodyAndQualificationIdentity(t *testing.T) {
 	r.Setup = true
 	r.Qualified = true
 	r.CheckID = "exact-check"
-	w.Machine.ExtensionReports = []ExtensionReport{r}
-	if qualifiedExtension(j, &w.Machine) == nil {
-		t.Fatal("exact qualification excluded")
-	}
-	for _, field := range []string{"host", "fingerprint", "environment", "check", "invocation", "setup"} {
-		changed := r
-		switch field {
-		case "host":
-			changed.Host = "other"
-		case "fingerprint":
-			changed.Fingerprint = "stale"
-		case "environment":
-			changed.EnvironmentIdentity = "stale"
-		case "check":
-			changed.CheckDigest = "stale"
-		case "invocation":
-			changed.CheckID = ""
-		case "setup":
-			changed.Setup = false
+	for _, id := range []string{"exact-check", automaticExtensionCheckID(w.Machine.ID, r)} {
+		r.CheckID = id
+		w.Machine.ExtensionReports = []ExtensionReport{r}
+		if qualifiedExtension(j, &w.Machine) == nil {
+			t.Fatal("exact qualification excluded")
 		}
-		w.Machine.ExtensionReports = []ExtensionReport{changed}
-		if qualifiedExtension(j, &w.Machine) != nil {
-			t.Fatal("stale qualification placed", field)
+		for _, field := range []string{"host", "fingerprint", "environment", "check", "invocation", "setup"} {
+			changed := r
+			switch field {
+			case "host":
+				changed.Host = "other"
+			case "fingerprint":
+				changed.Fingerprint = "stale"
+			case "environment":
+				changed.EnvironmentIdentity = "stale"
+			case "check":
+				changed.CheckDigest = "stale"
+			case "invocation":
+				changed.CheckID = ""
+			case "setup":
+				changed.Setup = false
+			}
+			w.Machine.ExtensionReports = []ExtensionReport{changed}
+			if qualifiedExtension(j, &w.Machine) != nil {
+				t.Fatal("stale qualification placed", field)
+			}
 		}
 	}
 	// Drain invalidates an unstarted delayed offer through the same launch gate.

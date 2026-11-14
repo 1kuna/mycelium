@@ -303,7 +303,8 @@ func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
 // A successful command alone is only smoke evidence, never qualification.
 func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
 	view, ok := e.forMachine(m)
-	if strings.HasPrefix(r.CheckID, "auto-") && !matchingExtensionReport(e, m, r) {
+	automatic := strings.HasPrefix(r.CheckID, "auto-")
+	if automatic && !matchingExtensionReport(e, m, r) {
 		return "host, environment or check identity changed; check required"
 	}
 	if m.Devices != nil && (extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint) {
@@ -324,6 +325,11 @@ func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) st
 	if len(e.Variants) == 0 {
 		return ""
 	} // existing legacy checks retain their wire contract
+	if automatic && r.Setup {
+		// The exact host, target, fingerprint, environment and check identity
+		// were already matched above; do not hash them a second time.
+		return ""
+	}
 	if r.Target == nil || *r.Target != machineTarget(m) || r.Host == "" || r.Host != hostID(m) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint || r.EnvironmentIdentity != extensionEnvironmentIdentity(e, m) || r.CheckDigest != extensionCheckIdentity(e, m) || r.CheckID == "" || !r.Setup {
 		return "host, environment or check identity changed; check required"
 	}

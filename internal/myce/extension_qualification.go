@@ -25,12 +25,28 @@ func automaticExtensionCheck(j *Job) *ExtensionReport {
 }
 
 func extensionReportIdentity(r ExtensionReport) string {
+	return identityHash(extensionReportIdentityFields(r))
+}
+
+func extensionReportIdentityFields(r ExtensionReport) ExtensionReport {
 	r.Setup, r.Qualified, r.CheckID, r.CheckState, r.Reason = false, false, "", "", ""
-	return identityHash(r)
+	return r
 }
 
 func matchingExtensionReport(e Extension, m *Machine, r ExtensionReport) bool {
-	return m.ExtensionFingerprint != "" && extensionReportIdentity(r) == extensionReportIdentity(newExtensionReport(e, m, r.Work))
+	if m.ExtensionFingerprint == "" {
+		return false
+	}
+	want := extensionReportIdentityFields(newExtensionReport(e, m, r.Work))
+	r = extensionReportIdentityFields(r)
+	if (r.Target == nil) != (want.Target == nil) || r.Target != nil && *r.Target != *want.Target {
+		return false
+	}
+	// Compare the same identity fields without serializing and hashing both
+	// reports on every placement probe. Target identity is its value, not its
+	// allocation; the persisted identity hash and automatic check IDs stay put.
+	r.Target, want.Target = nil, nil
+	return r == want
 }
 
 func automaticExtensionCheckID(machine string, r ExtensionReport) string {
