@@ -23,6 +23,7 @@ type statusOptions struct {
 	since                 time.Time
 	limit                 int
 	full                  bool
+	stream                bool // Borrow immutable history; copy only the row being encoded.
 	sections              []string
 }
 
@@ -31,6 +32,7 @@ type statusSelection struct {
 	page    StatusJobsPage
 	compact bool
 	upgrade *FleetUpgradeStatus
+	custody *Queue // Immutable cancellation inputs for a streamed history row.
 }
 
 func parseStatusOptions(v url.Values) (statusOptions, error) {

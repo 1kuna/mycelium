@@ -943,6 +943,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if len(query) > 0 {
 			path += "?" + query.Encode()
 		}
+		if *statusHistory && *statusJSON {
+			return client.Call(ctx, "GET", path, nil, os.Stdout)
+		}
 		var raw json.RawMessage
 		if err = client.Call(ctx, "GET", path, nil, &raw); err != nil {
 			return err

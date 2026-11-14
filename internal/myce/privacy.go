@@ -33,6 +33,10 @@ func (q *Queue) publicSnapshot(contexts ...context.Context) (Snapshot, error) {
 
 func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
 	s, err := q.statusSnapshotOptions(options, contexts...)
+	return publicStatusValue(s), err
+}
+
+func publicStatusValue(s Snapshot) Snapshot {
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
@@ -91,7 +95,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			m.EnvironmentReports[i].PathDiagnostic = safeWorkerPathDiagnostic(m.EnvironmentReports[i].PathDiagnostic)
 		}
 	}
-	return s, err
+	return s
 }
 
 func statusEnvironmentName(name string) string {

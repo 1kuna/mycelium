@@ -269,7 +269,12 @@ decoded once in the background, off the queue lock and outside every request,
 so concurrent reads do not each charge the same retained history. A history page
 copies only its returned rows; other retained work contributes its shared
 immutable summary. Response copies still consume the queue's measured memory
-allowance: `detail=full` still returns (and charges) all retained history.
+allowance. `detail=full` streams one complete JSON document from one pinned
+publication: it copies, projects and encodes one job at a time, outside `q.mu`.
+Its per-request ordering index grows with the number of jobs, rather than their
+retained attempt payloads. Fleet metadata and each individual job must fit the
+measured allowance. A client that explicitly negotiates a maximum response byte
+count retains the existing buffered response/byte-ceiling contract.
 
 The page and `GET /api/status` share a cached response for a lease learned from
 local build/hit costs and mutation intervals. Job receipts use the same
@@ -433,6 +438,14 @@ reads may perform expensive diagnostic planning, even when returning a subset.
 all sections and audit metadata, with the existing public redaction contract.
 CLI `--history` and Python `client.status(full=True)` use that preservation view.
 Keep it explicit for release-preservation snapshots; the default is not a ledger.
+The JSON CLI forwards the streamed document without collecting all jobs in
+memory. Python and Go callers decoding a snapshot still allocate their returned
+document; no pagination loop or output-schema change is required. A failed or
+interrupted stream is incomplete: check the command's exit status before using
+the saved JSON. Full-history reads do not enter control-pressure admission when
+they use an existing publication. `myce usage` also reads committed accounting
+without starting a maintenance transaction or capturing execution history; the
+queue's normal maintenance tick owns new accounting samples.
 
 Job selection remains independent of section selection:
 

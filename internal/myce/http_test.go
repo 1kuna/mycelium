@@ -1,8 +1,10 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,6 +12,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestClientHistoryStreaming(t *testing.T) {
+	for _, body := range []string{`{"jobs":[{"id":"one"}]}`, `{"jobs":[`, `{"jobs":[]} {}`} {
+		var got bytes.Buffer
+		err := copyJSONDocument(&got, strings.NewReader(body))
+		if (err == nil) != json.Valid([]byte(body)) {
+			t.Fatalf("stream validation %q: %v", body, err)
+		}
+		if got.String() != body {
+			t.Fatal("stream changed bytes")
+		}
+	}
+	reader, writer := io.Pipe()
+	first := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- copyJSONDocument(&historySignalWriter{first: first}, reader) }()
+	if _, err := io.WriteString(writer, `{"jobs":[`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("client buffered the document")
+	}
+	_, _ = io.WriteString(writer, `{"id":"one"}]}`)
+	_ = writer.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type historySignalWriter struct{ first chan struct{} }
+
+func (w *historySignalWriter) Write(b []byte) (int, error) {
+	select {
+	case <-w.first:
+	default:
+		close(w.first)
+	}
+	return len(b), nil
+}
 
 func TestAPIAuthenticationAndFlow(t *testing.T) {
 	q, _ := fixture(t)
