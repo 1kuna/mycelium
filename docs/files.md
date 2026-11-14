@@ -1144,6 +1144,15 @@ saves lose a tie). Reconciliation retains the current execution on a tie. These
 are deterministic compatibility rules, not estimates of legacy progress.
 Invalid generation metadata fails visibly instead of using timestamps. A job must also make its output writes safe to retry.
 
+On a NAS, write payload files directly into the final directory (file renames
+are fine) and publish a small JSON commit manifest last. Do not rename freshly
+written directories: Linux CIFS deferred close can retain child handles through
+`closetimeo`, causing EACCES/EBUSY despite correct permissions. If unavoidable,
+retry with short backoff. Mycelium's directory publications retry those errors
+for up to two `closetimeo` windows (one for deferred close, one for scheduling
+slack), using the mount option when available or the CIFS one-second default;
+persistent failures retain their original error.
+
 On Linux CIFS/SMB mounts, the Go checkpoint-copy path and Python helper skip
 only directory fsync: Linux `cifs_dir_fsync` is explicitly a dummy operation
 because directory operations are synchronous. Go identifies CIFS on the opened

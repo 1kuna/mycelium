@@ -333,6 +333,11 @@ Mycelium stopped for its own maintenance or updates resumes ahead of the
 tier's other queued work, and its host drains toward it
 ([classes](references/waiting.md#classes-and-preemption)).
 
+For NAS checkpoints, write files in the final directory (file renames are fine)
+and publish a small commit manifest last. Avoid renaming freshly written
+directories: SMB deferred close can return EACCES/EBUSY; if unavoidable, retry
+with a short backoff through the mount's `closetimeo` window.
+
 ## Pipelines
 
 Submit every later stage up front with `after:`, so the queue can see the whole

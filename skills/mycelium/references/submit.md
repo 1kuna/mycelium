@@ -272,6 +272,11 @@ experiment may declare `preemptible: true` so it can leave a scarce host by
 restarting from scratch (MY-26); class alone never implies it. See
 [checkpoints](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs).
 
+On a NAS, write payload files directly in their final directory (file renames
+are fine), then publish a small commit manifest last. Do not rename freshly
+written directories: SMB deferred close can refuse with EACCES/EBUSY. If a
+directory rename is unavoidable, retry with short backoff through `closetimeo`.
+
 Resumes stay on the checkpoint's target. The queue records the OS/arch/platform
 of the attempt that wrote the newest accepted generation and places the resume
 only on a host of that target while one remains in the fleet, even if it is

@@ -133,7 +133,7 @@ func (c *ModelCache) discardContext(ctx context.Context, path string) error {
 		return e
 	}
 	dest := filepath.Join(trash, ID()+"-"+filepath.Base(path))
-	if e = os.Rename(path, dest); e == nil {
+	if e = renameStoragePath(ctx, path, dest); e == nil {
 		return nil
 	} else if !errors.Is(e, syscall.EXDEV) {
 		return e
@@ -497,7 +497,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			c.progress.Store(key, r)
 			return "", e
 		}
-		if e = os.Rename(temp, dest); e != nil {
+		if e = renameStoragePath(ctx, temp, dest); e != nil {
 			return "", e
 		}
 		if e = syncWorkerDir(c.Root); e != nil {
@@ -527,7 +527,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 			c.progress.Store(key, r)
 			return "", e
 		}
-		if e = os.Rename(temp, dest); e != nil {
+		if e = renameStoragePath(ctx, temp, dest); e != nil {
 			return "", e
 		}
 		dir, err := os.Open(c.Root)
@@ -616,7 +616,7 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 		c.progress.Store(key, r)
 		return "", e
 	}
-	if e = os.Rename(temp, dest); e != nil {
+	if e = renameStoragePath(ctx, temp, dest); e != nil {
 		return "", e
 	}
 	// Sync the directory so atomic publication survives a power failure.

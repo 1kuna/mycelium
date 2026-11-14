@@ -337,7 +337,7 @@ func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...fu
 		if err = verifyDeliveryDirectory(root, stage, receipt, progress); err != nil {
 			return err
 		}
-		if err = root.Rename(stage, dest); err != nil {
+		if err = renameStorageDirectory(context.Background(), filepath.Join(root.Name(), stage), func() error { return root.Rename(stage, dest) }); err != nil {
 			return err
 		}
 		// Persist the rename and newly created ancestors as well as the tree itself.

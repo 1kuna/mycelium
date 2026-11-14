@@ -333,7 +333,7 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	if err = syncModelDirectory(stage); err != nil {
 		return "", err
 	}
-	if err = os.Rename(stage, dest); err != nil {
+	if err = renameStoragePath(ctx, stage, dest); err != nil {
 		return "", err
 	}
 	if err = syncWorkerDir(j.Checkpoint); err != nil {
