@@ -11,6 +11,14 @@ Unreleased startup executions still gate recovery; released publication does
 not. The original session stays until its actors finish, preserving result
 fences while new work uses the remaining capacity.
 
+Queue `event=file_upload` journal lines attribute upload mutations and server
+errors to a digest and, when supplied, exact job/attempt. They include method,
+status, requested/accepted offsets, declared length, publication operation and
+safe error class. Offsets describe tus acceptance; only the verified blob and
+accepted result establish delivery. An accepted end can still need publication.
+Go uploads negotiate HTTP 102 reports from actual verification reads so the
+final PATCH can verify the full blob without being mistaken for a dead socket.
+
 ## Reading `myce status`
 
 `myce status` prints current work, machines, holds and active health conditions.
