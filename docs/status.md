@@ -1724,7 +1724,10 @@ The ledger has its own `captured_at`, oldest worker `observed_at`,
 `allowance_gb` means no explicit static allowance, not zero physical capacity.
 Each owner identifies an attempt, retained release or model execution, with
 its actual `charge_gb` and remaining `growth_gb`. A live attempt and its nominal
-release receipt appear once. Reservation entries preserve ID, bound job, ready
+release receipt appear once. For guarded by-use lending, `growth_gb` also covers
+the measured growth through stop grace and sensor freshness; it can exceed
+`charge_gb` minus resident credit. This reserves physical headroom without
+raising the bounded charge or execution ceiling. Reservation entries preserve ID, bound job, ready
 time and lifecycle state. Pending custody reuses existing reservation accounting,
 with `pending_known` and `pending_observed_at`; if that pass did not evaluate it,
 pending state is explicitly unknown. Capturing a comparison adds no reservation
@@ -1743,7 +1746,8 @@ A machine reports host RAM as the one memory rule's three terms (#990, #1366),
 ledger, not measured process RSS) and `room_gb` = capacity − charged, signed
 (negative is debt). Capacity is the smaller arm the rule admits within: the
 live reading less its one margin plus Mycelium's own resident use, which that
-reading already excludes; or the queue's enforced allowance (read and set it
+reading already excludes, less any additional lending stop-horizon headroom;
+or the queue's enforced allowance (read and set it
 with `myce host status HOST` / `myce host budget`). It is absent while the
 host's RAM reading is unknown. Text: `host H RAM capacity C, charged X, room R
 GiB`; the page shows a Host RAM row.

@@ -981,6 +981,14 @@ requeues with no retry charge (`memory_overcommit_yield`). Production yields
 only to protect other running production work on the host, and only if
 resumable.
 
+Placement and both worker launch checks reserve that same measured growth
+through stop grace plus sensor freshness, including unified device growth.
+This physical headroom can exceed the bounded charge's sample-age forecast;
+it does not raise the attempt's ceiling or its allowance charge. Release
+planning returns the corresponding headroom as well as the charge. A yielded
+job stays queued while the surviving lenders still need that headroom; fresh
+measurements or their exact release admit it again, without a timed cooldown.
+
 ### Job memory envelopes
 <a id="amendment-job-memory-envelopes-146"></a>
 

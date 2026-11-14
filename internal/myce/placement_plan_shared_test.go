@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -86,6 +87,49 @@ func TestSharedDeviceEqualTierWaits(t *testing.T) {
 	requireState(t, q, waiting.ID, "queued")
 	if reason := job(t, q, waiting.ID).Reason; !strings.Contains(reason, "device 0 shared with 2 attempts") {
 		t.Fatal("waiting reason does not name the shared device:", reason)
+	}
+}
+
+func TestSharedDeviceEqualTierWaitingPreservesRunning(t *testing.T) {
+	for _, sameProject := range []bool{false, true} {
+		for _, resumable := range []bool{false, true} {
+			t.Run(fmt.Sprintf("same_project=%t/resumable=%t", sameProject, resumable), func(t *testing.T) {
+				q, clock := fixture(t)
+				m := sharedUnifiedMachine()
+				s := sharedSpec("experiment", 30)
+				s.Project, s.Resumable = "training", resumable
+				submit(t, q, s)
+				running := assignedJob(machineCheck(t, q, m))
+				if running == nil {
+					t.Fatal("training was not assigned")
+				}
+				if err := q.Started(result(running, false)); err != nil {
+					t.Fatal(err)
+				}
+				s = sharedSpec("experiment", 17)
+				s.Project = "short-job"
+				if sameProject {
+					s.Project = "training"
+				}
+				waiting := submit(t, q, s)
+				for range 10 {
+					clock.Advance(8 * time.Minute)
+					r := growthCheck(t, q, m, []*Job{running}, []float64{20}, 0)
+					if assignedJob(r) != nil {
+						t.Fatal("waiting equal-tier job was admitted onto an occupied card")
+					}
+					got := job(t, q, running.ID)
+					if got.State != "running" || got.Attempt != 1 || priorityStop(got) != nil || got.PreemptionCount != 0 {
+						t.Fatal("waiting equal-tier job stopped running work", got.State, got.Reason)
+					}
+					requireState(t, q, waiting.ID, "queued")
+				}
+				finish(t, q, running, true)
+				if a := assignedJob(machineCheck(t, q, m)); a == nil || a.ID != waiting.ID {
+					t.Fatal("short job did not start after exact completion/release")
+				}
+			})
+		}
 	}
 }
 

@@ -1,7 +1,10 @@
 package myce
 
 import (
+	"context"
+	"fmt"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -91,9 +94,9 @@ func TestUsedMemoryChargeGrowthContainedNotDoubleCharged(t *testing.T) {
 		// Learned need (4.125) bounds a job that has not yet reached it.
 		{"below learned need", hostMemorySample{gb: 2, footprintGB: 2, peakGB: 2, at: at}, 4.25, 2.25, 0},
 		// 8 resident + 1 measured increment + 0.5 GiB/s over 2 s age + drift.
-		{"growing", hostMemorySample{gb: 8, footprintGB: 8, peakGB: 8, growthGB: 1, rateGB: .5, at: at}, 10.125, 2.125, 2 * time.Second},
+		{"growing", hostMemorySample{gb: 8, footprintGB: 8, peakGB: 8, growthGB: 1, rateGB: .5, at: at}, 10.125, 8.25, 2 * time.Second},
 		// A fast grower is held at the kernel ceiling, not charged beyond it.
-		{"contained at ceiling", hostMemorySample{gb: 15, footprintGB: 15, peakGB: 15, growthGB: 2, rateGB: 4, at: at}, ceiling, ceiling - 15, 2 * time.Second},
+		{"contained at ceiling", hostMemorySample{gb: 15, footprintGB: 15, peakGB: 15, growthGB: 2, rateGB: 4, at: at}, ceiling, ceiling - 15 + .125, 2 * time.Second},
 		// The attempt's high water stays charged after use falls back.
 		{"high water retained", hostMemorySample{gb: 3, footprintGB: 3, peakGB: 11, at: at}, 11.125, 8.125, 0},
 	} {
@@ -103,8 +106,9 @@ func TestUsedMemoryChargeGrowthContainedNotDoubleCharged(t *testing.T) {
 			if !near(charge, tc.charge) || !near(growth, tc.growth) {
 				t.Fatalf("charge=%g growth=%g, want %g/%g", charge, growth, tc.charge, tc.growth)
 			}
-			if !near(growth, charge-tc.sample.gb) {
-				t.Fatal("resident memory not credited exactly once", charge, growth, tc.sample.gb)
+			_, stopGrowth := lendingStopGrowth(&j, &linux, tc.sample, defaultGPUStopGrace)
+			if !near(growth, max(charge-tc.sample.gb, stopGrowth+exploratoryDriftMarginGB(&linux))) {
+				t.Fatal("headroom must credit residency once and cover the lending stop", charge, growth, tc.sample.gb)
 			}
 		})
 	}
@@ -118,8 +122,8 @@ func TestUsedMemoryChargeGrowthContainedNotDoubleCharged(t *testing.T) {
 	sample := hostMemorySample{footprintGB: 6, peakGB: 6, rateGB: 2, at: at}
 	charge, growth := memoryCharge(&j, &darwin, dceiling, sample, at)
 	margin := exploratoryDriftMarginGB(&darwin) + overshoot
-	if !near(charge, 6+margin) || !near(growth, margin) {
-		t.Fatalf("darwin charge=%g growth=%g, want %g/%g", charge, growth, 6+margin, margin)
+	if !near(charge, 6+margin) || !near(growth, dceiling-6+margin) {
+		t.Fatalf("darwin charge=%g growth=%g, want %g/%g", charge, growth, 6+margin, dceiling-6+margin)
 	}
 	sample = hostMemorySample{footprintGB: 16.2, peakGB: 16.2, rateGB: 2, at: at}
 	if charge, _ := memoryCharge(&j, &darwin, dceiling, sample, at); !near(charge, dceiling+overshoot) {
@@ -234,6 +238,131 @@ func TestUsedMemoryOvercommitYieldsLowestTierFirst(t *testing.T) {
 	}
 	if got := job(t, q, jobs[0].ID); got.State != "running" {
 		t.Fatal("production stopped", got.State)
+	}
+}
+
+// #1619: a safety stop must not turn its exact release into another offer
+// while the surviving lender can still consume that RAM before a stop lands.
+func TestUsedMemoryOvercommitReadmission(t *testing.T) {
+	for _, tc := range []struct {
+		gpu   bool
+		grace time.Duration
+	}{{false, 10 * time.Second}, {true, 10 * time.Second}, {false, 30 * time.Second}, {true, 30 * time.Second}} {
+		t.Run(fmt.Sprintf("unified_gpu=%t/grace=%s", tc.gpu, tc.grace), func(t *testing.T) {
+			gpu := tc.gpu
+			q, clock := fixture(t)
+			if err := q.SetPreemptionGrace(tc.grace); err != nil {
+				t.Fatal(err)
+			}
+			m := sharedUnifiedMachine()
+			m.MemoryEnforcement, m.MemoryCeilingSlackGB = cgroupEnforced, .125
+			m.HostMemoryBudgetGB = 120
+			m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 96, 96
+			m.Devices[0].TotalMemoryGB = 128
+			lenderSpec := cpuSpec(2, 80)
+			lenderSpec.Priority, lenderSpec.Project = "production", "lender"
+			if gpu {
+				lenderSpec = sharedSpec("production", 60)
+				lenderSpec.Needs.HostMemoryGB, lenderSpec.Project = 20, "lender"
+			}
+			pendingLender := submit(t, q, lenderSpec)
+			lender := assignedJob(machineCheck(t, q, m))
+			if lender == nil {
+				t.Fatal("missing lender", job(t, q, pendingLender.ID).Reason)
+			}
+			if err := q.Started(result(lender, false)); err != nil {
+				t.Fatal(err)
+			}
+			q.mu.Lock()
+			envelope := *q.s.Jobs[lender.ID].MemoryEnvelope
+			envelope.Learned = unifiedPeaks(4, 0)
+			if gpu {
+				envelope.Learned = unifiedPeaks(4, 1)
+			}
+			q.s.Jobs[lender.ID].MemoryEnvelope = &envelope
+			q.mu.Unlock()
+			pending := submit(t, q, cpuSpec(2, 10))
+			victim := assignedJob(machineCheck(t, q, m, lender))
+			if victim == nil || victim.ID != pending.ID {
+				t.Fatal("missing borrower")
+			}
+			if err := q.Started(result(victim, false)); err != nil {
+				t.Fatal(err)
+			}
+			var reports []AttemptReport
+			var workerSamples map[attemptKey]hostMemorySample
+			report := func(available, rate float64, borrower bool) Reply {
+				t.Helper()
+				clock.Advance(time.Second)
+				fp, device := 4.0, 0.0
+				sample := &CurrentHostMemory{SampleID: clock.Now().UnixNano(), NonreclaimableGB: fp, FootprintGB: &fp, GrowthObserved: true, GrowthGB: rate, GrowthRateGB: rate}
+				if gpu {
+					sample.GrowthGB, sample.GrowthRateGB = 0, 0
+					sample.DeviceGB, sample.DeviceGrowthGB, sample.DeviceGrowthRateGB = &device, rate, rate
+				}
+				reports = []AttemptReport{{Execution: Execution{ID: lender.ID, Attempt: lender.Attempt}, Session: lender.Session, Started: true, CurrentHostMemory: sample}}
+				if borrower {
+					reports = append(reports, AttemptReport{Execution: Execution{ID: victim.ID, Attempt: victim.Attempt}, Session: victim.Session, Started: true})
+				}
+				m.HostAvailableMemoryGB = available
+				m.MemoryObservation = &HostMemoryObservation{TotalGB: 128, UsedGB: 128 - available}
+				workerSamples = updateHostMemorySamples(reports, clock.Now(), workerSamples)
+				r, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: reports})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r
+			}
+			report(50, 5, true)
+			stopped := job(t, q, victim.ID)
+			if stopped.State != "stopping" || priorityStop(stopped) == nil || priorityStop(stopped).Cause != memoryOvercommitCause {
+				t.Fatal("pressure did not stop borrower", stopped.State, stopped.Reason)
+			}
+			finishInterrupted(t, q, stopped)
+			attempt := job(t, q, victim.ID).Attempt
+			for range 20 {
+				r := report(50, 5, false)
+				if a := assignedJob(r); a != nil {
+					t.Fatalf("readmitted %s into the pressure that caused its yield", a.ID)
+				}
+				got := job(t, q, victim.ID)
+				if got.State != "queued" || got.Attempt != attempt || got.InfrastructureRetries != 0 || got.Losses != 0 {
+					t.Fatal("waiting consumed an attempt or retry", got.State, got.Attempt)
+				}
+			}
+			w := Worker{Machine: m, Clock: clock, AcceleratorStopGrace: tc.grace, hostMemorySamples: workerSamples, HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}
+			if err := localAttemptAdmission(w, []Job{*job(t, q, lender.ID)}, *job(t, q, victim.ID), nil); admissionDetail(err, Job{}) == nil || admissionDetail(err, Job{}).Subcheck != "live_host_growth" {
+				t.Fatal("worker would admit into the same lending pressure", err)
+			}
+			// Release planning must return the lender's future headroom too;
+			// returning only its small by-use charge hides a useful release.
+			q.mu.Lock()
+			afterRelease := q.hostRoomAfter(q.s.Machines[m.ID], []*Job{q.s.Jobs[lender.ID]}, nil)
+			q.mu.Unlock()
+			if afterRelease < victim.MemoryEnvelope.HostGB {
+				t.Fatal("lender release did not return its reserved headroom", afterRelease)
+			}
+			// A fresh measurement of real headroom, rather than a timer or
+			// a new submission, makes the original job admissible again.
+			r := report(120, 5, false)
+			offer := assignedJob(r)
+			if offer == nil || offer.ID != victim.ID {
+				t.Fatal("recovered capacity did not admit original borrower", job(t, q, victim.ID).Reason)
+			}
+			w.Machine, w.hostMemorySamples = m, workerSamples
+			if err := localAttemptAdmission(w, []Job{*job(t, q, lender.ID)}, *offer, nil); err != nil {
+				t.Fatal("placement and worker admission disagree", err)
+			}
+			rt := modelRuntime{worker: &w, clock: clock, machine: m.ID, memoryMachine: m, batchJobs: []Job{*job(t, q, lender.ID), *offer}, batchHostMemorySamples: workerSamples,
+				hostMemorySource: w.sharedHostLiveMemory}
+			rt.batchSupervisors = map[attemptKey]*attemptSupervisor{}
+			for _, j := range rt.batchJobs {
+				rt.batchSupervisors[jobKey(j)] = &attemptSupervisor{job: j, admissionMu: &rt.admissionMu}
+			}
+			if err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: offer.Session, Key: offer.ID, Attempt: strconv.Itoa(offer.Attempt)}); err != nil {
+				t.Fatal("final prelaunch disagreed", err)
+			}
+		})
 	}
 }
 

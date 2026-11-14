@@ -28,7 +28,8 @@ func metalFootprintJob(at time.Time) Job {
 // With a fresh footprint sample and a footprint-learned peak, Metal work is
 // charged max(peak, high water, forecast) plus drift and the guard's measured
 // overshoot, bounded by its unified envelope, and its footprint is credited
-// once. Without any of those it keeps its envelope.
+// once. Physical headroom also covers growth until a lending stop completes.
+// Without any of those it keeps its envelope.
 func TestMetalUsedMemoryCharge(t *testing.T) {
 	_, clock := fixture(t)
 	at := clock.Now()
@@ -42,9 +43,9 @@ func TestMetalUsedMemoryCharge(t *testing.T) {
 	}{
 		{"below accepted peak", hostMemorySample{footprintGB: 3, peakGB: 3, at: at}, 6 + drift, 3 + drift},
 		{"growing past peak", hostMemorySample{footprintGB: 7, peakGB: 7, growthGB: .5, rateGB: 1, at: at},
-			7.5 + drift + darwinGuardReaction.Seconds(), .5 + drift + darwinGuardReaction.Seconds()},
+			7.5 + drift + darwinGuardReaction.Seconds(), ceiling - 7 + drift + darwinGuardReaction.Seconds()},
 		{"held at envelope plus overshoot", hostMemorySample{footprintGB: 10, peakGB: 10, growthGB: 2, rateGB: 2, at: at},
-			ceiling + 2*darwinGuardReaction.Seconds(), ceiling + 2*darwinGuardReaction.Seconds() - 10},
+			ceiling + 2*darwinGuardReaction.Seconds(), ceiling + drift + 2*darwinGuardReaction.Seconds() - 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j := metalFootprintJob(at)
