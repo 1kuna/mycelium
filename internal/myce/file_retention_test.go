@@ -620,47 +620,70 @@ func TestFileRetentionMarkedUploadRestart(t *testing.T) {
 }
 
 func TestFileCacheEvictsExpiredVictims(t *testing.T) {
-	for _, partial := range []bool{false, true} {
-		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
-			q, clock := fixture(t)
-			// Keep expiry metadata while testing eviction of expired cache bytes.
-			if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
-				t.Fatal(err)
-			}
-			c := retentionClient(t, q)
-			_, a := retentionUpload(t, c, "aaaaaaaaaaaaaaaa")
-			s := spec("experiment")
-			s.Files = FileManifest{"input": a}
-			j := submit(t, q, s)
-			cache := FileCache{Root: t.TempDir(), Limit: 16, Clock: clock, Client: c}
-			if err := cache.copyTo(context.Background(), a, filepath.Join(t.TempDir(), "a")); err != nil {
-				t.Fatal(err)
-			}
-			victim := filepath.Join(cache.Root, a.SHA256)
-			if partial {
-				if err := os.Rename(victim, victim+".partial"); err != nil {
+	for _, mode := range []string{"cache_limit", "shared_budget_cache_limit", "disk_pressure", "collection"} {
+		for _, partial := range []bool{false, true} {
+			t.Run(fmt.Sprint(mode, "/partial=", partial), func(t *testing.T) {
+				q, clock := fixture(t)
+				// Keep expiry metadata while testing eviction of expired cache bytes.
+				if err := q.ConfigureLogRetention(2 * testFileRetention); err != nil {
 					t.Fatal(err)
 				}
-				victim += ".partial"
-			}
-			if err := q.Cancel(j.ID); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(testFileRetention)
-			if err := q.Tick(); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.HasFile(context.Background(), a); !isResultExpired(err) {
-				t.Fatal("victim did not expire", err)
-			}
-			_, b := retentionUpload(t, c, "bbbbbbbbbbbbbbbb")
-			if err := cache.copyTo(context.Background(), b, filepath.Join(t.TempDir(), "b")); err != nil {
-				t.Fatal("expired victim wedged cache", err)
-			}
-			if _, err := os.Stat(victim); !os.IsNotExist(err) {
-				t.Fatal("expired victim retained", err)
-			}
-		})
+				c := retentionClient(t, q)
+				_, a := retentionUpload(t, c, "aaaaaaaaaaaaaaaa")
+				s := spec("experiment")
+				s.Files = FileManifest{"input": a}
+				j := submit(t, q, s)
+				cache := FileCache{Root: t.TempDir(), Limit: 16, Clock: clock, Client: c}
+				victim := ""
+				if mode != "cache_limit" {
+					const total = uint64(100 << 30)
+					probe := func(string) (DiskReading, error) {
+						free := diskFreeFloor(total) + 64
+						if _, err := os.Stat(victim); err == nil && mode == "disk_pressure" {
+							free = diskFreeFloor(total)
+						}
+						return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
+					}
+					cache.diskProbe = probe
+					cache.budget = newWorkerDiskBudget(clock, probe)
+					cache.budget.add(diskBudgetRoot{name: "files", path: cache.Root, candidates: cache.budgetCandidates})
+				}
+				if err := cache.copyTo(context.Background(), a, filepath.Join(t.TempDir(), "a")); err != nil {
+					t.Fatal(err)
+				}
+				victim = filepath.Join(cache.Root, a.SHA256)
+				if partial {
+					if err := os.Rename(victim, victim+".partial"); err != nil {
+						t.Fatal(err)
+					}
+					victim += ".partial"
+				}
+				if err := q.Cancel(j.ID); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(testFileRetention)
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.HasFile(context.Background(), a); !isResultExpired(err) {
+					t.Fatal("victim did not expire", err)
+				}
+				if mode == "collection" && !partial {
+					cache.Limit = 1
+					if report := cache.collect(context.Background()); report.Error != "" || report.Reclaimed != a.SizeBytes {
+						t.Fatal("expired victim wedged background collection", report)
+					}
+					cache.Limit = 16
+				}
+				_, b := retentionUpload(t, c, "bbbbbbbbbbbbbbbb")
+				if err := cache.copyTo(context.Background(), b, filepath.Join(t.TempDir(), "b")); err != nil {
+					t.Fatal("expired victim wedged cache", err)
+				}
+				if _, err := os.Stat(victim); !os.IsNotExist(err) {
+					t.Fatal("expired victim retained", err)
+				}
+			})
+		}
 	}
 }
 

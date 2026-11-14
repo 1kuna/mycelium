@@ -65,20 +65,86 @@ func TestWorkerDiskBudgetSharedVolumeReservations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if release, err := b.reserve(ctx, "environment", 20, 0); err == nil {
+	b.add(diskBudgetRoot{name: "files", path: t.TempDir()})
+	if volumes := b.collect(ctx); len(volumes) != 1 || volumes[0].FloorBytes != floor || volumes[0].ReservedBytes != 10 {
+		t.Fatal("collection inherited model policy instead of physical headroom", volumes)
+	}
+	environment, err := b.reserve(ctx, "environment", 20, 0)
+	if err != nil {
+		t.Fatal("model policy leaked into unrelated staging", err)
+	}
+	if release, err := b.reserve(ctx, "environment", 71, 0); err == nil {
 		release()
-		t.Fatal("concurrent writer ignored active model floor")
+		t.Fatal("concurrent writer ignored pending bytes")
 	} else {
 		var capacity *stagingCapacityError
-		if !errors.As(err, &capacity) || capacity.capacity != "disk_free_floor" || capacity.required != 20 || capacity.available != 10 {
+		if !errors.As(err, &capacity) || capacity.capacity != "disk_free_floor" || capacity.required != 71 || capacity.available != 70 || capacity.limit != int64(total-floor) {
 			t.Fatal("pressure lost structured capacity evidence", err)
 		}
 	}
+	if release, err := b.reserve(ctx, "model", 1, floor+80); err == nil {
+		release()
+		t.Fatal("explicit model-copy floor ignored on its own admission")
+	}
+	environment()
 	policy()
 	if release, err := b.reserve(ctx, "environment", 90, 0); err != nil {
 		t.Fatal("release did not return headroom", err)
 	} else {
 		release()
+	}
+}
+
+func TestWorkerDiskBudgetFileCacheLocks(t *testing.T) {
+	_, clock := fixture(t)
+	ctx := context.Background()
+	c := &FileCache{Root: t.TempDir(), Clock: clock}
+	lock, err := c.collectionLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { unlockEnvironment(lock) }()
+	partial := filepath.Join(c.Root, strings.Repeat("a", 64)+".partial")
+	unknown := filepath.Join(c.Root, "unique-data")
+	for _, path := range []string{partial, unknown} {
+		if err := os.WriteFile(path, []byte("keep until unlocked"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const total = uint64(100 << 30)
+	b := newWorkerDiskBudget(clock, func(string) (DiskReading, error) {
+		free := diskFreeFloor(total)
+		if _, err := os.Stat(partial); os.IsNotExist(err) {
+			free += 4096
+		}
+		return DiskReading{Volume: "local", TotalBytes: total, FreeBytes: free}, nil
+	})
+	b.add(diskBudgetRoot{name: "files", path: c.Root, candidates: c.budgetCandidates})
+	refused := func() {
+		t.Helper()
+		release, err := b.reserve(ctx, c.Root, 1, 0)
+		if err == nil {
+			release()
+			t.Fatal("evicted an active private-file cache writer")
+		}
+		var capacity *stagingCapacityError
+		if !errors.As(err, &capacity) || capacity.available != 0 {
+			t.Fatal("missing physical capacity evidence", err)
+		}
+	}
+	refused() // Another process's collection/download lock protects partials.
+	unlockEnvironment(lock)
+	lock = nil
+	c.mu.Lock()
+	refused() // The in-process reader/writer lock protects them too.
+	c.mu.Unlock()
+	release, err := b.reserve(ctx, c.Root, 1, 0)
+	if err != nil {
+		t.Fatal("inactive partial could not be reclaimed", err)
+	}
+	release()
+	if _, err := os.Stat(unknown); err != nil {
+		t.Fatal("unknown data was evicted", err)
 	}
 }
 

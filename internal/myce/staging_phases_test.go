@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// Exercise real cache admission, expired victim checks, download/verification,
+// Exercise real cache admission, expired victim eviction, download/verification,
 // private placement, queue fencing and persisted attempt history together.
 func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 	clock := &workerFakeClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
@@ -58,15 +58,12 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, expired.SHA256) {
+		if strings.HasSuffix(r.URL.Path, expired.SHA256) || strings.HasSuffix(r.URL.Path, victim.SHA256) {
+			t.Error("disposable cache eviction contacted victim storage")
 			w.WriteHeader(410)
 			return
 		}
-		hash := ref.SHA256
-		if strings.HasSuffix(r.URL.Path, victim.SHA256) {
-			hash = victim.SHA256
-		}
-		w.Header().Set("ETag", fmt.Sprintf("%q", hash))
+		w.Header().Set("ETag", fmt.Sprintf("%q", ref.SHA256))
 		w.Header().Set("Content-Length", "8")
 		if r.Method == "GET" {
 			_, _ = io.WriteString(w, "new-data")
@@ -101,7 +98,7 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 	if value.CacheHits != 1 || value.CacheMisses != 1 || value.Evicted != 1 {
 		t.Fatalf("cache facts: %+v", value)
 	}
-	for _, phase := range []stagingPhase{stageDiskBudget, stageCacheLock, stageCollectionLock, stageCacheLookup, stageCacheEviction, stageEvictionCheck, stageBlobHead, stageBlobHeaders, stageDownload, stageVerify, stageCachePublish, stagePlacement} {
+	for _, phase := range []stagingPhase{stageDiskBudget, stageCacheLock, stageCollectionLock, stageCacheLookup, stageCacheEviction, stageBlobHead, stageBlobHeaders, stageDownload, stageVerify, stageCachePublish, stagePlacement} {
 		if value.Phases[phase].Calls == 0 {
 			t.Error("missing phase", stagingPhaseNames[phase])
 		}
@@ -112,8 +109,14 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 	if got := value.Phases[stageDownload]; got.Seconds != 3 {
 		t.Fatal("body timing", got)
 	}
-	if got := value.Phases[stageEvictionCheck]; got.Calls != 2 || got.Failures != 1 || got.Seconds != 4 || got.HTTP4xx != 1 || got.Expired != 1 {
-		t.Fatal("victim checks", got)
+	if got := value.Phases[stageEvictionCheck]; got.Calls != 0 {
+		t.Fatal("private-file eviction checked victim storage", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, expired.SHA256)); !os.IsNotExist(err) {
+		t.Fatal("expired oldest cache entry retained", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, victim.SHA256)); err != nil {
+		t.Fatal("evicted beyond the required capacity", err)
 	}
 	if data, err := os.ReadFile(dest); err != nil || string(data) != "new-data" {
 		t.Fatal("input changed", string(data), err)
@@ -161,10 +164,10 @@ func TestStagingPhasesRecordedInAttemptHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := json.Marshal(got)
-	if err != nil || !strings.Contains(string(data), `"staging_timings"`) || !strings.Contains(string(data), `"name":"eviction_check","calls":2,"seconds":4,"failures":1`) {
+	if err != nil || !strings.Contains(string(data), `"staging_timings"`) || !strings.Contains(string(data), `"name":"download","calls":1,"seconds":3`) {
 		t.Fatal("history JSON lost phases", string(data), err)
 	}
-	if text := got.AttemptHistory[0].StagingTimings.String(); !strings.Contains(text, "eviction_check=4.000s calls=2 failures=1") {
+	if text := got.AttemptHistory[0].StagingTimings.String(); !strings.Contains(text, "download=3.000s calls=1") {
 		t.Fatal(text)
 	}
 }

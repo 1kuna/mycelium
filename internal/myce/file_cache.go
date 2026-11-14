@@ -161,17 +161,6 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) (stage
 		// transient HEAD failure for an unrelated victim must not block new
 		// inputs. The requested blob was verified above before any eviction.
 		operation = "cache_evict"
-		if c.budget != nil {
-			if strings.HasSuffix(v.name, ".partial") {
-				continue
-			}
-			checkDone := stagingMeasure(ctx, stageEvictionCheck)
-			checkErr := c.Client.HasFile(ctx, FileRef{SHA256: hash, SizeBytes: v.size})
-			checkDone(checkErr)
-			if checkErr != nil {
-				continue
-			}
-		}
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
 			return err
 		}
