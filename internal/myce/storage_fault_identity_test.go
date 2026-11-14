@@ -141,6 +141,8 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		out := httptest.NewRecorder()
 		switch r.URL.Path {
+		case "/api/workers/launch":
+			_ = json.NewEncoder(out).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
 		case "/api/workers/checkin":
 			var c Checkin
 			if err := json.NewDecoder(r.Body).Decode(&c); err != nil {

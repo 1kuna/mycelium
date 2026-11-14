@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -160,21 +159,22 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 	}
 	stateDir := t.TempDir()
 	ceilings := fakeCeilings(t)
-	var n atomic.Int32
+	stolenMembers := map[int]bool{}
 	var stolen []net.Listener
 	var stealErr error
 	api := API{Queue: q, Token: "review-synthetic"}.Handler()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/launch" {
-			call := n.Add(1)
-			if call >= 3 && call <= int32(3*collisions) && call%3 == 0 {
+			if len(stolen) < collisions {
 				b, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 				var st workerState
 				_ = json.Unmarshal(b, &st)
 				b, _ = os.ReadFile(filepath.Join(stateDir, "native-"+st.Identity+".json"))
 				var v struct{ Members []nativeMember }
 				_ = json.Unmarshal(b, &v)
-				if len(v.Members) > 0 {
+				if len(v.Members) > 0 && v.Members[0].Phase == "gated" && !stolenMembers[v.Members[0].PID] {
+					// Steal only at the durable member exec boundary, after fork.
+					stolenMembers[v.Members[0].PID] = true
 					var custody workerState
 					b, e := os.ReadFile(filepath.Join(stateDir, "attempt-"+st.Identity+".json"))
 					if e != nil || json.Unmarshal(b, &custody) != nil {

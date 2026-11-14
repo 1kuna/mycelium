@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -38,39 +37,36 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		t.Fatal("no assignment")
 	}
 	stateDir := t.TempDir()
-	var n atomic.Int32
+	cleanupChecked := false
 	var stolen net.Listener
 	var stealErr error
 	var oldURL string
 	var oldGroup int
 	api := API{Queue: q, Token: "review-synthetic"}.Handler()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := int32(0)
 		if r.URL.Path == "/api/workers/launch" {
-			call = n.Add(1)
-		}
-		if call == 6 {
-			left, err := workerGroupMembers(oldGroup)
-			if err != nil || len(left) != 0 {
-				t.Errorf("relaunch before old group cleanup: %v %v", left, err)
-			}
-		}
-		if call == 5 {
-			dir := nativeWorkerWork(t, stateDir)
-			nativeFile(t, dir, "consumer-url")
-			data, err := os.ReadFile(filepath.Join(dir, "consumer-url"))
-			if err != nil {
-				t.Error(err)
-			}
-			oldURL = string(data)
 			b, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 			var st workerState
 			_ = json.Unmarshal(b, &st)
-			oldGroup = st.PID
+			if oldGroup != 0 && st.PID != 0 && st.PID != oldGroup && !cleanupChecked {
+				left, err := workerGroupMembers(oldGroup)
+				if err != nil || len(left) != 0 {
+					t.Errorf("relaunch before old group cleanup: %v %v", left, err)
+				}
+				cleanupChecked = true
+			}
 			b, _ = os.ReadFile(filepath.Join(stateDir, "native-"+st.Identity+".json"))
 			var v struct{ Members []nativeMember }
 			_ = json.Unmarshal(b, &v)
-			if len(v.Members) > 1 {
+			if stolen == nil && len(v.Members) > 1 && v.Members[1].Phase == "gated" {
+				dir := nativeWorkerWork(t, stateDir)
+				nativeFile(t, dir, "consumer-url")
+				data, err := os.ReadFile(filepath.Join(dir, "consumer-url"))
+				if err != nil {
+					t.Error(err)
+				}
+				oldURL = string(data)
+				oldGroup = st.PID
 				out, e := exec.Command("ps", "-p", strconv.Itoa(v.Members[1].PID), "-o", "command=").Output()
 				stealErr = e
 				fields := strings.Fields(string(out))
@@ -107,8 +103,8 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 	dir := p.job.Spec.Run.Workdir
 	select {
 	case finish := <-p.done:
-		if n.Load() != 12 || stolen == nil || stealErr != nil {
-			t.Fatalf("group restart not exercised: launches=%d collision=%v", n.Load(), stealErr)
+		if !cleanupChecked || stolen == nil || stealErr != nil {
+			t.Fatalf("group restart not exercised: cleanup=%t collision=%v", cleanupChecked, stealErr)
 		}
 		if e = q.Complete(finish.result); e != nil {
 			t.Fatal(e)

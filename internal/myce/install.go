@@ -510,9 +510,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err != nil {
 		return err
 	}
-	if err := tx.put(filepath.Join(c.State, installStorageReceiptFile), receipt, 0600); err != nil {
-		return err
-	}
 	if reconciliation != nil {
 		// The rollback snapshot must contain exactly the qualified slot bytes.
 		original := tx.originals[c.Binary]
@@ -531,6 +528,10 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 	}
+	if err := tx.put(filepath.Join(c.State, installStorageReceiptFile), receipt, 0600); err != nil {
+		return err
+	}
+
 	// Publication and recovery share the complete pre-install snapshot.
 	if err = tx.put(c.Binary, data, 0700); err != nil {
 		return err

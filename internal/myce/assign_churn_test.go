@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -107,6 +108,8 @@ func TestAssignChurnPreflightRefusalReturnsPromptly(t *testing.T) {
 	}
 	defer root.close()
 	root.state.Session = offer.Session
+	// Match the worker loop's normalization before creating its attempt actor.
+	offer.Checkpoint = filepath.Join(t.TempDir(), offer.Checkpoint)
 	store, err := newAttemptStore(root, *offer)
 	if err != nil {
 		t.Fatal(err)
