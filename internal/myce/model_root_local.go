@@ -12,7 +12,7 @@ import (
 func validateLocalModelVolume(ctx context.Context, abort context.CancelCauseFunc, path string) (string, error) {
 	for {
 		info, err := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return os.Lstat(path) }, "local-model-ancestor")
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			parent := filepath.Dir(path)
 			if parent != path {
 				path = parent

@@ -26,13 +26,14 @@ import (
 // The queue authorizes the exact operation, session and drained host before
 // the launch and again immediately before the restart.
 type FleetUpdateInstruction struct {
-	Operation    string            `json:"operation"`
-	Revision     int               `json:"revision"`
-	Host         string            `json:"host"`
-	Machine      string            `json:"machine"`
-	Session      string            `json:"session"`
-	Release      EnrollmentRelease `json:"release"`
-	PublisherKey []byte            `json:"publisher_key"`
+	StorageDiagnostics bool              `json:"storage_diagnostics,omitempty"`
+	Operation          string            `json:"operation"`
+	Revision           int               `json:"revision"`
+	Host               string            `json:"host"`
+	Machine            string            `json:"machine"`
+	Session            string            `json:"session"`
+	Release            EnrollmentRelease `json:"release"`
+	PublisherKey       []byte            `json:"publisher_key"`
 }
 
 const fleetUpdateReceiptFile = "fleet-update.json"
@@ -189,7 +190,7 @@ func fleetAck(ctx context.Context, client Client, r fleetInstallReceipt) error {
 	if r.Phase == "failed" {
 		failure = fleetFailureCode(r.Failure)
 	}
-	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure, StorageFailure: fleetStorageFailure(failure, r.StorageFailure)}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: r.Phase, Failure: failure, StorageFailure: fleetReceiptStorageFailure(r)}
 	if err := client.Call(ctx, http.MethodPost, "/api/fleet/ack", ack, nil); err != nil {
 		return fleetControlFailure(err, "fleet_ack_failed")
 	}
@@ -591,5 +592,5 @@ func ReadFleetUpdateFailure(c ServiceConfig) (*FleetUpgradeAck, error) {
 		return nil, errors.New("fleet_receipt_invalid")
 	}
 	code := fleetFailureCode(r.Failure)
-	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code, StorageFailure: fleetStorageFailure(code, r.StorageFailure)}, nil
+	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code, StorageFailure: fleetReceiptStorageFailure(r)}, nil
 }

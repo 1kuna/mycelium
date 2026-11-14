@@ -70,8 +70,10 @@ containment and real-directory metadata, and checkpoint/model/environment
 write, sync, read-back and rename probes. Mount checks probe exact configured
 paths; state-format checks inspect local state roots.
 
-A storage failure records `storage_failure` in the private receipt, its live or
-replayed acknowledgement, and the host entry in `myce status --json`. It contains
+A storage failure records `storage_failure` in the private receipt. When the
+queue advertises `storage_diagnostics` in its instruction, the live/replayed
+acknowledgement and host entry in `myce status --json` carry it too; older queues
+reject unknown acknowledgement fields. It contains
 only a root role (`state`, a named cache/queue root, `nas`, `checkpoint`, `model`
 or `environment`), fixed `operation`, numeric `errno`, `elapsed_ns`, and
 `timed_out` when a filesystem call stalls. An unfinished syscall has no errno:

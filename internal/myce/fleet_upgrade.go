@@ -615,7 +615,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 	if !ok || !q.fleetHostQuiet(h) {
 		return FleetUpdateInstruction{}, nil
 	}
-	return FleetUpdateInstruction{Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
+	return FleetUpdateInstruction{StorageDiagnostics: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
 }
 
 func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string) error {

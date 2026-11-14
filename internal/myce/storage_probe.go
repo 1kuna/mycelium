@@ -130,6 +130,14 @@ func storageProbeFailureDetails(operation string, err error) (string, int) {
 	var path *os.PathError
 	if errors.As(err, &path) {
 		operation = path.Op
+	} else {
+		var link *os.LinkError
+		var call *os.SyscallError
+		if errors.As(err, &link) {
+			operation = link.Op
+		} else if errors.As(err, &call) {
+			operation = call.Syscall
+		}
 	}
 	switch operation {
 	case "open", "stat", "lstat", "write", "fsync", "sync", "close", "read", "rename",

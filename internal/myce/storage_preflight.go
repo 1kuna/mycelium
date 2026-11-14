@@ -138,3 +138,13 @@ func storageRootRefusal(ctx context.Context, operation string, refusal, evidence
 	}
 	return storageRefusal(refusal, storageCheckError(storageContextRoot(ctx), operation, 0, evidence))
 }
+
+// Older queues reject unknown acknowledgement fields. A new queue advertises
+// this additive diagnostic capability in the instruction; receipts retain it
+// regardless of the queue version, without retrying a refused acknowledgement.
+func fleetReceiptStorageFailure(r fleetInstallReceipt) *StoragePreflightFailure {
+	if r.Phase != "failed" || !r.Instruction.StorageDiagnostics {
+		return nil
+	}
+	return fleetStorageFailure(fleetFailureCode(r.Failure), r.StorageFailure)
+}

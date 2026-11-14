@@ -19,6 +19,7 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 	for _, fault := range []string{"open", "state", "inventory"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "darwin")
+			f.i.StorageDiagnostics = true
 			want := StoragePreflightFailure{Root: "checkpoint", Operation: "open", Errno: int(syscall.EISDIR)}
 			if fault == "inventory" {
 				f.c.RequireMountedNAS = true
@@ -84,6 +85,9 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 			}
 			fleetTick(t, q)
 			i := fleetInstructionFor(t, q)
+			if !i.StorageDiagnostics {
+				t.Fatal("queue omitted diagnostic capability")
+			}
 			replay.Operation, replay.Revision, replay.Host, replay.Machine, replay.Session = i.Operation, i.Revision, i.Host, i.Machine, i.Session
 			if err := q.AckFleetUpgrade(*replay); err != nil {
 				t.Fatal(err)
@@ -124,6 +128,7 @@ func TestOnboardingStorageFailureEvidence(t *testing.T) {
 
 func TestFleetStorageFailureSanitizesReceiptAndStatus(t *testing.T) {
 	f := newFleetInstallFixture(t, "darwin")
+	f.i.StorageDiagnostics = true
 	if err := f.launch(); err != nil {
 		t.Fatal(err)
 	}
@@ -168,4 +173,57 @@ func fleetCaptureAckClient(t *testing.T, ack *FleetUpgradeAck) *http.Client {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})}
+}
+
+func TestFleetStorageFailureWithPreviousQueue(t *testing.T) {
+	f := newFleetInstallFixture(t, "darwin") // Previous queues omit storage_diagnostics.
+	if err := f.launch(); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(f.c.NAS, "mycelium", "checkpoints")
+	if err := os.MkdirAll(storageProbePath(dir, ".myce-install-probe-", "install"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.apply(); err == nil {
+		t.Fatal("storage refusal missing")
+	}
+	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.StorageFailure == nil {
+		t.Fatal("previous queue erased local diagnostics")
+	}
+	var body strings.Builder
+	client := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
+		data, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body.Write(data)
+		// The previous queue has a strict decoder with only these fields.
+		var old struct {
+			Operation, Host, Machine, Session, Phase, Failure string
+			Revision                                          int
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(data)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&old); err != nil {
+			t.Errorf("broke previous queue: %v", err)
+		}
+		if old.Failure != "fleet_storage_preflight_failed" {
+			t.Error("lost failure code")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	})}}
+	if err := fleetAck(context.Background(), client, r); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := ReadFleetUpdateFailure(f.c)
+	if err != nil || replay.StorageFailure != nil {
+		t.Fatal("unsafe legacy replay", err)
+	}
+	if strings.Contains(body.String(), "storage_failure") {
+		t.Fatal("unsupported field sent to previous queue")
+	}
 }
