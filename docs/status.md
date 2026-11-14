@@ -1,5 +1,16 @@
 # Seeing your mycelium
 
+Released startup results replay independently of new compute admission.
+`machines[].result_publications[]` reports exact `id`/`attempt`, unique
+server-confirmed `published_bytes` observed since worker startup (including
+dedup hits), `blocking` operation/request, `waiting_seconds`, and a fixed
+`last_error` class. Default hypha summaries and worker logs show this progress.
+An outstanding filesystem call retains its single publication owner; a queue
+API call is watched against queue progress and measured request periods.
+Unreleased startup executions still gate recovery; released publication does
+not. The original session stays until its actors finish, preserving result
+fences while new work uses the remaining capacity.
+
 ## Reading `myce status`
 
 `myce status` prints current work, machines, holds and active health conditions.

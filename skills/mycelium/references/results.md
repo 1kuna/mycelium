@@ -36,6 +36,20 @@ output can take longer while the attempt remains owned. Transfers detect socket
 stalls and resume from the queue's accepted offset; cancelling the attempt owner
 ends publication and retains local bytes. Keep the job and key while it finishes.
 
+Startup replay of released results does not withhold otherwise available host
+capacity. The worker keeps the original session until pending publication and
+any new work finish; it never reruns a saved completed command. Status machine
+`result_publications[]` (also in default hypha summaries) and the worker log
+report the job/attempt, `published_bytes`, `blocking` operation/request,
+`waiting_seconds`, and fixed `last_error` class. Published bytes count unique
+blobs confirmed by the queue since this worker process started, including
+already-present blobs; they are not socket-write counters or accepted job
+success. Queue API stalls use the queue's progress evidence and request p99;
+failures retry with measured service cost or Retry-After. Filesystem publication
+retains one outstanding operation, so a stalled share cannot create duplicate
+writers; local admission and root-health checks still apply. Predecessor queues
+can omit the new status field; the worker log still reports it.
+
 ## Keep files on failure
 
 Do not exit 0 just to return logs. Declare `advanced: {keep_on_failure: [logs/, {path:

@@ -686,11 +686,13 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	stagingWire *atomic.Bool
-	faultWire   *atomic.Bool
-	URL         string
-	Token       string
-	HTTP        *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	publication     *publicationProgress
+	publicationWire *atomic.Bool
+	stagingWire     *atomic.Bool
+	faultWire       *atomic.Bool
+	URL             string
+	Token           string
+	HTTP            *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
 	uploadTiming  *uploadTiming
@@ -702,6 +704,8 @@ type Client struct {
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
+	done := c.publication.request(c.clock(), method, path)
+	defer done()
 	ctx, cancel := c.apiContext(ctx)
 	defer cancel()
 	clock := c.clock()

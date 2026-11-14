@@ -385,7 +385,9 @@ hours they waited while an excluded host had room, and how far typed
 - [Wait and status](references/wait-and-status.md): batch waits, status
   (host RAM is `host_memory`; older RAM fields are deprecated), stalled queues,
   observers, progress.
-- [Results](references/results.md): output failures, diagnostics, large outputs.
+- [Results](references/results.md): output failures, diagnostics, large outputs,
+  and startup publication progress. Released results replay without withholding
+  the host's free compute; retain their original job and attempt identity.
 - This guide ships with the `myce` binary: `myce skill install` installs it and
   upgrades refresh it ([setup](setup-project.md#install-the-agent-skill)).
 - [Setup](setup-project.md), [harness](harness-binding.md) and
