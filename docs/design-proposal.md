@@ -1519,6 +1519,37 @@ SQLite queue, plain commands, injected scheduling clock and attempt ownership
 remain. Explicit NAS configuration remains supported. One store is not a backup.
 See [files without a NAS](files.md) for configuration and retention limits.
 
+### Explicit local-first checkpoint generations (#1600)
+
+`advanced: {resumable: true, checkpoint: local_first}` opts an individual plain
+command into `checkpoint-local-first-v1`. Existing configured NAS checkpoints
+remain the default, unchanged. This platform-independent opt-in gives the payload
+a managed local `MYCE_CHECKPOINT_DIR`; it never silently substitutes local storage
+for a NAS checkpoint. Compatible workers advertise the versioned capability.
+
+V1 supports cooperative self-contained JSON saves up to the existing 1 MiB
+metadata limit. Python `Checkpoint.save()` syncs a new immutable generation file,
+renames it, then atomically publishes a synced `generation.json` manifest last.
+The worker captures only that manifest's verified files, outside queue locks.
+Save waits for the exact generation/manifest's durable current-attempt queue
+acceptance before returning or publishing another generation. Local-only work
+is not portable. Unsupported policies/forms refuse with
+`checkpoint_policy_unsupported` or `checkpoint_protocol_unsupported`.
+
+The existing file-store transport restores the greatest accepted generation on
+another compatible target. With configured NAS checkpoints, acceptance also
+records immutable mirror custody in the same SQLite transaction. The existing
+queue-owned output publisher and identity/content receipts mirror generations
+asynchronously under the configured checkpoint root. A stalled syscall keeps
+its single slot; no overlapping retry or payload NAS write is introduced.
+Pending mirrors pin their queue bytes across restart and retention; settled
+checkpoints retain the existing 72-hour grace. Queue capacity and measured local
+headroom cause cooperative backpressure; arbitrary command writes have no hard
+filesystem bound. NAS mirror lag is unbounded during outage. See the
+[publication, acknowledgement and recovery limits](files.md#local-first-checkpoints-1600).
+Native sustained SMB/restart/migration acceptance is release work, not a laptop
+or merge claim.
+
 ### Ephemeral execution-worker data (#1585)
 
 `advanced: {worker_data: ephemeral}` opts a non-resumable plain command with
@@ -1584,7 +1615,7 @@ Tasks may explicitly select `output_delivery: async_nas` with declared outputs
 and a positive `disk.output_bytes` estimate. Existing tasks retain their result
 semantics. The queue's `--output-delivery-root` selects the NAS destination
 independently of checkpoint mode; SQLite and the queue file store stay on durable
-local storage. This authorizes output delivery only, not local-first checkpoints.
+local storage. This selects output delivery only; local-first checkpoints require the separate explicit checkpoint opt-in above.
 
 After payload exit, the worker retains an immutable synced local output spool
 until exact durable queue acceptance. Queue admission reserves estimated output

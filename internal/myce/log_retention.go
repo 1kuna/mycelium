@@ -202,11 +202,14 @@ func workerRetention(dir string, now time.Time, logAge time.Duration) error {
 // custody is read, and custody is saved before a folder is created, so a listed
 // folder without custody can never belong to a starting attempt.
 func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCollector) error {
+	return pruneAttemptFilesAt(dir, "job-files", now, collectors...)
+}
+func pruneAttemptFilesAt(dir, folder string, now time.Time, collectors ...*attemptFilesCollector) error {
 	var collector *attemptFilesCollector
 	if len(collectors) > 0 {
 		collector = collectors[0]
 	}
-	root := filepath.Join(dir, "job-files")
+	root := filepath.Join(dir, folder)
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -284,7 +287,7 @@ func pruneAttemptFiles(dir string, now time.Time, collectors ...*attemptFilesCol
 			}
 			custody[e.ID][strconv.Itoa(e.Attempt)] = true
 		}
-		if st.PublishedAttempt != nil && st.Job == nil && st.Result == nil && st.PID == 0 && !st.LaunchPending && st.Pending == 0 {
+		if folder == "job-files" && st.PublishedAttempt != nil && st.Job == nil && st.Result == nil && st.PID == 0 && !st.LaunchPending && st.Pending == 0 {
 			e := st.PublishedAttempt
 			if published[e.ID] == nil {
 				published[e.ID] = map[string]bool{}

@@ -409,6 +409,9 @@
             "null"
           ]
         },
+        "checkpoint": {
+          "type": "string"
+        },
         "diagnostics": {
           "$ref": "#/$defs/DiagnosticSpec"
         },
@@ -1352,6 +1355,25 @@
       "required": [
         "pieces",
         "members"
+      ],
+      "type": "object"
+    },
+    "CheckpointMirror": {
+      "properties": {
+        "checkpoint": {
+          "$ref": "#/$defs/FileCheckpoint"
+        },
+        "delivery": {
+          "$ref": "#/$defs/OutputDelivery"
+        },
+        "prefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint",
+        "delivery",
+        "prefix"
       ],
       "type": "object"
     },
@@ -3253,6 +3275,16 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "checkpoint_mirrors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CheckpointMirror"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "checkpoint_target": {
           "$ref": "#/$defs/CheckpointOrigin",
           "x-contract": "diagnostic"
@@ -3499,6 +3531,10 @@
         },
         "liveness": {
           "$ref": "#/$defs/AttemptLiveness",
+          "x-contract": "diagnostic"
+        },
+        "local_checkpoint_generation": {
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "local_outputs": {
@@ -4680,6 +4716,9 @@
         },
         "destination_id": {
           "type": "string"
+        },
+        "generation": {
+          "type": "integer"
         },
         "id": {
           "type": "string"
@@ -5934,6 +5973,10 @@
           "x-contract": "diagnostic"
         },
         "authoring_origin": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "checkpoint_policy": {
           "type": "string",
           "x-contract": "diagnostic"
         },

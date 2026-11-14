@@ -145,6 +145,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	CheckpointPolicy string `json:"checkpoint_policy,omitempty" yaml:"-"`
 	// Diagnostic only: assigned by readers, excluded from submission identity.
 	AuthoringOrigin string `json:"authoring_origin,omitempty" yaml:"-"`
 	WallTime        string `json:"wall_time,omitempty" yaml:"wall_time,omitempty"`
@@ -263,6 +264,9 @@ func (s Spec) Validate() error {
 	}
 	if s.StorageProtocol != "" || s.OutputDestination != nil || s.OutputRetention != "" {
 		return errors.New(parkedStorageReason)
+	}
+	if err := validateLocalFirst(s); err != nil {
+		return err
 	}
 	if err := validateOutputDelivery(s); err != nil {
 		return reject("job_files_invalid", err)
@@ -564,27 +568,29 @@ type Job struct {
 
 	HostMemoryCharge *AttemptHostMemoryCharge `json:"host_memory_charge,omitempty"`
 
-	FileTransport         bool                     `json:"file_transport,omitempty"`
-	FileCheckpoints       map[int]FileCheckpoint   `json:"file_checkpoints,omitempty"`
-	ResumeFiles           *FileCheckpoint          `json:"resume_files,omitempty"`
-	FilesExpired          bool                     `json:"files_expired,omitempty"`
-	FileReclamation       *FileReclamation         `json:"file_reclamation,omitempty"`
-	OutputRefs            FileManifest             `json:"output_refs,omitempty"`
-	MemoryEnvelope        *JobMemoryEnvelope       `json:"memory_envelope,omitempty"`
-	LastMemoryAdmission   *MemoryAdmissionSnapshot `json:"last_memory_admission,omitempty"`
-	MemoryAttempts        []AttemptMemoryFacts     `json:"memory_attempts,omitempty"`
-	MemoryAttemptsDropped int                      `json:"memory_attempts_dropped,omitempty"`
-	MemoryFallback        *SizeHint                `json:"memory_fallback,omitempty"`
-	MemoryOOMFloor        *SizeHint                `json:"memory_oom_floor,omitempty"`
-	DeviceMemoryFloorGB   float64                  `json:"device_memory_floor_gb,omitempty"`
-	MeasuredNeeds         *SizeHint                `json:"measured_needs,omitempty"`
-	OOMCapacity           *SizeHint                `json:"oom_capacity,omitempty"`
-	OOMRetries            int                      `json:"oom_retries,omitempty"`
-	Extensions            []Extension              `json:"extensions,omitempty"`
-	Extension             *ExtensionSelection      `json:"extension,omitempty"`
-	OutputFiles           map[string]string        `json:"output_files,omitempty"`
-	ReleaseConfirmed      bool                     `json:"release_confirmed,omitempty"`
-	RequeuedByOperator    bool                     `json:"requeued_by_operator,omitempty"`
+	FileTransport             bool                         `json:"file_transport,omitempty"`
+	LocalCheckpointGeneration int64                        `json:"local_checkpoint_generation,omitempty"`
+	CheckpointMirrors         map[string]*CheckpointMirror `json:"checkpoint_mirrors,omitempty"`
+	FileCheckpoints           map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
+	ResumeFiles               *FileCheckpoint              `json:"resume_files,omitempty"`
+	FilesExpired              bool                         `json:"files_expired,omitempty"`
+	FileReclamation           *FileReclamation             `json:"file_reclamation,omitempty"`
+	OutputRefs                FileManifest                 `json:"output_refs,omitempty"`
+	MemoryEnvelope            *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
+	LastMemoryAdmission       *MemoryAdmissionSnapshot     `json:"last_memory_admission,omitempty"`
+	MemoryAttempts            []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
+	MemoryAttemptsDropped     int                          `json:"memory_attempts_dropped,omitempty"`
+	MemoryFallback            *SizeHint                    `json:"memory_fallback,omitempty"`
+	MemoryOOMFloor            *SizeHint                    `json:"memory_oom_floor,omitempty"`
+	DeviceMemoryFloorGB       float64                      `json:"device_memory_floor_gb,omitempty"`
+	MeasuredNeeds             *SizeHint                    `json:"measured_needs,omitempty"`
+	OOMCapacity               *SizeHint                    `json:"oom_capacity,omitempty"`
+	OOMRetries                int                          `json:"oom_retries,omitempty"`
+	Extensions                []Extension                  `json:"extensions,omitempty"`
+	Extension                 *ExtensionSelection          `json:"extension,omitempty"`
+	OutputFiles               map[string]string            `json:"output_files,omitempty"`
+	ReleaseConfirmed          bool                         `json:"release_confirmed,omitempty"`
+	RequeuedByOperator        bool                         `json:"requeued_by_operator,omitempty"`
 	// MaintenanceResume is when Mycelium's own maintenance (host or device
 	// maintenance, a rollout drain or a critical update) stopped the attempt
 	// this queued job resumes. Cleared when the resumed attempt starts.
@@ -838,10 +844,11 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
-	Resources              *AttemptResources `json:"resources,omitempty"`
-	Liveness               *LivenessReport   `json:"liveness,omitempty"`
-	OutputDeliveryProgress uint64            `json:"output_delivery_progress,omitempty"`
-	ApplicationProgress    *ProgressReport   `json:"application_progress,omitempty"`
+	LocalCheckpointGeneration int64             `json:"local_checkpoint_generation,omitempty"`
+	Resources                 *AttemptResources `json:"resources,omitempty"`
+	Liveness                  *LivenessReport   `json:"liveness,omitempty"`
+	OutputDeliveryProgress    uint64            `json:"output_delivery_progress,omitempty"`
+	ApplicationProgress       *ProgressReport   `json:"application_progress,omitempty"`
 
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
 	DockerCause       retiredField       `json:"docker_cause,omitzero"` // Previous release only (MY-49).

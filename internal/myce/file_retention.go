@@ -192,7 +192,7 @@ func (q *Queue) expireJobFiles(id string, now time.Time) uint64 {
 	if j == nil || !terminal(j.State) || !hasJobFiles(j) {
 		return 0
 	}
-	if parkedStorageCustody(j) || deliveryPending(j) {
+	if parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j)) || j.Spec.localFirst() && attemptReleasePending(j) {
 		return 0
 	}
 	if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
@@ -254,13 +254,16 @@ func (q *Queue) jobFileRetention(j *Job) time.Duration {
 	if p, _ := parseProjectFileRetention(q.s.Policies[j.Spec.Project].FileRetention); p > 0 && (r == 0 || p < r) {
 		r = p
 	}
+	if j.Spec.localFirst() {
+		r = max(r, q.expiryGrace())
+	}
 	return r
 }
 
 // Caller holds q.mu. Zero means no deadline: retained until explicit release.
 func (q *Queue) fileExpiryDeadline(j *Job) time.Time {
 	retention := q.jobFileRetention(j)
-	if retention == 0 || !terminal(j.State) || !hasJobFiles(j) || j.FilesExpired || deliveryPending(j) {
+	if retention == 0 || !terminal(j.State) || !hasJobFiles(j) || j.FilesExpired || (deliveryPending(j) || checkpointMirrorsPending(j)) || j.Spec.localFirst() && attemptReleasePending(j) {
 		return time.Time{}
 	}
 	if j.FinishedAt == nil {
@@ -372,7 +375,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		}
 		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
 		filesExpired := j.FilesExpired
-		protected := parkedStorageCustody(j) || deliveryPending(j)
+		protected := parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j))
 		if terminal(j.State) && filesExpired {
 			if custody == nil {
 				custody = q.cancellationObservation()
@@ -405,7 +408,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		if !terminal(j.State) {
 			keepFiles("pending_output", j.PendingOutputRefs)
 		}
-		if parkedStorageCustody(j) || deliveryPending(j) {
+		if parkedStorageCustody(j) || (deliveryPending(j) || checkpointMirrorsPending(j)) || j.Spec.localFirst() && attemptReleasePending(j) {
 			keepFiles("pending_delivery", j.OutputRefs)
 		}
 		for _, a := range j.AttemptHistory {
@@ -445,9 +448,12 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 			}
 		}
 		for _, save := range j.FileCheckpoints {
+			if j.Spec.localFirst() && j.FilesExpired {
+				continue
+			}
 			keepFiles("checkpoint", save.Files)
 		}
-		if j.ResumeFiles != nil {
+		if j.ResumeFiles != nil && !(j.Spec.localFirst() && j.FilesExpired) {
 			keepFiles("resume_checkpoint", j.ResumeFiles.Files)
 		}
 		for _, e := range j.Extensions {

@@ -327,6 +327,53 @@ class ClientTests(unittest.TestCase):
                 client.openai(project="test")
 
 
+class LocalFirstCheckpointTests(unittest.TestCase):
+    def test_local_generation_sync_failure_keeps_previous_manifest(self):
+        from mycelium import CheckpointError
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"MYCE_CHECKPOINT_PROTOCOL": "checkpoint-local-first-v1"}):
+            checkpoint = Checkpoint(folder)
+            with patch.object(checkpoint, "_wait_accepted"):
+                checkpoint.save({"step": 1})
+                marker = Path(folder, "generation.json").read_bytes()
+                with patch("mycelium.checkpoint.os.fsync", side_effect=OSError("local flush failed")):
+                    with self.assertRaises(OSError):
+                        checkpoint.save({"step": 2})
+                self.assertEqual(Path(folder, "generation.json").read_bytes(), marker)
+                self.assertEqual(checkpoint.load(), {"step": 1})
+                with self.assertRaises(CheckpointError) as refused:
+                    checkpoint.save({}, "custom.json")
+                self.assertEqual(refused.exception.code, "checkpoint_protocol_unsupported")
+                with self.assertRaises(CheckpointError) as refused:
+                    checkpoint.save("x" * (1 << 20))
+                self.assertEqual(refused.exception.code, "checkpoint_protocol_unsupported")
+
+    def test_concurrent_local_writer_refuses(self):
+        import fcntl
+        from mycelium import CheckpointError
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"MYCE_CHECKPOINT_PROTOCOL": "checkpoint-local-first-v1"}):
+            checkpoint = Checkpoint(folder)
+            with Path(folder, ".myce-writer.lock").open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(CheckpointError) as refused:
+                    checkpoint.save(1)
+                self.assertEqual(refused.exception.code, "checkpoint_protocol_unsupported")
+
+    def test_local_disk_pressure_and_checksum_refuse(self):
+        from mycelium import CheckpointError
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"MYCE_CHECKPOINT_PROTOCOL": "checkpoint-local-first-v1"}):
+            checkpoint = Checkpoint(folder)
+            with patch.object(checkpoint, "_wait_accepted"):
+                checkpoint.save(1)
+                with patch("mycelium.checkpoint.os.statvfs", return_value=os.statvfs_result((4096,4096,100,0,0,0,0,0,0,255))):
+                    with self.assertRaises(CheckpointError) as refused:
+                        checkpoint.save(2)
+                self.assertEqual(refused.exception.code, "checkpoint_local_capacity")
+                Path(folder, "generation-1.json").write_text("torn")
+                with self.assertRaises(CheckpointError) as refused:
+                    checkpoint.load()
+                self.assertEqual(refused.exception.code, "checkpoint_generation_invalid")
+
+
 class CheckpointTests(unittest.TestCase):
     def test_newest_atomic_and_temp_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -445,6 +492,35 @@ def process_alive(pid):
 
 
 class DevTests(unittest.TestCase):
+    def test_local_first_worker_queue_and_mirror(self):
+        source = """import os
+from pathlib import Path
+from mycelium import Checkpoint
+assert os.environ['MYCE_CHECKPOINT_PROTOCOL'] == 'checkpoint-local-first-v1'
+c = Checkpoint()
+assert 'local-checkpoints' in c.directory.parts
+assert c.load() is None
+c.save({'step': 7})
+assert c.load() == {'step': 7}
+print('queue accepted local generation', flush=True)
+"""
+        spec = self.spec([sys.executable, "-c", source], advanced={"resumable": True, "checkpoint": "local_first"})
+        spec["run"]["env"] = {"PYTHONPATH": str(ROOT / "clients/python/src")}
+        submitted = self.client.submit(spec)
+        result = self.client.wait(submitted["id"], timeout=30)
+        self.assertEqual(result["state"], "succeeded", result)
+        self.assertEqual(max(c["generation"] for c in result["file_checkpoints"].values()), 1)
+        end = time.monotonic() + 10
+        while True:
+            result = self.client.get(submitted["id"])
+            if all(m["delivery"]["state"] == "verified" for m in result.get("checkpoint_mirrors", {}).values()):
+                break
+            if time.monotonic() >= end:
+                self.fail("local-first mirror did not verify")
+            time.sleep(.05)
+        self.assertEqual(len(result["checkpoint_mirrors"]), 1)
+
+
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix="myce-python-")

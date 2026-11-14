@@ -98,7 +98,7 @@ func mutableJob(j *Job) bool {
 	if parkedStorageCustody(j) {
 		return true
 	}
-	return deliveryPending(j) || !terminal(j.State) || attemptReleasePending(j)
+	return checkpointMirrorsPending(j) || deliveryPending(j) || !terminal(j.State) || attemptReleasePending(j)
 }
 func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil || q.records.live[id] == nil || !mutableJob(j) {

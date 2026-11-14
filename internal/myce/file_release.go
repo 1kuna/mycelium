@@ -177,7 +177,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		if q.jobReleasePending(j) {
 			item.Blockers = append(item.Blockers, "physical_custody")
 		}
-		if deliveryPending(j) {
+		if deliveryPending(j) || j.Spec.localFirst() {
 			item.Blockers = append(item.Blockers, "pending_delivery")
 		}
 		if d := j.Delivery; d != nil {

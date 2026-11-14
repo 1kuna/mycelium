@@ -547,6 +547,9 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 // Simulated workers have an always-available pretend NAS; production still probes it.
 func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvailable }
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
+	if j.Spec.localFirst() {
+		return contains(m.Capabilities, localFirstProtocol)
+	}
 	return !needsCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
 }
 
@@ -1075,7 +1078,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		} else {
 			id = ID()
 		}
-		j := &Job{EntryCoverage: entryCoverage, CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
+		j := &Job{EntryCoverage: entryCoverage, CommandDiscovery: discovery, PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints || s.localFirst(), Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: q.checkpointPath(id)}
 		// Uploaded lock bytes are frozen in EnvironmentRecipes (with their digest);
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
@@ -3060,10 +3063,13 @@ type attemptProgress struct {
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.touchJob(report.ID)
+	if j != nil && j.Spec.localFirst() && j.Attempt == report.Attempt && j.Machine == m.ID && j.Session == report.Session && report.Session == m.Session {
+		j.LocalCheckpointGeneration = max(j.LocalCheckpointGeneration, report.LocalCheckpointGeneration)
+	}
 	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && ((!j.Spec.localFirst() && (m.CheckpointUnavailable || !q.checkpointsAvailable())) || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
 			}
@@ -3264,6 +3270,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	if j.FileTransport {
 		j.ResumeFiles = bestFileCheckpoint(j)
+		j.LocalCheckpointGeneration = 0
 	}
 	if (j.Spec.extensionJob() || j.Spec.After != nil) && !j.storedFileResults() {
 		j.OutputFiles = map[string]string{}
