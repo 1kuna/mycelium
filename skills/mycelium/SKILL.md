@@ -390,7 +390,10 @@ hours they waited while an excluded host had room, and how far typed
   upgrades refresh it ([setup](setup-project.md#install-the-agent-skill)).
 - [Setup](setup-project.md), [harness](harness-binding.md) and
   [T3 binding](t3-binding.md): adoption, skill install, notifiers.
-- [Owner operations](references/owner-operations.md): queue-owner writes.
+- [Owner operations](references/owner-operations.md): queue-owner writes. Fleet storage
+  preflight failures include sanitized root/operation/errno and duration in
+  `myce status --json` when the installed updater and queue support them; retain those
+  details for the storage owner and leave an operation-owned drain in place.
 - No fleet: `myce dev -- sh script.sh` runs your script against a temporary
   queue with fake GPUs ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
   every `myce` command and `Client.from_installed()` use the dev queue, even on

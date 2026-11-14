@@ -188,6 +188,15 @@ func TestQueueTransactionsReuseRecentCheckpointProbe(t *testing.T) {
 // A probe failure remains attributable without exposing the mount path or
 // trusting arbitrary operation text supplied by an error wrapper.
 func TestStorageProbeFailureDetails(t *testing.T) {
+	for _, err := range []error{
+		&os.LinkError{Op: "rename", Old: "/private-mount/source", New: "/private-mount/target", Err: syscall.EACCES},
+		&os.SyscallError{Syscall: "rename", Err: syscall.EACCES},
+	} {
+		op, errno := storageProbeFailureDetails("stat", err)
+		if op != "rename" || errno != int(syscall.EACCES) {
+			t.Fatalf("nested marker operation lost: %s/%d", op, errno)
+		}
+	}
 	for _, tc := range []struct {
 		op   string
 		want string

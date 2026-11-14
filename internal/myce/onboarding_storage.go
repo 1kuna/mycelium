@@ -18,6 +18,7 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	started := time.Now()
 	bounded, cancel := context.WithTimeout(ctx, onboardingMountInventoryBudget)
 	defer cancel()
 	roots, err := mountedNASRoots(bounded, osname, command)
@@ -25,7 +26,7 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 		return nil, context.Canceled
 	}
 	if bounded.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-		return nil, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS mount inventory exceeded the %s budget; restore the mount and retry", onboardingMountInventoryBudget))
+		return nil, storageRefusal(preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS mount inventory exceeded the %s budget; restore the mount and retry", onboardingMountInventoryBudget)), storageCheckError("nas", "inventory", time.Since(started), context.DeadlineExceeded))
 	}
 	return roots, err
 }
@@ -50,6 +51,7 @@ func mountedNASInventory(ctx context.Context, osname string, command func(contex
 	if command == nil {
 		return nil, preflightError("nas_unreachable", "storage", "mount inventory runner missing")
 	}
+	started := time.Now()
 	var b []byte
 	var err error
 	if osname == "linux" {
@@ -63,7 +65,7 @@ func mountedNASInventory(ctx context.Context, osname string, command func(contex
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		return nil, preflightError("nas_unreachable", "storage", "cannot inspect existing NAS mounts; mount the shared NAS through the OS")
+		return nil, storageRefusal(preflightError("nas_unreachable", "storage", "cannot inspect existing NAS mounts; mount the shared NAS through the OS"), storageCheckError("nas", "inventory", time.Since(started), err))
 	}
 	mounts := []nasMount{}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -172,16 +174,17 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 	if err := ctx.Err(); err != nil {
 		return c, err
 	}
+	started := time.Now()
 	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
 	if err != nil {
-		return c, err
+		return c, storageCheckError("nas", "inventory", time.Since(started), err)
 	}
 	mount := onboardingMount(c, roots)
 	if mount == "" {
 		if discover || c.NAS == "" {
-			return c, nasNotConfigured(roots)
+			return c, storageCheckError("nas", "inventory", time.Since(started), nasNotConfigured(roots))
 		}
-		return c, preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH")
+		return c, storageCheckError("nas", "inventory", time.Since(started), preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH"))
 	}
 	ioCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
@@ -192,7 +195,7 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		return c, context.Canceled
 	}
 	if errors.Is(err, errCheckpointIOTimeout) || errors.Is(err, errCheckpointIOPending) || errors.Is(err, context.DeadlineExceeded) {
-		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation stalled beyond the %s filesystem-operation stall bound or another validation is still pending; restore the mount and retry", onboardingFilesystemStallBudget))
+		return c, storageRefusal(preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation stalled beyond the %s filesystem-operation stall bound or another validation is still pending; restore the mount and retry", onboardingFilesystemStallBudget)), storageCheckError("", "filesystem", time.Since(started), err))
 	}
 	if err != nil {
 		return c, err
@@ -213,16 +216,16 @@ func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCause
 	if len(operation) > 0 {
 		name = operation[0]
 	}
+	started := time.Now()
 	opCtx, cancel := context.WithTimeout(ctx, onboardingFilesystemStallBudget)
 	stop := context.AfterFunc(opCtx, func() {
 		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
 			log.Printf("NAS validation operation=%s stalled budget=%s", name, onboardingFilesystemStallBudget)
-			abort(errCheckpointIOTimeout)
+			abort(storageCheckError(storageContextRoot(ctx), name, time.Since(started), errCheckpointIOTimeout))
 		}
 	})
 	defer cancel()
 	defer stop()
-	started := time.Now()
 	value, err := fn()
 	elapsed := time.Since(started)
 	log.Printf("NAS validation operation=%s completed elapsed=%s success=%t", name, elapsed, err == nil && opCtx.Err() == nil)
@@ -230,12 +233,12 @@ func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCause
 		log.Printf("NAS slow: %s took %.1f s", name, elapsed.Seconds())
 	}
 	if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-		abort(errCheckpointIOTimeout)
+		abort(storageCheckError(storageContextRoot(ctx), name, time.Since(started), errCheckpointIOTimeout))
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		return value, cause
 	}
-	return value, err
+	return value, storageCheckError(storageContextRoot(ctx), name, elapsed, err)
 }
 func onboardingFSError(ctx context.Context, abort context.CancelCauseFunc, fn func() error, operation ...string) error {
 	_, err := onboardingFSOperation(ctx, abort, func() (bool, error) { return false, fn() }, operation...)
@@ -254,12 +257,14 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	ctx = storageRootContext(ctx, "nas")
 	// Check the mount and every ancestor before mkdir. In particular, a missing
 	// mountpoint is never created on the local disk.
 	if st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }, "mount-metadata"); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-		return preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount")
+		return storageRootRefusal(ctx, "mount-metadata", preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount"), e)
 	}
 	for role, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		ctx := storageRootContext(ctx, []string{"nas", "checkpoint", "model", "environment"}[role])
 		base := mount
 		if role == 2 && !withinNAS(mount, path) && filepath.IsAbs(path) {
 			// Model acquisition may use local disk; checkpoint/environment mount
@@ -270,7 +275,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 			}
 			base = local
 		} else if !filepath.IsAbs(path) || !withinNAS(mount, path) {
-			return preflightError("nas_root_outside_mount", "storage", "checkpoint and environment roots must stay on the mounted NAS; model roots may also use verified local disk")
+			return storageRootRefusal(ctx, "containment", preflightError("nas_root_outside_mount", "storage", "checkpoint and environment roots must stay on the mounted NAS; model roots may also use verified local disk"), nil)
 		}
 		rel, _ := filepath.Rel(base, path)
 		at := base
@@ -294,14 +299,15 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 					}
 					return err
 				}, "mkdir"); e != nil {
-					return preflightError("nas_unreachable", "storage", "NAS roots cannot be created; check reachability and write permission")
+					return storageRootRefusal(ctx, "mkdir", preflightError("nas_unreachable", "storage", "NAS roots cannot be created; check reachability and write permission"), e)
 				}
 			} else if e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-				return preflightError("nas_root_invalid", "storage", "NAS roots require accessible real directories, without symlinks")
+				return storageRootRefusal(ctx, "ancestor-metadata", preflightError("nas_root_invalid", "storage", "NAS roots require accessible real directories, without symlinks"), e)
 			}
 		}
 	}
 	for i, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+		ctx := storageRootContext(ctx, []string{"checkpoint", "model", "environment"}[i])
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -314,7 +320,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 			err = onboardingFSError(ctx, abort, func() error { return fs.probe(path) })
 		}
 		if err != nil {
-			return preflightError("nas_unreachable", "storage", "NAS write/sync/rename probe failed; restore mount reachability and permissions")
+			return storageRootRefusal(ctx, "filesystem", preflightError("nas_unreachable", "storage", "NAS write/sync/rename probe failed; restore mount reachability and permissions"), err)
 		}
 		log.Printf("NAS validation root=%s completed elapsed=%s", []string{"checkpoint", "model", "environment"}[i], time.Since(started))
 	}
