@@ -26,7 +26,7 @@ func (c *FileCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate
 			continue
 		}
 		path := filepath.Join(c.Root, entry.Name())
-		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(ctx context.Context) (bool, error) {
+		out = append(out, diskBudgetCandidate{path: path, used: info.ModTime(), evict: func(context.Context) (bool, error) {
 			if !c.mu.TryLock() {
 				return false, nil
 			}
@@ -47,16 +47,11 @@ func (c *FileCache) budgetCandidates(ctx context.Context) ([]diskBudgetCandidate
 			if !os.SameFile(info, current) || !current.ModTime().Equal(info.ModTime()) {
 				return false, nil
 			}
-			// HEAD validates size and identity at the authoritative file store.
-			ref := FileRef{SHA256: hash, SizeBytes: current.Size()}
-			if strings.HasSuffix(path, ".partial") {
-				// A partial's size is not the authoritative blob size; retain it
-				// unless a complete sibling supplies that identity.
-				return false, nil
-			}
-			if err = c.Client.HasFile(ctx, ref); err != nil {
-				return false, err
-			}
+			// This cache owns disposable input copies, never result/checkpoint
+			// custody. Attempts have private materializations. Both locks exclude
+			// active readers and downloaders, including partial writers in another
+			// process. Queue expiry or a failed victim HEAD cannot make these
+			// copies unique or prevent reclaim (#720).
 			return true, os.Remove(path)
 		}})
 	}
