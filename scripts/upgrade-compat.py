@@ -192,7 +192,7 @@ def process(binary, mode, root, *, queue="", config="", tools=None, listen=""):
                 raise RuntimeError(f"{detail}{mode} fixture exited {child.returncode}:\n{log.read()[-6000:]}")
 
 
-def await_file(path, child, predicate=lambda value: True, timeout=30):
+def await_file(path, child, predicate=bool, timeout=30):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():

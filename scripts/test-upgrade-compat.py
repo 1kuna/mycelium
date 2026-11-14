@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name('upgrade-compat.py')
 spec = importlib.util.spec_from_file_location('upgrade_compat', MODULE_PATH)
@@ -18,6 +19,17 @@ spec.loader.exec_module(compat)
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_inventory_restart_waits_for_nonempty_queue_readiness(self):
+        # The URL file can exist while its writer has only truncated it.
+        # Do not start a worker with an empty queue address during that gap.
+        path, child = mock.Mock(), mock.Mock()
+        path.exists.return_value = True
+        path.read_text.side_effect = ["", "http://127.0.0.1:1234"]
+        child.poll.return_value = None
+        with mock.patch.object(compat.time, 'sleep'):
+            self.assertEqual(compat.await_file(path, child), "http://127.0.0.1:1234")
+        self.assertEqual(path.read_text.call_count, 2)
+
     def test_inventory_restart_only_accepts_one_exact_additive_retry(self):
         fence = dict(session="same-session", attempt_protocol="keyed-attempt-v1", hash="same-inventory", rollback_baseline_sha256="same-request")
         refused = dict(fence, status=400, disk_budget_fields=True, error=json.dumps(dict(code="request_invalid", error='json: unknown field "disk_budget"')))

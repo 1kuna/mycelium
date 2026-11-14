@@ -223,42 +223,26 @@ func TestQueueShutdownCancelsPortability(t *testing.T) {
 	}
 }
 
+// Reservation projection no longer takes q.mu. Its captured-state contract is
+// covered by TestOutputDeliveryCapacityPreservesSpoolAndReservations.
 func TestQueueShutdownCancelsFileStatus(t *testing.T) {
-	for _, phase := range []string{"lifecycle", "reservations"} {
-		t.Run(phase, func(t *testing.T) {
-			q, _ := fixture(t)
-			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
-				t.Fatal(err)
-			}
-			view := q.captureFileStoreStatus()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			entered := make(chan struct{})
-			unlock := q.fileLifecycle.Unlock
-			if phase == "lifecycle" {
-				q.fileLifecycle.Lock()
-				close(entered)
-			} else {
-				q.mu.Lock()
-				unlock = q.mu.Unlock
-				original := q.files.reservedOutputs
-				q.files.reservedOutputs = func(payloads map[string]storedPayload, contexts ...context.Context) uint64 {
-					close(entered)
-					return original(payloads, contexts...)
-				}
-			}
-			done := make(chan struct{})
-			go func() { defer close(done); _ = view.status(ctx) }()
-			<-entered
-			cancel()
-			select {
-			case <-done:
-				unlock()
-			case <-time.After(testWaitTimeout):
-				unlock()
-				<-done
-				t.Fatal("file status retained its " + phase + " lock wait after cancellation")
-			}
-		})
+	q, _ := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	view := q.captureFileStoreStatus()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q.fileLifecycle.Lock()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = view.status(ctx) }()
+	cancel()
+	select {
+	case <-done:
+		q.fileLifecycle.Unlock()
+	case <-time.After(testWaitTimeout):
+		q.fileLifecycle.Unlock()
+		<-done
+		t.Fatal("file status retained its lifecycle lock wait after cancellation")
 	}
 }
