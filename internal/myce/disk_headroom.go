@@ -37,7 +37,7 @@ func (q *Queue) diskWork(j *Job, m *Machine) diskWork {
 	if m == nil {
 		return w
 	}
-	if len(q.s.StorageObservations) > 0 {
+	if q.hasStorageProgram(j) {
 		if p, _, ok := q.learnedStorage(j, q.storageKey(j, m)); ok {
 			w.scratch = p.Scratch.need(p.AllocationUnit)
 		}

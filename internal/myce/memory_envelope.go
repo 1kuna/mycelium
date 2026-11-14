@@ -310,11 +310,18 @@ func (q *Queue) memoryCandidates(j *Job, m *Machine) []*Job {
 			continue
 		}
 		if candidate.Spec.Program != nil {
-			copy := *candidate
-			q.applyLearnedNeeds(&copy)
-			candidate = &copy
+			if candidate == j {
+				copy := *candidate
+				candidate = &copy
+			}
+			q.applyLearnedNeeds(candidate)
 		}
-		candidates[i] = q.memoryCandidate(candidate, m)
+		if candidate == j {
+			candidates[i] = q.memoryCandidate(candidate, m)
+		} else {
+			// Extension lowering already owns a target-specific Job copy.
+			candidates[i] = q.memoryCandidateOwned(candidate, m)
+		}
 	}
 	return candidates
 }
@@ -326,7 +333,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		return j
 	}
 	copy := *j
-	n := &copy.Spec.Needs
+	return q.memoryCandidateOwned(&copy, m)
+}
+
+// The caller owns this candidate. Resolve against its original needs and only
+// install the result after all evidence reads, avoiding another full Job copy.
+func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
+	needs := j.Spec.Needs
+	n := &needs
 	source, refusal, basis, evidence := "declared", "", "declared", 0
 	probeFloor, limit := 0.0, 0.0
 	if n.Memory != "auto" {
@@ -336,7 +350,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 	} else {
 		// Explicit optional member caps remain declarations to preserve.
-		hostFloor := memberHostFloor(&copy, m)
+		hostFloor := memberHostFloor(j, m)
 		floorRun := q.chargesFirstRunFloor(j, m)
 		estimate := q.memoryEstimate(j, m)
 		refusal = estimate.refusal
@@ -555,29 +569,30 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	if enforcement == "" {
 		enforcement = "admission-only"
 	}
-	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
+	envelope := &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
 	if limit > 0 {
 		// The candidate's needs carry the charge for admission; assignment
 		// restores the typed limit to the job (assign).
-		copy.MemoryEnvelope.ChargeHostGB, copy.MemoryEnvelope.LimitHostGB = n.HostMemoryGB, limit
+		envelope.ChargeHostGB, envelope.LimitHostGB = n.HostMemoryGB, limit
 	}
 	if basis == "exploratory" && evidence == 0 && estimatePhysicalSource(source) {
-		copy.MemoryEnvelope.LaunchDriftGB = q.jobProbeDriftMarginGB(j, m)
-		copy.MemoryEnvelope.AvailableHostGB = m.FreeHostMemoryGB
+		envelope.LaunchDriftGB = q.jobProbeDriftMarginGB(j, m)
+		envelope.AvailableHostGB = m.FreeHostMemoryGB
 	}
 	if probeFloor > 0 {
-		copy.MemoryEnvelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
+		envelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
+	j.Spec.Needs, j.MemoryEnvelope = needs, envelope
 	// The envelope acknowledgement keeps new workers on the old stop contract
 	// with older queues, and older workers on their existing kernel ceilings.
 	if contains(m.Capabilities, learnedMemoryGuardCapability) {
-		copy.MemoryEnvelope.Enforcement = learnedMemoryGuardEnforcement
-		if adaptiveMemoryCeilingGB(&copy, m) <= 0 {
-			copy.MemoryEnvelope.Enforcement = enforcement
+		envelope.Enforcement = learnedMemoryGuardEnforcement
+		if adaptiveMemoryCeilingGB(j, m) <= 0 {
+			envelope.Enforcement = enforcement
 		}
 	}
-	q.observeMemoryAdmission(&copy, m)
-	return &copy
+	q.observeMemoryAdmission(j, m)
+	return j
 }
 
 func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) string {

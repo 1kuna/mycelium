@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -676,6 +677,10 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	if q.stopping.Load() {
 		return queueStopping()
 	}
+	// All qualification consumers in this writer share the same frozen
+	// extension/report predicates, including projection and persistence tails.
+	// The complete inventory/report key fences changes during maintenance.
+	defer q.memoizeExtensionQualifications(nil)()
 	previousMaintenance := q.maintenance
 	q.maintenance = &queueMaintenance{}
 	defer func() { q.maintenance = previousMaintenance }()
@@ -1306,6 +1311,7 @@ func (q *Queue) maintain() {
 	if q.maintenance == nil {
 		defer func() { q.maintenance = nil }()
 	}
+	defer q.memoizeExtensionQualifications(nil)()
 	defer q.bodyPhaseFinish("maintain", q.bodyPhaseStart())
 	q.beginMaintenance()
 	q.expireInventoryObservations()
@@ -2456,6 +2462,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snapshot {
+	defer q.memoizeExtensionQualifications(nil)()
 	compact := q.observationSelection != nil && q.observationSelection.compact
 	out := Snapshot{CheckpointExpiry: q.checkpointExpiryCounts(), EvidenceRetention: q.evidenceRetention, Efficiency: q.efficiencyView, HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), Holds: []Hold{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	out.HealthAlertDelivery = q.healthAlertDelivery()
@@ -2936,9 +2943,9 @@ func cloneJob(j *Job) Job {
 	// FileRef is a value of strings and an integer. Copy the manifest directly
 	// rather than encoding and decoding every input in each transaction undo.
 	value.Spec.Files = nil
-	data, _ := json.Marshal(&value)
-	var out Job
-	_ = json.Unmarshal(data, &out)
+	// Use the same detached, JSON-owned copy as observation and retained
+	// records. A transaction undo needs memory ownership, not wire encoding.
+	out := copyObservationValue(reflect.ValueOf(value)).Interface().(Job)
 	if len(j.Spec.Files) > 0 {
 		out.Spec.Files = maps.Clone(j.Spec.Files)
 	}

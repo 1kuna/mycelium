@@ -298,10 +298,61 @@ func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
 	return r
 }
 
+// memoizeExtensionQualifications scopes qualification reuse to one scheduler or
+// detached observation pass. Capacity projections inherit the memo; report and
+// target identities remain part of the key. Live inventory is cleared before
+// the caller releases q.mu, and observation copies omit this private field.
+func (q *Queue) memoizeExtensionQualifications(targets []*Machine) func() {
+	installed := []*Machine{}
+	install := func(m *Machine) {
+		if m != nil && m.qualificationMemo == nil {
+			m.qualificationMemo = map[extensionQualificationKey]string{}
+			installed = append(installed, m)
+		}
+	}
+	for _, m := range q.s.Machines {
+		install(m)
+	}
+	for _, m := range targets {
+		install(m)
+	}
+	return func() {
+		for _, m := range installed {
+			m.qualificationMemo = nil
+		}
+	}
+}
+
 // extensionQualificationReason is the single qualification predicate for check
 // verdicts, cached reports and placement. Empty means qualified for this host.
 // A successful command alone is only smoke evidence, never qualification.
-func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
+type extensionQualificationKey struct {
+	digest                      string
+	report                      ExtensionReport
+	target, reportTarget        ExecutionTarget
+	host, device, fingerprint   string
+	reportHasTarget, hasDevices bool
+}
+
+func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) (reason string) {
+	// Frozen extension bytes and inventory are immutable during a candidate
+	// pass. Many jobs use the same check: evaluate its complete predicate once,
+	// rather than repeatedly preparing identities and validating that report.
+	if m.qualificationMemo != nil && len(e.Digest) == 64 {
+		key := extensionQualificationKey{digest: e.Digest, report: r, target: machineTarget(m), host: hostID(m), device: m.Device, fingerprint: m.ExtensionFingerprint, hasDevices: m.Devices != nil, reportHasTarget: r.Target != nil}
+		if r.Target != nil {
+			key.reportTarget = *r.Target
+		}
+		key.report.Target = nil
+		if cached, ok := m.qualificationMemo[key]; ok {
+			return cached
+		}
+		defer func() { m.qualificationMemo[key] = reason }()
+	}
+	return uncachedExtensionQualificationReason(e, r, m)
+}
+
+func uncachedExtensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
 	view, ok := e.forMachine(m)
 	if strings.HasPrefix(r.CheckID, "auto-") && !matchingExtensionReport(e, m, r) {
 		return "host, environment or check identity changed; check required"

@@ -25,9 +25,9 @@ func backfillFiniteExecution(j *Job) bool {
 	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil && j.Spec.ExtensionCheck == nil
 }
 
-func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, inventory []*Machine) []*Job {
+func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, resources map[batchResourceKey]batchResourceRoom) []*Job {
 	if j.Spec.FanOut != nil {
-		if candidate := q.fanOutCandidateWithResources(j, projected, nil, inventory); candidate != nil {
+		if candidate := q.fanOutCandidateWithResources(j, projected, resources); candidate != nil {
 			return []*Job{candidate}
 		}
 		return nil
@@ -72,35 +72,19 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, projected.FreeHostMemoryGB)
 		projections[targetKey(m)] = &projected
 	}
-	// Keep dispatch's target order and global wave planner. Passing the entire
-	// projected inventory selects one wave/target rather than reserving every
-	// host independently for a fan-out parent's unscaled per-piece template.
-	inventory := make([]*Machine, 0, len(projections))
-	for _, m := range scan.machines {
-		if projected := projections[targetKey(m)]; projected != nil {
-			inventory = append(inventory, projected)
-		}
-	}
 	choices := []*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
 	drains := map[string]*Machine{}
+	resources := map[*Machine]map[batchResourceKey]batchResourceRoom{}
+	resourceRoom := func(m *Machine) map[batchResourceKey]batchResourceRoom {
+		if resources[m] == nil {
+			resources[m] = map[batchResourceKey]batchResourceRoom{}
+		}
+		return resources[m]
+	}
 	for _, j := range demands {
 		var best *hostBackfillDemand
 		drain := maintenanceResume(j) && j.Spec.FanOut == nil
-		demandInventory := inventory
-		if j.Spec.FanOut != nil && j.FanOut != nil {
-			for _, target := range scan.machines {
-				if projections[targetKey(target)] == nil || !q.workerIdle(target, j) {
-					continue
-				}
-				if candidate := q.fanOutCandidateWithResources(j, target, nil, scan.machines); q.immediateCandidate(candidate, target) != nil {
-					// Dispatch can use capacity now, including serial fallback on
-					// a qualified target without curves. Preserve that destination.
-					demandInventory = scan.machines
-					break
-				}
-			}
-		}
 		for _, m := range scan.machines {
 			projected := projections[targetKey(m)]
 			if projected == nil || !q.placementAllowed(j, m) || !q.preemptionPlacementAllows(j, m) || q.preemptionReleasesPending(j) || !q.checkpointReady(j, m) || q.environmentFailureBlocked(j, m) {
@@ -115,7 +99,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				}
 				projected, device = drains[targetKey(m)], drains[targetKey(m)].FreeMemoryGB
 			}
-			for _, candidate := range q.backfillCandidates(j, m, projected, demandInventory) {
+			for _, candidate := range q.backfillCandidates(j, m, projected, resourceRoom(projected)) {
 				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !drain && !q.batchSlotFree(m, candidate) || !fits(candidate, projected, device) {
 					continue
 				}

@@ -602,6 +602,7 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 // Runs on a private committed generation, never under the live writer mutex.
 // No status/read path records evidence, and no OS, network or storage I/O runs.
 func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) {
+	defer q.memoizeExtensionQualifications(scan.machines)()
 	now := q.clock.Now()
 	started := holdNow(q.holdClock)
 	waiting := []*Job{}

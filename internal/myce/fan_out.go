@@ -209,16 +209,17 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	return q.fanOutCandidateWithResources(j, m, nil)
 }
 
-func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom, inventories ...[]*Machine) *Job {
+func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || q.fanOutCapHold(j) != nil || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	// Each piece is an ordinary serial job: reuse ordinary eligibility and
 	// release planning.
-	for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
+	candidates, _ := extensionCandidates(j, m, true, true)
+	for _, candidate := range candidates {
 		candidate.Spec.Args = append(slices.Clone(candidate.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
 		q.applyLearnedNeeds(candidate)
-		candidate = q.memoryCandidate(candidate, m)
+		candidate = q.memoryCandidateOwned(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			candidate.Spec.FanOut = j.Spec.FanOut
 			candidate.FanOut = j.FanOut

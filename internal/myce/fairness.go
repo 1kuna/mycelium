@@ -294,7 +294,11 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		if !q.admissionPass(j, m, memorySizingTargetFits(candidate, m), predicateMemoryTarget) || !q.admissionPass(j, m, toolsFit(candidate, m), predicateTools) || !q.admissionPass(j, m, nativeNetworkFits(candidate, m), predicateNativeNetwork) || !q.admissionPass(j, m, q.batchCPUCeilingFits(candidate, m, scans...), predicateCPUCeiling) {
 			continue
 		}
-		candidate = q.memoryCandidate(candidate, m)
+		if candidate == j {
+			candidate = q.memoryCandidate(candidate, m)
+		} else {
+			candidate = q.memoryCandidateOwned(candidate, m)
+		}
 		if q.admissionPass(j, m, q.capReasonFor(candidate, m) == "", predicateProjectCapacity) && q.batchResourcesFitWithScan(candidate, m, resources) {
 			return candidate
 		}

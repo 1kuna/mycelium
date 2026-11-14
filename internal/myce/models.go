@@ -624,11 +624,15 @@ func (q *Queue) maintainModels() {
 		if j == nil {
 			break
 		}
-		if machine := q.makeBatchRoom(j, planned, handled, candidates, scan); machine != "" {
+		if machine, changed := q.makeBatchRoom(j, planned, handled, candidates, scan); machine != "" {
 			planned[machine] = true
 			// Applying releases changes eligibility and active fair-share usage.
-			candidates = map[string]*candidateSet{}
-			scan = q.placementScan()
+			// An already-free target changes neither: keep the same immutable
+			// pass for the next target instead of sizing the backlog again.
+			if changed {
+				candidates = map[string]*candidateSet{}
+				scan = q.placementScan()
+			}
 		}
 		handled[j.ID] = true
 	}
@@ -1231,7 +1235,7 @@ func modelConfigHash(c ModelConfig) string {
 
 // Batch workers run one command at a time. Plan its release together with
 // resident models, rather than requiring either allocation alone to suffice.
-func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidates map[string]*candidateSet, scan *placementScan) string {
+func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidates map[string]*candidateSet, scan *placementScan) (string, bool) {
 	var best *placementPlan
 	var selected *Job
 	for _, m := range scan.machines {
@@ -1264,8 +1268,13 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		q.noteWaitPreemption(winner, m, decision)
 	}
 	if best == nil {
-		return ""
+		return "", false
 	}
+	// Empty release plans only reserve this target's turn in the local pass.
+	// Any victim, preparation or retained placement can mutate eligibility;
+	// conservatively rebuild after those, including already-stopping victims.
+	changed := len(best.jobs) > 0 || len(best.slots) > 0 || len(best.calls) > 0 ||
+		best.preparations && len(q.s.PreparationPlans) > 0 || q.s.Jobs[j.ID].PreemptionPlacement != nil
 	if best.stops > 0 {
 		live := q.touchJob(j.ID)
 		if live.PreemptionPlacement == nil {
@@ -1278,8 +1287,10 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		decision.Reason = "selected_release_plan"
 	}
 	q.noteWaitPreemption(selected, best.machine, decision)
-	q.retainPlacementReleases(best, q.touchJob(j.ID))
-	return targetKey(best.machine)
+	if changed {
+		q.retainPlacementReleases(best, q.touchJob(j.ID))
+	}
+	return targetKey(best.machine), changed
 }
 
 var errPriorityPreemption = errors.New("model call interrupted by higher priority demand")

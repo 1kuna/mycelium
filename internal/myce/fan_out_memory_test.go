@@ -143,6 +143,14 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			if !learned && (want.MemoryEnvelope.Source != physicalMemoryProbe || want.Spec.Needs.HostMemoryGB != 24-minimumHostMemoryGB || want.Spec.Needs.MemoryGB != 30) {
 				t.Fatalf("missing bounded host exploration with whole card: %+v", want.MemoryEnvelope)
 			}
+			queued := q.s.Jobs[parent.ID]
+			beforeNeeds, beforeEnvelope := queued.Spec.Needs, queued.MemoryEnvelope
+			if planned := q.fanOutCandidate(queued, &target); planned == nil {
+				t.Fatal("qualified serial piece was not planned")
+			}
+			if queued.Spec.Needs.HostMemoryGB != beforeNeeds.HostMemoryGB || queued.Spec.Needs.MemoryGB != beforeNeeds.MemoryGB || queued.MemoryEnvelope != beforeEnvelope || queued.FanOut.Next != 0 {
+				t.Fatal("candidate sizing mutated its queued parent")
+			}
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil {
 				t.Fatalf("qualified device1 must receive the serial child: %s", job(t, q, parent.ID).Reason)

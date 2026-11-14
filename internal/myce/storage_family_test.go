@@ -30,7 +30,9 @@ func TestStorageFamilyLearnsPerItemScratch(t *testing.T) {
 		probe := submit(t, q, s)
 		q.mu.Lock()
 		j, mm := q.s.Jobs[probe.ID], q.s.Machines[m.ID]
+		q.memoryPlanning = newMemoryPlanningCache()
 		w, e := q.diskWork(j, mm), q.storageEnvelope(j, mm)
+		q.memoryPlanning = nil
 		q.mu.Unlock()
 		if err := q.Cancel(probe.ID); err != nil {
 			t.Fatal(err)
@@ -63,6 +65,11 @@ func TestStorageFamilyLearnsPerItemScratch(t *testing.T) {
 	fourth := item(4)
 	if got, basis := scratchFor(fourth); got != 50<<30 || basis != "family" {
 		t.Fatalf("new item not sized from the family: scratch %d basis %s", got, basis)
+	}
+	unrelated := item(5)
+	unrelated.Name = "another-entry"
+	if got, basis := scratchFor(unrelated); got != hint || basis != "declared" {
+		t.Fatalf("another entry inherited scratch evidence: scratch %d basis %s", got, basis)
 	}
 	small := reportDisk(t, cpuMachine("small-worker", "small-host", "cpu", 8, 32), clock, "small-volume", []string{"data"}, 100<<30, 40<<30)
 	check(t, q, small, nil)

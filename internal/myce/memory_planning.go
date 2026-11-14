@@ -15,6 +15,7 @@ type memoryPlanningCache struct {
 	allocations  map[allocationViewKey]*Machine
 	// Storage observations grouped by family for this pass.
 	storageFamilies map[string][]StorageObservation
+	storagePrograms map[string]bool
 }
 
 type memoryComponentKey struct {
