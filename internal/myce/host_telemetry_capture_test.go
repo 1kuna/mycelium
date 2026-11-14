@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	generate "github.com/invopop/jsonschema"
+	"golang.org/x/sys/unix"
 )
 
 func TestHostTelemetryCaptureLocalProbe(t *testing.T) {
@@ -37,19 +39,27 @@ func TestHostTelemetryCaptureSensorDescendants(t *testing.T) {
 			c, _ := captureFixture(t)
 			dir := t.TempDir()
 			pidPath := filepath.Join(dir, "child.pid")
+			// Readiness is an IPC handshake, not a shell-startup deadline. Opening
+			// both ends avoids EOF before the helper connects.
+			if err := syscall.Mkfifo(pidPath, 0600); err != nil {
+				t.Fatal(err)
+			}
+			readyPipe, err := os.OpenFile(pidPath, os.O_RDWR|syscall.O_NONBLOCK, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer readyPipe.Close()
 			// uv is an allowed fake-tool boundary in LocalMachineProbe. No hardware
 			// command runs: only this owned shell and its sleeping descendant.
 			helper := filepath.Join(dir, "uv")
-			if err := os.WriteFile(helper, []byte("#!/bin/sh\nsleep 10 &\nprintf '%s' \"$!\" > \"$1\"\nif [ \"$2\" = exited-parent ]; then exit 0; fi\nwait\n"), 0700); err != nil {
+			if err := os.WriteFile(helper, []byte("#!/bin/sh\nsleep 10 &\nprintf '%s\\n' \"$!\" > \"$1\"\nif [ \"$2\" = exited-parent ]; then exit 0; fi\nwait\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
 			run, original := LocalMachineProbe().Command, c.Probe.Command
-			ready := make(chan struct{})
 			c.Probe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 				if name != "xpu-smi" {
 					return original(ctx, name, args...)
 				}
-				close(ready)
 				return run(ctx, helper, pidPath, mode)
 			}
 			c.Probe.XeActivity = nil
@@ -57,17 +67,28 @@ func TestHostTelemetryCaptureSensorDescendants(t *testing.T) {
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { _, err := c.Sample(ctx); done <- err }()
-			<-ready
-			var pid int
-			until := time.Now().Add(2 * time.Second)
-			for time.Now().Before(until) {
-				if b, err := os.ReadFile(pidPath); err == nil {
-					pid, _ = strconv.Atoi(string(b))
-					if pid > 0 {
-						break
-					}
+			// Darwin deliberately leaves named FIFOs out of Go's netpoller.
+			// Wait for readable data before the nonblocking read, without polling
+			// sleeps or assuming how long launching the sensor takes.
+			fds := []unix.PollFd{{Fd: int32(readyPipe.Fd()), Events: unix.POLLIN}}
+			until := time.Now().Add(testWaitTimeout) // Deadlock backstop only.
+			for {
+				n, err := unix.Poll(fds, max(0, int(time.Until(until)/time.Millisecond)))
+				if errors.Is(err, unix.EINTR) {
+					continue
 				}
-				time.Sleep(time.Millisecond)
+				if err != nil || n != 1 {
+					t.Fatal("sensor readiness handshake blocked:", err)
+				}
+				break
+			}
+			line, err := bufio.NewReader(readyPipe).ReadString('\n')
+			if err != nil {
+				t.Fatal("sensor readiness:", err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(line))
+			if err != nil {
+				t.Fatal("invalid sensor readiness:", line, err)
 			}
 			if pid <= 0 {
 				t.Fatal("scratch sensor did not start")
