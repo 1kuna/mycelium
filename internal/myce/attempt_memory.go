@@ -769,9 +769,13 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 	switch {
 	case unreported:
 		return 0, foreign, errDeviceMemoryNotReported
-	case !found:
+	case len(ids) == 0:
 		return 0, foreign, errAttemptMemoryPending
 	}
+	// A successful complete enumeration before CUDA initialization has no row
+	// for this attempt. That is measured zero, not a stalled sensor. Imports
+	// and CPU-side loading can take arbitrarily longer than one sensor cycle.
+	// Listed N/A counters and failed queries still take their unknown paths.
 	return total, foreign, nil
 }
 

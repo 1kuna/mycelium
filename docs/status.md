@@ -1420,6 +1420,10 @@ reading, and the host counter keeps its own older age. A sampler that stops
 producing readings still becomes stale after ten seconds; refreshing the report
 does not renew its evidence. Unified CUDA admission
 requires a fresh sample from every existing tenant before adding another.
+A successful CUDA process enumeration without a context for the attempt
+supplies a fresh zero, including during CPU-side startup. This never discounts
+its declared or learned device vector. A failed query, missing PID inventory or
+a listed N/A counter is still unknown, rather than zero.
 
 When CUDA lists attempt PIDs but reports `[N/A]`, a Linux worker also reads
 those PIDs' RSS and the exact attempt cgroup's resident anonymous, kernel and
@@ -1440,8 +1444,12 @@ atomically alongside its value. Missing, stale or uncertain attribution prevents
 new unified CUDA sharing. A newly started attempt may wait for its first sample
 within the existing two-period sensor freshness window; that wait cannot admit
 another tenant or excuse explicitly uncertain evidence. Once the window expires,
-missing samples also require exclusive execution. Existing shared attempts yield in the guard's normal
-lowest-tier, then greatest-over-reservation order until execution is exclusive.
+missing samples also require exclusive execution. Existing shared attempts yield
+from the lowest tier, preferring an unobservable tenant within that tier when
+uncertainty requires exclusivity. With complete measurements the guard retains
+its greatest-over-reservation order. A pressure-stopped copy's `recoverable:
+false` prohibits re-adopting that execution; the logical job still requeues under
+its same key without a failure-budget charge.
 The running reason names uncertain attribution. Dedicated-card missing-sample
 behavior remains diagnostic only. Higher CUDA classes still stop every lower
 co-tenant and await exact release before starting. Workers negotiate

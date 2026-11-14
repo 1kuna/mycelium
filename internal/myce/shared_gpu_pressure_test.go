@@ -126,3 +126,25 @@ func TestSharedGPUPressureSingleTenant(t *testing.T) {
 	growthCheck(t, q, m, []*Job{run}, []float64{50}, 0)
 	requireState(t, q, run.ID, "running")
 }
+
+func TestSharedGPUPressureUncertainVictim(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	a, b := sharedPair(t, q, m)
+	clock.Advance(deviceMemorySampleFreshFor)
+	// The measured tenant grew, but the pair still fits (18 + 13 < 40).
+	// Missing evidence for the other tenant requires exclusive execution;
+	// its uncertainty must not be attributed to the measurable grower.
+	growthCheck(t, q, m, []*Job{a, b}, []float64{18}, 0)
+	requireState(t, q, a.ID, "running")
+	requireState(t, q, b.ID, "stopping")
+	finishInterrupted(t, q, b)
+	// Replaying the unobservable execution cannot revive it after release.
+	r := growthCheck(t, q, m, []*Job{a, b}, []float64{18}, 0)
+	for _, directive := range r.Attempts {
+		if directive.ID == b.ID && (!directive.Stop || !directive.Kill) {
+			t.Fatal("stopped copy was recovered", directive)
+		}
+	}
+	requireState(t, q, a.ID, "running")
+}
