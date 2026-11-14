@@ -1,7 +1,9 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,15 +86,30 @@ func TestJobSnapshotCacheSingleflight(t *testing.T) {
 				return
 			}
 			got.Spec.Project = "caller-mutation"
-			if len(got.Resources) > 0 {
-				got.Resources[0].Dimension = "caller-mutation"
+			if len(got.Resources) == 0 || got.SpecProjection == nil || len(got.SpecProjection.Omitted) == 0 {
+				t.Error("fixture lacks nested public diagnostics")
+				return
 			}
+			got.Resources[0].Dimension = "caller-mutation"
+			if got.Resources[0].Declared != nil {
+				*got.Resources[0].Declared = -123
+			}
+			got.SpecProjection.Omitted[0] = "caller-mutation"
 		}(i)
 	}
 	wg.Wait()
 	got, err := q.jobSnapshot(j.ID)
 	if err != nil || got.Spec.Project == "caller-mutation" {
 		t.Fatal("cache aliased response", err)
+	}
+	// Compare the entire reply with the existing public JSON boundary, including
+	// nested diagnostics and nil/empty normalization, after concurrent mutations.
+	var want Job
+	if err := json.Unmarshal([]byte(q.jobSnapshots[j.ID].data), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatal("copied reply differs from public JSON")
 	}
 	if captures.Load() != 1 {
 		t.Fatal("duplicate diagnostic captures", captures.Load())
@@ -242,5 +259,71 @@ func TestJobSnapshotCacheBatchDependsOnCallCommit(t *testing.T) {
 				t.Fatal("batch retained committed call blocker", got, err)
 			}
 		})
+	}
+}
+
+// Isolate the hot receipt path from the release contention benchmark's
+// intentionally unbounded number of concurrent reader requests.
+func BenchmarkJobSnapshotCacheWarm(b *testing.B) {
+	q, _ := fixture(b)
+	s := spec("experiment")
+	s.Run.Command = []string{"echo", strings.Repeat("payload", 256)}
+	j := submit(b, q, s)
+	if _, err := q.jobSnapshot(j.ID); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := q.jobSnapshot(j.ID); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestJobSnapshotReplyOwnership(t *testing.T) {
+	value := Job{ID: "reply", Spec: spec("experiment")}
+	value.Spec.Run.Env = map[string]string{"MODE": "original"}
+	value.Spec.Files = FileManifest{"input": {SHA256: strings.Repeat("a", 64), SizeBytes: 42}}
+	deadline := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	value.Spec.Deadline = &deadline
+	value.Resources = []ResourceBasis{{Dimension: "host_memory_gb", Declared: new(float64)}}
+	value.SpecProjection = &SpecProjection{Projected: true, Omitted: []string{"files"}}
+	for _, populated := range []bool{true, false} {
+		if !populated {
+			value = Job{ID: "sparse"}
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var normalized Job
+		if err := json.Unmarshal(data, &normalized); err != nil {
+			t.Fatal(err)
+		}
+		reply := &jobSnapshotReply{data: string(data)}
+		got, err := reply.clone()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(*got, normalized) {
+			t.Fatal("copy changed public reply values")
+		}
+		if populated {
+			got.Spec.Run.Command[0] = "changed"
+			got.Spec.Run.Env["MODE"] = "changed"
+			got.Spec.Files["input"] = FileRef{}
+			*got.Spec.Deadline = time.Time{}
+			*got.Resources[0].Declared = -1
+			got.SpecProjection.Omitted[0] = "changed"
+		}
+		next, err := reply.clone()
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := json.Marshal(next)
+		if err != nil || string(again) != string(data) {
+			t.Fatal("caller changed a subsequent reply", err)
+		}
 	}
 }
