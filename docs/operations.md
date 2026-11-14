@@ -1481,3 +1481,12 @@ Older links to these anchors land here; each entry points to the section's curre
 - <a id="durable-model-engine-interval-history-663"></a>[Durable model-engine interval history (#663)](reference/models.md#durable-model-engine-interval-history-663)
 - <a id="completion-observer-upgrade-and-recovery-next-release"></a>[Completion observer upgrade and recovery (next release)](reference/completion-observer.md#completion-observer-upgrade-and-recovery-next-release)
 - <a id="completion-and-health-delivery-acceptance"></a>[Completion and health delivery acceptance](reference/completion-observer.md#completion-and-health-delivery-acceptance)
+
+### Candidate version diagnostics
+
+`myce version --json` (also `--version` and `-v`) is a read-only probe:
+it does not refresh installed agent guides. Fleet helpers parse its stdout only.
+The local private `fleet-update.json` receipt retains up to 4 KiB of candidate
+stderr as `version_stderr`, on success or failure; arbitrary diagnostic text is
+not sent in fleet acknowledgements. Older helpers parse combined output, so
+candidates must keep version probes free of startup notices when upgrading them.

@@ -37,7 +37,10 @@ func main() {
 		log.Print(err)
 		os.Exit(exitCode(err))
 	}
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" {
+	// Version is a read-only probe, including for older fleet helpers that
+	// decode combined stdout/stderr as JSON.
+	versionProbe := len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v")
+	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" {
 		localSkillInstaller(os.Stderr).refresh(localSkillDirs())
 	}
 	if err := run(os.Args[1:]); err != nil {
