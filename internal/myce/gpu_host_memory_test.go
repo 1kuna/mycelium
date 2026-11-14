@@ -417,31 +417,41 @@ func TestGPUHostMemoryTelemetryHelperBoundary(t *testing.T) {
 	valid := `{"sampled_at":"2026-10-30T00:00:00Z","gtt_mm":{"0000:03:00.0":"use_type: 1\nuse_tt: 1\nusage: 28672\n"}}`
 	for _, mode := range []string{"fresh", "future", "missing timestamp", "malformed", "oversized", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
-			body := valid
-			switch mode {
-			case "future":
-				body = strings.ReplaceAll(body, "00:00:00Z", "00:00:01Z")
-			case "missing timestamp":
-				body = `{"gtt_mm":{"0000:03:00.0":"usage: 0"}}`
-			case "malformed":
-				body = `{broken`
-			case "oversized":
-				body += strings.Repeat(" ", 64<<10)
+			check := func(t *testing.T) {
+				body := valid
+				switch mode {
+				case "future":
+					body = strings.ReplaceAll(body, "00:00:00Z", "00:00:01Z")
+				case "missing timestamp":
+					body = `{"gtt_mm":{"0000:03:00.0":"usage: 0"}}`
+				case "malformed":
+					body = `{broken`
+				case "oversized":
+					body += strings.Repeat(" ", 64<<10)
+				}
+				script := "[ \"$#\" -eq 0 ] && [ -z \"$MYCE_TOKEN\" ] && [ -z \"$MYCE_JOB_ID\" ] || exit 7\ncat <<'SAMPLE'\n" + body + "\nSAMPLE\n"
+				if mode == "timeout" {
+					// Outlives the test's backstop, so returning proves the helper timeout.
+					script = "exec /bin/sleep 120\n"
+				}
+				path := gpuTelemetryTestHelper(t, script)
+				var got map[string]string
+				var err error
+				returnsWhileBlocked(t, "telemetry helper", func() { got, err = readGPUTelemetryHelper(context.Background(), clock, path) })
+				if (err == nil) != (mode == "fresh") {
+					t.Fatalf("helper %s: evidence=%v err=%v", mode, got, err)
+				}
+				if mode == "fresh" && got["0000:03:00.0"] != "use_type: 1\nuse_tt: 1\nusage: 28672\n" {
+					t.Fatal("helper did not preserve raw manager accounting")
+				}
 			}
-			script := "[ \"$#\" -eq 0 ] && [ -z \"$MYCE_TOKEN\" ] && [ -z \"$MYCE_JOB_ID\" ] || exit 7\ncat <<'SAMPLE'\n" + body + "\nSAMPLE\n"
 			if mode == "timeout" {
-				// Outlives the test's backstop, so returning proves the helper timeout.
-				script = "exec /bin/sleep 120\n"
-			}
-			path := gpuTelemetryTestHelper(t, script)
-			var got map[string]string
-			var err error
-			returnsWhileBlocked(t, "telemetry helper", func() { got, err = readGPUTelemetryHelper(context.Background(), clock, path) })
-			if (err == nil) != (mode == "fresh") {
-				t.Fatalf("helper %s: evidence=%v err=%v", mode, got, err)
-			}
-			if mode == "fresh" && got["0000:03:00.0"] != "use_type: 1\nuse_tt: 1\nusage: 28672\n" {
-				t.Fatal("helper did not preserve raw manager accounting")
+				// A blocked real process must still be canceled by the real deadline.
+				check(t)
+			} else {
+				// Inject timer time: OS process startup is external I/O, so it cannot
+				// consume a successful fixture's 200 ms budget under shared-host load.
+				synctest.Test(t, check)
 			}
 		})
 	}

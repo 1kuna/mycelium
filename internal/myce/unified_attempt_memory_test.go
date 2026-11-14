@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -38,122 +39,127 @@ func (f *unifiedResidentFS) set(p, v string) {
 func TestUnifiedAttemptMemorySharing(t *testing.T) {
 	for _, total := range []float64{4, 1024} {
 		t.Run(fmt.Sprint(total), func(t *testing.T) {
-			q, clock := fixture(t)
-			m := sharedUnifiedMachine()
-			m.HostAvailableMemoryGB = total
-			m.CapabilityProfile.SystemMemoryBytes = uint64(total * (1 << 30))
-			m.MemoryObservation = &HostMemoryObservation{TotalGB: total}
-			m.Devices[0].ReserveMemoryGB = 0
-			m.Devices[0].BudgetGB, m.Devices[0].TotalMemoryGB, m.Devices[0].FreeMemoryGB = total, total, total
-			s := sharedSpec("experiment", total/8)
-			s.Needs.HostMemoryGB = total / 32
-			first := submit(t, q, s)
-			a := assignedJob(machineCheck(t, q, m))
-			if a == nil || a.ID != first.ID {
-				t.Fatal("first attempt not assigned")
-			}
-			if err := q.Started(result(a, false)); err != nil {
-				t.Fatal(err)
-			}
-			second := submit(t, q, s)
-			// No current evidence: a declared number alone cannot authorize sharing.
-			if r := growthCheck(t, q, m, []*Job{a}, nil, 0); assignedJob(r) != nil {
-				t.Fatal("missing evidence shared")
-			}
-			ceilings := fakeCeilings(t)
-			fs := &unifiedResidentFS{values: map[string]string{}}
-			rootResident := total / 4
-			stat := func(gb float64) string { return fmt.Sprintf("anon %d\nkernel 0\nshmem 0\n", uint64(gb*(1<<30))) }
-			fs.set(filepath.Join(ceilings.root, "memory.stat"), stat(rootResident))
-			fs.set("/proc/meminfo", fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64((total-rootResident)*(1<<20))))
-			var memory []*memoryAttempt
-			for i := 0; i < 2; i++ {
-				mem, err := ceilings.create(fmt.Sprint("attempt-", i), int64(total*(1<<30)), 0)
+			// One injected tick represents one successful sensor cycle. Freeze timer
+			// time during external command I/O; a startup timeout would consume the
+			// only tick and has no relation to the virtual growth/admission proof.
+			synctest.Test(t, func(t *testing.T) {
+				q, clock := fixture(t)
+				m := sharedUnifiedMachine()
+				m.HostAvailableMemoryGB = total
+				m.CapabilityProfile.SystemMemoryBytes = uint64(total * (1 << 30))
+				m.MemoryObservation = &HostMemoryObservation{TotalGB: total}
+				m.Devices[0].ReserveMemoryGB = 0
+				m.Devices[0].BudgetGB, m.Devices[0].TotalMemoryGB, m.Devices[0].FreeMemoryGB = total, total, total
+				s := sharedSpec("experiment", total/8)
+				s.Needs.HostMemoryGB = total / 32
+				first := submit(t, q, s)
+				a := assignedJob(machineCheck(t, q, m))
+				if a == nil || a.ID != first.ID {
+					t.Fatal("first attempt not assigned")
+				}
+				if err := q.Started(result(a, false)); err != nil {
+					t.Fatal(err)
+				}
+				second := submit(t, q, s)
+				// No current evidence: a declared number alone cannot authorize sharing.
+				if r := growthCheck(t, q, m, []*Job{a}, nil, 0); assignedJob(r) != nil {
+					t.Fatal("missing evidence shared")
+				}
+				ceilings := fakeCeilings(t)
+				fs := &unifiedResidentFS{values: map[string]string{}}
+				rootResident := total / 4
+				stat := func(gb float64) string { return fmt.Sprintf("anon %d\nkernel 0\nshmem 0\n", uint64(gb*(1<<30))) }
+				fs.set(filepath.Join(ceilings.root, "memory.stat"), stat(rootResident))
+				fs.set("/proc/meminfo", fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64((total-rootResident)*(1<<20))))
+				var memory []*memoryAttempt
+				for i := 0; i < 2; i++ {
+					mem, err := ceilings.create(fmt.Sprint("attempt-", i), int64(total*(1<<30)), 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					mem.fs, mem.hostBaseline, mem.rootBaseline = fs, &gpuHostState{available: total}, new(float64)
+					pid := 42 + i
+					fs.set(filepath.Join(mem.path, "memory.stat"), stat(total/8))
+					fs.set(filepath.Join(mem.path, "memory.current"), strconv.FormatUint(uint64(total/8*(1<<30)), 10))
+					fs.set(filepath.Join("/proc", strconv.Itoa(pid), "status"), fmt.Sprintf("VmRSS: %d kB\n", uint64(total/8*(1<<20))))
+					memory = append(memory, mem)
+				}
+				dir := t.TempDir()
+				t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, N/A\\nGPU-one, 43, N/A\\n'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				workerClock := &lockedTestClock{now: clock.Now()}
+				w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock}
+				ctx, cancel := context.WithCancel(context.Background())
+				var results []<-chan deviceMemoryResult
+				var ticks []chan time.Time
+				for i, mem := range memory {
+					trigger := make(chan time.Time, 1)
+					ticks = append(ticks, trigger)
+					pid, other := 42+i, 43-i
+					results = append(results, w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
+						return map[int]bool{pid: true}, map[int]bool{other: true}, nil
+					}, fs, time.Second, workerClock, mem, trigger))
+					trigger <- workerClock.Now()
+				}
+				t.Cleanup(func() {
+					cancel()
+					for _, r := range results {
+						select {
+						case <-r:
+						case <-time.After(testWaitTimeout):
+							t.Error("sampler did not stop")
+						}
+					}
+				})
+				await(t, func() bool { return memory[0].device.Load() != nil && memory[1].device.Load() != nil })
+				report := func(j *Job, i int) AttemptReport {
+					return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: memory[i].currentHostMemory(workerClock).aged(clock.Now())}
+				}
+				r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report(a, 0)}})
 				if err != nil {
 					t.Fatal(err)
 				}
-				mem.fs, mem.hostBaseline, mem.rootBaseline = fs, &gpuHostState{available: total}, new(float64)
-				pid := 42 + i
-				fs.set(filepath.Join(mem.path, "memory.stat"), stat(total/8))
-				fs.set(filepath.Join(mem.path, "memory.current"), strconv.FormatUint(uint64(total/8*(1<<30)), 10))
-				fs.set(filepath.Join("/proc", strconv.Itoa(pid), "status"), fmt.Sprintf("VmRSS: %d kB\n", uint64(total/8*(1<<20))))
-				memory = append(memory, mem)
-			}
-			dir := t.TempDir()
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, N/A\\nGPU-one, 43, N/A\\n'\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			workerClock := &lockedTestClock{now: clock.Now()}
-			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock}
-			ctx, cancel := context.WithCancel(context.Background())
-			var results []<-chan deviceMemoryResult
-			var ticks []chan time.Time
-			for i, mem := range memory {
-				trigger := make(chan time.Time, 1)
-				ticks = append(ticks, trigger)
-				pid, other := 42+i, 43-i
-				results = append(results, w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
-					return map[int]bool{pid: true}, map[int]bool{other: true}, nil
-				}, fs, time.Second, workerClock, mem, trigger))
-				trigger <- workerClock.Now()
-			}
-			t.Cleanup(func() {
-				cancel()
-				for _, r := range results {
-					select {
-					case <-r:
-					case <-time.After(testWaitTimeout):
-						t.Error("sampler did not stop")
-					}
+				b := assignedJob(r)
+				if b == nil || b.ID != second.ID {
+					t.Fatal("two small jobs did not share", job(t, q, second.ID).Reason, memory[0].device.Load())
+				}
+				if err := q.Started(result(b, false)); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(maxGPUStopGrace + deviceMemorySamplePeriod)
+				// The grower consumes another 1/32 of RAM in one sample horizon.
+				// Its forecast consumes the remaining physical headroom before zero.
+				fs.mu.Lock()
+				workerClock.advance(maxGPUStopGrace + deviceMemorySamplePeriod)
+				fs.values[filepath.Join(memory[0].path, "memory.stat")] = stat(total * 5 / 32)
+				fs.values["/proc/42/status"] = fmt.Sprintf("VmRSS: %d kB\n", uint64(total*5/32*(1<<20)))
+				fs.values[filepath.Join(ceilings.root, "memory.stat")] = stat(total * 9 / 32)
+				fs.values["/proc/meminfo"] = fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64(total*23/32*(1<<20)))
+				fs.mu.Unlock()
+				for _, tick := range ticks {
+					tick <- workerClock.Now()
+				}
+				await(t, func() bool {
+					return memory[0].device.Load().at.Equal(workerClock.Now()) && memory[1].device.Load().at.Equal(workerClock.Now())
+				})
+				if sample := memory[0].device.Load(); sample.gb != total*5/32 || sample.growthGB != total/32 || sample.exclusive {
+					t.Fatal("fake-clock growth signal incorrect", sample)
+				}
+				// Host pressure from other users leaves less than one observed growth
+				// horizon, though both reservations and current samples fit the card.
+				m.MemoryObservation.UsedGB = total * 63 / 64
+				_, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report(a, 0), report(b, 1)}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				requireState(t, q, a.ID, "stopping")
+				requireState(t, q, b.ID, "running")
+				if got := job(t, q, a.ID); priorityStop(got) == nil || got.Reason != "shared GPU growth consumes physical memory headroom" {
+					t.Fatal("physical headroom did not trigger a planned stop", got.Reason)
 				}
 			})
-			await(t, func() bool { return memory[0].device.Load() != nil && memory[1].device.Load() != nil })
-			report := func(j *Job, i int) AttemptReport {
-				return AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, CurrentHostMemory: memory[i].currentHostMemory(workerClock).aged(clock.Now())}
-			}
-			r, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report(a, 0)}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			b := assignedJob(r)
-			if b == nil || b.ID != second.ID {
-				t.Fatal("two small jobs did not share", job(t, q, second.ID).Reason, memory[0].device.Load())
-			}
-			if err := q.Started(result(b, false)); err != nil {
-				t.Fatal(err)
-			}
-			clock.Advance(maxGPUStopGrace + deviceMemorySamplePeriod)
-			// The grower consumes another 1/32 of RAM in one sample horizon.
-			// Its forecast consumes the remaining physical headroom before zero.
-			fs.mu.Lock()
-			workerClock.advance(maxGPUStopGrace + deviceMemorySamplePeriod)
-			fs.values[filepath.Join(memory[0].path, "memory.stat")] = stat(total * 5 / 32)
-			fs.values["/proc/42/status"] = fmt.Sprintf("VmRSS: %d kB\n", uint64(total*5/32*(1<<20)))
-			fs.values[filepath.Join(ceilings.root, "memory.stat")] = stat(total * 9 / 32)
-			fs.values["/proc/meminfo"] = fmt.Sprintf("MemAvailable: %d kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n", uint64(total*23/32*(1<<20)))
-			fs.mu.Unlock()
-			for _, tick := range ticks {
-				tick <- workerClock.Now()
-			}
-			await(t, func() bool {
-				return memory[0].device.Load().at.Equal(workerClock.Now()) && memory[1].device.Load().at.Equal(workerClock.Now())
-			})
-			if sample := memory[0].device.Load(); sample.gb != total*5/32 || sample.growthGB != total/32 || sample.exclusive {
-				t.Fatal("fake-clock growth signal incorrect", sample)
-			}
-			// Host pressure from other users leaves less than one observed growth
-			// horizon, though both reservations and current samples fit the card.
-			m.MemoryObservation.UsedGB = total * 63 / 64
-			_, err = q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report(a, 0), report(b, 1)}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			requireState(t, q, a.ID, "stopping")
-			requireState(t, q, b.ID, "running")
-			if got := job(t, q, a.ID); priorityStop(got) == nil || got.Reason != "shared GPU growth consumes physical memory headroom" {
-				t.Fatal("physical headroom did not trigger a planned stop", got.Reason)
-			}
 		})
 	}
 }
