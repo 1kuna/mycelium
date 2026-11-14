@@ -76,8 +76,8 @@ func testWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 			if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "NAS unreachable: filesystem operation timed out") {
 				t.Fatalf("timeout error changed: %v", err)
 			}
-			if !s.checkpointUnavailable || s.state.Result != nil || s.state.PID != 0 {
-				t.Fatal("timed-out preparation started or failed the job")
+			if s.checkpointUnavailable || s.state.Result != nil || s.state.PID != 0 {
+				t.Fatal("pending preparation started, failed, or fenced the job's storage")
 			}
 		case <-time.After(checkpointPreparationBudget + time.Second):
 			t.Fatal("hung preparation exceeded its bounded wait")
