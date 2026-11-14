@@ -369,7 +369,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		if e = ctx.Err(); e != nil {
 			return e
 		}
-		return os.Rename(stage, root)
+		return renameStoragePath(ctx, stage, root)
 	})
 	if err != nil {
 		return "", err

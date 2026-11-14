@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -974,7 +975,7 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 		}
 	}
 	if err == nil {
-		err = os.Rename(staging, dest)
+		err = renameStoragePath(context.Background(), staging, dest)
 	}
 	if err == nil {
 		err = syncDir(j.Checkpoint)

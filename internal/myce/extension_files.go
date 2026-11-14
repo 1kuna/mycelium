@@ -204,7 +204,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		return err
 	}
 	operation = "publish"
-	if err := os.Rename(staged, dir); err != nil {
+	if err := renameStoragePath(ctx, staged, dir); err != nil {
 		return err
 	}
 
@@ -305,7 +305,9 @@ func (w Worker) publishExtensionFiles(j Job, attemptWork string) (err error) {
 }
 
 func publishJobOutputs(j Job, root string) error {
-	return publishDirectoryJobOutputs(j, root, os.Rename, copyJobFileContents)
+	return publishDirectoryJobOutputs(j, root, func(from, to string) error {
+		return renameStoragePath(context.Background(), from, to)
+	}, copyJobFileContents)
 }
 
 // Publish each prefix as one complete attempt directory on local and shared

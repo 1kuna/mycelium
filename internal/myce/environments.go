@@ -795,7 +795,7 @@ func (c *EnvironmentCache) trash(path string) error {
 		return nil
 	}
 	dst := filepath.Join(c.Root, ".Trash", ID()+"-"+filepath.Base(path))
-	if e := os.Rename(path, dst); e != nil {
+	if e := renameStoragePath(context.Background(), path, dst); e != nil {
 		return e
 	}
 	_, e := os.Stat(dst)

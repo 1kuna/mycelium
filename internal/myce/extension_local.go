@@ -110,7 +110,7 @@ func InstallExtension(root string, e Extension) error {
 			return err
 		}
 	}
-	if err := os.Rename(tmp, dir); err != nil {
+	if err := renameStoragePath(context.Background(), tmp, dir); err != nil {
 		return err
 	}
 	return nil

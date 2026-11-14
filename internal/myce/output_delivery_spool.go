@@ -124,7 +124,7 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 	if err = syncModelDirectory(stage); err != nil {
 		return "", nil, err
 	}
-	if err = os.Rename(stage, dest); err != nil {
+	if err = renameStoragePath(context.Background(), stage, dest); err != nil {
 		return "", nil, err
 	}
 	if err = syncWorkerDir(parent); err != nil {
