@@ -144,6 +144,8 @@ func installName(v string) error {
 // explicit aliases for one field, so table order can never define precedence.
 func InstallSettings() []InstallSetting {
 	return []InstallSetting{
+		// Invocation evidence only: no flag, persistence or configuration authority.
+		{Field: "storageWarning"},
 		installSetting("daily-use", "DailyUse", "wait for owner inactivity and safe power/heat", func(c *ServiceConfig) *bool { return &c.DailyUse }, installAny[bool]),
 		installContext(installSetting("laptop", "Laptop", "require external power", func(c *ServiceConfig) *bool { return &c.Laptop }, installAny[bool]), func(c ServiceConfig) error {
 			if c.Laptop && c.Desktop {

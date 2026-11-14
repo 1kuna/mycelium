@@ -319,8 +319,10 @@ func TestRereviewMountInventoryHasIndependentBudget(t *testing.T) {
 		defer cancel()
 		start := time.Now()
 		command := func(ctx context.Context, _ string, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
-		_, err := PrepareOnboardingStorage(ctx, c, false, command)
-		requirePreflightCode(t, err, "nas_unresponsive")
+		got, err := PrepareOnboardingStorage(ctx, c, false, command)
+		if err != nil || got.storageWarning == nil || !got.storageWarning.TimedOut {
+			t.Fatalf("missing inventory warning: %+v %v", got.storageWarning, err)
+		}
 		if elapsed := time.Since(start); elapsed != onboardingMountInventoryBudget {
 			t.Fatalf("mount inventory exceeded its budget: %s", elapsed)
 		}
