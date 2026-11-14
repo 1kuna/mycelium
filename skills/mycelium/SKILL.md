@@ -192,9 +192,11 @@ per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#pla
 A stopped job loses everything since its last checkpoint. For anything long,
 save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
 declare `advanced: {resumable: true}`; Python's `mycelium.Checkpoint` and `StopSignal` do
-the saving and the signal. A stop sends SIGTERM to the process group with 10
-seconds (production preemption) or two minutes (deadline, planned leave) before
-SIGKILL, so also save periodically. Checkpoints are kept 72 hours after the job
+the saving and the signal. A stop sends SIGTERM, then SIGKILL to the whole
+process group 10 seconds (production preemption) or two minutes (deadline,
+planned leave) later, so also save periodically. A GPU or device job's whole
+group gets the SIGTERM; a CPU-only job's SIGTERM goes only to the launched
+process, so a wrapper script must forward it to the process that saves. Checkpoints are kept 72 hours after the job
 ends; declare outputs for anything you need
 ([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
 
