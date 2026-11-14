@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -45,7 +46,7 @@ func TestInputStagingTimestampPrecedesMemoryAndLaunch(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	c := Client{URL: server.URL, Token: "test"}
+	c := Client{URL: server.URL, Token: "test", stagingWire: &atomic.Bool{}}
 	w := Worker{StateDir: newTestStateRoot(t), Machine: m, Clock: clock, Client: c, JobFileRoot: q.root, ExtensionRoot: extensionRoot, extensionFingerprint: m.ExtensionFingerprint,
 		HostMemorySource: func(context.Context) (float64, error) { return 64, nil },
 		MemorySource: func(context.Context) (float64, error) {

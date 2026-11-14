@@ -1240,6 +1240,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 }
 func (w Worker) Run(stop context.Context) error {
 	w.Client.faultWire = &atomic.Bool{}
+	w.Client.stagingWire = &atomic.Bool{}
 	w.launchCtx = stop
 	if w.ServiceConfig != nil {
 		w.serviceStop = stop

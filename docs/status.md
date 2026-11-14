@@ -52,7 +52,9 @@ Do not sum nested counters or call the whole interval network transfer time.
 Unmeasured remainder includes dispatch, retries between preparation calls and
 uninstrumented local setup; headers do not split queue-internal work. Environment
 or checkpoint preparation after inputs-staged belongs to the later launch
-interval. Legacy attempts have no phase evidence; timings never change scheduling.
+interval. Legacy attempts have no phase evidence; timings never change scheduling. During
+a rolling upgrade, workers retain timings locally and send them only after the
+queue advertises staging phase support on its existing worker replies.
 
 The rest of this page is a field-by-field reference.
 

@@ -9,7 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -178,4 +181,72 @@ func (b *stagingTimedBody) Read(p []byte) (int, error) {
 		b.advanced = true
 	}
 	return b.ReadCloser.Read(p)
+}
+
+// The adjacent queue rejects new request fields. Negotiation must strip only
+// the wire copy, and a queue replacement's decode refusal is safe to retry once.
+func TestStagingPhasesWireCompatibility(t *testing.T) {
+	var advertised, allow bool
+	var mu sync.Mutex
+	applied := 0
+	var seen []bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		present := body["staging_timings"] != nil
+		if raw := body["attempts"]; raw != nil {
+			var reports []map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &reports); err != nil {
+				t.Error(err)
+			}
+			for _, report := range reports {
+				present = present || report["staging_timings"] != nil
+			}
+		}
+		seen = append(seen, present)
+		w.Header().Set("Content-Type", "application/json")
+		if advertised {
+			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
+		}
+		if present && !allow {
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, `{"code":"request_invalid","error":"unknown field"}`)
+			return
+		}
+		applied++
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	wire := &atomic.Bool{}
+	client := Client{URL: server.URL, stagingWire: wire}
+	facts := &StagingTimings{StartedAt: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
+	report := Checkin{Attempts: []AttemptReport{{StagingTimings: facts}}}
+	send := func(path string, value any) {
+		t.Helper()
+		if err := client.Call(context.Background(), "POST", path, value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("/api/workers/checkin", &report) // old queue, no field and no refusal
+	mu.Lock()
+	advertised, allow = true, true
+	mu.Unlock()
+	send("/api/workers/checkin", report) // discover support without new JSON fields
+	send("/api/workers/checkin", report) // telemetry now sent
+	r := Result{StagingTimings: facts}
+	send("/api/workers/started", &r)
+	mu.Lock()
+	advertised, allow = false, false
+	mu.Unlock()
+	send("/api/workers/complete", &r) // decode refusal then stripped replay
+	mu.Lock()
+	defer mu.Unlock()
+	want := []bool{false, false, true, true, true, false}
+	if applied != 5 || !slices.Equal(seen, want) || wire.Load() || report.Attempts[0].StagingTimings != facts || r.StagingTimings != facts {
+		t.Fatal("wire negotiation lost evidence or changed application count", seen, wire.Load())
+	}
 }

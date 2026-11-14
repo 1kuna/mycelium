@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -188,4 +189,45 @@ func (s *StagingTimings) String() string {
 		}
 	}
 	return b.String()
+}
+
+const stagingPhasesHeader = "X-Myce-Staging-Phases"
+const stagingPhasesProtocol = "staging-phases-v1"
+
+// Preserve durable evidence locally while the adjacent older queue still uses
+// a strict decoder. Like fault evidence, negotiate on existing worker replies.
+func stagingWireInput(in any, supported bool) (any, bool) {
+	switch c := in.(type) {
+	case *Checkin:
+		if c != nil {
+			return stagingWireInput(*c, supported)
+		}
+	case *Result:
+		if c != nil {
+			return stagingWireInput(*c, supported)
+		}
+	case Checkin:
+		present := false
+		for _, report := range c.Attempts {
+			present = present || report.StagingTimings != nil
+		}
+		if supported {
+			return c, present
+		}
+		if !present {
+			return c, false
+		}
+		c.Attempts = slices.Clone(c.Attempts)
+		for i := range c.Attempts {
+			c.Attempts[i].StagingTimings = nil
+		}
+		return c, false
+	case Result:
+		if supported {
+			return c, c.StagingTimings != nil
+		}
+		c.StagingTimings = nil
+		return c, false
+	}
+	return in, false
 }

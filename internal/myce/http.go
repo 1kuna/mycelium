@@ -524,6 +524,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(resourceProtocolHeader, resourceProtocol)
 			w.Header().Set(cpuPressureProtocolHeader, cpuPressureProtocol)
 			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
+			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
 		}
 		var finishBudget func()
 		var budgetErr error
@@ -685,10 +686,11 @@ func (q *Queue) Run(ctx context.Context) error {
 var clientTransport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 type Client struct {
-	faultWire *atomic.Bool
-	URL       string
-	Token     string
-	HTTP      *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	stagingWire *atomic.Bool
+	faultWire   *atomic.Bool
+	URL         string
+	Token       string
+	HTTP        *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
 	transferIdle  time.Duration
 	uploadTiming  *uploadTiming
@@ -707,14 +709,19 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	var last error
 	for {
 		started := clock.Now()
-		wireIn, faultFields := faultWireInput(in, c.faultWire != nil && c.faultWire.Load())
+		prepared, stagingFields := stagingWireInput(in, c.stagingWire != nil && c.stagingWire.Load())
+		wireIn, faultFields := faultWireInput(prepared, c.faultWire != nil && c.faultWire.Load())
 		err := c.callWatched(ctx, method, path, wireIn, out)
 		var rejected *HTTPError
-		if faultFields && errors.As(err, &rejected) && rejected.Status == 400 && rejected.Code == "request_invalid" {
+		if (faultFields || stagingFields) && errors.As(err, &rejected) && rejected.Status == 400 && rejected.Code == "request_invalid" {
 			if c.faultWire != nil {
 				c.faultWire.Store(false)
 			}
+			if c.stagingWire != nil {
+				c.stagingWire.Store(false)
+			}
 			legacy, _ := faultWireInput(in, false)
+			legacy, _ = stagingWireInput(legacy, false)
 			err = c.callWatched(ctx, method, path, legacy, out)
 		}
 		var api *HTTPError
@@ -769,6 +776,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		return err
 	}
 	defer res.Body.Close()
+	if c.stagingWire != nil && workerProtocolEndpoint(path) {
+		c.stagingWire.Store(res.Header.Get(stagingPhasesHeader) == stagingPhasesProtocol)
+	}
 	if c.faultWire != nil && workerProtocolEndpoint(path) {
 		c.faultWire.Store(res.Header.Get(faultEvidenceHeader) == faultEvidenceProtocol)
 	}
