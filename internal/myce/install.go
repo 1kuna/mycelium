@@ -112,6 +112,8 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 }
 
 type ServiceConfig struct {
+	storageWarning *StoragePreflightFailure // Current invocation only; never configuration authority.
+
 	DailyUse       bool            `json:"daily_use"`
 	Laptop         bool            `json:"laptop"`
 	Desktop        bool            `json:"desktop"`
@@ -466,7 +468,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 	}
-	var extraPaths []string
+	extraPaths := []string{filepath.Join(c.State, installStorageReceiptFile)}
 	if invitation != nil {
 		extraPaths = append(extraPaths, c.JoiningFile)
 	}
@@ -486,7 +488,8 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			}
 		}
 	}()
-	if err := prepareInstallNAS(ctx, c, command); err != nil {
+	warning, err := prepareInstallStorage(ctx, c, command, false, files.storageFS)
+	if err != nil {
 		return err
 	}
 	if err := PrepareStateRoots(roots...); err != nil {
@@ -500,6 +503,13 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if err = os.MkdirAll(path, 0700); err != nil {
 			return err
 		}
+	}
+	receipt, err := json.Marshal(installStorageReceipt{Warning: warning})
+	if err != nil {
+		return err
+	}
+	if err := tx.put(filepath.Join(c.State, installStorageReceiptFile), receipt, 0600); err != nil {
+		return err
 	}
 	if reconciliation != nil {
 		// The rollback snapshot must contain exactly the qualified slot bytes.

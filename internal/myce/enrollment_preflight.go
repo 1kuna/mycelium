@@ -24,7 +24,7 @@ func PreflightEnrollmentInstall(ctx context.Context, c ServiceConfig, executable
 	if err := CheckStateRoots(roots...); err != nil {
 		return err
 	}
-	if err := prepareInstallNASMode(ctx, c, command, true); err != nil {
+	if _, err := prepareInstallStorage(ctx, c, command, true, nil); err != nil {
 		return err
 	}
 	if c.Detection.OS == "linux" {
