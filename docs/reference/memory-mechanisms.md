@@ -62,6 +62,12 @@ it does not raise the attempt's ceiling or its allowance charge. Release
 planning returns the corresponding headroom as well as the charge. A yielded
 job stays queued while the surviving lenders still need that headroom; fresh
 measurements or their exact release admit it again, without a timed cooldown.
+The last started copy's lending-yield cause survives requeue and queue restart.
+On that same host, readmission must fit the live attempts' unconsumed ceilings
+and the resumed job's limit without lending again. A flat or missing growth
+sample cannot clear that claim; measured room or exact release can. Other
+hosts and first admissions keep ordinary by-use lending. Unknown physical
+telemetry withholds admission but never counts as measured pressure for a yield.
 
 ### Job memory envelopes
 <a id="amendment-job-memory-envelopes-146"></a>
@@ -76,7 +82,7 @@ per-observation bounds. Do not add a newer range's variation to an older,
 already larger cumulative peak, or treat differences between allowance-key
 maxima as another measured range. Incomplete observations independently retain
 their total-cgroup peak plus sampling growth, with launch slack added separately;
-a complete neighbour never discounts them. These margins cover measured between-attempt variation,
+except for the covered exact-local unified CUDA case below. These margins cover measured between-attempt variation,
 growth before the next sample and snapshot-to-launch drift, respectively.
 They are empirical bounds, not guarantees about an unseen tail; pressure,
 OOM recovery, physical admission and release custody still bind.
@@ -217,6 +223,13 @@ or final age beyond two periods rejects completeness. Attempt completion waits
 at most one period for a cancelled collector; late results cannot change its
 published peak. This bounds observation latency, never job execution time.
 Every host/driver sample must succeed; existing nonzero host swap is allowed.
+`memory_peak.host_sampling` retains the first failed host predicate, successful
+collection count, maximum read duration/gap and final age. Read errors use bounded
+source/class labels rather than raw errors or private paths. CUDA proc status may
+vanish between cgroup enumeration and reading: only a fresh exact-subtree inventory
+confirming that PID has left permits skipping it; absolute physical/global pin
+counters still cover residual allocations. Missing live-PID counters, permission
+errors, slow reads and real gaps continue to reject completeness.
 Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
 baseline the host and attempt-cgroup cumulative `some total` counters before
 payload/sidecar launch, while the attempt cgroup is empty. Reject learning if
@@ -266,9 +279,15 @@ sample, physical headroom and stop-grace guards. The CUDA absolute outside-root
 residual includes device pages: preserve each complete combined physical upper
 bound plus its measured host range/growth and device variation independently of
 non-reclaimable host plus device. Do not add device again to the residual or
-subtract independently sampled maxima to claim a unique-page union. Every
-incomplete historical row retains total-cgroup plus device sizing and its host
-uncertainty. Cross-machine transfer, unknown attribution, recovery/retry floors
+subtract independently sampled maxima to claim a unique-page union. A physical range needs two complete accepted attempts to measure variation.
+It supersedes incomplete total-cgroup-plus-device forecasts only if the complete
+forecast covers every retained total-cgroup-plus-growth floor and every
+resident-plus-device forecast, including measured device variation. An uncovered
+peak restores the conservative additive fallback. Incomplete-only kinds keep
+their existing estimator; missing history is never relabelled as cache. Keep each
+cumulative physical peak plus drift independently of a restarted range's forecast.
+Physical-range variation, sampling growth and device variation share the forecast
+margin; do not add a device allowance again to an already combined bound. Cross-machine transfer, unknown attribution, recovery/retry floors
 and rejected-pressure exclusions retain their conservative rules.
 
 **Ceiling-bound envelopes.** There is no low-resident file-cache exception. OOM, swap-out,
@@ -319,8 +338,14 @@ Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
 For unified CUDA, retain the physical [free-RAM floor](../design-proposal.md#unified-cuda-free-ram-floor) equal to the existing OS/driver reserve. Fresh raw host observations and outstanding growth bound queue
-admission; workers recheck raw RAM at launch. Cgroup credit never reduces the
-device vector. Lower tiers must also leave room for a sole qualified host's
+admission; workers recheck raw RAM at launch. Fresh exact-attempt direct CUDA
+readings on unified hosts can credit already-resident physical memory through
+the existing single-process union lower bound: max(all credited host pages,
+one process's device counter), never their sum or summed process counters.
+Missing, stale, ambiguous, fallback and multi-card evidence keep conservative
+admission. This credit reduces pending physical growth while retaining the
+charged envelope, unconsumed device demand, growth-stop forecast and OOM
+protection. Cgroup credit never reduces the device vector. Lower tiers must also leave room for a sole qualified host's
 queued or forecast production envelope with existing estimator margins. Existing
 production holds, preemption and work-scoped parity approvals remain authoritative.
 

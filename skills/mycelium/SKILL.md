@@ -27,6 +27,18 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 
+For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
+`host_memory_ledger` on supporting queues. Compare physical room
+(`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
+at that snapshot's timestamp. Charges alone do not explain live occupancy;
+do not combine an earlier wait with a later machine reading. Missing ledgers
+on older records are unknown, not zero usage. On supporting unified CUDA
+workers, fresh exact-attempt single-process device evidence also earns resident
+credit through max(all credited host pages, one device process counter). Device
+counters are never summed for this credit. Missing/stale/ambiguous evidence and
+older workers retain conservative pending growth; this does not reduce charges
+or qualify native coexistence.
+
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
@@ -356,7 +368,10 @@ files. Memory safety stops have distinct causes: `shared_gpu_pressure` for
 shared-card growth or uncertain attribution, and `memory_overcommit_yield`
 when running work grows into lent host RAM. These can interrupt equal tiers;
 they are not a waiting job's priority preemption. A lending yield waits on
-measured headroom before readmission; keep the same job and key.
+measured headroom before readmission; keep the same job and key. A wait saying
+`waiting for lent host memory` means the same host cannot yet fit the running
+attempts' remaining ceilings and this job's limit without lending again. A flat
+growth sample does not clear it; measured capacity or exact release does.
 Lost machines and critical Mycelium updates can interrupt any tier; the
 job requeues on the same key and resumes from its checkpoint. Work that
 Mycelium stopped for its own maintenance or updates resumes ahead of the
@@ -458,7 +473,12 @@ present. A CUDA proc physical upper bound includes device and possibly unrelated
 occupancy. With repeated complete accepted local evidence, Mycelium keeps that
 combined bound independently of non-reclaimable host plus device, and uses
 between-attempt device peak variation rather than adding startup allocation twice.
-Incomplete historical readings retain total-cgroup plus device floors; unknown
+Retain `host_sampling` too: its predicate and read/gap/final-age timings explain
+incomplete host evidence; device completeness alone does not establish host
+coverage. Repeated complete physical forecasts supersede legacy additive sizing
+only when they cover every retained total-cgroup floor and resident-plus-device
+forecast. Incomplete-only history and uncovered larger peaks keep conservative
+sizing; unknown
 or stale live device attribution still requires exclusive execution. For local
 benchmark telemetry on a worker-only host, omit `--queue-pid`; its RSS is marked
 `not_configured`. See the

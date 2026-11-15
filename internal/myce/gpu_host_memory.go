@@ -384,7 +384,45 @@ func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, 
 // not job runtime; slow/incomplete evidence costs conservative sizing only.
 const attemptMemorySamplePeriod = 200 * time.Millisecond
 
+// HostMemorySampling explains why host evidence was or was not promoted.
+// Labels are worker-owned predicates, never raw errors, PIDs or private paths.
+type HostMemorySampling struct {
+	Complete             bool    `json:"complete"`
+	Reason               string  `json:"reason"`
+	Samples              int     `json:"samples"`
+	MaxCollectionSeconds float64 `json:"max_collection_seconds"`
+	MaxIntervalSeconds   float64 `json:"max_interval_seconds"`
+	FinalAgeSeconds      float64 `json:"final_age_seconds"`
+}
+
+type hostMemoryReadError struct {
+	reason string
+	err    error
+}
+
+func (e hostMemoryReadError) Error() string { return e.reason }
+func (e hostMemoryReadError) Unwrap() error { return e.err }
+
+func hostMemoryReadReason(err error) string {
+	reason := "driver_read"
+	var read hostMemoryReadError
+	if errors.As(err, &read) {
+		reason = read.reason
+	}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return reason + ":not_found"
+	case errors.Is(err, os.ErrPermission):
+		return reason + ":permission"
+	case errors.Is(err, errAttemptMemoryUnsupported):
+		return reason + ":unsupported"
+	default:
+		return reason + ":read_failed"
+	}
+}
+
 type gpuHostCollection struct {
+	sampling             HostMemorySampling
 	driverGB             float64
 	pinnedGB, physicalGB float64
 	seen                 bool
@@ -417,10 +455,25 @@ func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper,
 				gb, seen, err = a.gpuHostMemory(context.WithoutCancel(ctx), clock, helper, pci)
 			}
 			end := clock.Now()
-			if err != nil || end.Before(start) || end.Sub(start) > attemptMemorySamplePeriod || !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod {
+			out.sampling.MaxCollectionSeconds = max(out.sampling.MaxCollectionSeconds, end.Sub(start).Seconds())
+			if !out.last.IsZero() {
+				out.sampling.MaxIntervalSeconds = max(out.sampling.MaxIntervalSeconds, start.Sub(out.last).Seconds())
+			}
+			switch {
+			case err != nil:
+				out.sampling.Reason = hostMemoryReadReason(err)
+			case end.Before(start):
+				out.sampling.Reason = "collector_clock_reversed"
+			case end.Sub(start) > attemptMemorySamplePeriod:
+				out.sampling.Reason = "collector_read_over_period"
+			case !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod:
+				out.sampling.Reason = "collector_gap"
+			}
+			if out.sampling.Reason != "" {
 				out.complete = false
 				return
 			}
+			out.sampling.Samples++
 			out.driverGB, out.seen, out.last = max(out.driverGB, gb), out.seen || seen, end
 			out.pinnedGB, out.physicalGB = max(out.pinnedGB, pinned), max(out.physicalGB, physical)
 			select {

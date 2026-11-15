@@ -322,8 +322,9 @@ func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 	return validMemoryValue(available) && available >= hostNeed(m, gpu, host)
 }
 
-// CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
-// Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
+// CurrentHostMemory reports uniquely charged host RAM and an optional direct
+// single-process device lower bound. Peaks, RSS and summed device counters
+// cannot safely grant physical resident credit.
 type CurrentHostMemory struct {
 	// Stable worker-local observation identity, not a queue-clock timestamp.
 	// Negotiated independently; cached/delayed deliveries cannot renew credit.
@@ -348,13 +349,16 @@ type CurrentHostMemory struct {
 	// The latest device counter or labelled conservative unified-RAM estimate.
 	// Exclusive marks uncertain ownership and forbids co-tenancy. Neither RSS
 	// nor this estimate grants nonreclaimable host-memory credit.
-	DeviceSource     string   `json:"device_source,omitempty"`
-	DeviceExclusive  bool     `json:"device_exclusive,omitempty"`
-	DeviceGB         *float64 `json:"device_gb,omitempty"`
+	DeviceSource    string   `json:"device_source,omitempty"`
+	DeviceExclusive bool     `json:"device_exclusive,omitempty"`
+	DeviceGB        *float64 `json:"device_gb,omitempty"`
+	// Largest direct process counter, never the sum across the attempt tree.
+	// Absent on older workers or when device attribution is incomplete.
+	DeviceResidentGB *float64 `json:"device_resident_gb,omitempty"`
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
 	deviceSample     *atomic.Pointer[hostMemorySample]
-	deviceResidentGB float64 // Local direct CUDA single-process lower bound; never sent on the wire.
+	deviceResidentGB float64 // Worker-local mirror of the direct single-process bound.
 }
 
 // Refresh device telemetry independently of the actor snapshot. Log/result I/O
@@ -374,6 +378,12 @@ func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
 			sample.DeviceGB, sample.deviceSampledAt, sample.DeviceGrowthGB = &gb, device.at, device.growthGB
 			sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB = device.source, device.exclusive, device.rateGB
 			sample.deviceResidentGB = device.residentGB
+			if device.source == "" && !device.exclusive && device.residentGB > 0 {
+				resident := device.residentGB
+				sample.DeviceResidentGB = &resident
+			} else {
+				sample.DeviceResidentGB = nil
+			}
 		}
 	}
 	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
@@ -455,6 +465,9 @@ func updateHostMemorySamples(reports []AttemptReport, now time.Time, previous ma
 			s.deviceGrowthGB = sample.DeviceGrowthGB
 			s.source, s.exclusive, s.deviceRateGB = sample.DeviceSource, sample.DeviceExclusive, sample.DeviceGrowthRateGB
 			s.residentGB = sample.deviceResidentGB
+			if sample.DeviceResidentGB != nil && validMemoryValue(*sample.DeviceResidentGB) && *sample.DeviceResidentGB <= *d {
+				s.residentGB = *sample.DeviceResidentGB
+			}
 		}
 		s.peakGB = max(old.peakGB, s.gb, s.footprintGB)
 		s.devicePeakGB = max(old.devicePeakGB, s.deviceGB)
@@ -584,5 +597,5 @@ func (q *Queue) hostJobCharge(j *Job) float64 {
 
 func (q *Queue) hostJobChargeGrowth(j *Job) (charge, growth float64) {
 	m := q.planningAllocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-	return memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now(), q.preemptionGrace())
+	return memoryChargeForGrace(j, m, hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now(), q.preemptionGrace(), q.deviceResidentCredit(j, m))
 }

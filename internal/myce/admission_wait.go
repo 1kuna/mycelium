@@ -114,6 +114,7 @@ func (q *Queue) drainAdmissionWaitLocked(b *admissionWaitBuilder) {
 // The commit already freezes these inputs for supported status reads. Capturing
 // their pointers adds no backlog copy or diagnostic planner work under q.mu.
 type admissionWaitCapture struct {
+	ledgers    map[string]*HostMemoryLedger // Immutable accounting from this committed turn.
 	index      *publishedReadIndex
 	decisions  map[string]map[string]admissionWaitDecision
 	admissions map[string]map[string]AdmissionDecision
@@ -133,7 +134,7 @@ func (q *Queue) freezeAdmissionWait() *admissionWaitCapture {
 			if q.admissionTrace != nil {
 				admissions = q.admissionTrace.jobs
 			}
-			return &admissionWaitCapture{admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock, queueClock: q.clock, revision: q.fileReferenceRevision}
+			return &admissionWaitCapture{ledgers: q.hostMemoryLedgers, admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock, queueClock: q.clock, revision: q.fileReferenceRevision}
 		}
 	}
 	q.admissionWaitLast.Store(nil)
@@ -231,6 +232,7 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	source.s.Jobs, source.records = jobs, nil
 	source.evidenceBytes, source.holdClock = c.bytes, c.clock
 	source.admissionWaitDecisions = c.decisions
+	source.hostMemoryLedgers = c.ledgers
 	source.admissionTrace = &admissionTrace{jobs: c.admissions}
 	source.memoryPlanning = newMemoryPlanningCache()
 	refresh := func(at time.Time) {
@@ -384,6 +386,7 @@ type AdmissionWaitTarget struct {
 	RequiredHostGB      float64               `json:"required_host_gb"`
 	AvailableHostGB     float64               `json:"available_host_gb"`
 	HostMemoryKnown     bool                  `json:"host_memory_known"`
+	HostMemoryLedger    *HostMemoryLedger     `json:"host_memory_ledger,omitempty"`
 	HostDebtGB          float64               `json:"host_debt_gb"`
 	RequiredDeviceGB    float64               `json:"required_device_gb"`
 	AvailableDeviceGB   float64               `json:"available_device_gb"`
@@ -564,7 +567,7 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 		}
 		n := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
-		charge, growth := memoryChargeForGrace(j, owner, n, sample, now, q.preemptionGrace())
+		charge, growth := q.hostJobChargeGrowth(j)
 		h.AdmissionHostGB, h.ChargedHostGB, h.RemainingGrowthGB = waitNumber(n), waitNumber(charge), waitNumber(growth)
 		if j.Spec.Needs.Memory != "auto" {
 			h.DeclaredHostGB = waitNumber(j.Spec.Needs.HostMemoryGB)
@@ -717,6 +720,12 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 					HostMemoryKnown:   m.HostMemoryMeasured && m.HostMemoryError == "",
 					DeviceMemoryKnown: m.MemoryMeasured && m.MemoryError == "",
 					Preemption:        WaitPreemption{Source: "diagnostic_projection", Reason: "not_scheduler_turn"}}
+				// Keep the physical and allowance arms from this comparison. A
+				// later LastMemoryAdmission may describe different occupancy.
+				// Qualification/release projections must not borrow a live ledger.
+				if l := q.hostMemoryLedgers[m.ID]; l != nil && l.FreeGB == m.FreeHostMemoryGB && l.ReservedGB == m.HostMemoryInUseGB {
+					target.HostMemoryLedger = l
+				}
 				var fit targetFit
 				fitsResourcesChecked(candidate, m, m.FreeMemoryGB, &fit)
 				for _, p := range fit.failed {

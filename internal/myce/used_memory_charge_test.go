@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -245,10 +246,11 @@ func TestUsedMemoryOvercommitYieldsLowestTierFirst(t *testing.T) {
 // while the surviving lender can still consume that RAM before a stop lands.
 func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 	for _, tc := range []struct {
-		gpu   bool
-		grace time.Duration
-	}{{false, 10 * time.Second}, {true, 10 * time.Second}, {false, 30 * time.Second}, {true, 30 * time.Second}} {
-		t.Run(fmt.Sprintf("unified_gpu=%t/grace=%s", tc.gpu, tc.grace), func(t *testing.T) {
+		gpu      bool
+		grace    time.Duration
+		recovery string
+	}{{false, 10 * time.Second, "headroom"}, {true, 10 * time.Second, "headroom"}, {false, 30 * time.Second, "headroom"}, {true, 30 * time.Second, "headroom"}, {false, 10 * time.Second, "release"}, {true, 10 * time.Second, "other host"}} {
+		t.Run(fmt.Sprintf("unified_gpu=%t/grace=%s/%s", tc.gpu, tc.grace, tc.recovery), func(t *testing.T) {
 			gpu := tc.gpu
 			q, clock := fixture(t)
 			if err := q.SetPreemptionGrace(tc.grace); err != nil {
@@ -319,15 +321,26 @@ func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 				t.Fatal("pressure did not stop borrower", stopped.State, stopped.Reason)
 			}
 			finishInterrupted(t, q, stopped)
+			q = memoryFactsRestart(t, q, clock)
+			fakeCheckpointAvailability(t, q, true)
 			attempt := job(t, q, victim.ID).Attempt
-			for range 20 {
-				r := report(50, 5, false)
+			for i := range 20 {
+				// A flat sample does not prove the memory lent by this live
+				// execution has been returned. Growth may resume next sample.
+				rate := 5.0
+				if i%2 == 0 {
+					rate = 0
+				}
+				r := report(50, rate, false)
 				if a := assignedJob(r); a != nil {
 					t.Fatalf("readmitted %s into the pressure that caused its yield", a.ID)
 				}
 				got := job(t, q, victim.ID)
 				if got.State != "queued" || got.Attempt != attempt || got.InfrastructureRetries != 0 || got.Losses != 0 {
 					t.Fatal("waiting consumed an attempt or retry", got.State, got.Attempt)
+				}
+				if !strings.Contains(got.Reason, "lent host memory") {
+					t.Fatal("wait does not explain the outstanding lending", got.Reason)
 				}
 			}
 			w := Worker{Machine: m, Clock: clock, AcceleratorStopGrace: tc.grace, hostMemorySamples: workerSamples, HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }}
@@ -341,6 +354,19 @@ func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 			q.mu.Unlock()
 			if afterRelease < victim.MemoryEnvelope.HostGB {
 				t.Fatal("lender release did not return its reserved headroom", afterRelease)
+			}
+			if tc.recovery != "headroom" {
+				if tc.recovery == "release" {
+					finish(t, q, lender, true)
+				} else {
+					m = cpuMachine("other", "other-host", "cpu", 8, 50)
+				}
+				offer := assignedJob(machineCheck(t, q, m))
+				if offer == nil || offer.ID != victim.ID {
+					t.Fatal("yield hold survived actual release or blocked another host", job(t, q, victim.ID).Reason)
+				}
+				finish(t, q, offer, true)
+				return
 			}
 			// A fresh measurement of real headroom, rather than a timer or
 			// a new submission, makes the original job admissible again.
@@ -362,6 +388,17 @@ func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 			if err := rt.checkBatchLaunchMemory(t.Context(), HostLaunch{Machine: m.ID, Session: offer.Session, Key: offer.ID, Attempt: strconv.Itoa(offer.Attempt)}); err != nil {
 				t.Fatal("final prelaunch disagreed", err)
 			}
+			victim = offer
+			if err := q.Started(result(offer, false)); err != nil {
+				t.Fatal(err)
+			}
+			for range 20 {
+				report(120, 5, true)
+				if got := job(t, q, victim.ID); got.State != "running" {
+					t.Fatal("recovered job yielded again", got.State, got.Reason)
+				}
+			}
+			finish(t, q, victim, true)
 		})
 	}
 }
@@ -675,6 +712,33 @@ func TestUnifiedUsedMemoryOvercommitYieldsOnDeviceGrowth(t *testing.T) {
 		}
 	}
 	// The device share grows at 1 GiB/s while free memory falls to 6 GiB.
+	// Admission conservatively maps missing physical evidence to zero room;
+	// that zero must never manufacture a measured safety-stop condition.
+	for _, missing := range []string{"physical observation", "physical capacity", "fresh host health", "fresh worker"} {
+		t.Run(missing, func(t *testing.T) {
+			q.mu.Lock()
+			live := q.s.Machines[m.ID]
+			saved := *live
+			switch missing {
+			case "physical observation":
+				live.MemoryObservation = nil
+			case "physical capacity":
+				live.CapabilityProfile = nil
+			case "fresh host health":
+				live.HostHealth = &HostHealth{Probe: &ProbeObservation{}}
+			case "fresh worker":
+				live.LastSeen = time.Time{}
+			}
+			q.yieldMemoryOvercommit()
+			*live = saved
+			q.mu.Unlock()
+			for _, j := range jobs {
+				if got := job(t, q, j.ID); got.State != "running" {
+					t.Fatal("unknown capacity triggered a safety yield", got.ID, got.State, got.Reason)
+				}
+			}
+		})
+	}
 	report(30, 1, 6)
 	if got := job(t, q, jobs[0].ID); got.State != "running" {
 		t.Fatal("production stopped", got.State, got.Reason)

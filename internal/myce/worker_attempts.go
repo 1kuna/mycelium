@@ -830,10 +830,14 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		usedCores += n
 	}
 	growth := usedRAM
+	var union deviceResidentUnion
+	if len(jobs) > 0 {
+		union = residentUnion(jobs, &w.Machine, w.hostMemorySamples, w.Clock.Now())
+	}
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
-		charge, pending := memoryChargeForGrace(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), w.AcceleratorStopGrace)
+		charge, pending := memoryChargeForGrace(&j, allocationMachine(&w.Machine, j.AllocatedDevices), need, w.hostMemorySamples[jobKey(j)], w.Clock.Now(), w.AcceleratorStopGrace, union.credit(jobKey(j)))
 		usedRAM += charge
 		growth += pending
 		sharedCard := !next.Spec.Needs.cpuOnly() && !j.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) })

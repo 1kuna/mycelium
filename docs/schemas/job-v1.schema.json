@@ -340,6 +340,9 @@
         "host_memory_known": {
           "type": "boolean"
         },
+        "host_memory_ledger": {
+          "$ref": "#/$defs/HostMemoryLedger"
+        },
         "last_planner_decision": {
           "$ref": "#/$defs/AdmissionWaitPlan"
         },
@@ -836,6 +839,9 @@
         },
         "host_gb": {
           "type": "number"
+        },
+        "host_sampling": {
+          "$ref": "#/$defs/HostMemorySampling"
         },
         "nonreclaimable_gb": {
           "type": "number"
@@ -3209,6 +3215,37 @@
         "session",
         "charge_gb",
         "growth_gb"
+      ],
+      "type": "object"
+    },
+    "HostMemorySampling": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "final_age_seconds": {
+          "type": "number"
+        },
+        "max_collection_seconds": {
+          "type": "number"
+        },
+        "max_interval_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "reason",
+        "samples",
+        "max_collection_seconds",
+        "max_interval_seconds",
+        "final_age_seconds"
       ],
       "type": "object"
     },

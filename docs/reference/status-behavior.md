@@ -143,9 +143,16 @@ Accepted work observations also retain `device_range`, the min/max of independen
 attempt device peaks. For exact local unified CUDA work with repeated complete
 host evidence, sizing uses peak variation rather than adding the startup load to
 the already reserved device peak. The CUDA physical residual remains a combined
-upper bound; it is not added to device memory again. Every incomplete historical
-row keeps its total-cgroup plus device floor, and complete rows keep their entire
-physical upper bound. This may still exceed resident host plus device memory.
+upper bound; it is not added to device memory again. Complete physical forecasts supersede legacy additive sizing only when they
+cover every retained total-cgroup floor and resident-plus-device forecast. Two
+complete attempts are the minimum to measure variation; a larger uncovered peak
+keeps conservative additive sizing. Incomplete-only history is unchanged, and
+complete rows keep their entire physical upper bound.
+`memory_peak.host_sampling` retains completeness, the first failed host predicate,
+collection count, maximum read duration/gap and final age. Predicate/error-class
+labels contain no raw errors or private paths. Verified departed PIDs may be
+skipped after exact-subtree re-enumeration; unreadable live PIDs, slow reads and
+real gaps still reject coverage. Older attempts may omit this diagnostic. This may still exceed resident host plus device memory.
 
 `diagnostic_code: memory_evidence_recovering` (#850)
 means declared requirements have an eligible target but the learned/exploratory
@@ -1711,6 +1718,33 @@ Timeout and queue outage fail without changing policy or release custody.
 Every host command uses queue evidence; there is no local envelope or rest verdict.
 
 ### Live headroom and reservations
+
+`admission_wait.first.targets[]` and later wait snapshots retain an optional
+`host_memory_ledger` from that same comparison. It is absent when no matching
+live ledger is available, including hypothetical release/qualification views.
+Use its `capacity_gb - growth_gb` for physical room and
+`allowance_gb - reserved_gb` for allowance room; admission takes the smaller
+arm (and any shared-interactive cap). `capacity_gb` is live RAM after the one
+host margin, not total RAM. `available_gb` is the worker's admission reading,
+which already excludes its explicit reserve. Owner charges include launch
+slack; do not subtract it again. A later `last_memory_admission` or machine
+reading can describe different occupancy and must not be mixed into this
+snapshot. Older records without this ledger cannot recover missing samples.
+
+Linux uses `MemAvailable`, including reclaimable cache, rather than `MemFree`.
+Fresh anonymous resident credit reduces pending growth. On unified CUDA,
+workers also report `current_host_memory.device_resident_gb`, the largest direct
+single-process counter from that exact attempt, separately from the summed
+`device_gb` used for charging. Queue and worker admission credit at most the
+union lower bound: max(all credited host pages, one process's device counter).
+Only the difference goes to that process's attempt; device counters are never
+summed across processes or co-tenants. Missing, stale, ambiguous, fallback or
+multi-card device evidence grants no additional credit. Older workers without
+the lower-bound field keep their conservative behavior. Full charges, remaining
+device demand, growth forecasts and lending-stop headroom remain protected. An
+allowance-minus-charges comparison alone cannot attribute that difference to
+external processes or to an extra reservation. Production reservations and
+device-scoped holds confer priority/release custody, not extra RAM charges.
 
 Per-job JSON retains `last_memory_admission`: the last
 changed blocking host-memory comparison in its current wait episode. It is
