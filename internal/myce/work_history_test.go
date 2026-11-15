@@ -115,8 +115,10 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	// MY-42: retired curve fields in persisted rows are tolerated. The current
 	// duration and memory fields still belong to the accepted-work record.
 	if _, err := q.db.Exec(`UPDATE queue_state SET data=json_set(data,
-		'$.mean_seconds', 999, '$.seconds_per_unit', 888,
-		'$.memory_gb', 777, '$.points', json('[1,2]'))
+		'$.rate', 999, '$.latency_seconds', 888,
+		'$.host_memory_gb', 777, '$.device_memory_gb', 666,
+		'$.units', 10, '$.service_calibration', json('{"samples":2}'),
+		'$.repeated', json('{"samples":3}'))
 		WHERE key LIKE 'work_observations/%'`); err != nil {
 		t.Fatal(err)
 	}
