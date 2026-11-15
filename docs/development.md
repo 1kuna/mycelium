@@ -599,8 +599,8 @@ verification belongs to the separately authorized release after deployment.
 ### Release upgrade compatibility
 
 The full gate runs `scripts/upgrade-compat.py` against the current sources and
-one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.18 candidate
-pairs with r6.17.1 (`706b5bec9f823da1ab8093b417cb9b8033b9b3f7`).
+one pinned predecessor under [MY-42](DECISIONS.md#my-42). The r6.19 candidate
+pairs with r6.18 (`17eeef6b5cd7e254b916df92a7ffa3abc9767ba3`).
 For an additional live patch predecessor, pass its exact commit and version to
 both `prepare` and `run` with `--previous SHA --old-version VERSION`. Advance `PREVIOUS`, `OLD_VERSION` and `VERSION` together for a
 release. `internal/myce/testdata/r6.10-queue.sql` and its generator still pin
