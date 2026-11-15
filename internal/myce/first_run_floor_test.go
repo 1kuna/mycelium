@@ -362,3 +362,47 @@ func TestFirstRunFloorRoomFromWorkerLedger(t *testing.T) {
 		t.Fatalf("others of a charged %g/%g, want b's unstarted %g", charge, pending, want)
 	}
 }
+
+// Missing enforcement is not a blanket placement ban: declarations, accepted
+// sizing and measured retry floors remain usable without a cold bootstrap.
+func TestFirstRunFloorUnenforcedKnownDemand(t *testing.T) {
+	for _, enforcement := range []string{"", "admission-only"} {
+		for _, demand := range []string{"declared", "learned", "retry"} {
+			t.Run(enforcement+"/"+demand, func(t *testing.T) {
+				q, clock, m, s := observationFixture(t)
+				peak := 2.0
+				var queued *Job
+				if demand != "declared" {
+					if demand == "retry" {
+						s.Needs.Memory = "auto"
+					}
+					first := startObservation(t, q, m, s)
+					clock.Advance(time.Second)
+					r := result(&first, demand == "learned")
+					r.OutOfMemory = demand == "retry"
+					r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+					if demand == "retry" {
+						queued = job(t, q, first.ID)
+					} else {
+						s.Needs.Memory = "auto"
+					}
+				}
+				m.MemoryEnforcement = enforcement
+				if demand != "retry" {
+					check(t, q, m, nil)
+					queued = submit(t, q, s)
+				}
+				run := check(t, q, m, nil).Job
+				if run == nil || run.ID != queued.ID {
+					t.Fatalf("known %s demand blocked without enforcement: %+v", demand, job(t, q, queued.ID))
+				}
+				if e := run.MemoryEnvelope; e == nil || e.Refusal != "" || floorCharged(e) || demand != "declared" && e.HostGB < peak {
+					t.Fatalf("known demand lost its safe charge: %+v", e)
+				}
+			})
+		}
+	}
+}

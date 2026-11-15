@@ -57,6 +57,8 @@ func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Ma
 		t.Fatal(err)
 	}
 	m := cpuMachine("variant-worker", "variant-host", "cpu", 8, 64)
+	// #1645 refuses unguarded unknown CPU work, even with measured RAM.
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.ExtensionFingerprint = "cpu-v1"
 	report := newExtensionReport(e, &m, "extension:sample")
 	report.Setup, report.Qualified, report.CheckID = true, true, "check"

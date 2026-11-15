@@ -73,13 +73,15 @@ func TestMemoryEscalationTransferMargin(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	// A different CPU family on the same OS still needs calibrated transfer error.
+	// #1645 starts CPU probes at their measured floor instead of claiming
+	// physical capacity. Unknown transfer error still stays exploratory, and
+	// OOM recovery must retain the accepted peak plus its minimum uncertainty.
 	for id, point := range q.s.WorkObservations {
 		point.Key.Target.Arch = "other-arch"
 		q.putWorkObservation(id, point)
 	}
 	estimate := q.memoryEstimate(&first, q.s.Machines[m.ID])
-	if estimate.host == nil || !estimate.escalation || !estimate.uncalibrated || estimate.measuredHostGB < 32-minimumHostMemoryGB {
+	if estimate.host == nil || !estimate.escalation || !estimate.uncalibrated || math.Abs(estimate.measuredHostGB-(peak+minimumHostMemoryGB)) > 1e-9 {
 		t.Fatalf("transfer margin lost: %+v", estimate)
 	}
 }

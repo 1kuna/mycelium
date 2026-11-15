@@ -980,14 +980,11 @@ func cudaAttemptDeviceMemory(w Worker, ctx context.Context, ids map[int]bool, _ 
 	if !strings.HasPrefix(selector, "GPU-") {
 		return 0, false, errAttemptMemoryUnsupported
 	}
-	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
-	// A descendant can retain the query's pipes after it exits or is killed.
-	// Bound that drain too, so it cannot stop future five-second samples.
-	// Incomplete output remains unknown rather than a partial measurement.
-	cmd.WaitDelay = attemptMemorySamplePeriod
-	b, err := cmd.Output()
+	query := w.cudaMemoryQuery
+	if query == nil {
+		query = queryCUDAAttemptMemory
+	}
+	b, err := query(ctx)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return 0, false, errAttemptMemoryUnsupported
@@ -996,6 +993,17 @@ func cudaAttemptDeviceMemory(w Worker, ctx context.Context, ids map[int]bool, _ 
 		return 0, false, errAttemptMemoryPending
 	}
 	return cudaAttemptMemoryReading(b, selector, ids, resident, known...)
+}
+
+func queryCUDAAttemptMemory(ctx context.Context) ([]byte, error) {
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
+	// A descendant can retain the query's pipes after it exits or is killed.
+	// Bound that drain too, so it cannot stop future five-second samples.
+	// Incomplete output remains unknown rather than a partial measurement.
+	cmd.WaitDelay = attemptMemorySamplePeriod
+	return cmd.Output()
 }
 func xpuAttemptDeviceMemory(w Worker, _ context.Context, ids map[int]bool, fs memoryFS, _ *float64, _ ...map[int]bool) (float64, bool, error) {
 	if w.selectedDevice == nil || w.selectedDevice.pciAddress == "" {
