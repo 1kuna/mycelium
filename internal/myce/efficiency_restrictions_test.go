@@ -57,7 +57,7 @@ func TestEfficiencyRestrictionCost(t *testing.T) {
 			p = &q.efficiencyView.Restrictions[i]
 		}
 	}
-	if p == nil || p.Jobs != 2 || p.HostRestricted != 1 || p.StrandedSeconds != 2*3600 || p.TypedMemory != 2 || p.TypedCores != 2 {
+	if p == nil || p.Jobs != 2 || p.HostRestricted != 1 || p.Restricted != 1 || p.RestrictedWaitSeconds != 2*3600 || p.StrandedJobs != 1 || p.StrandedSeconds != 2*3600 || p.TypedMemory != 2 || p.TypedCores != 2 {
 		t.Fatalf("restrictions=%+v", q.efficiencyView.Restrictions)
 	}
 	text := strings.Join(q.efficiencyView.ProjectLines(waiting.Spec.Project), "\n")
@@ -77,5 +77,37 @@ func TestEfficiencyRestrictionCost(t *testing.T) {
 	c.Advance(time.Hour)
 	if got := q.efficiencyReport().Restrictions; got[0].StrandedSeconds != 2*3600 {
 		t.Fatalf("stranded time kept counting: %+v", got)
+	}
+}
+
+func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
+	q, c := fixture(t)
+	now := c.Now()
+	queued := now.Add(-2 * time.Hour)
+	started := queued.Add(30 * time.Minute)
+	for _, j := range []*Job{
+		{ID: "lists", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, ExcludedMachines: []string{"two"}}, State: "queued", Queued: queued},
+		{ID: "targets", Spec: Spec{Project: "demo", Targets: []ExecutionTarget{{OS: "linux"}}}, State: "done", Queued: queued, StartedAt: &started},
+		{ID: "both", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, Targets: []ExecutionTarget{{OS: "linux"}}}, State: "queued", Queued: queued,
+			Efficiency: &JobEfficiency{At: now.Add(-time.Minute), Blocker: "capacity", WaitSeconds: map[string]float64{"capacity": 60, "holds": 60}}},
+		{ID: "free", Spec: Spec{Project: "other"}, State: "queued", Queued: queued},
+	} {
+		q.putJob(j.ID, j)
+	}
+	rows := q.projectRestrictions(now, []StrandedDemand{
+		{JobID: "lists", Project: "demo", Platform: "linux"},
+		{JobID: "lists", Project: "demo", Platform: "darwin"},
+	})
+	if len(rows) != 2 || rows[0].Jobs != 3 || rows[0].Restricted != 3 || rows[0].HostRestricted != 2 || rows[0].Targeted != 2 || rows[0].StrandedJobs != 1 || rows[0].RestrictedWaitSeconds != 9180 || rows[1].Restricted != 0 {
+		t.Fatalf("restrictions=%+v", rows)
+	}
+	if q.s.Jobs["both"].Efficiency.WaitSeconds["capacity"] != 60 {
+		t.Fatal("report mutated recorded wait")
+	}
+	text := strings.Join((&EfficiencyReport{Restrictions: rows}).ProjectLines("demo"), "\n")
+	for _, want := range []string{"3/3 (100%) retained jobs", "plain queue wait 2.5 hours", "1 stranded jobs now", "unrestricted counterfactual unavailable"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in\n%s", want, text)
+		}
 	}
 }

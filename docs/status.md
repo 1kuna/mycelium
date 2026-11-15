@@ -3030,10 +3030,18 @@ minute/hour bucket boundaries remain proportional estimates.
   and custody checks still apply. It names every excluding field. This is the
   shared definition for resolve advice; it grants no portability or parity.
 - `restrictions` has one row per project over retained jobs: jobs naming hosts
-  (`host_restricted`), jobs with `targets` and how many of those are below the
+  (`host_restricted`), their union with targets (`restricted`, counted once),
+  plain queue wait for that union (`restricted_wait_seconds`), distinct currently
+  stranded restricted jobs (`stranded_jobs`), jobs with `targets` and how many are below the
   production tier, and `stranded_seconds`, the queue wait accrued while the
   maintenance `stranded` verdict above held for the job (job
-  `efficiency.stranded_seconds`). `stranded_platforms` names the platforms
+  `efficiency.stranded_seconds`). Plain wait sums sampled blocker times; older
+  jobs without wait telemetry use the current queue episode through assignment,
+  start, finish or observation, whichever comes first. Retention bounds the
+  sample; this is not an all-time rate. Stranded time observes an unrestricted
+  fit, not an exact counterfactual start time or saving. Without that evidence,
+  only plain wait is reported and the counterfactual is unavailable.
+  `stranded_platforms` names the platforms
   (OS/architecture and accelerator kind, never hosts) with room now. Typed
   `host_memory_gb` and `cpu_cores` counts sit beside the mean typed-minus-learned
   peak where a learned figure exists. `advice` gives one action per item.

@@ -502,8 +502,11 @@ In an existing project, Mycelium now does these; delete your own:
 ## Check your project's efficiency
 
 After a batch, run `myce efficiency --project NAME` once. It shows what your
-own steering cost you: the share of jobs that name hosts or targets, the queue
-hours they waited while an excluded host had room, and how far typed
+own steering cost you: the share of retained jobs with any host list or target
+(counted once), their plain queue wait, distinct jobs stranded now, and queue
+hours when unrestricted capacity was observed to fit. This observation is not
+an exact counterfactual start time; without it, only plain wait is known.
+It also shows how far typed
 `host_memory_gb` and `cpu_cores` sit from what Mycelium measured. Act on each
 `advice:` line in your entries, then drop the steering it names.
 
