@@ -34,6 +34,11 @@ func (n *checkpointProgressReader) read(clock Clock, period time.Duration, path 
 	if exists && !observation.pending && now.Before(observation.until) {
 		return observation.value, observation.err
 	}
+	if exists && observation.pending && n.inFlight() {
+		// Joining an owned syscall must not spend another observation budget
+		// on every actor tick or serialize duplicate queue reports behind it.
+		return observation.value, errCheckpointIOPending
+	}
 	// Keep only this interval's observations, not the queue's retained history.
 	for key, old := range n.recent {
 		if !now.Before(old.until) && key != path {

@@ -136,6 +136,10 @@ func TestCheckpointProgressPendingRefresh(t *testing.T) {
 		if value != 1 || !errors.Is(err, errCheckpointIOPending) {
 			t.Fatal("pending refresh lost prior progress", value, err)
 		}
+		started := time.Now()
+		if value, err := n.read(clock, 5*time.Second, "attempt"); value != 1 || !errors.Is(err, errCheckpointIOPending) || time.Since(started) != 0 {
+			t.Fatal("pending refresh blocked a duplicate report", value, err)
+		}
 		close(release)
 		synctest.Wait()
 		if value, err := n.read(clock, 5*time.Second, "attempt"); value != 2 || err != nil {
