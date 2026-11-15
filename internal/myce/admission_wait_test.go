@@ -342,8 +342,17 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 			CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: row[0] - row[1]}})
 	}
 	m.HostAvailableMemoryGB = 78.12232208251953
-	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
-		t.Fatal(err)
+	// machineCheck supplies unidentified bootstrap readings. Negotiate a
+	// distinct second sample before raising resident credit, as a worker does;
+	// replaying an unidentified observation must not renew or raise its credit.
+	for id := int64(1); id <= 2; id++ {
+		clock.Advance(time.Second)
+		for _, report := range reports {
+			report.CurrentHostMemory.SampleID = id
+		}
+		if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s := cpuSpec(1, 43.29749156746103-.125)
 	s.Priority = "production"
