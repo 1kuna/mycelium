@@ -199,6 +199,8 @@ a remaining time or deadline; Mycelium no longer predicts completion (MY-49).
 [report contract](https://github.com/1kuna/mycelium/blob/main/docs/status.md#execution-elapsed-time-last-accepted-duration-and-application-progress).
 
 Checkpoint `progress` is a durable generation number, not a percentage or ETA.
+NAS progress is sampled at most once per worker report interval; a new save
+appears after the next sample/report, and pending reads retain prior progress.
 Neither stage completion nor a checkpoint means success or resource release:
 keep the job ID, wait for success and verify results.
 
