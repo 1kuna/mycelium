@@ -7,7 +7,8 @@ and are cited here by MY number where they govern. The text was consolidated on
 Approval dates, issue receipts and replaced wording stay in git: see the
 [text before consolidation](https://github.com/1kuna/mycelium/blob/e0488c0c5034b5a57827ceebfa69f770c060bb8f/docs/design-proposal.md) and the section map in
 [#1433](https://github.com/1kuna/mycelium/pull/1433). Old heading anchors still
-resolve here.
+resolve here. Mechanism chapters under `reference/` linked below are part of
+this approved design; their relocation changes no product contract.
 
 Laptop tests and `myce dev` are implementation evidence. Native hardware
 qualification and deployment are separate and are never inferred from them
@@ -319,95 +320,8 @@ verified accepted artifact; native hardware qualification remains separate.
 ### Adaptive worker loss
 <a id="adaptive-worker-loss-661-my-31my-34"></a>
 
-Loss detection is measured, not a fixed timeout (MY-31, MY-34).
-
-Loss uses the current session's send interval and observed arrival/path variation,
-measured with the injected queue Clock. Workers advertise their actual interval
-through an optional header compatible with older strict JSON decoders. An older
-worker without that header first establishes cadence from successive accepted
-wall-time arrivals; queue occupancy cannot compress its expected send period.
-The second accepted arrival learns cadence before admission, so a headerless
-worker waits at most one observed send interval plus actual control-path delay
-for its first offer after a queue cutover. Startup recovery reports can supply
-these samples before ordinary admission. An empty keyed reply is idle, with no
-assignment to launch; existing attempts continue reporting and retain custody.
-Retained engines receive retention-only plans and their existing cleanup
-deadlines during cold qualification; those plans cannot start a missing engine.
-Until then automatic loss is unknown and capacity is suspect, even with a saved
-operator minimum, so no new attempt can acquire an unbounded unknown loss
-allowance. The allowance is at least two send intervals (the
-expected arrival and one missed-arrival confirmation), extended by the shared
-RFC 6298 mean/variation estimator. It has no class-specific default duration.
-Explicit old timeout settings remain minimums, never permission to count queue
-delay as silence; zero selects automatic timing. Existing saved settings survive.
-Each accepted transaction also saves its session's frozen contact allowance for
-offline conversion. That stopped-queue observation expires against the original
-accepted wall timestamp; opening a queue does not renew it. An older database
-without this evidence needs the existing verified-empty drain path. Running
-queues still require live contact and startup reconciliation.
-
-The queue accounts the union of all queue-mutex occupancy, including readers,
-with constant-size local counters. This time is unavailable control service and
-is excluded from silence. A newly slow transaction is protected immediately,
-without first training a latency percentile. A current-session check-in protects
-that worker while the server processes or writes its response, including work
-outside the mutex; it cannot protect a dead peer. Rejection removes that credit.
-Cancellation retains a reconnect opportunity following the worker's existing
-retry schedule, without changing accepted LastSeen. Unsettled synthetic arrivals
-expire after the measured allowance. Stale sessions cannot renew current contact.
-
-For a normally responding queue and an ordinary one-second worker, detection
-takes roughly two seconds of service opportunity, plus learned variation and the
-next maintenance turn. An observed first one-second gap initially gives three
-seconds under the estimator; further steady samples converge to the two-interval
-floor. Under overload the wall duration additionally includes actual queue
-occupancy. For example, a 31-second blocked transaction adds 31 seconds, not a
-charged infrastructure failure. Suspicion uses wall time since the last current-session arrival, with an
-allowance of at least two observed wall arrival intervals plus measured variation.
-That wall cadence includes delivered queue service cost even for a worker that
-advertises a shorter send interval. It remains separate from the opportunity
-allowance for confirmed loss; otherwise a healthy slow control path could
-withhold every new offer. Before the second arrival, the completed response's
-measured wall cost extends the advertised interval. Recovery inference excludes
-late pending arrivals but retains this completed delivery evidence, so normal
-slow delivery can establish cadence instead of repeatedly resetting it.
-Confirmed loss requires both a missed wall arrival and the opportunity
-allowance: available service alone cannot make an expected arrival overdue.
-Pending NAS inspection delivery uses the same wall
-allowance, including in detached status/resolve views. Even during continuous mutex saturation, a dead sender
-becomes **suspect** after that allowance plus the next maintenance/observation
-turn. An old in-flight request cannot suppress suspicion. Suspect workers are
-never shown as healthy, receive no new attempts or preparation launches, and
-raise an owner-attention health alert. New arrival evidence clears suspicion.
-Suspicion never interrupts an existing attempt or charges loss/retry.
-
-A worker's check-in loop also does local durable work between check-ins, and
-under host load that work can delay its next check-in past the allowance while
-the process is alive (#1450). The worker's stop-event long poll runs beside
-that loop, so a current-session poll also counts as contact for confirmed loss:
-while it is open, and for the allowance after it ends normally. A dropped
-connection gives no credit after its start, so a dead process is fenced at once
-and a silently dead host after at most the server's existing poll window. The
-poll proves the process, not its loop, so its credit is bounded: check-in
-silence beyond the measured filesystem-operation stall backstop (30 s, #289),
-or twice the session's longest completed check-in gap if that is longer, is
-still confirmed loss, so a wedged loop's attempts are retried. Suspicion and
-cadence learning still use check-ins only, so a stalled loop is still suspect
-and receives no new work.
-
-Continuous saturation or a wholly unreachable fleet has no finite trustworthy
-**confirmed-loss** bound: retain custody until control service or connectivity
-supplies evidence. If even maintenance cannot execute, neither diagnostic
-publication nor a useful relaunch can have a finite execution bound. Suspicion
-is computed at every subsequent observation; its elapsed-time threshold does
-not stop with the control clock. The explicit startup recovery grace also excludes blocked queue service so
-workers can reconcile before it expires. Genuine loss preserves exact
-attempt fencing and the existing retry budgets, and never proves release.
-
-Fleet, maintenance, placement, inventory and stale-host diagnostics use the same
-confirmed-contact and suspicion calculations, frozen at status capture time. LastSeen remains an actual
-accepted queue timestamp. Physical memory/disk/pressure/probe sample validity
-still ages independently; liveness never manufactures fresh sensor evidence.
+See [adaptive worker loss](reference/scheduling-mechanisms.md#adaptive-worker-loss) for the
+approved mechanism and its constraints.
 
 ### Production infrastructure retries and start windows
 
@@ -667,188 +581,18 @@ and offers at most one additional assignment; later check-ins fill free capacity
 
 ### Inventory and resource ownership
 
-Device IDs are unique canonical nonnegative decimal strings, stable against
-hardware identity (CUDA UUID, PCI BDF or Level Zero UUID), not discovery order,
-driver version or display name. Recheck runtime identity at startup and before
-every member launch. XPU discovery and every member force
-`ZE_ENABLE_PCI_ID_DEVICE_ORDER=1`. A mismatch withholds that device with
-`device_identity_mismatch`; unavailable probes use `device_probe_unavailable`;
-missing budget uses `device_budget_unavailable`. Re-evaluate these conditions;
-matching identity restores eligibility. Accepting replacement hardware requires
-settling the old custody, preserving its spool, a fresh `--state-dir` and native
-requalification. Other healthy components remain usable.
-
-Worker `--device 0,1` offers two independently selectable cards; omitted means
-all. Unmatched allowances expose `device_selector_unmatched`; no matched card
-refuses startup. Fixed XPU budgets/reserves stay per device and never substitute
-host RAM or unreliable telemetry. Unified capacity uses measured memory when
-`--memory-gb 0`; a nonzero allowance caps it. Live headroom and reserves still apply.
-
-Assignment atomically reserves host cores/RAM and zero, one or several GPUs of
-one host with their VRAM in SQLite before delivery. Preparation, stopping, engines and unconfirmed release remain
-charged exactly once. Discrete VRAM and additional host RAM fit separately;
-unified allocations share one physical pool. Host reserves, launch slack and
-preparation/core hand-back are machine-wide. Lowered allowances expose debt and
-withhold new work; they never resize running ceilings. Omission, elapsed grace,
-service exit or missing inventory never refunds custody.
-
-**Shared GPUs (MY-30, MY-31).**
-A GPU holds several single-card batch attempts when their memory fits: the
-newcomer's declared or learned device vector and its host vector must fit the
-card's and host's existing headroom beside every co-tenant's charge, unified
-hosts counting the one pool. A finished co-tenant stays charged until exact
-release. A learned host
-peak without a device measurement retains a recipe-default device figure;
-attempts with that figure keep the card to themselves until
-an accepted device measurement supplies their learned vector. The
-envelope's `source` identifies `GPU recipe default` in this case. Model-server,
-extension-check, fan-out, exploratory first-run
-and multi-card attempts keep the card to themselves, as does a hint that names
-no device memory (its device figure is only a default), and a newcomer never
-joins a higher tier's attempt. For placement, equal tiers never preempt; a higher tier stops the
-fewest co-tenants whose release frees enough on its selected host/cards and
-starts there only after that exact release; a multi-card demand stops every
-co-tenant on its selected cards. On XPU and CUDA cards (including unified-memory
-CUDA), a higher tier instead stops every lower-tier co-tenant and waits for each
-exact release even when memory would fit beside them. XPU teardown can reset the
-card's engines; CUDA
-co-tenants can grow past their reservations and starve a higher-tier model load
-without reliable fresh per-process growth evidence. The cost is lost mixed-tier
-co-residency on XPU and CUDA. Equal-tier packing, including experiments packing
-among themselves, and other platforms are unchanged. Waiting reasons name
-`device N shared with K attempts`. CPU attempts can run alongside GPU work and one another within host resources and caps;
-model engines retain their usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
-number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,
-empty explicit sets and invalid counts use `gpu_selector_invalid`. An explicit
-count above one and multi-card model masks use `gpu_count_unsupported`, never
-partial reservation or reduction. Unknown/offline selections remain queued with
-`no_matching_device`.
-
-Shared-card memory growth uses fresh per-process device samples from check-ins
-(younger than ten seconds, using the injected clock). If the sum of each
-tenant's larger measured use or reservation, plus resident model charges,
-exceeds the card budget, stop the lowest tier; among equals choose the tenant
-most over its reservation. If unified-memory attribution instead becomes
-uncertain, prefer an unobservable tenant within the lowest tier, so another
-tenant's measured growth does not make it the victim of missing evidence.
-This safety stop may displace an equal tier. It
-retains normal checkpoint grace and exact-release custody and requeues without
-spending a failure budget. Each grower's measured peak × 1.25 becomes a durable
-device-memory floor for its next placement; running reservations stay fixed.
-Single tenants are unaffected. Every tenant needs fresh per-process evidence
-before the guard acts. Missing or stale samples establish no growth, and the
-running job's reason reports unavailable per-process evidence. Host memory-drop
-estimates cannot attribute co-tenants and do not trigger this guard. At
-check-in send time, workers read the sampler's latest per-attempt device
-counter independently of cached actor reports. Slow actor log/result I/O must
-not hide fresh device evidence. This refresh retains the sensor's original
-timestamp; it cannot make a stalled sensor fresh or renew old host-memory
-credit.
-
-A successful complete CUDA process enumeration with no context belonging to
-the attempt reports zero device use, including during CPU-side imports and
-model preparation. Its full declared or learned device vector remains charged.
-Failed queries, listed N/A counters and missing PID inventory remain unknown;
-they do not become zero or extend the sensor freshness allowance.
-
-**Cards per job (MY-30).**
-`memory_gb` (declared or learned) decides the cards. Work one card of its host
-can hold gets one card. Work no single card holds, but N same-backend discrete
-cards of one host hold in equal shares, gets the fewest such cards: the N with
-the most free memory, reserved together with one release record, each charged
-`memory_gb / N`, host RAM and cores once. All are visible to every member
-(`MYCE_GPU_COUNT`, `MYCE_DEVICES`); preemption reclaims them as one attempt, and
-a card stopped for a waiting multi-card demand is withheld from equal and lower
-tiers until it starts, while the host's usable cards can still hold it. Model-server and extension-check jobs keep one
-card; unmeasured `memory: auto` first runs explore one card, and multi-card
-attempts do not feed per-card memory learning. Extension work needs every card
-qualified; no separate multi-card parity check exists yet. Using more cards for
-speed when one fits is not planned (MY-49 removed work curves). Cross-machine gang execution
-remains deferred.
+See [inventory and resource ownership](reference/worker-mechanisms.md#inventory-and-resource-ownership) for the
+approved mechanism and its constraints.
 
 ### Attempt fencing and containment
 
-Every supervisor, result, log, checkpoint, launch, Started, stop and release is
-bound to `(machine, session, job, attempt)` and its selected device. Private
-per-attempt environments never mutate the worker environment. CUDA uses the
-assigned UUID; XPU uses the verified physical affinity mask and renumbered
-selector (one assigned card is in-job device 0); Metal uses device 0. Hide other
-families. CPU uses empty `CUDA_VISIBLE_DEVICES`,
-`ZE_AFFINITY_MASK=2147483647` and `ONEAPI_DEVICE_SELECTOR=!*:*`, qualified by actual
-runtime enumeration. Unavailable CUDA/XPU select-none evidence withholds CPU
-with `cpu_accelerator_isolation_unavailable`; loss before launch requeues without
-an infrastructure loss. macOS CPU work remains cooperative, with Metal isolation
-explicitly `not-enforced`. No child inherits `MYCE_TOKEN`; authored environment
-cannot widen device visibility. These masks are not a hostile-code sandbox.
-
-Each native attempt has its own control/main/sidecar subtree and verified
-aggregate/member ceilings before exec where supported. Engines have independent
-subtrees. Attempt stop/OOM/cleanup never targets siblings or the worker service.
-Service stop intentionally contains all descendants (`Delegate=memory`,
-`KillMode=mixed`). Unsupported platforms remain admission-only and
-required ceilings refuse them. Core reservations do not enforce CPU time.
-
-One machine heartbeat uses its session's adaptive contact evidence for every
-active class. A genuine worker loss affects every owned attempt independently,
-including each production retry counter (at most two infrastructure requeues).
-Unknown release stays charged; a timeout cannot authorize overlap. A single
-attempt's failure does not mark its neighbors lost. Control/heartbeats and bulk
-preparation/result I/O remain independent; bulk I/O never holds the queue lock.
-
-Spool reopen reconciles every saved attempt and buffered result before new
-admission. `recovering: true` blocks batch, model and preparation admission at
-planning and launch without allocating an attempt or consuming a retry. Exact
-cleanup/replay continues; all machine targets are blocked while other machines
-remain eligible. Persist `recovering_since`; continuous recovery reports
-`recovery_needs_attention` after two minutes, with no heartbeat reset. Clearing
-recovery clears the warning. Legacy GPU custody lacking device evidence blocks
-all GPU targets until exact cleanup; do not invent a component.
+See [attempt fencing and containment](reference/worker-mechanisms.md#attempt-fencing-and-containment) for the
+approved mechanism and its constraints.
 
 ### Placement, protocol and compatibility
 
-Use one shared planner for jobs, models and status. Enumerate
-(machine, device) GPU targets and (machine, no device) CPU targets. Qualification,
-engines, pins and readiness are exact-device identities; a neighbor's check never
-qualifies the selected card. Disk weights may share caches, not engine custody.
-Policy/allowlists/platform/device restrictions intersect. Prefer free capacity
-before stops, retain single-sufficient-victim/greedy/reverse-prune selection and
-its nonoptimality, and count useful host resources only once. Fairness remains
-allocated device-seconds or CPU core-seconds; grouping cards resets no usage/caps.
-
-Pending stops are planning projections only. For machine workers, lower-tier
-grace/kill releases have credit only before `StopAt + preemptionGrace()` (ten
-seconds by default). Confirmed exits retain credit until fresh inventory or that
-same bound. Neither heartbeats nor completion extend it. Then seek useful
-capacity elsewhere; admission still requires exact cleanup acknowledgements.
-Physical-host production holds fence every device and CPU resources; an opt-in
-device scope keeps their release custody and leaves reclamation to this planner. Maintenance
-outranks holds, preparation and Started. Planned maintenance/preemption preserves
-infrastructure counters; independent stage failure remains failure, completion
-wins over stop intent, and cancellation wins over both.
-
-`host-launch-v3` plus echoed `attempt_protocol: keyed-attempt-v1` carries a
-collection of exact keyed reports/controls without a wire cardinality cap.
-Strict decoding refuses mixed forms, duplicates, invalid sessions or revision
-mismatch before mutation. Keyed workers require the echo and fail closed with
-HTTP 426 `worker_protocol_invalid` against older queues; upgrade the queue first,
-preserving saved custody. The bounded current unkeyed v3 adapter remains for
-supported old workers, restricted to one attempt/device and the common host
-ledger. Pre-v3 is refused. No automatic downgrade. See [wire details](development.md#current-worker-protocol).
-
-New assignments use physical `machine` plus additive `allocated_devices` (empty
-for CPU). Retired identities exist only for exact historical result/release
-handling and explicit replacement diagnostics. New intent naming them fails
-`machine_renamed`; never infer aliases from `-gpuN`. Existing keyed replay returns
-the original logical job before new-placement validation and preserves its
-fingerprint, counters and checkpoint generations. Legacy sessions and a machine
-worker cannot coexist on the same host. The unkeyed adapter can retire only after
-all hosts convert and the rollback window closes; historical custody remains.
-
-Split-worker conversion and rollback are below the [MY-42 release floor](DECISIONS.md#my-42)
-and remain only in source history. Retained historical identities and exact custody
-still bind. Keep native device isolation, reboot/manager, driver fault and
-simultaneous memory qualification separate from laptop proof in
-[development](development.md#native-acceptance-checklist).
+See [placement, protocol and compatibility](reference/worker-mechanisms.md#placement-protocol-and-compatibility) for the
+approved mechanism and its constraints.
 
 ## CPU and shared host resources
 <a id="cpu-and-shared-host-resources-r1-9822"></a>
@@ -932,388 +676,25 @@ no new fixed reserve is introduced.
 ### Unified CUDA free-RAM floor
 <a id="amendment-count-the-idle-footprint-once-2026-11-11"></a>
 
-Hosts running only Mycelium jobs give their memory to jobs (maintainer,
-2026-11-11; MY-34). The unified CUDA physical free-RAM floor is compared with
-live used RAM, which already contains the OS, driver and idle-service footprint.
-A measured allowance already excludes that footprint, so physical RAM minus a
-measured allowance would subtract it twice. With a measured allowance and no
-shared-interactive profile, the floor is the existing OS/driver reserve alone,
-and the allowance still caps reservations. The same holds for an authored
-allowance: an allowance of any origin caps charges and is never a floor, so the
-idle footprint is not withheld twice (orchestrator decision, 2026-11-11, under
-MY-34). Only shared-interactive hosts keep the larger of the reserve and
-physical RAM minus the allowance, as their stricter owner protection under
-MY-45. The reserve is the configured value, with no built-in minimum (MY-34,
-MY-48).
+See [unified cuda free-ram floor](reference/memory-mechanisms.md#unified-cuda-free-ram-floor) for the
+approved mechanism and its constraints.
 
 ### Charging running attempts by use
 
-A running attempt is charged the memory it uses, not its declared envelope,
-only where a guard contains its growth: started native CPU-only work with a
-declared size, on a dedicated host with Linux cgroup v2 ceilings or the Darwin
-RSS guard, with learned evidence for that work on that target and a fresh
-exact-attempt sample. The charge is the larger of the learned need, the
-attempt's high water and its live forecast, plus the measured overshoot before
-containment acts (on Darwin, growth rate times the guard's reaction window),
-bounded by the enforced ceiling. On a unified CUDA host with cgroup v2
-ceilings, GPU work is charged by use too: measured on a GB10, the cgroup
-contains host, managed and pinned allocations, while device allocations
-(`cudaMalloc`) escape it and RSS but appear in the per-process NVML sample and
-in host availability. Each share is charged the larger of its accepted peak on
-that target (without the envelope's uncertainty), the attempt's high water and
-its forecast, from a fresh per-process device sample, bounded by the envelope.
-Metal work with a declared size is guarded and charged on `phys_footprint`:
-measured on M4 Macs, Metal buffers raise it 1:1 while RSS sees none of them.
-The Darwin worker sums it over the attempt's owned tree at the RSS guard's
-cadence and stops the attempt past its unified envelope (device plus host plus
-slack) after the same consecutive samples. The attempt's peak records RSS as
-the host share and the footprint beyond RSS as the device share, so unified
-sizing can learn Metal work. Its charge is the larger of those accepted peaks,
-its high water and its forecast, plus drift and the guard's measured overshoot,
-bounded by the envelope plus that overshoot. First runs, auto-sized Metal work,
-non-cgo Darwin builds, discrete accelerators, multi-card attempts,
-interactive hosts and missing, stale or estimated samples keep the envelope.
-When by-use jobs grow back into memory lent to their neighbours and live free
-memory can no longer absorb the growth expected before a stop completes, one
-job yields through the planned-stop path: the lowest tier first, then by-use
-work, then the most recently started. It checkpoints if resumable, then
-requeues with no retry charge (`memory_overcommit_yield`). Production yields
-only to protect other running production work on the host, and only if
-resumable.
-
-Placement and both worker launch checks reserve that same measured growth
-through stop grace plus sensor freshness, including unified device growth.
-This physical headroom can exceed the bounded charge's sample-age forecast;
-it does not raise the attempt's ceiling or its allowance charge. Release
-planning returns the corresponding headroom as well as the charge. A yielded
-job stays queued while the surviving lenders still need that headroom; fresh
-measurements or their exact release admit it again, without a timed cooldown.
+See [charging running attempts by use](reference/memory-mechanisms.md#charging-running-attempts-by-use) for the
+approved mechanism and its constraints.
 
 ### Job memory envelopes
 <a id="amendment-job-memory-envelopes-146"></a>
 
-**Local host calibration (#1044).** Each comparable observation retains its
-own physical-demand floor and measured range. With complete non-reclaimable
-CPU, xe or unified CUDA host evidence, its forecast is range maximum plus the
-larger of that range's spread, measured sampling growth and launch drift. Keep the
-cumulative resident/driver peak plus launch drift as another floor, including
-when the range restarted after incomplete coverage. Take the largest of these
-per-observation bounds. Do not add a newer range's variation to an older,
-already larger cumulative peak, or treat differences between allowance-key
-maxima as another measured range. Incomplete observations independently retain
-their total-cgroup peak plus sampling growth, with launch slack added separately;
-a complete neighbour never discounts them. These margins cover measured between-attempt variation,
-growth before the next sample and snapshot-to-launch drift, respectively.
-They are empirical bounds, not guarantees about an unseen tail; pressure,
-OOM recovery, physical admission and release custody still bind.
-
-Unified CUDA complete evidence includes the cgroup non-reclaimable counters,
-exact-attempt proc pin/lock readings and a conservative absolute whole-host
-physical residual for uncharged driver allocations. Missing or interrupted
-coverage retains total-cgroup sizing. The residual keeps unrelated occupancy
-and possible device overlap; it is an upper bound, not a per-client NVIDIA
-host-allocation counter. Device sample coverage, extrema and step variation are
-retained per attempt for native qualification. Device peaks and their conservative
-growth margins remain separate and are added once to the host charge. Retained independent maxima
-cannot establish a physical union or justify subtracting cache or device
-overlap. Native coexistence and output proof remain separate from calibration.
-
-Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
-admission meanings and defaults, including production. Optional `needs.memory:
-auto` first selects fresh accepted whole-attempt peaks ([comparable
-observations](#comparable-observations)) for the same work, recipe, input shape
-and machine/component, times 1.25. Host RAM uses the largest comparable
-accepted peak across sibling devices on the same host, target and memory layout
-when the environment matches and the source device's hardware/backend
-fingerprint still matches its current inventory (including the Linux kernel).
-Device-memory evidence retains its per-device identity and transfer margins.
-For local Linux CPU work, at least two complete, unpressured non-reclaimable
-attempt peaks per contributing observation enable peak plus the largest of the
-observed range (maximum minus minimum), 25% of the retained component peak, and
-the existing snapshot drift floor (at least 128 MiB). Two attempts establish a
-range, not confidence in an unseen tail; retain the existing 25% allowance for
-unobserved growth between 200 ms samples. Keep all comparable resident peaks as
-a floor. Missing/incomplete local observations keep total-peak sizing. GPU work
-uses the same conservative total-peak fallback unless discrete Linux xe/XPU
-attempts also retain complete per-client driver system/GTT allocations,
-independent runtime xe debugfs GTT-manager usage, and whole-host
-MemAvailable-drop evidence from before payload launch. For that case, use the
-non-reclaimable peak plus the peak of max(driver allocations, whole-host drop
-minus synchronized current components, zero), also floored by whole-host drop.
-Retain all resident/driver floors, then the same range/25%/launch-drift margin.
-Two complete attempts per contributing local observation remain necessary. This
-is an observed envelope; native pressure-free concurrency and output parity
-require separate proof. Without local history, use the same recipe/work/ shape
-from another machine: prefer the same OS/architecture/accelerator/memory-layout
-family, times 1.25 × 1.5; otherwise times 1.25 × 2. Label both as a
-cross-machine estimate. For CPU work, accepted same-OS evidence takes
-precedence over the conservative foreign-OS prior. Constrained same-OS
-observations are lower bounds only and cannot replace that prior. If the prior
-exceeds every qualified target-OS allowance, fresh comparable same-OS
-lower-bound evidence (with the existing 25% margin) and any submitter hint must
-fit before permitting one bounded exploration on the largest qualified
-allowance. Keep normal launch slack and live admission guards.
-Assignment durably consumes this exception per frozen work/configuration and
-target OS, including across resubmission, history collection and restart. A
-clean result learns through the single eligibility gate; OOM gets no retry, and
-constrained or otherwise ineligible results cannot reopen the exception.
-Successful constrained attempts retain their ordinary job outcome. The foreign
-prior remains available with the capacity-remedy diagnostic. Claiming at
-assignment may spend a probe before launch, preventing duplicate launches after
-a lost offer. Qualification and output parity remain unchanged. For a
-discrete-GPU target with only one accepted sample from another target/layout
-family, the same durable probe applies when the transferred host estimate
-exceeds every eligible allowance in the target family. The measured peak plus
-25% and any host hint must fit the largest allowance after launch slack and
-drift margin. Keep total-cgroup sizing when complete evidence cannot
-distinguish reclaimable cache; a smaller resident figure alone is not enough.
-Assignment consumes one probe per frozen work/configuration and target
-OS/architecture/backend/layout. Accepted target-family evidence replaces the
-prior; OOM gets no retry and ineligible results cannot reopen it. Unified
-targets, multi-card work and fan-out retain their existing rules. Next use an
-optional submitter hint; a bootstrap declaration is not required and recipe
-defaults do not count as submitter hints. Without either, allow an exploratory
-first run only with measured memory, a known allowance (physical RAM if
-uncapped), at least half that allowance available after existing reserves and
-charges, and no protected attempt or model residency charging a quarter of the
-allowance. Use that available room, less existing per-attempt slack, as the
-envelope. Lower-priority work remains reclaimable through the existing release
-planner; release acknowledgement still precedes admission. Accepted exploratory
-peaks become measurements. Status shows the source, envelope and enforcement
-mode. Memory learning is independent of throughput occupancy comparability:
-clean, attempt-specific single-piece serial fan-out children teach the ordinary
-recipe's memory class, including piece arguments, while their throughput stays
-unknown. Operator resource allowances and power mode remain throughput fences,
-but do not identify memory need. Existing allowance-stale memory evidence is
-revalidated through the normal curve-recovery path; hardware, backend,
-environment, recipe and reference changes still invalidate it. No stored key
-rewrite or database edit is needed. Input-size/duration scaling per recipe is
-later work. Reservations are frozen per attempt; stale, failed, OOM,
-constrained and resumed observations cannot shrink an envelope. Resumed jobs
-can use prior accepted estimates. An auto OOM or constrained attempt
-invalidates comparable learned memory points across machines and families,
-without recording a bound or setting the performance Forbidden flag. To measure
-the true need after a ceiling-bound run, submit the same comparable work with
-`memory: auto` and no submitter hint: a CPU run starts at its retained measured
-floor; GPU work keeps its device containment contract. When a constrained peak invalidated the measurement, its source reads
-`exploratory (previous peak constrained)`. A successful unconstrained
-exploration re-teaches the peak. Ceiling pressure alone does not retry or
-change the job's outcome. After OOM, one retry keeps a job-local host floor
-with 25% more room, on the same host if it fits, without raising its GPU
-reservation from a host OOM. If that floor exceeds every eligible host
-allowance or card, fail explicitly with the required GiB. Device reservations
-never exceed the card total and never stand in for measured device peaks.
-Member caps are optional; explicit caps remain supported and fit the job
-envelope.
-
-Linux native attempts use their existing shared parent cgroup for main and all
-sidecars, bounded/zero swap and a job OOM cause. Sample whole-parent
-anon + kernel + shmem from `memory.stat` every 200 ms and retain the kernel's
-total high-water mark from `memory.peak`. Complete new measurements also retain
-anon + kernel + shmem + unevictable + file_dirty + file_writeback as a
-conservative non-reclaimable peak for CPU work. All six counters must be present.
-Retain all kernel/shmem memory and conservatively double-count overlapping
-locked/dirty/writeback pages rather than omit pages requiring I/O before reclaim.
-Clean file cache is excluded only with the complete local evidence above.
-The unevictable LRU counter is
-not a DMA pin counter: XPU pinned host buffers, shared USM CPU storage, CUDA
-registered/mapped host memory and driver allocations are not bounded by VRAM
-measurements. Discrete xe/XPU attempts additionally retain all DRM system/GTT
-host-object allocations, deliberately double-counting any overlap with cgroup
-charges. Add absolute xe debugfs GTT-manager use on every participating card,
-conservatively double-counting its overlap with client GTT objects. This runtime
-source is required: missing, unreadable or malformed manager counters invalidate
-GPU completeness. Direct reads use the worker's existing permissions. An optional
-operator-owned `--gpu-telemetry-helper` executable can supply the same raw manager
-text keyed by PCI, with a timestamp within its current invocation; stale, failed,
-oversized or missing evidence rejects completeness. It receives no arguments,
-job environment or fleet credentials and runs outside the resident sampler with
-the same coverage limits. The installer preserves this opt-in setting but
-installs no helper, privilege grant or permission change; service privilege
-policy is unchanged. The provided unprivileged `myce gpu-telemetry-client` uses
-`/run/mycelium/gpu-telemetry.sock`: no request payload, a fresh per-connection
-JSON snapshot, and EOF. A separately installed root-owned broker supplies the
-raw counters; no sudo/setuid is used by the worker or client. See the [operations contract](reference/host-capacity.md#optional-privileged-gpu-telemetry-source).
-Retain a whole-host availability-drop floor from an empty-cgroup baseline;
-unrelated RAM release can mask that net delta, so it never replaces absolute
-driver accounting. Missing DRM client identity invalidates the entire attempt.
-Keep resident/component/host-pressure sampling independent of driver I/O. One
-driver collection has a 200 ms coverage window, matching resident cadence; a gap
-or final age beyond two periods rejects completeness. Attempt completion waits
-at most one period for a cancelled collector; late results cannot change its
-published peak. This bounds observation latency, never job execution time.
-Every host/driver sample must succeed; existing nonzero host swap is allowed.
-Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
-baseline the host and attempt-cgroup cumulative `some total` counters before
-payload/sidecar launch, while the attempt cgroup is empty. Reject learning if
-either counter's increase in microseconds is at least 1% of the elapsed attempt
-window measured with the injected Clock. `some` includes `full` stalls, so do
-not add those totals again. The total-delta check catches short stalls before
-Linux refreshes avg10 (roughly every two seconds); avg10 is an extra signal,
-never the only check. Exclude baseline/final sensor-read time from the elapsed
-denominator, conservatively counting any stalls during those reads. The same
-1% band means 2 ms stalled in a 200 ms attempt, or 100 ms in ten seconds.
-Hierarchical parent PSI covers descendants; capped members retain their own
-pressure/event checks.
-
-Missing/unreadable/malformed host or cgroup PSI, counter resets, or a nonpositive
-observation window makes the Linux sample ineligible for **all** memory-envelope
-learning, including ordinary RSS/total fallback. Preserve raw diagnostic peaks
-with `pressure_unavailable: true` on the result and attempt facts, across the
-worker/queue JSON boundary and SQLite restart. Unknown pressure cannot refresh
-or replace prior qualified memory evidence and does not invalidate it. Real
-pressure still invalidates comparable peaks under the existing policy. Missing
-coverage also prevents complete component/GPU evidence. No swap allowance can
-override either stall check or missing coverage. Queue support for this additive
-result field must precede workers sending it.
-
-Host swap-used growth and cumulative swap-out bytes are compared independently
-with a budget of 1% of the smaller of the attempt's resident peak and the
-minimum host MemAvailable. Reject if either exceeds that budget. Compare
-whole-attempt maxima against the prelaunch baseline at finish, rather than
-against startup's near-zero RSS; historical swap is never new pressure. One
-percent bounds the potentially hidden resident error far below the existing 25%
-growth margin, while the availability bound prevents large jobs excusing swap
-churn as headroom disappears. Also reject if minimum MemAvailable falls below
-max(operator host reserve, 25% of resident peak, 128 MiB): preserve the
-existing growth and minimum launch-drift headroom even without a PSI spike.
-These thresholds bound measurement error and available growth room; they are
-not a claim of native two-card qualification. Other GPU work retains total-peak
-sizing. Native GPU concurrency acceptance is separate from estimator
-implementation. Missing counters, older workers, macOS RSS evidence and
-cross-machine transfers retain conservative sizing. This does not relax
-pressure rejection. Device peaks remain separate. Exact-local unified CUDA work
-with at least two complete accepted host observations uses the largest accepted
-device peak plus measured between-attempt peak spread (at least launch drift).
-Retain that range across accepted completions; a loading increment from zero to
-an already reserved peak is diagnostic, not a second whole device allocation.
-Live growth forecasts use the current increment/rate and keep the existing fresh
-sample, physical headroom and stop-grace guards. The CUDA absolute outside-root
-residual includes device pages: preserve each complete combined physical upper
-bound plus its measured host range/growth and device variation independently of
-non-reclaimable host plus device. Do not add device again to the residual or
-subtract independently sampled maxima to claim a unique-page union. Every
-incomplete historical row retains total-cgroup plus device sizing and its host
-uncertainty. Cross-machine transfer, unknown attribution, recovery/retry floors
-and rejected-pressure exclusions retain their conservative rules.
-
-**Ceiling-bound envelopes.** There is no low-resident file-cache exception. OOM, swap-out,
-anonymous workingset refault, or any `memory.events` `max > 0` / `high > 0`
-constrains the measurement, including pressure in capped members. A pressured
-sample cannot establish true need even when its resident-only peak stays low.
-The queue applies this rule to older-worker results and excludes already-stored
-pressure evidence from estimates. Successful unconstrained exploration can
-re-teach the peak. File-heavy jobs can therefore reserve more memory or explore
-again; pressure invalidates the measured range too, so the next comparable
-unhinted attempt explores. A smaller resident-based ceiling is not a promise
-that a file-heavy workload will avoid reclaim pressure. Ceiling-bound explicit-memory runs cannot seed an
-auto estimate. Explicit admission and job outcomes retain their existing behavior.
-The attempt's `memory.events` max/high/OOM counts are kept beside its peak;
-absent counts mean they were not read, not zero.
-Workers without cgroups (macOS) learn the summed RSS of the attempt's process
-groups, sampled every 500 ms outside the queue lock; single-command jobs are
-also raised to the main process's exit max RSS (native groups are not). The
-sum counts shared pages once per process but omits compressed pages, members
-that left the group and spikes between samples, so it can read high or low;
-rusage alone reports only the largest waited process. These peaks are
-measured but unenforced. Host swap and pressure are machine-wide and cannot
-attribute the cause to this attempt. Darwin warning/critical memory-pressure
-levels (2/4), swap-out bytes beyond the same 1% budget, or available RAM below
-the same headroom floor reject that attempt's learning. Normal level 1 and
-small swap-out remain eligible; missing pressure/swap-out readings reject
-learning. These host signals never invalidate other hosts' learned peaks; a
-real OOM still does. Pressure reads share a 200 ms observation budget, bounding
-extra sampling/teardown work; failure costs only learning eligibility. The next
-run retains its existing ×1.25 or larger headroom.
-Darwin Metal/unified-memory jobs still explore, since no device peak is
-measured.
-Fully capped native groups preserve member-level OOM attribution and kill mode.
-GPU samples belong to the attempt's process inventory where supported, only for
-auto or estimate-feeding attempts, every five seconds and until unsupported.
-Independent host and GPU sampler goroutines max-track under one small mutex;
-cancellation joins both before the final read, so a slow GPU query cannot
-delay host sampling. The GPU query keeps its existing two-second timeout.
-Without an in-flight host tick, mark the result constrained and do not learn
-from start or post-exit readings alone.
-Empty process rows, uninitialised counters and transient query timeouts retry;
-missing tools or unparseable counters stop GPU sampling. A retained recipe GPU
-default is named as such beside a measured host source.
-Missing counters stay unknown. Native measurement on a GB10 (#1044) found
-`cudaMalloc` allocations outside memcg charges, so unified hosts add measured
-host and GPU peaks. An unknown device peak cannot supply an exact unified estimate.
-Keep the existing operator/driver reserve and
-per-attempt slack; do not invent another fixed reserve. Live available RAM and
-the shared machine allowance both bound admission, with a visible refusal reason.
-For unified CUDA, retain the physical [free-RAM floor](#unified-cuda-free-ram-floor) equal to the existing OS/driver reserve. Fresh raw host observations and outstanding growth bound queue
-admission; workers recheck raw RAM at launch. Cgroup credit never reduces the
-device vector. Lower tiers must also leave room for a sole qualified host's
-queued or forecast production envelope with existing estimator margins. Existing
-production holds, preemption and work-scoped parity approvals remain authoritative.
+See [job memory envelopes](reference/memory-mechanisms.md#job-memory-envelopes) for the
+approved mechanism and its constraints.
 
 ### Learned memory by default and bounded first runs
 <a id="amendment-learned-memory-by-default-and-bounded-first-runs-585-559"></a>
 
-Under MY-31, agents state needs, not memory numbers they would have to guess.
-A plain job with no usable memory figure is accepted as `memory: auto`;
-partial figures stay submitter hints. Explicit figures keep their meaning.
-Plain auto commands get a comparable memory identity from project, name, run,
-environment and inputs, so their accepted peaks teach later runs through the
-existing single eligibility gate.
-
-A CPU first run with no usable evidence or hint starts at one maximum supported
-kernel page (64 KiB), plus the existing per-attempt launch slack. This is an
-accounting floor, not a prediction of an arbitrary command's memory need.
-Authored member caps, measured constrained peaks and retry floors can only
-raise it. Accepted comparable family peaks still use their measured spread
-and growth; there is no guessed fraction of host RAM or multiplier of a
-failed envelope.
-
-On workers advertising `first_run_floor_v1`, non-production CPU work outside
-the shared-interactive role grows into room measured by the worker's local
-ledger. Each sample subtracts other charges, their unused reservations, the
-owner reserve and measured growth over the sampling interval plus stop grace.
-The queue charge follows measured use upward. Other CPU first runs retain a
-strict attempt ceiling, raised to the measured 5.75 MiB native shell startup
-envelope when configured launch slack supplies less. That envelope is the
-larger of a 3,895,296-byte Linux total cgroup peak and a 3,375,104-byte Darwin
-RSS peak plus 2,621,440 bytes of measured growth, rounded to 64 KiB pages.
-It is a measured startup seed, not a bound on an arbitrary workload; larger
-commands use measured-stop recovery. These paths do not gain allowance-wide
-lending. Unknown CPU work needs a kernel ceiling or sampled guard; an
-admission-only host cannot contain it. Linux `myce dev` reuses the owned-session
-RSS guard because its foreground workers have no delegated cgroup; installed
-Linux workers retain kernel containment. A measured memory stop requeues at the
-peak plus measured uncertainty without an infrastructure loss or retry charge.
-Recovery demand is bounded by permanent capacity, independently of live free
-RAM. Exact-attempt release custody remains authoritative. Launch-drift history,
-its learned margins and the `cold_probe_margin` hold are removed. Existing
-wire diagnostic fields remain readable during the adjacent-release transition.
-
-GPU first runs keep their separate device and host accounting below: unknown
-driver/device allocations cannot be inferred from CPU RSS (#596, #1044).
-
-On a unified-memory host, a plain `memory: auto` GPU job with no accepted estimate owns the
-card exclusively and reserves the host's whole shared physical headroom
-(`unifiedGPUFirstRun`, since e0202e34b): without a device sample, the shared
-pool cannot be split into two separate size guesses. With neither figure
-stated, the device side is a one-page marker of exclusivity, not a device-use
-estimate, and the enforced host member gets the rest of the pool. A hint
-figure keeps its value. GPU allocation failures are not classified, so the
-device side never doubles on failure. Learning needs a complete sample: where
-the driver reports per-process device memory (measured on a GB10, #1044; see
-[charging by use](#charging-running-attempts-by-use)), an accepted run's host
-and device peaks become the learned estimate, and later runs are sized and
-charged from it. A host-only sample never turns unknown device use into
-accepted sharing evidence, so such work keeps exploring. The cost is one
-exclusive host per cold run; a declared `--mem` is not `memory: auto` and skips
-it. Extension jobs keep their exploration.
-
-Job GET `memory_envelope.basis` is `declared`, `learned`, `hint` or
-`exploratory`. `evidence` counts the accepted attempts behind a learned figure
-or a similar-work bound. Status and waiting reasons show both. The local queue
-policy field `learned_memory: false` turns all of this off: omitted figures are
-rejected again, and cold runs explore host-wide. Unset means on. An omitted
-field in a policy update keeps the saved switch.
+See [learned memory by default and bounded first runs](reference/memory-mechanisms.md#learned-memory-by-default-and-bounded-first-runs) for the
+approved mechanism and its constraints.
 
 ## Native job isolation
 <a id="amendment-minimum-native-job-isolation-177-219-248"></a>
@@ -1506,19 +887,8 @@ availability while its machine or NAS is down.
 ### Pre-copying
 <a id="pre-copying-maintainer-2026-10-09"></a>
 
-`myce model sync MODEL --to machine|platform|all` persists a request to copy NAS
-masters before use; `--cancel` pauses that target request without discarding
-partial bytes. Pins warm/protect every possible landing worker's disk cache,
-including before a scheduled window. Idle workers pre-copy queued and recently
-used models, most-needed first. Real jobs, engine loads and model calls pause
-background copies. One copy per worker is the default, configurable with
-`--model-copy-parallel`. Cache limits include partials and full active copy
-reservations; background eviction never displaces pinned, loaded, active or
-more-used models. Final size and SHA-256 verification precede atomic publication.
-Status reports progress, errors and measured achieved copy speed. Placement
-estimates remaining NAS bytes divided by that worker's measured speed (40 MB/s
-until measured), prefers verified cached models, and keeps engine startup time
-separate from this transfer estimate. Everything remains laptop-testable.
+See [pre-copying](reference/model-mechanisms.md#pre-copying) for the
+approved mechanism and its constraints.
 
 ### Shared native server entries
 <a id="shared-native-server-entries-68"></a>
@@ -1658,29 +1028,8 @@ whole-input timeout.
 ### Durable asynchronous NAS output delivery
 <a id="opt-in-durable-asynchronous-nas-output-delivery-349-2026-10-29"></a>
 
-Tasks may explicitly select `output_delivery: async_nas` with declared outputs
-and a positive `disk.output_bytes` estimate. Existing tasks retain their result
-semantics. The queue's `--output-delivery-root` selects the NAS destination
-independently of checkpoint mode; SQLite and the queue file store stay on durable
-local storage. This selects output delivery only; local-first checkpoints require the separate explicit checkpoint opt-in above.
-
-After payload exit, the worker retains an immutable synced local output spool
-until exact durable queue acceptance. Queue admission reserves estimated output
-bytes, exchanges them for the current attempt's exact missing manifest, and
-preserves physical-space/quota backpressure. Queue success atomically records
-verified file-store outputs and a pending delivery. `output_refs` retrieval and
-compute completion never wait for NAS publication. Consumers needing NAS files
-explicitly wait for verified delivery and the accepted execution identity.
-
-One queue-owned background publisher stages complete immutable job/attempt
-paths, verifies bytes and an identity/policy/manifest receipt, syncs and renames.
-A pending NAS syscall retains its slot. Returned failures retry durably using the
-injected Clock. Restart/lost-ack replay compares receipts and content; conflicts
-and stale executions cannot claim verified delivery. Pending/failed delivery pins
-blobs beyond ordinary expiry, and status exposes state, bytes, age, attempts and
-cause. Verified delivery preserves ordinary retrieval retention; no early deletion,
-rollback, new storage service or publisher election is introduced. Details and
-supported forms: [file guide](files.md#complete-from-queue-storage-deliver-to-nas-later-349).
+See [durable asynchronous nas output delivery](reference/file-mechanisms.md#durable-asynchronous-nas-output-delivery) for the
+approved mechanism and its constraints.
 
 ## Extension composition
 <a id="extension-composition-e1-98"></a>
@@ -2013,95 +1362,14 @@ fall back locally.
 
 ### Migration: one-shot converter, fix forward
 
-Choose a **one-shot source converter**, not runtime compatibility readers for a
-deprecation window. MY-03 favors one current runtime; two permanent readers
-retain competing concepts and validation drift. Cost: one reviewed source/caller
-change per maintained consumer. Queued jobs, keys, frozen plans, output refs,
-checkpoints and exact custody remain unchanged. Retire old source-authoring
-entry points, not the internal decoder needed by saved bundles. Today preparation
-calls `extensionFromFiles` and execution calls `ReadExtension` on frozen
-`extension.yaml`; keep those paths (including the exact legacy/composed schemas,
-bytes and digest verification) for persisted job/registry snapshots. New adapter
-entries lower into the same execution representation. Internal snapshot decoding
-cannot accept a mutable author path or register a new old-format file. It remains
-while any retained snapshot needs it; consumer conversion alone cannot justify
-its deletion. This is decoding durable v3 intent, not an old runtime fallback.
-No accepted identity or digest is rewritten and no rollback layer is added.
-
-`myce adapter convert` reads explicitly selected profiles/extensions and emits
-one adapter plus field/caller-change report without overwriting its sources. An
-explicit apply publishes the reviewed output. Original sources stay in Git
-history. Refuse conflicting names, missing bytes and unrepresentable fields;
-never guess targets, references, outputs or locks. Preserve catalog names;
-copying their exact recipe bytes into a project requires the project-supplied
-environment option. Never invent a lock for installed tools.
-
-Profiles retain source, argv appending, env, project/class, targets/allow-lists,
-resources, memory comparability, common/item input identity, outputs/diagnostics
-and notifier recovery. Their `check` becomes `checks.result`. Extensions retain
-complete variants, setup/assets, named environments, sidecar caps/readiness,
-work types, baselines, references/sweeps and resumability; their `check` becomes
-`checks.qualification`. Changed frozen digests require fresh native qualification,
-not a relabelled old pass. Observations remain historical and reusable only when
-their complete comparability identity still matches.
-
-Stage converter/new reader first, then convert maintained callers and remove old
-YAML authoring readers/init paths in the cutover batch. This is implementation
-staging, not a supported dual-format window or automatic fallback. Retirement
-requires verified consumer conversion, not an arbitrary date. Old new-submission
-commands return typed conversion guidance; accepted-key replay, cancellation,
-receipt recovery and serialized job/registry snapshots keep working through
-the retained internal decoder. Retirement additionally requires a laptop restart
-proof: accept a native job before cutover, restart queue/worker with empty local
-extension/environment caches, fetch/decode its original snapshot, qualify that
-exact identity and execute the job, then verify accepted output and keyed replay.
-The original bundle, digest and submission fingerprint must remain unchanged.
-Incomplete conversion or failed cold-recovery proof leaves the retirement issue
-open and source-authoring entry points intact until cutover.
-
-Consumer migration preserves each existing seam: exact source/runtime and frozen
-inputs, target/resource/placement restrictions, sidecars, checks and artifacts,
-submission/key/cancellation behavior, endpoints and existing holds. A conversion
-must not substitute an environment, infer native qualification or launch held
-work. Runtime or platform changes require separate parity and native proof.
-Keep private paths, host IDs, data and receipts in consumer repositories and
-use sanitized fixtures in Mycelium.
-
-| Work kind | Preserve and prove at its existing seam |
-| --- | --- |
-| Offline suites and native naming | Two offline-suite entries retain Pixi CPU tools, wrapper, exact target and JUnit check. Its native naming extension retains CUDA variant, sidecar, baseline/result names and production submit/key/cancel seam. Model endpoints remain unchanged. |
-| Application backend/frontend/tooling | Backend/frontend/tooling entries retain targeted/full distinctions, macOS-only suites, placement restrictions, Python/Node prerequisites and markers/archive. Copy exact temporary queue-side lock bytes only under the approved environment option; do not infer Linux qualification from a list. |
-| Python/browser tests | Pytest/browser-e2e entries retain explicit Git bundle input and stale-bundle check (source omits `.git`), resources/thread limits, installed Python/Node/browser prerequisites and success markers. Conversion does not substitute a new environment. |
-| Rendering | Render/canary and per-item catalog entries retain frozen scene/binary inputs, snapshot identities, large frame archives, semantic checks, private placement and existing holds. Conversion must not launch another render. |
-| Generation/validation/evaluation | Generation/validation/evaluation entries retain the exact native CPU runtime/source closure, checksum checks, seed/candidate coverage, artifacts and holds. Historical loader alternatives stay historical; new uv/Pixi runtimes or GPU ports need separate parity/native proof. |
-
-Convert Mycelium's gate/go-test profiles and starter extensions first. Prove a
-small CPU fixture and fake native variant in `myce dev`, then compare sanitized
-consumer conversions through the same lowering. Consumer owners apply changes,
-update harness/CI callers and record one small authorized accepted-result proof
-per active entry type, requalifying changed native digests. A held consumer stays
-held with owner/next action and blocks removal of any reader it still uses.
-Retire redundant docs/examples and update the offload skill with cutover.
+See [migration: one-shot converter, fix forward](reference/adapter-mechanisms.md#migration-one-shot-converter-fix-forward) for the
+approved mechanism and its constraints.
 
 ### Remaining work
 <a id="implementation-plan-and-acceptance"></a>
 
-The unified file and lowering (#250) and the converter with internal dogfood
-(#253) are complete; their acceptance lists are in the
-[text before consolidation](https://github.com/1kuna/mycelium/blob/e0488c0c5034b5a57827ceebfa69f770c060bb8f/docs/design-proposal.md#L2352-L2384). One slice remains open.
-
-**[Consumer cutover and reader retirement (#254)](https://github.com/1kuna/mycelium/issues/254).**
-Acceptance: reviewed maintained-consumer files/callers with evidence or explicit
-holds; no active caller requires a removed reader; changed native digests
-requalify; old new-submission calls give conversion guidance while keyed
-recovery works. Require the pre-cutover native job's cold-cache queue/worker
-restart proof described under migration; retain internal snapshot decoders while
-referenced, even after source-authoring readers retire. Update
-guides/examples/skill without weakening checks, widening targets or consuming
-unaccepted results.
-
-#192 and #248 remain open until live acceptance; design text alone removes
-no consumer support.
+See [remaining work](reference/adapter-mechanisms.md#remaining-work) for the
+approved mechanism and its constraints.
 
 ### Per-item profile runs
 <a id="per-item-profile-runs-222"></a>
@@ -2247,156 +1515,26 @@ place work (MY-07, MY-31).
 ### Comparable observations
 <a id="comparable-observations-slice-1-107-approved-2026-10-22"></a>
 
-Observations change no admission, qualification or concurrency limit.
-
-A variant may declare `references`, keyed by its existing work type. Each entry
-has `input_shape` (an opaque compatibility bucket), `unit` (a generic work
-unit), and positive `units` (the amount in that work type's bundled native
-baseline). It requires that variant's check command and baseline. This is a
-serial reference contract: one independent item, concurrency 1, vector batch
-size 1. Threads, backend/cache settings and correctness semantics belong in the
-frozen recipe; changing the reference or recipe changes the extension digest
-and requires qualification again. Sweeps run only as [safe sparse
-curves](#safe-sparse-curves) allow.
-
-An ordinary extension job opts into comparable timing with
-`workload: {input_shape: small-v1, units: 100}`. The author promises the same
-serial execution mode and work unit as the matching reference. Absent metadata,
-legacy profiles, checks (which have not yet qualified), resumptions and unmatched
-shapes remain unknown. Successful accepted attempts alone update a per-key mean;
-failed, interrupted, stopped, stale and duplicate results cannot contribute.
-
-Keys bind work type, extension digest, exact target, reference, input shape,
-physical host/component, hardware/backend/environment fingerprints, host/device
-allowances, and the attempt's declared resources. Queue Clock timestamps measure
-Started acknowledgement through accepted completion: preparation is excluded,
-while cleanup/result handoff is included. These are observed elapsed times, not
-isolated kernel timings; contention is reported and mixed/unknown occupancy is
-excluded from comparable estimates. No rates are inferred from old scalar
-onboarding benchmarks. Evidence persists as per-record SQLite rows alongside jobs.
-
-Status exposes the frozen prediction, actual accepted elapsed time, sample
-count and unknown reason. Predictions use only matching prior evidence, and
-placement uses them only through [completion-aware
-placement](#completion-aware-placement). Status remains a read-only projection:
-no mutation, persistence or history-wide reserialization is added to status
-reads.
+See [comparable observations](reference/measurement-mechanisms.md#comparable-observations) for the
+approved mechanism and its constraints.
 
 ### Safe sparse curves
 <a id="safe-sparse-curves-slice-2-107-approved-2026-10-24"></a>
 
-> **Removed by [MY-49](DECISIONS.md#my-49).**
-
-Sweeps change no placement or ordinary admission/concurrency limit.
-
-A variant may declare `sweeps`, keyed by a declared reference work type, with a
-`command`, sorted supported power-of-two `counts` starting at 1, and positive
-`max_concurrency` (at most 64). One command implements concurrency internally;
-Mycelium does not launch concurrent GPU attempts. `--curve-max-concurrency N`
-on `join`, together with `--onboarding-benchmark`, explicitly enables sweeps up
-to the smaller operator/recipe bound (default 0, disabled). There is no periodic
-load generation. Prepared exact variants and native baselines must qualify first.
-
-Reuse host-wide benchmark preparation custody, command supervision and cleanup.
-Busy/recovering hosts cannot start; components run serially. Daily-use hosts need
-fresh locally measured idle recovery, external-power and safe-heat evidence. Owner return or
-unsafe/unknown signals cancels the command, retaining custody until cleanup.
-A sweep has a 60-second Clock budget, and each command a ten-second bound.
-Stop on non-increasing aggregate throughput, memory exhaustion or failure.
-The declared per-item CPU/RAM/device floors bound counts conservatively; unified
-memory is charged once against the one host allowance. Unknown memory permits
-no point. No resources are granted by learned measurements.
-
-The command gets `MYCE_BENCHMARK_CONCURRENCY`, normal check input/output/work,
-and `MYCE_BENCHMARK_OUTPUT`. It replays the bundled reference with unchanged
-quality, writes each item’s native output to `MYCE_CHECK_OUTPUT_DIR/0`, `/1`,
-and so on (all are compared), and reports aggregate `units`, measured service `seconds`, mean
-`latency_seconds`, baseline and peak host/device GiB, plus `out_of_memory`.
-Correct output is required for successful samples. Incremental memory is peak
-minus baseline; high-water memory never decreases. OOM permanently forbids that
-exact point, even if a later successful sample arrives.
-
-Store points as separate rows in the existing observation store. Clean accepted
-ordinary attempts refine their exact point using `0.8 * old + 0.2 * sample`;
-serial-only ordinary timing stays serial. Failed, mixed, interrupted, duplicate
-and stale attempts never refine rates. Fingerprint, hardware, recipe/reference,
-environment or allowance changes retain evidence with a stale reason and prevent
-rate reuse; 30-day-old points also become stale. JSON, CLI and HTML status expose
-rates, latency, incremental/high-water memory, samples and stale/forbidden reasons.
-Native mixed-load curves and fleet acceptance require separate authorization.
+See [safe sparse curves](reference/measurement-mechanisms.md#safe-sparse-curves) for the
+approved mechanism and its constraints.
 
 ### Completion-aware placement
 <a id="completion-aware-placement-slice-3-107-approved-2026-10-24"></a>
 
-> **Reduced by [MY-49](DECISIONS.md#my-49)** to the last accepted duration on each target.
-
-Rank qualified extension commands using a common completion estimate: declared
-workload units divided by the exact comparable serial measured rate, plus cold
-environment setup, model copy and input-file transfer costs. Reuse the existing
-setup/copy estimates; input transfers require measured network throughput.
-Missing, stale, forbidden, resumed or incompatible evidence remains unknown.
-Unknown estimates retain the existing placement decision exactly, including
-legacy scalar benchmark ordering. Comparable measured candidates precede
-unknown ones; distinct reference groups and equal estimates have deterministic
-ordering.
-
-Eligibility precedes ranking. Existing resource and learned memory floors,
-platform preferences, owner policy, tiers, fairness, project caps, holds and
-checkpoint/cleanup fences remain authoritative. Reuse the existing victim
-selection and minimize stop count/lost-work cost before completion ranking.
-Only currently admissible alternatives can defer dispatch; estimates create no
-reservations and never wait for a busy fast host. Ranking changes no
-concurrency: attempts share a card only under the [shared GPU
-rules](#inventory-and-resource-ownership) (MY-30). Freeze the chosen measured
-estimate's reason for JSON/CLI/HTML status. All time comparisons use the
-injected Clock; ranking does no I/O.
-
-Model calls use the shared estimate seam but remain unknown without the
-explicit model/reference binding defined under [declared fan-out](#declared-fan-out-and-batch-planning).
-Their routing, configured limits and victim selection remain as configured.
-Extension command sweep concurrency does not qualify a model server for
-concurrent calls. The quality-tolerance filter belongs at the existing
-qualified-variant eligibility boundary ([variant eligibility](#variant-eligibility-and-production-approval)),
-before completion ranking; ranking adds no quality policy.
+See [completion-aware placement](reference/measurement-mechanisms.md#completion-aware-placement) for the
+approved mechanism and its constraints.
 
 ### Repeated plain-command measurements
 <a id="repeated-plain-command-measurements-878"></a>
 
-Under MY-31/MY-34, native plain commands without workload units can teach seconds
-per whole job through the same accepted-attempt timing path and observation store.
-The speed key adds a digest of the exact run, frozen source archive and input
-manifests, output contract, environment recipes and isolation. It retains the
-existing target, physical host/component, runtime fingerprint, resources,
-allowance and power-mode identity. This exact-byte identity is deliberately
-narrower than the memory work identity; changing source/input size cannot reuse
-a prior speed, even when memory learning remains comparable. Unversioned legacy
-inputs, dynamic upstream inputs, external work directories/runtimes and missing
-runtime fingerprints remain unknown. Undeclared external state is outside this
-comparison contract; these observations do not qualify software or prove parity.
-
-Only successful accepted serial attempts with exact custody and complete clean
-contention evidence contribute. Resumptions, failed/interrupted/stale/duplicate
-results and intervals with another host obligation are excluded. Existing memory
-pressure classification must be eligible, and complete CPU scheduling-stall,
-quota-throttling and I/O-stall counters must measure zero. Linux `cpu.pressure`
-is read in the existing resource sampler; quota throttling alone cannot detect
-an unrelated process delaying execution. An independently negotiated optional
-CPU-pressure field preserves the prior telemetry contract with older queues.
-This has no new tuned pressure threshold: its cost is that internal parallelism,
-intrinsic I/O stalls and platforms without complete counters cannot teach a clean
-comparison. No second collector or benchmark runs.
-
-Each comparable key retains the incremental mean seconds/job, a clean sample
-count and observed minimum/maximum. One sample explicitly leaves variability
-unknown; the observed range is not a confidence interval or a deadline. Existing
-staleness/invalidation rules apply. Each speed mutation records its exact
-before/after digest in the job's accepted-sample ledger transaction, preserving
-release-verification evidence even when the usable timing window restarts.
-Status and inspection expose this evidence
-through work curves and attempt timing. Completion ranking adds existing setup
-and measured transfer costs and remains after admission, tiers, fairness and
-least-valuable fit. Estimates neither reserve capacity nor wait for a busy faster
-machine. Prediction-error calibration is separate work (#879).
+See [repeated plain-command measurements](reference/measurement-mechanisms.md#repeated-plain-command-measurements) for the
+approved mechanism and its constraints.
 
 ## Declared fan-out and batch planning
 <a id="declared-fan-out-and-batch-planning-slice-4-107-approved-2026-10-24"></a>
@@ -2546,190 +1684,14 @@ Adding a supported machine type takes one command (MY-08).
 ### One-command enrollment
 <a id="one-command-enrollment-b0b1b6-108-2026-10-21"></a>
 
-A hypha reports all its components. The existing `myce invite` and `myce
-install worker --enroll` paths provide bootstrap and enrollment. By default
-invite prints exactly one paste-ready line to stdout; `--out FILE` also saves
-it privately. Foreground `join` remains the worker runtime. NAS mode is
-required. The [onboarding preflight](#onboarding-preflight) owns hardware
-preflight, NAS/tools and saved service/policy fields; enrollment passes its
-ordinary installer options through unchanged. Legacy conversion is retired
-(MY-42); qualification remains separate.
-
-Releases contain linux/amd64, linux/arm64 and native darwin/arm64+cgo binaries.
-The publisher signs an exact JSON manifest with Ed25519. The queue verifies it
-against an independently provisioned public key, never a key from the manifest,
-then supplies approved public release metadata to pinned authenticated
-inviters. Explicit local manifest/key/origin overrides perform the same
-verification. Release versions are ordered semver values (for example
-`v3.1.0`). Queue approval is persisted in SQLite and must strictly increase
-unless `--allow-downgrade` explicitly re-approves or downgrades it. Repeating
-an identical verified approval is idempotent. `myce release approve` advances
-the running queue's default after a signed deployment without changing catalogs
-or service settings. The queue persists the publisher key provisioned only on
-its host; API approval requires an exact key match and verifies against that
-stored key. Startup verifies then skips/logs older or equal flag manifests
-unless explicitly forced, preserving the newer default across restart. Missing
-stored trust refuses API approval until local provisioning; key rotation
-remains local. Semver build metadata has equal precedence. The verified
-manifest binds version, protocols, OS/arch, size, SHA-256 and native Mac
-sensing. A small POSIX command bootstraps clean hosts, which have no myce, Go
-or Git. Its embedded verified hash matrix selects the artifact and HTTPS
-origin; curl resumes a private partial download, refuses redirects, and a
-platform SHA-256 tool verifies bytes before execution. Publisher HTTPS plus the
-signed manifest are separate from the LAN queue's exact certificate-DER pin.
-Never confuse that pin with curl's SPKI pinnedpubkey.
-
-Authenticated inviters mint 15-minute tickets (maximum one hour) over pinned TLS.
-The existing SQLite stores only ticket digests, expiry, queue pin and consumed
-state. Used and expired rows are pruned. One atomic conditional update redeems
-exactly once. Tickets authorize only redemption, never the jobs/status API; expiry uses the injected queue Clock. The
-fleet credential travels only in the pinned TLS response and mode-0600 installed
-joining file, never argv, URLs, history or diagnostics. If a redemption response
-is lost before durable saving, mint a new ticket; do not make replay reusable.
-Existing private file invitations remain supported with explicit
-`--private-file --out FILE` for compatibility. Installed
-reruns use their saved joining authority and do not redeem the spent ticket.
-The limited ticket enters the installer on stdin, never in its argv or environment.
-Bootstrap authority is retained at mode 0600 only until the installed joining file
-is durable, then deleted, including on interrupted-install recovery.
-
-Enrollment completion requires the installed spool's exact session, the current
-host-launch and keyed-attempt protocols, every expected device identity, CPU/RAM
-facts and live memory, policy acknowledgement, fresh queue observations, a small
-recorded runner smoke with no fleet token, and stable service-manager health.
-A machine's receipt binds its service PID, exact release/session, expected
-inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be
-acknowledged.
-Saved per-device settings or explicit selector lists independently establish expected
-devices. A failed probe retains `device_probe_unavailable`; a successful probe
-with a configured but absent device reports `device_selector_unmatched` and
-cannot be ready. launchd health reads the service block's direct keys, ignoring
-nested resource states. Healthy service identity must remain stable for 30 seconds.
-Unchanged receipts are not rewritten; receipt-write failures are logged without
-terminating the worker, and retried after the next successful check-in. Registration
-alone is incomplete. A healthy daily-use hypha may finish as `polite_waiting`;
-an operator-maintained host finishes as `disabled` or `drained`, never `ready`.
-Unknown devices, queue outage/426, recovery or a start-loop cannot complete ready.
-The summary includes the hypha name, OS/arch, devices, CPU/RAM allowances, storage,
-participation and enforcement. This smoke does not qualify project extensions.
-
-Each printed line freezes the approved release and checksums for
-reproducibility. Reuse that line for interrupted installation and same-version
-health checks; use a line for a newer approved release to upgrade. Installed
-upgrades use saved authority without redeeming or requiring another ticket.
-Same-version reruns verify health without changing files or restarting
-services, and explicitly explain that installer flags are not reapplied. Older
-releases are refused unless the operator passes `--allow-downgrade` explicitly;
-comparison uses the installed binary's version, not an invitation's age or a
-stale worker receipt. Equal versions (including `+build` metadata) require
-identical bytes, otherwise `--allow-downgrade` is required. Replacing an
-installed non-semver version such as `development` also requires that explicit
-flag; the published target remains semver. A changed release refuses busy local
-hosts before draining through existing queue maintenance. A race with new
-custody is bounded: drain-wait failure conditionally restores its own exact
-transition. Drain-wait and install/readiness have separate budgets. The
-existing installer transaction and spool remain the install path. Existing
-disabled/drained policy is preserved; an installer never resumes an
-operator-disabled host. A private resume receipt fences a self-made drain by
-host, name and policy timestamp. Its durable intent precedes the drain POST; an
-intent plus an observed drain on rerun is promoted to the exact timestamp
-receipt. Install/readiness failure restores the previous installation through
-the existing transaction and verifies its enrolled readiness before resuming
-only the self-made drain, with a separate cleanup budget. Errors state whether
-the previous release resumed or why recovery failed. A crash loses the
-in-memory installer snapshot; if already-installed bytes never become ready on
-rerun, report rollback unavailable and preserve maintenance. Operator-created
-maintenance remains respected. No fleet operation, reboot, driver install or
-privileged service is implied.
+See [one-command enrollment](reference/enrollment-mechanisms.md#one-command-enrollment) for the
+approved mechanism and its constraints.
 
 ### Onboarding preflight
 <a id="one-command-onboarding-preflight-b2b4-108109"></a>
 
-Onboarding reuses the machine inventory, installer overlay and service
-transaction. It enumerates all components, preserves explicit selector lists
-and per-device fixed budgets, and refuses typed driver, inventory or memory
-failures instead of saving CPU fallback. Enumerate PCI display and
-processing-accelerator classes, classify each vendor and integrated/discrete
-topology from sysfs facts (local device memory or PCIe link width), then
-correlate every runtime device with its PCI address. A CUDA device can expose a
-nonzero PCI transport width while sharing host RAM. When its memory total is
-unavailable, the selected PCI device's CUDA driver integrated attribute can
-establish unified topology; an unavailable total alone cannot. Product names
-never determine memory mode. Missing facts stay unknown; ambiguous multi-device
-correlation refuses instead of guessing. NVIDIA devices and discrete Intel
-endpoints require their runtime independently of any other working component. A
-failed `nvidia-smi` is informational when PCI inventory confirms no NVIDIA
-display device. Working integrated Intel graphics enrolls as `xpu` with unified
-memory; a missing integrated runtime permits CPU, while a broken runtime still
-refuses. Other display controllers are informational and do not block CPU
-enrollment. Explicit CPU selection remains supported; re-detection is an
-explicit install operation so upgrades do not silently broaden an owner's
-component allowance. Inventory errors retain the `device_probe_unavailable`
-runtime rejection while also carrying the more specific typed onboarding
-diagnosis.
-
-Enrollment completes hardware, storage, policy, state-root and service-session
-preflights before acquiring a drain. The candidate binary and a private staged
-config run the existing service-environment hardware probe before the live
-installation changes. Post-publication validation and exact-session readiness
-still verify the installed worker. Environment backend acquisition stays lazy.
-
-NAS mode is the only supported onboarding storage mode. Checkpoint, model and
-environment roots must use an existing reachable network filesystem. Use the
-saved NAS root, an explicit `--nas PATH`, or the documented default (`/mnt/nas`
-on Linux, `/Volumes/NAS` on macOS). Never adopt another discovered share;
-missing selection refuses `nas_not_configured` with candidate mount paths and a
-`--nas` hint before printing the plan. Preserve saved roots. Never mount a
-share, modify fstab or substitute local directories. The legacy deviceless test
-flag cannot bypass this requirement for CPU/GPU workers. The file store remains
-the job input/output transport, not a second storage mode. Resolve uv/pixi on
-the service PATH first and preserve that order on upgrades. Only a native
-environment build that needs a backend may acquire its pinned vendor binary in
-the ordinary user's installation; invoke it by absolute path. Include uvx when
-shipped with uv. An offline machine with no recipes needs no backend download.
-Do not execute remote installer scripts or print credentials.
-
-NAS validation uses the existing bounded checkpoint I/O pattern with one 250 ms
-network-filesystem budget per metadata/create/write/sync/close/rename/ cleanup
-operation (following the worker CIFS allowance), with a 5 s cap on the whole
-check, including mount inventory. Fresh/default NAS selection for both real and
-dry-run plans uses that same bounded, cancellable mount helper. Slow healthy
-sequences may exceed 250 ms in total. Timeout returns `nas_unresponsive`;
-caller cancellation remains `context.Canceled`. Cancelled/timed-out results are
-discarded before retrying the same key. An uninterruptible syscall can finish
-afterward, with no second sequence launched while it is pending. Known NFS/SMB
-mount types, autofs-managed mounts and explicitly network FUSE subtypes
-(`fuse.sshfs`, `fuse.rclone`, `fuse.smbnetfs`) are eligible. Generic or local
-FUSE is not. Autofs is triggered only inside bounded validation.
-
-Save daily-use, laptop and desktop policy through the same flags/overlay/Args
-as budgets. False and zero are values, including on rerun. Linux onboarding
-enables and verifies user lingering without sudo, or reports the administrator
-prerequisite. macOS installs a LaunchAgent in the logged-in gui domain and
-validates its environment there. The injected Clock owns the service-probe
-deadline; a real ticker paces local output polling without advancing scheduling
-time. Bounded service stderr retains only allowlisted typed reasons. It starts at GUI login, not before login, and
-does not promise survival after logout. CPU/RAM admission on macOS is not an OS
-ceiling; required unsupported memory ceilings refuse explicitly. Hardware,
-service-session and native participation qualification remain separate gates.
-
-The enrollment command calls `PreflightHardware` and `ApplyHardwarePreflight`
-while planning, then `OverlayHardwareSettings` after explicit memory overrides.
-Call `PrepareOnboardingStorage` before publishing a service (discovery only for
-a fresh default mount), `BootstrapEnvironmentTools`, and
-`EnsureOnboardingServiceSession`. The existing `Install` transaction invokes
-`ValidateWorkerServiceEnvironment`; `detect --config` returns the whole
-selected hardware plan without reading credentials. These functions accept fake
-probes; service-probe deadlines use the injected Clock. Ordinary install
-upgrades keep saved component choices; `install worker --redetect` explicitly
-refreshes them.
-
-Tool versions are uv **0.8.22** and pixi **0.81.0**, with vendor GitHub release
-archive SHA-256 pins for Linux/macOS amd64/arm64. Both use versioned user-local
-directories; no existing system/user executable is replaced. The saved PATH
-prepends those directories and remains stable on rerun. Unsupported releases,
-downloads, checksums, archive shapes and executable versions refuse with typed
-reasons. These pins are onboarding prerequisites, not extension qualification.
+See [onboarding preflight](reference/enrollment-mechanisms.md#onboarding-preflight) for the
+approved mechanism and its constraints.
 
 ## Upgrade and state formats
 <a id="upgrade-and-migration-80"></a>

@@ -122,6 +122,8 @@ fi
 if [[ -f scripts/test-gate-default-cache.py ]]; then
   step gate-default-cache-regressions python3 scripts/test-gate-default-cache.py
 fi
+step docs-links-regressions python3 scripts/test-check-doc-links.py
+step docs-links python3 scripts/check-doc-links.py
 step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
