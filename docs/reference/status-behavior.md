@@ -1725,11 +1725,16 @@ reading can describe different occupancy and must not be mixed into this
 snapshot. Older records without this ledger cannot recover missing samples.
 
 Linux uses `MemAvailable`, including reclaimable cache, rather than `MemFree`.
-Fresh anonymous resident credit reduces pending growth. Summed CUDA process
-counters can overlap host memory and each other, so they do not grant queue
-resident credit; local launch uses a separately measured single-process union
-lower bound for its own helper. Thus live CUDA occupancy can lower physical
-room while the queue still protects unconsumed device demand. An
+Fresh anonymous resident credit reduces pending growth. On unified CUDA,
+workers also report `current_host_memory.device_resident_gb`, the largest direct
+single-process counter from that exact attempt, separately from the summed
+`device_gb` used for charging. Queue and worker admission credit at most the
+union lower bound: max(all credited host pages, one process's device counter).
+Only the difference goes to that process's attempt; device counters are never
+summed across processes or co-tenants. Missing, stale, ambiguous, fallback or
+multi-card device evidence grants no additional credit. Older workers without
+the lower-bound field keep their conservative behavior. Full charges, remaining
+device demand, growth forecasts and lending-stop headroom remain protected. An
 allowance-minus-charges comparison alone cannot attribute that difference to
 external processes or to an extra reservation. Production reservations and
 device-scoped holds confer priority/release custody, not extra RAM charges.

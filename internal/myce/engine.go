@@ -1056,7 +1056,7 @@ func (rt *modelRuntime) memoryStopGrace() time.Duration {
 // actor reads never acquire process/control locks or perform receipt I/O.
 func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured bool, samples map[attemptKey]hostMemorySample, launching ...attemptKey) error {
 	cores, ram, growth := 0, 0.0, 0.0
-	anon, ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+	ownResident, ownCharge, ownAnon, ownForecast, ownPending := 0.0, 0.0, 0.0, 0.0, 0.0
 	ownDevicePending := 0.0
 	var contributors []HostGrowthContributor
 	ownContributor := -1
@@ -1064,6 +1064,7 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 	if rt.clock != nil {
 		now = rt.clock.Now()
 	}
+	union := rt.deviceResidentUnionLocked(samples, now, launching...)
 	for _, j := range rt.batchJobs {
 		// Preparation can outlast a heartbeat or receive an out-of-band stop.
 		// Consult the exact actor at launch time, not its original running job.
@@ -1076,7 +1077,11 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		helper := 0.0
 		cores += j.Spec.Needs.cores()
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		charge, pending := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now, rt.memoryStopGrace())
+		extra := union.credit(jobKey(j))
+		if slices.Contains(launching, jobKey(j)) {
+			extra = 0
+		}
+		charge, pending := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), samples[jobKey(j)], now, rt.memoryStopGrace(), extra)
 		if slices.Contains(launching, jobKey(j)) && adaptiveMemoryCeilingGB(&j, owner) > 0 && j.MemoryEnvelope.ProbeFloorGB > 0 {
 			// This cold command has not executed yet. Its offered reservation
 			// must fit. Bounded estimates already use the offer plus retained
@@ -1086,9 +1091,6 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 		}
 		sample := samples[jobKey(j)]
 		forecast, fresh := sample.hostGrowth(now)
-		if fresh {
-			anon += sample.gb
-		}
 		if slices.Contains(launching, jobKey(j)) {
 			// The exact launch owns this complete reservation (#1033). Helpers
 			// cannot demand more unallocated RAM than that bound.
@@ -1130,11 +1132,11 @@ func (rt *modelRuntime) checkHostAdmissionLocked(hostFree float64, hostMeasured 
 			contributors = append(contributors, HostGrowthContributor{Kind: "model", ChargeGB: need, PendingGB: need})
 		}
 	}
-	if ownResident > 0 {
+	if ownResident > 0 && ownContributor >= 0 && union.owner == launching[0] {
 		// Host anon is uniquely charged across attempt cgroups, but can also
 		// contain CUDA pages. Credit only the union lower bound max(all anon,
 		// one process's CUDA counter), never their sum or two process counters.
-		additional := max(0, ownResident-anon)
+		additional := union.credit(launching[0])
 		pending := max(0, ownCharge-ownAnon-additional, ownForecast, ownDevicePending)
 		growth += pending - ownPending
 		if ownContributor >= 0 {
@@ -1170,6 +1172,7 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 		now = rt.clock.Now()
 	}
 	l := &hostLedger{attempts: map[attemptKey][2]float64{}}
+	union := rt.deviceResidentUnionLocked(rt.batchHostMemorySamples, now)
 	for _, j := range rt.batchJobs {
 		if a := rt.batchSupervisors[jobKey(j)]; a != nil {
 			j = a.admissionJob()
@@ -1178,7 +1181,7 @@ func (rt *modelRuntime) publishHostLedgerLocked() {
 			continue
 		}
 		owner := allocationMachine(&rt.memoryMachine, j.AllocatedDevices)
-		c, p := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now, rt.memoryStopGrace())
+		c, p := memoryChargeForGrace(&j, owner, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), rt.batchHostMemorySamples[jobKey(j)], now, rt.memoryStopGrace(), union.credit(jobKey(j)))
 		l.charge, l.pending, l.attempts[jobKey(j)] = l.charge+c, l.pending+p, [2]float64{c, p}
 	}
 	for _, other := range rt.models {

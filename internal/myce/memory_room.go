@@ -135,7 +135,7 @@ func memoryCharge(j *Job, m *Machine, envelope float64, s hostMemorySample, now 
 	return memoryChargeForGrace(j, m, envelope, s, now, defaultGPUStopGrace)
 }
 
-func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time, grace time.Duration) (charge, growth float64) {
+func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySample, now time.Time, grace time.Duration, deviceCredit ...float64) (charge, growth float64) {
 	if j == nil || m == nil {
 		return envelope, envelope
 	}
@@ -185,14 +185,20 @@ func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySamp
 	} else {
 		charge = max(base, retained, peak, min(measured, ceiling))
 	}
-	credit := memoryResidentCredit(s, now, rss)
+	// The host-wide union grants at most one device increment, after all
+	// uniquely charged host pages have been counted. Forecast/stop floors stay.
+	extra := 0.0
+	if len(deviceCredit) > 0 {
+		extra = known(deviceCredit[0])
+	}
+	credit := memoryResidentCredit(s, now, rss) + extra
 	growth = max(0, charge-credit)
 	if lend == lendByUse || below {
 		growth = max(growth, min(margin, charge))
 	} else if device && lend == lendNone {
 		// Without a measured device share, the declared device size is still
 		// to come: no device overlap with the cgroup sample is proved (#424).
-		growth = max(growth, j.Spec.Needs.MemoryGB)
+		growth = max(growth, j.Spec.Needs.MemoryGB-extra)
 	}
 	if lend == lendByUse {
 		// Admission must leave the same headroom that the lending safety
@@ -435,7 +441,7 @@ func (q *Queue) jobRelease(m *Machine, j *Job) roomArms {
 	// Release also returns the stop-horizon headroom held for this lender,
 	// without treating that headroom as resident or inflating its allowance.
 	physical := max(charge, growth+memoryResidentCredit(sample, now, rss))
-	return roomArms{physical + uncreditedGB(j, owner, sample, now), charge}
+	return roomArms{physical + max(0, uncreditedGB(j, owner, sample, now)-q.deviceResidentCredit(j, owner)), charge}
 }
 
 func (q *Queue) slotRelease(m *Machine, s *ModelSlot) roomArms {
