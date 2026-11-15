@@ -2,12 +2,107 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// #1650: ordinary producer outputs use the same accepted-attempt binding,
+// readiness clock, retention and transitive cancellation as fan-out outputs.
+func TestPieceDependencyOrdinaryProducer(t *testing.T) {
+	for _, outcome := range []string{"success", "failure", "cancel", "expiry"} {
+		t.Run(outcome, func(t *testing.T) {
+			q, clock, m, s := fanOutFixture(t, 1)
+			s.FanOut = nil
+			s.Outputs = map[string]string{"out": "results"}
+			parent := submit(t, q, s)
+			c := pieceConsumer(s, parent.ID, "")
+			c.SubmissionKey = "ordinary-consumer"
+			consumer := submit(t, q, c)
+			if dependencyReady(consumer) || !consumer.WaitingSince.IsZero() {
+				t.Fatal("ordinary consumer ran before producer acceptance")
+			}
+			invalid := c
+			invalid.SubmissionKey = "invalid"
+			invalid.After = &PieceDependency{Job: parent.ID, Piece: "not-a-piece", Outputs: c.After.Outputs}
+			if _, err := q.Submit(invalid); err == nil {
+				t.Fatal("ordinary source accepted a piece selector")
+			}
+			invalid.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"input": "undeclared"}}
+			_, err := q.Submit(invalid)
+			var refusal *HTTPError
+			if !errors.As(err, &refusal) || refusal.Code != "job_files_invalid" || refusal.Message != "after output is not declared by the parent" {
+				t.Fatal("dependency validation lost its typed field rule", err)
+			}
+			if _, err := q.Resolve(ResolveRequest{Spec: invalid}); !errors.As(err, &refusal) || refusal.Message != "after output is not declared by the parent" {
+				t.Fatal("resolve did not catch the same dependency error", err)
+			}
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != parent.ID {
+				t.Fatal("blocked consumer displaced producer", run)
+			}
+			if outcome == "cancel" {
+				if _, err := q.CancelJob(parent.ID); err != nil {
+					t.Fatal(err)
+				}
+				if got := job(t, q, consumer.ID); got.State != "cancelled" || got.Attempt != 0 {
+					t.Fatal("ordinary cancellation missed blocked dependent", got)
+				}
+				return
+			}
+			clock.Advance(time.Second)
+			finish(t, q, run, outcome != "failure")
+			ready := job(t, q, consumer.ID)
+			if outcome == "failure" {
+				if ready.State != "failed" || ready.DiagnosticCode != "upstream_failed" || ready.Attempt != 0 {
+					t.Fatal("failed producer released consumer", ready)
+				}
+				return
+			}
+			if !dependencyReady(ready) || ready.Dependency.Execution != (Execution{ID: parent.ID, Attempt: run.Attempt}) || ready.Dependency.Inputs["input"] != job(t, q, parent.ID).OutputFiles["out"] || !ready.Dependency.ReadyAt.Equal(clock.Now()) {
+				t.Fatal("ordinary output lacks exact accepted binding", ready.Dependency)
+			}
+			q = reopenCancellationQueue(t, q, clock)
+			if replay := submit(t, q, c); replay.ID != consumer.ID || replay.Dependency.Execution != ready.Dependency.Execution || !replay.Dependency.ReadyAt.Equal(*ready.Dependency.ReadyAt) {
+				t.Fatal("restart/replay changed ordinary binding", replay)
+			}
+			if outcome == "expiry" {
+				if err := q.update(func() error { q.touchJob(parent.ID).FilesExpired = true; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				c.SubmissionKey = "expired"
+				if _, err := q.Submit(c); !isResultExpired(err) {
+					t.Fatal("new ordinary binding ignored expired outputs", err)
+				}
+				return
+			}
+			running := check(t, q, m, nil).Job
+			if running == nil || running.ID != consumer.ID {
+				t.Fatal("ready ordinary consumer was not placed", running)
+			}
+			// A successful producer's later abort still fences running descendants.
+			ack, err := q.CancelJob(parent.ID)
+			if err != nil || ack.Release == nil || *ack.Release != "pending" || !cancelled(job(t, q, consumer.ID)) {
+				t.Fatal("ordinary abort lost downstream release custody", ack, err)
+			}
+			if err := q.Started(result(running, true)); err == nil {
+				t.Fatal("aborted consumer retained launch authority")
+			}
+			finish(t, q, running, false)
+			ack, err = q.CancelJob(parent.ID)
+			if err != nil || ack.Release == nil || *ack.Release == "pending" {
+				t.Fatal("ordinary abort did not settle exact release", ack, err)
+			}
+			c.SubmissionKey = "late"
+			if late := submit(t, q, c); late.State != "queued" || !dependencyReady(late) {
+				t.Fatal("later cancellation invalidated a succeeded producer's outputs", late)
+			}
+		})
+	}
+}
 
 func pieceConsumer(s Spec, parent, piece string) Spec {
 	s.FanOut = nil

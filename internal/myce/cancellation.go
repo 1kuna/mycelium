@@ -418,16 +418,15 @@ func releaseState(state string) *string { return &state }
 // Producer waves and registered consumers share the existing exact-copy custody.
 // Existing-parent dependency validation keeps the traversal finite.
 func (q *Queue) cancellationMembers(j *Job) []*Job {
-	if j.FanOut == nil {
-		return nil
-	}
 	if q.cancellationMembersByParent != nil {
 		return q.cancellationMembersByParent[j.ID]
 	}
 	out := []*Job{}
-	for _, id := range j.FanOut.Children {
-		if child := q.retainedJob(id); child != nil {
-			out = append(out, child)
+	if j.FanOut != nil {
+		for _, id := range j.FanOut.Children {
+			if child := q.retainedJob(id); child != nil {
+				out = append(out, child)
+			}
 		}
 	}
 	for _, child := range q.s.Jobs {
@@ -472,13 +471,12 @@ func (q *Queue) cancellationObservation() *Queue {
 		}
 	}
 	for id, j := range retained {
-		if j.FanOut == nil {
-			continue
-		}
-		members := make([]*Job, 0, len(j.FanOut.Children)+len(dependents[id]))
-		for _, childID := range j.FanOut.Children {
-			if child := retained[childID]; child != nil {
-				members = append(members, child)
+		members := []*Job{}
+		if j.FanOut != nil {
+			for _, childID := range j.FanOut.Children {
+				if child := retained[childID]; child != nil {
+					members = append(members, child)
+				}
 			}
 		}
 		view.cancellationMembersByParent[id] = append(members, dependents[id]...)

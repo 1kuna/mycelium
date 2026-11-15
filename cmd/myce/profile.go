@@ -418,7 +418,12 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() {
+		// Keep the flock inode: unlinking lets an existing waiter and a new
+		// submitter lock different files. Clear the retired holder before unlock.
+		_ = lock.Truncate(0)
+		_ = lock.Close()
+	}()
 	stages, err := filepath.Glob(filepath.Join(receipts, ".prepare-*"))
 	if err != nil {
 		return err
@@ -769,15 +774,18 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			}
 			overloaded := errors.As(e, &h) && (h.Status == 429 || h.Status >= 500)
 			if errors.As(e, &h) && !overloaded {
-				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
-					r.PathDiagnostic = h.PathDiagnostic
-					r.RefusalCode, r.RefusalReason = h.Code, h.Message
-					if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
-						return err
-					}
-					return profileFailure(out, &r, 78, h.Code+": "+h.Message)
+				r.PathDiagnostic = h.PathDiagnostic
+				r.RefusalCode, r.RefusalReason = h.Code, h.Message
+				if c.Token != "" {
+					r.RefusalReason = strings.ReplaceAll(r.RefusalReason, c.Token, "[redacted]")
 				}
-				return profileFailure(out, &r, 65, "submission_rejected: queue rejected the saved intent")
+				if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+					return err
+				}
+				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
+					return profileFailure(out, &r, 78, r.RefusalCode+": "+r.RefusalReason)
+				}
+				return profileFailure(out, &r, 65, "submission_rejected: "+r.RefusalCode+": "+r.RefusalReason)
 			}
 			// Name the cause (overload, stall, transport) so a timeout is not mistaken for an outage (#1016).
 			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key (cause: "+e.Error()+")")

@@ -87,6 +87,67 @@ func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
 		t.Fatal("argv evaluated as shell")
 	}
 }
+
+// #1650 exercises myce run's frozen source and dependency through the real
+// API, worker, accepted output transport and a replay of the consumer intent.
+func TestAdapterDevOrdinaryAfter(t *testing.T) {
+	root := t.TempDir()
+	conversionWrite(t, filepath.Join(root, "source", "run.sh"), "test -z \"${MYCE_TOKEN:-}\"\nif [ -f input ]; then cat input > result; else printf producer > result; fi\n")
+	data := strings.Replace(cpuAdapterYAML("source"), "    checks: {result: [test, -s, result]}\n", "", 1)
+	path := filepath.Join(root, "adapter.yaml")
+	conversionWrite(t, path, data)
+	binary := devTestBinary(t)
+	state := t.TempDir()
+	d, err := myce.StartDev(myce.DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), Token: "after-adapter-token", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+	defer cancel()
+	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
+	invoke := func(key string) profileReceipt {
+		t.Helper()
+		command := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", d.URL, "--key", key, "--notify", filepath.Join(root, "absent-notifier"))
+		command.Dir = root
+		command.Env = append(os.Environ(), "MYCE_TOKEN=after-adapter-token")
+		var diagnostics bytes.Buffer
+		command.Stderr = &diagnostics
+		out, err := command.Output()
+		// Explicitly absent notifier returns the accepted receipt without a
+		// detached observer; this fixture owns waiting through Client.Wait.
+		if exitCodeForTest(err) != 74 {
+			t.Fatalf("submit: %v %s %s", err, out, &diagnostics)
+		}
+		var r profileReceipt
+		if err := json.Unmarshal(out, &r); err != nil || r.JobID == "" {
+			t.Fatalf("receipt %s %v", out, err)
+		}
+		return r
+	}
+	producer := invoke("producer")
+	data = strings.Replace(data, "    source:", fmt.Sprintf("    after: {job: %s, outputs: {input: result}}\n    source:", producer.JobID), 1)
+	conversionWrite(t, path, data)
+	consumer := invoke("consumer")
+	if consumer.Spec.After == nil || consumer.Spec.After.Job != producer.JobID {
+		t.Fatal("adapter lost the dependency", consumer.Spec)
+	}
+	completed, err := d.Client().Wait(ctx, consumer.JobID)
+	if err != nil || completed.State != "succeeded" || completed.Dependency.Execution.ID != producer.JobID {
+		t.Fatalf("consumer %+v %v", completed, err)
+	}
+	output := filepath.Join(root, "accepted")
+	if err := d.Client().DownloadResult(ctx, consumer.JobID, "result", output); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(output); err != nil || string(b) != "producer" {
+		t.Fatal("consumer did not read accepted producer bytes", string(b), err)
+	}
+	if replay := invoke("consumer"); replay.JobID != consumer.JobID {
+		t.Fatal("consumer replay duplicated work", replay)
+	}
+}
+
 func TestAdapterDevCheckedArtifact(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -299,7 +360,7 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 	if err := os.Mkdir(source, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for name, text := range map[string]string{"run.sh": "test -z \"${MYCE_TOKEN:-}\"\nprintf '%s' \"$1\" > result\n", "check.sh": "cat \"$MYCE_CHECK_INPUT\" > \"$MYCE_CHECK_OUTPUT\"\n", "input": "baseline", "native": "baseline"} {
+	for name, text := range map[string]string{"run.sh": "test -z \"${MYCE_TOKEN:-}\"\ntest \"$LIBGL_ALWAYS_SOFTWARE\" = 1 && test \"$EGL_PLATFORM\" = surfaceless || exit 98\nprintf '%s' \"$1\" > result\n", "check.sh": "test \"$LIBGL_ALWAYS_SOFTWARE\" = 1 && test \"$EGL_PLATFORM\" = surfaceless || exit 98\ncat \"$MYCE_CHECK_INPUT\" > \"$MYCE_CHECK_OUTPUT\"\n", "input": "baseline", "native": "baseline"} {
 		if err := os.WriteFile(filepath.Join(source, name), []byte(text), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -308,7 +369,7 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 	a := projectAdapter{Schema: 1, Project: "native-fixture", Default: "native-fixture", Entries: map[string]adapterEntry{"native-fixture": {
 		Version: strings.Repeat("v", 64),
 		Source:  profileSource{Directory: source}, Spec: myce.Spec{Class: "deadline", Deadline: &deadline, Outputs: map[string]string{"result": "results"}},
-		Variants: []adapterVariant{{Target: myce.ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake"}, Needs: myce.ResourceNeeds{MemoryGB: 0.25, HostMemoryGB: 0.25}, Execution: myce.ExecutionSpec{Main: myce.ExecutionMember{Command: []string{"sh", "{extension}/run.sh"}}}, Checks: adapterChecks{Result: []string{"test", "-s", "result"}, Qualification: []string{"sh", "{extension}/check.sh"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:native-fixture": {Input: "input", Output: "native", Measure: "exact", Native: "fixture shell copy", Variation: "exact deterministic bytes"}}}},
+		Variants: []adapterVariant{{Target: myce.ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake"}, Needs: myce.ResourceNeeds{MemoryGB: 0.25, HostMemoryGB: 0.25}, Execution: myce.ExecutionSpec{Main: myce.ExecutionMember{Command: []string{"sh", "{extension}/run.sh"}, Env: map[string]string{"LIBGL_ALWAYS_SOFTWARE": "1", "EGL_PLATFORM": "surfaceless"}}}, Checks: adapterChecks{Result: []string{"test", "-s", "result"}, Qualification: []string{"sh", "{extension}/check.sh"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:native-fixture": {Input: "input", Output: "native", Measure: "exact", Native: "fixture shell copy", Variation: "exact deterministic bytes"}}}},
 	}}}
 	data, err := yaml.Marshal(a)
 	if err != nil {

@@ -1673,9 +1673,18 @@ queue lock.
 `after.piece` keeps early per-piece readiness for ordinary consumers. A fan-out
 consumer uses the whole-parent form only. There is still one existing-parent
 edge per submission: no general DAG language, multiple-parent joins,
-ordinary-job sources, forward references, dynamic enumeration, timed
+forward references, dynamic enumeration, timed
 accumulation, atomic graph submission, or automatic semantic reduction. Broader
 stage planning is later work.
+
+The #1650 implementation task extends this same edge to ordinary producers:
+omit `piece`, map declared output names directly, and bind only after success
+and verified acceptance. `dependency.execution` records that producer's exact
+attempt. Existing readiness, transport, retention, replay and cancellation
+custody apply; no additional workflow engine is introduced. Internal pieces,
+check jobs and program jobs remain excluded as sources. Read-only resolve
+checks the same source/output rules, and rejected `myce run` intents preserve
+the typed queue reason in stderr and the receipt.
 
 ## Enrolling a machine
 

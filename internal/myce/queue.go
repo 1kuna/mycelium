@@ -995,7 +995,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			if isResultExpired(err) {
 				return err
 			}
-			return reject("job_files_invalid", err)
+			return rejectFieldRule("job_files_invalid", err)
 		}
 		validationErr := plainValidationErr
 		if s.extensionJob() {

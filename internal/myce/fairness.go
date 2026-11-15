@@ -647,7 +647,7 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	}
 	if !dependencyReady(j) {
 		if j.Spec.After != nil && j.Spec.After.Piece == "" {
-			return newHold("upstream", "waiting for upstream fan-out parent success")
+			return newHold("upstream", "waiting for upstream producer success")
 		}
 		return newHold("upstream", "waiting for accepted producer piece")
 	}
