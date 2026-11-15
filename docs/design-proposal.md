@@ -1182,8 +1182,20 @@ not a claim of native two-card qualification. Other GPU work retains total-peak
 sizing. Native GPU concurrency acceptance is separate from estimator
 implementation. Missing counters, older workers, macOS RSS evidence and
 cross-machine transfers retain conservative sizing. This does not relax
-pressure rejection. Device peaks remain separate, with the existing
-conservative host-plus-device accounting on unified devices.
+pressure rejection. Device peaks remain separate. Exact-local unified CUDA work
+with at least two complete accepted host observations uses the largest accepted
+device peak plus measured between-attempt peak spread (at least launch drift).
+Retain that range across accepted completions; a loading increment from zero to
+an already reserved peak is diagnostic, not a second whole device allocation.
+Live growth forecasts use the current increment/rate and keep the existing fresh
+sample, physical headroom and stop-grace guards. The CUDA absolute outside-root
+residual includes device pages: preserve each complete combined physical upper
+bound plus its measured host range/growth and device variation independently of
+non-reclaimable host plus device. Do not add device again to the residual or
+subtract independently sampled maxima to claim a unique-page union. Every
+incomplete historical row retains total-cgroup plus device sizing and its host
+uncertainty. Cross-machine transfer, unknown attribution, recovery/retry floors
+and rejected-pressure exclusions retain their conservative rules.
 
 **Ceiling-bound envelopes.** There is no low-resident file-cache exception. OOM, swap-out,
 anonymous workingset refault, or any `memory.events` `max > 0` / `high > 0`

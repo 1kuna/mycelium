@@ -67,3 +67,27 @@ func TestHostTelemetryLocalCapture(t *testing.T) {
 		t.Fatal("unbounded capture accepted")
 	}
 }
+
+func TestHostTelemetryWorkerOnlyCapture(t *testing.T) {
+	worker := os.Getpid()
+	probe := myce.MachineProbe{OS: "linux", ReadFile: func(string) ([]byte, error) {
+		return []byte("MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n"), nil
+	}, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		if name != "ps" {
+			t.Fatal(name)
+		}
+		return []byte(fmt.Sprintf("%d 1 2048\n", worker)), nil
+	}}
+	var out bytes.Buffer
+	args := []string{"capture", "--run-id", "worker-only", "--host-ref", "host-a", "--worker-pid", strconv.Itoa(worker), "--duration", "50ms", "--interval", "50ms"}
+	if err := hostTelemetryCommand(context.Background(), args, probe, &out); err != nil {
+		t.Fatal(err)
+	}
+	var r myce.HostTelemetrySample
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Queue.PID != 0 || r.Queue.BirthID != "" || r.Queue.RSS.Value != nil || r.Queue.RSS.Missing != "not_configured" || r.Worker.RSS.Value == nil || *r.Worker.RSS.Value != 2<<20 || r.WorkerTreeRSS.Value == nil || r.HostUsed.Value == nil {
+		t.Fatal("worker-only evidence missing or invented queue zero", r)
+	}
+}

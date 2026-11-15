@@ -28,6 +28,10 @@ myce telemetry capture --run-id baseline-r1 --host-ref host-a \
   --native-worker-only > host-telemetry.jsonl
 ```
 
+On worker-only hosts, omit `--queue-pid`. Queue RSS is then explicitly missing
+with `not_configured`, without probing PID zero or inventing zero RSS. Worker
+identity fencing, host/device probes and worker-tree attribution remain active.
+
 The duration is an explicit capture bound, not a benchmark timeout. Choose it
 to cover the actual run, with separate idle-before/after windows when useful.
 The example cadence matches the existing five-second device-memory cadence;

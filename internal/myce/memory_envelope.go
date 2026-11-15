@@ -869,6 +869,29 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 		} else if !j.Spec.Needs.cpuOnly() {
 			estimate.deviceUncalibrated = true
 		}
+		if !escalation && exact != nil && sameHost != nil && unifiedCUDA(m) && !j.Spec.Needs.cpuOnly() && !estimate.uncalibrated && !estimate.deviceUncalibrated {
+			local := pointsForExact(acceptedMemoryPoints(q, points), *key)
+			if host, device, _, ok := unifiedCUDACalibration(local, exploratoryDriftMarginGB(m)); ok {
+				// Recovery and constrained lower bounds above remain floors. The
+				// normal host bound includes CUDA's device-bearing residual, so
+				// replace only that ordinary exact-local bound, not recovery.
+				if q.memoryConstraintEvidence(*key, configuration, false).recovery == 0 {
+					// Exact device evidence cannot discount another card's host
+					// evidence. Preserve that ordinary same-host transfer floor.
+					var siblings []*WorkObservation
+					for _, point := range acceptedMemoryPoints(q, points) {
+						if point.Key.Component != key.Component && sameMemoryHost(point.Key, *key, m) && point.Key.Target == key.Target {
+							siblings = append(siblings, point)
+						}
+					}
+					peak, margin, _ := observedMemoryPeakAndMarginWithDrift(siblings, false, exploratoryDriftMarginGB(m))
+					host = max(host, peak+margin)
+					estimate.measuredHostGB = host
+					estimate.deviceFactor = max(1, device / *estimate.device.DeviceGB)
+					estimate.source = "unified CUDA physical bound + measured peak variation"
+				}
+			}
+		}
 
 	}
 	return estimate

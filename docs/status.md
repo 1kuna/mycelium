@@ -136,7 +136,16 @@ envelope; missing fields retain total-cgroup sizing.
 `memory_peak.device_sampling` records one exact attempt's driver sample count,
 extrema, final reading, largest/last step, first/peak timing and maximum gap.
 `complete: false` identifies missing, late or fallback coverage. These diagnostics
-do not reduce `device_growth_gb`, relax fresh sharing guards or qualify coexistence.
+do not relax fresh sharing guards or qualify coexistence. `device_growth_gb`
+retains the largest observed positive increment; live forecasts use the current
+increment/rate, so a completed loading burst does not keep projecting growth.
+Accepted work observations also retain `device_range`, the min/max of independent
+attempt device peaks. For exact local unified CUDA work with repeated complete
+host evidence, sizing uses peak variation rather than adding the startup load to
+the already reserved device peak. The CUDA physical residual remains a combined
+upper bound; it is not added to device memory again. Every incomplete historical
+row keeps its total-cgroup plus device floor, and complete rows keep their entire
+physical upper bound. This may still exceed resident host plus device memory.
 
 `diagnostic_code: memory_evidence_recovering` (#850)
 means declared requirements have an eligible target but the learned/exploratory
