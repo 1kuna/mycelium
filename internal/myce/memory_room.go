@@ -189,7 +189,7 @@ func memoryChargeForGrace(j *Job, m *Machine, envelope float64, s hostMemorySamp
 	// uniquely charged host pages have been counted. Forecast/stop floors stay.
 	extra := 0.0
 	if len(deviceCredit) > 0 {
-		extra = known(deviceCredit[0])
+		extra = min(known(deviceCredit[0]), helperDeviceResident(m, s, now))
 	}
 	credit := memoryResidentCredit(s, now, rss) + extra
 	growth = max(0, charge-credit)

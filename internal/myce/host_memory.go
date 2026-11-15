@@ -358,7 +358,7 @@ type CurrentHostMemory struct {
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
 	deviceSample     *atomic.Pointer[hostMemorySample]
-	deviceResidentGB float64 // Local direct CUDA single-process lower bound; never sent on the wire.
+	deviceResidentGB float64 // Worker-local mirror of the direct single-process bound.
 }
 
 // Refresh device telemetry independently of the actor snapshot. Log/result I/O

@@ -763,7 +763,8 @@ func cudaAttemptMemoryReading(b []byte, selector string, ids map[int]bool, resid
 	if resident != nil && found && !unreported {
 		// A sum can count one CUDA allocation in several processes. A single
 		// process's counter is a lower bound on their physical union. Keep this
-		// worker-local: neither RSS/fallback estimates nor remote reports grant it.
+		// separate from the summed charge and RSS/fallback estimates. A worker can
+		// report this lower bound for host-wide union credit on the queue.
 		*resident = largest
 	}
 	switch {
