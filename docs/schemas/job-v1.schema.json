@@ -340,6 +340,9 @@
         "host_memory_known": {
           "type": "boolean"
         },
+        "host_memory_ledger": {
+          "$ref": "#/$defs/HostMemoryLedger"
+        },
         "last_planner_decision": {
           "$ref": "#/$defs/AdmissionWaitPlan"
         },

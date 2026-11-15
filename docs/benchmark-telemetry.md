@@ -31,6 +31,10 @@ myce telemetry capture --run-id baseline-r1 --host-ref host-a \
 On worker-only hosts, omit `--queue-pid`. Queue RSS is then explicitly missing
 with `not_configured`, without probing PID zero or inventing zero RSS. Worker
 identity fencing, host/device probes and worker-tree attribution remain active.
+This is included in r6.19 (`7f10215c`). If a capture appears to require a queue
+PID, retain the exact invocation, error and `version` output from the same
+executable path used for capture. A version from another CLI or a refusal from
+an earlier release does not establish which sampler ran.
 
 The duration is an explicit capture bound, not a benchmark timeout. Choose it
 to cover the actual run, with separate idle-before/after windows when useful.

@@ -1712,6 +1712,28 @@ Every host command uses queue evidence; there is no local envelope or rest verdi
 
 ### Live headroom and reservations
 
+`admission_wait.first.targets[]` and later wait snapshots retain an optional
+`host_memory_ledger` from that same comparison. It is absent when no matching
+live ledger is available, including hypothetical release/qualification views.
+Use its `capacity_gb - growth_gb` for physical room and
+`allowance_gb - reserved_gb` for allowance room; admission takes the smaller
+arm (and any shared-interactive cap). `capacity_gb` is live RAM after the one
+host margin, not total RAM. `available_gb` is the worker's admission reading,
+which already excludes its explicit reserve. Owner charges include launch
+slack; do not subtract it again. A later `last_memory_admission` or machine
+reading can describe different occupancy and must not be mixed into this
+snapshot. Older records without this ledger cannot recover missing samples.
+
+Linux uses `MemAvailable`, including reclaimable cache, rather than `MemFree`.
+Fresh anonymous resident credit reduces pending growth. Summed CUDA process
+counters can overlap host memory and each other, so they do not grant queue
+resident credit; local launch uses a separately measured single-process union
+lower bound for its own helper. Thus live CUDA occupancy can lower physical
+room while the queue still protects unconsumed device demand. An
+allowance-minus-charges comparison alone cannot attribute that difference to
+external processes or to an extra reservation. Production reservations and
+device-scoped holds confer priority/release custody, not extra RAM charges.
+
 Per-job JSON retains `last_memory_admission`: the last
 changed blocking host-memory comparison in its current wait episode. It is
 retained through a start-deadline failure and queue restart; a retry starts a

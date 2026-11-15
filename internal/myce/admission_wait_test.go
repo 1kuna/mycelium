@@ -314,6 +314,83 @@ func admissionWaitAPI(t *testing.T, q *Queue, id string) *AdmissionWaitEvidence 
 	return found
 }
 
+// Replay the physical/allowance gap with opaque CPU holders. No device-counter
+// union or historical process attribution is inferred from these numbers.
+func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
+	q, clock := fixture(t)
+	m := guardedCPUMachine("worker", "host", "cpu", 32, 117)
+	m.HostMemoryBudgetGB = 113.64812850952148
+	m.MemoryCeilingSlackGB = .125
+	m.CapabilityProfile.SystemMemoryBytes = 129992077312
+	m.Devices = []MachineDevice{}
+	machineCheck(t, q, m)
+	var reports []AttemptReport
+	var runs []*Job
+	for _, row := range [][2]float64{{43.29749156746103, 42.154821889726655}, {8.125, 6.3597564697265625}, {14.125, 5.931949615478516}} {
+		s := cpuSpec(1, row[0]-.125)
+		s.Priority = "production"
+		holder := submit(t, q, s)
+		run := assignedJob(machineCheck(t, q, m, runs...))
+		if run == nil || run.ID != holder.ID {
+			t.Fatalf("missing synthetic holder: %s", job(t, q, holder.ID).Reason)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, run)
+		reports = append(reports, AttemptReport{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
+			CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: row[0] - row[1]}})
+	}
+	m.HostAvailableMemoryGB = 78.12232208251953
+	// machineCheck supplies unidentified bootstrap readings. Negotiate a
+	// distinct second sample before raising resident credit, as a worker does;
+	// replaying an unidentified observation must not renew or raise its credit.
+	for id := int64(1); id <= 2; id++ {
+		clock.Advance(time.Second)
+		for _, report := range reports {
+			report.CurrentHostMemory.SampleID = id
+		}
+		if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: reports}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := cpuSpec(1, 43.29749156746103-.125)
+	s.Priority = "production"
+	waiting := submit(t, q, s)
+	first := admissionWaitAPI(t, q, waiting.ID).First
+	if first == nil || len(first.Targets) != 1 {
+		t.Fatal("missing first comparison", first)
+	}
+	target := first.Targets[0]
+	l := target.HostMemoryLedger
+	if l == nil {
+		t.Fatal("first comparison lost its physical ledger")
+	}
+	near := func(got, want float64) {
+		t.Helper()
+		if math.Abs(got-want) > 1e-9 {
+			t.Fatalf("got %.12f, want %.12f", got, want)
+		}
+	}
+	near(l.AllowanceGB, 113.64812850952148)
+	near(l.ReservedGB, 65.54749156746104)
+	near(l.GrowthGB, 54.44652797493173)
+	near(l.CapacityGB-l.GrowthGB, 23.675794107587798)
+	near(l.FreeGB, target.AvailableHostGB)
+	near(l.AllowanceGB-l.ReservedGB-l.FreeGB, 24.42484283447265)
+	if len(l.Owners) != 3 {
+		t.Fatal("missing or duplicated exact holder", l.Owners)
+	}
+	// Later occupancy and a queue restart must not rewrite the first ledger.
+	clock.Advance(time.Second)
+	m.HostAvailableMemoryGB = 60
+	machineCheck(t, q, m)
+	q = memoryFactsRestart(t, q, clock)
+	if got := admissionWaitAPI(t, q, waiting.ID).First; !reflect.DeepEqual(got, first) {
+		t.Fatal("later comparison or restart rewrote first accounting")
+	}
+}
+
 // Test queues publish evidence synchronously (admission_wait_mode_test.go), so
 // this is a no-op for them. Tests of the asynchronous builder flush committed
 // pending captures with it; never advance scheduling time to wait for a
