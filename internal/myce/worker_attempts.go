@@ -836,7 +836,10 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		usedCores += n
 	}
 	growth := usedRAM
-	union := residentUnion(jobs, &w.Machine, w.hostMemorySamples, w.Clock.Now())
+	var union deviceResidentUnion
+	if len(jobs) > 0 {
+		union = residentUnion(jobs, &w.Machine, w.hostMemorySamples, w.Clock.Now())
+	}
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
