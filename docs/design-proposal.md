@@ -1182,8 +1182,20 @@ not a claim of native two-card qualification. Other GPU work retains total-peak
 sizing. Native GPU concurrency acceptance is separate from estimator
 implementation. Missing counters, older workers, macOS RSS evidence and
 cross-machine transfers retain conservative sizing. This does not relax
-pressure rejection. Device peaks remain separate, with the existing
-conservative host-plus-device accounting on unified devices.
+pressure rejection. Device peaks remain separate. Exact-local unified CUDA work
+with at least two complete accepted host observations uses the largest accepted
+device peak plus measured between-attempt peak spread (at least launch drift).
+Retain that range across accepted completions; a loading increment from zero to
+an already reserved peak is diagnostic, not a second whole device allocation.
+Live growth forecasts use the current increment/rate and keep the existing fresh
+sample, physical headroom and stop-grace guards. The CUDA absolute outside-root
+residual includes device pages: preserve each complete combined physical upper
+bound plus its measured host range/growth and device variation independently of
+non-reclaimable host plus device. Do not add device again to the residual or
+subtract independently sampled maxima to claim a unique-page union. Every
+incomplete historical row retains total-cgroup plus device sizing and its host
+uncertainty. Cross-machine transfer, unknown attribution, recovery/retry floors
+and rejected-pressure exclusions retain their conservative rules.
 
 **Ceiling-bound envelopes.** There is no low-resident file-cache exception. OOM, swap-out,
 anonymous workingset refault, or any `memory.events` `max > 0` / `high > 0`
@@ -1937,11 +1949,11 @@ worker-specific failure propagation, not another package manager.
 5. A real build failure excludes only that worker/target for that recipe identity.
    Status shows environment hash, worker, target, preparation failure and log
    reference; another compatible worker can build/run. The queue retains the
-   failed build evidence without terminally failing waiting jobs. If all known
-   compatible workers fail, keep accepted demand
-   queued with an explicit no-buildable-worker reason until repair, cancellation
-   or its existing deadline. Unknown/offline capacity is neither success nor a
-   proven failure.
+   failed build evidence and tries other compatible builders. If no known host
+   can perform the preparation, or every compatible builder has deterministically
+   failed, fail accepted demand with one finding and one action. Repair or changed
+   inputs require a new submission; terminal jobs do not reopen.
+   Unknown/offline capacity is neither success nor a proven failure.
 6. Persist failure evidence for the same key/fingerprint across restart. New
    recipe/relevant host identity or an explicit retry of that worker's failed
    preparation permits another build; idle polling does not. Planned stops and

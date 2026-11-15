@@ -98,7 +98,7 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 // output while sharing the API's current-policy advice with CLI observers.
 func DeadlineGuidanceText(j *Job) string {
 	d := j.DeadlineGuidance
-	if d == nil || terminal(j.State) {
+	if d == nil || terminal(j.State) || jobClass(j.Spec) != "deadline" {
 		return ""
 	}
 	p := j.PriorityPolicy

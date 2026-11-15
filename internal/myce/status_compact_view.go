@@ -199,38 +199,6 @@ func (c CompactStatus) Lines(full bool) []string {
 		}
 	}
 	out = append(out, header+"; "+c.Detail)
-	if len(c.Alerts) > 0 {
-		total := 0
-		for _, g := range c.Alerts {
-			total += g.Count
-		}
-		out = append(out, fmt.Sprintf("alerts: %d active in %d kinds; members: myce efficiency, status --sections machines,jobs", total, len(c.Alerts)))
-		for _, g := range c.Alerts {
-			line := "  " + g.Kind
-			if g.Count > 1 {
-				line += fmt.Sprintf(" ×%d", g.Count)
-			}
-			if len(g.Scopes) > 0 {
-				var scopes []string
-				for _, scope := range slices.Sorted(maps.Keys(g.Scopes)) {
-					if n := g.Scopes[scope]; n > 1 {
-						scopes = append(scopes, fmt.Sprintf("%s %d", scope, n))
-					} else {
-						scopes = append(scopes, scope)
-					}
-				}
-				line += " (" + strings.Join(scopes, ", ") + ")"
-			}
-			out = append(out, line+" since "+g.Since.UTC().Format(time.RFC3339))
-		}
-	}
-	if c.AlertDelivery != nil {
-		out = append(out, c.AlertDelivery.Summary())
-	}
-	if c.QueueRelease.Version != "" {
-		out = append(out, fmt.Sprintf("queue release: %s (%s)", c.QueueRelease.Version, c.QueueRelease.Commit))
-	}
-	out = append(out, c.FleetUpgrade...)
 	for _, host := range slices.Sorted(maps.Keys(c.HostStates)) {
 		out = append(out, fmt.Sprintf("host %s: %s", host, c.HostStates[host]))
 	}
@@ -263,32 +231,6 @@ func (c CompactStatus) Lines(full bool) []string {
 	if c.Warning != "" {
 		out = append(out, c.Warning)
 	}
-	for _, h := range c.Hyphas {
-		line := fmt.Sprintf("hypha %s: %s, %.1f GiB free, %s", h.ID, h.GPU, h.FreeMemoryGB, h.Availability)
-		if h.HostRAMGB != nil {
-			line += fmt.Sprintf("; host RAM %.1f GiB for admission", *h.HostRAMGB)
-		}
-		if h.CPU != nil {
-			line += fmt.Sprintf("; CPU %d/%d cores free", *h.FreeCPU, *h.CPU)
-		}
-		if h.Running > 0 {
-			line += fmt.Sprintf("; running %d", h.Running)
-		}
-		if h.Release != "" {
-			line += "; release " + h.Release
-		}
-		out = append(out, line)
-		for _, p := range h.ResultPublications {
-			out = append(out, "  "+p.String())
-		}
-		for _, p := range h.Preparing {
-			out = append(out, "  preparing "+p)
-		}
-		for _, p := range h.Copying {
-			out = append(out, "  copying "+p)
-		}
-	}
-	out = append(out, c.Models...)
 	for _, j := range c.Jobs {
 		id := ShortID(j.ID)
 		if full {
@@ -333,6 +275,46 @@ func (c CompactStatus) Lines(full bool) []string {
 	if len(c.Jobs) == 0 && len(c.Paused) == 0 {
 		out = append(out, "No jobs yet.")
 	}
+	for _, h := range c.Hyphas {
+		line := fmt.Sprintf("hypha %s: %s, %.1f GiB free, %s", h.ID, h.GPU, h.FreeMemoryGB, h.Availability)
+		if h.HostRAMGB != nil {
+			line += fmt.Sprintf("; host RAM %.1f GiB for admission", *h.HostRAMGB)
+		}
+		if h.CPU != nil {
+			line += fmt.Sprintf("; CPU %d/%d cores free", *h.FreeCPU, *h.CPU)
+		}
+		if h.Running > 0 {
+			line += fmt.Sprintf("; running %d", h.Running)
+		}
+		if h.Release != "" {
+			line += "; release " + h.Release
+		}
+		out = append(out, line)
+		for _, p := range h.ResultPublications {
+			out = append(out, "  "+p.String())
+		}
+		for _, p := range h.Preparing {
+			out = append(out, "  preparing "+p)
+		}
+		for _, p := range h.Copying {
+			out = append(out, "  copying "+p)
+		}
+	}
+	out = append(out, c.Models...)
+	if c.AlertDelivery != nil {
+		out = append(out, c.AlertDelivery.Summary())
+	}
+	if len(c.Alerts) > 0 {
+		total := 0
+		for _, g := range c.Alerts {
+			total += g.Count
+		}
+		out = append(out, fmt.Sprintf("alerts: %d active in %d kinds; detail: myce status --sections alerts", total, len(c.Alerts)))
+	}
+	if c.QueueRelease.Version != "" {
+		out = append(out, fmt.Sprintf("queue release: %s (%s)", c.QueueRelease.Version, c.QueueRelease.Commit))
+	}
+	out = append(out, c.FleetUpgrade...)
 	return out
 }
 

@@ -18,13 +18,13 @@ import (
 // This command never constructs a client or reads installed authority/state.
 func hostTelemetryCommand(ctx context.Context, args []string, probe myce.MachineProbe, out io.Writer) error {
 	if len(args) == 0 || args[0] != "capture" {
-		return errors.New("usage: myce telemetry capture --run-id ID --host-ref LABEL --queue-pid PID --worker-pid PID --duration D --interval D [--card LABEL=PCI]")
+		return errors.New("usage: myce telemetry capture --run-id ID --host-ref LABEL --worker-pid PID --duration D --interval D [--queue-pid PID] [--card LABEL=PCI]")
 	}
 	f := flag.NewFlagSet("myce telemetry capture", flag.ContinueOnError)
 	c := myce.HostTelemetryCapture{Probe: probe}
 	f.StringVar(&c.RunID, "run-id", "", "benchmark run identity")
 	f.StringVar(&c.HostRef, "host-ref", "", "opaque host alias; never a host name/address")
-	f.IntVar(&c.QueuePID, "queue-pid", 0, "local queue daemon PID")
+	f.IntVar(&c.QueuePID, "queue-pid", 0, "optional local queue daemon PID; omit on worker-only hosts")
 	f.IntVar(&c.WorkerPID, "worker-pid", 0, "local worker daemon PID")
 	f.BoolVar(&c.NativeWorkerOnly, "native-worker-only", false, "assert every managed attempt runs inside the worker tree; otherwise external attribution is missing")
 	duration := f.Duration("duration", 0, "required finite capture duration, including probe time")

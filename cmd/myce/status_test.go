@@ -156,16 +156,17 @@ func TestStatusUsabilityStructuredFieldsAndInternalLabel(t *testing.T) {
 }
 
 // Default status for one job has one reason line: its binding reason and next action.
-// Evidence, the isolation note, variant rows and the priority advisory once
+// Evidence, the isolation note and variant rows once
 // filled a dozen lines and 700 characters per read (gap 3); --history keeps them.
 func TestStatusJobShowsOneReasonLine(t *testing.T) {
+	class := "experiment"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"id":"waiting-job-0123456789","state":"queued","queued":"2026-11-12T00:00:00Z","isolation":"unsandboxed: evidence-isolation",
 "hold":{"kind":"native_qualification","owner":"queue","reason":"its native check abc on host-a is queued","clears":"the native check passes","next":"wait; nothing to do","detail":"evidence-detail"},
 "variant_eligibility":[{"extension":"x@1","host":"host-b","reasons":["evidence-variant"]}],
 "priority_policy":{"tier":"experiment","selector":"*/*","revision":1},
 "deadline_guidance":{"deadline_policy":{"tier":"deadline"},"eta":"unknown","message":"evidence-advisory"},
-"spec":{"name":"waiting sample","project":"p","class":"experiment"}}`)
+"spec":{"name":"waiting sample","project":"p","class":"`+class+`"}}`)
 	}))
 	defer server.Close()
 	read := func(args ...string) string {
@@ -202,8 +203,16 @@ func TestStatusJobShowsOneReasonLine(t *testing.T) {
 	if strings.Contains(out, "evidence-") {
 		t.Fatalf("default status printed detail:\n%s", out)
 	}
+	class = "deadline"
+	if deadline := read("waiting-job-0123456789"); !strings.Contains(deadline, "priority advisory:") {
+		t.Fatal("deadline status lost advice", deadline)
+	}
+	class = "experiment"
 	detail := read("--history", "waiting-job-0123456789")
-	for _, want := range []string{"evidence-detail", "evidence-isolation", "evidence-variant", "evidence-advisory"} {
+	if strings.Contains(detail, "priority advisory:") {
+		t.Fatal("experiment status printed deadline advice", detail)
+	}
+	for _, want := range []string{"evidence-detail", "evidence-isolation", "evidence-variant"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("--history lost %q", want)
 		}

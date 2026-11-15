@@ -10,10 +10,10 @@ import (
 )
 
 // Driver-shaped fixtures exercise the actual CUDA sampler and Result wire
-// boundary. A startup load stays in the conservative growth forecast; the
-// measured tail and missing-cycle evidence survive independently for #1044.
+// boundary. A startup load stays in peak-growth diagnostics; a later flat
+// reading ends its live forecast. Tail/coverage evidence survives for #1044.
 func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
-	for _, mode := range []string{"complete", "missed interval", "late first sample", "inventory failure", "stale finish"} {
+	for _, mode := range []string{"complete", "missed interval", "late first sample", "inventory failure", "stale finish", "flat tail"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -34,7 +34,11 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				return map[int]bool{42: true}, nil, nil
 			}, nil, time.Second, clock, a, ticks)
 			defer cancel()
-			for i, raw := range []string{"GPU-one, 42, 1024\nGPU-other, 42, 65536\nGPU-one, 99, 8192\n", "GPU-one, 42, 17408\n", "GPU-one, 42, 17664\n"} {
+			readings := []string{"GPU-one, 42, 1024\nGPU-other, 42, 65536\nGPU-one, 99, 8192\n", "GPU-one, 42, 17408\n", "GPU-one, 42, 17664\n"}
+			if mode == "flat tail" {
+				readings = append(readings, readings[len(readings)-1])
+			}
+			for i, raw := range readings {
 				if err := os.WriteFile(filepath.Join(dir, "reading"), []byte(raw), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -48,6 +52,12 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				clock.advance(at.Sub(clock.Now()))
 				ticks <- at
 				await(t, func() bool { s := a.device.Load(); return s != nil && s.at == at })
+			}
+			if mode == "flat tail" {
+				live := a.device.Load()
+				if live.growthGB != 0 || live.rateGB != 0 {
+					t.Fatalf("ended startup burst still blocks admission: %+v", live)
+				}
 			}
 			if mode == "inventory failure" {
 				// The unbuffered tick establishes happens-before for the flag;
@@ -72,7 +82,11 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			s := wire.MemoryPeak.DeviceSampling
-			if s == nil || s.Samples != 3 || s.MinGB != 1 || s.MaxGB != 17.25 || s.LastGB != 17.25 || s.MaxStepGB != 16 || s.LastStepGB != .25 || s.Complete != (mode == "complete") {
+			lastStep := .25
+			if mode == "flat tail" {
+				lastStep = 0
+			}
+			if s == nil || s.Samples != len(readings) || s.MinGB != 1 || s.MaxGB != 17.25 || s.LastGB != 17.25 || s.MaxStepGB != 16 || s.LastStepGB != lastStep || s.Complete != (mode == "complete" || mode == "flat tail") {
 				t.Fatalf("lost measured CUDA variation/coverage: %+v", s)
 			}
 			if *wire.MemoryPeak.DeviceGrowthGB < 16 {

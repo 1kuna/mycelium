@@ -143,7 +143,14 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 			}
 			want := 12 + minimumHostMemoryGB
 			if complete {
-				want = combined + .125
+				// The CUDA residual already includes device pages. Keep it as
+				// an independent physical bound, alongside resident + device,
+				// instead of adding the whole device peak to it a second time.
+				physical := max(combined, nr+4) + .125 + .125
+				want = physical - 4.125
+				if estimate.device == nil || estimate.device.DeviceGB == nil || *estimate.device.DeviceGB*estimate.deviceFactor != 4.125 {
+					t.Fatal("device peak/variation lost", estimate)
+				}
 			}
 			if math.Abs(estimate.measuredHostGB-want) > 1e-9 {
 				t.Fatalf("calibrated %g, want %g (complete %v)", estimate.measuredHostGB, want, complete)

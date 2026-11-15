@@ -18,6 +18,16 @@ means only an operator clears it. An offer is not a started build; an unknown
 observation is not measured zero capacity. Keep typed reasons and original intent, and fix the cause rather than
 retrying an unchanged deterministic failure. See [diagnostics](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
+Single-job text prints the hold's reason and `next` action. `--history` adds
+evidence and variants; priority advice appears only for deadline-class jobs.
+The queue schedules native checks and environment preparation ahead of useful
+work. If no known host can perform that prerequisite, the job fails with a
+`dead_end_wait` finding and one action. Busy hosts and unknown/offline inventory
+remain waits. A deterministic build failure excludes its exact worker/target/hash;
+another compatible builder can proceed. If all compatible builders have failed,
+repair a builder or the recipe and resubmit with a new key. Terminal jobs do not
+reopen when a builder is repaired.
+
 ## Coverage versus capacity
 
 Placement coverage reasons differ from occupied capacity or environment

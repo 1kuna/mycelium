@@ -898,7 +898,7 @@ func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[i
 	go func() {
 		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 		unreported, shared, incompleteFallback := false, false, false
-		var growth memoryGrowth
+		var growth processMemoryGrowth
 		sampling := deviceSampling{start: started}
 		defer func() {
 			peak.DeviceSampling = sampling.finish(clock.Now(), period)

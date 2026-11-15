@@ -150,10 +150,10 @@ func TestEfficiencyPredictionAndSuspectAttempts(t *testing.T) {
 	if len(errors) != 1 || *errors[0].HostErrorGB != 10 || *errors[0].DurationErrorSeconds != 10 || errors[0].Basis != "exploratory" {
 		t.Fatalf("errors=%+v", errors)
 	}
-	// A completed program can teach prediction error without another live job.
+	// Completed comparisons remain diagnostics; the retired predictor creates no alerts.
 	_, signals := efficiencySignals(&EfficiencyReport{At: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC), Predictions: errors}, nil)
-	if len(signals) != 2 || errors[0].Work == "" {
-		t.Fatalf("completed prediction facts did not reach the adaptive path: %+v", signals)
+	if len(signals) != 0 || errors[0].Work == "" {
+		t.Fatalf("diagnostic comparison created retired prediction alerts: %+v", signals)
 	}
 	wasted := efficiencyWasted(j)
 	if len(wasted) != 1 || wasted[0].Suspect == nil || !*wasted[0].Suspect || wasted[0].Kind != "oom" {
@@ -482,5 +482,40 @@ func TestEfficiencyReservationUsesLiveAdmissionCharge(t *testing.T) {
 	q.projectEfficiency(&view)
 	if got := view.Efficiency.Allocations[0].ReservedMemoryGBSeconds; got != charge {
 		t.Fatalf("integrated ceiling instead of admission charge: got %g want %g", got, charge)
+	}
+}
+
+// Retired prediction alerts must disappear from saved queues, not merely from
+// default rendering. Comparisons remain diagnostic data, never new signals.
+func TestEfficiencyRetiresPredictionAlerts(t *testing.T) {
+	q, c := fixture(t)
+	peak, actual, deviation := 1.0, 2.0, 100.0
+	r := &EfficiencyReport{At: c.Now(), Predictions: []PredictionError{{Work: "old", Basis: "learned", AcceptedHostPeakGB: &peak, HostErrorGB: &deviation, ActualSeconds: &actual, DurationErrorSeconds: &deviation}}}
+	old := map[string]efficiencyBaseline{}
+	for _, metric := range []string{"memory_prediction_relative_error", "duration_prediction_relative_error"} {
+		key := "work:old:learned/" + metric
+		old[key] = efficiencyBaseline{Active: true}
+		q.observeCurrentHealth("efficiency/"+key, true, HealthAlert{Kind: "efficiency_regression", Reason: metric})
+	}
+	q.observeCurrentHealth("test/retained", true, HealthAlert{Kind: "host_degraded", Host: "h"})
+	next, signals := efficiencySignals(r, old)
+	if len(next) != 0 || len(signals) != 0 {
+		t.Fatalf("retired predictor still trains alerts: %+v %+v", next, signals)
+	}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for key := range q.s.Health.Conditions {
+		if strings.HasPrefix(key, "efficiency/work:old:") {
+			t.Fatal("retained prediction condition", key)
+		}
+	}
+	for _, event := range q.s.Health.Events {
+		if retiredPredictionAlert(event.Reason) {
+			t.Fatal("retained prediction alert", event)
+		}
+	}
+	if len(alertsOf(q, "host_degraded")) != 1 {
+		t.Fatal("removed unrelated host evidence")
 	}
 }

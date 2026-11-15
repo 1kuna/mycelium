@@ -48,6 +48,8 @@ func parseStatusOptions(v url.Values) (statusOptions, error) {
 			continue
 		}
 		switch section {
+		case "alerts":
+			o.sections = append(o.sections, "health")
 		case "jobs", "machines", "storage", "work", "health", "efficiency", "usage", "diagnostics":
 			o.sections = append(o.sections, section)
 		default:

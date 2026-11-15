@@ -529,6 +529,24 @@ func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) str
 	if !q.inventoryFresh(owner) {
 		return ""
 	}
+	// The queue's exact native check needs the variant's resource floors too.
+	// Compare permanent capacity, never another job's current reservations.
+	if m.CapabilityProfile.LogicalCPUs > 0 && m.CapabilityProfile.SystemMemoryBytes > 0 && inventoryWaitingReason(m) == "" && m.MemoryError == "" {
+		capacity := q.qualificationCapacity(m)
+		probe := *j
+		probe.Spec.ExtensionCheck = &ExtensionCheckRequest{Work: work}
+		probe.Spec.FanOut, probe.FanOut = nil, nil
+		capable := false
+		for _, candidate := range q.memoryCandidates(&probe, &capacity) {
+			if cpuFits(candidate, &capacity) && hostFits(&capacity, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && candidate.Spec.Needs.MemoryGB <= capacity.TotalMemoryGB {
+				capable = true
+				break
+			}
+		}
+		if !capable {
+			return "dead end: no known host can fit the native check's resource requirements; action: reduce its resource requirements or provide a capable host and resubmit"
+		}
+	}
 	for _, r := range m.ExtensionReports {
 		if r.Work != work || r.Digest != e.Digest || !matchingExtensionReport(e, m, r) {
 			continue

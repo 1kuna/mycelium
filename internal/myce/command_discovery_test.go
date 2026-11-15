@@ -381,3 +381,33 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 		t.Fatal(replay, err)
 	}
 }
+
+func TestCommandDiscoveryPreparesAheadOfJobMemory(t *testing.T) {
+	q, clock := fixture(t)
+	discoveryCatalog(t, q, breadthRecipe("linux-64"))
+	m := cpuMachine("builder", "builder", "cpu", 8, 32)
+	m.EnvironmentBuilder = true
+	check(t, q, m, nil)
+	s := discoverySpec()
+	s.Needs.HostMemoryGB = 8
+	j := submit(t, q, s)
+	m.HostAvailableMemoryGB = 1
+	reply := check(t, q, m, nil)
+	if reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
+		t.Fatal("discovery build depended on useful job admission", reply)
+	}
+	p := reply.EnvironmentPlan[0]
+	if p.Target == nil || p.Target.OS != "linux" || p.Launch.Demand != j.ID {
+		t.Fatal("lost target or demand", p)
+	}
+	if err := q.AuthorizeLaunch(*p.Launch); err != nil {
+		t.Fatal(err)
+	}
+	m.EnvironmentReports = []EnvironmentReport{{Key: p.Key, Attempt: p.Launch.Attempt, State: "ready"}}
+	m.Environments = []string{p.Key}
+	m.HostAvailableMemoryGB = 32
+	clock.Advance(time.Second)
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
+		t.Fatal("prepared work did not run", got)
+	}
+}

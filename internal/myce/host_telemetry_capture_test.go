@@ -33,6 +33,29 @@ func TestHostTelemetryCaptureLocalProbe(t *testing.T) {
 	}
 }
 
+func TestHostTelemetryCaptureWorkerOnlyIdentity(t *testing.T) {
+	c, _ := captureFixture(t)
+	c.QueuePID, c.Cards = 0, nil
+	workerBirth := "birth-a"
+	c.Birth = func(pid int) (string, error) {
+		if pid != c.WorkerPID {
+			t.Fatalf("read unconfigured queue PID %d", pid)
+		}
+		return workerBirth, nil
+	}
+	if err := c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Sample(context.Background())
+	if err != nil || r.Queue.RSS.Missing != "not_configured" || r.WorkerTreeRSS.Value == nil || r.ExternalMemory.Value == nil {
+		t.Fatal(r, err)
+	}
+	workerBirth = "reused"
+	if _, err := c.Sample(context.Background()); err == nil {
+		t.Fatal("worker PID reuse did not stop capture")
+	}
+}
+
 func TestHostTelemetryCaptureSensorDescendants(t *testing.T) {
 	for _, mode := range []string{"cancel", "exited-parent"} {
 		t.Run(mode, func(t *testing.T) {

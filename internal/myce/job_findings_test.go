@@ -68,3 +68,26 @@ func TestJobFindingCarriesMeasuredEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestJobFindingsDeadEndPrivacyAndRepeatProjection(t *testing.T) {
+	for _, reason := range []string{
+		"dead end: no registered implementation matches a known host (private-name); action: /private/secret",
+		"dead end: private-name declares no native check for private-work; action: /private/secret",
+		"dead end: private-name declares no native baseline for private-work; action: /private/secret",
+		"dead end: the native check for private-name failed on private-host (/private/secret); action: /private/secret",
+		"dead end: environment preparation failed on every compatible builder; action: /private/secret",
+		"dead end: no known host can prepare the required environment; action: /private/secret",
+		"dead end: no known host can fit the native check's resource requirements; action: /private/secret",
+		"dead end: no host can size this auto-memory job (/private/secret); action: /private/secret",
+	} {
+		j := statusJobValue(&Job{State: "failed", DiagnosticCode: deadEndWait, Reason: reason})
+		text := JobReason(&j)
+		if j.Finding == nil || strings.Count(text, "Next:") != 1 || strings.Contains(text, "private") || strings.Contains(text, "execution failed") {
+			t.Fatal(text)
+		}
+		again := statusJobValue(&j)
+		if JobReason(&again) != text {
+			t.Fatalf("second projection changed finding: %s -> %s", text, JobReason(&again))
+		}
+	}
+}

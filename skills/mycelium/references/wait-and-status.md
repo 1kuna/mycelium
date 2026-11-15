@@ -24,8 +24,17 @@ output.
 
 Use `myce status JOB_ID` and `myce logs JOB_ID` for a real blocker; keep full or
 history status out of loops. Default fleet status is compact current work,
-machines, holds and active alerts; absence is not proof of completion or loss.
+unhealthy hosts and holds, with one trailing alert count; absence is not proof of completion or loss.
 Job reasons there are last committed facts, not a new placement plan.
+Single-job text shows one hold reason and its next action; `--history` adds
+supporting evidence and variants. Priority advice prints only for deadline-class
+jobs. The queue offers native checks and environment preparation before useful
+work can start. If no known host can perform the prerequisite, the job fails
+with one finding/action. Temporary capacity pressure or unknown/offline
+inventory remains a wait. Deterministic build failures exclude that exact
+worker/recipe; another compatible builder can proceed. If every compatible
+builder has failed, repair the recipe or a builder and resubmit; the failed job
+is terminal.
 Default `myce status --json`, `GET /api/status` and Python `client.status()`
 return that compact view (a few KB): `counts`, `alert_groups`, `hyphas`,
 running/waiting `jobs` with full IDs and reasons, and `paused` grouped by
@@ -34,7 +43,7 @@ project and reason with their `ids`. Full job objects need
 `client.status(snapshot=True)`.
 
 - `myce status --sections jobs,machines` adds detailed diagnostics;
-  `--sections work,storage,health,efficiency,usage,diagnostics` selects retained
+  `--sections work,storage,alerts,efficiency,usage,diagnostics` selects retained
   collections. Python: `client.status(sections="work,storage")`. A machine's
   host RAM is `host_memory`: `capacity_gb`, `charged_gb`, `room_gb` (room =
   capacity − charged; negative is debt). `free_host_memory_gb`,

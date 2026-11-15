@@ -11,6 +11,11 @@ Mycelium runs your commands on a fleet of CPU and GPU machines through one
 queue. You say what the work needs; Mycelium picks the machine, runs it and
 hands back verified files. Climb the ladder only as far as your work needs.
 
+Default `myce status` puts unhealthy hosts, holds and waiting work first; alerts
+are one trailing count. Use `myce status --sections alerts` for records or
+`myce efficiency` for sizing and placement findings. Host health openings and
+closings go to the installation owner's Mycelium inbox when its hook is configured.
+
 ## Ground rules
 
 - Use the installed `myce` CLI or Python `Client.from_installed()`; both find
@@ -409,8 +414,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only
   that worker/target/hash; keep the same queued job for another compatible worker.
-  `no_buildable_worker` means every freshly observed compatible worker failed.
-  Read `myce status --sections machines` for its hash, target, failure and log
+  If no known host can build it, or every compatible builder has deterministically
+  failed, the job ends with `dead_end_wait` and one finding/action. Repair and
+  resubmit with a new key; terminal jobs do not reopen. Unknown/offline inventory
+  remains a wait. Read `myce status --sections machines` for its hash, target, failure and log
   reference. Repair the worker, then `myce env retry WORKER HASH OS ARCH PLATFORM`,
   or submit changed recipe inputs. Process restarts and idle polling do not
   clear failures; transient network/disk failures and planned stops remain holds.
@@ -444,9 +451,14 @@ detail you need from a job within 14 days.
 
 For memory qualification, retain the exact attempt's `memory_peak`, including
 `gpu_host` pin/physical evidence and `device_sampling` coverage/variation when
-present. A CUDA proc physical upper bound can include unrelated occupancy and
-device overlap; it does not justify an overlap deduction or a smaller device
-growth allowance. Incomplete readings keep conservative sizing. See the
+present. A CUDA proc physical upper bound includes device and possibly unrelated
+occupancy. With repeated complete accepted local evidence, Mycelium keeps that
+combined bound independently of non-reclaimable host plus device, and uses
+between-attempt device peak variation rather than adding startup allocation twice.
+Incomplete historical readings retain total-cgroup plus device floors; unknown
+or stale live device attribution still requires exclusive execution. For local
+benchmark telemetry on a worker-only host, omit `--queue-pid`; its RSS is marked
+`not_configured`. See the
 [memory status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md).
 
 ## Python

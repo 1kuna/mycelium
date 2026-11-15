@@ -150,9 +150,18 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 	}
 	if corrected && !oldCorrected || !memoryIdentityUsable(old) {
 		old.MemoryPeak, old.MemoryRange, old.GPUHostRange, old.MemorySamples = nil, nil, nil, 0
+		old.DeviceRange = nil
+	}
+	if old.MemoryRecordedAt.IsZero() || old.MemoryPeak.constrained() {
+		old.DeviceRange = nil
 	}
 	point.MemoryEscalation = nil
 	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
+	if p := r.MemoryPeak; p.DeviceGB != nil && validRate(*p.DeviceGB) {
+		point.DeviceRange = mergeMemoryPeakRanges(old.DeviceRange, &MemoryPeakRange{Samples: 1, MinGB: *p.DeviceGB, MaxGB: *p.DeviceGB})
+	} else {
+		point.DeviceRange = nil
+	}
 	if p := r.MemoryPeak; p.NonreclaimableGB != nil && validRate(*p.NonreclaimableGB) && p.Events != nil && p.Source != processGroupMemorySource {
 		point.MemoryRange = mergeMemoryPeakRanges(old.MemoryRange, &MemoryPeakRange{Samples: 1, MinGB: *p.NonreclaimableGB, MaxGB: *p.NonreclaimableGB})
 	} else {
