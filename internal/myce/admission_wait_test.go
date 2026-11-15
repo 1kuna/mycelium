@@ -381,6 +381,24 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 	if len(l.Owners) != 3 {
 		t.Fatal("missing or duplicated exact holder", l.Owners)
 	}
+	// Public replies own their nested ledger, even while other queued jobs
+	// borrow this job's placement inputs for their own status projection.
+	detached, err := q.jobSnapshot(waiting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached.AdmissionWait.First.Targets[0].HostMemoryLedger.Owners[0].ChargeGB = -1
+	detached.AdmissionWait.First.Targets[0].HostMemoryLedger.Owners[0].Execution.ID = "changed-by-caller"
+	if got := admissionWaitAPI(t, q, waiting.ID).First; !reflect.DeepEqual(got, first) {
+		t.Fatal("public reply mutated committed physical accounting")
+	}
+	other := submit(t, q, s)
+	if got := admissionWaitAPI(t, q, other.ID).First; got == nil || got.Targets[0].HostMemoryLedger == nil {
+		t.Fatal("another queued job lost its matching ledger")
+	}
+	if got := admissionWaitAPI(t, q, waiting.ID).First; !reflect.DeepEqual(got, first) {
+		t.Fatal("another job's projection changed retained accounting")
+	}
 	// Later occupancy and a queue restart must not rewrite the first ledger.
 	clock.Advance(time.Second)
 	m.HostAvailableMemoryGB = 60

@@ -440,7 +440,17 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 						copy.Spec.SubmissionKey = j.Spec.SubmissionKey
 						s.Jobs[key] = &copy
 					} else {
-						s.Jobs[key] = j
+						if id != "" && key != id && j.AdmissionWait != nil {
+							// Other live jobs supply placement inputs, not returned
+							// receipts. Their immutable refusal history (including
+							// physical ledgers) cannot affect this job's planning.
+							// Do not deep-copy it into every single-job projection.
+							copy := *j
+							copy.AdmissionWait = nil
+							s.Jobs[key] = &copy
+						} else {
+							s.Jobs[key] = j
+						}
 					}
 				}
 			}
