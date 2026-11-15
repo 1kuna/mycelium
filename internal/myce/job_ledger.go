@@ -330,3 +330,39 @@ func (q *Queue) checkLedgerNativeCoverage(j *Job) {
 		j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 	}
 }
+
+// WorkLearningChange binds the exact accepted mutation, without duplicating the
+// learning algorithm or publishing its worker payload. Stored in the job ledger
+// in the same transaction as the observation and the accepted completion.
+type WorkLearningChange struct {
+	Key    ObservationKey `json:"key"`
+	Before string         `json:"before"`
+	After  string         `json:"after"`
+}
+
+func workMeasurementDigest(p WorkObservation) string {
+	p.StaleReason = "" // Availability/identity labels are not persisted measurements.
+	return identityHash(p)
+}
+
+func (q *Queue) recordWorkLearning(j *Job, old WorkObservation, exists bool, point WorkObservation) {
+	before := ""
+	if exists {
+		before = workMeasurementDigest(old)
+	}
+	e := ledgerAttempt(j, "work_learning", "accepted_sample")
+	e.WorkLearning = &WorkLearningChange{Key: point.Key, Before: before, After: workMeasurementDigest(point)}
+	q.appendJobLedger(j, e)
+}
+
+// recordMemoryInvalidation binds each comparable memory key rewritten by a
+// failed attempt to that attempt's ledger, without adding an accepted sample.
+func (q *Queue) recordMemoryInvalidation(j *Job, old, point WorkObservation) {
+	before, after := workMeasurementDigest(old), workMeasurementDigest(point)
+	if before == after {
+		return
+	}
+	e := ledgerAttempt(j, "work_learning", "memory_invalidated")
+	e.WorkLearning = &WorkLearningChange{Key: point.Key, Before: before, After: after}
+	q.appendJobLedger(j, e)
+}

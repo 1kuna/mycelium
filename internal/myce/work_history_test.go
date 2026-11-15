@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+func workHistorySnapshot(t *testing.T, q *Queue) Snapshot {
+	t.Helper()
+	s, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func observationFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -103,6 +112,16 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
 		t.Fatal(err)
 	}
+	// MY-42: retired curve fields in persisted rows are tolerated. The current
+	// duration and memory fields still belong to the accepted-work record.
+	if _, err := q.db.Exec(`UPDATE queue_state SET data=json_set(data,
+		'$.rate', 999, '$.latency_seconds', 888,
+		'$.host_memory_gb', 777, '$.device_memory_gb', 666,
+		'$.units', 10, '$.service_calibration', json('{"samples":2}'),
+		'$.repeated', json('{"samples":3}'))
+		WHERE key LIKE 'work_observations/%'`); err != nil {
+		t.Fatal(err)
+	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +132,11 @@ func TestWorkObservationAcceptedTimingAndPersistence(t *testing.T) {
 	defer reopened.Close()
 	if len(reopened.s.WorkObservations) != 1 || reopened.s.Jobs[second.ID].Timing.ActualSeconds == nil {
 		t.Fatal("observations not restored")
+	}
+	for _, point := range reopened.s.WorkObservations {
+		if point.LastSeconds != 3 || point.Samples != 2 || point.Key != observed.Key {
+			t.Fatal("retired curve fields changed accepted history", point)
+		}
 	}
 }
 

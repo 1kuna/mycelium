@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -23,7 +22,7 @@ func memoryIdentityUsable(p WorkObservation) bool {
 	return p.StaleReason == "" || p.StaleReason == "resource allowance or power mode changed"
 }
 
-func curveReferenceKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
+func memoryReferenceKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
 	v := e.variant(machineTarget(m))
 	if v == nil {
 		return nil, "recipe target unavailable"
@@ -55,7 +54,7 @@ func curveReferenceKey(e Extension, m *Machine, work string) (*ObservationKey, s
 }
 
 // Queue mutation only: retain historical evidence with an explicit reason.
-func (q *Queue) invalidateWorkCurves() {
+func (q *Queue) invalidateWorkObservations() {
 	for id, p := range q.s.WorkObservations {
 		// Missing inventory is temporary (notably before the first check-in
 		// after a queue restart). Revalidate it against fresh identity evidence;
@@ -91,7 +90,7 @@ func (q *Queue) invalidateWorkCurves() {
 					if e.Digest != p.Key.ExtensionDigest {
 						continue
 					}
-					reason = curveStaleReason(p, e, m)
+					reason = memoryStaleReason(p, e, m)
 					break
 				}
 			}
@@ -131,36 +130,7 @@ func profileMemoryStaleReason(p WorkObservation, m *Machine) string {
 	return ""
 }
 
-func (p WorkObservation) Summary() string { return p.SummaryAt(p.RecordedAt) }
-
-// SummaryAt shows the kind of work's record: its last accepted duration and
-// accepted peak, with any invalidation.
-func (p WorkObservation) SummaryAt(time.Time) string {
-	state := "current"
-	if p.StaleReason != "" {
-		state = "stale: " + p.StaleReason
-	}
-	if p.Forbidden {
-		state = "forbidden: OOM or memory bound exceeded"
-		if p.StaleReason != "" {
-			state += "; stale: " + p.StaleReason
-		}
-	}
-	last := "unknown"
-	if validRate(p.LastSeconds) {
-		last = fmt.Sprintf("%.2fs", p.LastSeconds)
-	}
-	peak := "unknown"
-	if p.MemoryPeak != nil && p.MemoryPeak.HostGB != nil {
-		peak = fmt.Sprintf("host %.2f GiB", *p.MemoryPeak.HostGB)
-		if p.MemoryPeak.DeviceGB != nil {
-			peak += fmt.Sprintf(", device %.2f GiB", *p.MemoryPeak.DeviceGB)
-		}
-	}
-	return fmt.Sprintf("%s %s/%s: last accepted duration %s; peak %s; %s; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, last, peak, state, p.Samples)
-}
-
-// Explicit OOMs forbid their performance point; auto OOMs and failed constrained
+// Explicit OOMs forbid their duration record; auto OOMs and failed constrained
 // attempts invalidate comparable memory so exploration can re-teach it.
 func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	if !oomFailure && !memoryConstraintResult(j.StartedAt != nil, r) {
@@ -226,11 +196,11 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 // Identity fences only. Throughput age (RecordedAt) and memory age
 // (MemoryRecordedAt) are checked by their own readers, and ordinary readers
 // key through current qualification, so neither kind of evidence expires the other.
-func curveStaleReason(p WorkObservation, e Extension, m *Machine) string {
+func memoryStaleReason(p WorkObservation, e Extension, m *Machine) string {
 	if m.ExtensionFingerprint != p.Key.Fingerprint {
 		return "driver or backend fingerprint changed"
 	}
-	k, why := curveReferenceKey(e, m, p.Key.Work)
+	k, why := memoryReferenceKey(e, m, p.Key.Work)
 	if k == nil {
 		return why
 	}

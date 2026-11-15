@@ -47,31 +47,12 @@ snapshot it lacks from the model hub into its own snapshot cache
 General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,
 placement, pins and release custody. See [servers](../services.md) for routing,
 local secrets, approved folders, timeout/retry behavior and log policy.
-`myce measure` loads declared models together, optionally overlaps warm-ups,
-records observations, and unloads. Use explicit runtime/device/worker identity
-and an authorized maintenance window. Measured peaks and headroom, not model-file
-sizes or a guessed budget, qualify native admission. The [native test plan](../development.md)
-keeps this proof separate from laptop fixtures.
-The installed queue must support the fresh `/api/measure/safety` read used by
-the measurement binary. This small production-work/call/pin check avoids the
-full inspection snapshot. Transient read timeouts back off within the existing
-load-timeout budget and any earlier maintenance-context deadline. Keep the
-external maintenance deadline in force: the safety wait consumes window time,
-and no timeout, missing route or failed check certifies production safety.
-See the [measurement contract](../services.md#model-catalog-and-worker-setup).
-The command uses installed queue credentials and TLS authority by default;
-`--config` selects the installation without exporting or copying its token.
-
-On Linux unified CUDA hosts whose selected device reports unsupported used and
-free memory counters, measurement uses `MemTotal - MemAvailable`, matching
-admission's unified-memory detection. Reports label these readings
-`basis: unified/host`: device and host figures are the same shared RAM usage and
-must not be added. Baseline-to-peak deltas cover load and warm-up; absolute peaks
-still determine whether the supplied total usage budget fits. These are system
-observations, including other processes, rather than isolated GPU allocations.
-Malformed counters, a failed probe, unsupported used memory on a device with a
-numeric free-memory counter, or unavailable Linux host counters still refuse
-measurement. A change of memory basis during a run also fails the measurement.
+Accepted jobs retain their last duration and eligible memory peaks. Memory
+admission uses those observations with measured uncertainty; wall-time limits
+come only from the job's explicit contract. Native model qualification still
+needs representative load and request peaks, runtime overhead and OS headroom;
+laptop fixtures do not qualify real model capacity. Use the ordinary worker
+telemetry and attempt memory facts described in [status](../status.md).
 
 ## Durable model-engine interval history (#663)
 

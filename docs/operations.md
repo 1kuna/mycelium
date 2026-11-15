@@ -925,67 +925,14 @@ no capacity. While it is open:
   out-of-service action and is not refused.
 - `myce fleet upgrade` leaves that host pending with admission open, as above.
 
-## Preserve learned curves across a release
+## Preserve accepted work evidence across a release
 
-Use the versioned `scripts/verify-curve-preservation.sh` guard (or
-`myce release verify-curves`) instead of private release-script equality checks:
-
-```sh
-MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
-  --before before-status.json --after after-status.json \
-  --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
-rc=$? # retain this status, stderr and the diff receipt, including on failure
-```
-
-Capture authenticated **`/api/status?detail=full`** snapshots before and after
-cutover, using the canonical helper's read-only capture mode:
-
-```sh
-MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
-  --config CONFIG > before-status.json 2> before-capture.stderr
-# Perform the separately authorized cutover, then capture the after snapshot:
-MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
-  --config CONFIG > after-status.json 2> after-capture.stderr
-# Require exit 0 for each capture before verifying.
-```
-
-The default `/api/status` view is bounded: it can omit older terminal jobs and
-work curves. Never use that view to collect either side of preservation proof.
-Capture requests full detail for **both jobs and curves**, and preserves the
-server completeness metadata. Capture and verification reject bounded or
-incomplete job pages and missing jobs/curves fields; a queue predating page
-metadata can still return its original full snapshot. Collect accepted-learning
-ledger pages from the complete job inventory, not the default recent-job list.
-The **before response's server `now`** is the learning boundary, never the local
-save time or installer launch. The ledger file is a JSON array of pages from
-`GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
-could have learned, including pagination. Use the after snapshot's `now` as the
-upper boundary; later ledger entries are ignored.
-
-The guard preserves every key, sample count and throughput/memory evidence
-clock. It ignores only derived `stale_reason` labels. Changed values and new
-keys require a complete chain of accepted sample records, with exact job,
-attempt, key and queue-time provenance. Each record binds before/after digests
-of the actual learning mutation in the same SQLite transaction as completion;
-the guard shares the runtime's measurement digest and does not reimplement
-EWMA or memory merges. Memory-only samples may advance their sample count and
-memory clock while preserving the old throughput and its provenance.
-
-A failed OOM or ceiling-bound auto attempt invalidates comparable memory on
-every host's key and may keep its constrained peak there as a diagnostic. Each
-key it rewrites gets a `memory_invalidated` record on that failing job's ledger,
-binding the same before/after digests. The guard accepts it as a link that adds
-no sample and may reset the memory clock, so collect ledger pages for failed
-jobs too.
-
-Removed keys, resets, backward clocks, changed measurements without new
-samples or invalidation records, missing/ambiguous provenance and unexplained
-final values fail closed. Older jobs have no such learning ledger proof: an
-unchanged curve still passes, but an unproven change stops the release for
-investigation. Reference sweep changes, and invalidations recorded before this
-ledger record existed, also stop this guard.
-Ledger records follow existing job history retention; collect evidence before
-it expires. No release, install or fleet operation is performed by the guard.
+Accepted durations and memory peaks remain in the queue's `work_observations`
+records. Keep the database and ordinary backup/release checks; restarting a
+queue must preserve those records and revalidate worker identity before reuse.
+The status wire name `work_curves` remains for adjacent-release compatibility
+(MY-42); it contains accepted history rather than fitted predictions. Learning
+and memory-invalidation ledger entries remain part of evidence retention.
 
 ## Queue maintenance
 

@@ -20,7 +20,6 @@ type acceleratorBackend struct {
 	memoryCommand, memorySelectorFlag string
 	liveFreeMemory                    func(context.Context, func(context.Context, string, ...string) ([]byte, error)) (float64, error)
 	attemptMemory                     func(Worker, context.Context, map[int]bool, memoryFS, *float64, ...map[int]bool) (float64, bool, error)
-	measureMemory                     func(context.Context, string, float64, func(context.Context, string, ...string) ([]byte, error)) (MemoryReading, error)
 	resolveDevice                     func(context.Context, string) (string, error)
 
 	hostOS, hostArch          string
@@ -61,7 +60,7 @@ func init() {
 			memoryCommand: "nvidia-smi", memorySelectorFlag: "--id=",
 			platform: "cuda", pciVendor: "0x10de", extensionDevice: "cuda:0", resourceName: "NVIDIA (CUDA)",
 			autoUnifiedMemory: true, isolateTiers: true, multipleDevices: true, unifiedProcessAdmission: true,
-			resolveDevice: ResolveCUDADevice, attemptMemory: cudaAttemptDeviceMemory, measureMemory: measureCUDADeviceMemory,
+			resolveDevice: ResolveCUDADevice, attemptMemory: cudaAttemptDeviceMemory,
 			nativeReadRoot: "/proc/driver/nvidia/gpus", isolationPresence: "dev/nvidiactl",
 			visibleDevicesVariable: "CUDA_VISIBLE_DEVICES", accessNodes: "/dev/nvidia[0-9]*",
 			detect: detectCUDAAccelerator, inventory: cudaAccelerators, liveFreeMemory: cudaFreeMemory,
@@ -72,7 +71,7 @@ func init() {
 			platform: "xpu", pciVendor: "0x8086", extensionDevice: "xpu:0", resourceName: "Intel (XPU)",
 			telemetryPendingSource: "XPU telemetry not yet sampled",
 			fixedMemoryDefault:     true, optionalIntegratedRuntime: true, isolateTiers: true, multipleDevices: true, deviceHostMemory: true, repeatedTeardownAttention: true,
-			attemptMemory: xpuAttemptDeviceMemory, measureMemory: measureXPUDeviceMemory, isolationPresence: "dev/dri/renderD*",
+			attemptMemory: xpuAttemptDeviceMemory, isolationPresence: "dev/dri/renderD*",
 			visibleDevicesVariable: "ZE_AFFINITY_MASK", runtimeSelectorPrefix: "level_zero:", accessNodes: "/dev/dri/renderD*",
 			detect: detectXPUAccelerator, inventory: xpuAccelerators, prepareServiceProbe: xpuServiceProbe,
 			nativeNodes: xpuDeviceNodes, verifyCPUIsolation: verifyXPUSelectNone, fingerprint: xpuFingerprint, faultReasons: []string{"device_fault_xe", "device_fault_i915"},

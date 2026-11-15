@@ -746,7 +746,7 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 	}
 	if err == nil {
 		q.detectHealth()
-		q.invalidateWorkCurves()
+		q.invalidateWorkObservations()
 	}
 	if err == nil {
 		q.closeChangedAdmissionWaits()

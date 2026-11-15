@@ -113,7 +113,6 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 	a.registerCompletions(mux)
 	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
-	a.registerMeasurementSafety(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)
 	a.registerReservations(mux)

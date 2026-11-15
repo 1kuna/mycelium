@@ -751,21 +751,10 @@ The worker streams generic uploads to the engine. Batch `needs.model` remains a 
 request to launch a server. Queued commands never inherit the fleet token.
 
 `join --device ID` isolates commands/engines to one card and binds CUDA memory
-probes. XPU fixed admission cannot detect other owners. Before enabling warm
-production pins, run `myce measure` locally in an approved maintenance window
-with the exact worker identity/spool, explicit platform/device/budget and model
-list. It holds all models together, optionally warms them, writes JSON and text,
-and unloads them. Missing native counters fail visibly. See the separate
-[native measurement checklist](development.md).
-
-`measure --warmup-parallel N` defaults to `1` (warm each model after loading it).
-With `N > 1`, load all selected models first, then run at most N warm-up
-requests concurrently. `--load-timeout DURATION` defaults to `5m` per model;
-both flags require positive values. Each model reports `load_seconds` and
-`warmup_seconds`; the report also includes the warm-up phase's wall time,
-parallel limit, load timeout, and combined absolute device/host peaks. Concurrent
-warm-up peaks are joint observations, not attributed per-model deltas. Failure
-cancels all warm-ups, waits for them to exit, and unloads every attempted engine.
+probes. XPU fixed admission cannot detect other owners. Before enabling warm production
+pins, collect representative native load/request peaks and OS headroom in an
+authorized maintenance window. Retain the selected device and worker identity
+with those observations; see [native qualification](development.md).
 
 ## Production start deadline
 

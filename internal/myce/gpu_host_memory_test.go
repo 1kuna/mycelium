@@ -394,7 +394,6 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM" || mode == "host PSI" || mode == "cgroup PSI" || mode == "low available" || strings.HasSuffix(mode, "PSI total")) {
 					t.Fatalf("host swap growth not retained: %+v", peak)
 				}
-
 			})
 		})
 	}
@@ -947,7 +946,7 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 				break
 			}
 			run := start()
-			before := preservationSnapshot(t, q)
+			before := workHistorySnapshot(t, q)
 			clock.Advance(time.Second)
 			success := strings.HasSuffix(outcome, "success")
 			r = result(run, success)
@@ -969,7 +968,7 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 			if err := q.Complete(wire); err != nil {
 				t.Fatal(err)
 			}
-			after := preservationSnapshot(t, q)
+			after := workHistorySnapshot(t, q)
 			if len(before.WorkCurves) != len(after.WorkCurves) {
 				t.Fatal("curve key removed")
 			}
@@ -987,17 +986,12 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 				}
 			}
 			if success {
-				page, err := q.JobLedger(run.ID, 0, -1, 256)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := VerifyCurvePreservation(before, after, []JobLedgerPage{page}); err != nil {
-					t.Fatal(err)
-				}
 				q = memoryFactsRestart(t, q, clock)
 				memoryFactsGET(t, q, *run, wire.MemoryPeak, false)
-				if _, err := VerifyCurvePreservation(after, preservationSnapshot(t, q), nil); err != nil {
-					t.Fatal("restart", err)
+				for _, point := range after.WorkCurves {
+					if workMeasurementDigest(point) != workMeasurementDigest(q.s.WorkObservations[identityHash(point.Key)]) {
+						t.Fatal("restart changed memory evidence", point)
+					}
 				}
 			}
 		})

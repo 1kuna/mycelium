@@ -316,7 +316,7 @@ func TestWorkCurveHeartbeatLabelsDoNotRewriteMeasurements(t *testing.T) {
 			if err := json.Unmarshal(durableQueueRecord(t, q.db, "work_observations/"+id), &durable); err != nil {
 				t.Fatal(err)
 			}
-			if durable.StaleReason != "" || curveMeasurementDigest(durable) != curveMeasurementDigest(p) {
+			if durable.StaleReason != "" || workMeasurementDigest(durable) != workMeasurementDigest(p) {
 				t.Fatal("diagnostic label changed accepted measurement")
 			}
 		}

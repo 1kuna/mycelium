@@ -13,7 +13,8 @@ MEMORY_CONSUMERS = ('process_memory_test.go', 'attempt_memory_facts_test.go')
 SUPPLEMENTAL_CONSUMERS = {
     f'internal/myce/{source}.go': MEMORY_CONSUMERS
     for source in ('attempt_memory', 'memory_learning', 'memory_envelope',
-                   'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
+                   'gpu_host_memory', 'capability_placement', 'work_history',
+                   'memory_observation_identity', 'queue')
 }
 
 # The owned-session sampler is shared by Darwin and foreground Linux dev.

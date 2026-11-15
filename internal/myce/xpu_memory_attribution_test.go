@@ -128,7 +128,6 @@ func TestXPUHostMemoryCorrectedSampleReplacesLegacyAfterReopen(t *testing.T) {
 	host, outside, device := 10.75, 8.0, 8.0
 	legacy := &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{DriverGB: &outside, OutsideGB: &outside, HostDropGB: &host}}
 	complete(legacy)
-	before := preservationSnapshot(t, q)
 	// A sibling card/older allowance may retain the same over-attributed history.
 	for _, point := range q.s.WorkObservations {
 		old := point
@@ -137,23 +136,7 @@ func TestXPUHostMemoryCorrectedSampleReplacesLegacyAfterReopen(t *testing.T) {
 		break
 	}
 	p.DeviceGB = &device
-	corrected := complete(p)
-	after := preservationSnapshot(t, q)
-	page, err := q.JobLedger(corrected.ID, 0, -1, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The extra old key was introduced outside the before snapshot only as a
-	// reader fixture; verify the real accepted key's replacement separately.
-	after.WorkCurves = nil
-	for _, point := range q.s.WorkObservations {
-		if point.Key.Allowance != "legacy-allowance" {
-			after.WorkCurves = append(after.WorkCurves, point)
-		}
-	}
-	if _, err := VerifyCurvePreservation(before, after, []JobLedgerPage{page}); err != nil {
-		t.Fatal(err)
-	}
+	complete(p)
 	// A late accepted result from an old worker must not restore the old
 	// aggregate, even during a rolling upgrade.
 	complete(legacy)
