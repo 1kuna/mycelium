@@ -90,6 +90,12 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 	if err := s.Validate(); err != nil {
 		return ResolveReport{}, specRejection(err)
 	}
+	if err := view.validatePieceSource(s); err != nil {
+		if isResultExpired(err) {
+			return ResolveReport{}, err
+		}
+		return ResolveReport{}, &HTTPError{Status: 400, Code: "job_files_invalid", Message: err.Error()}
+	}
 	if err := view.defaultMemory(&s); err != nil {
 		return ResolveReport{}, specRejection(err)
 	}

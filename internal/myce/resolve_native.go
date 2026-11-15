@@ -8,6 +8,21 @@ import (
 // Reuse the bounded metadata-only portability reader. An authored recipe has
 // no frozen registration, so never infer launch eligibility from local bytes.
 func (q *Queue) resolveNative(req ResolveRequest, ctx context.Context) (ResolveReport, error) {
+	if req.Spec.After != nil {
+		view, err := q.captureResolveView(ctx)
+		if err != nil {
+			return ResolveReport{}, err
+		}
+		if err := validatePieceDependency(req.Spec); err != nil {
+			return ResolveReport{}, &HTTPError{Status: 400, Code: "job_files_invalid", Message: err.Error()}
+		}
+		if err := view.validatePieceSource(req.Spec); err != nil {
+			if isResultExpired(err) {
+				return ResolveReport{}, err
+			}
+			return ResolveReport{}, &HTTPError{Status: 400, Code: "job_files_invalid", Message: err.Error()}
+		}
+	}
 	p, err := q.Portability(PortabilityRequest{SourceUnverified: req.SourceUnverified, Recipe: req.Recipe, Project: req.Spec.Project, RequirementReasons: req.RequirementReasons}, ctx)
 	if err != nil {
 		return ResolveReport{}, err

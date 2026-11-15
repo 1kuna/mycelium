@@ -1506,9 +1506,36 @@ downstream parents, their children and ordinary consumers, and release includes
 every exact attempt. Terminal results remain intact. Existing readiness clocks,
 absolute deadlines, expiry and transport checks still apply.
 
-Only one already submitted fan-out parent in the same project may be named.
-Ordinary-job sources, multiple-parent joins, forward references, dynamic piece
-creation, timed accumulation and atomic graph submission remain out of scope.
+Only one already submitted producer in the same project may be named.
+Multiple-parent joins, forward references, dynamic piece creation, timed
+accumulation and atomic graph submission remain out of scope.
+
+### Ordinary producer outputs
+
+An ordinary producer uses the same `after` binding. Omit `piece` and map its
+declared output names directly, without a fan-out key prefix:
+
+```yaml
+after: {job: FULL_PRODUCER_JOB_ID, outputs: {input.json: result.json}}
+```
+
+The consumer waits for producer success and verified output acceptance, then
+records the exact producer attempt in `dependency.execution`. Existing
+readiness clocks, immutable input staging, replay, failure, retention and
+transitive cancellation/release apply. As with a succeeded fan-out parent,
+cancelling a succeeded producer stops its existing unfinished consumers but
+keeps its successful outputs available to new consumers until expiry. Internal
+pieces, check jobs and program jobs cannot be named as producers. Consumer
+check/program/workdir restrictions remain unchanged.
+
+Adapter entries declare this `after` field and submit with `myce run`. Rejections
+retain the queue's typed code and reason in stderr and receipt
+`refusal_code`/`refusal_reason`, including dependency field rules. The saved
+intent remains recoverable; use a new key for changed intent. The submission
+lock retains its inode for concurrent waiters, but clears its retired holder
+text on exit; file existence alone never means another submitter holds it.
+`myce spec check --resolve` validates the same existing producer and declared
+output mapping before submission.
 
 ## Per-recording stage chains
 

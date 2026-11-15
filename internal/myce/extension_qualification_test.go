@@ -291,6 +291,66 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 	}
 }
 
+// A probed software requirement is native qualification, not a host pin or
+// executable-name inventory. A failed host must not poison another host's proof.
+func TestExtensionCapabilityQualificationPlacement(t *testing.T) {
+	q, w, e, demand, _, plans := qualificationFixture(t)
+	var plan ExtensionQualificationPlan
+	for _, p := range plans {
+		if p.Report.Work == demand.Spec.workType() {
+			plan = p
+		}
+	}
+	healthy := cloneMachine(&w.Machine)
+	healthy.ID, healthy.HostID, healthy.Session = "capable", "capable-host", "capable-session"
+	healthy.ExtensionFingerprint = "capable-native-fingerprint"
+	healthy.ExtensionReports = nil
+	for _, work := range extensionWorks(e) {
+		r := newExtensionReport(e, &healthy, work)
+		r.Setup, r.Qualified, r.CheckID = true, true, "fixture-native-comparison"
+		healthy.ExtensionReports = append(healthy.ExtensionReports, r)
+	}
+	// Keep a second compatible host known before the failed verdict, so the
+	// useful job remains runnable there instead of becoming a global dead end.
+	if _, err := q.Checkin(Checkin{Machine: healthy, Recovering: true}); err != nil {
+		t.Fatal(err)
+	}
+	reconcileQualification(t, w, plan)
+	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+	assigned := check(t, q, w.Machine, nil).Job
+	if assigned == nil || assigned.Spec.ExtensionCheck == nil {
+		t.Fatal("probe not admitted before useful work", assigned)
+	}
+	finish(t, q, assigned, false)
+	reconcileQualification(t, w, plan)
+	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+	refused := check(t, q, w.Machine, nil)
+	if refused.Job != nil && refused.Job.ID == demand.ID || qualifiedExtension(demand, q.s.Machines[w.Machine.ID]) != nil {
+		t.Fatal("failed capability host received useful work")
+	}
+	for _, offered := range refused.ExtensionQualificationPlan {
+		if offered.Report.Work == plan.Report.Work {
+			t.Fatal("negative capability cache retried unchanged probe")
+		}
+	}
+	placed := check(t, q, healthy, nil)
+	if placed.Job == nil || placed.Job.ID != demand.ID || len(placed.Job.Spec.AllowedMachines) != 0 || len(placed.ExtensionQualificationPlan) != 0 {
+		t.Fatal("unrestricted job did not use the qualified host", placed)
+	}
+	changed := cloneMachine(&healthy)
+	changed.ExtensionFingerprint = "changed-native-fingerprint"
+	if qualifiedExtension(demand, &changed) != nil {
+		t.Fatal("capability cache survived a host identity change")
+	}
+	changed = cloneMachine(&healthy)
+	for i := range changed.ExtensionReports {
+		changed.ExtensionReports[i].EnvironmentIdentity = "changed-environment"
+	}
+	if qualifiedExtension(demand, &changed) != nil {
+		t.Fatal("capability cache survived an environment change")
+	}
+}
+
 // A drained host removes demand only temporarily. Cancelling the pending
 // check then left no verdict and no rerun, so useful work waited forever.
 func TestExtensionQualificationSurvivesHostDrain(t *testing.T) {

@@ -556,6 +556,58 @@ func TestProfileOSOnlyPrebuiltError(t *testing.T) {
 	}
 }
 
+func TestProfileSubmissionRejectionCause(t *testing.T) {
+	root := t.TempDir()
+	conversionWrite(t, filepath.Join(root, "source", "run.sh"), "true\n")
+	data := strings.Replace(cpuAdapterYAML("source"), "    checks: {result: [test, -s, result]}\n", "    after: {job: missing-producer, outputs: {input: result}}\n", 1)
+	a, err := decodeAdapter([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, frozen, err := adapterProfile(a, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _, db, _ := waitQueue(t)
+	if err := q.ConfigureFileStore(db+".files", 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(myce.API{Queue: q, Token: "rejection-token"}.Handler())
+	defer server.Close()
+	client := myce.Client{URL: server.URL, Token: "rejection-token"}
+	var report myce.ResolveReport
+	err = client.Call(context.Background(), "POST", "/api/resolve", myce.ResolveRequest{Spec: p.Spec}, &report)
+	var refusal *myce.HTTPError
+	if !errors.As(err, &refusal) || refusal.Code != "job_files_invalid" || !strings.Contains(refusal.Message, "after.job must be a full producer job ID") {
+		t.Fatal("resolve API/client hid the dependency cause", err)
+	}
+	var out, diagnostics bytes.Buffer
+	err = runPreparedProfile(context.Background(), root, p, frozen, nil, nil, "rejected", "", "", "", server.URL, "rejection-token", &out, &diagnostics)
+	want := "after.job must be a full producer job ID in the same project"
+	if exitCode(err) != 65 || !strings.Contains(err.Error(), "submission_rejected: job_files_invalid: "+want) {
+		t.Fatal("submission hid the typed cause", err, &diagnostics)
+	}
+	var printed, saved profileReceipt
+	if err := json.Unmarshal(out.Bytes(), &printed); err != nil {
+		t.Fatal(err)
+	}
+	if err := readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{p.Project, "rejected"}), "receipt.json"), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if printed.RefusalCode != "job_files_invalid" || !strings.Contains(printed.RefusalReason, want) || saved.RefusalReason != printed.RefusalReason || saved.RefusalCode != printed.RefusalCode || printed.JobID != "" {
+		t.Fatal("printed and saved rejection differ", printed, saved)
+	}
+	path := filepath.Join(root, ".mycelium", "receipts", "submit.lock")
+	if b, err := os.ReadFile(path); err != nil || len(b) != 0 {
+		t.Fatal("rejected submission left a stale holder", string(b), err)
+	}
+	lock, err := profileLock(path)
+	if err != nil {
+		t.Fatal("rejected submission retained the flock", err)
+	}
+	lock.Close()
+}
+
 func TestProfileTargetRefusalStderrAndReceipt(t *testing.T) {
 	root := t.TempDir()
 	profileDir := filepath.Join(root, ".mycelium", "profiles")

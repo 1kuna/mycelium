@@ -157,6 +157,16 @@ unsupported with entries. Only production entries need a target list; every fiel
   sidecars ([migration](references/submit.md#environments)).
 - **Installed tools** are the default. List what the command calls in
   `needs: {tools: [git, node]}` so placement skips machines without them.
+- **Probed software capabilities** use native `checks.qualification` and a
+  bundled `baselines: {extension:ENTRY_NAME: ...}` comparison, with exact
+  targets and the same environment as the payload. For software EGL, run the
+  application's small render probe with `LIBGL_ALWAYS_SOFTWARE=1` and
+  `EGL_PLATFORM=surfaceless`; assert llvmpipe and the rendered pixels before
+  writing `$MYCE_CHECK_OUTPUT`. Set those variables on the payload too.
+  Mycelium caches pass/fail per frozen entry, environment and host/device
+  fingerprint and places useful work only on passing hosts. Drop
+  `allowed_machines`; `needs.tools` alone cannot prove rendering works. See the
+  [complete declaration](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#probe-a-software-capability-instead-of-pinning-a-host).
 - **Locked environments**: `environment: {backend: pixi, lock_file: pixi.lock}`,
   `{lock_file: uv.lock, python: "3.12"}` or
   `{backend: npm, lock_file: package-lock.json}`. A relative `lock_file`
@@ -391,6 +401,17 @@ directories: SMB deferred close can return EACCES/EBUSY; if unavoidable, retry
 with a short backoff through the mount's `closetimeo` window.
 
 ## Pipelines
+
+For an ordinary producer, omit `after.piece` and map its declared output names
+directly: `after: {job: PRODUCER_JOB_ID, outputs: {input.json: result.json}}`.
+The producer must already be submitted in the same project. This works in an
+adapter entry with `myce run --entry consumer`; use a new key when changing the
+dependency. The queue stages verified accepted bytes, so keep producer results
+out of the source payload. For a fan-out producer, whole-parent mappings use
+`KEY/OUTPUT_NAME`, as below; `piece: KEY` allows an ordinary consumer to start
+when that piece is accepted. Dependent entries currently omit `checks.result`.
+A rejected run prints and saves `refusal_code` and `refusal_reason` in its
+receipt; `spec check --resolve` checks the same source/output dependency rules.
 
 Submit every later stage up front with `after:`, so the queue can see the whole
 pipeline. Each stage starts once its producer's outputs are accepted, and

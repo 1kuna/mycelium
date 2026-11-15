@@ -259,6 +259,74 @@ comparison; a warm repeat reuses matching evidence. Failure remains visible and
 unqualified until an explicit qualification retry or a changed identity. Result
 checks never replace native qualification.
 
+### Probe a software capability instead of pinning a host
+
+Use the existing native `checks.qualification` for requirements such as
+"software EGL rendering works". `needs.tools` only proves executable names are
+available; it does not test libraries, device selection or successful rendering.
+There is no separate `needs.capabilities` field. Name the native entry for the
+work it qualifies and bundle the probe with that entry:
+
+```yaml
+schema: 1
+project: example
+default: software-egl
+entries:
+  software-egl:
+    source: {git: HEAD}
+    targets:
+      - {os: linux, arch: arm64, platform: cpu}
+      - {os: linux, arch: amd64, platform: cpu}
+    needs: {cpu_cores: 1, memory_gb: 1, platform: cpu}
+    run:
+      command: [python, '{extension}/scripts/render.py']
+      env: {LIBGL_ALWAYS_SOFTWARE: '1', EGL_PLATFORM: surfaceless}
+    checks:
+      qualification: [sh, '{extension}/scripts/check-software-egl.sh']
+    baselines:
+      extension:software-egl:
+        input: probes/scene.json
+        output: probes/software-egl.ok
+        measure: exact
+        native: Software EGL probe asserts llvmpipe and verifies a rendered frame
+        variation: Exact success marker after renderer and frame assertions
+    outputs: {frame.png: results}
+```
+
+Supply the existing application command, its locked native `environments` if
+needed, and a small bundled scene. The example uses installed Python; a managed
+variant uses `{env.main.python}` for **both** execution and qualification.
+Each native target must be exact. List only supported OS/architecture pairs;
+if the payload also needs an accelerator, declare that platform and its actual
+resource needs instead of `cpu`. No machine name is required.
+
+The project supplies `scripts/check-software-egl.sh`, for example:
+
+```sh
+set -eu
+export LIBGL_ALWAYS_SOFTWARE=1 EGL_PLATFORM=surfaceless
+# This project-owned probe uses the application's EGL initialization, asserts
+# that GL_RENDERER is llvmpipe, renders the bundled scene and checks its pixels.
+python "$MYCE_EXTENSION_DIR/scripts/render_probe.py" "$MYCE_CHECK_INPUT"
+printf 'software-egl-ok\n' > "$MYCE_CHECK_OUTPUT"
+```
+
+`probes/software-egl.ok` contains `software-egl-ok` followed by a newline.
+The marker is valid only after the real renderer assertions pass. Environment
+variables alone, `eglinfo`, library import or device enumeration cannot prove
+that the application's EGL path renders correctly. A crash/nonzero exit or
+wrong output leaves that host unqualified for this entry.
+
+On first useful demand, Mycelium prepares the frozen entry/environment and runs
+the normal internal qualification job on each compatible host as needed. The
+cache binds the entry digest, exact target/device, environment identity and
+host fingerprint. Warm work reuses it; failure is negative-cached without an
+automatic retry loop. Changed recipe/identity or an explicit qualification
+retry permits a new check. Qualification is entry-scoped, not a global label
+other programs can borrow. Drop `allowed_machines` and let placement select a
+host with passing evidence. These declarations do not establish native EGL
+support until the probe actually passes there.
+
 Registration returns non-blocking live portability warnings: missing recipes,
 declared-but-unqualified targets and unknown inventory are separate. Re-run the
 live report after requirements or inventory change. Status and job GET expose

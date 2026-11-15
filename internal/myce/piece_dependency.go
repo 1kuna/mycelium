@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-// One edge to a declared piece or whole fan-out parent, never an internal wave.
+// One edge to an ordinary producer, declared piece or whole fan-out parent,
+// never an internal wave.
 type PieceDependency struct {
 	Job     string            `json:"job" yaml:"job"`
 	Piece   string            `json:"piece,omitempty" yaml:"piece,omitempty"`
@@ -74,18 +75,20 @@ func (q *Queue) validatePieceSource(s Spec) error {
 		return nil
 	}
 	p := q.retainedJob(s.After.Job)
-	if p == nil || p.Spec.Project != s.Project || p.Spec.FanOut == nil || p.FanOut == nil {
-		return errors.New("after.job must be a full fan-out parent ID in the same project")
+	if p == nil || p.Spec.Project != s.Project || p.Batch != nil || p.Spec.ExtensionCheck != nil || p.Spec.Program != nil {
+		return errors.New("after.job must be a full producer job ID in the same project, not an internal piece, check or program")
 	}
 	declared := map[string]bool{}
-	for _, piece := range p.Spec.FanOut.Pieces {
-		declared[piece.Key] = true
+	if p.Spec.FanOut != nil {
+		for _, piece := range p.Spec.FanOut.Pieces {
+			declared[piece.Key] = true
+		}
 	}
 	if s.After.Piece != "" && !declared[s.After.Piece] {
 		return errors.New("after.piece is not declared by the parent")
 	}
 	for _, name := range s.After.Outputs {
-		if s.After.Piece == "" {
+		if s.After.Piece == "" && p.Spec.FanOut != nil {
 			key, output, ok := strings.Cut(name, "/")
 			if !ok || !declared[key] {
 				return errors.New("whole-parent after outputs require declared KEY/OUTPUT_NAME names")
@@ -155,13 +158,17 @@ func (q *Queue) maintainPieceDependency(j *Job) {
 			j.DiagnosticCode, j.Reason = "result_expired", "producer outputs expired"
 		}
 		if a.Piece == "" && j.DiagnosticCode == "upstream_failed" {
-			j.Reason = fmt.Sprintf("upstream fan-out parent %s did not succeed", a.Job)
+			kind := "producer"
+			if p != nil && p.FanOut != nil {
+				kind = "fan-out parent"
+			}
+			j.Reason = fmt.Sprintf("upstream %s %s did not succeed", kind, a.Job)
 		}
 		j.FinishedAt = &now
 	} else {
 		reason := "waiting for accepted producer piece"
 		if a.Piece == "" {
-			reason = "waiting for upstream fan-out parent success"
+			reason = "waiting for upstream producer success"
 		}
 		if j.Reason != reason {
 			q.touchJob(j.ID)
@@ -173,10 +180,26 @@ func (q *Queue) maintainPieceDependency(j *Job) {
 // Metadata-only binding: completion has already verified the exact accepted
 // outputs outside q.mu. A whole-parent edge never releases on partial results.
 func bindPieceDependency(p *Job, a *PieceDependency) *PieceBinding {
-	if p == nil || p.FanOut == nil || p.FilesExpired || a.Piece == "" && p.State != "succeeded" {
+	if p == nil || p.FilesExpired || a.Piece == "" && p.State != "succeeded" {
 		return nil
 	}
 	b := &PieceBinding{Job: p.ID, Piece: a.Piece, State: "ready", Files: FileManifest{}, Inputs: map[string]string{}}
+	if p.FanOut == nil {
+		if a.Piece != "" || p.State != "succeeded" {
+			return nil
+		}
+		b.Execution = Execution{ID: p.ID, Attempt: p.Attempt}
+		for local, source := range a.Outputs {
+			if ref, ok := p.OutputRefs[source]; ok {
+				b.Files[local] = ref
+			} else if path, ok := p.OutputFiles[source]; ok {
+				b.Inputs[local] = path
+			} else {
+				return nil
+			}
+		}
+		return b
+	}
 	if a.Piece == "" {
 		b.Executions = map[string]Execution{}
 	}
