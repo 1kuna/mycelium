@@ -16,6 +16,13 @@ const firstRunFloorCapability = "first_run_floor_v1"
 // The envelope source part of a first run charged its floor.
 const firstRunFloorSource = "charged its floor, grows into measured room"
 
+// Native shell startup measured on Linux and Darwin (2026-11-14): the larger
+// of total memcg peak 3,895,296 bytes and RSS peak + measured growth
+// 3,375,104 + 2,621,440 bytes, rounded up to the supported 64 KiB page size.
+// This seeds strictly contained first runs, not arbitrary workload demand.
+// Configured launch slack already contributes to that startup envelope.
+const firstRunStartupGB = float64(92*65536) / (1 << 30)
+
 // chargesFirstRunFloor says target m charges a guarded CPU first run its
 // floor (member caps, constrained lower bound, OOM floor, any foreign peak)
 // rather than the host's whole free room. Strict containment stays where

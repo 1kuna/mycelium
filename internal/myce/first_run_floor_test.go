@@ -102,47 +102,69 @@ func TestFirstRunFloorEchoChargedSmall(t *testing.T) {
 	}
 }
 
-// Shared/protected and previous-release workers get the same small charge,
-// with a strict kernel ceiling. They never gain unqualified room lending.
+// Shared/protected and previous-release workers reserve measured shell startup
+// even without launch slack. They never gain unqualified room lending.
 func TestFirstRunFloorStrictContainment(t *testing.T) {
-	for _, kind := range []string{"older worker", "production", "shared interactive host", "unguarded"} {
-		t.Run(kind, func(t *testing.T) {
-			q, _, m := floorFixture(t)
-			s := autoSpec("echo", "echo", "hello")
-			s.Project = "prod"
-			j := &Job{ID: "probe", State: "queued", Spec: s}
-			if err := q.defaultMemory(&j.Spec); err != nil {
-				t.Fatal(err)
+	for _, platform := range []string{"linux", "darwin"} {
+		for _, slack := range []float64{0, firstRunStartupGB / 2, .125} {
+			for _, kind := range []string{"older worker", "production", "shared interactive host", "unguarded"} {
+				t.Run(fmt.Sprintf("%s/%g/%s", platform, slack, kind), func(t *testing.T) {
+					q, clock, m := floorFixture(t, platform)
+					s := autoSpec("echo", "echo", "hello")
+					s.Project = "prod"
+					j := &Job{ID: "probe", State: "queued", Spec: s}
+					if err := q.defaultMemory(&j.Spec); err != nil {
+						t.Fatal(err)
+					}
+					if err := normalizeResources(&j.Spec); err != nil {
+						t.Fatal(err)
+					}
+					m = *q.s.Machines[m.ID]
+					m.MemoryCeilingSlackGB = slack
+					switch kind {
+					case "older worker":
+						m.Capabilities = slices.DeleteFunc(slices.Clone(m.Capabilities), func(c string) bool { return c == firstRunFloorCapability })
+					case "production":
+						j.Spec.Priority = "production"
+					case "shared interactive host":
+						m.SharedHost = &SharedHostProfile{}
+					case "unguarded":
+						m.MemoryEnforcement = "admission-only"
+					}
+					got := q.memoryCandidate(j, &m)
+					if kind == "unguarded" {
+						if got.MemoryEnvelope.Refusal == "" {
+							t.Fatal("unguarded unknown work admitted")
+						}
+						return
+					}
+					want := max(firstRunStartupGB, minimumHostMemoryGB+slack)
+					if got.MemoryEnvelope.HostGB != want || got.MemoryEnvelope.Refusal != "" || floorCharged(got.MemoryEnvelope) {
+						t.Fatalf("not a small strictly contained attempt: %+v", got.MemoryEnvelope)
+					}
+					bytes, err := (Worker{Machine: m}).jobCeilingBytes(*got)
+					if err != nil || math.Abs(float64(bytes)/(1<<30)-got.MemoryEnvelope.HostGB) > minimumHostMemoryGB {
+						t.Fatalf("kernel ceiling %d differs from charged %.8f GiB: %v", bytes, got.MemoryEnvelope.HostGB, err)
+					}
+					g := (Worker{Machine: m}).learnedGuard(*got)
+					roots := map[int]string{7: "birth"}
+					for range 10 {
+						if stop := g.observeMemory(clock.Now(), roots, 3375104, 1, nil, nil); stop != nil {
+							t.Fatalf("measured startup stopped at slack %g: %+v", slack, stop)
+						}
+						clock.Advance(attemptMemorySamplePeriod)
+					}
+					var stopped bool
+					for range 10 {
+						stopped = stopped || g.observeMemory(clock.Now(), roots, uint64(bytes)+65536, 1, nil, nil) != nil
+						clock.Advance(attemptMemorySamplePeriod)
+					}
+					if !stopped {
+						t.Fatal("strict guard lent memory above the startup envelope")
+					}
+				})
 			}
-			if err := normalizeResources(&j.Spec); err != nil {
-				t.Fatal(err)
-			}
-			m = *q.s.Machines[m.ID]
-			switch kind {
-			case "older worker":
-				m.Capabilities = slices.DeleteFunc(slices.Clone(m.Capabilities), func(c string) bool { return c == firstRunFloorCapability })
-			case "production":
-				j.Spec.Priority = "production"
-			case "shared interactive host":
-				m.SharedHost = &SharedHostProfile{}
-			case "unguarded":
-				m.MemoryEnforcement = "admission-only"
-			}
-			got := q.memoryCandidate(j, &m)
-			if kind == "unguarded" {
-				if got.MemoryEnvelope.Refusal == "" {
-					t.Fatal("unguarded unknown work admitted")
-				}
-				return
-			}
-			if got.Spec.Needs.HostMemoryGB != minimumHostMemoryGB || got.MemoryEnvelope.Refusal != "" || floorCharged(got.MemoryEnvelope) {
-				t.Fatalf("not a small strictly contained attempt: %+v", got.MemoryEnvelope)
-			}
-			bytes, err := (Worker{Machine: m}).jobCeilingBytes(*got)
-			if err != nil || math.Abs(float64(bytes)/(1<<30)-got.MemoryEnvelope.HostGB) > minimumHostMemoryGB {
-				t.Fatalf("kernel ceiling %d differs from charged %.8f GiB: %v", bytes, got.MemoryEnvelope.HostGB, err)
-			}
-		})
+		}
 	}
 }
 

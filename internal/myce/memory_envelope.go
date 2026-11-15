@@ -908,7 +908,7 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 		if m.MemoryEnforcement != cgroupMemoryEnforcement && m.MemoryEnforcement != darwinRSSGuardStatus {
 			return 0, "first run needs a kernel memory ceiling or sampled memory guard", false
 		}
-		return minimumHostMemoryGB, "", false
+		return max(minimumHostMemoryGB, firstRunStartupGB-m.MemoryCeilingSlackGB), "", false
 	}
 	return q.physicalProbeMemoryStatus(j, m)
 }

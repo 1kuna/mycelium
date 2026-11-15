@@ -33,7 +33,8 @@ typed figure as the charge. A CPU entry's first run, with nothing learned, is
 charged a physical accounting floor (one maximum supported kernel page plus
 existing launch slack), raised by any known member or measured floors.
 Supporting workers let it grow into measured room; protected/shared or older
-workers retain strict containment at that charge. A memory stop reruns the
+workers retain strict containment, with a measured 5.75 MiB shell startup
+minimum including launch slack. A memory stop reruns the
 same job at its measured peak without spending infrastructure losses or
 retries. Keep the job and key; no resubmission is needed. Admission-only hosts
 cannot run unknown CPU work. GPU first runs retain their separate accounting.

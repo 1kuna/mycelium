@@ -78,8 +78,8 @@ outgrows that room, the guard stops it, it requeues with its measured peak as
 the floor, and it relearns without an infrastructure loss or retry charge.
 With no evidence the floor is one maximum supported kernel page (64 KiB),
 plus existing launch slack. Production, the shared interactive host and
-workers without `first_run_floor_v1` use that same small charge with strict
-attempt containment; they gain no allowance-wide lending. Unknown CPU work
+workers without `first_run_floor_v1` use strict attempt containment with at
+least the measured 5.75 MiB shell startup envelope, including launch slack; they gain no allowance-wide lending. Unknown CPU work
 waits on hosts without a kernel ceiling or sampled guard. OOM recovery uses
 measured demand and permanent capacity; GPU first runs keep separate device
 accounting. CPU first runs no longer learn launch-drift margins or hold on

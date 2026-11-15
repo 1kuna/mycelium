@@ -1273,7 +1273,12 @@ the shared-interactive role grows into room measured by the worker's local
 ledger. Each sample subtracts other charges, their unused reservations, the
 owner reserve and measured growth over the sampling interval plus stop grace.
 The queue charge follows measured use upward. Other CPU first runs retain a
-strict attempt ceiling at their small charge: they do not gain allowance-wide
+strict attempt ceiling, raised to the measured 5.75 MiB native shell startup
+envelope when configured launch slack supplies less. That envelope is the
+larger of a 3,895,296-byte Linux total cgroup peak and a 3,375,104-byte Darwin
+RSS peak plus 2,621,440 bytes of measured growth, rounded to 64 KiB pages.
+It is a measured startup seed, not a bound on an arbitrary workload; larger
+commands use measured-stop recovery. These paths do not gain allowance-wide
 lending. Unknown CPU work needs a kernel ceiling or sampled guard; an
 admission-only host cannot contain it. A measured memory stop requeues at the
 peak plus measured uncertainty without an infrastructure loss or retry charge.
