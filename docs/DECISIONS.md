@@ -233,11 +233,11 @@ MY-05 coordination ruling, 2026-10-16/22. MY-15 pause clarification, 2026-10-17.
 These are agents' decisions, not Zach's rulings. Change them through their issues.
 
 - **Interactive hosts decline bulk classes** (implementation worker, 2026-11-15,
-  under MY-45 and MY-11/MY-26). The shared interactive profile refuses `batch`,
+  under MY-45 and MY-11/MY-26, [#1665](https://github.com/1kuna/mycelium/issues/1665)). The shared interactive profile refuses `batch`,
   `test`, `ci`, `rollout` and `eval` classes and same-named owner tiers on every
   OS, regardless of fleet pressure. Light prepared CPU commands remain eligible
   within existing measured CPU/RAM allowances and owner-pressure protection.
-  Basis: a project's relayed ruling, "stop hogging the Mac mini", keeps its
+  Basis: a project's relayed ruling, "stop hogging [the agents’ host]" (host name redacted), keeps its
   builds/tests off the agents' host because CI load disrupts its shared DEV
   stack. A second project's relayed ruling keeps rollout/eval pools off the
   overloaded coordination host and requests host-level protection. Received by

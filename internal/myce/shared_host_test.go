@@ -106,6 +106,7 @@ func TestSharedHostExcludesBulkClassesWhenFleetFull(t *testing.T) {
 					peer := cpuBackfillMachine("ordinary", 16)
 					machineCheck(t, q, peer)
 					full := cpuSpec(8, 1)
+					full.Priority = "production"
 					full.AllowedMachines = []string{peer.ID}
 					occupied := submit(t, q, full)
 					running := assignedJob(machineCheck(t, q, peer))

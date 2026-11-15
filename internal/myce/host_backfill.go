@@ -39,10 +39,10 @@ func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, resources map[
 }
 
 // Select one currently usable target per demand, preferring immediate capacity
-// and then ordinary placement value. Busy cards, cold environments, missing
-// qualification, pressure and stale workers cannot withhold backfill. Only
-// host capacity released by finite CPU work is projected; device capacity and
-// all other current readiness checks remain unchanged.
+// and then ordinary placement value. Cold environments, missing qualification,
+// pressure and stale workers cannot withhold backfill. Finite CPU releases and
+// queued GPU demand behind finite device executions project host capacity only;
+// actual device admission still requires the ordinary exact-release checks.
 func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfillDemand {
 	if scan.hostBackfill != nil {
 		return scan.hostBackfill
@@ -85,7 +85,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 			if len(deviceJobs) > 0 {
 				future := q.afterReleases(m, append(jobs, deviceJobs...), nil)
 				for _, running := range deviceJobs {
-					future.FreeMemoryGB += running.Spec.Needs.MemoryGB
+					future.FreeMemoryGB += deviceShareGB(running)
 				}
 				future.FreeMemoryGB = min(m.TotalMemoryGB, future.FreeMemoryGB)
 				future.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, future.FreeHostMemoryGB)

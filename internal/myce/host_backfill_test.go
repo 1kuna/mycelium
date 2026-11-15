@@ -239,10 +239,11 @@ func TestHostBackfillProtectsNextGPUWhileDeviceBusy(t *testing.T) {
 		t.Run(fmt.Sprint(cores), func(t *testing.T) {
 			q, clock := fixture(t)
 			m := backfillMachine("accelerator", 64)
+			m.Devices[0].TotalMemoryGB, m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 16, 16, 16
 			machineCheck(t, q, m)
 			gpu := spec("experiment")
 			gpu.Needs.Platform = Platform{Required: []string{"cuda"}}
-			gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 64, 1, 1
+			gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 16, 1, 1
 			first := submit(t, q, gpu)
 			running := assignedJob(machineCheck(t, q, m))
 			if running == nil || running.ID != first.ID {
