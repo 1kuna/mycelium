@@ -368,7 +368,10 @@ files. Memory safety stops have distinct causes: `shared_gpu_pressure` for
 shared-card growth or uncertain attribution, and `memory_overcommit_yield`
 when running work grows into lent host RAM. These can interrupt equal tiers;
 they are not a waiting job's priority preemption. A lending yield waits on
-measured headroom before readmission; keep the same job and key.
+measured headroom before readmission; keep the same job and key. A wait saying
+`waiting for lent host memory` means the same host cannot yet fit the running
+attempts' remaining ceilings and this job's limit without lending again. A flat
+growth sample does not clear it; measured capacity or exact release does.
 Lost machines and critical Mycelium updates can interrupt any tier; the
 job requeues on the same key and resumes from its checkpoint. Work that
 Mycelium stopped for its own maintenance or updates resumes ahead of the

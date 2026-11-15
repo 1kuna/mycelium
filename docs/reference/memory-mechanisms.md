@@ -62,6 +62,12 @@ it does not raise the attempt's ceiling or its allowance charge. Release
 planning returns the corresponding headroom as well as the charge. A yielded
 job stays queued while the surviving lenders still need that headroom; fresh
 measurements or their exact release admit it again, without a timed cooldown.
+The last started copy's lending-yield cause survives requeue and queue restart.
+On that same host, readmission must fit the live attempts' unconsumed ceilings
+and the resumed job's limit without lending again. A flat or missing growth
+sample cannot clear that claim; measured room or exact release can. Other
+hosts and first admissions keep ordinary by-use lending. Unknown physical
+telemetry withholds admission but never counts as measured pressure for a yield.
 
 ### Job memory envelopes
 <a id="amendment-job-memory-envelopes-146"></a>

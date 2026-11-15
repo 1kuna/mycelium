@@ -168,6 +168,9 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 // yield decisions also belong to the exact demand, so keep that fallback out
 // of the shared projection used by an immutable candidate pass.
 func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan, bool) {
+	if batch && q.memoryYieldHold(j, m) != nil {
+		return nil, false
+	}
 	if m.Recovering {
 		return nil, false
 	}

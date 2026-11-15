@@ -67,6 +67,9 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
 				block("memory", targetFitReason("memory envelope", candidate, m))
 			}
+			if h := q.memoryYieldHold(candidate, m); h != nil {
+				block("memory", h.Detail)
+			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.
 			if len(blocked) == 0 {
