@@ -19,7 +19,7 @@ func TestExploratoryOOMIncidentMakesProgress(t *testing.T) {
 	machineCheck(t, q, m)
 	queued := submit(t, q, s)
 	first := assignedJob(machineCheck(t, q, m))
-	if first == nil || first.ID != queued.ID || first.MemoryEnvelope.HostGB != minimumHostMemoryGB {
+	if first == nil || first.ID != queued.ID || first.MemoryEnvelope.HostGB != firstRunStartupGB {
 		t.Fatalf("incident first ceiling: %+v", first)
 	}
 	// Reconcile an already-issued pre-upgrade execution: its frozen tiny

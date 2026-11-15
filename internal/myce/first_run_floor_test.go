@@ -152,12 +152,12 @@ func TestFirstRunFloorStrictContainment(t *testing.T) {
 						if stop := g.observeMemory(clock.Now(), roots, 3375104, 1, nil, nil); stop != nil {
 							t.Fatalf("measured startup stopped at slack %g: %+v", slack, stop)
 						}
-						clock.Advance(attemptMemorySamplePeriod)
+						clock.Advance(processMemorySamplePeriod)
 					}
 					var stopped bool
 					for range 10 {
 						stopped = stopped || g.observeMemory(clock.Now(), roots, uint64(bytes)+65536, 1, nil, nil) != nil
-						clock.Advance(attemptMemorySamplePeriod)
+						clock.Advance(processMemorySamplePeriod)
 					}
 					if !stopped {
 						t.Fatal("strict guard lent memory above the startup envelope")

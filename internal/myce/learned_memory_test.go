@@ -79,7 +79,7 @@ func TestLearnedMemoryOmittedFigureLearnsAcrossReopen(t *testing.T) {
 		t.Fatal("omitted memory must pass static validation:", err)
 	}
 	first := runMemory(t, q, clock, m, s, 2, nil)
-	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != minimumHostMemoryGB || first.Spec.Needs.Memory != "auto" {
+	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != firstRunStartupGB || first.Spec.Needs.Memory != "auto" {
 		t.Fatalf("cold run not bounded: %+v needs=%+v", e, first.Spec.Needs)
 	}
 	second := runMemory(t, q, clock, m, s, 2, nil)
