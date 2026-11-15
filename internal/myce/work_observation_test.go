@@ -24,6 +24,7 @@ func observationFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
 		t.Fatal(err)
 	}
 	m := cpuMachine("synthetic", "synthetic-host", "cpu", 8, 32)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.ExtensionFingerprint = "synthetic-cpu-v1"
 	r := newExtensionReport(e, &m, "extension:sample")
 	r.Setup, r.Qualified, r.CheckID = true, true, "synthetic-check"

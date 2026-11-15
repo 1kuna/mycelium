@@ -19,7 +19,8 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			var m Machine
 			for i := 0; i < tc.hosts; i++ {
 				host := fmt.Sprintf("worker-%d", i)
-				target := cpuMachine(host, host, "cpu", 1, tc.ram)
+				target := guardedCPUMachine(host, host, "cpu", 1, tc.ram)
+				target.MemoryEnforcement = cgroupMemoryEnforcement
 				target.CapabilityProfile.SystemMemoryBytes = uint64(tc.ram * (1 << 30))
 				target.HostMemoryBudgetGB, target.ExtensionFingerprint = tc.ram, "cpu-v1"
 				target.HostAvailableMemoryGB = tc.ram * .75
@@ -31,13 +32,13 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			s := cpuSpec(1, 0)
 			s.AllowedMachines = []string{m.ID}
 			first := runMemory(t, q, clock, m, s, tc.ram/8, nil)
-			room := m.HostAvailableMemoryGB - exploratoryDriftMarginGB(&m)
-			if e := first.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 || math.Abs(e.HostGB-room) > 1e-8 || strings.Contains(e.Source, "25%") {
-				t.Fatalf("physical cold probe: %+v", e)
+			startup := max(minimumHostMemoryGB, firstRunStartupGB-m.MemoryCeilingSlackGB)
+			if e := first.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 || math.Abs(e.HostGB-startup) > 1e-8 || strings.Contains(e.Source, "25%") {
+				t.Fatalf("small cold charge: %+v", e)
 			}
 			growth := tc.ram / 64
 			second := runMemory(t, q, clock, m, s, tc.ram/8, func(r *Result) { r.MemoryPeak.GrowthGB = &growth })
-			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB >= first.MemoryEnvelope.HostGB {
+			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB != tc.ram/8+minimumHostMemoryGB || e.HostGB <= first.MemoryEnvelope.HostGB {
 				t.Fatalf("first accepted sample not used: %+v", e)
 			}
 			third := runMemory(t, q, clock, m, s, tc.ram/8, nil)
@@ -102,11 +103,12 @@ func TestAdaptiveMemoryTransferUsesPairedError(t *testing.T) {
 			var source, destination Machine
 			for i := 0; i < tc.hosts; i++ {
 				id := fmt.Sprintf("worker-%d", i)
-				m := cpuMachine(id, id, "cpu", 1, tc.ram)
+				m := guardedCPUMachine(id, id, "cpu", 1, tc.ram)
 				m.HostMemoryBudgetGB, m.ExtensionFingerprint = tc.ram, id+"-v1"
 				m.CapabilityProfile.SystemMemoryBytes = uint64(tc.ram * (1 << 30))
 				if i == 1 {
 					m.CapabilityProfile.OS = "darwin"
+					m.MemoryEnforcement = darwinRSSGuardStatus
 				}
 				check(t, q, m, nil)
 				if i == 0 {
@@ -194,8 +196,8 @@ func TestAdaptiveMemoryGrowthUsesClockAndLiveCredit(t *testing.T) {
 // isolates memory admission; input/cache readiness remains a separate predicate.
 func TestAdaptiveMemoryCPUFamilyLeavesMeasuredTrainingHeadroom(t *testing.T) {
 	q, clock := fixture(t)
-	cpu := cpuMachine("cpu-worker", "mixed-host", "cpu", 8, 64)
-	gpu := cpuMachine("gpu-worker", "mixed-host", "cuda", 8, 64)
+	cpu := guardedCPUMachine("cpu-worker", "mixed-host", "cpu", 8, 64)
+	gpu := guardedCPUMachine("gpu-worker", "mixed-host", "cuda", 8, 64)
 	cpu.HostMemoryBudgetGB, gpu.HostMemoryBudgetGB = 64, 64
 	cpu.ExtensionFingerprint, gpu.ExtensionFingerprint = "cpu-v1", "gpu-v1"
 	check(t, q, gpu, nil)
@@ -231,7 +233,7 @@ func TestAdaptiveMemoryCPUFamilyLeavesMeasuredTrainingHeadroom(t *testing.T) {
 
 func TestAdaptiveMemoryTransferDoesNotDivideBySourceUncertainty(t *testing.T) {
 	q, clock, source := learnedMemoryFixture(t)
-	destination := cpuMachine("destination", "destination-host", "cpu", 8, 32)
+	destination := guardedCPUMachine("destination", "destination-host", "cpu", 8, 32)
 	destination.HostMemoryBudgetGB, destination.ExtensionFingerprint = 32, "destination-v1"
 	check(t, q, destination, nil)
 	s := cpuSpec(1, 0)
@@ -265,7 +267,7 @@ func TestAdaptiveMemoryFirstConstrainedCompletionRetainsFloor(t *testing.T) {
 	for _, ram := range []float64{.5, 512} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 8, ram)
+			m := guardedCPUMachine("worker", "host", "cpu", 8, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram, "cpu-v1"
 			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
 			check(t, q, m, nil)

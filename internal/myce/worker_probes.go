@@ -10,8 +10,12 @@ var workerProfileProbe = LocalProfileProbe
 var workerHostMemorySource = NewHostMemorySource
 var workerOwnerSignals = LocalOwnerSignals
 var workerProcessMemory = localProcessMemory
+var workerDevProcessMemory = localDevProcessMemory
 
 var workerMachineProbe = LocalMachineProbe
+
+// ProcessMemoryProbe exposes the existing owned-tree sensor for injected dev hosts.
+type ProcessMemoryProbe = processMemoryProbe
 
 // WorkerProbeDefaults groups host sources used when a worker has no override.
 // Embedded callers may inject these before starting any worker goroutines.
@@ -29,7 +33,8 @@ type WorkerProbeDefaults struct {
 	Identity     func() MachineProbe
 	DeviceFaults func() DeviceFaultSource
 	// Nil disables per-attempt process sampling on hosts without cgroups.
-	ProcessMemory func() *processMemoryProbe
+	ProcessMemory    func() *processMemoryProbe
+	DevProcessMemory func() *processMemoryProbe
 	// Nil disables process-tree CPU observation; cgroup accounting remains available.
 	ProcessCPU func(context.Context, int, string) (float64, string, error)
 	// Nil disables host I/O pressure and sampled per-attempt process-tree CPU.
@@ -57,6 +62,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerHostMemorySource = p.HostMemory
 	workerOwnerSignals = p.OwnerSignals
 	workerProcessMemory = p.ProcessMemory
+	workerDevProcessMemory = p.DevProcessMemory
 	workerMemoryRSS = p.MemoryRSS
 	workerLivenessCPU = p.ProcessCPU
 	workerIOPressure = p.IOPressure

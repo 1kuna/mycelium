@@ -13,20 +13,26 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 	for _, margin := range []float64{2.1867791904561273, 12} {
 		t.Run(fmt.Sprint(margin), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "worker", "cpu", 8, 32)
+			m := guardedCPUMachine("worker", "worker", "cpu", 8, 32)
 			m.ExtensionFingerprint = "cpu-v1"
 			clock.now = time.Date(2026, 11, 7, 18, 29, 0, 0, time.UTC)
 			m.CapabilityProfile.OS = "darwin"
+			m.MemoryEnforcement = darwinRSSGuardStatus
 			m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 6.5, .125
 			check(t, q, m, nil)
-			larger := cpuMachine("larger", "larger", "cpu", 8, 32)
+			larger := guardedCPUMachine("larger", "larger", "cpu", 8, 32)
 			larger.CapabilityProfile.OS = "darwin"
+			larger.MemoryEnforcement = darwinRSSGuardStatus
 			larger.HostMemoryBudgetGB, larger.ExtensionFingerprint = 32, "cpu-v1"
 			larger.Leaving = true // Permanent qualification still sees its capacity.
 			check(t, q, larger, nil)
 			s := cpuSpec(1, 0)
 			s.Targets = []ExecutionTarget{{OS: "darwin", Arch: m.CapabilityProfile.Arch, Platform: "cpu"}}
 			oomPeak, constrainedPeak := 3.3578033447265625, 5.3555145263671875
+			// Preserve the incident's original large launch envelope. Otherwise
+			// this synthetic peak above the new startup seed is a new measured
+			// guard overshoot, rather than only the recorded sampling growth.
+			s.Needs.Memory, s.Needs.HostMemoryGB = "auto", m.HostMemoryBudgetGB-2*m.MemoryCeilingSlackGB
 			stopped := runMemory(t, q, clock, m, s, oomPeak, func(r *Result) {
 				r.Success, r.OutOfMemory = false, true
 				r.MemoryPeak.Constrained = true
@@ -35,6 +41,7 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 			if err := q.Cancel(stopped.ID); err != nil {
 				t.Fatal(err)
 			}
+			s.Needs.HostMemoryGB = 0 // Later work uses the retained measurements.
 			runMemory(t, q, clock, m, s, constrainedPeak, func(r *Result) {
 				r.MemoryPeak.Constrained = true
 			})
@@ -44,7 +51,7 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 			check(t, q, m, nil)
 			queued := submit(t, q, s)
 			candidate := q.memoryCandidate(queued, q.s.Machines[m.ID])
-			room, why := q.exploratoryMemory(queued, q.s.Machines[m.ID])
+			room, why := q.recoveryMemoryRoom(queued, q.s.Machines[m.ID])
 			want := max(constrainedPeak, min(oomPeak+margin, room)) + .125
 			if why != "" || math.Abs(candidate.MemoryEnvelope.HostGB-want) > 1e-9 {
 				t.Fatalf("paired target envelope=%+v want=%g refusal=%q", candidate.MemoryEnvelope, want, why)
@@ -69,8 +76,9 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 				q.s.HostReleases = map[string]HostRelease{}
 			}
 			q.s.HostReleases["unconfirmed"] = HostRelease{Host: hostID(&m), Job: "unconfirmed", HostChargeGB: 1}
-			if e := q.memoryCandidate(queued, q.s.Machines[m.ID]); e.MemoryEnvelope.Refusal == "" {
-				t.Fatal("recovery bypassed unconfirmed release custody", e.MemoryEnvelope)
+			q.refreshHostMemory()
+			if e := q.memoryCandidate(queued, q.s.Machines[m.ID]); hostFits(q.s.Machines[m.ID], 0, e.Spec.Needs.HostMemoryGB) {
+				t.Fatal("recovery bypassed unconfirmed release charge", e.MemoryEnvelope)
 			}
 			delete(q.s.HostReleases, "unconfirmed")
 			if run := check(t, q, m, nil).Job; run == nil || run.ID != queued.ID {
@@ -82,9 +90,10 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 
 func TestMemoryRecoveryTargetRetainsOOMFloor(t *testing.T) {
 	q, clock := fixture(t)
-	m := cpuMachine("worker", "worker", "cpu", 8, 32)
+	m := guardedCPUMachine("worker", "worker", "cpu", 8, 32)
 	m.ExtensionFingerprint = "cpu-v1"
 	m.CapabilityProfile.OS = "darwin"
+	m.MemoryEnforcement = darwinRSSGuardStatus
 	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 6.5, .125
 	check(t, q, m, nil)
 	s := cpuSpec(1, 0)

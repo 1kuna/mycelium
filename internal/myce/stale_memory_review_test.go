@@ -104,7 +104,7 @@ func TestHostMemoryIdentityRecoversAfterUnknownSample(t *testing.T) {
 
 func TestNeverStartedLearnedAllocationKeepsBoundedCharge(t *testing.T) {
 	q, clock := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 8, 64)
+	m := guardedCPUMachine("worker", "host", "cpu", 8, 64)
 	m.ExtensionFingerprint = "memory-v1"
 	m.HostMemoryBudgetGB = 48
 	m.CapabilityProfile.SystemMemoryBytes = 64 << 30

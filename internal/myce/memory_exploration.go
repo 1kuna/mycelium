@@ -226,7 +226,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 		// error requires a physical probe, never another guessed factor.
 		lower = max(lower, hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
 	}
-	budget := cap - m.MemoryCeilingSlackGB - q.coldProbeDriftMarginGB(m)
+	budget := cap - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(m)
 	hint := 0.0
 	if j.MemoryFallback != nil {
 		hint = j.MemoryFallback.HostMemoryGB
@@ -237,7 +237,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	if lower <= 0 || !validRate(lower) || lower > budget || hint > budget {
 		return 0, "", false
 	}
-	room, why := q.exploratoryMemory(j, m)
+	room, why, _ := q.physicalProbeMemoryStatus(j, m)
 	if why == "" && room < budget {
 		why = boundedMemoryCapacityWait
 	}

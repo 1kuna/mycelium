@@ -29,6 +29,7 @@ func memoryExplorationFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machin
 	linux := cpuMachine("linux-worker", "linux-host", "cpu", 8, 32)
 	darwin := cpuMachine("darwin-worker", "darwin-host", "cpu", 8, 32)
 	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
+	linux.MemoryEnforcement, darwin.MemoryEnforcement = cgroupMemoryEnforcement, darwinRSSGuardStatus
 	linux.HostMemoryBudgetGB, darwin.HostMemoryBudgetGB = 32, 8
 	for _, m := range []*Machine{&linux, &darwin} {
 		m.ExtensionFingerprint = "cpu-v1"
@@ -182,7 +183,7 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 	// A different host has no calibrated transfer error, so its next run
 	// remains a physical probe even after this clean local completion.
 	next := check(t, q, small, nil).Job
-	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Basis != "exploratory" {
+	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB < 4 || next.Spec.Needs.HostMemoryGB >= 5 || next.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatal("uncalibrated same-OS transfer lost its physical bound", next, job(t, q, second.ID).Reason)
 	}
 	localSpec := s

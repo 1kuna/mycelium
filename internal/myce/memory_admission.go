@@ -117,7 +117,6 @@ type memoryAdmissionDecision struct {
 }
 type memoryAdmissionCapture struct {
 	decisions map[string]memoryAdmissionDecision
-	drift     map[string]float64
 	// Populated only by existing reservation accounting, never by a candidate.
 	reservations map[string]MemoryAdmissionReservation
 }
@@ -155,12 +154,6 @@ func (q *Queue) observeReservationPending(r Reservation, pending []string) {
 
 func memoryAdmissionKey(j *Job, m *Machine) string { return j.ID + "/" + targetKey(m) }
 
-func (q *Queue) observeMemoryAdmissionDrift(j *Job, m *Machine, gb float64) {
-	if c := q.memoryAdmissionCapture; c != nil {
-		c.drift[memoryAdmissionKey(j, m)] = gb
-	}
-}
-
 func (q *Queue) observeMemoryAdmission(j *Job, m *Machine) {
 	c := q.memoryAdmissionCapture
 	if c == nil || j.State != "queued" || j.MemoryEnvelope == nil || !q.jobAllowsMachine(j, m.ID) {
@@ -192,7 +185,7 @@ func (q *Queue) observeMemoryAdmission(j *Job, m *Machine) {
 	if m.FreeHostMemoryGB != ledger.FreeGB || m.HostMemoryInUseGB != ledger.ReservedGB {
 		return // Qualification and hypothetical release projections are not live comparisons.
 	}
-	s := MemoryAdmissionSnapshot{CapturedAt: q.clock.Now(), WaitingSince: j.WaitingSince, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, Host: hostID(m), Device: m.Device, Target: machineTarget(m), Envelope: *j.MemoryEnvelope, DriftReserveGB: c.drift[memoryAdmissionKey(j, m)], Reason: why, Ledger: ledger}
+	s := MemoryAdmissionSnapshot{CapturedAt: q.clock.Now(), WaitingSince: j.WaitingSince, Attempt: j.Attempt, Machine: m.ID, Session: m.Session, Host: hostID(m), Device: m.Device, Target: machineTarget(m), Envelope: *j.MemoryEnvelope, Reason: why, Ledger: ledger}
 	// Keep one deterministic representative: the least RAM shortfall, then
 	// target identity. It records a comparison, never a placement promise.
 	if old, ok := c.decisions[j.ID]; ok && old.generation == q.memoryLedgerGeneration {

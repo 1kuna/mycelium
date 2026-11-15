@@ -51,6 +51,9 @@ func init() {
 	queueHostMemorySource = workerHostMemorySource
 	workerOwnerSignals = func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} }
 	workerProcessMemory = nil
+	workerDevProcessMemory = func() *processMemoryProbe {
+		return &processMemoryProbe{OwnedResident: func(map[int]string) (uint64, int, error) { return 0, 1, nil }}
+	}
 	workerMemoryRSS = nil
 	workerLivenessCPU = nil
 	workerIOPressure = func(clock Clock) *IOPressure {

@@ -19,7 +19,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 		ram := tc.ram
 		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 32, ram)
+			m := guardedCPUMachine("worker", "host", "cpu", 32, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, "cpu-v1"
 			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
 			m.UnifiedMemory = true
@@ -64,7 +64,7 @@ func TestMemoryLiveShapeProtectedAttemptAllowsColdProbe(t *testing.T) {
 	for _, ram := range []float64{2, 256} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 16, ram)
+			m := guardedCPUMachine("worker", "host", "cpu", 16, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, "cpu-v1"
 			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
 			m.UnifiedMemory = true
@@ -105,7 +105,7 @@ func TestMemoryLiveShapeLinuxCacheIsAvailable(t *testing.T) {
 		t.Fatal("unified source discarded reclaimable cache", n, err)
 	}
 	q, _ := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 16, 128)
+	m := guardedCPUMachine("worker", "host", "cpu", 16, 128)
 	m.HostAvailableMemoryGB, _ = host(ctx)
 	m.HostMemoryBudgetGB = 96
 	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
@@ -126,8 +126,8 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 	for _, ram := range []float64{2, 256} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
-			source := cpuMachine("source", "source-host", "cpu", 32, ram)
-			target := cpuMachine("target", "target-host", "cpu", 32, ram)
+			source := guardedCPUMachine("source", "source-host", "cpu", 32, ram)
+			target := guardedCPUMachine("target", "target-host", "cpu", 32, ram)
 			for _, m := range []*Machine{&source, &target} {
 				m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, m.ID+"-v1"
 				m.CPUExtensionFingerprint = m.ExtensionFingerprint
@@ -156,10 +156,22 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			if a == nil || a.ID != first.ID || a.MemoryEnvelope.Basis != "exploratory" || a.MemoryEnvelope.Evidence != 1 {
 				t.Fatalf("one-point transfer not probed: %+v", a)
 			}
-			ceiling := a.Spec.Needs.HostMemoryGB
-			if ceiling < ram*.7 {
-				t.Fatal("initial probe did not retain physical containment", ceiling)
+			if a.Spec.Needs.HostMemoryGB != ram/8 {
+				t.Fatal("transfer probe lost its measured foreign floor", a.Spec.Needs.HostMemoryGB)
 			}
+			// Retain a previous-release whole-host execution for the telemetry
+			// credit checks below. New assignments keep the small foreign floor;
+			// two such assignments already fit without borrowing any credit.
+			if err := q.update(func() error {
+				legacy := q.s.Jobs[a.ID]
+				legacy.Spec.Needs.HostMemoryGB = ram * .75
+				legacy.MemoryEnvelope.HostGB = ram * .75
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			a = job(t, q, a.ID)
+			ceiling := a.Spec.Needs.HostMemoryGB
 			second := submit(t, q, render)
 			var sampleID int64
 			report := func(j *Job) AttemptReport {

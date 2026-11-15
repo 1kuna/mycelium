@@ -15,6 +15,7 @@ import (
 func TestEngineProbeMemoryQueueAndRuntimeAgree(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 16, 16
 	m.CapabilityProfile.SystemMemoryBytes, m.CapabilityProfile.LogicalCPUs = 16<<30, 16
 	m.CPUExtensionFingerprint = "cpu-v1"
@@ -34,6 +35,18 @@ func TestEngineProbeMemoryQueueAndRuntimeAgree(t *testing.T) {
 	if probe.MemoryEnvelope == nil || probe.MemoryEnvelope.ProbeFloorGB <= 0 {
 		t.Fatal("cold auto run lacks its measured probe floor")
 	}
+	// A previous-release execution retains its original whole-host ceiling.
+	// The new small startup charge fits beside the model even without a
+	// sample, so only that retained execution exercises stale-credit refusal.
+	if err := q.update(func() error {
+		legacy := q.s.Jobs[probe.ID]
+		legacy.Spec.Needs.HostMemoryGB = m.HostMemoryBudgetGB
+		legacy.MemoryEnvelope.HostGB = m.HostMemoryBudgetGB
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probe = job(t, q, probe.ID)
 	footprint := 2.0
 	report := AttemptReport{Execution: Execution{ID: probe.ID, Attempt: probe.Attempt}, Session: probe.Session, Started: true, CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: 2, FootprintGB: &footprint, GrowthObserved: true}}
 	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{report}}); err != nil {

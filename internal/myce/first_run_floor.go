@@ -9,16 +9,24 @@ import (
 // charge only on measured host pressure, never on memory PSI growth alone
 // (#1110, #1484). A first run charged its floor there grows into the room it
 // measures, so the queue charges it the floor instead of offering it the
-// host's whole free room. Older workers keep the whole-room probe (MY-42).
+// host's whole free room. Other workers contain the small charge with their
+// strict attempt guard.
 const firstRunFloorCapability = "first_run_floor_v1"
 
 // The envelope source part of a first run charged its floor.
 const firstRunFloorSource = "charged its floor, grows into measured room"
 
+// Native shell startup measured on Linux and Darwin (2026-11-14): the larger
+// of total memcg peak 3,895,296 bytes and RSS peak + measured growth
+// 3,375,104 + 2,621,440 bytes, rounded up to the supported 64 KiB page size.
+// This seeds strictly contained first runs, not arbitrary workload demand.
+// Configured launch slack already contributes to that startup envelope.
+const firstRunStartupGB = float64(92*65536) / (1 << 30)
+
 // chargesFirstRunFloor says target m charges a guarded CPU first run its
 // floor (member caps, constrained lower bound, OOM floor, any foreign peak)
-// rather than the host's whole free room. The whole-room probe stays where
-// there is no evidence the floor is as safe (#1484):
+// rather than the host's whole free room. Strict containment stays where
+// room lending has not been qualified (#1484, #1500):
 //   - production, which keeps its protection;
 //   - the shared interactive host (MY-45);
 //   - a host without a cgroup v2 or Darwin RSS guard, or without measured

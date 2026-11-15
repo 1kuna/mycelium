@@ -113,7 +113,7 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	}
 
 	q, clock, m, s := observationFixture(t)
-	m.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
+	m.MemoryEnforcement = darwinRSSGuardStatus
 	s.Needs.Memory = "auto"
 	first := startObservation(t, q, m, s)
 	if first.MemoryEnvelope.Source != physicalMemoryProbe {
@@ -134,8 +134,8 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A new 16 GiB target with 4.6 GiB actually free gets a physical
-	// probe; the source peak alone cannot quantify its transfer error.
+	// A new 16 GiB target with 4.6 GiB actually free gets a guarded
+	// first run floored at the source peak, without claiming a transfer bound.
 	m.ID, m.HostID, m.Session = "m4-16", "m4-16-host", "session-m4-16"
 	m.CapabilityProfile.SystemMemoryBytes = 16 << 30
 	m.HostAvailableMemoryGB = 4.6
@@ -144,8 +144,8 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	report.Setup, report.Qualified, report.CheckID = true, true, "m4-16-check"
 	m.ExtensionReports = []ExtensionReport{report}
 	check(t, q, m, nil)
-	if room, why := q.exploratoryMemory(&first, q.s.Machines[m.ID]); why != "" || room != 4.6-minimumHostMemoryGB {
-		t.Fatalf("physical exploration ignored actual free memory: %v %q", room, why)
+	if seed, why := q.exploratoryMemory(&first, q.s.Machines[m.ID]); why != "" || seed != firstRunStartupGB {
+		t.Fatalf("CPU startup charge used live free room: %v %q", seed, why)
 	}
 	s.AllowedMachines = []string{m.ID}
 	queued := submit(t, q, s)
@@ -153,8 +153,8 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	if next == nil {
 		t.Fatalf("16 GiB host refused the learned estimate: %s", job(t, q, queued.ID).Reason)
 	}
-	if next.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
-		t.Fatalf("uncalibrated same-family transfer must probe measured headroom: %+v", next.MemoryEnvelope)
+	if next.Spec.Needs.HostMemoryGB != 2 || next.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("uncalibrated same-family transfer lost its measured floor: %+v", next.MemoryEnvelope)
 	}
 	q.mu.Lock()
 	for id, point := range q.s.WorkObservations {
@@ -170,8 +170,10 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	defer q.mu.Unlock()
 	probe := *q.s.Jobs[next.ID]
 	probe.State = "queued"
-	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != 4.6-minimumHostMemoryGB || other.MemoryEnvelope.Basis != "exploratory" {
-		t.Fatalf("uncalibrated other-family transfer must remain physical exploration: %+v", other.Spec.Needs)
+	// The altered observation no longer matches its owner's identity. Without
+	// eligible history, this is a new guarded first run, not a transferable peak.
+	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != firstRunStartupGB || other.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("invalidated history did not fall back to small guarded startup: %+v", other.Spec.Needs)
 	}
 }
 
@@ -191,7 +193,7 @@ func TestProcessMemoryPeakNeverInvalidatesLearnedPeaks(t *testing.T) {
 
 	darwin := linux
 	darwin.ID, darwin.HostID, darwin.Session = "m4", "m4-host", "session-m4"
-	darwin.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
+	darwin.MemoryEnforcement = darwinRSSGuardStatus
 	report := newExtensionReport(learn.Extensions[0], &darwin, "extension:sample")
 	report.Setup, report.Qualified, report.CheckID = true, true, "m4-check"
 	darwin.ExtensionReports = []ExtensionReport{report}

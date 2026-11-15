@@ -17,10 +17,9 @@ func TestExploratoryOOMIncidentMakesProgress(t *testing.T) {
 	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
 	machineCheck(t, q, m)
-	q.s.HostLaunchMemory[hostID(&m)].RefusalGB = 22.7 - .16655705502260787
 	queued := submit(t, q, s)
 	first := assignedJob(machineCheck(t, q, m))
-	if first == nil || first.ID != queued.ID || first.MemoryEnvelope.HostGB < 2 {
+	if first == nil || first.ID != queued.ID || first.MemoryEnvelope.HostGB != firstRunStartupGB {
 		t.Fatalf("incident first ceiling: %+v", first)
 	}
 	// Reconcile an already-issued pre-upgrade execution: its frozen tiny

@@ -226,16 +226,13 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	}
 	setSource("commit one")
 	first := start(physicalMemoryProbe, 0)
-	// #559: a bounded first run leaves room for other work beside it.
+	// Unknown work starts beside another first run without claiming the host.
 	busy := submit(t, q, s)
-	if beside := assignedJob(machineCheck(t, q, m, first)); beside != nil {
-		t.Fatal("cold probe shared unknown demand", beside)
+	beside := assignedJob(machineCheck(t, q, m, first))
+	if beside == nil || beside.ID != busy.ID || beside.Spec.Needs.HostMemoryGB != minimumHostMemoryGB {
+		t.Fatal("small first run did not fit beside existing work")
 	}
 	complete(first, 2)
-	beside := assignedJob(machineCheck(t, q, m))
-	if beside == nil || beside.ID != busy.ID || beside.MemoryEnvelope.Basis != "learned" {
-		t.Fatal("accepted peak did not release probe exclusivity")
-	}
 	if err := q.Started(result(beside, false)); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +330,7 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	complete(first, 3, true)
 	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 	const linuxPeak = 3.634326934814453
-	complete(start(linux, physicalMemoryProbe, 31.75), linuxPeak, false)
+	complete(start(linux, physicalMemoryProbe, minimumHostMemoryGB), linuxPeak, false)
 	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 3 {
 		t.Fatal("constrained diagnostic was not retained", facts)
 	}
@@ -354,8 +351,8 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The Linux peak fits Darwin's allowance, so it floors an ordinary first
-	// run, offered the full allowance here, not a 3 GiB cap.
-	complete(start(darwin, "exploratory (transfer error unavailable)", 7.75), 4, false)
+	// run at that measured floor, independently of free host headroom.
+	complete(start(darwin, "exploratory (transfer error unavailable)", linuxPeak), 4, false)
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 2, true)
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
 	complete(start(darwin, "accepted peak + measured uncertainty", 4+minimumHostMemoryGB), 8.5, false)
@@ -399,7 +396,7 @@ func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 		t.Fatalf("cross-machine candidate refused: %s", job(t, q, queued.ID).Reason)
 	}
 	data, _ := json.Marshal(next)
-	if next.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || !strings.Contains(string(data), "transfer error unavailable") {
+	if next.Spec.Needs.HostMemoryGB < 2 || next.Spec.Needs.HostMemoryGB >= 32-minimumHostMemoryGB || !strings.Contains(string(data), "transfer error unavailable") {
 		t.Fatalf("uncalibrated same-family transfer must remain physical exploration: %s", data)
 	}
 	// A different family also needs measured transfer error.

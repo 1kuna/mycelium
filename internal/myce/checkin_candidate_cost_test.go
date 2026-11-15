@@ -24,7 +24,7 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 	workers := make([]Machine, 5)
 	for i := range workers {
 		id := fmt.Sprintf("worker-%d", i)
-		m := cpuMachine(id, id, "cpu", 16, 128)
+		m := guardedCPUMachine(id, id, "cpu", 16, 128)
 		m.ExtensionFingerprint, m.CPUExtensionFingerprint = "synthetic-cpu", "synthetic-cpu"
 		m.Devices = []MachineDevice{}
 		if i == 0 {
@@ -237,12 +237,14 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := fmt.Sprintf("%x", sha256.Sum256(data))
-			want := map[bool]string{true: "c10fc6597e76f5bc3f0298146a20dfc62e94cd6742f1eb10cc593beec95b9f61", false: "64f5571bc125dc317237aa5b4e477dbfa3646573bb59b9fba02f899bd9ed0b09"}[retained]
+			// Guarded cold CPU candidates now carry the small startup envelope;
+			// retain every placement decision in the snapshot.
+			want := map[bool]string{true: "874cdae98a6ef7951743cb3ef6ccf5adf486552778d618b2b0887cfa98bcd774", false: "472adf65344dce4866e50bb6cc16aef571fd3f8d193664db792588063b46136f"}[retained]
 			if fixture.grouped {
-				want = map[bool]string{true: "60e8a7095f2b2d4dceec8d575911b78f52256973c4a15f99817239512230b813", false: "7076ee26b7146d96beb0080f99f3748b16d4686251eb4551fee56bcc2d1fc285"}[retained]
+				want = map[bool]string{true: "589b417d4ca4e8740f8b0203ae48fc8d24109dd76db6e3f8f74d335f58a76dd0", false: "b98a4c2783cddf83aeb723d5e08c43341d920cdfe78157eab00a298daeb6c3b7"}[retained]
 			}
 			if digest != want {
-				t.Fatalf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
+				t.Errorf("placement digest %s (%d decisions), want %s", digest, len(decisions), want)
 			}
 			var placements []decision
 			plan := q.assignmentPlan(scan)
@@ -255,9 +257,9 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want = "fbbc3c4d7b78a6932febae1378a5697cfdf9b216a5543d38cf0937b0c8fcf311"
+			want = "0e58086cf7cfc9238366318b9e870a41394de965f9dd3dca82bbf7b9968ce74f"
 			if fixture.grouped {
-				want = "20e76e155167a57f7c12f38ce2f3e0de549c80530f8b85772bf5145f702de9d6"
+				want = "6dcd451e0df467a2fbb1f05bac262b4280f3e074b587882c66e9e651d3160c55"
 			}
 			if digest = fmt.Sprintf("%x", sha256.Sum256(data)); digest != want {
 				t.Fatalf("assignment digest %s (%d placements), want %s", digest, len(placements), want)

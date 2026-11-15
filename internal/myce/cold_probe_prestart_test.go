@@ -12,7 +12,7 @@ import (
 // the command has any opportunity to report memory (#1116).
 func TestColdProbePrestartKeepsOfferedCharge(t *testing.T) {
 	q, clock, m, spec := coldProbeAdmissionFixture(t, true)
-	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability)
+	m.Capabilities = append(m.Capabilities, learnedMemoryGuardCapability, firstRunFloorCapability)
 	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 	machineCheck(t, q, m)
 	submit(t, q, cpuSpec(1, 6))

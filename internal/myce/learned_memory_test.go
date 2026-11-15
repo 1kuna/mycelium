@@ -20,11 +20,20 @@ func setLearnedMemory(t *testing.T, q *Queue, on bool) {
 	}
 }
 
-// One 32 GiB CPU host; the cold probe owns measured physical headroom.
+// Memory-learning fixtures model a native worker with an actual attempt guard.
+// cpuMachine itself also serves admission-only and unenforced host tests.
+func guardedCPUMachine(id, host, backend string, cores int, ram float64) Machine {
+	m := cpuMachine(id, host, backend, cores, ram)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
+	return m
+}
+
+// One guarded 32 GiB CPU host; cold work starts at its measured startup floor.
 func learnedMemoryFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "worker-host", "cpu", 8, 32)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1" // Workers report their backend probe.
 	check(t, q, m, nil)
 	return q, clock, m
@@ -79,7 +88,7 @@ func TestLearnedMemoryOmittedFigureLearnsAcrossReopen(t *testing.T) {
 		t.Fatal("omitted memory must pass static validation:", err)
 	}
 	first := runMemory(t, q, clock, m, s, 2, nil)
-	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || first.Spec.Needs.Memory != "auto" {
+	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != firstRunStartupGB || first.Spec.Needs.Memory != "auto" {
 		t.Fatalf("cold run not bounded: %+v needs=%+v", e, first.Spec.Needs)
 	}
 	second := runMemory(t, q, clock, m, s, 2, nil)
@@ -118,7 +127,7 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 	}
 	runMemory(t, q, clock, m, s, 6, constrained)
 	next := runMemory(t, q, clock, m, s, 3, nil)
-	if next.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
+	if next.Spec.Needs.HostMemoryGB < 6 || next.Spec.Needs.HostMemoryGB >= 32-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatal("constrained evidence was treated as an upper bound", next.MemoryEnvelope)
 	}
 	other := s

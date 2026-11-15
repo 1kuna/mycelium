@@ -1052,7 +1052,7 @@ observations are lower bounds only and cannot replace that prior. If the prior
 exceeds every qualified target-OS allowance, fresh comparable same-OS
 lower-bound evidence (with the existing 25% margin) and any submitter hint must
 fit before permitting one bounded exploration on the largest qualified
-allowance. Keep normal launch slack, drift margin and live admission guards.
+allowance. Keep normal launch slack and live admission guards.
 Assignment durably consumes this exception per frozen work/configuration and
 target OS, including across resubmission, history collection and restart. A
 clean result learns through the single eligibility gate; OOM gets no retry, and
@@ -1094,8 +1094,8 @@ can use prior accepted estimates. An auto OOM or constrained attempt
 invalidates comparable learned memory points across machines and families,
 without recording a bound or setting the performance Forbidden flag. To measure
 the true need after a ceiling-bound run, submit the same comparable work with
-`memory: auto` and no submitter hint: that next run explores the available host
-headroom. When a constrained peak invalidated the measurement, its source reads
+`memory: auto` and no submitter hint: a CPU run starts at its retained measured
+floor; GPU work keeps its device containment contract. When a constrained peak invalidated the measurement, its source reads
 `exploratory (previous peak constrained)`. A successful unconstrained
 exploration re-teaches the peak. Ceiling pressure alone does not retry or
 change the job's outcome. After OOM, one retry keeps a job-local host floor
@@ -1260,20 +1260,37 @@ Plain auto commands get a comparable memory identity from project, name, run,
 environment and inputs, so their accepted peaks teach later runs through the
 existing single eligibility gate.
 
-A cold CPU job with no comparable accepted peak and no hint does not reserve
-most of the host, so a small job cannot block unrelated work while it is first
-measured. The first run starts from the largest fresh accepted unconstrained
-CPU peak of similar work on the same OS (the same project and name, or the same
-extension and work type, under any configuration) times 2.5. That is the 1.25
-headroom times 2 used for cross-machine estimates. Without such peaks, it
-starts from a quarter of the host allowance. Either figure is then raised to
-twice any retained constrained peak of the same work; constrained peaks only
-ever raise this bound. An OOM on a bounded first run doubles its job-local
-floor without spending the one OOM retry. When the bound reaches half the
-allowance, the host-wide exploration above applies unchanged, with its custody
-fences and its one retry. The cost is one ceiling hit or OOM per doubling for
-work larger than the bound. GPU work on a discrete card keeps its existing
-exploration, since the card is already exclusive.
+A CPU first run with no usable evidence or hint starts at one maximum supported
+kernel page (64 KiB), plus the existing per-attempt launch slack. This is an
+accounting floor, not a prediction of an arbitrary command's memory need.
+Authored member caps, measured constrained peaks and retry floors can only
+raise it. Accepted comparable family peaks still use their measured spread
+and growth; there is no guessed fraction of host RAM or multiplier of a
+failed envelope.
+
+On workers advertising `first_run_floor_v1`, non-production CPU work outside
+the shared-interactive role grows into room measured by the worker's local
+ledger. Each sample subtracts other charges, their unused reservations, the
+owner reserve and measured growth over the sampling interval plus stop grace.
+The queue charge follows measured use upward. Other CPU first runs retain a
+strict attempt ceiling, raised to the measured 5.75 MiB native shell startup
+envelope when configured launch slack supplies less. That envelope is the
+larger of a 3,895,296-byte Linux total cgroup peak and a 3,375,104-byte Darwin
+RSS peak plus 2,621,440 bytes of measured growth, rounded to 64 KiB pages.
+It is a measured startup seed, not a bound on an arbitrary workload; larger
+commands use measured-stop recovery. These paths do not gain allowance-wide
+lending. Unknown CPU work needs a kernel ceiling or sampled guard; an
+admission-only host cannot contain it. Linux `myce dev` reuses the owned-session
+RSS guard because its foreground workers have no delegated cgroup; installed
+Linux workers retain kernel containment. A measured memory stop requeues at the
+peak plus measured uncertainty without an infrastructure loss or retry charge.
+Recovery demand is bounded by permanent capacity, independently of live free
+RAM. Exact-attempt release custody remains authoritative. Launch-drift history,
+its learned margins and the `cold_probe_margin` hold are removed. Existing
+wire diagnostic fields remain readable during the adjacent-release transition.
+
+GPU first runs keep their separate device and host accounting below: unknown
+driver/device allocations cannot be inferred from CPU RSS (#596, #1044).
 
 On a unified-memory host, a plain `memory: auto` GPU job with no accepted estimate owns the
 card exclusively and reserves the host's whole shared physical headroom

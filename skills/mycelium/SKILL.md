@@ -56,6 +56,10 @@ with the worker's installed tools in an empty folder. `--cpu N`, `--mem 8G` and
 `--gpu cuda|xpu|metal` describe needs; leave memory out and Mycelium learns it.
 A typed memory figure is a limit, not a reservation: once the work has run,
 Mycelium charges what it measured and keeps your figure as the ceiling.
+An unknown CPU command starts with a small physical accounting floor. Its
+charge follows measured use on supporting workers; protected/shared or older
+workers keep strict containment with a measured shell startup minimum. A memory
+stop reruns the same job at its measured peak without an infrastructure loss; keep its job and key.
 
 ## 2. Files back
 
@@ -527,7 +531,8 @@ hours they waited while an excluded host had room, and how far typed
   `storage_failure` in supported fleet status; retain that evidence for the
   storage owner and leave an operation-owned drain in place.
 - No fleet: `myce dev -- sh script.sh` runs your script against a temporary
-  queue with fake GPUs ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
+  queue with fake GPUs and an owned-process RSS guard for CPU work
+  ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
   every `myce` command and `Client.from_installed()` use the dev queue, even on
   a machine that has joined a fleet.
 - Problems: search the public issues, then file one with expected and observed

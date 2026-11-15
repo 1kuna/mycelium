@@ -122,7 +122,7 @@ func TestGrownHostMemoryChargeSurvivesMissingTelemetry(t *testing.T) {
 
 func TestHostMemoryChargeCheckinPersistsAcrossRestart(t *testing.T) {
 	q, clock := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 8, 16)
+	m := guardedCPUMachine("worker", "host", "cpu", 8, 16)
 	m.ExtensionFingerprint = "memory-v1"
 	m.HostMemoryBudgetGB = 12
 	m.CapabilityProfile.SystemMemoryBytes = 16 << 30

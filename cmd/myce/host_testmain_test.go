@@ -97,6 +97,9 @@ func installSyntheticHost() {
 
 func syntheticWorkerProbes() myce.WorkerProbeDefaults {
 	return myce.WorkerProbeDefaults{
+		DevProcessMemory: func() *myce.ProcessMemoryProbe {
+			return &myce.ProcessMemoryProbe{OwnedResident: func(map[int]string) (uint64, int, error) { return 0, 1, nil }}
+		},
 		FaultHost:      func() (map[string]string, []string) { return nil, []string{"synthetic_host"} },
 		SignalEvidence: func(myce.SignalCapture) *myce.SignalEvidence { return &myce.SignalEvidence{CoreCapture: "unavailable"} },
 		IOPressure: func(clock myce.Clock) *myce.IOPressure {

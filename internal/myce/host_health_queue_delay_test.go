@@ -515,6 +515,21 @@ func TestHostHealthQueueDelayHTTPResponse(t *testing.T) {
 	for _, cancelled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "completed", true: "cancelled"}[cancelled], func(t *testing.T) {
 			q, clock := fixture(t)
+			// Publication precedes reply hydration's final read turn. Advance
+			// available service atomically so that turn cannot consume the jump.
+			advanceService := func(d time.Duration) {
+				await(t, func() bool {
+					control := q.mu.control
+					control.mu.Lock()
+					defer control.mu.Unlock()
+					if control.active != 0 {
+						return false
+					}
+					clock.Advance(d)
+					control.advance()
+					return true
+				})
+			}
 			m := machine("http-cold-health", "fake")
 			m.HostHealth = &HostHealth{Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .0036, ValidSeconds: 1.021}, AgeSeconds: .0036, History: []HostHealthSample{{At: clock.Now()}}}
 			handler := API{Queue: q, Token: "test"}.Handler()
@@ -543,7 +558,7 @@ func TestHostHealthQueueDelayHTTPResponse(t *testing.T) {
 				defer q.mu.Unlock()
 				return q.s.Machines[m.ID] != nil
 			})
-			clock.Advance(3 * time.Second)
+			advanceService(3 * time.Second)
 			if cancelled {
 				cancel()
 			}
@@ -553,13 +568,14 @@ func TestHostHealthQueueDelayHTTPResponse(t *testing.T) {
 			}
 			q.mu.Lock()
 			reason := q.hostHygieneReason(q.s.Machines[m.ID])
+			serviceElapsed := q.hostHealthServiceElapsed(q.s.Machines[m.ID])
 			q.mu.Unlock()
 			if reason != expected {
-				t.Fatal("NAS response preparation freshness", reason)
+				t.Fatalf("NAS response preparation freshness %q, service elapsed %s", reason, serviceElapsed)
 			}
 			releaseNAS.Do(nas.mu.Unlock)
 			<-writer.entered
-			clock.Advance(3 * time.Second)
+			advanceService(3 * time.Second)
 			q.mu.Lock()
 			reason = q.hostHygieneReason(q.s.Machines[m.ID])
 			q.mu.Unlock()

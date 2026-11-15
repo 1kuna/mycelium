@@ -2648,8 +2648,7 @@ that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage
 (a unified-memory host's headroom kept for expected production),
 `pinned_model`, `disk_headroom`,
 `reservation`, `capacity` (mixed or card/CPU causes),
-`memory`, `host_memory_headroom`, `cold_probe_margin` (a whole-room first run
-needs host memory above its launch margin), `host_backfill`, `host_unavailable`,
+`memory`, `host_memory_headroom`, `host_backfill`, `host_unavailable`,
 `capability`, `shared_input`, `extension`, `no_eligible_host`,
 `waiting_for_worker`, `model_engine` (a model call waits for its engine to
 recover) and the preparation and coverage kinds below. A queued model call's
@@ -2953,11 +2952,10 @@ attempt retains the envelope actually applied. Recovery does not fail merely
 because a fixed number of exploratory attempts OOMed. A lower bound exceeding
 all eligible physical/allowance capacities produces a capacity refusal. Linux
 kernel ceilings and the pressure guard still bound a leak. Device-OOM retry contracts and accepted-family sizing are unchanged.
-Physical probes also report `launch_drift_gb` and `available_host_gb`: the
-exact job/worker-session launch-error reserve and ledger headroom at sizing.
-Unrelated inventory declines and other jobs' old launch errors cannot starve a
-new CPU probe or extension check. Exact launch refusals teach the same job's
-next offer; strict worker rechecks remain authoritative.
+New assignments no longer populate `launch_drift_gb` or `available_host_gb`.
+Those optional fields and `drift_reserve_gb` remain readable for retained
+adjacent-release observations; new admission snapshots have zero drift reserve.
+Strict worker rechecks remain authoritative.
 
 ## Queue efficiency (#857)
 
