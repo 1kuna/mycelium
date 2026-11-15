@@ -16,7 +16,7 @@ import (
 
 func TestEfficiencyCommand(t *testing.T) {
 	report := &myce.EfficiencyReport{CPUStatus: "unknown", Stranded: []myce.StrandedDemand{{JobID: "waiting", Host: "peer", Fields: []string{"targets"}}},
-		Restrictions: []myce.ProjectRestrictions{{Project: "demo", Jobs: 2, HostRestricted: 1, StrandedSeconds: 3600, Advice: []string{"drop allowed_machines and excluded_machines"}}, {Project: "other", Jobs: 1}}}
+		Restrictions: []myce.ProjectRestrictions{{Project: "demo", Jobs: 2, HostRestricted: 1, HostWaitSeconds: 3600, HostStrandedJobs: 1, Targeted: 2, Restricted: 1, RestrictedWaitSeconds: 7200, StrandedJobs: 1, StrandedSeconds: 3600, Advice: []string{"review allowed_machines and excluded_machines"}}, {Project: "other", Jobs: 1}}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/efficiency" {
 			t.Errorf("broad read: %s", r.URL.Path)
@@ -36,15 +36,15 @@ func TestEfficiencyCommand(t *testing.T) {
 		}
 		if asJSON {
 			var got myce.EfficiencyReport
-			if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.Stranded) != 1 {
+			if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.Stranded) != 1 || got.Restrictions[0].Restricted != 1 || got.Restrictions[0].RestrictedWaitSeconds != 7200 || got.Restrictions[0].StrandedJobs != 1 || got.Restrictions[0].HostWaitSeconds != 3600 || got.Restrictions[0].HostStrandedJobs != 1 {
 				t.Fatal(out, err)
 			}
-		} else if !strings.Contains(out, "excluded by targets") || !strings.Contains(out, "CPU use unknown") {
+		} else if !strings.Contains(out, "excluded by targets") || !strings.Contains(out, "CPU use unknown") || !strings.Contains(out, "named-host lists (pins): 1/2 (50%) retained jobs; plain queue wait 1.0 hours; 1 stranded jobs now") {
 			t.Fatal(out)
 		}
 	}
 	out, _, err := captureUsageOutput(t, []string{"efficiency", "--queue", server.URL, "--token", "test", "--project", "demo"})
-	if err != nil || !strings.Contains(out, "hosts named 1/2 (50%)") || !strings.Contains(out, "advice: drop allowed_machines") || strings.Contains(out, "peer") || strings.Contains(out, "other") {
+	if err != nil || !strings.Contains(out, "named-host lists (pins): 1/2 (50%)") || !strings.Contains(out, "advice: review allowed_machines") || strings.Contains(out, "peer") || strings.Contains(out, "other") {
 		t.Fatal(out, err)
 	}
 }
