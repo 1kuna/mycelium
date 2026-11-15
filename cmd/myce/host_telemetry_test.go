@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -90,4 +92,25 @@ func TestHostTelemetryWorkerOnlyCapture(t *testing.T) {
 	if r.Queue.PID != 0 || r.Queue.BirthID != "" || r.Queue.RSS.Value != nil || r.Queue.RSS.Missing != "not_configured" || r.Worker.RSS.Value == nil || *r.Worker.RSS.Value != 2<<20 || r.WorkerTreeRSS.Value == nil || r.HostUsed.Value == nil {
 		t.Fatal("worker-only evidence missing or invented queue zero", r)
 	}
+	t.Run("executable", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("host telemetry's native probes require Linux")
+		}
+		// Exercise production dispatch and real local probes, without a queue
+		// or installed authority. The parent test is the owned worker fixture.
+		cmd := exec.CommandContext(t.Context(), devTestBinary(t), "telemetry", "capture",
+			"--run-id", "worker-only", "--host-ref", "host-a",
+			"--worker-pid", strconv.Itoa(worker), "--duration", "2s", "--interval", "2s")
+		data, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("worker-only executable capture: %v\n%s", err, data)
+		}
+		var sample myce.HostTelemetrySample
+		if err := json.Unmarshal(data, &sample); err != nil {
+			t.Fatal(err)
+		}
+		if sample.Queue.PID != 0 || sample.Queue.RSS.Value != nil || sample.Queue.RSS.Missing != "not_configured" || sample.Worker.RSS.Value == nil || sample.WorkerTreeRSS.Value == nil || sample.HostUsed.Value == nil {
+			t.Fatal("executable lost worker-only readings", sample)
+		}
+	})
 }

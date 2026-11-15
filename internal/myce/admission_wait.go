@@ -384,6 +384,7 @@ type AdmissionWaitTarget struct {
 	RequiredHostGB      float64               `json:"required_host_gb"`
 	AvailableHostGB     float64               `json:"available_host_gb"`
 	HostMemoryKnown     bool                  `json:"host_memory_known"`
+	HostMemoryLedger    *HostMemoryLedger     `json:"host_memory_ledger,omitempty"`
 	HostDebtGB          float64               `json:"host_debt_gb"`
 	RequiredDeviceGB    float64               `json:"required_device_gb"`
 	AvailableDeviceGB   float64               `json:"available_device_gb"`
@@ -717,6 +718,12 @@ func (q *Queue) buildAdmissionWaits(scan *placementScan, service time.Duration) 
 					HostMemoryKnown:   m.HostMemoryMeasured && m.HostMemoryError == "",
 					DeviceMemoryKnown: m.MemoryMeasured && m.MemoryError == "",
 					Preemption:        WaitPreemption{Source: "diagnostic_projection", Reason: "not_scheduler_turn"}}
+				// Keep the physical and allowance arms from this comparison. A
+				// later LastMemoryAdmission may describe different occupancy.
+				// Qualification/release projections must not borrow a live ledger.
+				if l := q.hostMemoryLedgers[m.ID]; l != nil && l.FreeGB == m.FreeHostMemoryGB && l.ReservedGB == m.HostMemoryInUseGB {
+					target.HostMemoryLedger = l
+				}
 				var fit targetFit
 				fitsResourcesChecked(candidate, m, m.FreeMemoryGB, &fit)
 				for _, p := range fit.failed {

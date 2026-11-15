@@ -27,6 +27,13 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 
+For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
+`host_memory_ledger` on supporting queues. Compare physical room
+(`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
+at that snapshot's timestamp. Charges alone do not explain live occupancy;
+do not combine an earlier wait with a later machine reading. Missing ledgers
+on older records are unknown, not zero usage.
+
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
