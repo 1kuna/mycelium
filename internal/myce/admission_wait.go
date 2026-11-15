@@ -114,6 +114,7 @@ func (q *Queue) drainAdmissionWaitLocked(b *admissionWaitBuilder) {
 // The commit already freezes these inputs for supported status reads. Capturing
 // their pointers adds no backlog copy or diagnostic planner work under q.mu.
 type admissionWaitCapture struct {
+	ledgers    map[string]*HostMemoryLedger // Immutable accounting from this committed turn.
 	index      *publishedReadIndex
 	decisions  map[string]map[string]admissionWaitDecision
 	admissions map[string]map[string]AdmissionDecision
@@ -133,7 +134,7 @@ func (q *Queue) freezeAdmissionWait() *admissionWaitCapture {
 			if q.admissionTrace != nil {
 				admissions = q.admissionTrace.jobs
 			}
-			return &admissionWaitCapture{admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock, queueClock: q.clock, revision: q.fileReferenceRevision}
+			return &admissionWaitCapture{ledgers: q.hostMemoryLedgers, admissions: admissions, index: q.publishedReads.Load(), decisions: q.admissionWaitDecisions, bytes: q.evidenceBytes, service: service, clock: q.holdClock, queueClock: q.clock, revision: q.fileReferenceRevision}
 		}
 	}
 	q.admissionWaitLast.Store(nil)
@@ -231,6 +232,7 @@ func (q *Queue) finishAdmissionWait(c *admissionWaitCapture) {
 	source.s.Jobs, source.records = jobs, nil
 	source.evidenceBytes, source.holdClock = c.bytes, c.clock
 	source.admissionWaitDecisions = c.decisions
+	source.hostMemoryLedgers = c.ledgers
 	source.admissionTrace = &admissionTrace{jobs: c.admissions}
 	source.memoryPlanning = newMemoryPlanningCache()
 	refresh := func(at time.Time) {
