@@ -463,7 +463,12 @@ present. A CUDA proc physical upper bound includes device and possibly unrelated
 occupancy. With repeated complete accepted local evidence, Mycelium keeps that
 combined bound independently of non-reclaimable host plus device, and uses
 between-attempt device peak variation rather than adding startup allocation twice.
-Incomplete historical readings retain total-cgroup plus device floors; unknown
+Retain `host_sampling` too: its predicate and read/gap/final-age timings explain
+incomplete host evidence; device completeness alone does not establish host
+coverage. Repeated complete physical forecasts supersede legacy additive sizing
+only when they cover every retained total-cgroup floor and resident-plus-device
+forecast. Incomplete-only history and uncovered larger peaks keep conservative
+sizing; unknown
 or stale live device attribution still requires exclusive execution. For local
 benchmark telemetry on a worker-only host, omit `--queue-pid`; its RSS is marked
 `not_configured`. See the

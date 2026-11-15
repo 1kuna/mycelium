@@ -143,9 +143,16 @@ Accepted work observations also retain `device_range`, the min/max of independen
 attempt device peaks. For exact local unified CUDA work with repeated complete
 host evidence, sizing uses peak variation rather than adding the startup load to
 the already reserved device peak. The CUDA physical residual remains a combined
-upper bound; it is not added to device memory again. Every incomplete historical
-row keeps its total-cgroup plus device floor, and complete rows keep their entire
-physical upper bound. This may still exceed resident host plus device memory.
+upper bound; it is not added to device memory again. Complete physical forecasts supersede legacy additive sizing only when they
+cover every retained total-cgroup floor and resident-plus-device forecast. Two
+complete attempts are the minimum to measure variation; a larger uncovered peak
+keeps conservative additive sizing. Incomplete-only history is unchanged, and
+complete rows keep their entire physical upper bound.
+`memory_peak.host_sampling` retains completeness, the first failed host predicate,
+collection count, maximum read duration/gap and final age. Predicate/error-class
+labels contain no raw errors or private paths. Verified departed PIDs may be
+skipped after exact-subtree re-enumeration; unreadable live PIDs, slow reads and
+real gaps still reject coverage. Older attempts may omit this diagnostic. This may still exceed resident host plus device memory.
 
 `diagnostic_code: memory_evidence_recovering` (#850)
 means declared requirements have an eligible target but the learned/exploratory

@@ -433,6 +433,16 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	cudaHost := unifiedCUDA(&w.Machine) && deviceTelemetry && len(w.selectedDevices) <= 1
 	gpuHost := cudaHost || backendFor(w.Machine.GPU).deviceHostMemory && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
 	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
+	hostRejection := ""
+	rejectHost := func(reason string) {
+		if hostRejection == "" {
+			hostRejection = reason
+		}
+		completeGPUHost = false
+	}
+	if gpuHost && !completeGPUHost {
+		rejectHost("host_or_root_baseline_unavailable")
+	}
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
 	unknownReason := "pressure_baseline_unavailable"
@@ -466,7 +476,8 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
 			pressureKnown = false
 			unknownReason = "host_pressure_unavailable_or_reset"
-			completeGPUHost, unifiedDelta = false, false
+			rejectHost("host_pressure_unavailable_or_reset")
+			unifiedDelta = false
 			return
 		}
 		worstHost.retainPressure(host)
@@ -478,12 +489,12 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			unifiedOutsideGB = max(unifiedOutsideGB, a.hostBaseline.available-host.available-(root-*a.rootBaseline))
 		}
 		if !completeGPUHost || component == nil || component.nonreclaimableSampleGB == nil || component.PressureUnavailable {
-			completeGPUHost = false
+			rejectHost("cgroup_components_unavailable")
 			return
 		}
 		root, ok := cgroupResidentGB(a.fs, filepath.Dir(a.path))
 		if !ok || component.HostGB == nil {
-			completeGPUHost = false
+			rejectHost("root_cgroup_components_unavailable")
 			return
 		}
 		// The root includes this attempt's resident counters, so remove only
@@ -580,7 +591,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			sampleHost(final)
 			if !pressureKnown || elapsed <= 0 {
 				record(&AttemptMemoryPeak{PressureUnavailable: true})
-				completeGPUHost = false
+				rejectHost("pressure_window_unavailable")
 			}
 			if peak != nil {
 				peak.Constrained = peak.Constrained || guard.exceeded
@@ -625,7 +636,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 					}
 				case <-wait.Done():
 					record(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
-					completeGPUHost = false
+					rejectHost("device_sampler_finish_timeout")
 				}
 			}
 			var collected gpuHostCollection
@@ -636,10 +647,38 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				select {
 				case collected = <-driver:
 				case <-wait.Done():
+					rejectHost("host_collector_finish_timeout")
 				}
 			}
 			age := clock.Now().Sub(collected.last)
-			completeGPUHost = completeGPUHost && collected.complete && collected.seen && age >= 0 && age <= 2*attemptMemorySamplePeriod
+			if gpuHost {
+				switch {
+				case collected.sampling.Reason != "":
+					rejectHost(collected.sampling.Reason)
+				case !collected.complete:
+					rejectHost("host_collector_incomplete")
+				case !collected.seen:
+					rejectHost("host_collector_no_process")
+				case age < 0:
+					rejectHost("host_collector_clock_reversed")
+				case age > 2*attemptMemorySamplePeriod:
+					rejectHost("host_collector_stale")
+				}
+				if !hostSampled || !completeNonreclaimable || final == nil || final.nonreclaimableSampleGB == nil || final.PressureUnavailable {
+					rejectHost("cgroup_components_incomplete")
+				}
+				if peak != nil {
+					s := collected.sampling
+					s.Complete, s.Reason = completeGPUHost, hostRejection
+					if s.Complete {
+						s.Reason = "complete"
+					}
+					if !collected.last.IsZero() {
+						s.FinalAgeSeconds = age.Seconds()
+					}
+					peak.HostSampling = &s
+				}
+			}
 			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && !peak.PressureUnavailable && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil && !final.PressureUnavailable {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 				if gpuHost {

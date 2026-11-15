@@ -1,0 +1,785 @@
+{
+  "accepted": [
+    {
+      "peak": {
+        "device_growth_gb": 17.162109375,
+        "device_sampling": {
+          "samples": 56,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 0.1904296875,
+          "max_step_gb": 17.162109375,
+          "last_step_gb": -22.1279296875,
+          "first_at_seconds": 5.026796057,
+          "peak_at_seconds": 25.048732521,
+          "elapsed_seconds": 280.86854171,
+          "max_interval_seconds": 5.315866907
+        },
+        "growth_gb": 0.4570351411218381,
+        "combined_host_gb": 28.482318878173828,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 29.55703353881836,
+          "sibling_adjusted": true,
+          "driver_gb": 26.438568115234375,
+          "host_drop_gb": 24.770809173583984,
+          "outside_gb": 26.438568115234375
+        },
+        "nonreclaimable_gb": 2.043750762939453,
+        "host_gb": 2.0404090881347656,
+        "cgroup_gb": 2.1780433654785156,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 282610717.2,
+          "host_stall_us": 34539,
+          "cgroup_stall_us": 10348,
+          "host_avg10": 0.18,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.0404090881347656,
+          "min_available_gb": 90.83559036254883,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020404090881347658,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 17.162109375,
+        "device_sampling": {
+          "samples": 68,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 22.318359375,
+          "max_step_gb": 17.162109375,
+          "last_step_gb": 0,
+          "first_at_seconds": 5.13813328,
+          "peak_at_seconds": 20.026135869,
+          "elapsed_seconds": 344.636535141,
+          "max_interval_seconds": 5.018291839
+        },
+        "growth_gb": 0.45741183207110453,
+        "host_gb": 2.048450469970703,
+        "cgroup_gb": 2.1186294555664062,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 345715958.189,
+          "host_stall_us": 551916,
+          "cgroup_stall_us": 231544,
+          "host_avg10": 3.9,
+          "cgroup_avg10": 1.46,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.048450469970703,
+          "min_available_gb": 89.76405715942383,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020484504699707032,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 21.412109375,
+        "device_sampling": {
+          "samples": 69,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 0.1904296875,
+          "max_step_gb": 21.412109375,
+          "last_step_gb": -22.1279296875,
+          "first_at_seconds": 5.025693776,
+          "peak_at_seconds": 20.032492281,
+          "elapsed_seconds": 345.635443828,
+          "max_interval_seconds": 5.121192684
+        },
+        "growth_gb": 0.3965085185710782,
+        "combined_host_gb": 28.62921142578125,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 36.871150970458984,
+          "sibling_adjusted": true,
+          "driver_gb": 26.576717376708984,
+          "host_drop_gb": 25.30850601196289,
+          "outside_gb": 26.576717376708984
+        },
+        "nonreclaimable_gb": 2.0524940490722656,
+        "host_gb": 2.0494651794433594,
+        "cgroup_gb": 2.055511474609375,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 346929507.785,
+          "host_stall_us": 280424,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.0494651794433594,
+          "min_available_gb": 82.3075065612793,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020494651794433594,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.3046875,
+        "device_sampling": {
+          "samples": 42,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 22.318359375,
+          "max_step_gb": 22.3046875,
+          "last_step_gb": 0,
+          "first_at_seconds": 5.026388981,
+          "peak_at_seconds": 20.029088627,
+          "elapsed_seconds": 214.521711201,
+          "max_interval_seconds": 5.022639443
+        },
+        "growth_gb": 0.4837892642035769,
+        "combined_host_gb": 28.73908233642578,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 40.36231994628906,
+          "sibling_adjusted": true,
+          "driver_gb": 26.68869400024414,
+          "host_drop_gb": 26.19104766845703,
+          "outside_gb": 26.68869400024414
+        },
+        "nonreclaimable_gb": 2.0503883361816406,
+        "host_gb": 2.0472984313964844,
+        "cgroup_gb": 2.0935935974121094,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 215544551.876,
+          "host_stall_us": 356124,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0.62,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.0472984313964844,
+          "min_available_gb": 79.07437896728516,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020472984313964843,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.3046875,
+        "device_sampling": {
+          "samples": 86,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 22.318359375,
+          "max_step_gb": 22.3046875,
+          "last_step_gb": 0,
+          "first_at_seconds": 5.026567706,
+          "peak_at_seconds": 20.038903417,
+          "elapsed_seconds": 433.616195731,
+          "max_interval_seconds": 5.018063731
+        },
+        "growth_gb": 0.4387374812788025,
+        "host_gb": 2.0762863159179688,
+        "cgroup_gb": 2.080303192138672,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 434734895.437,
+          "host_stall_us": 1272406,
+          "cgroup_stall_us": 0,
+          "host_avg10": 6.49,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.0762863159179688,
+          "min_available_gb": 79.65761947631836,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020762863159179686,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 21.412109375,
+        "device_sampling": {
+          "samples": 76,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 22.318359375,
+          "max_step_gb": 21.412109375,
+          "last_step_gb": 0,
+          "first_at_seconds": 5.026213295,
+          "peak_at_seconds": 20.030283565,
+          "elapsed_seconds": 384.985375876,
+          "max_interval_seconds": 5.018046662
+        },
+        "growth_gb": 0.37384456587160014,
+        "combined_host_gb": 29.101985931396484,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 1.0752067565917969,
+          "physical_gb": 43.59342956542969,
+          "sibling_adjusted": true,
+          "driver_gb": 27.03402328491211,
+          "host_drop_gb": 24.97884750366211,
+          "outside_gb": 27.03402328491211
+        },
+        "nonreclaimable_gb": 2.067962646484375,
+        "host_gb": 2.067962646484375,
+        "cgroup_gb": 2.105144500732422,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 386082574.204,
+          "host_stall_us": 421136,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0.62,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 4096,
+          "host_swap_out_bytes": 4096,
+          "resident_gb": 2.067962646484375,
+          "min_available_gb": 76.0479850769043,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.02067962646484375,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.3046875,
+        "device_sampling": {
+          "samples": 56,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 0.1904296875,
+          "max_step_gb": 22.3046875,
+          "last_step_gb": -22.1279296875,
+          "first_at_seconds": 5.028432219,
+          "peak_at_seconds": 20.043126184,
+          "elapsed_seconds": 280.580594694,
+          "max_interval_seconds": 5.053711773
+        },
+        "growth_gb": 0.4034223511962916,
+        "host_gb": 2.040363311767578,
+        "cgroup_gb": 2.1793289184570312,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 281861065.317,
+          "host_stall_us": 677,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.040363311767578,
+          "min_available_gb": 78.34538650512695,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020403633117675783,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 21.412109375,
+        "device_sampling": {
+          "samples": 70,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 0.1904296875,
+          "max_step_gb": 21.412109375,
+          "last_step_gb": -22.1279296875,
+          "first_at_seconds": 5.025881585,
+          "peak_at_seconds": 20.028582073,
+          "elapsed_seconds": 350.348798982,
+          "max_interval_seconds": 5.141445793
+        },
+        "growth_gb": 0.46418681649846144,
+        "combined_host_gb": 28.33005142211914,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 1.0125389099121094,
+          "physical_gb": 39.80702590942383,
+          "sibling_adjusted": true,
+          "driver_gb": 26.282703399658203,
+          "host_drop_gb": 24.890586853027344,
+          "outside_gb": 26.282703399658203
+        },
+        "nonreclaimable_gb": 2.0473480224609375,
+        "host_gb": 2.0445098876953125,
+        "cgroup_gb": 2.1003456115722656,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 351205805.592,
+          "host_stall_us": 10978,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.0445098876953125,
+          "min_available_gb": 80.27620697021484,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.020445098876953127,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.3046875,
+        "device_sampling": {
+          "samples": 70,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 0.1904296875,
+          "max_step_gb": 22.3046875,
+          "last_step_gb": -22.1279296875,
+          "first_at_seconds": 5.024836301,
+          "peak_at_seconds": 20.028198832,
+          "elapsed_seconds": 350.487535431,
+          "max_interval_seconds": 5.040954584
+        },
+        "growth_gb": 0.4056098296062723,
+        "combined_host_gb": 28.756324768066406,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 1.3728790283203125,
+          "physical_gb": 41.28129577636719,
+          "sibling_adjusted": true,
+          "driver_gb": 26.703670501708984,
+          "host_drop_gb": 24.84511947631836,
+          "outside_gb": 26.703670501708984
+        },
+        "nonreclaimable_gb": 2.052654266357422,
+        "host_gb": 2.04949951171875,
+        "cgroup_gb": 2.127269744873047,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 351372553.754,
+          "host_stall_us": 1407,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.04949951171875,
+          "min_available_gb": 78.96942138671875,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.0204949951171875,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.28125,
+        "device_sampling": {
+          "samples": 43,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.318359375,
+          "last_gb": 22.318359375,
+          "max_step_gb": 22.28125,
+          "last_step_gb": 0,
+          "first_at_seconds": 5.026537838,
+          "peak_at_seconds": 20.033063719,
+          "elapsed_seconds": 217.107279291,
+          "max_interval_seconds": 5.010804958
+        },
+        "growth_gb": 0.35913022345364676,
+        "combined_host_gb": 28.55794906616211,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 38.620601654052734,
+          "sibling_adjusted": true,
+          "driver_gb": 26.50756072998047,
+          "host_drop_gb": 24.84528350830078,
+          "outside_gb": 26.50756072998047
+        },
+        "nonreclaimable_gb": 2.0503883361816406,
+        "host_gb": 2.04736328125,
+        "cgroup_gb": 2.094257354736328,
+        "device_gb": 22.318359375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 218175836.754,
+          "host_stall_us": 106785,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0.9,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 2.04736328125,
+          "min_available_gb": 81.4289779663086,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.0204736328125,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "eligible"
+    }
+  ],
+  "excluded": [
+    {
+      "peak": {
+        "device_growth_gb": 22.28125,
+        "device_sampling": {
+          "samples": 3,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.28125,
+          "last_gb": 22.28125,
+          "max_step_gb": 22.28125,
+          "last_step_gb": 22.28125,
+          "first_at_seconds": 5.022900844,
+          "peak_at_seconds": 15.023057854,
+          "elapsed_seconds": 17.106295221,
+          "max_interval_seconds": 5.002687724
+        },
+        "growth_gb": 0.45916875130029533,
+        "combined_host_gb": 27.936397552490234,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 36.85380172729492,
+          "sibling_adjusted": true,
+          "driver_gb": 26.626129150390625,
+          "host_drop_gb": 23.554237365722656,
+          "outside_gb": 26.626129150390625
+        },
+        "nonreclaimable_gb": 1.3102684020996094,
+        "host_gb": 1.2235298156738281,
+        "cgroup_gb": 1.2513389587402344,
+        "device_gb": 22.28125,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 17977124.548,
+          "host_stall_us": 0,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0.05,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 1.2235298156738281,
+          "min_available_gb": 82.79515075683594,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.01223529815673828,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "infrastructure_interrupted"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 21.412109375,
+        "device_sampling": {
+          "samples": 3,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 21.412109375,
+          "last_gb": 21.412109375,
+          "max_step_gb": 21.412109375,
+          "last_step_gb": 21.412109375,
+          "first_at_seconds": 5.025476393,
+          "peak_at_seconds": 15.021542367,
+          "elapsed_seconds": 16.682513326,
+          "max_interval_seconds": 5.013089892
+        },
+        "growth_gb": 0.557524522740286,
+        "combined_host_gb": 28.298004150390625,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 42.62870788574219,
+          "sibling_adjusted": true,
+          "driver_gb": 26.70363998413086,
+          "host_drop_gb": 23.86453628540039,
+          "outside_gb": 26.70363998413086
+        },
+        "nonreclaimable_gb": 1.5943641662597656,
+        "host_gb": 1.2235221862792969,
+        "cgroup_gb": 1.3152694702148438,
+        "device_gb": 21.412109375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 17434807.458,
+          "host_stall_us": 539,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 1.2235221862792969,
+          "min_available_gb": 77.89998626708984,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.012235221862792968,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "infrastructure_interrupted"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 22.3046875,
+        "device_sampling": {
+          "samples": 3,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 22.3046875,
+          "last_gb": 22.3046875,
+          "max_step_gb": 22.3046875,
+          "last_step_gb": 22.3046875,
+          "first_at_seconds": 5.026298445,
+          "peak_at_seconds": 15.044583691,
+          "elapsed_seconds": 16.196859277,
+          "max_interval_seconds": 5.017126091
+        },
+        "growth_gb": 0.4105726499777952,
+        "combined_host_gb": 28.07027816772461,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 0.8754997253417969,
+          "physical_gb": 42.05524444580078,
+          "sibling_adjusted": true,
+          "driver_gb": 26.84566879272461,
+          "host_drop_gb": 23.85924530029297,
+          "outside_gb": 26.84566879272461
+        },
+        "nonreclaimable_gb": 1.224609375,
+        "host_gb": 1.2230606079101562,
+        "cgroup_gb": 1.2347755432128906,
+        "device_gb": 22.3046875,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 17245121.202,
+          "host_stall_us": 714,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 1.2230606079101562,
+          "min_available_gb": 78.65209197998047,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.012230606079101564,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "infrastructure_interrupted"
+    },
+    {
+      "peak": {
+        "device_growth_gb": 21.412109375,
+        "device_sampling": {
+          "samples": 3,
+          "complete": true,
+          "min_gb": 0,
+          "max_gb": 21.412109375,
+          "last_gb": 21.412109375,
+          "max_step_gb": 21.412109375,
+          "last_step_gb": 21.412109375,
+          "first_at_seconds": 5.026047356,
+          "peak_at_seconds": 15.160128172,
+          "elapsed_seconds": 16.857865827,
+          "max_interval_seconds": 5.131685854
+        },
+        "growth_gb": 0.397196827685922,
+        "combined_host_gb": 27.462188720703125,
+        "gpu_host": {
+          "source": "CUDA proc physical upper bound",
+          "pinned_gb": 1.0252418518066406,
+          "physical_gb": 37.95863723754883,
+          "sibling_adjusted": true,
+          "driver_gb": 26.23727035522461,
+          "host_drop_gb": 23.81987762451172,
+          "outside_gb": 26.23727035522461
+        },
+        "nonreclaimable_gb": 1.2249183654785156,
+        "host_gb": 1.2233161926269531,
+        "cgroup_gb": 1.2547607421875,
+        "device_gb": 21.412109375,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "pressure": {
+          "reason": "eligible",
+          "elapsed_us": 17963265.738,
+          "host_stall_us": 2351,
+          "cgroup_stall_us": 0,
+          "host_avg10": 0,
+          "cgroup_avg10": 0,
+          "host_swap_growth_bytes": 0,
+          "host_swap_out_bytes": 0,
+          "resident_gb": 1.2233161926269531,
+          "min_available_gb": 82.39221572875977,
+          "reserve_gb": 4,
+          "available_floor_gb": 4,
+          "swap_budget_gb": 0.012233161926269531,
+          "host_oom_delta": 0
+        }
+      },
+      "reason": "infrastructure_interrupted"
+    }
+  ]
+}

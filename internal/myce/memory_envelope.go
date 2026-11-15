@@ -25,6 +25,7 @@ type AttemptMemoryPeak struct {
 	// horizon. It is measured by the attempt's injected clock, never inferred
 	// from a universal percentage. Nil means the worker predates this sensor.
 	DeviceGrowthGB      *float64                `json:"device_growth_gb,omitempty"`
+	HostSampling        *HostMemorySampling     `json:"host_sampling,omitempty"`
 	DeviceSampling      *DeviceMemorySampling   `json:"device_sampling,omitempty"`
 	GrowthGB            *float64                `json:"growth_gb,omitempty"`
 	CombinedHostGB      *float64                `json:"combined_host_gb,omitempty"`
@@ -261,6 +262,11 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	if next.Source != "" {
 		out.Source = next.Source
+	}
+	out.HostSampling = nil // An aggregate cannot inherit another attempt's coverage.
+	if next.HostSampling != nil {
+		s := *next.HostSampling
+		out.HostSampling = &s
 	}
 	out.DeviceSampling = nil // A new row without coverage cannot inherit an old window.
 	if next.DeviceSampling != nil {
