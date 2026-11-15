@@ -25,6 +25,15 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 		{"docker", "job_docker_retired", "docs/services.md", func(_ *testing.T, _ *Queue, s *Spec) {
 			s.Run.Docker, s.Run.Command = true, []string{"registry.invalid/image:tag"}
 		}},
+		{"docker network", "job_docker_retired", "native job", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Run.DockerNetwork = "private"
+		}},
+		{"docker memory", "job_docker_retired", "native job", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Run.DockerMemoryGB = 2
+		}},
+		{"docker swap", "job_docker_retired", "native job", func(_ *testing.T, _ *Queue, s *Spec) {
+			s.Run.DockerMemorySwap = new(float64) // Explicit zero still asks for Docker.
+		}},
 		{"docker sidecars", "job_docker_retired", "native sidecars", func(_ *testing.T, _ *Queue, s *Spec) {
 			s.Needs.HostMemoryGB = 2
 			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo"}, MemoryGB: 1}}

@@ -207,9 +207,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		if old.Role != role || old.Config != configPath || old.Detection.OS != probe.OS || old.Detection.Arch != probe.Arch {
 			return errors.New("installed role, config and platform identity cannot change")
 		}
-		if warning := old.DropRetiredDocker(); warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
-		}
 		installed = &old
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

@@ -129,38 +129,33 @@ type ServiceConfig struct {
 
 	Version int `json:"version"`
 
-	// Retired with managed Docker (MY-49). Configs written by earlier releases
-	// still carry these keys: they are accepted, ignored and dropped on the next
-	// install, with a warning. Remove after the release following r6.15 (MY-42).
-	DockerEndpoint        string         `json:"docker_endpoint,omitempty"`
-	WorkerUser            string         `json:"worker_user"`
-	WorkerHome            string         `json:"worker_home"`
-	LocalDisableReceipts  bool           `json:"local_disable_receipts"`
-	OnboardingBenchmark   bool           `json:"onboarding_benchmark"`
-	JoiningFile           string         `json:"joining_file"`
-	EnvironmentFile       string         `json:"environment_file"`
-	HostID                string         `json:"host_id"`
-	DB                    string         `json:"db"`
-	ProjectConfig         string         `json:"project_config"`
-	HostConfig            string         `json:"host_config"`
-	UploadSpoolDir        string         `json:"upload_spool_dir"`
-	UploadSpoolBytes      int64          `json:"upload_spool_bytes"`
-	ContainerRetention    *time.Duration `json:"container_retention,omitempty"` // Retired; see DockerEndpoint.
-	FileRetention         time.Duration  `json:"file_retention"`
-	LogRetention          time.Duration  `json:"log_retention"`
-	Heartbeat             time.Duration  `json:"heartbeat"`
-	RestartGrace          time.Duration  `json:"restart_grace"`
-	ProductionLossTimeout time.Duration  `json:"production_loss_timeout"`
-	DeadlineLossTimeout   time.Duration  `json:"deadline_loss_timeout"`
-	ExperimentLossTimeout time.Duration  `json:"experiment_loss_timeout"`
-	ReserveHostMemoryGB   float64        `json:"reserve_host_memory_gb"`
-	PrivateDevices        bool           `json:"private_devices"`
-	NoNewPrivileges       bool           `json:"no_new_privileges"`
-	Nice                  int            `json:"nice"`
-	CPUQuota              string         `json:"cpu_quota"`
-	IOWeight              int            `json:"io_weight,omitempty"`
-	MemoryMax             string         `json:"memory_max"`
-	TasksMax              string         `json:"tasks_max"`
+	WorkerUser            string        `json:"worker_user"`
+	WorkerHome            string        `json:"worker_home"`
+	LocalDisableReceipts  bool          `json:"local_disable_receipts"`
+	OnboardingBenchmark   bool          `json:"onboarding_benchmark"`
+	JoiningFile           string        `json:"joining_file"`
+	EnvironmentFile       string        `json:"environment_file"`
+	HostID                string        `json:"host_id"`
+	DB                    string        `json:"db"`
+	ProjectConfig         string        `json:"project_config"`
+	HostConfig            string        `json:"host_config"`
+	UploadSpoolDir        string        `json:"upload_spool_dir"`
+	UploadSpoolBytes      int64         `json:"upload_spool_bytes"`
+	FileRetention         time.Duration `json:"file_retention"`
+	LogRetention          time.Duration `json:"log_retention"`
+	Heartbeat             time.Duration `json:"heartbeat"`
+	RestartGrace          time.Duration `json:"restart_grace"`
+	ProductionLossTimeout time.Duration `json:"production_loss_timeout"`
+	DeadlineLossTimeout   time.Duration `json:"deadline_loss_timeout"`
+	ExperimentLossTimeout time.Duration `json:"experiment_loss_timeout"`
+	ReserveHostMemoryGB   float64       `json:"reserve_host_memory_gb"`
+	PrivateDevices        bool          `json:"private_devices"`
+	NoNewPrivileges       bool          `json:"no_new_privileges"`
+	Nice                  int           `json:"nice"`
+	CPUQuota              string        `json:"cpu_quota"`
+	IOWeight              int           `json:"io_weight,omitempty"`
+	MemoryMax             string        `json:"memory_max"`
+	TasksMax              string        `json:"tasks_max"`
 
 	RequireMemoryCeilings    bool    `json:"require_memory_ceilings"`
 	RequireMountedNAS        bool    `json:"require_mounted_nas"`
@@ -630,7 +625,13 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	e = decoder.Decode(&c)
+	// Old saved configs can outlive a binary upgrade. Decode retired keys only
+	// at this boundary; they are neither settings nor part of the saved config.
+	e = decoder.Decode(&struct {
+		*ServiceConfig
+		DockerEndpoint     json.RawMessage `json:"docker_endpoint"`
+		ContainerRetention json.RawMessage `json:"container_retention"`
+	}{ServiceConfig: &c})
 	if e == nil {
 		_, e = deviceAllowance(c.Device)
 	}

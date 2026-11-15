@@ -5,11 +5,55 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestQueuePersistenceRetiredDockerJob(t *testing.T) {
+	q, clock := fixture(t)
+	// An actual pre-retirement job row, not a new submission: validation must
+	// refuse new Docker work without making historical records unreadable.
+	const record = `{"id":"docker-history","state":"succeeded","attempt":1,
+		"queued":"2026-10-08T11:59:00Z","finished_at":"2026-10-08T12:00:00Z",
+		"docker_cause":{"operation":"inspect","class":"not_found"},
+		"spec":{"name":"historical container","project":"test","priority":"experiment",
+		"run":{"command":["registry.invalid/image@sha256:old"],"docker":true,
+		"docker_network":"private","docker_memory_gb":2,"docker_memory_swap":0,
+		"docker_sidecars":[{"name":"server","image":"registry.invalid/server:old"}]}}}`
+	if _, err := q.db.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", "jobs/docker-history", []byte(record)); err != nil {
+		t.Fatal(err)
+	}
+	var original Job
+	if err := json.Unmarshal([]byte(record), &original); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		q = reopenQueue(t, q, clock)
+		stored := q.s.Jobs[original.ID]
+		if stored == nil || stored.State != original.State || !reflect.DeepEqual(stored.Spec.Run, original.Spec.Run) {
+			t.Fatalf("restart %d lost Docker history: %+v", i, stored)
+		}
+		r := httptest.NewRequest("GET", "/api/jobs/"+original.ID, nil)
+		r.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		var displayed Job
+		if err := json.Unmarshal(w.Body.Bytes(), &displayed); err != nil || w.Code != http.StatusOK || displayed.ID != original.ID || displayed.State != original.State || displayed.Spec.Name != original.Spec.Name {
+			t.Fatalf("historical job display: status=%d body=%s err=%v", w.Code, w.Body.String(), err)
+		}
+		// Force the current writer to persist the row before the next restart.
+		if err := q.update(func() error {
+			q.touchJob(original.ID).Reason = "retained history"
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestStorageEnvelopeLogicalDedupReplayRestart(t *testing.T) {
 	q, clock, m, s, out := storageFixture(t)

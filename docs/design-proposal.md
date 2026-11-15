@@ -1461,8 +1461,9 @@ on 2026-10-11 as an optional path (MY-13), was retired on 2026-11-12 under
 A job spec, profile or adapter entry that still sets a `run.docker*` field is
 refused at submission with `job_docker_retired`, pointing to native
 environments and sidecars ([services](services.md#a-model-server-in-a-native-job-instead-of-a-container-image)).
-The previous release's Docker wire fields and install keys are accepted and
-ignored for one release (MY-42).
+Historical Docker job records still load and display (MY-42); their retained
+specs do not authorize execution. Docker CLI flags and installer settings are
+removed. Old config keys are discarded when read and omitted on reinstall.
 
 ## Models
 <a id="models-nas-masters-local-cache-and-production-pins-maintainer-2026-10-09"></a>

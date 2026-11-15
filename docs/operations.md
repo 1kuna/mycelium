@@ -1404,13 +1404,13 @@ No manual spool or database edits are needed.
 
 Managed Docker was retired on 2026-11-12 ([MY-49](DECISIONS.md#my-49)). Workers
 no longer start, observe or clean up containers, and `myce resolve-docker` is
-gone. For one release (MY-42):
-
-- A worker started by an older service unit that still passes `--docker-host`
-  or `--container-retention` starts normally and logs that it ignores them.
-  Reinstall (`myce install worker --config ...`) to drop them from the unit.
-- An installed config that still has `docker_endpoint` or `container_retention`
-  loads normally; the next install warns once and removes both keys.
+gone. The one-release CLI grace period has ended: `--docker-host` and
+`--container-retention` are unknown flags. During an authorized upgrade,
+reinstall (`myce install worker --config ...`) to remove them from an old
+service unit before starting the new worker. An old config with
+`docker_endpoint` or `container_retention` still loads; those keys are ignored
+at read time and omitted on reinstall. They are no longer installer settings.
+Historical Docker jobs remain readable through status and the job API (MY-42).
 
 Containers and networks that earlier releases kept as evidence carry the
 `myce.attempt` label. Mycelium no longer removes them. Once no record needs
