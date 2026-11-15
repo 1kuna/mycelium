@@ -87,7 +87,7 @@ func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
 	started := queued.Add(30 * time.Minute)
 	for _, j := range []*Job{
 		{ID: "lists", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, ExcludedMachines: []string{"two"}}, State: "queued", Queued: queued},
-		{ID: "targets", Spec: Spec{Project: "demo", Targets: []ExecutionTarget{{OS: "linux"}}}, State: "done", Queued: queued, StartedAt: &started},
+		{ID: "targets", Spec: Spec{Project: "demo", Targets: []ExecutionTarget{{OS: "linux"}}}, State: "succeeded", Queued: queued, StartedAt: &started},
 		{ID: "both", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, Targets: []ExecutionTarget{{OS: "linux"}}}, State: "queued", Queued: queued,
 			Efficiency: &JobEfficiency{At: now.Add(-time.Minute), Blocker: "capacity", WaitSeconds: map[string]float64{"capacity": 60, "holds": 60}}},
 		{ID: "free", Spec: Spec{Project: "other"}, State: "queued", Queued: queued},
