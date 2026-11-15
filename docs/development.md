@@ -1675,3 +1675,14 @@ For a natural signal exit verify any core pointer and privately recover stack,
 argument registers and ELF build IDs. Do not induce GPU faults or enable cores
 as part of the laptop/full gate. Current historical causes for #155/#300 remain
 unknown; this capture is not a preventive fix or a benign classification.
+
+## Generated status documentation
+
+Run `go generate ./internal/statusdoc` after changing status types. The field
+inventory in [status](status.md#generated-field-inventory) is derived from the
+compact status, snapshot and job-page types and their reachable objects; edit
+behavior explanations in [the reference](reference/status-behavior.md).
+`TestStatusFieldsCurrent` runs in every quick gate, including docs-only changes.
+Quick and full also run `python3 scripts/check-doc-links.py` to check local
+Markdown paths and heading anchors in root documents, `docs/` and `skills/`.
+Mechanism chapters linked from the approved design remain part of that design.

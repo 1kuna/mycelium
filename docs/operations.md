@@ -16,7 +16,7 @@ Agent skill/harness installation lives [beside the skill](../skills/mycelium/set
 | Install, reinstall or upgrade one service | [install and upgrade](#install-and-upgrade) | [installer transactions](reference/install.md) |
 | Replace pre-v3 state | [archive old state](#archive-old-state-and-install-fresh) | [migration archive](reference/migrations.md) |
 | Build, sign and approve a release | [publish](#publish-and-approve-an-onboarding-release), [advance the default](#advance-the-default-after-a-signed-update) | [invite and upgrade machines](reference/onboarding.md#invite-and-upgrade-machines) |
-| Upgrade the whole fleet | [rolling fleet upgrades](#rolling-fleet-upgrades), [preserve curves](#preserve-learned-curves-across-a-release) | [fleet upgrade internals and failure codes](reference/fleet-upgrades.md) |
+| Upgrade the whole fleet | [rolling fleet upgrades](#rolling-fleet-upgrades), [preserve accepted work evidence](#preserve-accepted-work-evidence-across-a-release) | [fleet upgrade internals and failure codes](reference/fleet-upgrades.md) |
 | Drain, disable, exclude or budget a host or device | [queue maintenance](#queue-maintenance) | [maintenance semantics](reference/queue-maintenance.md), [host capacity](reference/host-capacity.md) |
 | Qualify an extension or reserve hardware | [extension check](#check-an-installed-workers-extension), [reservations](#reserve-a-host-or-its-devices-for-an-existing-validation-job) | [reservation semantics](reference/queue-maintenance.md#validation-reservation-semantics) |
 | Change project or host policy | [live project policy](#change-live-project-policy) | [scheduling](scheduling.md) |
