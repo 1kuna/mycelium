@@ -103,7 +103,8 @@ type Worker struct {
 	sharedCPUDev            bool
 	devEnvironmentSizing    bool // Dev session: size the environment cache from need (#1540).
 	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
-	processMemory           *processMemoryProbe // Without cgroups only.
+	processMemory           *processMemoryProbe                   // Without cgroups only.
+	cudaMemoryQuery         func(context.Context) ([]byte, error) // Nil queries the driver; tests inject readings.
 	MemorySwapMaxBytes      int64
 	GPUTelemetryHelper      string // Operator-owned optional read-only telemetry executable.
 	nativeListenerProbe     func(port string, group int) error

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -13,17 +12,22 @@ import (
 // boundary. A startup load stays in peak-growth diagnostics; a later flat
 // reading ends its live forecast. Tail/coverage evidence survives for #1044.
 func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
-	for _, mode := range []string{"complete", "missed interval", "late first sample", "inventory failure", "stale finish", "flat tail"} {
+	for _, mode := range []string{"complete", "missed interval", "late first sample", "inventory failure", "query timeout", "stale finish", "flat tail"} {
 		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("MYCE_TEST_CUDA_READING", filepath.Join(dir, "reading"))
-			if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\ncat \"$MYCE_TEST_CUDA_READING\"\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
+			// Coverage time and driver readings are both injected. A real shell
+			// query can exceed the driver's two-second deadline under host load,
+			// yielding no sample for an otherwise deterministic fake-clock tick.
+			var reading []byte
+			queryTimeout := false
 			clock := &lockedTestClock{now: time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)}
 			a := &memoryAttempt{}
-			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true},
+				cudaMemoryQuery: func(context.Context) ([]byte, error) {
+					if queryTimeout {
+						return nil, context.DeadlineExceeded
+					}
+					return reading, nil
+				}}
 			ctx, cancel := context.WithCancel(context.Background())
 			ticks := make(chan time.Time)
 			inventoryError := false
@@ -39,9 +43,7 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				readings = append(readings, readings[len(readings)-1])
 			}
 			for i, raw := range readings {
-				if err := os.WriteFile(filepath.Join(dir, "reading"), []byte(raw), 0600); err != nil {
-					t.Fatal(err)
-				}
+				reading = []byte(raw)
 				at := clock.Now().Add(time.Second)
 				if mode == "missed interval" && i == 2 {
 					at = at.Add(2 * time.Second)
@@ -63,6 +65,10 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				// The unbuffered tick establishes happens-before for the flag;
 				// cancellation joins the collector before inspecting its summary.
 				inventoryError = true
+				ticks <- clock.Now()
+			}
+			if mode == "query timeout" {
+				queryTimeout = true
 				ticks <- clock.Now()
 			}
 			if mode == "stale finish" {

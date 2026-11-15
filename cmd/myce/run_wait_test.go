@@ -57,6 +57,8 @@ func TestRunWaitSignalsDetachAndReattach(t *testing.T) {
 					clock.advance(time.Second)
 					m := maintenanceCLIWorker("signal-worker")
 					m.CPUIsolation = "select-none"
+					// #1645 requires containment for an unknown CPU first run.
+					m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 					reply, err := currentCLICheckin(q, clock, myce.Checkin{Machine: m})
 					if err != nil || reply.Job == nil {
 						t.Fatalf("assign: %+v %v %s", reply, err, waitAssignmentDiagnostics(q))
