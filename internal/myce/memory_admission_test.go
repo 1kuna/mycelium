@@ -3,7 +3,6 @@ package myce
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -153,17 +152,8 @@ func TestMemoryAdmissionCapturesGrowthWithoutNominalDoubleCharge(t *testing.T) {
 	}
 }
 
-func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
+func TestMemoryAdmissionRetainsOOMFloor(t *testing.T) {
 	q, clock, m := memoryAdmissionFixture(t)
-	// The retained comparison must name the measured reserve used by #902,
-	// rather than the older page-only floor at this capture point.
-	clock.Advance(time.Second)
-	m.HostAvailableMemoryGB -= .5
-	machineCheck(t, q, m)
-	drift := q.coldProbeDriftMarginGB(&m)
-	if drift <= exploratoryDriftMarginGB(&m) {
-		t.Fatal("fixture has no measured launch drift")
-	}
 	// An auto requirement retained from an OOM must never shrink to live room.
 	s := cpuSpec(1, 0)
 	s.Needs.Memory = "auto"
@@ -171,20 +161,13 @@ func TestMemoryAdmissionColdDriftAndOOMFloor(t *testing.T) {
 	if err := q.update(func() error {
 		live := q.touchJob(j.ID)
 		live.MemoryOOMFloor = &SizeHint{HostMemoryGB: 22}
-		// Native CPU probes now retain their own strict-launch refusal
-		// margin, rather than inheriting every host-wide headroom change.
-		h := q.s.HostLaunchMemory[hostID(&m)]
-		if h.Refusals == nil {
-			h.Refusals = map[string]float64{}
-		}
-		h.Refusals[j.ID] = drift
 		q.maintain()
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	a := q.s.Jobs[j.ID].LastMemoryAdmission
-	if a == nil || a.Envelope.HostGB < 22 || math.Abs(a.DriftReserveGB-drift) > 1e-10 {
+	if a == nil || a.Envelope.HostGB < 22 || a.DriftReserveGB != 0 {
 		t.Fatalf("lost cold reserve or OOM floor: %+v", a)
 	}
 	if !a.CapturedAt.Equal(clock.Now()) || !a.WaitingSince.Equal(j.WaitingSince) || a.Session != m.Session || a.Target.OS != "linux" {
@@ -247,7 +230,7 @@ func TestMemoryAdmissionIgnoresRunningVictimDestinations(t *testing.T) {
 	if err := q.update(func() error {
 		live := q.touchJob(victim.ID)
 		live.LastMemoryAdmission = prior
-		q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
+		q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}}
 		defer func() { q.memoryAdmissionCapture = nil }()
 		q.yieldAlternative(live, m.HostID, nil)
 		// Other hypothetical callers also cannot make a queued copy of a

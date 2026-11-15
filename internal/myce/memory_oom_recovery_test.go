@@ -82,13 +82,14 @@ func TestExactLaunchGrowthFitsOwnedEnvelope(t *testing.T) {
 	}
 }
 
-func TestRecoveryRefusalKeepsSourceAndLearnsDeficit(t *testing.T) {
+func TestRecoveryRefusalKeepsSourceAndDemand(t *testing.T) {
 	for _, source := range []string{measuredOOMRecoverySource, "exploratory OOM recovery; measured peak + growth; physical headroom"} {
 		t.Run(source, func(t *testing.T) {
 			q, clock, m, s := coldProbeAdmissionFixture(t, true)
 			submit(t, q, s)
 			run := assignedJob(machineCheck(t, q, m))
 			run.MemoryEnvelope.Source = source
+			run.Spec.Needs.HostMemoryGB, run.MemoryEnvelope.HostGB = 19.49, 19.49
 			q.s.Jobs[run.ID].MemoryEnvelope.Source = source
 			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 19, nil }}
 			d := admissionDetail(localAttemptAdmission(w, nil, *run, nil), *run)
@@ -101,8 +102,8 @@ func TestRecoveryRefusalKeepsSourceAndLearnsDeficit(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
-			if q.jobProbeDriftMarginGB(q.s.Jobs[run.ID], q.s.Machines[m.ID]) < .48 {
-				t.Fatal("exact recovery deficit did not teach launch drift")
+			if got := job(t, q, run.ID); got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+				t.Fatalf("prelaunch recovery refusal spent a failure budget: %+v", got)
 			}
 		})
 	}

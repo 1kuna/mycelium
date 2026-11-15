@@ -18,6 +18,7 @@ func cpuSpec(cores int, ram float64) Spec {
 }
 func cpuMachine(id, host, backend string, cores int, ram float64) Machine {
 	m := machine(id, backend, host)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "linux", "amd64"
 	m.CapabilityProfile.LogicalCPUs = cores
 	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, ram

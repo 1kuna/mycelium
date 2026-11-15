@@ -30,10 +30,13 @@ the job's enforced ceiling, and once the work has accepted runs on a CPU
 target the queue charges their peak plus spread instead, so typing a large
 figure no longer holds memory other work could use. Production keeps its
 typed figure as the charge. A CPU entry's first run, with nothing learned, is
-charged a small floor and grows into the room its host has, so it starts
-without waiting for a whole free host. If it outgrows that room, Mycelium stops
-it and reruns it on its own with its measured peak as the floor; no action is
-needed.
+charged a physical accounting floor (one maximum supported kernel page plus
+existing launch slack), raised by any known member or measured floors.
+Supporting workers let it grow into measured room; protected/shared or older
+workers retain strict containment at that charge. A memory stop reruns the
+same job at its measured peak without spending infrastructure losses or
+retries. Keep the job and key; no resubmission is needed. Admission-only hosts
+cannot run unknown CPU work. GPU first runs retain their separate accounting.
 
 A non-production entry without `targets` runs on any machine type its platform,
 lock and `needs.tools` fit. A first failure on a type the recipe never succeeded

@@ -226,7 +226,8 @@ type LearnedMemory struct {
 	PeakDeviceGB float64 `json:"peak_device_gb,omitempty"`
 }
 
-// Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
+// Physical GPU probes retain configured launch slack and page rounding.
+// CPU bootstrap charges do not reserve snapshot-to-launch drift.
 func exploratoryDriftMarginGB(m *Machine) float64 {
 	// The operator's explicit launch slack is preserved. One maximum supported
 	// kernel page is the physical rounding floor, not a workload-size reserve.
@@ -545,9 +546,6 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				// measures, and the ledger charges what it uses (lendProbe).
 				// A refusal of the whole-room offer does not apply to it.
 				n.HostMemoryGB, source = probeFloor, source+"; "+firstRunFloorSource
-				if roomOfferRefusal(refusal) {
-					refusal = ""
-				}
 			}
 		}
 		if floor := j.MemoryOOMFloor; floor != nil {
@@ -575,17 +573,13 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		// restores the typed limit to the job (assign).
 		envelope.ChargeHostGB, envelope.LimitHostGB = n.HostMemoryGB, limit
 	}
-	if basis == "exploratory" && evidence == 0 && estimatePhysicalSource(source) {
-		envelope.LaunchDriftGB = q.jobProbeDriftMarginGB(j, m)
-		envelope.AvailableHostGB = m.FreeHostMemoryGB
-	}
 	if probeFloor > 0 {
 		envelope.ProbeFloorGB = hostNeed(m, 0, probeFloor)
 	}
 	j.Spec.Needs, j.MemoryEnvelope = needs, envelope
 	// The envelope acknowledgement keeps new workers on the old stop contract
 	// with older queues, and older workers on their existing kernel ceilings.
-	if contains(m.Capabilities, learnedMemoryGuardCapability) {
+	if contains(m.Capabilities, learnedMemoryGuardCapability) && !(probeFloor > 0 && !floorCharged(envelope)) {
 		envelope.Enforcement = learnedMemoryGuardEnforcement
 		if adaptiveMemoryCeilingGB(j, m) <= 0 {
 			envelope.Enforcement = enforcement
@@ -874,27 +868,6 @@ func (q *Queue) memoryEstimateForState(j *Job, m *Machine, key *ObservationKey, 
 	return estimate
 }
 
-// The cold-probe drift margin's refusal; exploratoryMemoryStatus alone writes it.
-const coldProbeMarginRefusal = "exploratory first run needs physical headroom above launch slack"
-
-// The whole-room offer's wait for a release to confirm; exploratoryMemoryStatus alone writes it.
-const unconfirmedReleaseRefusal = "exploratory first run blocked by an unconfirmed memory-heavy release"
-
-// roomOfferRefusal says why is a temporary refusal of the whole-room offer,
-// which a first run charged its floor does not wait for.
-func roomOfferRefusal(why string) bool {
-	return strings.HasPrefix(why, coldProbeMarginRefusal) || why == unconfirmedReleaseRefusal
-}
-
-// The hold kind of a resolved envelope's refusal: the cold-probe drift margin
-// is its own kind, every other refusal is ordinary memory.
-func memoryRefusalKind(e *JobMemoryEnvelope, fallback string) string {
-	if strings.HasPrefix(e.Refusal, coldProbeMarginRefusal) {
-		return "cold_probe_margin"
-	}
-	return fallback
-}
-
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger
 // and release predicates; the normal planner alone can authorize stops.
 func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
@@ -905,7 +878,23 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 // The boolean identifies temporary physical contention, not unknown telemetry or
 // a structural inability to run. Startup waiting uses this same sizing evidence.
 func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bool) {
-	drift := q.jobProbeDriftMarginGB(j, m)
+	if q.learnedMemory() && j.Spec.Needs.cpuOnly() {
+		if !m.HostMemoryMeasured || m.HostMemoryError != "" || hostMemoryAllowanceGB(m) <= 0 {
+			return 0, "first run needs measured host memory and a known allowance or physical capacity", false
+		}
+		if m.MemoryEnforcement != cgroupMemoryEnforcement && m.MemoryEnforcement != darwinRSSGuardStatus {
+			return 0, "first run needs a kernel memory ceiling or sampled memory guard", false
+		}
+		return minimumHostMemoryGB, "", false
+	}
+	return q.physicalProbeMemoryStatus(j, m)
+}
+
+// GPU attribution and explicitly disabled learning retain physical probing.
+// Transfer-prior exceptions also use this capacity comparison, never the CPU
+// bootstrap charge. No learned snapshot-to-launch drift margin is retained.
+func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine) (float64, string, bool) {
+	drift := exploratoryDriftMarginGB(m)
 	allowance := hostMemoryAllowanceGB(m)
 	if allowance <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return 0, "exploratory first run needs measured host memory and a known allowance or physical capacity", false
@@ -916,7 +905,7 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 		}
 		live := q.s.Jobs[release.Job]
 		if live == nil || live.Machine != release.Machine || live.Session != release.Session || live.Attempt != release.Attempt || (live.State != "running" && live.State != "stopping") {
-			return 0, unconfirmedReleaseRefusal, true
+			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release", true
 		}
 	}
 	var jobs []*Job
@@ -943,9 +932,8 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + drift
-	q.observeMemoryAdmissionDrift(j, m, drift)
 	if room <= slack {
-		return 0, fmt.Sprintf(coldProbeMarginRefusal+" (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
+		return 0, fmt.Sprintf("exploratory first run needs physical headroom (%.1f GiB available; %.1f GiB allowance)", room, allowance), true
 	}
 	return room - slack, "", false
 }
@@ -954,8 +942,6 @@ func (q *Queue) exploratoryMemoryStatus(j *Job, m *Machine) (float64, string, bo
 // grants no resources and does not initiate preparation or release work.
 func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 	var reasons []string
-	// One kind when every blocked target agrees, as targetWait reports.
-	kinds := map[string]bool{}
 	for _, m := range machines {
 		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) {
 			continue
@@ -972,7 +958,6 @@ func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 			}
 			if candidate.MemoryEnvelope.Refusal != "" {
 				reasons = append(reasons, m.ID+": "+candidate.MemoryEnvelope.Refusal)
-				kinds[memoryRefusalKind(candidate.MemoryEnvelope, "host_memory_headroom")] = true
 				continue
 			}
 			if !fitsResources(candidate, m, max(m.FreeMemoryGB, m.TotalMemoryGB)) {
@@ -992,18 +977,13 @@ func (q *Queue) memoryWait(j *Job, machines map[string]*Machine) *Hold {
 				why += "; host telemetry unavailable"
 			}
 			reasons = append(reasons, why)
-			kinds["host_memory_headroom"] = true
 		}
 	}
 	slices.Sort(reasons)
 	if len(reasons) == 0 {
 		return nil
 	}
-	kind := "host_memory_headroom"
-	if len(kinds) == 1 && kinds["cold_probe_margin"] {
-		kind = "cold_probe_margin"
-	}
-	return newHold(kind, "waiting for RAM envelope: "+strings.Join(reasons, "; "))
+	return newHold("host_memory_headroom", "waiting for RAM envelope: "+strings.Join(reasons, "; "))
 }
 
 func estimatePhysicalSource(source string) bool {

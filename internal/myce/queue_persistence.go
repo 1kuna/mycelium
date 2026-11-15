@@ -332,7 +332,7 @@ func (q *Queue) loadPersistedState() error {
 	}
 	q.restoreLastSeen()
 	q.rebuildRecords()
-	q.histories = cloneHistories(q.s.EfficiencyHosts, q.s.HostLaunchMemory)
+	q.histories = cloneHistories(q.s.EfficiencyHosts)
 	return q.loadExpiredLearning()
 }
 

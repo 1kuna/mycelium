@@ -79,7 +79,7 @@ func TestLearnedMemoryOmittedFigureLearnsAcrossReopen(t *testing.T) {
 		t.Fatal("omitted memory must pass static validation:", err)
 	}
 	first := runMemory(t, q, clock, m, s, 2, nil)
-	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || first.Spec.Needs.Memory != "auto" {
+	if e := first.MemoryEnvelope; e.Source != physicalMemoryProbe || e.Basis != "exploratory" || first.Spec.Needs.HostMemoryGB != minimumHostMemoryGB || first.Spec.Needs.Memory != "auto" {
 		t.Fatalf("cold run not bounded: %+v needs=%+v", e, first.Spec.Needs)
 	}
 	second := runMemory(t, q, clock, m, s, 2, nil)
@@ -118,7 +118,7 @@ func TestLearnedMemoryBoundsGrowAndNeverShrink(t *testing.T) {
 	}
 	runMemory(t, q, clock, m, s, 6, constrained)
 	next := runMemory(t, q, clock, m, s, 3, nil)
-	if next.Spec.Needs.HostMemoryGB != 32-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
+	if next.Spec.Needs.HostMemoryGB < 6 || next.Spec.Needs.HostMemoryGB >= 32-minimumHostMemoryGB || next.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatal("constrained evidence was treated as an upper bound", next.MemoryEnvelope)
 	}
 	other := s

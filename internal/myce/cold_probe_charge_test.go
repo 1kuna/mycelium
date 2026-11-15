@@ -19,6 +19,7 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 		t.Run(evidence, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := unifiedCUDAAdmissionMachine()
+			m.MemoryEnforcement = cgroupMemoryEnforcement
 			m.CapabilityProfile.Arch = "arm64"
 			m.HostAvailableMemoryGB = 99
 			m.MemoryObservation = &HostMemoryObservation{TotalGB: 121, UsedGB: 6}
@@ -26,9 +27,14 @@ func TestColdCPUProbeChargeAfterSlowHeartbeatInventory(t *testing.T) {
 			machineCheck(t, q, m)
 			submit(t, q, cpuSpec(2, 0))
 			probe := assignedJob(machineCheck(t, q, m))
-			if probe == nil || probe.MemoryEnvelope.ProbeFloorGB <= 0 || probe.MemoryEnvelope.HostGB < 80 {
+			if probe == nil || probe.MemoryEnvelope.ProbeFloorGB <= 0 {
 				t.Fatal("missing large cold probe")
 			}
+			// Replay an already-issued whole-room offer from the previous release.
+			probe.Spec.Needs.HostMemoryGB = m.HostMemoryBudgetGB - m.MemoryCeilingSlackGB - minimumHostMemoryGB
+			probe.MemoryEnvelope.HostGB = hostNeed(&m, 0, probe.Spec.Needs.HostMemoryGB)
+			q.s.Jobs[probe.ID].Spec.Needs.HostMemoryGB = probe.Spec.Needs.HostMemoryGB
+			q.s.Jobs[probe.ID].MemoryEnvelope = probe.MemoryEnvelope
 			ceiling := probe.Spec.Needs.HostMemoryGB
 			dir := t.TempDir()
 			write := func(name, value string) {

@@ -51,6 +51,10 @@ with the worker's installed tools in an empty folder. `--cpu N`, `--mem 8G` and
 `--gpu cuda|xpu|metal` describe needs; leave memory out and Mycelium learns it.
 A typed memory figure is a limit, not a reservation: once the work has run,
 Mycelium charges what it measured and keeps your figure as the ceiling.
+An unknown CPU command starts with a small physical accounting floor. Its
+charge follows measured use on supporting workers; protected/shared or older
+workers keep strict containment at that charge. A memory stop reruns the same
+job at its measured peak without an infrastructure loss; keep its job and key.
 
 ## 2. Files back
 

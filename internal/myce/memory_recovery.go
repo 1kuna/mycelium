@@ -118,13 +118,13 @@ func (q *Queue) recoveryMemoryBound(j *Job, m *Machine, estimate memoryEstimate,
 }
 
 func (q *Queue) recoveryMemoryRoom(j *Job, m *Machine) (float64, string) {
-	// Reuse physical headroom, allowance, launch drift and release custody.
-	// Qualification passes its permanent-capacity view; dispatch passes the
-	// live ledger. Neither needs another target's allowance or a fixed cap.
-	// Only permanent physical/allowance capacity may bound replaceable
-	// uncertainty. Live free RAM determines whether it can launch, not demand.
+	// Recovery uncertainty is bounded by permanent capacity, never by a
+	// first run's bootstrap charge or current free memory.
 	physical := q.qualificationCapacity(m)
-	room, why := q.exploratoryMemory(j, &physical)
+	room, why := min(hostMemoryAllowanceGB(m), physical.FreeHostMemoryGB)-m.MemoryCeilingSlackGB, ""
+	if room <= 0 || !m.HostMemoryMeasured || m.HostMemoryError != "" {
+		why = "memory recovery needs measured host memory and a known allowance or physical capacity"
+	}
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
 		room -= j.Spec.Needs.MemoryGB
 	}

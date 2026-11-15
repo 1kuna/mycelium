@@ -75,9 +75,15 @@ pending growth and the host's measured loss of room until a stop could land.
 Host PSI and swap activity do not stop it; on a working Linux host they
 moved in up to 28% of 200 ms samples with 14 GiB or more available. If it
 outgrows that room, the guard stops it, it requeues with its measured peak as
-the floor, and it relearns. Production, the shared interactive host, hosts
-without a cgroup v2 or Darwin RSS guard, OOM retries, GPU first runs and
-workers without `first_run_floor_v1` keep the whole-room probe.
+the floor, and it relearns without an infrastructure loss or retry charge.
+With no evidence the floor is one maximum supported kernel page (64 KiB),
+plus existing launch slack. Production, the shared interactive host and
+workers without `first_run_floor_v1` use that same small charge with strict
+attempt containment; they gain no allowance-wide lending. Unknown CPU work
+waits on hosts without a kernel ceiling or sampled guard. OOM recovery uses
+measured demand and permanent capacity; GPU first runs keep separate device
+accounting. CPU first runs no longer learn launch-drift margins or hold on
+`cold_probe_margin`.
 
 Memory measured on one OS does not size work on another: the measurement
 differs (macOS samples process RSS, Linux reads the cgroup) and so does the

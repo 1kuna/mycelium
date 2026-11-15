@@ -34,7 +34,7 @@ func crashCopy(t *testing.T, q *Queue, clock *fakeClock) *Queue {
 	return crashed
 }
 
-func storedHistories(t *testing.T, q *Queue) (EfficiencyHost, *hostLaunchMemory) {
+func storedHistories(t *testing.T, q *Queue) EfficiencyHost {
 	t.Helper()
 	q.mu.RLock()
 	data := q.persisted["state"]
@@ -43,19 +43,18 @@ func storedHistories(t *testing.T, q *Queue) (EfficiencyHost, *hostLaunchMemory)
 	if err := json.Unmarshal(data, &s); err != nil {
 		t.Fatal(err)
 	}
-	return s.EfficiencyHosts["host"], s.HostLaunchMemory["host"]
+	return s.EfficiencyHosts["host"]
 }
 
-func liveHistories(q *Queue) (EfficiencyHost, hostLaunchMemory, float64) {
+func liveHistories(q *Queue) EfficiencyHost {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return q.s.EfficiencyHosts["host"], *q.s.HostLaunchMemory["host"], q.coldProbeDriftMarginGB(q.s.Machines["worker"])
+	return q.s.EfficiencyHosts["host"]
 }
 
-// Steady check-ins leave both histories as stored; each is written when its
-// stored copy would stop supporting the live decision. After a crash the
-// reconstructed integrals and the cold-probe reserve match the live queue,
-// and the next cold probe gets the same ceiling.
+// Efficiency readings are batched until their own validity expires. Crash
+// recovery preserves coverage and bounds integral error by the unwritten spread.
+// First-run sizing no longer depends on a separate launch history.
 func TestMeasurementHistoriesResumeAfterCrash(t *testing.T) {
 	q, clock, m, s := coldProbeAdmissionFixture(t, true)
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 32, UsedGB: 10, MyceliumGB: 2}
@@ -67,56 +66,44 @@ func TestMeasurementHistoriesResumeAfterCrash(t *testing.T) {
 	}
 	step(19.48, 2)
 	step(19.46, 2.5)
-	written, writtenLaunch := storedHistories(t, q)
-	if writtenLaunch == nil || len(writtenLaunch.Samples) < 2 || written.Rate.MeasuredMemoryGB == nil {
-		t.Fatalf("first reserve and measured rate were not stored: %+v %+v", written, writtenLaunch)
+	written := storedHistories(t, q)
+	if written.Rate.MeasuredMemoryGB == nil {
+		t.Fatalf("measured rate was not stored: %+v", written)
 	}
 
-	// The same 0.02 GiB drop again: the reserve is unchanged, so no write.
+	// Before expiry, new measured readings remain batched.
 	for i := range 6 {
 		step([]float64{19.48, 19.46}[i%2], 2+float64(i)/10)
 		if !clock.Now().Before(written.Rate.ValidUntil) {
 			break
 		}
-		stored, launch := storedHistories(t, q)
-		if !reflect.DeepEqual(stored, written) || !reflect.DeepEqual(launch, writtenLaunch) {
+		stored := storedHistories(t, q)
+		if !reflect.DeepEqual(stored, written) {
 			t.Fatalf("steady check-in %d rewrote a history", i)
 		}
 	}
-	live, liveLaunch, _ := liveHistories(q)
-	if len(liveLaunch.Samples) <= len(writtenLaunch.Samples) || !live.At.After(written.At) {
+	live := liveHistories(q)
+	if !live.At.After(written.At) {
 		t.Fatal("histories did not advance in memory")
 	}
 
 	// The stored measurement's own validity lapses: write the integral.
 	clock.Advance(written.Rate.ValidUntil.Sub(clock.Now()))
 	step(19.48, 3)
-	stored, _ := storedHistories(t, q)
-	live, _, _ = liveHistories(q)
+	stored := storedHistories(t, q)
+	live = liveHistories(q)
 	if !reflect.DeepEqual(stored, live) {
 		t.Fatalf("lapsed measurement not rewritten:\nstored %+v\nlive   %+v", stored, live)
 	}
-	// A larger drop changes the reserve: write the samples.
 	step(19.30, 3)
-	_, launch := storedHistories(t, q)
-	_, liveLaunch, liveMargin := liveHistories(q)
-	if !reflect.DeepEqual(*launch, liveLaunch) {
-		t.Fatal("reserve change not written")
-	}
-	step(19.32, 3.5) // Smaller drop: batched.
-
-	// Crash before any further write.
+	step(19.32, 3.5)
 	crashed := crashCopy(t, q, clock)
-	_, crashedLaunch, crashedMargin := liveHistories(crashed)
-	if crashedMargin != liveMargin || len(crashedLaunch.Samples) >= len(liveHistoriesSamples(q)) {
-		t.Fatalf("restart reserve %v, live %v", crashedMargin, liveMargin)
-	}
 	// At the crash instant: seconds, reservations and measured coverage are
 	// exact; readings since the last write use the stored one, never more than
 	// the readings' spread over that window. Coverage then pauses until the
 	// first check-in, as for any restart.
 	now := clock.Now()
-	stored, _ = storedHistories(t, q)
+	stored = storedHistories(t, q)
 	q.mu.RLock()
 	want := q.s.EfficiencyHosts["host"]
 	q.mu.RUnlock()
@@ -151,16 +138,11 @@ func TestMeasurementHistoriesResumeAfterCrash(t *testing.T) {
 
 	// A clean close writes the full live histories.
 	step(19.41, 4)
-	live, liveLaunch, _ = liveHistories(q)
+	live = liveHistories(q)
 	q = reopenQueue(t, q, clock)
-	reopened, reopenedLaunch, _ := liveHistories(q)
+	reopened := liveHistories(q)
 	// Startup recomputes the rate without telemetry; the integral is intact.
-	if !reflect.DeepEqual(reopened.ResourceIntegral, live.ResourceIntegral) || !reopened.At.Equal(live.At) || reopened.Identity != live.Identity || !reflect.DeepEqual(reopenedLaunch, liveLaunch) {
-		t.Fatalf("clean close lost history:\n%+v\n%+v\n%+v\n%+v", reopened, live, reopenedLaunch, liveLaunch)
+	if !reflect.DeepEqual(reopened.ResourceIntegral, live.ResourceIntegral) || !reopened.At.Equal(live.At) || reopened.Identity != live.Identity {
+		t.Fatalf("clean close lost history:\n%+v\n%+v", reopened, live)
 	}
-}
-
-func liveHistoriesSamples(q *Queue) []hostHeadroomSample {
-	_, h, _ := liveHistories(q)
-	return h.Samples
 }

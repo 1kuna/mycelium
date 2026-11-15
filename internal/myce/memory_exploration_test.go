@@ -182,7 +182,7 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 	// A different host has no calibrated transfer error, so its next run
 	// remains a physical probe even after this clean local completion.
 	next := check(t, q, small, nil).Job
-	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB != 5 || next.MemoryEnvelope.Basis != "exploratory" {
+	if next == nil || next.ID != second.ID || next.Spec.Needs.HostMemoryGB < 4 || next.Spec.Needs.HostMemoryGB >= 5 || next.MemoryEnvelope.Basis != "exploratory" {
 		t.Fatal("uncalibrated same-OS transfer lost its physical bound", next, job(t, q, second.ID).Reason)
 	}
 	localSpec := s

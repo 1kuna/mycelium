@@ -64,7 +64,6 @@ type state struct {
 	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
-	HostLaunchMemory       map[string]*hostLaunchMemory   `json:"host_launch_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
@@ -1319,7 +1318,7 @@ func (q *Queue) maintain() {
 	q.beginMaintenance()
 	q.expireInventoryObservations()
 	previousCapture := q.memoryAdmissionCapture
-	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}, drift: map[string]float64{}}
+	q.memoryAdmissionCapture = &memoryAdmissionCapture{decisions: map[string]memoryAdmissionDecision{}}
 	defer func() {
 		q.retainMemoryAdmissions()
 		q.memoryAdmissionCapture = previousCapture
@@ -1794,7 +1793,6 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		q.acceptContactPeriod(&m, c.period, c.contact)
 		body.next("checkin_memory")
-		q.recordHostLaunchMemory(&m, old)
 		q.recordExternalMemory(&m)
 		if q.hostMemorySamples == nil {
 			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
@@ -2259,7 +2257,6 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	r.ExecutionCause = safeAttemptRuntimeCause(j, r.ExecutionCause)
 	r.CleanupCause = safeAttemptRuntimeCause(j, r.CleanupCause)
-	q.recordColdProbeRefusal(j, r)
 	if r.ExecutionCause != nil && (r.ExecutionCause.Operation == "input_staging" || checkpointStorageInterruption(r.ExecutionCause) || r.ExecutionCause.Finalization != nil) {
 		// Keep the durable reason as safe as the structured cause; Error may
 		// contain the original worker-supplied diagnostic name or private text.
@@ -3312,7 +3309,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.WorkerDataCleanup = &WorkerDataCleanup{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, State: "pending", CheckedAt: q.clock.Now()}
 	}
 	q.claimMemoryExploration(j, m)
-	q.recordColdProbeAssignment(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {
