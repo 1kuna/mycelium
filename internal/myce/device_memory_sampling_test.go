@@ -19,11 +19,13 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 			// yielding no sample for an otherwise deterministic fake-clock tick.
 			var reading []byte
 			queryTimeout := false
+			queryFailed := make(chan struct{})
 			clock := &lockedTestClock{now: time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)}
 			a := &memoryAttempt{}
 			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true},
 				cudaMemoryQuery: func(context.Context) ([]byte, error) {
 					if queryTimeout {
+						queryFailed <- struct{}{}
 						return nil, context.DeadlineExceeded
 					}
 					return reading, nil
@@ -39,6 +41,14 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 			}, nil, time.Second, clock, a, ticks)
 			defer cancel()
 			readings := []string{"GPU-one, 42, 1024\nGPU-other, 42, 65536\nGPU-one, 99, 8192\n", "GPU-one, 42, 17408\n", "GPU-one, 42, 17664\n"}
+			if mode == "query timeout" {
+				// Replay a missed driver query without waiting on wall time.
+				// A later tick can recover, but coverage must remain incomplete.
+				queryTimeout = true
+				ticks <- clock.Now()
+				<-queryFailed
+				queryTimeout = false
+			}
 			if mode == "flat tail" {
 				readings = append(readings, readings[len(readings)-1])
 			}
@@ -65,10 +75,6 @@ func TestDeviceMemorySamplingCUDAEvidence(t *testing.T) {
 				// The unbuffered tick establishes happens-before for the flag;
 				// cancellation joins the collector before inspecting its summary.
 				inventoryError = true
-				ticks <- clock.Now()
-			}
-			if mode == "query timeout" {
-				queryTimeout = true
 				ticks <- clock.Now()
 			}
 			if mode == "stale finish" {
