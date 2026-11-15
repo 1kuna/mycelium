@@ -381,6 +381,13 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 	if len(l.Owners) != 3 {
 		t.Fatal("missing or duplicated exact holder", l.Owners)
 	}
+	// Public copies must detach the shared immutable ledger and its owners.
+	detached := admissionWaitAPI(t, q, waiting.ID)
+	detached.First.Targets[0].HostMemoryLedger.Owners[0].ChargeGB = -1
+	detached.First.Targets[0].HostMemoryLedger.Owners[0].Execution.ID = "caller mutation"
+	if got := admissionWaitAPI(t, q, waiting.ID).First; !reflect.DeepEqual(got, first) {
+		t.Fatal("caller mutation changed committed physical accounting")
+	}
 	// Later occupancy and a queue restart must not rewrite the first ledger.
 	clock.Advance(time.Second)
 	m.HostAvailableMemoryGB = 60

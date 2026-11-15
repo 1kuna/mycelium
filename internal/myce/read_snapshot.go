@@ -24,7 +24,8 @@ type readNode struct {
 	height, live int
 }
 type readRecord struct {
-	data    []byte // The persistence journal already owns immutable encodings.
+	data    []byte                 // The persistence journal already owns immutable encodings.
+	wait    *AdmissionWaitEvidence // Immutable, replaced on publication or closure.
 	mutable bool
 	once    sync.Once
 	decoded atomic.Bool
@@ -133,6 +134,10 @@ type discardReadJSON struct{}
 
 func (*discardReadJSON) UnmarshalJSON([]byte) error { return nil }
 func decodeReadJob(data []byte) (*Job, error) {
+	return decodeReadJobWithWait(data, nil)
+}
+
+func decodeReadJobWithWait(data []byte, wait *AdmissionWaitEvidence) (*Job, error) {
 	type job Job
 	out := &Job{}
 	data, err := expandJobRecord(data)
@@ -143,7 +148,19 @@ func decodeReadJob(data []byte) (*Job, error) {
 		*job
 		LedgerEntries discardReadJSON `json:"ledger_entries"`
 	}{job: (*job)(out)}
-	err = json.Unmarshal(data, &wire)
+	if wait == nil {
+		err = json.Unmarshal(data, &wire)
+	} else {
+		// Wait endpoints and their matching physical ledgers are immutable.
+		// Reuse the committed value instead of rebuilding every nested target
+		// and owner from JSON on each heartbeat. Public replies still detach it.
+		err = json.Unmarshal(data, &struct {
+			*job
+			LedgerEntries discardReadJSON `json:"ledger_entries"`
+			AdmissionWait discardReadJSON `json:"admission_wait"`
+		}{job: (*job)(out)})
+		out.AdmissionWait = wait
+	}
 	return out, err
 }
 
@@ -236,7 +253,7 @@ func (r *readRecord) decode(key string) (any, error) {
 		group, _, _ := strings.Cut(key, "/")
 		switch group {
 		case "jobs":
-			r.value, r.err = decodeReadJob(r.data)
+			r.value, r.err = decodeReadJobWithWait(r.data, r.wait)
 			if r.err == nil && !r.mutable {
 				j := r.value.(*Job)
 				input := statusJobInputs(j)
@@ -336,6 +353,11 @@ func (q *Queue) publishReadRecords(next map[string][]byte) {
 		var record *readRecord
 		if len(data) > 0 {
 			record = &readRecord{data: data, mutable: mutable}
+			if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+				if j := q.s.Jobs[id]; j != nil {
+					record.wait = j.AdmissionWait
+				}
+			}
 		}
 		q.readRoot = readPut(q.readRoot, key, record)
 	}
