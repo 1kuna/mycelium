@@ -20,6 +20,7 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			for i := 0; i < tc.hosts; i++ {
 				host := fmt.Sprintf("worker-%d", i)
 				target := cpuMachine(host, host, "cpu", 1, tc.ram)
+				target.MemoryEnforcement = cgroupMemoryEnforcement
 				target.CapabilityProfile.SystemMemoryBytes = uint64(tc.ram * (1 << 30))
 				target.HostMemoryBudgetGB, target.ExtensionFingerprint = tc.ram, "cpu-v1"
 				target.HostAvailableMemoryGB = tc.ram * .75
@@ -31,13 +32,13 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			s := cpuSpec(1, 0)
 			s.AllowedMachines = []string{m.ID}
 			first := runMemory(t, q, clock, m, s, tc.ram/8, nil)
-			room := m.HostAvailableMemoryGB - exploratoryDriftMarginGB(&m)
-			if e := first.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 || math.Abs(e.HostGB-room) > 1e-8 || strings.Contains(e.Source, "25%") {
-				t.Fatalf("physical cold probe: %+v", e)
+			startup := max(minimumHostMemoryGB, firstRunStartupGB-m.MemoryCeilingSlackGB)
+			if e := first.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 || math.Abs(e.HostGB-startup) > 1e-8 || strings.Contains(e.Source, "25%") {
+				t.Fatalf("small cold charge: %+v", e)
 			}
 			growth := tc.ram / 64
 			second := runMemory(t, q, clock, m, s, tc.ram/8, func(r *Result) { r.MemoryPeak.GrowthGB = &growth })
-			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB >= first.MemoryEnvelope.HostGB {
+			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB != tc.ram/8 || e.HostGB <= first.MemoryEnvelope.HostGB {
 				t.Fatalf("first accepted sample not used: %+v", e)
 			}
 			third := runMemory(t, q, clock, m, s, tc.ram/8, nil)

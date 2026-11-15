@@ -1280,7 +1280,9 @@ RSS peak plus 2,621,440 bytes of measured growth, rounded to 64 KiB pages.
 It is a measured startup seed, not a bound on an arbitrary workload; larger
 commands use measured-stop recovery. These paths do not gain allowance-wide
 lending. Unknown CPU work needs a kernel ceiling or sampled guard; an
-admission-only host cannot contain it. A measured memory stop requeues at the
+admission-only host cannot contain it. Linux `myce dev` reuses the owned-session
+RSS guard because its foreground workers have no delegated cgroup; installed
+Linux workers retain kernel containment. A measured memory stop requeues at the
 peak plus measured uncertainty without an infrastructure loss or retry charge.
 Recovery demand is bounded by permanent capacity, independently of live free
 RAM. Exact-attempt release custody remains authoritative. Launch-drift history,

@@ -189,6 +189,12 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}()
 	for i := 0; i < c.Workers; i++ {
 		w := Worker{EnvironmentLimit: c.EnvironmentCacheLimit, environmentSizeLimit: c.environmentSizeLimit, sharedCPUDev: true, devEnvironmentSizing: true, SharedPressureSource: c.SharedPressureSource, CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelRoot: c.ModelRoot, ModelHubURL: c.ModelHub, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		// Foreground Linux dev has no delegated cgroup. Reuse the sampled
+		// owned-session guard rather than admitting unknown work unguarded.
+		// Installed Linux workers still require their native kernel ceiling.
+		if workerDevProcessMemory != nil {
+			w.processMemory = workerDevProcessMemory()
+		}
 		if c.NASCheckpoints {
 			w.CheckpointRoot = c.Checkpoints
 		}

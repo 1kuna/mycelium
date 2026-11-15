@@ -137,7 +137,7 @@ func (w *Worker) initMemoryCeilings() {
 	if w.processMemory == nil && workerProcessMemory != nil {
 		w.processMemory = workerProcessMemory()
 	}
-	if runtime.GOOS == "darwin" && w.processMemory != nil && w.processMemory.OwnedResident != nil {
+	if (runtime.GOOS == "darwin" || w.sharedCPUDev) && w.processMemory != nil && w.processMemory.OwnedResident != nil {
 		w.Machine.MemoryEnforcement = darwinRSSGuardStatus
 	}
 }

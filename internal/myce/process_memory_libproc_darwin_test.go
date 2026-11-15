@@ -43,7 +43,7 @@ func TestLibprocOwnedResidentMatchesPS(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("fast probe: %v ok=%t", err, ok)
 	}
-	slow, slowMembers, err := darwinOwnedResident(roots)
+	slow, slowMembers, err := ownedSessionResident(roots)
 	if err != nil {
 		t.Fatal(err)
 	}

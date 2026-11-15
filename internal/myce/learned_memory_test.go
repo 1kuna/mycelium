@@ -20,11 +20,12 @@ func setLearnedMemory(t *testing.T, q *Queue, on bool) {
 	}
 }
 
-// One 32 GiB CPU host; the cold probe owns measured physical headroom.
+// One guarded 32 GiB CPU host; cold work starts at its measured startup floor.
 func learnedMemoryFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "worker-host", "cpu", 8, 32)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1" // Workers report their backend probe.
 	check(t, q, m, nil)
 	return q, clock, m

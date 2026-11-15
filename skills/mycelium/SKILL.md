@@ -531,7 +531,7 @@ hours they waited while an excluded host had room, and how far typed
   `storage_failure` in supported fleet status; retain that evidence for the
   storage owner and leave an operation-owned drain in place.
 - No fleet: `myce dev -- sh script.sh` runs your script against a temporary
-  queue with fake GPUs ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
+  queue with fake GPUs and an owned-process RSS guard for CPU work ([quick start](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md)). Inside it,
   every `myce` command and `Client.from_installed()` use the dev queue, even on
   a machine that has joined a fleet.
 - Problems: search the public issues, then file one with expected and observed

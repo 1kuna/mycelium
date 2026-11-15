@@ -29,6 +29,7 @@ func memoryExplorationFixture(t *testing.T) (*Queue, *fakeClock, Machine, Machin
 	linux := cpuMachine("linux-worker", "linux-host", "cpu", 8, 32)
 	darwin := cpuMachine("darwin-worker", "darwin-host", "cpu", 8, 32)
 	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
+	linux.MemoryEnforcement, darwin.MemoryEnforcement = cgroupMemoryEnforcement, darwinRSSGuardStatus
 	linux.HostMemoryBudgetGB, darwin.HostMemoryBudgetGB = 32, 8
 	for _, m := range []*Machine{&linux, &darwin} {
 		m.ExtensionFingerprint = "cpu-v1"
