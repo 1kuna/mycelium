@@ -257,9 +257,9 @@ func TestCandidateCostPlacementEquivalence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want = "fbbc3c4d7b78a6932febae1378a5697cfdf9b216a5543d38cf0937b0c8fcf311"
+			want = "0e58086cf7cfc9238366318b9e870a41394de965f9dd3dca82bbf7b9968ce74f"
 			if fixture.grouped {
-				want = "20e76e155167a57f7c12f38ce2f3e0de549c80530f8b85772bf5145f702de9d6"
+				want = "6dcd451e0df467a2fbb1f05bac262b4280f3e074b587882c66e9e651d3160c55"
 			}
 			if digest = fmt.Sprintf("%x", sha256.Sum256(data)); digest != want {
 				t.Fatalf("assignment digest %s (%d placements), want %s", digest, len(placements), want)

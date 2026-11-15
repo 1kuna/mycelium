@@ -170,8 +170,10 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	defer q.mu.Unlock()
 	probe := *q.s.Jobs[next.ID]
 	probe.State = "queued"
-	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != 2 || other.MemoryEnvelope.Basis != "exploratory" {
-		t.Fatalf("uncalibrated other-family transfer lost its measured floor: %+v", other.Spec.Needs)
+	// The altered observation no longer matches its owner's identity. Without
+	// eligible history, this is a new guarded first run, not a transferable peak.
+	if other := q.memoryCandidate(&probe, q.s.Machines[m.ID]); other.Spec.Needs.HostMemoryGB != firstRunStartupGB || other.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("invalidated history did not fall back to small guarded startup: %+v", other.Spec.Needs)
 	}
 }
 
