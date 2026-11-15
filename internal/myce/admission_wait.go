@@ -564,7 +564,7 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 		}
 		n := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 		sample := q.hostMemorySamples[j.Machine][jobKey(*j)]
-		charge, growth := memoryChargeForGrace(j, owner, n, sample, now, q.preemptionGrace())
+		charge, growth := q.hostJobChargeGrowth(j)
 		h.AdmissionHostGB, h.ChargedHostGB, h.RemainingGrowthGB = waitNumber(n), waitNumber(charge), waitNumber(growth)
 		if j.Spec.Needs.Memory != "auto" {
 			h.DeclaredHostGB = waitNumber(j.Spec.Needs.HostMemoryGB)

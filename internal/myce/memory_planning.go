@@ -120,7 +120,8 @@ func unifiedDeviceWork(j *Job, m *Machine) bool {
 // So the host share is contained and the device share is measured: by-use
 // unified work is charged both (memoryCharge). Per-process device counters can
 // count one allocation more than once and may overlap cgroup pages (#424), so
-// the sum only overstates, and only the host vector earns resident credit.
+// the sum only overstates. Resident credit uses a separate single-process
+// lower bound, unioned with all credited host pages (device_resident_credit.go).
 func deviceForecast(s hostMemorySample, now time.Time) float64 {
 	return s.deviceGB + s.deviceGrowthGB + s.deviceRateGB*now.Sub(s.deviceAt).Seconds()
 }

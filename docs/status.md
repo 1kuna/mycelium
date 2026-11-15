@@ -1785,11 +1785,17 @@ age. The envelope and forecast cover the same future bytes; they are not added.
 The static charge is at least the envelope and current anonymous residency plus
 that forecast, so observed over-use still consumes the allowance. The operator
 reserve is already removed from live availability; it is not subtracted again.
-Only fresh exact-attempt cgroup anonymous resident memory reduces growth.
-The unified-CUDA device-growth floor
-remains: host cgroup memory cannot cancel the device reservation. Summed
-per-process device counters may include shared allocations; neither their sum
-nor RSS/host-delta estimates establish unique physical residency for credit.
+Fresh anonymous resident credit reduces pending growth. On unified CUDA,
+workers also report `current_host_memory.device_resident_gb`, the largest direct
+single-process counter from that exact attempt, separately from summed
+`device_gb` used for charging. Queue and worker admission credit at most the
+union lower bound: max(all credited host pages, one process's device counter).
+Only the difference goes to that process's attempt; device counters are never
+summed across processes or co-tenants. Missing, stale, ambiguous, fallback or
+multi-card evidence grants no additional credit. Older workers without the
+lower-bound field keep conservative behavior. Full charges, remaining device
+demand, growth forecasts and lending-stop headroom remain protected. Neither
+summed process counters nor RSS/host-delta estimates establish residency credit.
 Heartbeat device snapshots freeze before reading physical
 headroom; aging them afterward never fetches newer allocations.
 Native helper memory can be reported before main starts: occupancy does not
@@ -1797,7 +1803,7 @@ establish main execution. Launch takes fresh actor snapshots before its live
 physical-RAM read and rechecks exact custody afterward. Confirmed local cleanup
 removes an old actor's reservation even before its next heartbeat; stop intent
 and pending cleanup do not.
-Only this current nonreclaimable memory reduces growth;
+Only this current nonreclaimable memory and qualified device union reduce growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or expired
 samples retain the full reservation, as do models and unconfirmed release custody.
 Host sample validity follows twice the longest observed

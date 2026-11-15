@@ -27,6 +27,11 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 
+On supporting unified CUDA workers, fresh exact-attempt single-process device
+evidence earns resident credit through max(all credited host pages, one device
+process counter). Device counters are never summed for this credit. Missing,
+stale or ambiguous evidence and older workers retain conservative pending
+growth; this does not reduce charges or qualify native coexistence.
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
