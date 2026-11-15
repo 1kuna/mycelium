@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,18 +20,30 @@ const cudaHostMemorySource = "CUDA proc physical upper bound"
 func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen bool, err error) {
 	ids := map[int]bool{}
 	if err = a.processIDs(ids); err != nil {
+		err = hostMemoryReadError{"cuda_process_inventory", err}
 		return
 	}
 	seen = len(ids) > 0
 	for pid := range ids {
 		var b []byte
 		b, err = a.fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+		if errors.Is(err, os.ErrNotExist) {
+			// cgroup.procs and proc status are not an atomic snapshot. A PID
+			// that has left this exact subtree no longer owns live proc pins;
+			// the absolute host/pin counters below still bound residual pages.
+			live := map[int]bool{}
+			if inventoryErr := a.processIDs(live); inventoryErr == nil && !live[pid] {
+				continue
+			}
+		}
 		if err != nil {
-			return // Even an exiting PID leaves an incomplete observation.
+			err = hostMemoryReadError{"cuda_proc_status", err}
+			return
 		}
 		var values map[string]uint64
 		values, err = memoryKiBCounters(b, "VmPin", "VmLck")
 		if err != nil {
+			err = hostMemoryReadError{"cuda_proc_pin_counters", err}
 			return
 		}
 		// May overlap one another, cgroup anon and inherited mappings. Never
@@ -52,17 +65,17 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 	}
 	before, e := root()
 	if e != nil {
-		err = e
+		err = hostMemoryReadError{"cuda_root_components", e}
 		return
 	}
 	b, e := a.fs.ReadFile("/proc/meminfo")
 	if e != nil {
-		err = e
+		err = hostMemoryReadError{"cuda_physical_counters", e}
 		return
 	}
 	v, e := memoryKiBCounters(b, "MemTotal", "MemFree", "Buffers", "Cached", "Shmem", "SReclaimable", "Unevictable", "Mlocked", "Dirty", "Writeback")
 	if e != nil || v["Shmem"] > v["Cached"] || v["MemFree"] > v["MemTotal"] {
-		err = errAttemptMemoryUnsupported
+		err = hostMemoryReadError{"cuda_physical_counters", errAttemptMemoryUnsupported}
 		return
 	}
 	// Put shmem back before excluding file cache. Add locked/dirty pages
@@ -70,19 +83,20 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 	cache := float64(v["Buffers"]) + float64(v["Cached"]-v["Shmem"]) + float64(v["SReclaimable"])
 	used := float64(v["MemTotal"] - v["MemFree"])
 	if cache > used {
-		err = errAttemptMemoryUnsupported
+		err = hostMemoryReadError{"cuda_physical_counters", errAttemptMemoryUnsupported}
 		return
 	}
 	physical = (used - cache + float64(v["Unevictable"]) + float64(v["Mlocked"]) + float64(v["Dirty"]) + float64(v["Writeback"])) / (1 << 20)
 	b, err = a.fs.ReadFile("/proc/vmstat")
 	if err != nil {
+		err = hostMemoryReadError{"cuda_global_pin_counters", err}
 		return
 	}
 	stats := memoryCounters(b)
 	acquired, aok := stats["nr_foll_pin_acquired"]
 	released, rok := stats["nr_foll_pin_released"]
 	if !aok || !rok || released > acquired || a.pageSize <= 0 {
-		err = errAttemptMemoryUnsupported
+		err = hostMemoryReadError{"cuda_global_pin_counters", errAttemptMemoryUnsupported}
 		return
 	}
 	// GUP-pinned file pages need not appear as unevictable. Retain all
@@ -90,7 +104,7 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 	pinned += float64(acquired-released) * float64(a.pageSize) / (1 << 30)
 	after, e := root()
 	if e != nil || min(before, after) > physical {
-		err = errAttemptMemoryUnsupported
+		err = hostMemoryReadError{"cuda_root_physical_comparison", errAttemptMemoryUnsupported}
 		return
 	}
 	// Read around the host snapshot and subtract the smaller value. Sibling

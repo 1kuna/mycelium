@@ -6,10 +6,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 )
+
+type cudaProcExitFS struct {
+	memoryFS
+	group  string
+	exited bool
+	slow   bool
+	once   sync.Once
+}
+
+func (f *cudaProcExitFS) ReadFile(path string) ([]byte, error) {
+	if path == "/proc/8/status" {
+		f.once.Do(func() {
+			if f.slow {
+				time.Sleep(250 * time.Millisecond)
+			}
+			if f.exited {
+				_ = f.memoryFS.WriteFile(filepath.Join(f.group, "cgroup.procs"), nil)
+			}
+		})
+		if f.slow {
+			return f.memoryFS.ReadFile(path)
+		}
+		return nil, os.ErrNotExist
+	}
+	return f.memoryFS.ReadFile(path)
+}
 
 func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 	t.Helper()
@@ -71,6 +98,8 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 			put(filepath.Join(proc, "meminfo"), meminfo) // Unrelated frees mask MemAvailable drop, never absolute occupancy.
 		case "host OOM":
 			put(filepath.Join(proc, "vmstat"), strings.ReplaceAll(vmstat, "oom_kill 3", "oom_kill 4"))
+		case "exited proc", "missing live proc", "slow collector":
+			a.fs = &cudaProcExitFS{memoryFS: a.fs, group: filepath.Join(a.path, "sidecar"), exited: mode == "exited proc", slow: mode == "slow collector"}
 		}
 		w := Worker{Clock: clock, Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
 		s := cpuSpec(1, 0)
@@ -86,12 +115,21 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 }
 
 func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
-	for _, mode := range []string{"complete", "masked host drop", "missing cgroup", "missing proc pin", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
+	for _, mode := range []string{"complete", "masked host drop", "exited proc", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
 		t.Run(mode, func(t *testing.T) {
 			p := cudaHostFixture(t, mode)
-			complete := mode == "complete" || mode == "masked host drop"
+			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc"
 			if p == nil || (p.NonreclaimableGB != nil) != (complete || mode == "host OOM") {
 				t.Fatalf("wrong complete evidence: %+v", p)
+			}
+			if p.HostSampling == nil || p.HostSampling.Complete != (complete || mode == "host OOM") || p.HostSampling.Reason == "" {
+				t.Fatalf("host collector lost its coverage/rejection reason: %+v", p.HostSampling)
+			}
+			if mode == "missing live proc" && p.HostSampling.Reason != "cuda_proc_status:not_found" {
+				t.Fatal("missing live process was silently ignored", p.HostSampling)
+			}
+			if mode == "slow collector" && (p.HostSampling.Reason != "collector_read_over_period" || p.HostSampling.MaxCollectionSeconds != .25) {
+				t.Fatal("slow collection lost predicate/timing", p.HostSampling)
 			}
 			const nr = 2 + .25 + .125 + .0625 + .03125 + .015625
 			const pins = .03125 + .0625 + .015625
@@ -135,6 +173,11 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 			probe.State = "queued"
 			target := m.Devices[0].machine(m)
 			estimate := q.memoryEstimate(&probe, &target)
+			q = memoryFactsRestart(t, q, clock)
+			retained := job(t, q, last.ID).MemoryAttempts[0].MemoryPeak.HostSampling
+			if retained == nil || *retained != *p.HostSampling {
+				t.Fatal("wire/SQLite lost rejection evidence", retained)
+			}
 			if mode == "host OOM" {
 				if estimate.measuredHostGB != 0 {
 					t.Fatal("OOM evidence trained the envelope", estimate)

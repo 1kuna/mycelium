@@ -76,7 +76,7 @@ per-observation bounds. Do not add a newer range's variation to an older,
 already larger cumulative peak, or treat differences between allowance-key
 maxima as another measured range. Incomplete observations independently retain
 their total-cgroup peak plus sampling growth, with launch slack added separately;
-a complete neighbour never discounts them. These margins cover measured between-attempt variation,
+except for the covered exact-local unified CUDA case below. These margins cover measured between-attempt variation,
 growth before the next sample and snapshot-to-launch drift, respectively.
 They are empirical bounds, not guarantees about an unseen tail; pressure,
 OOM recovery, physical admission and release custody still bind.
@@ -217,6 +217,13 @@ or final age beyond two periods rejects completeness. Attempt completion waits
 at most one period for a cancelled collector; late results cannot change its
 published peak. This bounds observation latency, never job execution time.
 Every host/driver sample must succeed; existing nonzero host swap is allowed.
+`memory_peak.host_sampling` retains the first failed host predicate, successful
+collection count, maximum read duration/gap and final age. Read errors use bounded
+source/class labels rather than raw errors or private paths. CUDA proc status may
+vanish between cgroup enumeration and reading: only a fresh exact-subtree inventory
+confirming that PID has left permits skipping it; absolute physical/global pin
+counters still cover residual allocations. Missing live-PID counters, permission
+errors, slow reads and real gaps continue to reject completeness.
 Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
 baseline the host and attempt-cgroup cumulative `some total` counters before
 payload/sidecar launch, while the attempt cgroup is empty. Reject learning if
@@ -266,9 +273,15 @@ sample, physical headroom and stop-grace guards. The CUDA absolute outside-root
 residual includes device pages: preserve each complete combined physical upper
 bound plus its measured host range/growth and device variation independently of
 non-reclaimable host plus device. Do not add device again to the residual or
-subtract independently sampled maxima to claim a unique-page union. Every
-incomplete historical row retains total-cgroup plus device sizing and its host
-uncertainty. Cross-machine transfer, unknown attribution, recovery/retry floors
+subtract independently sampled maxima to claim a unique-page union. A physical range needs two complete accepted attempts to measure variation.
+It supersedes incomplete total-cgroup-plus-device forecasts only if the complete
+forecast covers every retained total-cgroup-plus-growth floor and every
+resident-plus-device forecast, including measured device variation. An uncovered
+peak restores the conservative additive fallback. Incomplete-only kinds keep
+their existing estimator; missing history is never relabelled as cache. Keep each
+cumulative physical peak plus drift independently of a restarted range's forecast.
+Physical-range variation, sampling growth and device variation share the forecast
+margin; do not add a device allowance again to an already combined bound. Cross-machine transfer, unknown attribution, recovery/retry floors
 and rejected-pressure exclusions retain their conservative rules.
 
 **Ceiling-bound envelopes.** There is no low-resident file-cache exception. OOM, swap-out,

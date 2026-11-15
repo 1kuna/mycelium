@@ -103,6 +103,26 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 			t.Fatalf("final launch fit=%t: %v", wantFit, err)
 		}
 	}
+	// Keep the already assigned holder frozen at its historical charge. Only
+	// the incoming attempt gets the new complete physical-bound envelope.
+	charge := retainedUnifiedPhysicalCharge(t)
+	if !hostFits(q.s.Machines[m.ID], 22.443359375, charge-22.443359375-.125) || charge > after.FreeGB {
+		t.Fatal("calibrated second naming refused", charge, after.FreeGB)
+	}
+	next := Job{ID: "next-gpu", State: "running", Attempt: 1, Spec: spec("experiment")}
+	next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 22.443359375, charge-22.443359375-.125
+	if err := normalizeResources(&next.Spec); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID], HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }, HostMemoryReserveGB: 4}
+	if err := localAttemptAdmission(w, jobs, next, nil); err != nil {
+		t.Fatal("local calibrated naming refused", err)
+	}
+	rt.batchJobs = append(append([]Job{}, jobs...), next)
+	if err := rt.checkHostAdmissionLocked(m.HostAvailableMemoryGB, true, q.hostMemorySamples[m.ID]); err != nil {
+		t.Fatal("launch calibrated naming refused", err)
+	}
+	t.Logf("13:00:19Z: incoming %.12f GiB, available %.12f GiB, fits yes (old running charge frozen)", charge, after.FreeGB)
 	// Loss of live device evidence restores the exact conservative refusal.
 	reports[0].CurrentHostMemory.DeviceAgeSeconds = deviceMemorySampleFreshFor.Seconds()
 	near(refresh().FreeGB, before.FreeGB)
