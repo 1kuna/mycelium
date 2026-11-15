@@ -153,6 +153,48 @@ func TestCheckpointProgressPendingRefresh(t *testing.T) {
 	})
 }
 
+func TestCheckpointProgressLocalMarkerPrompt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w := recoveryWorker(t)
+		clock := &fakeClock{now: time.Unix(100, 0)}
+		w.Clock, w.Interval, w.control = clock, 5*time.Second, &processControl{}
+		root, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.close()
+		j := recoveryJob(t, []string{"true"})
+		j.Spec.CheckpointPolicy = "local_first"
+		if err := os.MkdirAll(attemptCheckpoint(j), 0700); err != nil {
+			t.Fatal(err)
+		}
+		localGeneration(t, j, 1)
+		s, err := newAttemptStore(root, j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.nasProgress.scan = func(string) (int64, error) {
+			t.Error("local-first must use its local marker, never a NAS walk")
+			return 0, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		a := &attemptSupervisor{store: s, job: j, worker: w, wake: make(chan struct{}, 1), done: make(chan struct{})}
+		go a.run(ctx)
+		defer func() { cancel(); <-a.done }()
+		synctest.Wait()
+		if r, _, _, _ := a.snapshot(); r.LocalCheckpointGeneration != 1 {
+			t.Fatal("missing initial local generation", r)
+		}
+		localGeneration(t, j, 2)
+		clock.Advance(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		if r, _, _, _ := a.snapshot(); r.LocalCheckpointGeneration != 2 {
+			t.Fatal("new marker waited for the NAS report interval", r)
+		}
+	})
+}
+
 func TestQueueCheckpointProgressReportCadence(t *testing.T) {
 	q, clock, m, _, j := yieldFixture(t, false)
 	clock.Advance(5 * time.Second) // Expire the fixture's first observation.
