@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,7 +107,7 @@ type workerStore struct {
 	extensionFiles        checkpointIO[stagedInputs]
 	checkpointUnavailable bool
 	nasProbe              checkpointAvailability
-	nasProgress           checkpointIO[int64]
+	nasProgress           checkpointProgressReader
 	nasPrepare            checkpointIO[string]
 	nasCleanup            checkpointIO[bool]
 	dir                   string
@@ -781,8 +782,12 @@ func checkpointProgress(dir string) (int64, error) {
 	return scanCheckpointProgress(dir, false)
 }
 func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
+	return scanCheckpointProgressWalk(dir, jobRoot, filepath.WalkDir)
+}
+
+func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.WalkDirFunc) error) (int64, error) {
 	latest := int64(-1)
-	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
+	err := walk(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

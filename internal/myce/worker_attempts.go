@@ -219,6 +219,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
 	var publicationPace ClientPace
 	var publicationRetryAt time.Time
+	var preparationRetryAt time.Time
 	var releaseSent bool
 	for ctx.Err() == nil {
 		a.mu.Lock()
@@ -308,9 +309,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
-				} else if !d.Hold && !admissionBlocked {
+				} else if !d.Hold && !admissionBlocked && !now.Before(preparationRetryAt) {
 					var err error
 					p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
+					if err != nil && !s.nasPrepare.inFlight() && !s.extensionFiles.inFlight() {
+						// Finished staging/restore failures must not re-walk NAS at
+						// actor speed. Pending copies still get consumed promptly;
+						// new work waits for the next report opportunity (#1670).
+						preparationRetryAt = w.Clock.Now().Add(w.Interval)
+					}
 					a.mu.Lock()
 					d = a.directive
 					a.mu.Unlock()
@@ -434,14 +441,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if needsCheckpoint(&a.job) {
 			path := attemptCheckpoint(a.job)
 			var err error
-			report.Progress, err = s.nasProgress.run(path, func() (int64, error) {
-				if a.job.Spec.localFirst() {
-					return localFirstProgress(path)
-				}
-				progress, err := checkpointProgress(path)
+			if a.job.Spec.localFirst() {
+				// The marker is local; save() waits for prompt queue acceptance.
+				report.Progress, err = s.nasProgress.run(path, func() (int64, error) { return localFirstProgress(path) })
+			} else {
+				report.Progress, err = s.nasProgress.read(w.Clock, w.Interval, path)
 				w.observeStorageError(err)
-				return progress, err
-			})
+			}
 			if a.job.Spec.localFirst() {
 				report.LocalCheckpointGeneration = max(0, report.Progress)
 			}

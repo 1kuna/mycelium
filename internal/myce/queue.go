@@ -208,7 +208,7 @@ type Queue struct {
 	nasProbe                   checkpointAvailability
 	nasRecent                  recentAvailability
 	nasProbeIO                 func(root string, progress func()) bool // Test seam; checkpointAvailable by default.
-	nasProgress                checkpointIO[int64]
+	nasProgress                checkpointProgressReader
 	shards                     checkpointShards
 	checkpointClaims           map[string]checkpointExpiryClaim // Under q.mu; in memory, reissued after restart.
 	checkpointGrace            time.Duration
@@ -1583,13 +1583,10 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		unlockRequest()
 		if progress.path != "" {
-			progress.durable, progress.err = q.nasProgress.run(progress.path, func() (int64, error) {
-				generation, err := checkpointProgress(progress.path)
-				if errors.Is(err, os.ErrNotExist) {
-					return 0, nil
-				}
-				return generation, err
-			})
+			progress.durable, progress.err = q.nasProgress.read(q.clock, q.checkpointProgressPeriod(c), progress.path)
+			if errors.Is(progress.err, os.ErrNotExist) {
+				progress.durable, progress.err = 0, nil
+			}
 		}
 	}
 	identities := q.snapshotCheckinMemoryIdentities(ctx)
