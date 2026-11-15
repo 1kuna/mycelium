@@ -52,17 +52,18 @@ func (q *Queue) maintainFleetNormalStops(h *fleetUpgradeHost) bool {
 	}
 	// Do not interrupt even resumable work while a neighboring non-resumable
 	// or production obligation remains. Old cleanup and model custody wait too.
+	active := map[string]bool{}
+	blocked := false
 	for _, p := range obligations {
-		if !seen[obligationKey(p)] && q.fleetNormalJob(p) == nil {
-			h.PlannedStops = nil
-			h.Wait = "waiting for running work on the host to finish (non-resumable, production, model work or cleanup)"
-			return false
+		key := obligationKey(p)
+		if q.fleetNormalJob(p) != nil {
+			active[key] = true
+		} else if !seen[key] {
+			blocked = true
 		}
 	}
-	active := map[string]bool{}
-	for _, p := range obligations {
-		active[obligationKey(p)] = true
-	}
+	// Cancel finished attempts' plans, but retain each still-running attempt's
+	// deadline across temporary blockers. Cleanup must not grant a fresh wait.
 	plans := h.PlannedStops[:0]
 	for _, plan := range h.PlannedStops {
 		if active[obligationKey(plan.Obligation)] {
@@ -70,6 +71,10 @@ func (q *Queue) maintainFleetNormalStops(h *fleetUpgradeHost) bool {
 		}
 	}
 	h.PlannedStops = plans
+	if blocked {
+		h.Wait = "waiting for running work on the host to finish (non-resumable, production, model work or cleanup)"
+		return false
+	}
 	for _, p := range obligations {
 		key := obligationKey(p)
 		if seen[key] {

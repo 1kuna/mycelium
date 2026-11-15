@@ -153,3 +153,55 @@ func TestFleetUpgradeNormalMixedWork(t *testing.T) {
 		})
 	}
 }
+
+func TestFleetUpgradeNormalDeadlineSurvivesNeighborCleanup(t *testing.T) {
+	q, c, _ := fleetFixture(t, "q")
+	m := m3Machine()
+	m.Fleet = fleetTestProof(c, m.Session, 200, false)
+	s := cpuSpec(1, 1)
+	s.Resumable = true
+	run := fleetRun(t, q, m, s)
+	s.Name = "neighbor"
+	submit(t, q, s)
+	neighbor := assignedJob(machineCheck(t, q, m, run))
+	if neighbor == nil {
+		t.Fatal("neighbor was not assigned")
+	}
+	if err := q.Started(result(neighbor, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	h := q.fleetActiveHost()
+	deadline := c.Now().Add(StopGrace)
+	if len(h.PlannedStops) != 2 {
+		t.Fatal("both resumable attempts need plans", h)
+	}
+	c.Advance(StopGrace / 2)
+	completion := result(neighbor, true)
+	completion.ReleasePending = true
+	if err := q.Complete(completion); err != nil {
+		t.Fatal(err)
+	}
+	fleetRefresh(t, q, c)
+	if len(h.PlannedStops) != 1 || h.PlannedStops[0].Obligation.Result.ID != run.ID || !h.PlannedStops[0].StopAfter.Equal(deadline) {
+		t.Fatal("neighbor cleanup discarded or renewed the active attempt deadline", h)
+	}
+	// Even an expired plan cannot signal while the neighbor still owns cleanup.
+	c.Advance(StopGrace)
+	fleetRefresh(t, q, c)
+	if got := job(t, q, run.ID); got.State != "running" || got.StopAt != nil || len(h.StopRequests) != 0 {
+		t.Fatal("cleanup did not protect the neighboring attempt", got.State, h)
+	}
+	release := result(neighbor, true)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	fleetRefresh(t, q, c)
+	if got := job(t, q, run.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(c.Now().Add(StopGrace)) || len(h.StopRequests) != 1 {
+		t.Fatal("released cleanup granted a fresh natural-completion wait", got.State, h)
+	}
+}
