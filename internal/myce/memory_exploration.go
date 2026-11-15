@@ -145,7 +145,7 @@ func (q *Queue) memoryConstraintEvidenceFrom(key ObservationKey, configuration s
 			usable := false
 			for _, e := range extensions {
 				if e.Digest == k.ExtensionDigest {
-					point.StaleReason = curveStaleReason(point, e, m)
+					point.StaleReason = memoryStaleReason(point, e, m)
 					usable = memoryIdentityUsable(point)
 				}
 			}

@@ -176,7 +176,7 @@ func (c *memoryPlanningCache) retainedMemoryEvidence(q *Queue, key memoryLowerKe
 			for _, e := range p.extension.Extensions {
 				if e.Digest == p.key.ExtensionDigest {
 					point := WorkObservation{Key: p.key}
-					point.StaleReason = curveStaleReason(point, e, m)
+					point.StaleReason = memoryStaleReason(point, e, m)
 					usable = memoryIdentityUsable(point)
 				}
 			}
