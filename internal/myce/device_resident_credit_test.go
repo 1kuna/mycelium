@@ -31,6 +31,9 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 			s = spec("experiment")
 			s.Needs.MemoryGB, s.Needs.HostMemoryGB = row[2], row[0]-row[2]-.125
 		}
+		if err := normalizeResources(&s); err != nil {
+			t.Fatal(err)
+		}
 		at := clock.Now()
 		j := Job{ID: []string{"gpu", "cpu-a", "cpu-b"}[i], State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, StartedAt: &at, Spec: s}
 		jobs = append(jobs, j)
@@ -53,6 +56,7 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 	near(before.ReservedGB, 65.54749156746104)
 	near(before.GrowthGB, 54.44652797493173)
 	near(before.FreeGB, 23.675794107587798)
+	beforeRelease := q.jobRelease(q.s.Machines[m.ID], q.s.Jobs["gpu"])
 	device := 22.318359375
 	reports[0].CurrentHostMemory.DeviceGB = &device
 	// DeviceGB alone is a potentially overlapping sum: old workers stay safe.
@@ -71,6 +75,8 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 	near(after.GrowthGB, 43.22913219246103)
 	near(after.FreeGB, 34.8931898900585)
 	near(after.AllowanceGB-after.ReservedGB, 48.10063694206045)
+	afterRelease := q.jobRelease(q.s.Machines[m.ID], q.s.Jobs["gpu"])
+	near(after.FreeGB+afterRelease.live, before.FreeGB+beforeRelease.live)
 	if after.FreeGB >= 43.29749156746103 {
 		t.Fatal("overlap uncertainty incorrectly qualified a second naming")
 	}
@@ -85,6 +91,9 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 			charge += .001
 		}
 		next := Job{ID: "next", State: "running", Attempt: 1, Spec: cpuSpec(1, charge-.125)}
+		if err := normalizeResources(&next.Spec); err != nil {
+			t.Fatal(err)
+		}
 		w := Worker{Machine: m, Clock: clock, hostMemorySamples: q.hostMemorySamples[m.ID], HostMemorySource: func(context.Context) (float64, error) { return m.HostAvailableMemoryGB, nil }, HostMemoryReserveGB: 4}
 		if err := localAttemptAdmission(w, jobs, next, nil); (err == nil) != wantFit {
 			t.Fatalf("local fit=%t: %v", wantFit, err)
@@ -154,5 +163,25 @@ func TestDeviceResidentUnionEvidence(t *testing.T) {
 	u.observe(&cpu, &m, hostMemorySample{gb: 24, at: at}, at, false)
 	if u.credit(jobKey(j))+u.credit(jobKey(neighbor)) != 0 {
 		t.Fatal("co-tenant host pages received duplicate device credit", u)
+	}
+}
+
+func TestDeviceResidentCreditPreservesLendingStopGrowth(t *testing.T) {
+	_, clock := fixture(t)
+	m := unifiedUsedChargeMachine()
+	at := clock.Now()
+	j := Job{ID: "gpu", State: "running", Attempt: 1, StartedAt: &at, Spec: spec("experiment")}
+	j.Spec.Needs.HostMemoryGB, j.Spec.Needs.MemoryGB = 24, 32
+	j.MemoryEnvelope = &JobMemoryEnvelope{Learned: unifiedPeaks(3, 22)}
+	s := hostMemorySample{gb: 3, footprintGB: 3, growthObserved: true, started: true, at: at,
+		deviceGB: 22, residentGB: 22, deviceAt: at, deviceGrowthGB: 1, deviceRateGB: 1}
+	var u deviceResidentUnion
+	u.observe(&j, &m, s, at, false)
+	ceiling := hostNeed(&m, 32, 24)
+	before, _ := memoryCharge(&j, &m, ceiling, s, at)
+	after, pending := memoryChargeForGrace(&j, &m, ceiling, s, at, defaultGPUStopGrace, u.credit(jobKey(j)))
+	_, stop := lendingStopGrowth(&j, &m, s, defaultGPUStopGrace)
+	if before != after || pending < stop+exploratoryDriftMarginGB(&m) {
+		t.Fatal("resident credit weakened charge or growth-stop headroom", before, after, pending, stop)
 	}
 }
