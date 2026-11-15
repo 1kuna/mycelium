@@ -231,3 +231,44 @@ func TestHostBackfillFullyOccupiedThenPartialRelease(t *testing.T) {
 		t.Fatal("demand did not start after full release", got)
 	}
 }
+
+// A queued GPU execution is known future demand even while the only CUDA
+// device is occupied. CPU backfill must leave its resolved host vector intact.
+func TestHostBackfillProtectsNextGPUWhileDeviceBusy(t *testing.T) {
+	for _, cores := range []int{2, 6} {
+		t.Run(fmt.Sprint(cores), func(t *testing.T) {
+			q, clock := fixture(t)
+			m := backfillMachine("accelerator", 64)
+			machineCheck(t, q, m)
+			gpu := spec("experiment")
+			gpu.Needs.Platform = Platform{Required: []string{"cuda"}}
+			gpu.Needs.MemoryGB, gpu.Needs.HostMemoryGB, gpu.Needs.CPUCores = 64, 1, 1
+			first := submit(t, q, gpu)
+			running := assignedJob(machineCheck(t, q, m))
+			if running == nil || running.ID != first.ID {
+				t.Fatal("initial GPU execution missing", running)
+			}
+			gpu.Needs.CPUCores = cores
+			demand := submit(t, q, gpu)
+			clock.Advance(time.Second)
+			cpu := submit(t, q, cpuSpec(8-cores, 1))
+			if got := assignedJob(machineCheck(t, q, m, running)); got != nil {
+				t.Fatal("CPU backfill took the next GPU execution's cores", got.ID)
+			}
+			status, err := q.jobSnapshot(cpu.ID, context.Background())
+			if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
+				t.Fatal("missing next-GPU capacity fence", status, err)
+			}
+			// Capacity beyond the actual demand remains useful; no fixed core hold.
+			light := submit(t, q, cpuSpec(7-cores, 1))
+			backfill := assignedJob(machineCheck(t, q, m, running))
+			if backfill == nil || backfill.ID != light.ID {
+				t.Fatal("excess CPU capacity withheld", backfill)
+			}
+			finish(t, q, running, true)
+			if got := assignedJob(machineCheck(t, q, m, backfill)); got == nil || got.ID != demand.ID {
+				t.Fatal("waiting GPU execution stranded after device release", got)
+			}
+		})
+	}
+}

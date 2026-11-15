@@ -232,6 +232,22 @@ MY-05 coordination ruling, 2026-10-16/22. MY-15 pause clarification, 2026-10-17.
 
 These are agents' decisions, not Zach's rulings. Change them through their issues.
 
+- **Interactive hosts decline bulk classes** (implementation worker, 2026-11-15,
+  under MY-45 and MY-11/MY-26). The shared interactive profile refuses `batch`,
+  `test`, `ci`, `rollout` and `eval` classes and same-named owner tiers on every
+  OS, regardless of fleet pressure. Light prepared CPU commands remain eligible
+  within existing measured CPU/RAM allowances and owner-pressure protection.
+  Basis: a project's relayed ruling, "stop hogging the Mac mini", keeps its
+  builds/tests off the agents' host because CI load disrupts its shared DEV
+  stack. A second project's relayed ruling keeps rollout/eval pools off the
+  overloaded coordination host and requests host-level protection. Received by
+  this implementation worker; these are scoped source rulings, not new words
+  from Zach about Mycelium. The general profile rule removes those projects'
+  need for routine host pins without changing any fleet policy. Capacity
+  accumulation also protects a queued GPU command's resolved host vector while
+  a finite GPU execution finishes, with excess capacity usable and no fixed
+  core reservation (MY-34). Existing stop contracts and exact release bind.
+
 - **One route to the destination** (orchestrator, 2026-11-12, acting on Zach's instruction to fix and prevent the problem: "those two things ... need to be told to the mycelium agent so it's aware and can rectify that stuff and prevent it from occurring in the future"). Map [#1485](https://github.com/1kuna/mycelium/issues/1485) is the single route to the destination in section 1. Older umbrella issues point to it. Before opening a new umbrella or feature issue, check whether a map ticket or its owner issue already covers it. Progress goes to Zach as the three MY-52 numbers, not as a status narrative; work that doesn't move them is off the route. The cadence is the orchestrator's choice; Zach set none.
 - **The skill follows the deployed release** (orchestrator, 2026-11-12, same instruction). The consumer skill agents load must match the release the fleet runs ([#1506](https://github.com/1kuna/mycelium/issues/1506)). A release note claims a skill change only after the release step has checked that the installed copies match.
 - **Measured local gate admission** (orchestrator, 2026-11-09, under MY-37). Admit full gates from measured per-leg CPU/RAM and live host capacity, not a fixed N=1, in head-of-line FIFO order; explicitly exclusive timing runs reserve all local capacity. CPU admission reserves a static fleet-worker share in local gate config (initially 4 cores, matching the admitted worker allowance), updated by the operator when that host's worker CPU budget changes; drift only overcommits CPU, an accepted tradeoff. RAM admission uses live available memory with no fleet allowance. Normal-pressure shortages keep their FIFO position with a visible memory reason; pressure, sustained-swap and disk stops remain, and a requirement above physical RAM is refused. Admission never depends on the fleet and never changes fleet-worker custody. Basis: four-core native peak 7.01 GiB, Linux/VM peak 10.57 GiB, measured headroom. It replaced the per-admission status-read, cache and generation-fencing design after reproduced races and starvation.

@@ -137,8 +137,13 @@ to already running processes. It sets the existing `last_resort` policy; that
 flag cannot be cleared while the profile is active. Profile removal leaves
 placement, budgets, independent exclusions and drain/disable in place.
 
-The profile admits native CPU commands with already prepared environments,
-including CI/tests and small builds. It withholds accelerator work through the
+The profile admits light native CPU commands with already prepared environments.
+It refuses the `batch`, `test`, `ci`, `rollout` and `eval` classes and owner
+policy tiers with those names, even when every ordinary host is full. This is
+a host-level rule for every project on Linux and macOS; consumers do not need
+per-job exclusions to protect an interactive machine. Other commands must fit
+the existing measured CPU/RAM allowances and interactive reserve; actual
+measured CPU occupancy and owner pressure still fence admission. It withholds accelerator work through the
 existing `kind=gpu` exclusion matching path, including future devices, without
 creating or editing an operator's selector. Explicit selector exclusions remain
 independent. Extension execution, new environment/extension preparation,

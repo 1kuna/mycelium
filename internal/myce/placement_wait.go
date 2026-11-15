@@ -59,7 +59,7 @@ func (q *Queue) targetWait(j *Job, scans ...*placementScan) *Hold {
 			if !nativeNetworkFits(candidate, m) {
 				block("capability", targetFitReason("native network isolation", candidate, m))
 			}
-			if why := sharedHostRefusal(candidate, m); why != "" {
+			if why := q.sharedHostAdmissionRefusal(candidate, m); why != "" {
 				block("capability", why)
 			} else if !environmentCanRun(candidate, m) {
 				block("capability", targetFitReason("environment", candidate, m))

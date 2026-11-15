@@ -355,7 +355,7 @@ func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 	switch {
 	case j.StartedAt == nil && j.ScarceHostYield != nil && !q.yieldResumeStartAllowed(j, m):
 		return "scarce_host_yield"
-	case j.StartedAt == nil && !sharedHostJobFits(j, m):
+	case j.StartedAt == nil && q.sharedHostAdmissionRefusal(j, m) != "":
 		return "shared_host_profile"
 	case !executionTargetMatches(j.Spec, m):
 		return "execution_target"

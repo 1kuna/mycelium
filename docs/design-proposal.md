@@ -224,6 +224,13 @@ host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
 inventory evidence establishes laptop behavior, not native fleet
 qualification. The explicit speed/deadline tradeoff is later work.
 
+Ready queued accelerator commands also protect their resolved host CPU/RAM
+vector against CPU backfill while a finite execution occupies their device.
+The existing capacity-accumulation planner chooses one target, leaves excess
+capacity usable and releases the fence when demand disappears. This predicts
+known queued demand from real executions, with no idle GPU core reservation.
+Running work keeps its stop contract and exact release still gates admission.
+
 ## Scarce-host yield
 <a id="amendment-scarce-host-yield-327-328-my-26"></a>
 
@@ -1799,7 +1806,10 @@ in code or configuration, and grant no priority or capacity.
 The opt-in [shared-host profile](operations.md) keeps orchestration and
 interactive machines usable for fitting native CPU commands at lower priority,
 with positive existing CPU/RAM allowances, an explicitly measured interactive
-reserve, historical/live RAM admission and existing last-resort placement. GPU
+reserve, historical/live RAM admission and existing last-resort placement.
+Agent default under MY-45: the shared interactive profile excludes `batch`,
+`test`, `ci`, `rollout` and `eval` classes and same-named owner tiers at any
+fleet pressure. Light work still fits within the measured host allowances. GPU
 admission uses the existing component exclusion path. Drains, exact launch
 fences and cleanup remain authoritative. First phase uses prepared
 environments; extensions/new preparations remain withheld.

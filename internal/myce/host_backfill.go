@@ -17,6 +17,9 @@ type hostBackfillDemand struct {
 	// to fit anyway, or nil when unknown.
 	drain bool
 	start *time.Time
+	// Device demand can be next after a finite GPU execution. Only CPU
+	// backfill observes this fence; it grants no accelerator admission.
+	devicePending bool
 }
 
 // Piece executions finish too. Parents describe demand; they never own
@@ -56,6 +59,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 	}
 	live := q.placementLiveness(scan)
 	projections := map[string]*Machine{}
+	deviceProjections := map[string]*Machine{}
 	for _, m := range scan.machines {
 		if !live[m.ID] || q.preparationActive(m) || q.preparationStopping(m) || m.HostMemoryError != "" || hostHasUnifiedCUDA(m) && !validHostMemoryObservation(m.MemoryObservation) {
 			continue
@@ -71,6 +75,23 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		capacity := q.qualificationCapacity(m)
 		projected.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, projected.FreeHostMemoryGB)
 		projections[targetKey(m)] = &projected
+		if m.GPU != "cpu" {
+			deviceJobs := []*Job{}
+			for _, running := range q.liveJobs() {
+				if !running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) && batchOnTarget(running, m) {
+					deviceJobs = append(deviceJobs, running)
+				}
+			}
+			if len(deviceJobs) > 0 {
+				future := q.afterReleases(m, append(jobs, deviceJobs...), nil)
+				for _, running := range deviceJobs {
+					future.FreeMemoryGB += running.Spec.Needs.MemoryGB
+				}
+				future.FreeMemoryGB = min(m.TotalMemoryGB, future.FreeMemoryGB)
+				future.FreeHostMemoryGB = min(capacity.FreeHostMemoryGB, future.FreeHostMemoryGB)
+				deviceProjections[targetKey(m)] = &future
+			}
+		}
 	}
 	choices := []*hostBackfillDemand{}
 	orders := map[string]*candidateSet{}
@@ -91,6 +112,11 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				continue
 			}
 			device := m.FreeMemoryGB
+			devicePending := false
+			if !j.Spec.Needs.cpuOnly() && !drain && deviceProjections[targetKey(m)] != nil {
+				projected = deviceProjections[targetKey(m)]
+				device, devicePending = projected.FreeMemoryGB, true
+			}
 			if drain {
 				// The whole host drains toward a maintenance resume.
 				if drains[targetKey(m)] == nil {
@@ -100,7 +126,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				projected, device = drains[targetKey(m)], drains[targetKey(m)].FreeMemoryGB
 			}
 			for _, candidate := range q.backfillCandidates(j, m, projected, resourceRoom(projected)) {
-				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !drain && !q.batchSlotFree(m, candidate) || !fits(candidate, projected, device) {
+				if !environmentReady(candidate, m) || q.capReasonFor(candidate, m) != "" || !drain && !devicePending && !q.batchSlotFree(m, candidate) || !fits(candidate, projected, device) {
 					continue
 				}
 				key := targetKey(m)
@@ -111,7 +137,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 				ready := fits(candidate, m, m.FreeMemoryGB)
 				bestReady := best != nil && fits(best.job, best.machine, best.machine.FreeMemoryGB)
 				if best == nil || ready && !bestReady || ready == bestReady && q.targetPlacementBetter(candidate, m, best.machine, scan) {
-					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain}
+					best = &hostBackfillDemand{job: candidate, machine: m, drain: drain, devicePending: devicePending}
 				}
 			}
 		}
@@ -141,6 +167,9 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand) bool {
 	if fence == nil || j.ID == fence.job.ID {
 		return true
+	}
+	if fence.devicePending && !j.Spec.Needs.cpuOnly() {
+		return true // Future device capacity never changes GPU admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects

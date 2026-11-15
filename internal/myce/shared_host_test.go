@@ -90,6 +90,59 @@ func TestSharedHostAdmissionUsesHistoryLiveReserveAndAcknowledgement(t *testing.
 	}
 }
 
+func TestSharedHostExcludesBulkClassesWhenFleetFull(t *testing.T) {
+	for _, os := range []string{"linux", "darwin"} {
+		for _, class := range []string{"batch", "test", "ci", "rollout", "eval"} {
+			for _, tier := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/tier=%v", os, class, tier), func(t *testing.T) {
+					q, clock := fixture(t)
+					m := sharedHostFixture(t, q)
+					m.CapabilityProfile.OS = os
+					m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+					if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+						t.Fatal(err)
+					}
+					check(t, q, m, nil)
+					peer := cpuBackfillMachine("ordinary", 16)
+					machineCheck(t, q, peer)
+					full := cpuSpec(8, 1)
+					full.AllowedMachines = []string{peer.ID}
+					occupied := submit(t, q, full)
+					running := assignedJob(machineCheck(t, q, peer))
+					if running == nil || running.ID != occupied.ID {
+						t.Fatal("ordinary host not occupied", running)
+					}
+					s := cpuSpec(1, 1)
+					s.Priority = ""
+					s.Class = class
+					if tier {
+						p := defaultPriorityPolicy()
+						p.Tiers = append([]PriorityTier{{class, []string{"*/bulk"}}}, p.Tiers...)
+						if _, err := q.SetPriorityPolicy(0, p); err != nil {
+							t.Fatal(err)
+						}
+						s.Class = "bulk"
+					}
+					bulk := submit(t, q, s)
+					clock.Advance(time.Millisecond)
+					if r := check(t, q, m, nil); assignedJob(r) != nil {
+						t.Fatal("interactive host accepted bulk work", r.Job)
+					}
+					status, err := q.jobSnapshot(bulk.ID, context.Background())
+					if err != nil || !strings.Contains(status.Reason, "shared interactive host excludes") {
+						t.Fatal("missing interactive exclusion explanation", status, err)
+					}
+					light := submit(t, q, cpuSpec(1, 1))
+					if got := assignedJob(check(t, q, m, nil)); got == nil || got.ID != light.ID {
+						t.Fatal("fitting light work refused", got)
+					}
+					requireState(t, q, bulk.ID, "queued")
+				})
+			}
+		}
+	}
+}
+
 func TestSharedHostHistoryExpiresAndReserveIsNotDoubleCounted(t *testing.T) {
 	q, clock := fixture(t)
 	m := sharedHostFixture(t, q)

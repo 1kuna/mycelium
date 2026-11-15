@@ -992,7 +992,14 @@ myce status
 `myce host status HOST`; prefer the identity when ordinals may have changed.
 Disabling a device preserves started work and needs no worker restart; enabling
 it does not resume a drained host. `myce host placement HOST --last-resort=true`
-ranks the host after ordinary hosts. See
+ranks the host after ordinary hosts. Last-resort placement alone remains a
+preference. To protect an interactive host from batch, test, CI, rollout and
+eval work, enable its measured shared profile (which implies the interactive
+role and last-resort placement); see [shared hosts](reference/shared-and-polite-hosts.md#shared-interactive-hosts).
+An already profiled host acquires these exclusions on queue upgrade without a
+policy change. Confirm with `myce host status HOST`; retain its measured reserve
+and budgets. `myce host placement HOST --last-resort=true` is sufficient only
+when that profile is already enabled. See
 [device maintenance, placement and drain semantics](reference/queue-maintenance.md#device-maintenance-placement-and-drain-semantics),
 including what `--wait` requires and how drains treat preparations.
 
