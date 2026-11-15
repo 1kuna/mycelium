@@ -89,7 +89,8 @@ func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
 		{ID: "lists", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, ExcludedMachines: []string{"two"}}, State: "queued", Queued: queued},
 		{ID: "targets", Spec: Spec{Project: "demo", Targets: []ExecutionTarget{{OS: "linux"}}}, State: "succeeded", Queued: queued, StartedAt: &started},
 		{ID: "both", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, Targets: []ExecutionTarget{{OS: "linux"}}}, State: "queued", Queued: queued,
-			Efficiency: &JobEfficiency{At: now.Add(-time.Minute), Blocker: "capacity", WaitSeconds: map[string]float64{"capacity": 60, "holds": 60}}},
+			Efficiency: &JobEfficiency{At: now.Add(-time.Minute), Blocker: "capacity", WaitSeconds: map[string]float64{"capacity": 60, "holds": 60},
+				Rate: efficiencyRate{Host: "one"}, Allocations: []EfficiencyAllocation{{Host: "one", ResourceIntegral: ResourceIntegral{Seconds: 10}}}}},
 		{ID: "free", Spec: Spec{Project: "other"}, State: "queued", Queued: queued},
 	} {
 		q.putJob(j.ID, j)
@@ -103,6 +104,9 @@ func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
 	}
 	if q.s.Jobs["both"].Efficiency.WaitSeconds["capacity"] != 60 {
 		t.Fatal("report mutated recorded wait")
+	}
+	if q.s.Jobs["both"].Efficiency.Allocations[0].Seconds != 10 {
+		t.Fatal("wait report mutated resource accounting")
 	}
 	text := strings.Join((&EfficiencyReport{Restrictions: rows}).ProjectLines("demo"), "\n")
 	for _, want := range []string{"3/3 (100%) retained jobs", "plain queue wait 2.5 hours", "1 stranded jobs now", "unrestricted counterfactual unavailable"} {

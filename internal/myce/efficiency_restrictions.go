@@ -131,14 +131,14 @@ func (q *Queue) projectRestrictions(now time.Time, stranded []StrandedDemand) []
 
 func restrictionQueueWait(j *Job, now time.Time) float64 {
 	if e := j.Efficiency; e != nil && e.WaitSeconds != nil {
-		copy := *e
-		copy.WaitSeconds = maps.Clone(e.WaitSeconds)
-		if mutableJob(j) {
-			copy.advance(now)
-		}
 		var seconds float64
-		for _, wait := range copy.WaitSeconds {
+		for _, wait := range e.WaitSeconds {
 			seconds += wait
+		}
+		// Only project the wait clock. Advancing all telemetry would also
+		// update resource integrals, whose slices belong to the recorded job.
+		if mutableJob(j) && e.Blocker != "" && now.After(e.At) {
+			seconds += now.Sub(e.At).Seconds()
 		}
 		return seconds
 	}
