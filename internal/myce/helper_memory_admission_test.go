@@ -166,6 +166,13 @@ func TestHelperResidentCounterIsLocalUniqueAndFresh(t *testing.T) {
 	if remote.deviceResidentGB != 0 {
 		t.Fatal("remote reports can mint local resident credit")
 	}
+	if remote.DeviceResidentGB == nil || *remote.DeviceResidentGB != resident {
+		t.Fatal("single-process lower bound lost across worker/queue wire")
+	}
+	remoteSample := currentHostMemorySamples([]AttemptReport{{Execution: r.Execution, CurrentHostMemory: &remote}}, clock.Now())[attemptKey{"own", 1, ""}]
+	if helperDeviceResident(&m, remoteSample, clock.Now()) != resident {
+		t.Fatal("queue lost the fresh single-process bound")
+	}
 	clock.Advance(deviceMemorySampleFreshFor)
 	if helperDeviceResident(&m, s, clock.Now()) != 0 {
 		t.Fatal("stale helper counter grants credit")

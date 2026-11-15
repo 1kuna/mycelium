@@ -32,7 +32,12 @@ For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
 (`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
 at that snapshot's timestamp. Charges alone do not explain live occupancy;
 do not combine an earlier wait with a later machine reading. Missing ledgers
-on older records are unknown, not zero usage.
+on older records are unknown, not zero usage. On supporting unified CUDA
+workers, fresh exact-attempt single-process device evidence also earns resident
+credit through max(all credited host pages, one device process counter). Device
+counters are never summed for this credit. Missing/stale/ambiguous evidence and
+older workers retain conservative pending growth; this does not reduce charges
+or qualify native coexistence.
 
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU

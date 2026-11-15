@@ -319,8 +319,14 @@ Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
 For unified CUDA, retain the physical [free-RAM floor](../design-proposal.md#unified-cuda-free-ram-floor) equal to the existing OS/driver reserve. Fresh raw host observations and outstanding growth bound queue
-admission; workers recheck raw RAM at launch. Cgroup credit never reduces the
-device vector. Lower tiers must also leave room for a sole qualified host's
+admission; workers recheck raw RAM at launch. Fresh exact-attempt direct CUDA
+readings on unified hosts can credit already-resident physical memory through
+the existing single-process union lower bound: max(all credited host pages,
+one process's device counter), never their sum or summed process counters.
+Missing, stale, ambiguous, fallback and multi-card evidence keep conservative
+admission. This credit reduces pending physical growth while retaining the
+charged envelope, unconsumed device demand, growth-stop forecast and OOM
+protection. Cgroup credit never reduces the device vector. Lower tiers must also leave room for a sole qualified host's
 queued or forecast production envelope with existing estimator margins. Existing
 production holds, preemption and work-scoped parity approvals remain authoritative.
 
