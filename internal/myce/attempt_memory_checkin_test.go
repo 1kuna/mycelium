@@ -126,16 +126,16 @@ func TestAttemptMemoryCheckinBeforeCUDAContext(t *testing.T) {
 			if err := q.Started(result(b, false)); err != nil {
 				t.Fatal(err)
 			}
-			dir := t.TempDir()
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			// The co-tenant is still importing/loading CPU data: a complete
 			// driver enumeration contains the model, but no CUDA context for it.
-			if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, 29953\\n'\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
+			// Inject the reading as well as the clock/ticks: a shell query can
+			// miss its real two-second deadline independently of fake time.
 			clock.Advance(deviceMemorySampleFreshFor)
 			workerClock := &lockedTestClock{now: clock.Now()}
-			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock}
+			w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}, Clock: workerClock,
+				cudaMemoryQuery: func(context.Context) ([]byte, error) {
+					return []byte("GPU-one, 42, 29953\n"), nil
+				}}
 			memory := &memoryAttempt{}
 			ctx, cancel := context.WithCancel(context.Background())
 			ticks := make(chan time.Time, 2)
@@ -151,7 +151,7 @@ func TestAttemptMemoryCheckinBeforeCUDAContext(t *testing.T) {
 			t.Cleanup(cancel)
 			ticks <- workerClock.Now()
 			// The second inventory callback cancels after the first complete
-			// driver command, without a wall-clock wait for the fake sensor.
+			// driver reading, without a wall-clock wait for the fake sensor.
 			ticks <- workerClock.Now()
 			<-done
 			sample := memory.device.Load()
