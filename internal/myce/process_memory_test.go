@@ -113,7 +113,7 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	}
 
 	q, clock, m, s := observationFixture(t)
-	m.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
+	m.MemoryEnforcement = darwinRSSGuardStatus
 	s.Needs.Memory = "auto"
 	first := startObservation(t, q, m, s)
 	if first.MemoryEnvelope.Source != physicalMemoryProbe {
@@ -191,7 +191,7 @@ func TestProcessMemoryPeakNeverInvalidatesLearnedPeaks(t *testing.T) {
 
 	darwin := linux
 	darwin.ID, darwin.HostID, darwin.Session = "m4", "m4-host", "session-m4"
-	darwin.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
+	darwin.MemoryEnforcement = darwinRSSGuardStatus
 	report := newExtensionReport(learn.Extensions[0], &darwin, "extension:sample")
 	report.Setup, report.Qualified, report.CheckID = true, true, "m4-check"
 	darwin.ExtensionReports = []ExtensionReport{report}

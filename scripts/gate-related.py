@@ -16,6 +16,10 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# The owned-session sampler is shared by Darwin and foreground Linux dev.
+SUPPLEMENTAL_CONSUMERS['internal/myce/process_memory_owned.go'] = (
+    'rss_guard_native_test.go', 'process_memory_libproc_darwin_test.go')
+
 # Platform signal capture helpers are covered by the shared native runner tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/native_namespace_other.go'] = (
     'native_group_test.go', 'fault_evidence_test.go')

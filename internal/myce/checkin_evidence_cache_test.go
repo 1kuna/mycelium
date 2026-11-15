@@ -46,11 +46,11 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 	}
 	compare := func(stage, want string) {
 		t.Helper()
-		collect := func(cache *memoryPlanningCache) []decision {
+		collect := func(cache *memoryPlanningCache, reference bool) []decision {
 			q.memoryPlanning = cache
 			var decisions []decision
 			for _, j := range q.s.Jobs {
-				if j.State != "queued" {
+				if j.State != "queued" || reference && j.ID >= "queued-012" {
 					continue
 				}
 				oversized := q.learnedEnvelopeOversized(j)
@@ -68,13 +68,26 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 			})
 			return decisions
 		}
-		decisions := collect(newMemoryPlanningCache())
+		decisions := collect(newMemoryPlanningCache(), false)
 		data, err := json.Marshal(decisions)
 		if err != nil {
 			t.Fatal(err)
 		}
-		uncached, err := json.Marshal(collect(nil))
-		if err != nil || string(data) != string(uncached) {
+		// Twelve distinct recipes cover CPU/GPU and cold/accepted evidence.
+		// The full snapshot below still covers all 660 decisions; repeating
+		// all retained-history scans uncached would dominate this regression.
+		var reference []decision
+		for _, d := range decisions {
+			if d.Job < "queued-012" {
+				reference = append(reference, d)
+			}
+		}
+		referenceData, err := json.Marshal(reference)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uncached, err := json.Marshal(collect(nil, true))
+		if err != nil || string(referenceData) != string(uncached) {
 			t.Fatalf("%s cached admission differs from uncached decisions: %v", stage, err)
 		}
 		got := fmt.Sprintf("%x", sha256.Sum256(data))

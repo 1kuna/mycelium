@@ -29,6 +29,10 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 			s := cpuSpec(1, 0)
 			s.Targets = []ExecutionTarget{{OS: "darwin", Arch: m.CapabilityProfile.Arch, Platform: "cpu"}}
 			oomPeak, constrainedPeak := 3.3578033447265625, 5.3555145263671875
+			// Preserve the incident's original large launch envelope. Otherwise
+			// this synthetic peak above the new startup seed is a new measured
+			// guard overshoot, rather than only the recorded sampling growth.
+			s.Needs.Memory, s.Needs.HostMemoryGB = "auto", m.HostMemoryBudgetGB-2*m.MemoryCeilingSlackGB
 			stopped := runMemory(t, q, clock, m, s, oomPeak, func(r *Result) {
 				r.Success, r.OutOfMemory = false, true
 				r.MemoryPeak.Constrained = true
@@ -37,6 +41,7 @@ func TestMemoryRecoveryTargetPairedEvidence(t *testing.T) {
 			if err := q.Cancel(stopped.ID); err != nil {
 				t.Fatal(err)
 			}
+			s.Needs.HostMemoryGB = 0 // Later work uses the retained measurements.
 			runMemory(t, q, clock, m, s, constrainedPeak, func(r *Result) {
 				r.MemoryPeak.Constrained = true
 			})

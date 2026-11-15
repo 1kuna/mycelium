@@ -12,7 +12,7 @@ import (
 func memoryAdmissionFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 8, 21.3)
+	m := guardedCPUMachine("worker", "host", "cpu", 8, 21.3)
 	m.HostMemoryBudgetGB = 24
 	m.CapabilityProfile.SystemMemoryBytes = 31 << 30
 	m.Devices = []MachineDevice{}

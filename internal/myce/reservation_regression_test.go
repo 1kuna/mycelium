@@ -100,6 +100,7 @@ func TestReservationOwnPreparationDoesNotSelfStop(t *testing.T) {
 func TestDeviceReservationDrainingAdmitsCPU(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	submit(t, q, exclusionSpec(m.ID, "0"))
 	existing := assignedJob(machineCheck(t, q, m))
 	if existing == nil {

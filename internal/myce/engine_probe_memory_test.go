@@ -15,6 +15,7 @@ import (
 func TestEngineProbeMemoryQueueAndRuntimeAgree(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 16, 16
 	m.CapabilityProfile.SystemMemoryBytes, m.CapabilityProfile.LogicalCPUs = 16<<30, 16
 	m.CPUExtensionFingerprint = "cpu-v1"

@@ -38,7 +38,7 @@ func TestAdaptiveMemoryPhysicalProbeLifecycle(t *testing.T) {
 			}
 			growth := tc.ram / 64
 			second := runMemory(t, q, clock, m, s, tc.ram/8, func(r *Result) { r.MemoryPeak.GrowthGB = &growth })
-			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB != tc.ram/8 || e.HostGB <= first.MemoryEnvelope.HostGB {
+			if e := second.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 1 || e.HostGB != tc.ram/8+minimumHostMemoryGB || e.HostGB <= first.MemoryEnvelope.HostGB {
 				t.Fatalf("first accepted sample not used: %+v", e)
 			}
 			third := runMemory(t, q, clock, m, s, tc.ram/8, nil)

@@ -149,7 +149,9 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			render := cpuSpec(2, 0)
 			render.Name, render.Run.Command = "render", []string{"echo", "render"}
 			render.AllowedMachines = []string{source.ID}
-			runMemory(t, q, clock, source, render, ram/8, nil)
+			// A large measured foreign floor keeps the telemetry-credit case
+			// meaningful after unknown work stopped reserving the whole host.
+			runMemory(t, q, clock, source, render, ram*.7, nil)
 			render.AllowedMachines = []string{target.ID}
 			first := submit(t, q, render)
 			a := assignedJob(machineCheck(t, q, target))
@@ -157,8 +159,8 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 				t.Fatalf("one-point transfer not probed: %+v", a)
 			}
 			ceiling := a.Spec.Needs.HostMemoryGB
-			if ceiling < ram*.7 {
-				t.Fatal("initial probe did not retain physical containment", ceiling)
+			if ceiling != ram*.7 {
+				t.Fatal("transfer probe lost its measured foreign floor", ceiling)
 			}
 			second := submit(t, q, render)
 			var sampleID int64
