@@ -212,7 +212,9 @@ func TestQueueCheckpointProgressReportCadence(t *testing.T) {
 	}
 	for tick := 0; tick < 50; tick++ {
 		if tick == 1 {
-			saveYieldGeneration(t, j, 2)
+			// Assignments carry share-relative paths; write through the queue's
+			// absolute fixture path, as a worker with a configured root would.
+			saveYieldGeneration(t, job(t, q, j.ID), 2)
 		}
 		_, err := q.Checkin(Checkin{Machine: m, period: 5 * time.Second, Attempts: []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: 2}, Session: j.Session, Started: true}}})
 		if err != nil {
