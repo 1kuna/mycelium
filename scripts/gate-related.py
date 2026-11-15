@@ -242,6 +242,7 @@ def select(base):
 # missed on 2026-11-11 (planning digest, status rendering, previous-release open).
 # About 12 s of race test time. A canary renamed away fails test-gate-related.py.
 CANARIES = {
+    'internal/statusdoc': ('TestStatusFieldsCurrent',),
     'internal/myce': ('TestCheckinPlanningOutcomeEquivalence', 'TestStatusReadPlanningEquivalence',
                       'TestStatusCompactRetainedEvidence', 'TestStatusPageRendersSnapshot',
                       'TestQueuePersistenceOpensPreviousReleaseDatabase'),
