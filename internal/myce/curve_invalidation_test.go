@@ -12,7 +12,7 @@ import (
 // failing attempt's ledger provenance; a key changed without it still fails.
 func TestCurvePreservationAcceptsMemoryInvalidationWithProvenance(t *testing.T) {
 	q, clock, a := learnedMemoryFixture(t)
-	b := cpuMachine("worker-b", "worker-b-host", "cpu", 8, 32)
+	b := guardedCPUMachine("worker-b", "worker-b-host", "cpu", 8, 32)
 	b.HostMemoryBudgetGB, b.ExtensionFingerprint = 32, "cpu-v1"
 	check(t, q, b, nil)
 	s := cpuSpec(1, 0)
@@ -97,7 +97,7 @@ func TestCurvePreservationAcceptsMemoryInvalidationWithProvenance(t *testing.T) 
 // accepted-sample ledger entry. Snapshot reads and restart cannot rewrite peaks.
 func TestCurvePreservationMemoryOnlyLearningKeepsSiblingUnchanged(t *testing.T) {
 	q, clock, a := learnedMemoryFixture(t)
-	b := cpuMachine("worker-b", "worker-b-host", "cpu", 8, 32)
+	b := guardedCPUMachine("worker-b", "worker-b-host", "cpu", 8, 32)
 	b.HostMemoryBudgetGB, b.ExtensionFingerprint = 32, "cpu-v1"
 	check(t, q, b, nil)
 	s := cpuSpec(1, 0)

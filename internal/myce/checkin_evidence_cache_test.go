@@ -33,6 +33,8 @@ func largeRetainedHistoryFixture(t testing.TB, retained int) (*Queue, []Machine)
 // Frozen on the uncached health implementation. Compare all permanent admission
 // predicates, resolved needs/envelopes and health outcomes for the incident shape,
 // including the next pass after new evidence and changed inventory identity.
+// The guarded fixture now charges cold CPU work its small startup seed. These
+// digests retain every other admission field and all 660 decision records.
 func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 	q, _ := largeRetainedHistoryFixture(t, incidentRetainedJobs)
 	type decision struct {
@@ -44,28 +46,36 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 	}
 	compare := func(stage, want string) {
 		t.Helper()
-		q.memoryPlanning = newMemoryPlanningCache()
-		var decisions []decision
-		for _, j := range q.s.Jobs {
-			if j.State != "queued" {
-				continue
+		collect := func(cache *memoryPlanningCache) []decision {
+			q.memoryPlanning = cache
+			var decisions []decision
+			for _, j := range q.s.Jobs {
+				if j.State != "queued" {
+					continue
+				}
+				oversized := q.learnedEnvelopeOversized(j)
+				q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+					decisions = append(decisions, decision{j.ID, targetKey(m), fit.failed, candidate.Spec.Needs, candidate.MemoryEnvelope, oversized})
+					return true
+				})
 			}
-			oversized := q.learnedEnvelopeOversized(j)
-			q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
-				decisions = append(decisions, decision{j.ID, targetKey(m), fit.failed, candidate.Spec.Needs, candidate.MemoryEnvelope, oversized})
-				return true
+			q.memoryPlanning = nil
+			sort.Slice(decisions, func(i, j int) bool {
+				if decisions[i].Job != decisions[j].Job {
+					return decisions[i].Job < decisions[j].Job
+				}
+				return decisions[i].Target < decisions[j].Target
 			})
+			return decisions
 		}
-		q.memoryPlanning = nil
-		sort.Slice(decisions, func(i, j int) bool {
-			if decisions[i].Job != decisions[j].Job {
-				return decisions[i].Job < decisions[j].Job
-			}
-			return decisions[i].Target < decisions[j].Target
-		})
+		decisions := collect(newMemoryPlanningCache())
 		data, err := json.Marshal(decisions)
 		if err != nil {
 			t.Fatal(err)
+		}
+		uncached, err := json.Marshal(collect(nil))
+		if err != nil || string(data) != string(uncached) {
+			t.Fatalf("%s cached admission differs from uncached decisions: %v", stage, err)
 		}
 		got := fmt.Sprintf("%x", sha256.Sum256(data))
 		oversized := 0
@@ -79,7 +89,7 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 			t.Errorf("%s decision digest %s, want %s", stage, got, want)
 		}
 	}
-	compare("fitting", "96c4e3fbe5185c413b629540b9ddea888643d0047ee115549111caebab8b30e4")
+	compare("fitting", "0865ba8ae50554a335e234a4e5c0b5fdfccea71a0fc8b99f032d50ac637a5b26")
 	for id, observation := range q.s.WorkObservations {
 		peak := 200.0
 		copy := *observation.MemoryPeak
@@ -98,7 +108,7 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 		}
 	}
 	q.memoryObservationIndex = nil
-	compare("new evidence", "ff969673176a103779cc2335886ac65e7353b33d12246358f9ef3048a544c90e")
+	compare("new evidence", "b200eb7ead08eaaa0d070e69f17ef3130d5e83c997e8ce7efbb2002c98bf54ac")
 	for _, m := range q.s.Machines {
 		m.ExtensionFingerprint, m.CPUExtensionFingerprint = "changed-identity", "changed-identity"
 		for i := range m.Devices {
@@ -106,7 +116,7 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 		}
 	}
 	q.memoryObservationIndex = nil
-	compare("changed identity", "46cc7217e338d91f0a0113977e7ce9f7845ef8e7530626d1e2df80eb9e90ac7b")
+	compare("changed identity", "11ea8a68d50a2a5b599a13f37f0114d210c713de208222feb60afebd015f13a7")
 }
 
 func TestCheckinRetainedEvidenceScans(t *testing.T) {
@@ -243,11 +253,9 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := fmt.Sprintf("%x", sha256.Sum256(data))
-			// Holds now persist the status sentence in all 80 production reasons:
-			// "waiting for a hypha to take this job". Replacing only that phrase
-			// with "waiting for a worker to pull this job" reproduces 7b41b03e;
-			// job IDs, states, resources and all six picks are unchanged.
-			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "58da4d26d2d553ece59b04f41d8640bf201597527b1f497b965af5e97e73fbaf"}[occupied]
+			// The small first-run charge changes available-capacity placements;
+			// occupied capacity still has the same jobs, reasons and six picks.
+			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "b447dc5bb5f63376bea5307ca07c56380ea34f96658214e9d79e15ed4c4f2ec6"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
 				t.Fatalf("planning outcomes %s, want %s", got, want)

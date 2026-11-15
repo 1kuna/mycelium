@@ -24,7 +24,7 @@ func candidateCostFixture(t testing.TB) (*Queue, []Machine) {
 	workers := make([]Machine, 5)
 	for i := range workers {
 		id := fmt.Sprintf("worker-%d", i)
-		m := cpuMachine(id, id, "cpu", 16, 128)
+		m := guardedCPUMachine(id, id, "cpu", 16, 128)
 		m.ExtensionFingerprint, m.CPUExtensionFingerprint = "synthetic-cpu", "synthetic-cpu"
 		m.Devices = []MachineDevice{}
 		if i == 0 {

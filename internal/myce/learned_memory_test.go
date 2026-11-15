@@ -20,6 +20,14 @@ func setLearnedMemory(t *testing.T, q *Queue, on bool) {
 	}
 }
 
+// Memory-learning fixtures model a native worker with an actual attempt guard.
+// cpuMachine itself also serves admission-only and unenforced host tests.
+func guardedCPUMachine(id, host, backend string, cores int, ram float64) Machine {
+	m := cpuMachine(id, host, backend, cores, ram)
+	m.MemoryEnforcement = cgroupMemoryEnforcement
+	return m
+}
+
 // One guarded 32 GiB CPU host; cold work starts at its measured startup floor.
 func learnedMemoryFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
 	t.Helper()

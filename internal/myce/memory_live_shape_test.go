@@ -19,7 +19,7 @@ func TestMemoryLiveShapeLearnedFamilyCoSchedules(t *testing.T) {
 		ram := tc.ram
 		t.Run(fmt.Sprintf("%g/%d", ram, tc.evidence), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 32, ram)
+			m := guardedCPUMachine("worker", "host", "cpu", 32, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, "cpu-v1"
 			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
 			m.UnifiedMemory = true
@@ -64,7 +64,7 @@ func TestMemoryLiveShapeProtectedAttemptAllowsColdProbe(t *testing.T) {
 	for _, ram := range []float64{2, 256} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := cpuMachine("worker", "host", "cpu", 16, ram)
+			m := guardedCPUMachine("worker", "host", "cpu", 16, ram)
 			m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, "cpu-v1"
 			m.CapabilityProfile.SystemMemoryBytes = uint64(ram * (1 << 30))
 			m.UnifiedMemory = true
@@ -105,7 +105,7 @@ func TestMemoryLiveShapeLinuxCacheIsAvailable(t *testing.T) {
 		t.Fatal("unified source discarded reclaimable cache", n, err)
 	}
 	q, _ := fixture(t)
-	m := cpuMachine("worker", "host", "cpu", 16, 128)
+	m := guardedCPUMachine("worker", "host", "cpu", 16, 128)
 	m.HostAvailableMemoryGB, _ = host(ctx)
 	m.HostMemoryBudgetGB = 96
 	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
@@ -126,8 +126,8 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 	for _, ram := range []float64{2, 256} {
 		t.Run(fmt.Sprint(ram), func(t *testing.T) {
 			q, clock := fixture(t)
-			source := cpuMachine("source", "source-host", "cpu", 32, ram)
-			target := cpuMachine("target", "target-host", "cpu", 32, ram)
+			source := guardedCPUMachine("source", "source-host", "cpu", 32, ram)
+			target := guardedCPUMachine("target", "target-host", "cpu", 32, ram)
 			for _, m := range []*Machine{&source, &target} {
 				m.HostMemoryBudgetGB, m.ExtensionFingerprint = ram*.75, m.ID+"-v1"
 				m.CPUExtensionFingerprint = m.ExtensionFingerprint

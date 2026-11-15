@@ -41,14 +41,14 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 			var machines []Machine
 			for i := 0; i < tc.hosts; i++ {
 				id := fmt.Sprintf("worker-%d", i)
-				m := cpuMachine(id, id, "cpu", 8, 8*scale)
+				m := guardedCPUMachine(id, id, "cpu", 8, 8*scale)
 				m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "darwin", "arm64"
 				m.CapabilityProfile.SystemMemoryBytes = uint64(8 * scale * (1 << 30))
 				m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB, m.ExtensionFingerprint = 4.4*scale, .125*scale, "cpu-v1"
 				check(t, q, m, nil)
 				machines = append(machines, m)
 			}
-			other := cpuMachine("incompatible", "other", "cpu", 8, 4096*scale)
+			other := guardedCPUMachine("incompatible", "other", "cpu", 8, 4096*scale)
 			other.HostMemoryBudgetGB = 4096 * scale
 			check(t, q, other, nil)
 			s := cpuSpec(1, 0)
@@ -148,6 +148,7 @@ func TestMemoryRecoveryIncident(t *testing.T) {
 func TestMemoryRecoveryGuardUsesObservedVariance(t *testing.T) {
 	q, clock, m := learnedMemoryFixture(t)
 	m.CapabilityProfile.OS = "darwin"
+	m.MemoryEnforcement = darwinRSSGuardStatus
 	m.MemoryCeilingSlackGB = .125
 	check(t, q, m, nil)
 	s := cpuSpec(1, 0)
@@ -221,7 +222,7 @@ func TestMemoryRecoveryNewEligibleCapacity(t *testing.T) {
 	if !strings.HasPrefix(memoryEvidenceReason(t, q, pending), memoryEvidenceRecovering+":") {
 		t.Fatal("not waiting")
 	}
-	larger := cpuMachine("additional", "additional-host", "cpu", 8, 64)
+	larger := guardedCPUMachine("additional", "additional-host", "cpu", 8, 64)
 	larger.HostMemoryBudgetGB, larger.ExtensionFingerprint = 64, "cpu-v1"
 	check(t, q, larger, nil)
 	if why := memoryEvidenceReason(t, q, pending); why != "" {
@@ -248,7 +249,7 @@ func TestMemoryRecoveryAutoVariantContainment(t *testing.T) {
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
-	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m := guardedCPUMachine("worker", "host", "cpu", 8, 32)
 	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1"
 	report := newExtensionReport(e, &m, "extension:sample")
 	report.Setup, report.Qualified, report.CheckID = true, true, "check"
@@ -275,7 +276,7 @@ func TestMemoryRecoveryVariantAutoSizingWaits(t *testing.T) {
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
 	}
-	m := cpuMachine("worker", "host", "cpu", 8, 32)
+	m := guardedCPUMachine("worker", "host", "cpu", 8, 32)
 	m.HostMemoryBudgetGB, m.ExtensionFingerprint = 32, "cpu-v1"
 	report := newExtensionReport(e, &m, "extension:sample")
 	report.Setup, report.Qualified, report.CheckID = true, true, "check"
