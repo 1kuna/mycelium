@@ -76,9 +76,9 @@ func TestUnifiedCUDACalibrationRetainedCharges(t *testing.T) {
 		t.Fatal("complete accepted CUDA evidence was not calibrated")
 	}
 	charge := host + device + .125
-	// Historical total-only evidence is still an independent physical floor.
-	// It cannot be retrospectively relabelled as reclaimable cache.
-	if math.Abs(charge-43.29749156746103) > 1e-8 {
+	// Complete physical evidence covers the legacy total and resident+device
+	// floors, so the unknown overlap is no longer added to the physical bound.
+	if math.Abs(charge-29.783607482910156) > 1e-8 {
 		t.Fatalf("corrected charge %.12f (host %.12f device %.12f physical %.12f)", charge, host, device, physical)
 	}
 	for _, p := range append(old.Accepted, func() []AttemptMemoryPeak {
@@ -92,7 +92,7 @@ func TestUnifiedCUDACalibrationRetainedCharges(t *testing.T) {
 	}()...) {
 		need := max(*p.HostGB, valueOrZero(p.NonreclaimableGB)) + valueOrZero(p.DeviceGB)
 		if p.GPUHost == nil {
-			need = max(need, hostMemoryPeakGB(&p)+valueOrZero(p.DeviceGB))
+			need = max(need, hostMemoryPeakGB(&p))
 		}
 		if combined, ok := p.gpuHostPeakGB(); ok {
 			need = max(need, combined)
@@ -133,6 +133,93 @@ func valueOrZero(p *float64) float64 {
 	return *p
 }
 
+// Numeric-only accepted attempt facts from the ten retained 2026-11-15 runs.
+// Rejected/interrupted attempts are retained separately, never sizing inputs.
+func unifiedPhysicalHistory(t *testing.T) []struct {
+	Peak   *AttemptMemoryPeak `json:"peak"`
+	Reason string             `json:"reason"`
+} {
+	t.Helper()
+	var h struct {
+		Accepted []struct {
+			Peak   *AttemptMemoryPeak `json:"peak"`
+			Reason string             `json:"reason"`
+		} `json:"accepted"`
+	}
+	b, err := os.ReadFile("testdata/unified-physical-history.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &h); err != nil {
+		t.Fatal(err)
+	}
+	return h.Accepted
+}
+
+func TestUnifiedCUDAPhysicalBoundRetainedCoverage(t *testing.T) {
+	retainedUnifiedPhysicalCharge(t)
+}
+
+func retainedUnifiedPhysicalCharge(t *testing.T) float64 {
+	t.Helper()
+	q, _ := fixture(t)
+	var points []*WorkObservation
+	for _, h := range calibrationHistory(t) {
+		if h.Name == "naming-cuda" {
+			points = append(points, h.Points...)
+		}
+	}
+	// Old total-only history still uses today's conservative estimator.
+	if _, _, _, ok := unifiedCUDACalibration(points, .125); ok {
+		t.Fatal("incomplete-only history calibrated")
+	}
+	host, _ := observedMemoryBound(points, false)
+	device, _ := observedMemoryBound(points, true)
+	if math.Abs(host+device+.125-65.55387202512249) > 1e-8 {
+		t.Fatal("incomplete fallback changed", host, device)
+	}
+	row := &WorkObservation{Key: points[0].Key}
+	points = append(points, row)
+	var peaks []*AttemptMemoryPeak
+	// Carry the prior accepted complete physical peaks as well as the new ten.
+	for _, h := range unifiedNamingHistory(t) {
+		if h.Reason != "eligible" {
+			continue
+		}
+		q.recordWorkMemory(eligibleMemorySample{gateBuilt: true, work: true, job: &Job{}, result: Result{MemoryPeak: h.Peak}}, *row, row)
+		peaks = append(peaks, h.Peak)
+	}
+	missing := 0
+	for _, h := range unifiedPhysicalHistory(t) {
+		if h.Reason != "eligible" || h.Peak.constrained() || h.Peak.PressureUnavailable {
+			t.Fatal("ineligible retained row")
+		}
+		if h.Peak.NonreclaimableGB == nil {
+			missing++
+		}
+		q.recordWorkMemory(eligibleMemorySample{gateBuilt: true, work: true, job: &Job{}, result: Result{MemoryPeak: h.Peak}}, *row, row)
+		peaks = append(peaks, h.Peak)
+	}
+	if missing != 3 {
+		t.Fatal("retained coverage changed", missing)
+	}
+	h, d, physical, ok := unifiedCUDACalibration(points, .125)
+	if !ok || math.Abs(h+d+.125-29.783607482910156) > 1e-8 {
+		t.Fatalf("charge %.12f physical %.12f ok %t range %+v", h+d+.125, physical, ok, row.GPUHostRange)
+	}
+	for _, p := range peaks {
+		need := max(valueOrZero(p.CgroupGB), max(*p.HostGB, valueOrZero(p.NonreclaimableGB))+*p.DeviceGB)
+		if combined, valid := p.gpuHostPeakGB(); valid {
+			need = max(need, combined)
+		}
+		if physical < need {
+			t.Fatal("accepted peak not covered", need, physical)
+		}
+	}
+	t.Logf("new charge %.12f = physical %.12f + slack .125; %d accepted peaks covered", h+d+.125, physical, len(peaks))
+	return h + d + .125
+}
+
 func TestUnifiedCUDACalibrationPeakVariation(t *testing.T) {
 	host, device, outside := 2.0, 22.0, 25.0
 	p := &WorkObservation{Key: ObservationKey{Component: "0"}, MemorySamples: 2,
@@ -142,7 +229,7 @@ func TestUnifiedCUDACalibrationPeakVariation(t *testing.T) {
 		GPUHostRange: &MemoryPeakRange{Samples: 2, MinGB: 26, MaxGB: 27},
 		DeviceRange:  &MemoryPeakRange{Samples: 2, MinGB: 20, MaxGB: 22}}
 	h, d, _, ok := unifiedCUDACalibration([]*WorkObservation{p}, .125)
-	if !ok || d != 24 || h+d < 30 {
+	if !ok || d != 24 || h+d != 29 {
 		t.Fatalf("lost device variation or combined floor: %v %v %v", h, d, ok)
 	}
 	// An incomplete completion clears the coverage range, but its aggregate
@@ -241,7 +328,7 @@ func TestUnifiedCUDACalibrationAdmission(t *testing.T) {
 	}
 	first := submit(t, q, spec)
 	a := assignedJob(machineCheck(t, q, m))
-	if a == nil || a.ID != first.ID || math.Abs(a.MemoryEnvelope.HostGB-43.29749156746103) > 1e-8 {
+	if a == nil || a.ID != first.ID || math.Abs(a.MemoryEnvelope.HostGB-29.783607482910156) > 1e-8 {
 		if a == nil {
 			t.Fatal("restart did not assign", job(t, q, first.ID).Reason)
 		}

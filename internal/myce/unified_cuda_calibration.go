@@ -7,10 +7,10 @@ import "math"
 // pages. It is a bound on the combined physical footprint, not another host
 // allocation to add to NVML. No independent maxima are subtracted here.
 //
-// Keep every incomplete row's total-cgroup PLUS device peak as a physical
-// floor. Complete rows forecast non-reclaimable host plus device, and retain
-// their entire proc/physical upper bound independently. Historical cache is
-// never retroactively discounted by a newer complete observation.
+// A measured range needs two complete accepted attempts, not a tuned sample
+// quota. It supersedes incomplete total+device forecasts only when its physical
+// forecast covers every retained total-cgroup floor AND resident+device forecast.
+// Otherwise the incomplete rows retain their conservative additive fallback.
 func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, device, physical float64, ok bool) {
 	complete := uint64(0)
 	devicePeak, deviceLow := 0.0, math.Inf(1)
@@ -40,7 +40,7 @@ func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, dev
 	deviceMargin := max(devicePeak-deviceLow, drift)
 	device = devicePeak + deviceMargin
 	var incomplete []*WorkObservation
-	incompleteDevice := 0.0
+	incompleteDevice, incompleteFloor, legacyPhysical := 0.0, 0.0, 0.0
 	for _, point := range points {
 		p := point.MemoryPeak
 		if p == nil || p.HostGB == nil || p.DeviceGB == nil || p.constrained() || p.PressureUnavailable {
@@ -56,25 +56,34 @@ func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, dev
 			if r := point.MemoryRange; r.valid() {
 				hostMargin = max(hostMargin, r.MaxGB-r.MinGB)
 			}
-			bound := max(combined, resident+*p.DeviceGB) + hostMargin + deviceMargin
+			// The cumulative physical peak may predate a restarted range.
+			// Keep it independently; do not add a newer range's spread again.
+			bound := max(combined+drift, resident+device+hostMargin)
 			if r := point.GPUHostRange; r.valid() {
-				bound = max(bound, r.MaxGB+max(r.MaxGB-r.MinGB, memoryGrowthGB(p), drift)+deviceMargin)
+				bound = max(bound, r.MaxGB+max(r.MaxGB-r.MinGB, memoryGrowthGB(p), deviceMargin, drift))
 			}
 			physical = max(physical, bound)
 		} else {
 			// Missing counters retain the complete old total/device floor and
 			// measured host growth. This can dominate otherwise small new runs.
 			// Cleared coverage also wins over cached aggregate GPU-host fields.
-			physical = max(physical, hostMemoryPeakGB(p)+hostMargin+*p.DeviceGB+deviceMargin)
+			legacyPhysical = max(legacyPhysical, hostMemoryPeakGB(p)+hostMargin+*p.DeviceGB+deviceMargin)
+			incompleteFloor = max(incompleteFloor, hostMemoryPeakGB(p)+hostMargin, resident+device+hostMargin)
 			incomplete = append(incomplete, point)
 			incompleteDevice = max(incompleteDevice, *p.DeviceGB)
 		}
 	}
-	// Unknown legacy host variation keeps the existing fallback, too. New
-	// complete counters cannot erase uncertainty in an unrelated old row.
+	// Total cgroup includes reclaimable cache and may include managed/pinned
+	// GPU pages. It is not an extra host-only allocation once a complete physical
+	// forecast covers it. Never claim its unknown cache/device overlap as measured.
+	// Uncovered evidence (including a new larger peak) keeps the old forecast.
 	peak, margin, _ := observedMemoryPeakAndMarginWithDrift(incomplete, false, drift)
 	if len(incomplete) > 0 {
-		physical = max(physical, peak+margin+incompleteDevice+deviceMargin)
+		incompleteFloor = max(incompleteFloor, peak+margin)
+		legacyPhysical = max(legacyPhysical, peak+margin+incompleteDevice+deviceMargin)
+		if physical < incompleteFloor {
+			physical = max(physical, legacyPhysical)
+		}
 	}
 	// Encode the combined bound in the existing host+device API. This is an
 	// algebraic split of a reservation, not a claimed unique-page measurement.
