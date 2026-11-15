@@ -274,10 +274,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
-	// Retired with managed Docker (MY-49). Service units installed by earlier
-	// releases still pass these; accept and ignore them for one release (MY-42).
-	f.String("docker-host", "", "retired: managed Docker was removed; ignored")
-	f.String("container-retention", "", "retired: managed Docker was removed; ignored")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total model-upload bytes (-1: measured free disk capacity)")
 	outputDeliveryRoot := f.String("output-delivery-root", "", "queue NAS destination root for opt-in async_nas outputs")
@@ -789,11 +785,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		f.Visit(func(v *flag.Flag) {
-			if v.Name == "docker-host" || v.Name == "container-retention" {
-				log.Printf("warning: ignoring --%s: managed Docker was retired (MY-49); reinstall to drop it from the service unit", v.Name)
-			}
-		})
 		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, GPUTelemetryHelper: *gpuTelemetryHelper, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: myce.AcceleratorMemoryMeasured(*gpu, *memoryMode), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, HostMemoryBudgetMeasured: *hostBudgetMeasured, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)

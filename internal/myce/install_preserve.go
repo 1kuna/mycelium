@@ -21,16 +21,6 @@ func (c ServiceConfig) InstallFlags() map[string]string {
 	return out
 }
 
-// DropRetiredDocker clears the retired Docker install keys (MY-49) and says
-// what it ignored, so the next saved config no longer carries them.
-func (c *ServiceConfig) DropRetiredDocker() string {
-	if c.DockerEndpoint == "" && c.ContainerRetention == nil {
-		return ""
-	}
-	c.DockerEndpoint, c.ContainerRetention = "", nil
-	return "warning: ignoring docker_endpoint and container_retention in the installed config: managed Docker was retired (MY-49); run containerized work as native jobs (docs/services.md)"
-}
-
 func ValidateInstallIdentity(old, next ServiceConfig) error {
 	if old.Role != next.Role || old.Service != next.Service || old.Binary != next.Binary || old.State != next.State || old.Config != next.Config || old.Credentials != next.Credentials || old.HostID != next.HostID || old.WorkerUser != next.WorkerUser || old.WorkerHome != next.WorkerHome || old.Device != next.Device || old.Detection.OS != next.Detection.OS || old.Detection.Arch != next.Detection.Arch {
 		return errors.New("installed role, account, host, device, unit and state identity cannot change; preserve custody and install separately")

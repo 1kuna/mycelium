@@ -26,7 +26,8 @@ type RunSpec struct {
 	// Managed Docker was retired on 2026-11-12 (MY-49). These fields are decoded
 	// only so a request that still asks for Docker gets a clear refusal instead
 	// of running its image name as a native command, and so retained records
-	// keep loading. Remove them after the release following r6.15 (MY-42).
+	// keep loading and displaying (MY-42). Keep the refusal even after those
+	// records expire: silently executing an image name natively is unsafe.
 	Docker           bool     `json:"docker,omitempty" yaml:"docker,omitempty"`
 	DockerNetwork    string   `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
 	DockerMemoryGB   float64  `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`

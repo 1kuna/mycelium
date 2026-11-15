@@ -4,6 +4,9 @@ Use immutable `files` for private inputs, `shared_inputs` for verified read-only
 large assets, and accepted `output_refs` for successful results. A NAS is optional
 for standalone file transport; the automated installer still requires a verified
 NAS mount. Failed-attempt diagnostics are separate from accepted outputs.
+These are native jobs; managed Docker file mounts are retired (MY-49). New
+Docker requests receive `job_docker_retired`; retained Docker job records and
+their existing file references still load under MY-42.
 
 - [Submit and transfer files](#start-and-submit)
 - [Failed-attempt recovery](#recover-outputs-from-a-failed-terminal-attempt)

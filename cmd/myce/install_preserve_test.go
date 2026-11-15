@@ -126,8 +126,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		f := v.Field(i)
 		name := v.Type().Field(i).Name
 		switch name {
-		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS",
-			"DockerEndpoint": // Retired (MY-49): an install drops it rather than preserving it.
+		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
 			continue
 		}
 		switch f.Kind() {

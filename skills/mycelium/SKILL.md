@@ -133,6 +133,9 @@ unsupported with entries. Only production entries need a target list; every fiel
 
 ## 4. Environment
 
+- **Native execution only:** managed Docker is retired. A `run.docker*`
+  request receives `job_docker_retired`; use a locked environment and native
+  sidecars ([migration](references/submit.md#environments)).
 - **Installed tools** are the default. List what the command calls in
   `needs: {tools: [git, node]}` so placement skips machines without them.
 - **Locked environments**: `environment: {backend: pixi, lock_file: pixi.lock}`,
