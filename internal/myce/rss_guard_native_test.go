@@ -13,7 +13,7 @@ import (
 )
 
 // Opt-in native proof; ordinary gates retain injected probes and laptop safety.
-func TestDarwinRSSGuardNative(t *testing.T) {
+func TestProcessRSSGuardNative(t *testing.T) {
 	if os.Getenv("MYCE_NATIVE_RSS_TEST") != "1" {
 		t.Skip("requires explicit bounded native RSS proof")
 	}
@@ -23,13 +23,13 @@ func TestDarwinRSSGuardNative(t *testing.T) {
 	w := recoveryWorker(t)
 	w.Machine.GPU = "cpu"
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
-	w.processMemory = localProcessMemory()
+	w.processMemory = localDevProcessMemory()
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.close()
-	j := recoveryJob(t, []string{"sh", "-c", `"$@" & wait`, "rss-parent", os.Args[0], "-test.run=^TestDarwinRSSGuardChild$"})
+	j := recoveryJob(t, []string{"sh", "-c", `"$@" & wait`, "rss-parent", os.Args[0], "-test.run=^TestProcessRSSGuardChild$"})
 	j.Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 64.0 / 1024, Platform: Platform{Required: []string{"cpu"}}}
 	j.Spec.Run.Env = map[string]string{"MYCE_RSS_CHILD": "1"}
 	p, err := startAfterFixtureInputs(t, w, store, j)
@@ -71,7 +71,7 @@ func TestDarwinRSSGuardNative(t *testing.T) {
 	}
 }
 
-func TestDarwinRSSGuardChild(t *testing.T) {
+func TestProcessRSSGuardChild(t *testing.T) {
 	if os.Getenv("MYCE_RSS_CHILD") != "1" {
 		return
 	}
@@ -86,7 +86,7 @@ func TestDarwinRSSGuardChild(t *testing.T) {
 	runtime.KeepAlive(data)
 }
 
-func TestDarwinRSSGuardMemberBirthAndControlExclusion(t *testing.T) {
+func TestProcessRSSGuardMemberBirthAndControlExclusion(t *testing.T) {
 	// The control anchor alone is far above the payload threshold; payload and
 	// a separate-PGID helper remain below it. Unrelated process 99 is excluded.
 	// A member that exits, is replaced or leaves the session mid-sample is

@@ -14,11 +14,11 @@ var workerDevProcessMemory = localDevProcessMemory
 
 var workerMachineProbe = LocalMachineProbe
 
-// WorkerProbeDefaults groups host sources used when a worker has no override.
-// Embedded callers may inject these before starting any worker goroutines.
 // ProcessMemoryProbe exposes the existing owned-tree sensor for injected dev hosts.
 type ProcessMemoryProbe = processMemoryProbe
 
+// WorkerProbeDefaults groups host sources used when a worker has no override.
+// Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
 	FaultHost      func() (map[string]string, []string)
 	SignalEvidence func(SignalCapture) *SignalEvidence
