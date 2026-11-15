@@ -342,7 +342,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 		}
 		point.LastSeconds = seconds
 		q.putWorkObservation(key, point)
-		q.recordCurveLearning(j, old, exists, point)
+		q.recordWorkLearning(j, old, exists, point)
 		return
 	}
 	if workload || !exists || old.StaleReason != "" {
@@ -360,7 +360,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 		q.recordWorkMemory(*sample, old, &point)
 	}
 	q.putWorkObservation(key, point)
-	q.recordCurveLearning(j, old, exists, point)
+	q.recordWorkLearning(j, old, exists, point)
 }
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.
@@ -394,4 +394,33 @@ func JobTiming(j *Job) string {
 		text += "; " + t.PlacementReason
 	}
 	return text + envelope + runtimeText(j)
+}
+
+func (p WorkObservation) Summary() string { return p.SummaryAt(p.RecordedAt) }
+
+// SummaryAt shows the kind of work's record: its last accepted duration and
+// accepted peak, with any invalidation.
+func (p WorkObservation) SummaryAt(time.Time) string {
+	state := "current"
+	if p.StaleReason != "" {
+		state = "stale: " + p.StaleReason
+	}
+	if p.Forbidden {
+		state = "forbidden: OOM or memory bound exceeded"
+		if p.StaleReason != "" {
+			state += "; stale: " + p.StaleReason
+		}
+	}
+	last := "unknown"
+	if validRate(p.LastSeconds) {
+		last = fmt.Sprintf("%.2fs", p.LastSeconds)
+	}
+	peak := "unknown"
+	if p.MemoryPeak != nil && p.MemoryPeak.HostGB != nil {
+		peak = fmt.Sprintf("host %.2f GiB", *p.MemoryPeak.HostGB)
+		if p.MemoryPeak.DeviceGB != nil {
+			peak += fmt.Sprintf(", device %.2f GiB", *p.MemoryPeak.DeviceGB)
+		}
+	}
+	return fmt.Sprintf("%s %s/%s: last accepted duration %s; peak %s; %s; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, last, peak, state, p.Samples)
 }

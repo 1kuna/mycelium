@@ -193,7 +193,7 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
 	m.ExtensionReports = []ExtensionReport{report}
 	check(t, q, m, nil)
-	k, why := curveReferenceKey(e, q.s.Machines[m.ID], "extension:sample")
+	k, why := memoryReferenceKey(e, q.s.Machines[m.ID], "extension:sample")
 	if k == nil {
 		t.Fatal(why)
 	}

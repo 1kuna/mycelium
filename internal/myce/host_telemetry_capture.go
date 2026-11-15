@@ -184,7 +184,7 @@ func (c *HostTelemetryCapture) Sample(ctx context.Context) (HostTelemetrySample,
 	hostStart := c.Clock.Now()
 	r.HostUsed = c.reading("bytes", "MemTotal minus MemAvailable; excludes reclaimable RAM", hostStart, nil, "host_memory_unavailable")
 	if data, err := c.Probe.ReadFile("/proc/meminfo"); err == nil {
-		if used, err := parseMeasureHost(data); err == nil {
+		if used, err := parseHostUsedMemory(data); err == nil {
 			r.HostUsed = c.reading("bytes", r.HostUsed.Source, hostStart, telemetryValue(used*(1<<30)), "")
 		}
 	}
@@ -254,4 +254,31 @@ func captureXPUMemory(ctx context.Context, p MachineProbe, pci string) ([3]float
 		return values, errors.New("card memory counter invalid")
 	}
 	return values, nil
+}
+
+func parseHostUsedMemory(data []byte) (float64, error) {
+	available, e := parseMemAvailable(data)
+	if e != nil {
+		return 0, e
+	}
+	var total float64
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) > 0 && f[0] == "MemTotal:" {
+			if found || len(f) != 3 || f[2] != "kB" {
+				return 0, errors.New("invalid MemTotal")
+			}
+			n, e := strconv.ParseUint(f[1], 10, 64)
+			if e != nil {
+				return 0, e
+			}
+			total = float64(n) / (1024 * 1024)
+			found = true
+		}
+	}
+	if !found || total <= 0 || available > total {
+		return 0, errors.New("invalid host total/available memory")
+	}
+	return total - available, nil
 }

@@ -86,7 +86,7 @@ package. Helper-only or computed paths still need explicit focused testing or
 `internal/myce` always include `TestWireSchemas`, since the reflected Job/Spec
 schema includes nested types across that package. Edits to the shared memory
 writers `attempt_memory.go`, `memory_learning.go`, `memory_envelope.go`,
-`gpu_host_memory.go`, `capability_placement.go`, `work_observation.go` and
+`gpu_host_memory.go`, `capability_placement.go`, `work_history.go`, `memory_observation_identity.go` and
 `queue.go` also include the tests in `process_memory_test.go` and
 `attempt_memory_facts_test.go`: their private-method consumers escape direct
 symbol matching (#493). This explicit consumer set does not follow transitive
@@ -1144,8 +1144,8 @@ recovery snapshot. An actual reboot or service interruption needs its own task
 authorization. Finish drained/disabled unless the task explicitly authorizes
 resume. There is no offline rest certificate.
 
-Use `myce measure` for the exact selected device/catalog, including representative
-overlapping warmups. Qualification stays UNQUALIFIED until native simultaneous
+Collect native telemetry for the exact selected device/catalog, including
+representative overlapping loads and requests. Qualification stays UNQUALIFIED until native simultaneous
 peaks, runtime overhead, sidecars and OS headroom are measured. For private models
 with `logs: none`, verify actual null stdout/stderr, including recovery; tests
 cannot qualify journald.
