@@ -149,19 +149,29 @@ func TestMemoryLiveShapeOnePointTransferProbeSharesAfterMeasurement(t *testing.T
 			render := cpuSpec(2, 0)
 			render.Name, render.Run.Command = "render", []string{"echo", "render"}
 			render.AllowedMachines = []string{source.ID}
-			// A large measured foreign floor keeps the telemetry-credit case
-			// meaningful after unknown work stopped reserving the whole host.
-			runMemory(t, q, clock, source, render, ram*.7, nil)
+			runMemory(t, q, clock, source, render, ram/8, nil)
 			render.AllowedMachines = []string{target.ID}
 			first := submit(t, q, render)
 			a := assignedJob(machineCheck(t, q, target))
 			if a == nil || a.ID != first.ID || a.MemoryEnvelope.Basis != "exploratory" || a.MemoryEnvelope.Evidence != 1 {
 				t.Fatalf("one-point transfer not probed: %+v", a)
 			}
-			ceiling := a.Spec.Needs.HostMemoryGB
-			if ceiling != ram*.7 {
-				t.Fatal("transfer probe lost its measured foreign floor", ceiling)
+			if a.Spec.Needs.HostMemoryGB != ram/8 {
+				t.Fatal("transfer probe lost its measured foreign floor", a.Spec.Needs.HostMemoryGB)
 			}
+			// Retain a previous-release whole-host execution for the telemetry
+			// credit checks below. New assignments keep the small foreign floor;
+			// two such assignments already fit without borrowing any credit.
+			if err := q.update(func() error {
+				legacy := q.s.Jobs[a.ID]
+				legacy.Spec.Needs.HostMemoryGB = ram * .75
+				legacy.MemoryEnvelope.HostGB = ram * .75
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			a = job(t, q, a.ID)
+			ceiling := a.Spec.Needs.HostMemoryGB
 			second := submit(t, q, render)
 			var sampleID int64
 			report := func(j *Job) AttemptReport {

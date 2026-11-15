@@ -100,11 +100,10 @@ func TestReservationOwnPreparationDoesNotSelfStop(t *testing.T) {
 func TestDeviceReservationDrainingAdmitsCPU(t *testing.T) {
 	q, clock := fixture(t)
 	m := m3Machine()
-	m.MemoryEnforcement = cgroupMemoryEnforcement
-	submit(t, q, exclusionSpec(m.ID, "0"))
+	demand := submit(t, q, exclusionSpec(m.ID, "0"))
 	existing := assignedJob(machineCheck(t, q, m))
 	if existing == nil {
-		t.Fatal("missing existing GPU work")
+		t.Fatal("missing existing GPU work", job(t, q, demand.ID).Reason)
 	}
 	if err := q.Started(result(existing, false)); err != nil {
 		t.Fatal(err)
@@ -114,6 +113,9 @@ func TestDeviceReservationDrainingAdmitsCPU(t *testing.T) {
 		t.Fatal(err)
 	}
 	reservationState(t, q, "check", "draining")
+	// Preserve the existing GPU fixture; the newly arriving unknown CPU
+	// work needs a guard, as a worker would advertise after delegation.
+	m.MemoryEnforcement = cgroupMemoryEnforcement
 	s := cpuSpec(2, 0)
 	s.Needs.Memory = "auto"
 	cpu := submit(t, q, s)
