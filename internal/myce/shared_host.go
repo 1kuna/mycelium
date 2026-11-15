@@ -8,6 +8,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"syscall"
 )
 
@@ -30,6 +31,26 @@ func cloneSharedHost(p *SharedHostProfile) *SharedHostProfile {
 // prepared environments. Daemon children do not inherit native process priority.
 func sharedHostJobFits(j *Job, m *Machine) bool { return sharedHostRefusal(j, m) == "" }
 
+func interactiveExcludedClass(class string) bool {
+	switch strings.ToLower(class) {
+	case "batch", "test", "ci", "rollout", "eval":
+		return true
+	}
+	return false
+}
+
+// Policy tiers can classify work independently of its submitted class. The
+// queue checks both; the worker independently fences the immutable class.
+func (q *Queue) sharedHostAdmissionRefusal(j *Job, m *Machine) string {
+	if why := sharedHostRefusal(j, m); why != "" {
+		return why
+	}
+	if m.SharedHost != nil && interactiveExcludedClass(q.priorityMatch(j.Spec).Tier) {
+		return "shared interactive host excludes batch, test, CI, rollout and eval tiers regardless of fleet pressure"
+	}
+	return ""
+}
+
 // sharedHostRefusal names the failed shared-host condition and its fix, so a
 // refusal and resolve explain the same rule (#548). Empty means admitted.
 func sharedHostRefusal(j *Job, m *Machine) string {
@@ -38,6 +59,9 @@ func sharedHostRefusal(j *Job, m *Machine) string {
 	}
 	if m.SharedHost == nil {
 		return ""
+	}
+	if interactiveExcludedClass(jobClass(j.Spec)) {
+		return "shared interactive host excludes batch, test, CI, rollout and eval classes regardless of fleet pressure"
 	}
 	// Admission and launch also receive the physical worker's accelerator
 	// view. CPU payloads use their prepared CPU recipes on either kind of host.

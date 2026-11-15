@@ -24,6 +24,13 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
   its typed refusal and keep heavy work off your own machine.
 - Describe what the work needs, never which machine: `--gpu cuda` finds CUDA
   hardware. Pin hardware only for a [real requirement](references/submit.md#explicit-placement-restrictions).
+- Shared interactive hosts refuse `batch`, `test`, `ci`, `rollout` and `eval`
+  classes and same-named policy tiers, including when the fleet is full. Submit
+  those classes normally; no host exclusion is needed to protect the agents
+  workstation. Light work still uses its measured allowances. Queued GPU work
+  protects its resolved CPU/RAM needs from CPU backfill, including while a finite
+  GPU execution finishes; no fixed core reserve or CUDA-host exclusion is needed.
+  Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 

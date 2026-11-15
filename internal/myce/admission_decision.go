@@ -300,6 +300,7 @@ const (
 	predicateSelectionOrder       AdmissionPredicate = "selection_order"
 	predicateSelectionSkipped     AdmissionPredicate = "selection_skipped"
 	predicateSharedHostBackoff    AdmissionPredicate = "shared_host_backoff"
+	predicateSharedHostProfile    AdmissionPredicate = "shared_host_profile"
 	predicateStagingHostRetry     AdmissionPredicate = "staging_host_retry"
 	predicateStartupRelease       AdmissionPredicate = "startup_release"
 	predicateStorageRoot          AdmissionPredicate = "storage_root"
