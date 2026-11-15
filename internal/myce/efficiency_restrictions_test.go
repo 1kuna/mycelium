@@ -57,11 +57,11 @@ func TestEfficiencyRestrictionCost(t *testing.T) {
 			p = &q.efficiencyView.Restrictions[i]
 		}
 	}
-	if p == nil || p.Jobs != 2 || p.HostRestricted != 1 || p.Restricted != 1 || p.RestrictedWaitSeconds != 2*3600 || p.StrandedJobs != 1 || p.StrandedSeconds != 2*3600 || p.TypedMemory != 2 || p.TypedCores != 2 {
+	if p == nil || p.Jobs != 2 || p.HostRestricted != 1 || p.HostWaitSeconds != 2*3600 || p.HostStrandedJobs != 1 || p.Restricted != 1 || p.RestrictedWaitSeconds != 2*3600 || p.StrandedJobs != 1 || p.StrandedSeconds != 2*3600 || p.TypedMemory != 2 || p.TypedCores != 2 {
 		t.Fatalf("restrictions=%+v", q.efficiencyView.Restrictions)
 	}
 	text := strings.Join(q.efficiencyView.ProjectLines(waiting.Spec.Project), "\n")
-	for _, want := range []string{"2.0 queue hours waited while an excluded host had room", "advice: your restrictions cost 2.0 queue hours", "drop allowed_machines and excluded_machines", "a linux/arm64 host has room", "stop typing host_memory_gb"} {
+	for _, want := range []string{"named-host lists (pins): 1/2 (50%)", "plain queue wait 2.0 hours", "review allowed_machines and excluded_machines", "a linux/arm64 host has room", "stop typing host_memory_gb"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in\n%s", want, text)
 		}
@@ -91,15 +91,18 @@ func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
 		{ID: "both", Spec: Spec{Project: "demo", AllowedMachines: []string{"one"}, Targets: []ExecutionTarget{{OS: "linux"}}}, State: "queued", Queued: queued,
 			Efficiency: &JobEfficiency{At: now.Add(-time.Minute), Blocker: "capacity", WaitSeconds: map[string]float64{"capacity": 60, "holds": 60},
 				Rate: efficiencyRate{Host: "one"}, Allocations: []EfficiencyAllocation{{Host: "one", ResourceIntegral: ResourceIntegral{Seconds: 10}}}}},
-		{ID: "free", Spec: Spec{Project: "other"}, State: "queued", Queued: queued},
+		{ID: "platform-only", Spec: Spec{Project: "other", Targets: []ExecutionTarget{{OS: "darwin"}}}, State: "succeeded", Queued: queued, StartedAt: &started},
 	} {
 		q.putJob(j.ID, j)
 	}
 	rows := q.projectRestrictions(now, []StrandedDemand{
-		{JobID: "lists", Project: "demo", Platform: "linux"},
-		{JobID: "lists", Project: "demo", Platform: "darwin"},
+		{JobID: "lists", Project: "demo", Platform: "linux", Fields: []string{"allowed_machines"}},
+		{JobID: "lists", Project: "demo", Platform: "darwin", Fields: []string{"excluded_machines"}},
+		{JobID: "targets", Project: "demo", Platform: "linux", Fields: []string{"targets"}},
+		{JobID: "both", Project: "demo", Platform: "linux", Fields: []string{"allowed_machines", "targets"}},
+		{JobID: "both", Project: "demo", Platform: "darwin", Fields: []string{"allowed_machines", "policy.projects.allowed_machines"}},
 	})
-	if len(rows) != 2 || rows[0].Jobs != 3 || rows[0].Restricted != 3 || rows[0].HostRestricted != 2 || rows[0].Targeted != 2 || rows[0].StrandedJobs != 1 || rows[0].RestrictedWaitSeconds != 9180 || rows[1].Restricted != 0 {
+	if len(rows) != 2 || rows[0].Jobs != 3 || rows[0].Restricted != 3 || rows[0].HostRestricted != 2 || rows[0].Targeted != 2 || rows[0].StrandedJobs != 3 || rows[0].HostStrandedJobs != 1 || rows[0].HostWaitSeconds != 7380 || rows[0].RestrictedWaitSeconds != 9180 || rows[1].Restricted != 1 || rows[1].HostRestricted != 0 || rows[1].HostWaitSeconds != 0 || rows[1].HostStrandedJobs != 0 {
 		t.Fatalf("restrictions=%+v", rows)
 	}
 	if q.s.Jobs["both"].Efficiency.WaitSeconds["capacity"] != 60 {
@@ -108,8 +111,12 @@ func TestEfficiencyRestrictionCountsAndPlainWait(t *testing.T) {
 	if q.s.Jobs["both"].Efficiency.Allocations[0].Seconds != 10 {
 		t.Fatal("wait report mutated resource accounting")
 	}
+	other := strings.Join((&EfficiencyReport{Restrictions: rows}).ProjectLines("other"), "\n")
+	if !strings.Contains(other, "named-host lists (pins): 0/1 (0%)") || !strings.Contains(other, "plain queue wait 0.0 hours") || strings.Contains(other, "drop targets") || strings.Contains(other, "targets cost") {
+		t.Fatalf("platform compatibility reported as pin cost: %s", other)
+	}
 	text := strings.Join((&EfficiencyReport{Restrictions: rows}).ProjectLines("demo"), "\n")
-	for _, want := range []string{"3/3 (100%) retained jobs", "plain queue wait 2.5 hours", "1 stranded jobs now", "unrestricted counterfactual unavailable"} {
+	for _, want := range []string{"named-host lists (pins): 2/3 (67%)", "platform targets (software compatibility): 2/3 (67%)", "plain queue wait 2.0 hours", "1 stranded jobs now", "named-host counterfactual wait saving unavailable"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in\n%s", want, text)
 		}

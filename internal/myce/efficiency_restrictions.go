@@ -17,6 +17,10 @@ type ProjectRestrictions struct {
 	Jobs    int    `json:"jobs"`
 	// Jobs naming hosts (allowed_machines or excluded_machines).
 	HostRestricted int `json:"host_restricted"`
+	// Plain wait for named-host jobs only, not software compatibility targets.
+	HostWaitSeconds float64 `json:"host_wait_seconds"`
+	// Distinct jobs with current capacity excluded only by named-host lists.
+	HostStrandedJobs int `json:"host_stranded_jobs"`
 	// Union of host lists and targets, counting each retained job once.
 	Restricted int `json:"restricted"`
 	// Plain queue wait for restricted jobs, not a causal cost estimate.
@@ -61,6 +65,7 @@ func (q *Queue) projectRestrictions(now time.Time, stranded []StrandedDemand) []
 		}
 		if len(s.AllowedMachines) > 0 || len(s.ExcludedMachines) > 0 {
 			p.HostRestricted++
+			p.HostWaitSeconds += restrictionQueueWait(j, now)
 		}
 		if len(s.Targets) > 0 {
 			p.Targeted++
@@ -98,11 +103,24 @@ func (q *Queue) projectRestrictions(now time.Time, stranded []StrandedDemand) []
 	}
 	platforms := map[string]map[string]bool{}
 	strandedJobs := map[string]bool{}
+	hostStrandedJobs := map[string]bool{}
 	for _, s := range stranded {
 		if platforms[s.Project] == nil {
 			platforms[s.Project] = map[string]bool{}
 		}
 		platforms[s.Project][s.Platform] = true
+		// Preserve platform targets and project policy when attributing a
+		// current fit to job host lists. Mixed exclusions cannot prove that.
+		hostListOnly := len(s.Fields) > 0
+		for _, field := range s.Fields {
+			if field != "allowed_machines" && field != "excluded_machines" {
+				hostListOnly = false
+			}
+		}
+		if hostListOnly && !hostStrandedJobs[s.JobID] {
+			row(s.Project).HostStrandedJobs++
+			hostStrandedJobs[s.JobID] = true
+		}
 		if !strandedJobs[s.JobID] {
 			j := q.s.Jobs[s.JobID]
 			if j != nil && len(j.Spec.AllowedMachines)+len(j.Spec.ExcludedMachines)+len(j.Spec.Targets) > 0 {
@@ -159,19 +177,10 @@ func restrictionQueueWait(j *Job, now time.Time) float64 {
 func (p *ProjectRestrictions) advice() []string {
 	var advice []string
 	if p.HostRestricted > 0 {
-		line := "drop allowed_machines and excluded_machines; state the need (platform, memory, tools) and Mycelium places the work"
-		if p.StrandedSeconds > 0 {
-			line = fmt.Sprintf("your restrictions cost %.1f queue hours while an excluded host had room; ", p.StrandedSeconds/3600) + line
-		}
-		advice = append(advice, line)
-	} else if p.StrandedSeconds > 0 {
-		advice = append(advice, fmt.Sprintf("your targets cost %.1f queue hours while an excluded host had room; widen or drop them", p.StrandedSeconds/3600))
+		advice = append(advice, "review allowed_machines and excluded_machines; state the need (platform, memory, tools) and keep named-host pins only for situational needs")
 	}
 	if len(p.StrandedPlatforms) > 0 {
 		advice = append(advice, "waiting now although a "+strings.Join(p.StrandedPlatforms, " or ")+" host has room")
-	}
-	if p.NonProductionTargeted > 0 {
-		advice = append(advice, "drop targets on non-production entries; keep them only where output parity matters")
 	}
 	if p.TypedMemory > 0 {
 		advice = append(advice, "stop typing host_memory_gb; use needs.memory: auto and Mycelium learns it")
@@ -196,15 +205,11 @@ func (p ProjectRestrictions) lines(indent string) []string {
 		cores = fmt.Sprintf("%+.1f from observed peak over %d", *p.CoresOverPeakCores, p.CoresCompared)
 	}
 	lines := []string{
-		fmt.Sprintf("%sproject %s restrictions: %s retained jobs; plain queue wait %.1f hours; %d stranded jobs now (unrestricted capacity fits)", indent, p.Project, share(p.Restricted), p.RestrictedWaitSeconds/3600, p.StrandedJobs),
-		fmt.Sprintf("%sproject %s steering: hosts named %s; targets %s (%d non-production); %.1f queue hours waited while an excluded host had room", indent, p.Project, share(p.HostRestricted), share(p.Targeted), p.NonProductionTargeted, p.StrandedSeconds/3600),
+		fmt.Sprintf("%sproject %s named-host lists (pins): %s retained jobs; plain queue wait %.1f hours; %d stranded jobs now (capacity fits with host lists removed, platform targets preserved)", indent, p.Project, share(p.HostRestricted), p.HostWaitSeconds/3600, p.HostStrandedJobs),
+		fmt.Sprintf("%sproject %s platform targets (software compatibility): %s; counted separately from named-host pins", indent, p.Project, share(p.Targeted)),
 		fmt.Sprintf("%sproject %s typed sizing: host_memory_gb %s, %s; cpu_cores %s, %s", indent, p.Project, share(p.TypedMemory), memory, share(p.TypedCores), cores),
 	}
-	if p.StrandedSeconds == 0 {
-		lines = append(lines, indent+"  unrestricted counterfactual unavailable; plain wait does not establish restriction cost")
-	} else {
-		lines = append(lines, indent+"  unrestricted capacity was observed during stranded wait; this is not a predicted start time or an exact wait saving")
-	}
+	lines = append(lines, indent+"  named-host counterfactual wait saving unavailable; plain wait does not establish pin cost")
 	for _, a := range p.Advice {
 		lines = append(lines, indent+"  advice: "+a)
 	}

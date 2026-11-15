@@ -501,14 +501,14 @@ In an existing project, Mycelium now does these; delete your own:
 
 ## Check your project's efficiency
 
-After a batch, run `myce efficiency --project NAME` once. It shows what your
-own steering cost you: the share of retained jobs with any host list or target
-(counted once), their plain queue wait, distinct jobs stranded now, and queue
-hours when unrestricted capacity was observed to fit. This observation is not
-an exact counterfactual start time; without it, only plain wait is known.
-It also shows how far typed
-`host_memory_gb` and `cpu_cores` sit from what Mycelium measured. Act on each
-`advice:` line in your entries, then drop the steering it names.
+After a batch, run `myce efficiency --project NAME` once. It shows named-host
+list usage (real pins), those jobs' plain queue wait and current stranded jobs
+that would fit with host lists removed while platform targets stay intact.
+Platform targets describe software compatibility and are counted separately;
+they are not named-host pins. Plain wait does not establish pin cost or an exact
+counterfactual saving. Review host lists for a general platform, memory or tool
+need; keep intentional situational pins. It also compares typed
+`host_memory_gb` and `cpu_cores` with measured use.
 
 ## References
 
