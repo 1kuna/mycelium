@@ -740,9 +740,51 @@ func TestHostDegradedOpensOnlyWhenSustained(t *testing.T) {
 	if records := alertsOf(q, "host_degraded"); len(records) != 1 || records[0].Count != 1 || records[0].State != "open" || records[0].Reason != "host_probe_unknown" {
 		t.Fatalf("sustained unknown evidence did not open one record: %+v", records)
 	}
-	report()
-	tick()
-	if records := alertsOf(q, "host_degraded"); len(records) != 1 || records[0].State != "closed" {
-		t.Fatalf("recovery did not close the record: %+v", records)
+	var opening healthDelivery
+	for _, d := range q.pendingHealthDeliveries() {
+		if d.alert.Kind == "host_degraded" {
+			opening = d
+		}
 	}
+	if opening.episode == "" {
+		t.Fatal("no sustained opening")
+	}
+	if err := q.ackHealthDelivery(t.Context(), opening); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		report()
+		if pending := q.pendingHealthDeliveries(); len(pending) != 0 {
+			t.Fatalf("brief clear sent closing: %+v", pending)
+		}
+		clock.Advance(window + 400*time.Millisecond)
+		tick()
+		if pending := q.pendingHealthDeliveries(); len(pending) != 0 {
+			t.Fatalf("adverse observation sent closing: %+v", pending)
+		}
+		clock.Advance(window)
+		tick()
+		if records := alertsOf(q, "host_degraded"); len(records) != 1 || records[0].DeliveryID != opening.episode || !records[0].Delivered {
+			t.Fatalf("flap replaced receiver episode: %+v", records)
+		}
+	}
+	report()
+	clock.Advance(window / 2)
+	report()
+	if len(q.pendingHealthDeliveries()) != 0 {
+		t.Fatal("closed before measured recovery window")
+	}
+	clock.Advance(window / 2)
+	report()
+	pending := q.pendingHealthDeliveries()
+	if len(pending) != 1 || !pending[0].closing || pending[0].alert.DeliveryID != opening.episode+"/closed" {
+		t.Fatalf("sustained recovery did not close one episode: %+v", pending)
+	}
+	if err := q.ackHealthDelivery(t.Context(), pending[0]); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.pendingHealthDeliveries()) != 0 {
+		t.Fatal("acknowledged closing repeated")
+	}
+
 }
