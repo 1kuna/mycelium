@@ -40,19 +40,20 @@ type HealthAlert struct {
 	Mount       *HostMountHealth `json:"mount,omitempty"`
 	// Record fields. An empty State is a previous-release per-firing row; the
 	// next transaction folds those into records (migrateHealthEvents).
-	State            string     `json:"state,omitempty"` // "open" or "closed"
-	FirstAt          *time.Time `json:"first_at,omitempty"`
-	LastAt           *time.Time `json:"last_at,omitempty"`
-	ClosedAt         *time.Time `json:"closed_at,omitempty"`
-	Count            int        `json:"count,omitempty"`
-	ClosedDelivered  bool       `json:"closed_delivered,omitempty"`
-	OpeningAttempted bool       `json:"opening_attempted,omitempty"`
-	ClosingAttempted bool       `json:"closing_attempted,omitempty"`
+	State           string     `json:"state,omitempty"` // "open" or "closed"
+	FirstAt         *time.Time `json:"first_at,omitempty"`
+	LastAt          *time.Time `json:"last_at,omitempty"`
+	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	Count           int        `json:"count,omitempty"`
+	ClosedDelivered bool       `json:"closed_delivered,omitempty"`
+	// Attempts retain receiver custody across ambiguous hook exits and restarts.
+	OpeningAttempted bool `json:"opening_attempted,omitempty"`
+	ClosingAttempted bool `json:"closing_attempted,omitempty"`
 }
 
 // HealthAlertRetention bounds closed records, matching finished-job file
-// retention (MY-47). Open records and unacknowledged configured notifications
-// stay; the record count is bounded by distinct kinds and subjects.
+// retention (MY-47). Open records and notifications already in delivery custody
+// stay even while delivery is disabled; the record count is bounded by distinct kinds and subjects.
 const HealthAlertRetention = 72 * time.Hour
 
 // healthAlertKey is the record identity: kind and subject. Attempt is the latest
@@ -295,7 +296,7 @@ func (q *Queue) reconcileHealthRecords() {
 	}
 	for i := len(current) - 1; i >= 0; i-- {
 		r := current[i]
-		if !(r.Kind == "efficiency_regression" && retiredPredictionAlert(r.Reason)) && (r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && healthAlertNotifies(r) && (r.Delivered || r.OpeningAttempted) && !r.ClosedDelivered) {
+		if !(r.Kind == "efficiency_regression" && retiredPredictionAlert(r.Reason)) && (r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || healthAlertNotifies(r) && (r.Delivered || r.OpeningAttempted) && !r.ClosedDelivered) {
 			continue
 		}
 		edit()
@@ -589,6 +590,7 @@ func (q *Queue) ackHealthDelivery(ctx context.Context, d healthDelivery) error {
 			r.Delivered, r.ClosedDelivered = true, true
 		default:
 			r.DeliveryID, r.At, r.Delivered, r.ClosedDelivered, r.OpeningAttempted = ID(), q.clock.Now(), false, false, false
+			r.ClosedAt = nil
 		}
 		q.s.Health.Events = events
 		q.healthEventChanged(i)

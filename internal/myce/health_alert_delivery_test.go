@@ -150,10 +150,11 @@ func TestHealthAlertDeliverySkipsClosedBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := q.update(func() error {
-		for range 3 {
+		for range 5969 {
 			q.appendHealthAlert(HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "a"})
-			clock.Advance(time.Minute)
+			clock.Advance(time.Second)
 		}
+		clock.Advance(24 * time.Hour)
 		q.observeHealth("test/b", true, 0, HealthAlert{Kind: "host_degraded", Reason: "host_probe_unknown", Host: "b"})
 		return nil
 	}); err != nil {
@@ -290,7 +291,12 @@ func TestHealthAlertDeliveryGapAndAmbiguousReceipt(t *testing.T) {
 	}
 	// Simulate receiver acceptance followed by a failed exit / missing queue ack.
 	observe(false)
-	clock.Advance(q.healthRecoverySustain(e))
+	clock.Advance(HealthAlertRetention + q.healthRecoverySustain(e))
+	// Delivery is off beyond retention: accepted or ambiguous openings still
+	// owe a closing and must survive, unlike untouched closed history.
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	q = reopenQueue(t, q, clock)
 	pending := q.pendingHealthDeliveries()
 	if len(pending) != 1 || pending[0].closing || pending[0].alert.State != "open" || pending[0].episode != opening.episode {
