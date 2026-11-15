@@ -246,10 +246,11 @@ func TestUsedMemoryOvercommitYieldsLowestTierFirst(t *testing.T) {
 // while the surviving lender can still consume that RAM before a stop lands.
 func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 	for _, tc := range []struct {
-		gpu   bool
-		grace time.Duration
-	}{{false, 10 * time.Second}, {true, 10 * time.Second}, {false, 30 * time.Second}, {true, 30 * time.Second}} {
-		t.Run(fmt.Sprintf("unified_gpu=%t/grace=%s", tc.gpu, tc.grace), func(t *testing.T) {
+		gpu      bool
+		grace    time.Duration
+		recovery string
+	}{{false, 10 * time.Second, "headroom"}, {true, 10 * time.Second, "headroom"}, {false, 30 * time.Second, "headroom"}, {true, 30 * time.Second, "headroom"}, {false, 10 * time.Second, "release"}, {true, 10 * time.Second, "other host"}} {
+		t.Run(fmt.Sprintf("unified_gpu=%t/grace=%s/%s", tc.gpu, tc.grace, tc.recovery), func(t *testing.T) {
 			gpu := tc.gpu
 			q, clock := fixture(t)
 			if err := q.SetPreemptionGrace(tc.grace); err != nil {
@@ -353,6 +354,19 @@ func TestUsedMemoryOvercommitReadmission(t *testing.T) {
 			q.mu.Unlock()
 			if afterRelease < victim.MemoryEnvelope.HostGB {
 				t.Fatal("lender release did not return its reserved headroom", afterRelease)
+			}
+			if tc.recovery != "headroom" {
+				if tc.recovery == "release" {
+					finish(t, q, lender, true)
+				} else {
+					m = cpuMachine("other", "other-host", "cpu", 8, 50)
+				}
+				offer := assignedJob(machineCheck(t, q, m))
+				if offer == nil || offer.ID != victim.ID {
+					t.Fatal("yield hold survived actual release or blocked another host", job(t, q, victim.ID).Reason)
+				}
+				finish(t, q, offer, true)
+				return
 			}
 			// A fresh measurement of real headroom, rather than a timer or
 			// a new submission, makes the original job admissible again.

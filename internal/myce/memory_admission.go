@@ -2,6 +2,7 @@ package myce
 
 import (
 	"cmp"
+	"fmt"
 	"reflect"
 	"slices"
 	"time"
@@ -246,6 +247,62 @@ func (q *Queue) retainMemoryAdmissions() {
 
 const memoryOvercommitCause = "memory_overcommit_yield"
 
+// The last started copy retains the yield cause through requeue and restart.
+// An unstarted launch refusal must not erase it; a later actual execution does.
+func memoryYieldOnHost(j *Job, m *Machine) bool {
+	if j.State != "queued" {
+		return false
+	}
+	var last *Copy
+	for i := range j.Copies {
+		c := &j.Copies[i]
+		if (c.StartedAt != nil || c.StopCause == memoryOvercommitCause) && (last == nil || c.Attempt > last.Attempt) {
+			last = c
+		}
+	}
+	return last != nil && last.PriorityStop != nil && last.PriorityStop.Cause == memoryOvercommitCause && last.PriorityStop.Demand == "host/"+hostID(m)
+}
+
+// A job already stopped for lending must not borrow the same live executions'
+// unused ceilings again. A flat sample only describes the current slope, not
+// release of their claim. Require room for those ceilings and this job's own
+// limit; exact release or measured physical headroom clears the wait. Other
+// hosts and ordinary first admissions retain by-use lending.
+func (q *Queue) memoryYieldHold(j *Job, m *Machine) *Hold {
+	if !memoryYieldOnHost(j, m) {
+		return nil
+	}
+	l := q.hostMemoryLedgers[m.ID]
+	if l == nil {
+		return newHold("memory", "waiting for lent host memory: fresh physical capacity is unknown")
+	}
+	reserved, growth := l.ReservedGB, l.GrowthGB
+	for _, holder := range q.liveJobs() {
+		owner := q.planningAllocationMachine(q.s.Machines[holder.Machine], holder.AllocatedDevices)
+		if owner == nil || hostID(owner) != hostID(m) || !batchReservesCapacity(holder) {
+			continue
+		}
+		charge, pending := q.hostJobChargeGrowth(holder)
+		full := max(charge, hostNeed(owner, holder.Spec.Needs.MemoryGB, holder.Spec.Needs.HostMemoryGB))
+		sample := q.hostMemorySamples[holder.Machine][jobKey(*holder)]
+		_, lend := lendingFloor(holder, owner, sample, q.clock.Now())
+		rss := owner.MemoryEnforcement == darwinRSSGuardStatus && (lend == lendByUse || chargedBelowLimit(holder))
+		credit := memoryResidentCredit(sample, q.clock.Now(), rss) + q.deviceResidentCredit(holder, owner)
+		reserved += full - charge
+		growth += max(pending, full-credit) - pending
+	}
+	room, _ := q.hostMemoryRoom(m, l.CapacityGB, reserved, growth)
+	host := j.Spec.Needs.HostMemoryGB
+	if e := j.MemoryEnvelope; e != nil {
+		host = max(host, e.LimitHostGB)
+	}
+	need := hostNeed(m, j.Spec.Needs.MemoryGB, host)
+	if room >= need {
+		return nil
+	}
+	return newHold("memory", fmt.Sprintf("waiting for lent host memory: %.1f GiB needed, %.1f GiB available without lending; waiting for measured headroom or running attempts to release", need, max(0, room)))
+}
+
 // yieldMemoryOvercommit is the backstop for charging by use. A job charged by
 // use may grow back toward its declared ceiling after others were admitted
 // into its unused share. The host is lending while live free memory is less
@@ -291,7 +348,11 @@ func (q *Queue) yieldMemoryOvercommit() {
 			h.availableKnown = false
 			continue
 		}
-		live := q.workerLiveMemory(m, m)
+		live, known := q.workerLiveMemoryReading(m, m)
+		if !known {
+			h.availableKnown = false
+			continue
+		}
 		if !h.alive {
 			h.availableGB = live
 		}

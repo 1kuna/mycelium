@@ -106,8 +106,15 @@ func (q *Queue) hostLiveCapacity(m *Machine) (capacity, available float64, known
 // allocations are visible only in the physical reading, so a unified host
 // also needs that reading fresh from a live worker session.
 func (q *Queue) workerLiveMemory(m, w *Machine) float64 {
-	live := w.HostAvailableMemoryGB
-	if !w.HostMemoryMeasured || w.HostMemoryError != "" {
+	live, _ := q.workerLiveMemoryReading(m, w)
+	return live
+}
+
+// Unknown capacity is zero room for admission, but is not measured pressure
+// that authorizes interrupting an execution.
+func (q *Queue) workerLiveMemoryReading(m, w *Machine) (live float64, known bool) {
+	live, known = w.HostAvailableMemoryGB, w.HostMemoryMeasured && w.HostMemoryError == ""
+	if !known {
 		live = 0
 	}
 	o := w.MemoryObservation
@@ -118,9 +125,10 @@ func (q *Queue) workerLiveMemory(m, w *Machine) float64 {
 		now := q.clock.Now()
 		if !validHostMemoryObservation(o) || w.CapabilityProfile == nil || w.CapabilityProfile.SystemMemoryBytes == 0 || !q.workerFresh(w, now) || !q.hostHealthEvidenceValid(w, now) {
 			live = min(live, 0)
+			known = false
 		}
 	}
-	return live
+	return live, known
 }
 
 // Charge.

@@ -201,6 +201,12 @@ growth through stop grace and sensor freshness. Keep the original job/key;
 it waits until measured headroom returns or those attempts release, rather
 than repeatedly restarting into the same pressure. A completion-time memory
 sample cannot reconstruct the stop-time forecast.
+`waiting for lent host memory` retains the last started copy's yield cause
+across requeue and queue restart. Readmission on that host needs room for the
+running attempts' unconsumed ceilings and the resumed job's limit, so a flat
+sample cannot restart the lending loop. Another compatible host can still run
+the job. Stale or unknown physical telemetry blocks admission and does not
+authorize a memory-safety yield.
 
 - **Production** is for work a person or customer is waiting on, as the
   project defines it. When it preempts, resumable work gets 10 seconds to save

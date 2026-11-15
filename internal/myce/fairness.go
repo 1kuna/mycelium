@@ -350,6 +350,10 @@ func resourceKey(j *Job) batchResourceKey {
 }
 
 func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
+	// This hold belongs to the exact yielded job, before any vector-only cache.
+	if !q.admissionHold(j, m, q.memoryYieldHold(j, m), predicateReleasePlan) {
+		return false
+	}
 	if !q.admissionHold(j, m, q.variantParityHold(j, m), predicateVariantParity) {
 		return false
 	}
