@@ -18,9 +18,9 @@ import (
 	"mycelium/internal/myce"
 )
 
-// installFakeFleet gives home an installed worker whose joining authority
+// installFakeFleet gives home an installed role whose joining authority
 // names a pinned HTTPS fleet queue; any request reaching it is counted.
-func installFakeFleet(t *testing.T, home, token string) *atomic.Int64 {
+func installFakeFleet(t *testing.T, home, role, token string) *atomic.Int64 {
 	t.Helper()
 	var requests atomic.Int64
 	fleet := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
@@ -30,11 +30,11 @@ func installFakeFleet(t *testing.T, home, token string) *atomic.Int64 {
 	if err := myce.WriteInvitation(joining, myce.Invitation{Version: 1, Fingerprint: hex.EncodeToString(hash[:]), Token: token, Address: fleet.URL}); err != nil {
 		t.Fatal(err)
 	}
-	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+	config := filepath.Join(home, ".local", "share", "mycelium", role, "config.json")
 	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := json.Marshal(myce.ServiceConfig{Role: "worker", Queue: fleet.URL, JoiningFile: joining})
+	data, _ := json.Marshal(myce.ServiceConfig{Role: role, Queue: fleet.URL, JoiningFile: joining})
 	if err := os.WriteFile(config, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,31 +45,38 @@ func installFakeFleet(t *testing.T, home, token string) *atomic.Int64 {
 // and the installed fleet authority neither reaches nor receives anything.
 func TestDevCommandOnEnrolledMachine(t *testing.T) {
 	binary := devTestBinary(t)
-	home := t.TempDir()
-	const fleetToken = "fake-fleet-token-1270"
-	requests := installFakeFleet(t, home, fleetToken)
-	t.Setenv("HOME", home)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	var out, errOut bytes.Buffer
-	err := devCommandSession(ctx, []string{"sh", "-ec", `"$1" run -- echo hi; "$1" run -- sh -c 'env'`, "fixture", binary}, nil, &out, &errOut)
-	if err != nil {
-		t.Fatalf("dev run on an enrolled machine: %v\n%s%s", err, out.String(), errOut.String())
-	}
-	if !strings.Contains(out.String(), "hi\n") {
-		t.Fatalf("missing job output:\n%s", out.String())
-	}
-	if strings.Contains(out.String()+errOut.String(), fleetToken) || requests.Load() != 0 {
-		t.Fatalf("fleet authority used inside dev: %d requests\n%s%s", requests.Load(), out.String(), errOut.String())
+	for _, role := range []string{"worker", "queue"} {
+		t.Run(role, func(t *testing.T) {
+			home := t.TempDir()
+			const fleetToken = "fake-fleet-token-1270"
+			requests := installFakeFleet(t, home, role, fleetToken)
+			t.Setenv("HOME", home)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			var out, errOut bytes.Buffer
+			err := devCommandSession(ctx, []string{"sh", "-ec", `"$1" status; "$1" run -- echo hi; "$1" run -- sh -c 'env'`, "fixture", binary}, nil, &out, &errOut)
+			if err != nil {
+				t.Fatalf("dev run on an enrolled machine: %v\n%s%s", err, out.String(), errOut.String())
+			}
+			if !strings.Contains(out.String(), "hi\n") {
+				t.Fatalf("missing job output:\n%s", out.String())
+			}
+			if strings.Contains(out.String()+errOut.String(), fleetToken) || requests.Load() != 0 {
+				t.Fatalf("fleet authority used inside dev: %d requests\n%s%s", requests.Load(), out.String(), errOut.String())
+			}
+		})
 	}
 }
 
 func TestDevSessionAuthorityPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	// An unreadable installed config proves the dev path never opens it.
-	if err := os.MkdirAll(filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json"), 0700); err != nil {
-		t.Fatal(err)
+	// Neither installed role may be read, including its token reference. A
+	// directory in place of each config makes any attempted read fail loudly.
+	for _, role := range []string{"worker", "queue"} {
+		if err := os.MkdirAll(filepath.Join(home, ".local", "share", "mycelium", role, "config.json"), 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("MYCE_JOINING_FILE", "")
 	t.Setenv("MYCE_DEV_SESSION_ROOT", t.TempDir())
@@ -89,7 +96,7 @@ func TestDevSessionAuthorityPrecedence(t *testing.T) {
 	}
 	// Explicit fleet authority cannot pin the dev queue's plain HTTP address.
 	fleetHome := t.TempDir()
-	requests := installFakeFleet(t, fleetHome, "fake-fleet-token-1270")
+	requests := installFakeFleet(t, fleetHome, "worker", "fake-fleet-token-1270")
 	if _, err := runClient(filepath.Join(fleetHome, ".local", "share", "mycelium", "worker", "config.json"), "", "http://127.0.0.1:9", ""); err == nil || requests.Load() != 0 {
 		t.Fatal("explicit fleet authority reached the dev queue")
 	}
