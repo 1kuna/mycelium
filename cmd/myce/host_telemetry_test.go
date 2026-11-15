@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"testing"
@@ -98,7 +99,12 @@ func TestHostTelemetryWorkerOnlyCapture(t *testing.T) {
 		}
 		// Exercise production dispatch and real local probes, without a queue
 		// or installed authority. The parent test is the owned worker fixture.
-		cmd := exec.CommandContext(t.Context(), devTestBinary(t), "telemetry", "capture",
+		binary := filepath.Join(t.TempDir(), "myce")
+		build := exec.CommandContext(t.Context(), "go", "build", "-p", "1", "-o", binary, ".")
+		if data, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build production CLI: %v\n%s", err, data)
+		}
+		cmd := exec.CommandContext(t.Context(), binary, "telemetry", "capture",
 			"--run-id", "worker-only", "--host-ref", "host-a",
 			"--worker-pid", strconv.Itoa(worker), "--duration", "2s", "--interval", "2s")
 		data, err := cmd.CombinedOutput()

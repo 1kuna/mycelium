@@ -322,19 +322,22 @@ func TestAdmissionWaitRetainsPhysicalMemoryAccounting(t *testing.T) {
 	m.HostMemoryBudgetGB = 113.64812850952148
 	m.MemoryCeilingSlackGB = .125
 	m.CapabilityProfile.SystemMemoryBytes = 129992077312
+	m.Devices = []MachineDevice{}
 	machineCheck(t, q, m)
 	var reports []AttemptReport
+	var runs []*Job
 	for _, row := range [][2]float64{{43.29749156746103, 42.154821889726655}, {8.125, 6.3597564697265625}, {14.125, 5.931949615478516}} {
 		s := cpuSpec(1, row[0]-.125)
 		s.Priority = "production"
 		holder := submit(t, q, s)
-		run := assignedJob(machineCheck(t, q, m))
+		run := assignedJob(machineCheck(t, q, m, runs...))
 		if run == nil || run.ID != holder.ID {
-			t.Fatal("missing synthetic holder")
+			t.Fatalf("missing synthetic holder: %s", job(t, q, holder.ID).Reason)
 		}
 		if err := q.Started(result(run, false)); err != nil {
 			t.Fatal(err)
 		}
+		runs = append(runs, run)
 		reports = append(reports, AttemptReport{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true,
 			CurrentHostMemory: &CurrentHostMemory{NonreclaimableGB: row[0] - row[1]}})
 	}
