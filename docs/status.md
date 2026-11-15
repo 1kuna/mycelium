@@ -2334,10 +2334,20 @@ by `delivery_id`. Deployment-specific inbox identity belongs in private config.
 - Exit 0 acknowledges durably. Failure or a 30-second timeout retries that ID
   after a minute; deliveries are paced one per second. `MYCE_TOKEN` is removed
   from the environment; stdout/stderr are not logged.
-- Closing before opening delivery sends one closing carrying the firing count.
-  Reopening before closing delivery continues the episode; reopening after an
-  acknowledged closing gets a new ID. The receiver must deduplicate retries.
-- `health_alert_delivery` reports `configured` and unacknowledged `pending`.
+- On activation or after a delivery gap, closed problems whose openings were
+  never attempted stay in status and produce no inbox messages. Only current
+  open problems start delivery; each record is rechecked before invoking the hook.
+- A closing waits for recovery to last the host's measured evidence window
+  (the same probe-validity rule as sustained host openings, with its existing
+  legacy fallback). Renewed adverse evidence interrupts recovery. Reopening
+  before closing delivery continues the receiver's episode; reopening after an
+  acknowledged closing gets a new ID.
+- Delivery custody is persisted before invoking the hook. An ambiguous opening
+  or closing retries the same ID across restarts, even if health changes while
+  delivery is unavailable. Receivers must deduplicate retries, including an
+  accepted message whose hook failed before returning its acknowledgement.
+- `health_alert_delivery` reports `configured` and unacknowledged `pending`
+  (including closings waiting for sustained recovery, excluding untouched closed history).
   Without a hook, status explains missing delivery. Hook acknowledgement proves
   receiver acceptance, not downstream agent execution. Restart without a hook
   clears historical configuration. Job completion delivery is independent.

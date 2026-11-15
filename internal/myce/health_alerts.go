@@ -46,11 +46,14 @@ type HealthAlert struct {
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	Count           int        `json:"count,omitempty"`
 	ClosedDelivered bool       `json:"closed_delivered,omitempty"`
+	// Attempts retain receiver custody across ambiguous hook exits and restarts.
+	OpeningAttempted bool `json:"opening_attempted,omitempty"`
+	ClosingAttempted bool `json:"closing_attempted,omitempty"`
 }
 
 // HealthAlertRetention bounds closed records, matching finished-job file
-// retention (MY-47). Open records and unacknowledged configured notifications
-// stay; the record count is bounded by distinct kinds and subjects.
+// retention (MY-47). Open records and notifications already in delivery custody
+// stay even while delivery is disabled; the record count is bounded by distinct kinds and subjects.
 const HealthAlertRetention = 72 * time.Hour
 
 // healthAlertKey is the record identity: kind and subject. Attempt is the latest
@@ -79,18 +82,28 @@ var healthNotifyKinds = []string{
 func healthAlertNotifies(e HealthAlert) bool { return slices.Contains(healthNotifyKinds, e.Kind) }
 
 // pendingHealthDeliveries sends openings and closings of host-level problems
-// only. A record that closed before its opening was delivered sends one
-// closing notification.
-func pendingHealthDeliveries(events []HealthAlert) []healthDelivery {
+// only. Untouched closed history is status-only. An ambiguous opening must
+// finish with its original identity before its closing can be delivered.
+func (q *Queue) pendingHealthDeliveries() []healthDelivery {
 	var out []healthDelivery
-	for _, r := range events {
+	bad := map[string]bool{}
+	for _, c := range q.s.Health.Conditions {
+		if c.Record != "" && (c.Active || !c.Since.IsZero()) {
+			bad[c.Record] = true
+		}
+	}
+	for _, r := range q.s.Health.Events {
 		if !healthAlertNotifies(r) {
 			continue
 		}
 		d := healthDelivery{alert: r, episode: r.DeliveryID}
 		switch {
-		case r.State == "open" && !r.Delivered:
-		case r.State == "closed" && !(r.Delivered && r.ClosedDelivered):
+		case r.ClosingAttempted:
+			d.closing = true
+			d.alert.State, d.alert.DeliveryID = "closed", r.DeliveryID+"/closed"
+		case !r.Delivered && (r.State == "open" || r.OpeningAttempted):
+			d.alert.State, d.alert.ClosedAt = "open", nil
+		case !bad[healthAlertKey(r)] && r.State == "closed" && r.Delivered && !r.ClosedDelivered && r.ClosedAt != nil && q.clock.Now().Sub(*r.ClosedAt) >= q.healthRecoverySustain(r):
 			d.closing = true
 			d.alert.DeliveryID += "/closed"
 		default:
@@ -138,9 +151,9 @@ func (d HealthAlertDelivery) Summary() string {
 }
 
 func (q *Queue) healthAlertDelivery() *HealthAlertDelivery {
-	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured, Pending: len(pendingHealthDeliveries(q.s.Health.Events))}
+	d := &HealthAlertDelivery{Configured: q.s.Health.DeliveryConfigured}
 	for _, e := range q.s.Health.Events {
-		if e.State == "" && !e.Delivered && healthAlertNotifies(e) {
+		if healthAlertNotifies(e) && ((!e.Delivered && (e.State == "" || e.State == "open" || e.OpeningAttempted)) || (!e.ClosedDelivered && (e.Delivered || e.ClosingAttempted))) {
 			d.Pending++
 		}
 	}
@@ -213,8 +226,12 @@ func (q *Queue) recordHealthAlert(e HealthAlert, point bool) string {
 	} else {
 		r := events[i]
 		n.FirstAt, n.Count = r.FirstAt, r.Count+1
-		if r.Delivered && r.State == "closed" && r.ClosedDelivered {
-			n.DeliveryID, n.At = ID(), now
+		n.OpeningAttempted, n.ClosingAttempted = r.OpeningAttempted, r.ClosingAttempted
+		if r.ClosingAttempted {
+			n.ClosedAt = r.ClosedAt
+		}
+		if r.State == "closed" && (r.ClosedDelivered || (!r.Delivered && !r.OpeningAttempted)) {
+			n.DeliveryID, n.At, n.OpeningAttempted = ID(), now, false
 			n.Recovery = q.recoverHealthAlert(n)
 		} else {
 			n.DeliveryID, n.At, n.Delivered = r.DeliveryID, r.At, r.Delivered
@@ -240,7 +257,11 @@ func (q *Queue) recordHealthAlert(e HealthAlert, point bool) string {
 // gap so only two rows change.
 func (q *Queue) reconcileHealthRecords() {
 	open := map[string]bool{}
+	pendingBad := map[string]bool{}
 	for _, c := range q.s.Health.Conditions {
+		if !c.Since.IsZero() && c.Record != "" {
+			pendingBad[c.Record] = true
+		}
 		if c.Active && c.Record != "" {
 			open[c.Record] = true
 		}
@@ -253,9 +274,19 @@ func (q *Queue) reconcileHealthRecords() {
 		}
 	}
 	for i, r := range q.s.Health.Events {
+		if r.State == "closed" && !r.ClosedDelivered && !r.ClosingAttempted && pendingBad[healthAlertKey(r)] {
+			// A renewed adverse observation interrupts sustained recovery even
+			// before it qualifies as another opening.
+			edit()
+			events[i].ClosedAt = &now
+			q.healthEventChanged(i)
+		}
 		if r.State == "open" && !open[healthAlertKey(r)] {
 			edit()
-			events[i].State, events[i].ClosedAt = "closed", &now
+			events[i].State = "closed"
+			if !r.ClosingAttempted {
+				events[i].ClosedAt = &now
+			}
 			q.healthEventChanged(i)
 		}
 	}
@@ -265,7 +296,7 @@ func (q *Queue) reconcileHealthRecords() {
 	}
 	for i := len(current) - 1; i >= 0; i-- {
 		r := current[i]
-		if !(r.Kind == "efficiency_regression" && retiredPredictionAlert(r.Reason)) && (r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || q.s.Health.DeliveryConfigured && healthAlertNotifies(r) && !(r.Delivered && r.ClosedDelivered)) {
+		if !(r.Kind == "efficiency_regression" && retiredPredictionAlert(r.Reason)) && (r.State != "closed" || r.ClosedAt == nil || now.Sub(*r.ClosedAt) < HealthAlertRetention || healthAlertNotifies(r) && (r.Delivered || r.OpeningAttempted) && !r.ClosedDelivered) {
 			continue
 		}
 		edit()
@@ -285,7 +316,7 @@ func (q *Queue) reconcileHealthRecords() {
 // migrateHealthEvents folds previous-release per-firing rows (empty State) into
 // records, and rearms active conditions without a record so they reopen one in
 // this pass. Migrated history is closed at its last firing; undelivered history
-// sends one closing notification per record if a notifier is configured.
+// stays in status unless its opening already has delivery custody.
 func (q *Queue) migrateHealthEvents() {
 	for key, c := range q.s.Health.Conditions {
 		if c.Active && c.Record == "" {
@@ -466,7 +497,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 		hook, wake := q.healthNotifier, q.wake
 		var pending []healthDelivery
 		if hook != "" {
-			pending = pendingHealthDeliveries(q.s.Health.Events)
+			pending = q.pendingHealthDeliveries()
 		}
 		q.mu.RUnlock()
 		if hook == "" {
@@ -474,13 +505,25 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 		}
 		failed := false
 		for _, delivery := range pending {
+			// Recheck after pacing or earlier hooks: an untouched problem may
+			// have recovered while delivery was unavailable. Persist custody
+			// before invoking the receiver, including ambiguous hook exits.
+			current, ok, err := q.beginHealthDelivery(ctx, delivery)
+			if err != nil {
+				failed = true
+				break
+			}
+			if !ok {
+				continue
+			}
+			delivery = current
 			e := delivery.alert
 			data, _ := json.Marshal(e)
 			// Bound a wedged local hook so health delivery cannot strand shutdown.
 			sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			cmd := exec.CommandContext(sendCtx, hook)
 			cmd.Env, cmd.Stdin = healthNotifierEnv(), bytes.NewReader(data)
-			err := cmd.Run()
+			err = cmd.Run()
 			cancel()
 			if ctx.Err() != nil {
 				return
@@ -537,16 +580,65 @@ func (q *Queue) ackHealthDelivery(ctx context.Context, d healthDelivery) error {
 		}
 		events := q.editHealthEvents()
 		r := &events[i]
+		if d.closing {
+			r.ClosingAttempted = false
+		}
 		switch {
 		case !d.closing:
 			r.Delivered = true
 		case r.State == "closed":
 			r.Delivered, r.ClosedDelivered = true, true
 		default:
-			r.DeliveryID, r.At, r.Delivered, r.ClosedDelivered = ID(), q.clock.Now(), false, false
+			r.DeliveryID, r.At, r.Delivered, r.ClosedDelivered, r.OpeningAttempted = ID(), q.clock.Now(), false, false, false
+			r.ClosedAt = nil
 		}
 		q.s.Health.Events = events
 		q.healthEventChanged(i)
 		return nil
 	}, nil)
+}
+
+// Recovery uses the same measured host evidence window as sustained openings.
+// Queue/storage-only alerts without host evidence use that rule's legacy window.
+func (q *Queue) healthRecoverySustain(e HealthAlert) time.Duration {
+	var window time.Duration
+	for _, m := range q.s.Machines {
+		if (e.Host != "" && hostID(m) == e.Host) || (e.Machine != "" && m.ID == e.Machine) {
+			window = max(window, hostDegradedSustain(m))
+		}
+	}
+	if window == 0 {
+		window = hostDegradedSustain(&Machine{})
+	}
+	return window
+}
+
+func (q *Queue) beginHealthDelivery(ctx context.Context, wanted healthDelivery) (healthDelivery, bool, error) {
+	var current healthDelivery
+	var found bool
+	err := q.updateRequest(ctx, func() error {
+		q.detectHealth() // refresh current conditions before taking delivery custody
+		for _, d := range q.pendingHealthDeliveries() {
+			if d.key != wanted.key || d.episode != wanted.episode || d.closing != wanted.closing {
+				continue
+			}
+			current, found = d, true
+			events := q.editHealthEvents()
+			for i := range events {
+				if events[i].DeliveryID == d.episode && healthAlertKey(events[i]) == d.key {
+					if d.closing {
+						events[i].ClosingAttempted = true
+					} else {
+						events[i].OpeningAttempted = true
+					}
+					q.healthEventChanged(i)
+					break
+				}
+			}
+			q.s.Health.Events = events
+			break
+		}
+		return nil
+	}, nil)
+	return current, found, err
 }

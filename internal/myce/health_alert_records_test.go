@@ -55,14 +55,14 @@ func TestHealthAlertCloseReopenAndExpire(t *testing.T) {
 	e := HealthAlert{Kind: "disk_below_guard", Host: "h"}
 	ack := func(want string, closing bool) {
 		t.Helper()
-		pending := pendingHealthDeliveries(q.s.Health.Events)
+		pending := q.pendingHealthDeliveries()
 		if len(pending) != 1 || pending[0].closing != closing || pending[0].alert.DeliveryID != want {
 			t.Fatalf("pending %+v, want %s closing=%v", pending, want, closing)
 		}
 		if err := q.ackHealthDelivery(t.Context(), pending[0]); err != nil {
 			t.Fatal(err)
 		}
-		if len(pendingHealthDeliveries(q.s.Health.Events)) != 0 {
+		if len(q.pendingHealthDeliveries()) != 0 {
 			t.Fatal("acknowledged delivery still pending")
 		}
 	}
@@ -75,7 +75,7 @@ func TestHealthAlertCloseReopenAndExpire(t *testing.T) {
 	}
 	// Reopened before the closing was delivered: the receiver still sees it open.
 	flapHealth(t, q, clock, "test/o", e, true)
-	if r := q.s.Health.Events[0]; r.State != "open" || r.DeliveryID != opening || !r.Delivered || len(pendingHealthDeliveries(q.s.Health.Events)) != 0 {
+	if r := q.s.Health.Events[0]; r.State != "open" || r.DeliveryID != opening || !r.Delivered || len(q.pendingHealthDeliveries()) != 0 {
 		t.Fatalf("silent reopen %+v", r)
 	}
 	flapHealth(t, q, clock, "test/o", e, false)
@@ -218,13 +218,13 @@ func TestHealthAlertNotifierReceivesHostLevelProblemsOnly(t *testing.T) {
 		flapHealth(t, q, clock, "test/"+e.Kind, e, true)
 		flapHealth(t, q, clock, "test/"+e.Kind, e, false)
 	}
-	pending := pendingHealthDeliveries(q.s.Health.Events)
-	if len(pending) != 1 || pending[0].alert.Kind != host.Kind || q.healthAlertDelivery().Pending != 1 {
+	pending := q.pendingHealthDeliveries()
+	if len(pending) != 0 || q.healthAlertDelivery().Pending != 0 {
 		t.Fatalf("notifier receives %+v", pending)
 	}
 	clock.Advance(HealthAlertRetention)
 	flapHealth(t, q, clock, "test/none", HealthAlert{}, false)
-	if len(q.s.Health.Events) != 1 || q.s.Health.Events[0].Kind != host.Kind {
+	if len(q.s.Health.Events) != 0 {
 		t.Fatalf("status-only records kept for a notifier that never receives them: %+v", q.s.Health.Events)
 	}
 }
