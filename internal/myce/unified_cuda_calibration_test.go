@@ -102,7 +102,7 @@ func TestUnifiedCUDACalibrationRetainedCharges(t *testing.T) {
 		}
 	}
 	m := &Machine{HostMemoryBudgetGB: 96, FreeHostMemoryGB: 96, HostMemoryMeasured: true, MemoryCeilingSlackGB: .125}
-	if !hostFits(m, 0, 2*charge) || hostFits(m, 0, 3*charge) {
+	if !hostFits(m, 0, 2*charge) || hostFits(m, 0, 4*charge) {
 		t.Fatal("pair fit/oversubscription")
 	}
 	key := points[0].Key

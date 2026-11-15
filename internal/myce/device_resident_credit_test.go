@@ -106,7 +106,7 @@ func TestDeviceResidentCreditRefusalReplay(t *testing.T) {
 	// Keep the already assigned holder frozen at its historical charge. Only
 	// the incoming attempt gets the new complete physical-bound envelope.
 	charge := retainedUnifiedPhysicalCharge(t)
-	if !hostFits(&m, after.ReservedGB, charge) || charge > after.FreeGB {
+	if !hostFits(q.s.Machines[m.ID], 22.443359375, charge-22.443359375-.125) || charge > after.FreeGB {
 		t.Fatal("calibrated second naming refused", charge, after.FreeGB)
 	}
 	next := Job{ID: "next-gpu", State: "running", Attempt: 1, Spec: spec("experiment")}

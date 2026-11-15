@@ -168,16 +168,16 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 				if len(facts) != 1 || facts[0].Attempt != last.Attempt || facts[0].Session != last.Session || (facts[0].LearningReason == "eligible") != (mode != "host OOM") {
 					t.Fatal("attempt facts or pressure exclusion lost", facts)
 				}
-				q = memoryFactsRestart(t, q, clock)
-				retained := job(t, q, last.ID).MemoryAttempts[0].MemoryPeak.HostSampling
-				if retained == nil || *retained != *p.HostSampling {
-					t.Fatal("wire/SQLite lost rejection evidence", retained)
-				}
 			}
 			probe := *q.s.Jobs[last.ID]
 			probe.State = "queued"
 			target := m.Devices[0].machine(m)
 			estimate := q.memoryEstimate(&probe, &target)
+			q = memoryFactsRestart(t, q, clock)
+			retained := job(t, q, last.ID).MemoryAttempts[0].MemoryPeak.HostSampling
+			if retained == nil || *retained != *p.HostSampling {
+				t.Fatal("wire/SQLite lost rejection evidence", retained)
+			}
 			if mode == "host OOM" {
 				if estimate.measuredHostGB != 0 {
 					t.Fatal("OOM evidence trained the envelope", estimate)
