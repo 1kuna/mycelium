@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"net/http"
@@ -19,13 +18,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const residentJobsCapability = "resident_jobs_v1"
 
 // ResidentBinding opts a command into an authored catalog engine. Engine is
 // queue-owned frozen execution data, never an authoring field. The command is
-// an ordinary attempt: it stages inputs, calls the socket, validates and writes
+// an ordinary attempt: it stages inputs, calls the bridge, validates and writes
 // declared outputs. Only the model process survives that attempt.
 type ResidentBinding struct {
 	Model  string          `json:"model" yaml:"model"`
@@ -70,7 +71,14 @@ func (q *Queue) freezeResident(j *Job) error {
 	if err := validateResident(j.Spec); err != nil {
 		return err
 	}
-	model, ok := q.model(j.Spec.Resident.Model)
+	var model Model
+	ok := false
+	for _, entry := range q.models.Models {
+		if entry.Name == j.Spec.Resident.Model {
+			model, ok = entry, true
+			break
+		}
+	}
 	if !ok || model.Engine != "server" && model.Engine != "llama.cpp" && model.Engine != "vllm" && model.Engine != "fake" {
 		return errors.New("resident model must name an existing catalog engine")
 	}
@@ -88,7 +96,7 @@ func (q *Queue) freezeResident(j *Job) error {
 	}
 	run, execution, environment := j.Spec.Run, j.Spec.Execution, j.Spec.Environment
 	if j.Spec.PrepareSource || len(extensions) > 0 {
-		run, execution, environment = RunSpec{}, nil, Environment{}
+		run, execution = RunSpec{}, nil
 	}
 	identity, err := json.Marshal(struct {
 		Project, Name, Kind, Extension string
@@ -149,7 +157,11 @@ func (q *Queue) residentJobFits(j *Job, m *Machine) bool {
 	if r.Engine == nil || !contains(m.Capabilities, residentJobsCapability) || len(m.groupMembers) > 0 || m.ModelURL == "" || !q.modelUsableMachine(r.Engine.Model, m) {
 		return false
 	}
-	if slot := q.s.ModelSlots[targetSlotKey(m, r.Engine.Model.Name)]; slot != nil && (slot.Session != m.Session || slot.State != "ready" && slot.State != "loading") {
+	if slot := q.s.ModelSlots[targetSlotKey(m, r.Engine.Model.Name)]; slot != nil {
+		if slot.Session != m.Session || slot.State != "ready" && slot.State != "loading" {
+			return false
+		}
+	} else if q.modelLoadDiskHeadroomReason(r.Engine.Model, m) != "" {
 		return false
 	}
 	planned := q.residentPlanningJob(j, m)

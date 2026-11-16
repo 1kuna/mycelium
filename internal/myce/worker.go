@@ -696,9 +696,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	sharedRelease = func() { residentClose(); oldSharedRelease() }
 	s.sharedRelease = sharedRelease
 	env := jobBaseEnvironment()
-	for k, v := range residentEnv {
-		env[k] = v
-	}
 	if compilerPath != "" {
 		env["GOCACHE"] = compilerPath
 	}
@@ -709,6 +706,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		env[k] = v
 	}
 	for k, v := range extensionEnv {
+		env[k] = v
+	}
+	for k, v := range residentEnv {
 		env[k] = v
 	}
 	if compilerPath != "" && env["GOCACHE"] != compilerPath {
