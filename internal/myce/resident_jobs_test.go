@@ -307,6 +307,15 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports, period: time.Second}); err != nil {
 		t.Fatal(err)
 	}
+	// Restarted worker reports clean custody only after the real process was reaped.
+	previous := m.Session
+	if err := rt.close(); err != nil {
+		t.Fatal(err)
+	}
+	m.Session = "replacement-session"
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
 	if job(t, q, first.ID).State != "succeeded" || job(t, q, second.ID).State != "succeeded" || !dependencyReady(job(t, q, consumer.ID)) {
 		t.Fatal("failed/cancelled/dead engine damaged accepted siblings")
 	}

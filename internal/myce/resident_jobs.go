@@ -285,6 +285,8 @@ func (w Worker) startResidentBridge(ctx context.Context, j Job, work string) (ma
 		}
 		req.Header = proxyHeaders(in.Header)
 		req.Header.Set("Authorization", "Bearer "+w.Client.Token)
+		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
+		req.Header.Set("User-Agent", "myce/"+BuildVersion)
 		req.Header.Set("X-Myce-Machine", j.Machine)
 		req.Header.Set("X-Myce-Session", j.Session)
 		req.Header.Set("X-Myce-Job-Attempt", strconv.Itoa(j.Attempt))
