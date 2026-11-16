@@ -2101,6 +2101,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	// discovers their last save before recording its resume origin or retrying.
 	var finalGeneration int64 = -1
 	if finalPath != "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		key := fmt.Sprintf("complete:%d:%s", r.Attempt, r.Session)
 		var e error
 		finalGeneration, e = q.nasProgress.event(q.clock, key, finalPath, func() (int64, error) { return checkpointProgress(finalPath) })

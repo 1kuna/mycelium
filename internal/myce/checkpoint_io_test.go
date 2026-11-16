@@ -278,6 +278,9 @@ func TestCheckpointAvailabilityIdleCacheKeepsPendingStallFence(t *testing.T) {
 				if role == "queue" {
 					q, queueClock := fixture(t)
 					clock = queueClock
+					q.nasRecent.mu.Lock()
+					q.nasRecent.observed = false // The fixture already probed before this counting seam.
+					q.nasRecent.mu.Unlock()
 					q.nasProbeIO = func(_ string, progress func()) bool { ok, _ := fn(progress); return ok }
 					poll = q.recentCheckpointAvailability
 				}

@@ -630,8 +630,13 @@ print('queue accepted local generation', flush=True)
             subprocess.run(["sh", "-ec", "git init -q && git commit -q --allow-empty -m start"],
                            cwd=project, env=environment, check=True)
             for index, block in enumerate(blocks):
-                result = subprocess.run(["sh", "-ec", block], cwd=project, env=environment,
-                                        capture_output=True, text=True, timeout=90)
+                try:
+                    result = subprocess.run(["sh", "-ec", block], cwd=project, env=environment,
+                                            capture_output=True, text=True, timeout=90)
+                except subprocess.TimeoutExpired as error:
+                    self.output.seek(0)
+                    self.fail(f"guide command timed out: {block}\nstdout={error.stdout!r}\nstderr={error.stderr!r}\n"
+                              f"dev status={self.client.status(snapshot=True)!r}\ndev log={self.output.read()}")
                 self.assertEqual(result.returncode, 0, block + result.stdout + result.stderr)
                 if index == 1:
                     self.assertEqual(result.stdout.splitlines()[-1], "mycelium-ease-audit-ok")

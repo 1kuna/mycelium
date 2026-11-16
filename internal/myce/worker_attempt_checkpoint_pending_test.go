@@ -26,8 +26,8 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Once the pending read completes, subsequent scans also fail on this
-		// unsupported symlink, so the completed-error diagnostic stays observable.
+		// Finalization is an event; its completed-error diagnostic stays cached
+		// without periodic attempts to reread the unsupported symlink.
 		if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -36,18 +36,19 @@ func TestAttemptPendingCheckpointScanDoesNotFenceHost(t *testing.T) {
 		}
 		release := make(chan error, 1)
 		defer close(release)
-		_, err = s.nasProgress.run(attemptCheckpoint(j), func() (int64, error) {
+		_, err = s.nasProgress.event(w.Clock, "final", attemptCheckpoint(j), func() (int64, error) {
 			return 7, <-release
 		})
 		if !errors.Is(err, errCheckpointIOPending) {
 			t.Fatal("scan did not exceed heartbeat wait", err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
+		s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 		a := &attemptSupervisor{store: s, job: j, worker: w, wake: make(chan struct{}, 1), done: make(chan struct{})}
 		go a.run(ctx)
 		defer func() { cancel(); <-a.done }()
-		// Keep the actual actor disconnected so it only observes existing
-		// custody; no command or queue is needed to reproduce this diagnostic.
+		// Keep the finalizing actor disconnected; no command or queue is
+		// needed to reproduce this diagnostic.
 		for {
 			report, diagnostic, _, _ := a.snapshot()
 			if report.ID == j.ID {
