@@ -223,9 +223,10 @@ authorize a memory-safety yield.
 - **Deadline** needs a real owner-set date (`--class deadline --deadline
   RFC3339`). It stops only resumable lower-tier work, with two minutes to save.
   The date orders work; it is not a completion guarantee.
-- **Experiment** can be stopped by either tier and requeued. A stop is not
-  charged as a loss, but a non-resumable job restarts from scratch, so make long
-  experiments resumable. Experiments keep a three-loss limit for real losses.
+- **Experiment** can be checkpoint-stopped by either tier and requeued when
+  resumable, without charging a loss. Running non-resumable commands finish
+  naturally, so make long experiments resumable to let production reclaim
+  capacity. Experiments keep a three-loss limit for real losses.
 
 Within a tier, jobs order by readiness (environment and model), earliest
 deadline, then waiting age, and competing projects share by recent use. There

@@ -382,8 +382,10 @@ losses and checkpoint progress. A successful completion wins over preemption;
 cancellation wins over both. Independent exit/OOM still fails under the shared
 outcome classifier. A deadline authorizes stopping, never assumes cleanup.
 
-Resumable victims get ten seconds by default, non-resumable commands stop
-immediately. Deadline demand preserves non-resumable commands and keeps the
+Resumable victims get ten seconds by default. Running non-resumable commands
+finish naturally (MY-56); unstarted offers remain reclaimable. History names
+these holders with `non_resumable_running`, and new non-resumable backfill
+cannot deepen ready production's host RAM/CPU deficit. Deadline demand keeps the
 120-second grace for resumable commands. `queue --preemption-stop-grace`
 configures the other priority-stop interval; the legacy
 `--production-stop-grace` flag remains an alias. After two displacements, resumed

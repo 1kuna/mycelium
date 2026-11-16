@@ -68,7 +68,7 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 				t.Fatal("production spent capacity before exact release", got.ID)
 			}
 			clock.Advance(time.Second)
-			if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, Session: run.Session, Started: true, Progress: 41}}}); err != nil {
+			if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: run.ID, Attempt: run.Attempt, Progress: 41}, Session: run.Session, Started: true}}}); err != nil {
 				t.Fatal(err)
 			}
 			r := result(run, false)
