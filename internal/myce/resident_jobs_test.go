@@ -179,7 +179,7 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	}
 	s.Outputs = map[string]string{"out": "results"}
 	first := residentAssigned(t, q, m, s)
-	if err := q.ConfigurePolicies(map[string]ProjectPolicy{s.Project: {Weight: 1, MaxConcurrent: 1, MaxConcurrentExperiments: 1}}); err != nil {
+	if err := q.ConfigureProjects(map[string]ProjectPolicy{s.Project: {Weight: 1, MaxConcurrent: 1, MaxConcurrentExperiments: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	frozen := first.Spec.Resident.Engine.Model
