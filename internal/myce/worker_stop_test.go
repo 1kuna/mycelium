@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -46,6 +47,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	q.clock = clock
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
+	var bootstrap sync.Mutex
 	var uploaded atomic.Bool
 	api := API{Queue: q, Token: "test"}.Handler()
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +58,31 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 			}
 		}
 		if blockCheckin && uploaded.Load() && r.URL.Path == "/api/workers/checkin" {
-			once.Do(func() { close(entered); <-release })
+			// Keep the response on the wire blocked after the queue accepts a
+			// fresh inventory. Holding an older request before acceptance can
+			// expire the fake device during bootstrap, preventing any stop from
+			// being planned and testing admission instead of stop delivery.
+			reply := httptest.NewRecorder()
+			api.ServeHTTP(reply, r)
+			bootstrap.Lock()
+			q.mu.Lock()
+			m := q.s.Machines["one"]
+			fresh := m != nil && inventoryObservationFresh(m.InventoryProbe, clock.Now().Add(time.Millisecond))
+			q.mu.Unlock()
+			hold := false
+			if fresh {
+				once.Do(func() { hold = true; close(entered) })
+			}
+			bootstrap.Unlock()
+			if hold {
+				<-release
+			}
+			for name, values := range reply.Header() {
+				w.Header()[name] = values
+			}
+			w.WriteHeader(reply.Code)
+			_, _ = w.Write(reply.Body.Bytes())
+			return
 		}
 		api.ServeHTTP(w, r)
 	}))
@@ -94,6 +120,8 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	// Launch and first upload are asynchronous I/O. Advance bootstrap time only
 	// until the held request enters; all stop assertions below freeze time.
 	awaitPhase("blocked request entered", func() bool {
+		bootstrap.Lock()
+		defer bootstrap.Unlock()
 		clock.Advance(time.Millisecond)
 		select {
 		case <-entered:
