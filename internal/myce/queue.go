@@ -853,6 +853,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	if _, err := s.FoldAdvanced(); err != nil {
 		return nil, err
 	}
+	if s.Resident != nil {
+		s.Resident = &ResidentBinding{Model: s.Resident.Model}
+	}
 	if s.SubmissionKey != "" {
 		if err := validateSubmissionKey(s.SubmissionKey); err != nil {
 			return nil, err
@@ -1088,6 +1091,9 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		// do not keep a second copy in every stored job spec.
 		j.Spec.Environment.Files = nil
 		j.EnvironmentLock = frozenLock
+		if err := q.freezeResident(j); err != nil {
+			return rejectFieldRule("job_resident_invalid", err)
+		}
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
@@ -3279,6 +3285,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if q.s.Machines[m.ID] == m {
 		q.touchMachine(m.ID)
 	}
+	q.reserveResident(j, m)
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 	// Starts plus admission requeues is the issued-attempt high-water mark, so
 	// an uncounted refusal or a recovered older copy never reissues a number.

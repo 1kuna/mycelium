@@ -101,7 +101,7 @@ func (q *Queue) addDeviceTierStops(p *placementPlan, demand *Job) bool {
 		p.addJob(r)
 	}
 	for _, s := range q.s.ModelSlots {
-		if !slotOnTarget(s, m) || !slotReservesMemory(s) || s.Model == demand.Spec.Needs.Model || q.comparePriority(q.slotSpec(s), demand.Spec) == 0 {
+		if !slotOnTarget(s, m) || !slotReservesMemory(s) || s.Model == demand.Spec.Needs.Model || ownsResidentSlot(demand.Spec, s) || q.comparePriority(q.slotSpec(s), demand.Spec) == 0 {
 			continue
 		}
 		if !q.slotReclaimableFor(s, demand.Spec) {
@@ -198,6 +198,9 @@ func (q *Queue) ordinaryRoomPlan(j *Job, m *Machine, batch bool) (*placementPlan
 	return best, best == nil && batch
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool, yieldPlans ...map[string]*ScarceHostYield) *placementPlan {
+	if batch {
+		j = q.residentPlanningJob(j, m)
+	}
 	m = q.launchCapacityProjection(j, m)
 	p := &placementPlan{machine: m, preparations: true}
 	if len(yieldPlans) > 0 {
@@ -354,6 +357,9 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
+		if ownsResidentSlot(j.Spec, s) {
+			continue
+		}
 		if slotOnTarget(s, m) && slotReservesMemory(s) && isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
 			if !q.slotReclaimableFor(s, j.Spec) {
 				return false

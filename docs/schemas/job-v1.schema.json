@@ -485,6 +485,9 @@
             "null"
           ]
         },
+        "resident": {
+          "$ref": "#/$defs/ResidentBinding"
+        },
         "resumable": {
           "type": "boolean"
         },
@@ -2285,6 +2288,9 @@
             "object",
             "null"
           ]
+        },
+        "resident": {
+          "$ref": "#/$defs/ResidentBinding"
         },
         "resumable": {
           "type": "boolean"
@@ -4620,6 +4626,185 @@
       ],
       "type": "object"
     },
+    "Model": {
+      "properties": {
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "device": {
+          "type": "string"
+        },
+        "device_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "direct_nas": {
+          "type": "boolean"
+        },
+        "engine": {
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "file_store": {
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ModelFile"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "health_url": {
+          "type": "string"
+        },
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "local_source": {
+          "type": "string"
+        },
+        "logs": {
+          "type": "string"
+        },
+        "max_in_flight": {
+          "type": "integer"
+        },
+        "measurement": {
+          "$ref": "#/$defs/retiredField"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "project": {
+          "type": "string"
+        },
+        "ready_timeout": {
+          "type": "integer"
+        },
+        "request_timeout": {
+          "type": "integer"
+        },
+        "retry_safe": {
+          "type": "boolean"
+        },
+        "secret_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "start_command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "stop_command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "stop_timeout": {
+          "type": "integer"
+        },
+        "vllm": {
+          "$ref": "#/$defs/VLLMPreset"
+        }
+      },
+      "required": [
+        "measurement",
+        "name",
+        "engine",
+        "path",
+        "memory_gb",
+        "platforms"
+      ],
+      "type": "object"
+    },
+    "ModelFile": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "ModelLimits": {
       "properties": {
         "free_floor_bytes": {
@@ -5542,6 +5727,40 @@
       ],
       "type": "object"
     },
+    "ResidentBinding": {
+      "properties": {
+        "engine": {
+          "$ref": "#/$defs/ResidentEngine"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ResidentEngine": {
+      "properties": {
+        "environments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/Model"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
     "ResourceBasis": {
       "properties": {
         "basis": {
@@ -6270,6 +6489,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "resident": {
+          "$ref": "#/$defs/ResidentBinding",
+          "x-contract": "diagnostic"
+        },
         "resumable": {
           "type": "boolean",
           "x-contract": "diagnostic"
@@ -6726,6 +6949,29 @@
       ],
       "type": "object"
     },
+    "VLLMPreset": {
+      "properties": {
+        "gpu_memory_utilization": {
+          "type": "number"
+        },
+        "kv_cache_dtype": {
+          "type": "string"
+        },
+        "max_context": {
+          "type": "integer"
+        },
+        "served_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "served_name",
+        "max_context",
+        "kv_cache_dtype",
+        "gpu_memory_utilization"
+      ],
+      "type": "object"
+    },
     "VariantEligibility": {
       "properties": {
         "device": {
@@ -7044,6 +7290,10 @@
         "measured_memory_gb",
         "valid_until"
       ],
+      "type": "object"
+    },
+    "retiredField": {
+      "properties": {},
       "type": "object"
     }
   },

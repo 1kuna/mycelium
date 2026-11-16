@@ -40,7 +40,7 @@ func main() {
 	// Version is a read-only probe, including for older fleet helpers that
 	// decode combined stdout/stderr as JSON.
 	versionProbe := len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v")
-	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" {
+	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" && os.Args[1] != "resident" {
 		localSkillInstaller(os.Stderr).refresh(localSkillDirs())
 	}
 	if err := run(os.Args[1:]); err != nil {
@@ -67,7 +67,7 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 
-const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|dev|version|release|skill|file|extension|env|portability|detect|service|model|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|dev|version|release|skill|file|extension|env|portability|detect|service|model|resident|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
@@ -103,6 +103,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "gpu-telemetry-client" {
 		return gpuTelemetryClientCommand(context.Background(), args[1:], os.Stdout)
+	}
+	if args[0] == "resident" {
+		return residentCommand(args[1:], os.Stdin, os.Stdout)
 	}
 	if args[0] == "fleet" {
 		return fleetCommand(context.Background(), args[1:], os.Stdout)

@@ -128,6 +128,26 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	default:
 		t.Fatal("old result was never replayed")
 	}
+	blocking := "POST /api/workers/log"
+	if mode == "output" {
+		blocking = "HEAD /api/files/blobs/:id"
+	}
+	// Replacement completion does not synchronize the next heartbeat. Keep
+	// publication blocked and wait for its operation to be reported, rather
+	// than requiring that report to precede the independent replacement.
+	await(t, func() bool {
+		clock.Advance(time.Millisecond * 10)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, c := range h.reports {
+			for _, p := range c.Machine.ResultPublications {
+				if p.ID == old.ID && p.Attempt == old.Attempt && p.Blocking == blocking {
+					return true
+				}
+			}
+		}
+		return false
+	})
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	releases := 0
@@ -141,21 +161,6 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	}
 	if mode == "output" && releases != 1 {
 		t.Fatalf("release acknowledged %d times while upload blocked", releases)
-	}
-	found := false
-	blocking := "POST /api/workers/log"
-	if mode == "output" {
-		blocking = "HEAD /api/files/blobs/:id"
-	}
-	for _, c := range h.reports {
-		for _, p := range c.Machine.ResultPublications {
-			if p.ID == old.ID && p.Attempt == old.Attempt && p.Blocking == blocking {
-				found = true
-			}
-		}
-	}
-	if !found {
-		t.Error("heartbeat omitted blocked publication request")
 	}
 }
 

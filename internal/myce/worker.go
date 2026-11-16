@@ -698,6 +698,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
+	residentEnv, residentClose, residentErr := w.startResidentBridge(ctx, j, executionWork)
+	if residentErr != nil {
+		return nil, s.startFailure(j, launchRefused, residentErr)
+	}
+	oldSharedRelease := sharedRelease
+	sharedRelease = func() { residentClose(); oldSharedRelease() }
+	s.sharedRelease = sharedRelease
 	env := jobBaseEnvironment()
 	if compilerPath != "" {
 		env["GOCACHE"] = compilerPath
@@ -709,6 +716,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		env[k] = v
 	}
 	for k, v := range extensionEnv {
+		env[k] = v
+	}
+	for k, v := range residentEnv {
 		env[k] = v
 	}
 	if compilerPath != "" && env["GOCACHE"] != compilerPath {
@@ -1558,10 +1568,8 @@ func (w Worker) Run(stop context.Context) error {
 			used = 0
 			for _, report := range reports {
 				if report.State == "loading" {
-					for _, model := range w.ModelConfig.Models {
-						if model.Name == report.Name {
-							used += model.MemoryGB
-						}
+					if model, ok := w.localModelBudget(report); ok {
+						used += model.MemoryGB
 					}
 				}
 			}

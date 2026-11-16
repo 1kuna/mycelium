@@ -896,12 +896,11 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	for _, r := range models {
 		if r.State == "ready" || r.State == "draining" || r.State == "loading" {
 			usedCores++
-			for _, m := range w.ModelConfig.Models {
-				if m.Name == r.Name {
-					need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
-					usedRAM += need
-					growth += need
-				}
+			m, ok := w.localModelBudget(r)
+			if ok {
+				need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+				usedRAM += need
+				growth += need
 			}
 		}
 	}
@@ -925,10 +924,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		}
 		for _, r := range models {
 			if r.State == "ready" || r.State == "draining" || r.State == "loading" {
-				for _, m := range w.ModelConfig.Models {
-					if m.Name == r.Name && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
-						usedGPU += m.MemoryGB
-					}
+				m, ok := w.localModelBudget(r)
+				if ok && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
+					usedGPU += m.MemoryGB
 				}
 			}
 		}
@@ -1380,7 +1378,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", residentJobsCapability, scarceHostYieldCapability, localFirstProtocol)
 			if w.modelSnapshots != nil {
 				// Any worker with a snapshot cache fetches missing snapshots itself.
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
@@ -1640,4 +1638,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		case <-tick.C:
 		}
 	}
+}
+
+func (w Worker) localModelBudget(r ModelReport) (Model, bool) {
+	if r.resourcesMeasured {
+		return Model{Name: r.Name, MemoryGB: r.memoryGB, HostMemoryGB: r.hostMemoryGB, Device: r.Device}, true
+	}
+	for _, m := range w.ModelConfig.Models {
+		if m.Name == r.Name {
+			return m, true
+		}
+	}
+	return Model{}, false
 }

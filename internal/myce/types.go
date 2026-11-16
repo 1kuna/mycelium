@@ -145,6 +145,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Resident *ResidentBinding `json:"resident,omitempty" yaml:"-"`
 	// Supersedes explicitly replaces this same-project job for completion delivery.
 	Supersedes       string `json:"supersedes,omitempty" yaml:"supersedes,omitempty"`
 	CheckpointPolicy string `json:"checkpoint_policy,omitempty" yaml:"-"`
@@ -234,6 +235,9 @@ func (s Spec) Validate() error {
 	}
 	if err := validateWorkerData(s); err != nil {
 		return reject("job_worker_data_unsupported", err)
+	}
+	if err := validateResident(s); err != nil {
+		return rejectFieldRule("job_resident_invalid", err)
 	}
 	if err := validateCPUFallback(s); err != nil {
 		return rejectFieldRule("job_platform_invalid", err)

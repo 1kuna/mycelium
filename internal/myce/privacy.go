@@ -38,6 +38,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 
 func publicStatusValue(s Snapshot) Snapshot {
 	for i := range s.LoadedModels {
+		s.LoadedModels[i].Resident = nil
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = modelReadinessDiagnostic(s.LoadedModels[i].Error)
 	}
@@ -267,7 +268,9 @@ func statusJobInputs(job *Job) Job {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
-	j.Advanced = AdvancedStatus(&job.Spec)
+	if j.SpecProjection == nil {
+		j.Advanced = AdvancedStatus(&job.Spec)
+	}
 	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Preemptible: j.Spec.Preemptible, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
@@ -288,7 +291,7 @@ func statusJobInputs(job *Job) Job {
 		"extension_check.directory", "extension_check.reserve", "extension_digest",
 		"fan_out", "files", "give_up_at", "inputs", "isolation",
 		"output_delivery", "output_destination", "output_retention", "outputs", "prepare_source", "profile_memory",
-		"program.args", "program.file", "reason", "require_target", "requirement_reasons", "resume_compatibility", "run",
+		"program.args", "program.file", "reason", "require_target", "requirement_reasons", "resident", "resume_compatibility", "run",
 		"shared_inputs", "size_hint", "submission_key", "targets",
 	}}
 	j.Extensions = nil
