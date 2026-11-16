@@ -468,6 +468,36 @@ func TestResidentJobsPayloadChild(t *testing.T) {
 		t.Fatalf("%s %v", data, err)
 	}
 }
+func TestResidentJobsDispatchStaysWorkerBound(t *testing.T) {
+	for _, kind := range []string{"stage", "qualification"} {
+		t.Run(kind, func(t *testing.T) {
+			w := recoveryWorker(t)
+			w.ServiceConfig = &ServiceConfig{Config: "test-config", Binary: "test-binary"}
+			if !w.detachedAttemptSupported() {
+				t.Fatal("fixture must otherwise permit detached dispatch")
+			}
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			// If dispatch regresses, refuse before invoking a native manager.
+			store.state.Custodian = "unproved-custodian"
+			j := recoveryJob(t, []string{"true"})
+			j.Spec.Resident = &ResidentBinding{Model: "test"}
+			if kind == "qualification" {
+				j.Spec.ExtensionCheck = &ExtensionCheckRequest{Work: "kind:sample"}
+			}
+			// The worker's ordinary device admission must run, rather than
+			// handing the resident job to an isolated custodian.
+			p, err := w.startAssignedAttempt(context.Background(), store, j)
+			if p != nil || err == nil || !strings.Contains(err.Error(), "assigned device is not in the machine inventory") {
+				t.Fatalf("resident dispatch bypassed worker admission: process=%v error=%v", p != nil, err)
+			}
+		})
+	}
+}
+
 func TestResidentJobsSandboxedPayload(t *testing.T) {
 	w := recoveryWorker(t)
 	api := httptest.NewServer(workerTestHandler(http.HandlerFunc(func(out http.ResponseWriter, in *http.Request) {
