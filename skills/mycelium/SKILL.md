@@ -581,7 +581,11 @@ incomplete host evidence; device completeness alone does not establish host
 coverage. Repeated complete physical forecasts supersede legacy additive sizing
 only when they cover every retained total-cgroup floor and resident-plus-device
 forecast. Incomplete-only history and uncovered larger peaks keep conservative
-sizing; unknown
+sizing. A later coverage gap retains an earlier accepted combined CUDA physical
+bound plus measured growth independently of the host/cgroup-plus-device fallback;
+device demand is not added again to that already combined bound. The bound can
+include unrelated whole-host occupancy; a statistical outlier alone does not
+justify lowering it. Unknown
 or stale live device attribution still requires exclusive execution. For local
 benchmark telemetry on a worker-only host, omit `--queue-pid`; its RSS is marked
 `not_configured`. See the

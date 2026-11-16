@@ -64,12 +64,22 @@ func unifiedCUDACalibration(points []*WorkObservation, drift float64) (host, dev
 			}
 			physical = max(physical, bound)
 		} else {
+			fallback := *p
+			if valid && p.GPUHost.Source == cudaHostMemorySource && p.GPUHost.SiblingAdjusted {
+				// A coverage gap clears the range, not an earlier accepted
+				// physical peak. Keep that device-bearing bound independently;
+				// only host/cgroup counters belong in the additive fallback.
+				physical = max(physical, combined+hostMargin)
+				fallback.GPUHost, fallback.CombinedHostGB = nil, nil
+			}
 			// Missing counters retain the complete old total/device floor and
 			// measured host growth. This can dominate otherwise small new runs.
 			// Cleared coverage also wins over cached aggregate GPU-host fields.
-			legacyPhysical = max(legacyPhysical, hostMemoryPeakGB(p)+hostMargin+*p.DeviceGB+deviceMargin)
-			incompleteFloor = max(incompleteFloor, hostMemoryPeakGB(p)+hostMargin, resident+device+hostMargin)
-			incomplete = append(incomplete, point)
+			legacyPhysical = max(legacyPhysical, hostMemoryPeakGB(&fallback)+hostMargin+*p.DeviceGB+deviceMargin)
+			incompleteFloor = max(incompleteFloor, hostMemoryPeakGB(&fallback)+hostMargin, resident+device+hostMargin)
+			row := *point
+			row.MemoryPeak = &fallback
+			incomplete = append(incomplete, &row)
 			incompleteDevice = max(incompleteDevice, *p.DeviceGB)
 		}
 	}

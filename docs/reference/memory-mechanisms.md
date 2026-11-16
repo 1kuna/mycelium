@@ -286,6 +286,11 @@ resident-plus-device forecast, including measured device variation. An uncovered
 peak restores the conservative additive fallback. Incomplete-only kinds keep
 their existing estimator; missing history is never relabelled as cache. Keep each
 cumulative physical peak plus drift independently of a restarted range's forecast.
+If later incomplete sampling clears the range while retaining a corrected CUDA
+combined peak, keep that peak plus measured growth independently. Compute the
+incomplete additive fallback from host/cgroup counters; adding device demand to
+the cached combined physical peak would charge the same device twice. This does
+not discard a larger accepted host-derived bound or prove unique job ownership.
 Physical-range variation, sampling growth and device variation share the forecast
 margin; do not add a device allowance again to an already combined bound. Cross-machine transfer, unknown attribution, recovery/retry floors
 and rejected-pressure exclusions retain their conservative rules.
