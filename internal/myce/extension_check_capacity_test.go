@@ -13,7 +13,7 @@ import (
 // first measurement. Actual local peaks, authored needs and OOM floors still
 // prove impossibility, and an unrelated larger target cannot hide that verdict.
 func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
-	for _, scenario := range []string{"transfer", "local accepted", "local constrained", "declared", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
+	for _, scenario := range []string{"transfer", "local fitting", "local constrained fits", "local accepted", "local constrained", "declared", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
 			capacity := 31.206165313720703
@@ -79,9 +79,15 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 					add(from, from.Configuration, "unified", pair[0], 0)
 					add(to, to.Configuration, "separate", pair[1]-minimumHostMemoryGB, 0)
 				}
-				if scenario == "local accepted" || scenario == "local constrained" {
-					add(*key, configuration, "separate", 70.59160131162189, 0)
-					if scenario == "local constrained" {
+				if strings.HasPrefix(scenario, "local ") {
+					host := 70.59160131162189
+					if scenario == "local fitting" {
+						host = 9.5
+					} else if scenario == "local constrained fits" {
+						host = 15
+					}
+					add(*key, configuration, "separate", host, 0)
+					if strings.Contains(scenario, "constrained") {
 						point := q.s.WorkObservations[identityHash(*key)]
 						point.MemoryPeak.Constrained = true
 						q.putWorkObservation(identityHash(*key), point)
@@ -111,6 +117,12 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				if e := sized.MemoryEnvelope; e.HostGB < 10.790241241455078 || e.HostGB > 12 || e.Basis != "exploratory" || e.Refusal != "" || !strings.Contains(e.Source, checkTransferProbe) || e.Enforcement != m.MemoryEnforcement {
 					t.Fatalf("weak transfer still blocks guarded native measurement: %+v", e)
 				}
+			}
+			if scenario == "local fitting" && (sized.MemoryEnvelope.Basis != "learned" || math.Abs(sized.Spec.Needs.HostMemoryGB-(9.5+minimumHostMemoryGB)) > 1e-9) {
+				t.Fatalf("transferred estimate overrode direct destination measurement: %+v", sized.MemoryEnvelope)
+			}
+			if scenario == "local constrained fits" && sized.Spec.Needs.HostMemoryGB < 15 {
+				t.Fatalf("probe lost destination lower bound: %+v", sized.MemoryEnvelope)
 			}
 			if scenario == "larger wrong target" {
 				larger := cloneMachine(&m)
