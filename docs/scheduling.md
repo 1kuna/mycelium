@@ -394,6 +394,11 @@ OpenAI streams emit an SSE error with `type: interruption` and
 `code: priority_preemption`; generic streams use the `X-Myce-Error-Code` trailer.
 Partial output is never transparently replayed.
 
+An already over-budget host still considers useful lower-tier releases against
+its signed RAM debt (MY-56). Backfill cannot deepen ready production's host
+RAM/CPU deficit, including work on another card. The ordinary physical-memory
+and exact-release gates still apply; compatible other hosts remain eligible.
+
 Equal-tier projects share available targets. One machine worker may run CPU
 attempts and one batch attempt per GPU concurrently within the shared ledger. Same-tier work is not stopped
 to rebalance usage: a single indefinite allocation can occupy a scarce device
