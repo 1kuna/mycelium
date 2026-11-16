@@ -102,7 +102,11 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 				n := candidate.Spec.Needs
 				estimate := q.memoryEstimate(candidate, target)
 				if estimate.host != nil {
-					n.HostMemoryGB = max(n.HostMemoryGB, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)
+					host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
+					if estimate.measuredHostGB > 0 {
+						host = estimate.measuredHostGB
+					}
+					n.HostMemoryGB = max(n.HostMemoryGB, host)
 				}
 				if estimate.device != nil && estimate.device.DeviceGB != nil {
 					n.MemoryGB = max(n.MemoryGB, *estimate.device.DeviceGB*estimate.deviceFactor)

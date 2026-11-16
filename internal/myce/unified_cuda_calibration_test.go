@@ -22,13 +22,30 @@ func TestUnifiedCUDACalibrationCoverageGapRetainedShape(t *testing.T) {
 	if err := json.Unmarshal(b, &rows); err != nil {
 		t.Fatal(err)
 	}
-	q, clock := fixture(t)
-	key := ObservationKey{Work: "profile:naming", Host: "unified-cuda", Component: "0", Hardware: "device", Fingerprint: "driver", Environment: "environment", Target: ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}}
+	q, clock, machine, spec := unifiedAutoFixture(t, 0)
+	spec.Priority = "production"
+	queued := submit(t, q, spec)
+	q.mu.Lock() // Admission evidence publication shares these borrowed records.
+	defer q.mu.Unlock()
+	m := allocationMachine(q.s.Machines[machine.ID], []string{"0"})
+	production := q.s.Jobs[queued.ID]
+	candidates := q.memoryCandidates(production, m)
+	if len(candidates) != 1 {
+		t.Fatal("missing qualified candidate", len(candidates))
+	}
+	provenance := *candidates[0]
+	provenance.Machine, provenance.Session = m.ID, m.Session
+	provenance.AllocatedDevices = []string{"0"}
+	key, why := q.workObservationKey(&provenance)
+	if key == nil {
+		t.Fatal("missing observation key", why)
+	}
+	configuration := memoryConfiguration(provenance.Spec.Needs, provenance.Spec.Args, provenance.Spec.Program)
 	samples := 0
 	for i, row := range rows {
-		row.Key = key
+		row.Key = *key
 		row.Key.Allowance = string(rune('a' + i))
-		row.MemoryLayout, row.MemoryConfiguration = "unified", "configuration"
+		row.MemoryLayout, row.MemoryConfiguration = "unified", configuration
 		row.MemoryRecordedAt = clock.Now()
 		samples += max(1, row.MemorySamples)
 		q.putWorkObservation(identityHash(row.Key), *row)
@@ -46,29 +63,28 @@ func TestUnifiedCUDACalibrationCoverageGapRetainedShape(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("fallback projection mutated retained evidence")
 	}
-	m := unifiedCUDAAdmissionMachine()
-	m.ID, m.HostID, m.Device = "worker", key.Host, key.Component
 	m.HostMemoryBudgetGB, m.ReservedMemoryGB = 112.83781051635742, 4
 	m.CapabilityProfile.SystemMemoryBytes = 129992077312
 	m.FreeHostMemoryGB = 54.25691604614258
-	s := spec("production")
-	s.Needs.Memory = "auto"
-	estimate := q.memoryEstimateForState(&Job{Spec: s}, &m, &key, "configuration", false)
-	if math.Abs(hostNeed(&m, *estimate.device.DeviceGB*estimate.deviceFactor, estimate.measuredHostGB)-want) > 1e-9 || estimate.samples != 142 {
+	estimate := q.memoryEstimateForState(production, m, key, configuration, false)
+	if estimate.device == nil || math.Abs(hostNeed(m, *estimate.device.DeviceGB*estimate.deviceFactor, estimate.measuredHostGB)-want) > 1e-9 || estimate.samples != 142 {
 		t.Fatalf("queue restored the duplicated physical bound: %+v", estimate)
 	}
-	s.Needs.Memory = ""
-	s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, host
-	production := Job{ID: "incoming", State: "queued", Spec: s}
-	q.s.Jobs[production.ID] = &production
-	q.s.Machines[m.ID] = &m
-	if !hostFits(&m, device, host) || q.unifiedCUDAProductionReason(&production, &m) != "" {
-		t.Fatal("incoming production charged a further production envelope")
+	candidate := q.memoryCandidate(production, m)
+	if math.Abs(candidate.MemoryEnvelope.HostGB-want) > 1e-9 || !hostFits(m, device, host) || q.unifiedCUDAProductionReason(production, m) != "" {
+		t.Fatal("incoming production charged a further production envelope", candidate.MemoryEnvelope)
 	}
-	experiment := production
-	experiment.ID, experiment.Spec.Priority = "experiment", "experiment"
-	if reason := q.unifiedCUDAProductionReason(&experiment, &m); !strings.Contains(reason, "unified CUDA production headroom") {
-		t.Fatal("experiment spent protected production headroom", reason)
+	experiment := Job{ID: "experiment", State: "queued", Spec: plainGPUSpec()}
+	experiment.Spec.Priority = "experiment"
+	experiment.Spec.Needs.MemoryGB, experiment.Spec.Needs.HostMemoryGB = device, host
+	if reason := q.unifiedCUDAProductionReason(&experiment, m); !strings.Contains(reason, "unified CUDA production headroom") || !strings.Contains(reason, "52.007 GiB production envelope") {
+		t.Fatal("experiment spent protected production headroom or duplicated its device vector", reason)
+	}
+	// The production guard must consume the calibrated host/device split too:
+	// restoring the raw combined peak as host would inflate protection again.
+	experiment.Spec.Needs.MemoryGB, experiment.Spec.Needs.HostMemoryGB = .5, .5
+	if reason := q.unifiedCUDAProductionReason(&experiment, m); reason != "" {
+		t.Fatal("small experiment plus measured production envelope fits", reason)
 	}
 	t.Logf("incoming production %.12f, remaining room %.12f, residual %.12f; experiment plus protected production %.12f exceeds room", want, m.FreeHostMemoryGB, m.FreeHostMemoryGB-want, 2*want)
 }
