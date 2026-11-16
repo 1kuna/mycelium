@@ -276,6 +276,11 @@ func (g *attemptCustodian) updateStore(s *workerStore) {
 	s.state.Job, s.state.Identity, s.state.Log = v.Job, v.Identity, v.Log
 	s.state.PID, s.state.Birth, s.state.Cgroup, s.state.Groups = v.PID, v.Birth, v.Cgroup, v.Groups
 	s.state.LaunchPending, s.state.InputWriterPending = v.LaunchPending, v.InputWriterPending
+	// A failed preparation can retain a builder without any payload PID. Carry
+	// its durable receipt into the existing exact-cleanup recovery path.
+	s.state.Preparation, s.state.CustodyID = v.Preparation, v.CustodyID
+	s.state.Accelerator, s.state.StopGrace = v.Accelerator, v.StopGrace
+	s.state.LaunchOutcome = v.LaunchOutcome
 }
 
 func (g *attemptCustodian) detach() {

@@ -169,3 +169,16 @@ func TestCustodianSharedHostKeepsAggregateCPUQuota(t *testing.T) {
 		t.Fatal("cooperative Darwin policy unnecessarily drained")
 	}
 }
+
+// A failed detached environment build may have no payload PID but still own a
+// builder. Its receipt must reach the recovery path; an in-process writer check
+// alone must never certify release of that unobserved helper.
+func TestCustodianPreparationFailureRetainsHelperCustody(t *testing.T) {
+	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
+	g := &attemptCustodian{last: custodianSnapshot{State: workerState{Job: &j, Session: j.Session, InputWriterPending: true, Preparation: "preparation-unconfirmed.json"}}}
+	s := &workerStore{dir: t.TempDir(), state: workerState{Job: &j, Session: j.Session}}
+	g.updateStore(s)
+	if err := s.cleanupOrphan(&fakeClock{now: time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)}); err == nil {
+		t.Fatal("missing helper receipt incorrectly proved release")
+	}
+}
