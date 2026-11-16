@@ -225,11 +225,20 @@ published peak. This bounds observation latency, never job execution time.
 Every host/driver sample must succeed; existing nonzero host swap is allowed.
 `memory_peak.host_sampling` retains the first failed host predicate, successful
 collection count, maximum read duration/gap and final age. Read errors use bounded
-source/class labels rather than raw errors or private paths. CUDA proc status may
-vanish between cgroup enumeration and reading: only a fresh exact-subtree inventory
-confirming that PID has left permits skipping it; absolute physical/global pin
-counters still cover residual allocations. Missing live-PID counters, permission
-errors, slow reads and real gaps continue to reject completeness.
+source/class labels rather than raw errors or private paths. On a CUDA proc pin
+parse failure, `failed_pid`, `failed_state` (one letter or `unknown`),
+`failed_counter` (the first rejected field) and `failed_counter_reason` (`missing`
+or `malformed`) identify the unmeasured owner. Details are extracted only on
+failure from the status bytes already read; no raw status or command is retained.
+CUDA proc status may vanish or lose memory fields between cgroup enumeration and
+reading. Linux drops the memory map before removing the exiting task from its
+cgroup, so the status can still be readable without `VmPin`/`VmLck`.
+Only a successful fresh exact-subtree inventory confirming that PID has left
+permits skipping it; absolute physical/global pin counters still cover residual
+allocations. A zombie leader can have live threads, so neither process state nor
+`Kthread` alone permits skipping a listed owner. Missing live-PID counters, failed
+inventory rechecks, permission errors, slow reads and real gaps continue to reject
+completeness.
 Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
 baseline the host and attempt-cgroup cumulative `some total` counters before
 payload/sidecar launch, while the attempt cgroup is empty. Reject learning if

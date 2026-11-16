@@ -43,7 +43,19 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 		var values map[string]uint64
 		values, err = memoryKiBCounters(b, "VmPin", "VmLck")
 		if err != nil {
-			err = hostMemoryReadError{"cuda_proc_pin_counters", err}
+			// exit_mm can remove these fields before cgroup_exit and before
+			// the status file disappears. As for ENOENT, skip only after a
+			// successful fresh inventory proves this PID left the subtree.
+			// State alone is insufficient: a zombie leader may have live
+			// threads still owning the process's memory map and pins.
+			live := map[int]bool{}
+			if inventoryErr := a.processIDs(live); inventoryErr == nil && !live[pid] {
+				err = nil
+				continue
+			}
+			var counter memoryKiBCounterError
+			errors.As(err, &counter)
+			err = hostMemoryReadError{"cuda_proc_pin_counters", cudaProcPinReadError{pid, procStatusState(b), counter}}
 			return
 		}
 		// May overlap one another, cgroup anon and inherited mappings. Never
@@ -113,6 +125,32 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 	return
 }
 
+// Only fixed field names/classes and the single-letter state leave the worker;
+// no status dump, command, raw value or path is retained.
+type cudaProcPinReadError struct {
+	pid     int
+	state   string
+	counter memoryKiBCounterError
+}
+
+func (e cudaProcPinReadError) Error() string { return e.counter.Error() }
+
+func procStatusState(b []byte) string {
+	for _, line := range strings.Split(string(b), "\n") {
+		if state, ok := strings.CutPrefix(line, "State:"); ok {
+			f := strings.Fields(state)
+			if len(f) > 0 && len(f[0]) == 1 && strings.Contains("RSDTtXZPIWK", f[0]) {
+				return f[0]
+			}
+		}
+	}
+	return "unknown"
+}
+
+type memoryKiBCounterError struct{ name, reason string }
+
+func (e memoryKiBCounterError) Error() string { return "memory counter " + e.name + ": " + e.reason }
+
 func memoryKiBCounters(b []byte, required ...string) (map[string]uint64, error) {
 	values := map[string]uint64{}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -127,7 +165,14 @@ func memoryKiBCounters(b []byte, required ...string) (map[string]uint64, error) 
 	}
 	for _, name := range required {
 		if _, ok := values[name]; !ok {
-			return nil, errors.New("memory counter unavailable")
+			reason := "missing"
+			for _, line := range strings.Split(string(b), "\n") {
+				if strings.HasPrefix(line, name+":") {
+					reason = "malformed"
+					break
+				}
+			}
+			return nil, memoryKiBCounterError{name, reason}
 		}
 	}
 	return values, nil

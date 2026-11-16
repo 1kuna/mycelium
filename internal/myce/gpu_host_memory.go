@@ -385,7 +385,8 @@ func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, 
 const attemptMemorySamplePeriod = 200 * time.Millisecond
 
 // HostMemorySampling explains why host evidence was or was not promoted.
-// Labels are worker-owned predicates, never raw errors, PIDs or private paths.
+// Labels are worker-owned predicates, never raw errors or private paths.
+// Failure-only proc details identify an unmeasured owner without a status dump.
 type HostMemorySampling struct {
 	Complete             bool    `json:"complete"`
 	Reason               string  `json:"reason"`
@@ -393,6 +394,10 @@ type HostMemorySampling struct {
 	MaxCollectionSeconds float64 `json:"max_collection_seconds"`
 	MaxIntervalSeconds   float64 `json:"max_interval_seconds"`
 	FinalAgeSeconds      float64 `json:"final_age_seconds"`
+	FailedPID            int     `json:"failed_pid,omitempty"`
+	FailedState          string  `json:"failed_state,omitempty"`
+	FailedCounter        string  `json:"failed_counter,omitempty"`
+	FailedCounterReason  string  `json:"failed_counter_reason,omitempty"`
 }
 
 type hostMemoryReadError struct {
@@ -462,6 +467,11 @@ func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper,
 			switch {
 			case err != nil:
 				out.sampling.Reason = hostMemoryReadReason(err)
+				var proc cudaProcPinReadError
+				if errors.As(err, &proc) {
+					out.sampling.FailedPID, out.sampling.FailedState = proc.pid, proc.state
+					out.sampling.FailedCounter, out.sampling.FailedCounterReason = proc.counter.name, proc.counter.reason
+				}
 			case end.Before(start):
 				out.sampling.Reason = "collector_clock_reversed"
 			case end.Sub(start) > attemptMemorySamplePeriod:
