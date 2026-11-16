@@ -73,7 +73,12 @@ func TestResidentJobsReuseChargeAndMeasuredIdle(t *testing.T) {
 		t.Fatalf("same stage reloaded or double charged: %+v", slot)
 	}
 	finish(t, q, second, true)
-	clock.Advance(time.Hour) // No configured ten-minute retention for this opt-in.
+	clock.Advance(3 * time.Second)
+	q.Tick()
+	if slot.State != "ready" {
+		t.Fatal("engine expired before its measured four-second reload cost")
+	}
+	clock.Advance(time.Second) // The observed reload cost, not the configured idle interval.
 	q.Tick()
 	if slot.State != "draining" || q.modelMemory(m.ID) != 8 {
 		t.Fatal("idle release must retain charge until acknowledgement")
