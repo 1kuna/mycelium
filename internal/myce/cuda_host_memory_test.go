@@ -14,10 +14,12 @@ import (
 
 type cudaProcExitFS struct {
 	memoryFS
-	group  string
-	exited bool
-	slow   bool
-	once   sync.Once
+	group            string
+	exited           bool
+	readable         bool
+	inventoryFailure bool
+	slow             bool
+	once             sync.Once
 }
 
 func (f *cudaProcExitFS) ReadFile(path string) ([]byte, error) {
@@ -29,8 +31,11 @@ func (f *cudaProcExitFS) ReadFile(path string) ([]byte, error) {
 			if f.exited {
 				_ = f.memoryFS.WriteFile(filepath.Join(f.group, "cgroup.procs"), nil)
 			}
+			if f.inventoryFailure {
+				_ = f.memoryFS.WriteFile(filepath.Join(f.group, "cgroup.procs"), []byte("invalid PID\n"))
+			}
 		})
-		if f.slow {
+		if f.slow || f.readable {
 			return f.memoryFS.ReadFile(path)
 		}
 		return nil, os.ErrNotExist
@@ -88,6 +93,23 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 			put(filepath.Join(a.path, "memory.stat"), strings.ReplaceAll(stat, "file_writeback 16777216\n", ""))
 		case "missing proc pin":
 			put(filepath.Join(proc, "8/status"), "VmLck: 0 kB\n")
+		case "exited proc status", "failed exit inventory":
+			// Linux proc_pid_status omits task_mem after exit_mm, before
+			// cgroup_exit removes the task. State can still be R, not Z.
+			put(filepath.Join(proc, "8/status"), "State:\tR (running)\nPid:\t8\nKthread:\t0\n")
+			a.fs = &cudaProcExitFS{memoryFS: a.fs, group: filepath.Join(a.path, "sidecar"), exited: mode == "exited proc status", readable: true, inventoryFailure: mode == "failed exit inventory"}
+		case "missing live lock":
+			put(filepath.Join(proc, "8/status"), "State:\tS (sleeping)\nVmPin: 0 kB\n")
+		case "malformed pin":
+			put(filepath.Join(proc, "8/status"), "State:\tS (sleeping)\nVmPin: unknown kB\nVmLck: 0 kB\n")
+		case "malformed lock":
+			put(filepath.Join(proc, "8/status"), "State:\tT (stopped)\nVmPin: 0 kB\nVmLck: -1 kB\n")
+		case "zombie leader":
+			// A leader without an mm can still represent live sibling threads
+			// in cgroup.procs. Its state never proves their pins are zero.
+			put(filepath.Join(proc, "8/status"), "State:\tZ (zombie)\nKthread:\t0\n")
+		case "kernel thread":
+			put(filepath.Join(proc, "8/status"), "State:\tI (idle)\nKthread:\t1\n")
 		case "missing physical":
 			put(filepath.Join(proc, "meminfo"), strings.ReplaceAll(meminfo, "SReclaimable: 2097152 kB\n", ""))
 		case "missing global pins":
@@ -115,10 +137,10 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 }
 
 func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
-	for _, mode := range []string{"complete", "masked host drop", "exited proc", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
+	for _, mode := range []string{"complete", "masked host drop", "exited proc", "exited proc status", "failed exit inventory", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing live lock", "malformed pin", "malformed lock", "zombie leader", "kernel thread", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
 		t.Run(mode, func(t *testing.T) {
 			p := cudaHostFixture(t, mode)
-			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc"
+			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status"
 			if p == nil || (p.NonreclaimableGB != nil) != (complete || mode == "host OOM") {
 				t.Fatalf("wrong complete evidence: %+v", p)
 			}
@@ -127,6 +149,31 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 			}
 			if mode == "missing live proc" && p.HostSampling.Reason != "cuda_proc_status:not_found" {
 				t.Fatal("missing live process was silently ignored", p.HostSampling)
+			}
+			state, counter, reason := "", "", ""
+			switch mode {
+			case "missing proc pin":
+				state, counter, reason = "unknown", "VmPin", "missing"
+			case "missing live lock":
+				state, counter, reason = "S", "VmLck", "missing"
+			case "malformed pin":
+				state, counter, reason = "S", "VmPin", "malformed"
+			case "malformed lock":
+				state, counter, reason = "T", "VmLck", "malformed"
+			case "zombie leader":
+				state, counter, reason = "Z", "VmPin", "missing"
+			case "kernel thread":
+				state, counter, reason = "I", "VmPin", "missing"
+			case "failed exit inventory":
+				state, counter, reason = "R", "VmPin", "missing"
+			}
+			sampling := p.HostSampling
+			if state != "" {
+				if sampling.Reason != "cuda_proc_pin_counters:read_failed" || sampling.FailedPID != 8 || sampling.FailedState != state || sampling.FailedCounter != counter || sampling.FailedCounterReason != reason {
+					t.Fatalf("lost proc rejection details: %+v", sampling)
+				}
+			} else if sampling.FailedPID != 0 || sampling.FailedState != "" || sampling.FailedCounter != "" || sampling.FailedCounterReason != "" {
+				t.Fatalf("proc details retained without a rejected read: %+v", sampling)
 			}
 			if mode == "slow collector" && (p.HostSampling.Reason != "collector_read_over_period" || p.HostSampling.MaxCollectionSeconds != .25) {
 				t.Fatal("slow collection lost predicate/timing", p.HostSampling)

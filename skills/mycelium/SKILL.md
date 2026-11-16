@@ -578,7 +578,13 @@ combined bound independently of non-reclaimable host plus device, and uses
 between-attempt device peak variation rather than adding startup allocation twice.
 Retain `host_sampling` too: its predicate and read/gap/final-age timings explain
 incomplete host evidence; device completeness alone does not establish host
-coverage. Repeated complete physical forecasts supersede legacy additive sizing
+coverage. A rejected CUDA proc pin read additionally records `failed_pid`,
+`failed_state`, `failed_counter` and `failed_counter_reason` (`missing` or
+`malformed`). Keep those failure-only fields with the exact attempt; missing
+fields on an older worker leave the cause unknown. An exiting PID is skipped
+only after a fresh subtree inventory confirms it left; a listed owner with
+unreadable counters still makes sampling incomplete.
+Repeated complete physical forecasts supersede legacy additive sizing
 only when they cover every retained total-cgroup floor and resident-plus-device
 forecast. Incomplete-only history and uncovered larger peaks keep conservative
 sizing. A later coverage gap retains an earlier accepted combined CUDA physical
