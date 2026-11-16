@@ -244,7 +244,7 @@ func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
 					continue
 				}
 				candidate.Spec.Needs.HostMemoryGB = max(candidate.Spec.Needs.HostMemoryGB, hostMemoryPeakGB(p))
-				if point.Key.Component == key.Component && p.DeviceGB != nil && validRate(*p.DeviceGB) {
+				if !candidate.Spec.Needs.cpuOnly() && point.Key.Component == key.Component && p.DeviceGB != nil && validRate(*p.DeviceGB) {
 					candidate.Spec.Needs.MemoryGB = max(candidate.Spec.Needs.MemoryGB, *p.DeviceGB)
 				}
 			}
