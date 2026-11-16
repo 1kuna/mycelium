@@ -459,10 +459,14 @@ func TestHostHygieneMountIdleCadence(t *testing.T) {
 		p := &hostMountProbe{root: "nas", path: "unused", clock: clock, period: checkpointMetadataInterval, measure: func(string, func()) hostMountResult { calls.Add(1); return hostMountResult{latency: time.Millisecond} }}
 		p.sample(clock.Now(), nil)
 		synctest.Wait()
-		p.sample(clock.Now(), nil)
+		if got := p.sample(clock.Now(), nil); got.Reason != "" || got.Adverse {
+			t.Fatal("first successful access did not establish idle health", got)
+		}
 		for i := 0; i < 600; i++ {
 			clock.Advance(100 * time.Millisecond)
-			p.sample(clock.Now(), nil)
+			if got := p.sample(clock.Now(), nil); got.Reason != "" || got.Adverse {
+				t.Fatal("cached healthy mount became unavailable between probes", got)
+			}
 			synctest.Wait()
 		}
 		if calls.Load() != 1 {

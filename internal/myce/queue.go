@@ -2104,7 +2104,11 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		key := fmt.Sprintf("complete:%d:%s", r.Attempt, r.Session)
+		event := "final"
+		if r.ReleaseOnly {
+			event = "release"
+		}
+		key := fmt.Sprintf("%s:%d:%s", event, r.Attempt, r.Session)
 		var e error
 		finalGeneration, e = q.nasProgress.event(q.clock, key, finalPath, func() (int64, error) { return checkpointProgress(finalPath) })
 		if errors.Is(e, errCheckpointIOPending) || errors.Is(e, errCheckpointIOTimeout) {

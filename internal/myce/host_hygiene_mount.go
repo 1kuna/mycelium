@@ -311,6 +311,12 @@ func mountHealthWithholds(reason string) bool {
 
 func (p *hostMountProbe) confirm(result HostMountHealth, fresh bool) HostMountHealth {
 	result.Adverse = result.Reason != ""
+	// Initial pending is absence of evidence, not a failed access. One
+	// completed success establishes health; real failed/stalled episodes still
+	// require the existing consecutive fresh recovery observations.
+	if p.reason == "mount_probe_pending" && fresh && !mountHealthWithholds(result.Reason) {
+		p.reason, p.candidate, p.consecutive = "", "", 0
+	}
 	if result.Reason != "" && result.Reason != "mount_probe_slow" && result.Reason != "mount_probe_stalled" {
 		p.reason, p.candidate, p.consecutive = result.Reason, result.Reason, 0
 		return result

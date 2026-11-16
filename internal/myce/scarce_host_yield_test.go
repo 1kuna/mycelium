@@ -400,7 +400,7 @@ func TestScarceHostYieldCancelledFinalVerificationKeepsReceipt(t *testing.T) {
 	authorizeYield(t, q, run)
 	saveYieldGeneration(t, job(t, q, run.ID), 2)
 	path := attemptCheckpoint(*job(t, q, run.ID))
-	key := fmt.Sprintf("complete:%d:%s", run.Attempt, run.Session)
+	key := fmt.Sprintf("final:%d:%s", run.Attempt, run.Session)
 	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
