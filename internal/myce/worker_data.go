@@ -115,11 +115,11 @@ func validateEphemeralExtensions(s Spec, extensions []Extension) error {
 		return nil
 	}
 	for _, e := range extensions {
+		if e.Resident != nil {
+			return errors.New("ephemeral worker data does not cover extension resident model runtimes")
+		}
 		for _, v := range e.Variants {
 			candidate := s
-			if e.Resident != nil {
-				candidate.Resident = e.Resident
-			}
 			candidate.Needs = v.Needs
 			candidate.Run = RunSpec{}
 			candidate.Execution = &v.Execution

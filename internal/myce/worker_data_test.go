@@ -387,7 +387,7 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	if _, err := base.FoldAdvanced(); err != nil || !base.ephemeral() || base.Validate() != nil || AdvancedStatus(&base).WorkerData != "ephemeral" {
 		t.Fatal("advanced policy not normalized", err)
 	}
-	cases := []func(*Spec){func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Needs.Model = "server" }, func(s *Spec) { s.ModelSnapshots = map[string]ModelSnapshot{"model": {}} }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
+	cases := []func(*Spec){func(s *Spec) { s.Resident = &ResidentBinding{Model: "shared-engine"} }, func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Needs.Model = "server" }, func(s *Spec) { s.ModelSnapshots = map[string]ModelSnapshot{"model": {}} }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
 	for i, mutate := range cases {
 		s := ephemeralSpec()
 		mutate(&s)

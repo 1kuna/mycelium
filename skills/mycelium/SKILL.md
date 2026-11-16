@@ -282,7 +282,7 @@ restage inputs; startup recovers process custody and cleanup. Supporting Linux
 namespace workers with file core routing or the qualified Mycelium core router
 advertising `worker_data_ephemeral_v2` are required; v1 workers cannot run the
 expanded scope. Resumability, custom workdirs (including extension workdirs),
-program jobs, extension checks, model servers/snapshots, diagnostics,
+program jobs, extension checks, model servers/snapshots, resident model runtimes, diagnostics,
 `keep_on_failure` and alternate output delivery remain refused with
 `job_worker_data_unsupported`. Environment recipes, extension source/assets and
 authored settings are shared software/metadata: put customer data only in

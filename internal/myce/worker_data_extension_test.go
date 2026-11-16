@@ -266,7 +266,7 @@ while :; do sleep .01; done
 }
 
 func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
-	for _, field := range []string{"workdir", "network"} {
+	for _, field := range []string{"workdir", "network", "resident", "legacy-resident"} {
 		t.Run(field, func(t *testing.T) {
 			e := compositionExtension(t, false)
 			v := &e.Variants[0]
@@ -275,6 +275,13 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 				v.Execution.Main.Workdir = "{cache}"
 			case "network":
 				v.Needs.Network = true
+			case "resident":
+				e.Resumable = false
+				e.Resident = &ResidentBinding{Model: "shared-engine"}
+			case "legacy-resident":
+				e = fakeExtension(t)
+				e.Resumable = false
+				e.Resident = &ResidentBinding{Model: "shared-engine"}
 			}
 			e = freezeComposition(t, e)
 			q, _ := fixture(t)
@@ -288,7 +295,7 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 			if !errors.As(err, &refusal) || refusal.Code != "job_worker_data_unsupported" {
 				t.Fatal(err)
 			}
-			message := map[string]string{"workdir": "{work}", "network": "offline"}[field]
+			message := map[string]string{"workdir": "{work}", "network": "offline", "resident": "resident model runtimes", "legacy-resident": "resident model runtimes"}[field]
 			if !strings.Contains(err.Error(), message) {
 				t.Fatal("imprecise refusal", err)
 			}
