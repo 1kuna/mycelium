@@ -74,13 +74,10 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 // An already assigned batch retains its authorization/custody across suspicion.
 // New preparation launches still require live arrival evidence.
 func (q *Queue) hostSessionLaunchAllowed(m *Machine, session string) bool {
-	return m != nil && q.hostHygieneReason(m) == "" && q.hostSessionOpen(m, session)
+	return m != nil && !q.fleetTakeoverFence(hostID(m)) && q.hostHygieneReason(m) == "" && q.hostSessionOpen(m, session)
 }
 
 func (q *Queue) hostSessionOpen(m *Machine, session string) bool {
-	if m != nil && q.fleetTakeoverFence(hostID(m)) {
-		return false
-	}
 	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m)
 }
 

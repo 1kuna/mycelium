@@ -2,6 +2,7 @@ package myce
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -113,8 +114,13 @@ func TestFleetUpgradeLiveTakeover(t *testing.T) {
 			if q.machineCapacityReason(q.s.Machines[m.ID]) == "" {
 				t.Fatal("new admission not fenced during cutover")
 			}
-			if q.hostSessionOpen(q.s.Machines[m.ID], m.Session) {
+			if q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session) {
 				t.Fatal("new launch not fenced")
+			}
+			// Native-group member restarts belong to the retained attempt, so
+			// the brief new-admission fence must leave their exact gates open.
+			if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: run.ID, Attempt: fmt.Sprint(run.Attempt)}); err != nil {
+				t.Fatalf("cutover refused retained attempt member launch: %v", err)
 			}
 			i := fleetInstructionFor(t, q)
 			if len(h.StopRequests) != 0 || job(t, q, run.ID).State != "running" {
