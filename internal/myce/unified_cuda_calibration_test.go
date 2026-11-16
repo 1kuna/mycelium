@@ -4,9 +4,74 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// Numeric-only installed status, 2026-11-16 07:43Z: 142 comparable accepted
+// samples in 15 aggregates. A later incomplete attempt cleared the physical
+// range while retaining an earlier complete 51.3077 GiB whole-host-derived
+// bound. This is not a recovered synchronized per-owner physical trace.
+func TestUnifiedCUDACalibrationCoverageGapRetainedShape(t *testing.T) {
+	b, err := os.ReadFile("testdata/unified-cuda-coverage-gap.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []*WorkObservation
+	if err := json.Unmarshal(b, &rows); err != nil {
+		t.Fatal(err)
+	}
+	q, clock := fixture(t)
+	key := ObservationKey{Work: "profile:naming", Host: "unified-cuda", Component: "0", Hardware: "device", Fingerprint: "driver", Environment: "environment", Target: ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}}
+	samples := 0
+	for i, row := range rows {
+		row.Key = key
+		row.Key.Allowance = string(rune('a' + i))
+		row.MemoryLayout, row.MemoryConfiguration = "unified", "configuration"
+		row.MemoryRecordedAt = clock.Now()
+		samples += max(1, row.MemorySamples)
+		q.putWorkObservation(identityHash(row.Key), *row)
+	}
+	if len(rows) != 15 || samples != 142 {
+		t.Fatal("retained population changed", len(rows), samples)
+	}
+	before, _ := json.Marshal(rows)
+	host, device, physical, ok := unifiedCUDACalibration(rows, .125)
+	const want = 52.00727383471761 // 51.307701110839844 + .5745727238777686 + .125.
+	if !ok || math.Abs(host+device+.125-want) > 1e-9 || device != 22.443359375 || physical < 51.307701110839844 {
+		t.Fatalf("charge %.12f, physical %.12f, device %.12f, calibrated %t", host+device+.125, physical, device, ok)
+	}
+	after, _ := json.Marshal(rows)
+	if string(before) != string(after) {
+		t.Fatal("fallback projection mutated retained evidence")
+	}
+	m := unifiedCUDAAdmissionMachine()
+	m.ID, m.HostID, m.Device = "worker", key.Host, key.Component
+	m.HostMemoryBudgetGB, m.ReservedMemoryGB = 112.83781051635742, 4
+	m.CapabilityProfile.SystemMemoryBytes = 129992077312
+	m.FreeHostMemoryGB = 54.25691604614258
+	s := spec("production")
+	s.Needs.Memory = "auto"
+	estimate := q.memoryEstimateForState(&Job{Spec: s}, &m, &key, "configuration", false)
+	if math.Abs(hostNeed(&m, *estimate.device.DeviceGB*estimate.deviceFactor, estimate.measuredHostGB)-want) > 1e-9 || estimate.samples != 142 {
+		t.Fatalf("queue restored the duplicated physical bound: %+v", estimate)
+	}
+	s.Needs.Memory = ""
+	s.Needs.MemoryGB, s.Needs.HostMemoryGB = device, host
+	production := Job{ID: "incoming", State: "queued", Spec: s}
+	q.s.Jobs[production.ID] = &production
+	q.s.Machines[m.ID] = &m
+	if !hostFits(&m, device, host) || q.unifiedCUDAProductionReason(&production, &m) != "" {
+		t.Fatal("incoming production charged a further production envelope")
+	}
+	experiment := production
+	experiment.ID, experiment.Spec.Priority = "experiment", "experiment"
+	if reason := q.unifiedCUDAProductionReason(&experiment, &m); !strings.Contains(reason, "unified CUDA production headroom") {
+		t.Fatal("experiment spent protected production headroom", reason)
+	}
+	t.Logf("incoming production %.12f, remaining room %.12f, residual %.12f; experiment plus protected production %.12f exceeds room", want, m.FreeHostMemoryGB, m.FreeHostMemoryGB-want, 2*want)
+}
 
 // Installed per-job history, 2026-11-14 22:04-23:03Z. Only numeric memory
 // evidence, eligibility and frozen charges survive sanitization. The older
