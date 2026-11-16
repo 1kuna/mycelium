@@ -265,7 +265,7 @@ func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 	run.cancel()
 	await(t, func() bool { sn, _ := q.Snapshot(); return len(sn.Machines) == 1 && sn.Machines[0].Leaving })
 	requireState(t, q, j.ID, "running")
-	if err := os.WriteFile(filepath.Join(j.Checkpoint, "attempt-1", "finish"), nil, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(run.state, "checkpoints", j.ID, "attempt-1", "finish"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })

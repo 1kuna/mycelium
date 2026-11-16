@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -319,14 +320,26 @@ func TestActionableBlockerNativeResolveQualification(t *testing.T) {
 // reason and every read agree instead of status overriding the text.
 func TestCheckpointRootHold(t *testing.T) {
 	for _, priority := range []string{"experiment", "deadline", "production"} {
-		for _, resumable := range []bool{false, true} {
+		for _, checkpoint := range []string{"none", "resumable", "declared", "ephemeral"} {
 			for _, unavailable := range []string{"queue", "worker", "both"} {
-				t.Run(fmt.Sprintf("%s/resumable=%t/%s", priority, resumable, unavailable), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/%s/%s", priority, checkpoint, unavailable), func(t *testing.T) {
 					q, clock := fixture(t)
 					m := cpuMachine("worker", "worker", "cpu", 8, 16)
+					if checkpoint == "ephemeral" {
+						if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+							t.Fatal(err)
+						}
+						m.Capabilities = append(m.Capabilities, ephemeralCapability, nativeCICapability, "native_isolation_namespace")
+					}
 					check(t, q, m, nil)
 					s := cpuSpec(1, 1)
-					s.Priority, s.Resumable = priority, resumable
+					s.Priority, s.Resumable = priority, checkpoint == "resumable"
+					if checkpoint == "declared" || checkpoint == "ephemeral" {
+						s.Disk = &DiskNeeds{CheckpointBytes: 1024}
+					}
+					if checkpoint == "ephemeral" {
+						s.WorkerData = "ephemeral"
+					}
 					if priority == "deadline" {
 						deadline := clock.Now().Add(time.Hour)
 						s.Deadline = &deadline
@@ -334,7 +347,7 @@ func TestCheckpointRootHold(t *testing.T) {
 					j := submit(t, q, s)
 					fakeCheckpointAvailability(t, q, unavailable == "worker")
 					m.CheckpointUnavailable = unavailable != "queue"
-					if !resumable {
+					if checkpoint == "none" || checkpoint == "ephemeral" {
 						if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
 							t.Fatalf("non-checkpointing %s job blocked by %s checkpoint storage", priority, unavailable)
 						}
@@ -371,7 +384,7 @@ func TestCheckpointRootHold(t *testing.T) {
 					m.CheckpointUnavailable = false
 					clock.Advance(time.Second)
 					if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
-						t.Fatal("restored storage did not release the resumable job")
+						t.Fatal("restored storage did not release the checkpoint-dependent job")
 					}
 				})
 			}
