@@ -78,6 +78,14 @@ class Checkpoint:
         if self.protocol and self.protocol != _PROTOCOL:
             raise CheckpointError("checkpoint_protocol_unsupported", "unknown checkpoint protocol")
 
+    def _notify(self, name: str, generation: int) -> None:
+        target = os.environ.get("MYCE_CHECKPOINT_NOTIFY")
+        assigned = os.environ.get("MYCE_CHECKPOINT_DIR")
+        # An explicitly different checkpoint directory must not notify the
+        # assigned attempt about unrelated bytes. Do not resolve/stat the NAS.
+        if target and assigned and os.path.abspath(self.directory) == os.path.abspath(assigned):
+            _atomic_local(Path(target), json.dumps({"name": name, "generation": generation}).encode("utf-8"))
+
     def save(self, value: Any, name: str = "checkpoint.json") -> Path:
         """Fsync temp, atomically replace, then sync directory except Linux CIFS."""
         if Path(name).name != name or name in {"", ".", ".."} or not name.endswith(".json"):
@@ -102,6 +110,7 @@ class Checkpoint:
                 os.fsync(fd)
             finally:
                 os.close(fd)
+        self._notify(name, generation)
         return path
 
     def _generation(self):

@@ -21,6 +21,13 @@ import (
 
 const storageProbeContent = "myce storage probe\n"
 
+// Successful NAS operations have taken 17.73s/23.22s (#234); the existing
+// per-operation stall allowance is 30s. Ten allowances between idle probes
+// bounds worst-observed probe duty below 10%, instead of one per heartbeat.
+// Real I/O failures and local OS mount inventory still fence immediately.
+// Cost: an otherwise idle failed share can remain cached for five minutes.
+const checkpointMetadataInterval = 10 * checkpointAvailabilityStallBudget
+
 var storageProbeHost = sync.OnceValue(func() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -222,7 +229,7 @@ func (q *Queue) checkpointProbeFreshness() time.Duration {
 			shortest = period
 		}
 	}
-	return shortest
+	return max(checkpointMetadataInterval, shortest)
 }
 
 // recentCheckpointAvailability reuses a completed probe within the freshness

@@ -1208,6 +1208,14 @@ func (q *Queue) retry(j *Job, why string) {
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.touchJob(j.ID)
+	// With no local publication, an interrupted NAS writer may have saved
+	// unreported bytes. Preserve its target until resume inspects those bytes;
+	// absence of a live progress report is not proof of an empty checkpoint.
+	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.CheckpointTarget == nil && j.StartedAt != nil {
+		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
+			j.CheckpointTarget = &CheckpointOrigin{Target: jobTargetOn(j, m), Attempt: j.Attempt}
+		}
+	}
 	// Read the stop cause while the attempt identity still names it.
 	maintenance := plannedMaintenanceStop(j)
 	j.PendingOutputRefs = nil
@@ -1582,6 +1590,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {
 		report, progress := &reports[i], &progresses[i]
+		var event string
 		unlockRequest := requestLock(ctx, &q.mu)
 		if j := q.s.Jobs[report.ID]; j != nil && j.FileTransport {
 			report.Progress = 0
@@ -1591,12 +1600,25 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
 				progress.durable = save.Generation
 			}
-		} else if j != nil && j.Spec.Resumable && (j.Attempt != report.Attempt || j.Spec.ResumeCompatibility != nil) {
-			progress.path = attemptCheckpoint(*j)
+		} else if j != nil && j.Spec.Resumable && j.Attempt != report.Attempt {
+			// Only a known recoverable execution can open a resume decision.
+			// Ordinary or already rejected stale heartbeats do no share I/O.
+			for _, copy := range j.Copies {
+				if copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == c.Machine.ID && copy.Session == c.Machine.Session {
+					progress.path = attemptCheckpoint(*j)
+					event = fmt.Sprintf("recovery:%d:%d:%s:%d", j.Attempt, report.Attempt, report.Session, report.Progress)
+					break
+				}
+			}
 		}
 		unlockRequest()
 		if progress.path != "" {
-			progress.durable, progress.err = q.nasProgress.read(q.clock, q.checkpointProgressPeriod(c), progress.path)
+			progress.durable, progress.err = q.nasProgress.event(q.clock, event, progress.path, func() (int64, error) {
+				if q.nasProgress.scan != nil {
+					return q.nasProgress.scan(progress.path)
+				}
+				return checkpointProgress(progress.path)
+			})
 			if errors.Is(progress.err, os.ErrNotExist) {
 				progress.durable, progress.err = 0, nil
 			}
@@ -2049,6 +2071,10 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	if err == nil && yieldMatches(j) && !j.FileTransport && !r.ReleaseOnly && r.Interrupted && r.FinalCheckpointGeneration != nil {
 		yieldPath = attemptCheckpoint(*j)
 	}
+	var finalPath string
+	if err == nil && j != nil && j.Spec.Resumable && !j.FileTransport && !r.ReleasePending {
+		finalPath = attemptCheckpoint(*j)
+	}
 	var outputs map[string]string
 	var keep []KeepFile
 	var host string
@@ -2068,22 +2094,26 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		}
 	}
 	unlockRequest()
+	// Arbitrary checkpoint writers do not report live progress. Finalization
+	// discovers their last save before recording its resume origin or retrying.
+	var finalGeneration int64 = -1
+	if finalPath != "" {
+		key := fmt.Sprintf("complete:%d:%s", r.Attempt, r.Session)
+		var e error
+		finalGeneration, e = q.nasProgress.event(q.clock, key, finalPath, func() (int64, error) { return checkpointProgress(finalPath) })
+		if errors.Is(e, errCheckpointIOPending) || errors.Is(e, errCheckpointIOTimeout) {
+			return e
+		}
+		if e != nil {
+			finalGeneration = -1
+		}
+	}
 	if yieldPath != "" {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// A heartbeat scan may predate the final save. Give final verification
-		// its own observation key, and retry unfinished I/O without accepting a
-		// failed-save verdict or discarding the worker's retained receipt.
-		key := fmt.Sprintf("%s:yield-final:%d", yieldPath, *r.FinalCheckpointGeneration)
-		generation, e := q.nasProgress.run(key, func() (int64, error) { return checkpointProgress(yieldPath) })
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if errors.Is(e, errCheckpointIOPending) || errors.Is(e, errCheckpointIOTimeout) {
-			return e
-		}
-		if e != nil || generation != *r.FinalCheckpointGeneration {
+		// Finalization is fresh evidence, independent of worker status.
+		if finalGeneration != *r.FinalCheckpointGeneration {
 			r.FinalCheckpointGeneration = nil
 		}
 	}
@@ -2111,6 +2141,13 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	var rejected error
 	err = q.updateRequest(ctx, func() error {
+		if finalPath != "" {
+			if current, e := q.current(r); e == nil && attemptCheckpoint(*current) == finalPath && finalGeneration >= 0 {
+				current = q.touchJob(current.ID)
+				current.Progress = finalGeneration
+				noteCheckpointTarget(current, allocationMachine(q.s.Machines[r.Machine], current.AllocatedDevices), current.Attempt, finalGeneration)
+			}
+		}
 		if yieldPath != "" {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -3136,8 +3173,10 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.Kill = true
 		return reply
 	}
-	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && progress.path == attemptCheckpoint(*j) && progress.err == nil && progress.durable > 0 {
-		j.YieldGeneration = max(j.YieldGeneration, progress.durable)
+	if !j.FileTransport && j.Spec.ResumeCompatibility != nil && report.Progress > 0 {
+		// Worker-local publication evidence; final yield still verifies the
+		// durable save at the stop/finalization event, never on status.
+		j.YieldGeneration = max(j.YieldGeneration, report.Progress)
 	}
 	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)

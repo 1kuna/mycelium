@@ -194,6 +194,14 @@ MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the q
 
 **Mycelium spends as little compute and as few tokens as it can, in the product and in how its agents report.**
 
+For checkpoint status, Zach's direction relayed by the orchestrator on
+2026-11-15 is: “shouldnt status come from the machine it runs on? not just
+constantly streamed to the nas for no reason?” Status and progress come from
+the executing worker's local signals and process view; the NAS is never read
+for status. Checkpoint saves, resume, and stop/release/finalization checks keep
+their durability contract. Received by the event-driven-progress implementation
+worker; implementation and release evidence belong to [#1670](https://github.com/1kuna/mycelium/issues/1670).
+
 Mycelium's product keeps control-plane cost per check-in low, default status output small, and gives consumer agents one batched wait (#1120, #1053). Mycelium's agents report only on a state change, a fault or a needed decision, plus one final summary.
 
 <a id="my-49"></a>Zach left the five slimming choices from the 2026-11-11 audit to the orchestrator (MY-49). The orchestrator chose the following. They are agent decisions, not his words, and can be changed on evidence:

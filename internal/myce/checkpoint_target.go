@@ -89,6 +89,9 @@ func (q *Queue) checkpointTargetRefusal(j *Job, m *Machine) string {
 	if len(hosts) == 0 {
 		return ""
 	}
+	if c.Generation == 0 {
+		return fmt.Sprintf("checkpoint progress is unknown on %s; resuming on its writing target (%s)", targetLabel(c.Target), strings.Join(hosts, ", "))
+	}
 	return fmt.Sprintf("checkpoint generation %d was written on %s, not %s; resuming on a host of that target (%s)", c.Generation, targetLabel(c.Target), targetLabel(here), strings.Join(hosts, ", "))
 }
 

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
+	"testing/synctest"
 	"time"
 )
 
@@ -86,7 +87,7 @@ func TestHostHygieneCheckpointAccessHangKeepsSingleRequest(t *testing.T) {
 	await(t, func() bool { return len(p.pending) == 1 })
 }
 
-func TestHostHygieneCheckpointAccessUpgradeKeepsNASBaseline(t *testing.T) {
+func TestHostHygieneCheckpointMetadataUpgradeDropsOldTimings(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC)}
 	dir := t.TempDir()
 	sample := HostHealthSample{Mounts: []HostMountHealth{{Root: "checkpoint", LatencySeconds: 10}, {Root: "nas", LatencySeconds: .001}}}
@@ -99,8 +100,8 @@ func TestHostHygieneCheckpointAccessUpgradeKeepsNASBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	mounts := m.health.Baseline[0].Mounts
-	if len(mounts) != 1 || mounts[0].Root != "nas" || len(m.health.History[0].Mounts) != 2 {
-		t.Fatal("upgrade reused checkpoint enumeration timings or lost NAS/history", m.health)
+	if len(mounts) != 0 || len(m.health.History[0].Mounts) != 2 {
+		t.Fatal("upgrade reused enumeration timings or lost history", m.health)
 	}
 }
 
@@ -193,15 +194,11 @@ func TestHostHygieneMountRecoveryReadBackoffAndHumanAlert(t *testing.T) {
 				fakeMu.Lock()
 				defer fakeMu.Unlock()
 				err := probeRecoveryMount("/storage/checkpoints", "/storage", osname, func(string) error {
-					return readHealthMount("root", func(path string) (os.FileInfo, error) { return fs.Stat(files, path) }, func(path string) (fs.ReadDirFile, error) {
+					return statHealthMount("root", func(path string) (os.FileInfo, error) {
 						if failure != nil {
 							return nil, failure
-						} // stat still succeeds from cache
-						f, err := files.Open(path)
-						if err != nil {
-							return nil, err
 						}
-						return f.(fs.ReadDirFile), nil
+						return fs.Stat(files, path)
 					}, func() {})
 				}, func() ([]nasMount, error) {
 					if mounted {
@@ -451,4 +448,31 @@ func TestHostHygieneMountUpgradeDiscardsOnlyStatBaseline(t *testing.T) {
 	if fresh < hostHealthWarmup {
 		t.Fatal("current probe baseline not retained on restart", fresh)
 	}
+}
+
+// Production mount sampling uses one metadata call per five idle minutes,
+// independent of the control cadence; a pending call retains its owner.
+func TestHostHygieneMountIdleCadence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := &fakeClock{now: time.Unix(100, 0)}
+		var calls atomic.Int64
+		p := &hostMountProbe{root: "nas", path: "unused", clock: clock, period: checkpointMetadataInterval, measure: func(string, func()) hostMountResult { calls.Add(1); return hostMountResult{latency: time.Millisecond} }}
+		p.sample(clock.Now(), nil)
+		synctest.Wait()
+		p.sample(clock.Now(), nil)
+		for i := 0; i < 600; i++ {
+			clock.Advance(100 * time.Millisecond)
+			p.sample(clock.Now(), nil)
+			synctest.Wait()
+		}
+		if calls.Load() != 1 {
+			t.Fatal("idle metadata poll multiplied", calls.Load())
+		}
+		clock.Advance(checkpointMetadataInterval)
+		p.sample(clock.Now(), nil)
+		synctest.Wait()
+		if calls.Load() != 2 {
+			t.Fatal("mount recovery check lost", calls.Load())
+		}
+	})
 }

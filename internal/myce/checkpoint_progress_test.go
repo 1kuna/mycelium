@@ -35,7 +35,7 @@ func checkpointCountingScan(root string) (*checkpointCountingFS, func(string) (i
 	}
 }
 
-func TestCheckpointProgressReportCadence(t *testing.T) {
+func TestCheckpointProgressEventDriven(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		w := recoveryWorker(t)
 		clock := &fakeClock{now: time.Unix(100, 0)}
@@ -66,13 +66,22 @@ func TestCheckpointProgressReportCadence(t *testing.T) {
 		}
 		write("1")
 		beforeFS, beforeScan := checkpointCountingScan(path)
-		for tick := 0; tick < 600; tick++ {
+		for tick := 0; tick < 12; tick++ {
 			if _, err := beforeScan(path); err != nil {
 				t.Fatal(err)
 			}
 		}
 		afterFS, scan := checkpointCountingScan(path)
 		s.nasProgress.scan = scan
+		var markers atomic.Int64
+		s.nasProgress.readSignal = func(path string, value any) error {
+			markers.Add(1)
+			return readCheckpointJSON(path, value)
+		}
+		signal := checkpointSignalFile(s.dir, j)
+		if err := os.MkdirAll(filepath.Dir(signal), 0700); err != nil {
+			t.Fatal(err)
+		}
 		// Inject an already-running process. No payload, NAS mount, or native
 		// resource probes are needed to exercise the actual 100ms actor loop.
 		p := &process{job: j, done: make(chan workerFinish, 1)}
@@ -84,6 +93,11 @@ func TestCheckpointProgressReportCadence(t *testing.T) {
 			cancel()
 			<-a.done
 		}()
+		synctest.Wait()
+		if afterFS.reads.Load() != 3 {
+			t.Fatal("recovery did not read fresh progress", afterFS.reads.Load())
+		}
+		afterFS.reads.Store(0) // Recovery is an event, outside steady state.
 		for tick := 0; tick < 600; tick++ {
 			if tick == 251 {
 				info, err := os.Stat(path)
@@ -91,6 +105,9 @@ func TestCheckpointProgressReportCadence(t *testing.T) {
 					t.Fatal(err)
 				}
 				write("2")
+				if err := os.WriteFile(signal, []byte(`{"name":"save.json","generation":2}`), 0600); err != nil {
+					t.Fatal(err)
+				}
 				updated, err := os.Stat(path)
 				if err != nil || !info.ModTime().Equal(updated.ModTime()) {
 					t.Fatal("fixture changed root mtime", err)
@@ -98,25 +115,37 @@ func TestCheckpointProgressReportCadence(t *testing.T) {
 			}
 			synctest.Wait()
 			report, _, _, err := a.snapshot()
-			if err != nil || !report.Started || report.Progress < 1 {
+			if err != nil || !report.Started {
 				t.Fatal("running progress unavailable", report, err)
 			}
-			if tick >= 301 && report.Progress != 2 {
-				t.Fatal("new generation absent after next report interval", report)
+			if tick > 0 && tick < 251 && report.Progress != -1 {
+				t.Fatal("arbitrary live progress must be unknown", report)
+			}
+			if tick >= 252 && report.Progress != 2 {
+				t.Fatal("local save absent from worker report", report)
 			}
 			// Check every prefix, not just an average that could hide bursts.
-			if got, limit := afterFS.reads.Load(), int64(3*(1+tick/50)); got > limit {
-				t.Fatalf("tick %d: directory reads %d exceed %d", tick, got, limit)
+			if got := afterFS.reads.Load(); got != 0 {
+				t.Fatalf("tick %d: live status read %d NAS directories", tick, got)
 			}
 			if tick < 599 {
 				clock.Advance(100 * time.Millisecond)
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
-		if beforeFS.reads.Load() != 1800 || afterFS.reads.Load() != 36 {
+		if beforeFS.reads.Load() != 36 || afterFS.reads.Load() != 0 || markers.Load() != 1 {
 			t.Fatal("unexpected directory-read measurement", beforeFS.reads.Load(), afterFS.reads.Load())
 		}
-		t.Logf("local counting filesystem, 60s, 100ms actor, 5s reports, three directories: before=%d reads/min (600 walks), after=%d reads/min (12 walks)", beforeFS.reads.Load(), afterFS.reads.Load())
+		t.Logf("local counting filesystem, 60s, 100ms actor, 5s reports, three directories: round1=%d NAS reads/min (12 walks), after=%d NAS reads/min (zero walks), published save=%d local marker read", beforeFS.reads.Load(), afterFS.reads.Load(), markers.Load())
+		// An arbitrary final save (no notification) is read at finalization.
+		write("3")
+		p.done <- workerFinish{result: Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}}}
+		clock.Advance(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		if r, _, _, _ := a.snapshot(); r.Progress != 3 || afterFS.reads.Load() != 3 {
+			t.Fatal("finalization missed arbitrary save", r, afterFS.reads.Load())
+		}
 	})
 }
 
@@ -199,37 +228,55 @@ func TestCheckpointProgressLocalMarkerPrompt(t *testing.T) {
 	})
 }
 
-func TestQueueCheckpointProgressReportCadence(t *testing.T) {
+func TestQueueCheckpointProgressFromWorker(t *testing.T) {
 	q, clock, m, _, j := yieldFixture(t, false)
-	clock.Advance(5 * time.Second) // Expire the fixture's first observation.
 	var scans atomic.Int64
-	q.nasProgress.scan = func(path string) (int64, error) {
-		// Scans must stay outside the queue mutex.
-		q.mu.Lock()
-		q.mu.Unlock()
-		scans.Add(1)
-		return checkpointProgress(path)
-	}
-	for tick := 0; tick < 50; tick++ {
-		if tick == 1 {
-			// Assignments carry share-relative paths; write through the queue's
-			// absolute fixture path, as a worker with a configured root would.
-			saveYieldGeneration(t, job(t, q, j.ID), 2)
-		}
+	q.nasProgress.scan = func(string) (int64, error) { scans.Add(1); return -1, errors.New("status must not read NAS") }
+	for tick := 0; tick < 600; tick++ {
+		// Deliberately do not write the reported generation to the share: live
+		// status comes from this worker; only finalization verifies durable bytes.
 		_, err := q.Checkin(Checkin{Machine: m, period: 5 * time.Second, Attempts: []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: 2}, Session: j.Session, Started: true}}})
 		if err != nil {
 			t.Fatal(err)
 		}
+		if scans.Load() != 0 {
+			t.Fatal("queue read NAS for status", scans.Load())
+		}
 		clock.Advance(100 * time.Millisecond)
 	}
-	if scans.Load() != 1 {
-		t.Fatal("queue re-walked before consumer interval", scans.Load())
+	got := job(t, q, j.ID)
+	if got.Progress != 2 || got.YieldGeneration != 2 || got.CheckpointTarget == nil || got.CheckpointTarget.Generation != 2 {
+		t.Fatal("worker progress not retained", got)
 	}
-	_, err := q.Checkin(Checkin{Machine: m, period: 5 * time.Second, Attempts: []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt, Progress: 2}, Session: j.Session, Started: true}}})
-	if err != nil || scans.Load() != 2 {
-		t.Fatal("queue did not refresh next report", scans.Load(), err)
-	}
-	if got := job(t, q, j.ID).CheckpointTarget; got == nil || got.Generation != 2 {
-		t.Fatal("queue failed to retain new generation", got)
-	}
+}
+
+func TestCheckpointProgressEventPending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clock := &fakeClock{now: time.Unix(100, 0)}
+		var n checkpointProgressReader
+		release := make(chan struct{})
+		var reads atomic.Int64
+		scan := func() (int64, error) { reads.Add(1); <-release; return 7, nil }
+		if _, err := n.event(clock, "recovery", "attempt", scan); !errors.Is(err, errCheckpointIOPending) {
+			t.Fatal(err)
+		}
+		for tick := 0; tick < 600; tick++ {
+			clock.Advance(100 * time.Millisecond)
+			if _, err := n.event(clock, "recovery", "attempt", scan); !errors.Is(err, errCheckpointIOPending) {
+				t.Fatal(err)
+			}
+		}
+		if reads.Load() != 1 {
+			t.Fatal("pending event duplicated", reads.Load())
+		}
+		close(release)
+		synctest.Wait()
+		if v, err := n.event(clock, "recovery", "attempt", scan); v != 7 || err != nil {
+			t.Fatal(v, err)
+		}
+		clock.Advance(time.Hour)
+		if v, err := n.event(clock, "recovery", "attempt", scan); v != 7 || err != nil || reads.Load() != 1 {
+			t.Fatal("idle event reread", v, err, reads.Load())
+		}
+	})
 }

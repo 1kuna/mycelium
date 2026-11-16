@@ -839,6 +839,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	env["MYCE_JOB_ID"] = j.ID
 	env["MYCE_ATTEMPT"] = strconv.Itoa(j.Attempt)
 	env["MYCE_CHECKPOINT_DIR"] = checkpoint
+	env["MYCE_CHECKPOINT_NOTIFY"] = checkpointSignalFile(s.dir, j)
 	delete(env, "MYCE_CHECKPOINT_PROTOCOL")
 	if j.Spec.localFirst() {
 		env["MYCE_CHECKPOINT_PROTOCOL"] = localFirstProtocol

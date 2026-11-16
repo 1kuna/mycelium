@@ -1195,6 +1195,21 @@ atomic JSON save, never by file times or wall clocks:
 {"myce_checkpoint": {"generation": 9}, "value": {"step": 42}}
 ```
 
+Job status and progress come only from the executing worker; the NAS is never
+read for status (#1670). The updated Python helper publishes its generation to
+`MYCE_CHECKPOINT_NOTIFY`, a worker-provided file in the attempt's private local
+work directory, after the save is durable. A custom writer can atomically
+publish `{"name":"checkpoint.json","generation":9}` there after syncing its
+JSON save or commit manifest. Use a plain `.json` filename and a positive int64
+generation; replace the local notification atomically. The worker reads the
+local marker once and reports it in its check-in, with no NAS status read.
+Without notifications, live checkpoint progress is unknown (`-1`); Mycelium
+reads durable progress only at resume/stop/release/finalization events. This
+can delay portable scarce-host-yield eligibility until positive publication
+evidence exists. `local_first` keeps its existing local manifest/ack protocol.
+See [the access audit](reference/checkpoint-scanning.md) for the remaining sparse
+host-level admission and mount probes.
+
 Increment the highest retained generation on every save, including after resume.
 The Python `Checkpoint` helper does this automatically and returns only `value`
 when loading. Keep a single writer per attempt. For non-JSON payloads, atomically

@@ -3,8 +3,6 @@ package myce
 import (
 	"context"
 	"errors"
-	"io"
-	"io/fs"
 	"os"
 	"runtime"
 	"slices"
@@ -14,11 +12,11 @@ import (
 	"mycelium/internal/probeguard"
 )
 
-// Read one directory entry, including EOF for an empty directory. Metadata alone
-// can succeed from cache while a dead SMB connection cannot serve reads.
+// Idle mount health checks metadata only. Actual payload/cache I/O supplies
+// data-path failures and recovery evidence; metadata success cannot clear those.
 var workerHealthMountProbe = func(path string, progress func()) error {
 	probeguard.Check()
-	return readHealthMount(path, os.Stat, func(path string) (fs.ReadDirFile, error) { return os.Open(path) }, progress)
+	return statHealthMount(path, os.Stat, progress)
 }
 
 // Reuse checkpoint admission's exclusive create/close/remove access check.
@@ -29,30 +27,11 @@ var workerHealthCheckpointProbe = func(path string, progress func()) error {
 	return workerCheckpointAvailable(path, progress)
 }
 
-func readHealthMount(path string, stat func(string) (os.FileInfo, error), open func(string) (fs.ReadDirFile, error), progress func()) (err error) {
+func statHealthMount(path string, stat func(string) (os.FileInfo, error), progress func()) error {
 	info, err := stat(path)
 	progress()
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
+	if err == nil && !info.IsDir() {
 		return errors.New("mount root is not a directory")
-	}
-	f, err := open(path)
-	progress()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := f.Close(); err == nil {
-			err = closeErr
-		}
-		progress()
-	}()
-	_, err = f.ReadDir(1)
-	progress()
-	if errors.Is(err, io.EOF) {
-		return nil
 	}
 	return err
 }
@@ -158,6 +137,7 @@ type hostMountResult struct {
 	dataProof  bool
 }
 type hostMountProbe struct {
+	period      time.Duration
 	root, path  string
 	clock       Clock
 	progressed  atomic.Pointer[time.Time]
@@ -231,11 +211,14 @@ func (p *hostMountProbe) sample(now time.Time, baseline []HostHealthSample) Host
 				}
 				// Failed attempts spread retries by their observed cost and repeated
 				// failure spacing. No universal mount-recovery deadline is assumed.
-				p.retryDelay = max(limit, max(r.latency, p.retryDelay*2))
+				p.retryDelay = max(p.period, max(limit, max(r.latency, p.retryDelay*2)))
 				p.nextProbe = now.Add(p.retryDelay)
 			} else {
 				p.failure = nil
 				p.retryDelay, p.nextProbe = 0, time.Time{}
+				if p.period > 0 {
+					p.nextProbe = now.Add(max(p.period, 10*r.latency))
+				}
 			}
 		default:
 		}
