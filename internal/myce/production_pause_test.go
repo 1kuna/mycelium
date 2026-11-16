@@ -102,7 +102,7 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 	}
 }
 
-func TestProductionPausePreservesNonResumableAndFencesBackfill(t *testing.T) {
+func TestProductionPauseFencesBackfill(t *testing.T) {
 	for _, dimension := range []string{"memory", "cpu", "device"} {
 		t.Run(dimension, func(t *testing.T) {
 			q, clock := fixture(t)
@@ -118,7 +118,7 @@ func TestProductionPausePreservesNonResumableAndFencesBackfill(t *testing.T) {
 				low.Needs.HostMemoryGB = 16
 				high.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
 			}
-			low.Resumable = false
+			low.Resumable = true
 			victim := submit(t, q, low)
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil || run.ID != victim.ID {
@@ -127,14 +127,18 @@ func TestProductionPausePreservesNonResumableAndFencesBackfill(t *testing.T) {
 			if err := q.Started(result(run, false)); err != nil {
 				t.Fatal(err)
 			}
+			// Existing repeated-preemption protection leaves a brief real deficit.
+			if err := q.update(func() error { q.touchJob(run.ID).PreemptionCount = 2; return nil }); err != nil {
+				t.Fatal(err)
+			}
 			demand := submit(t, q, high)
 			current := job(t, q, run.ID)
 			if current.State != "running" || priorityStop(current) != nil || current.StopAt != nil {
-				t.Fatal("priority killed non-resumable work", current.State)
+				t.Fatal("priority ignored minimum-runtime protection", current.State)
 			}
 			holder := q.waitHolder(HostObligation{Result: result(run, false)}, demand, clock.Now())
-			if holder.Preemptible || holder.PreemptionReason != "non_resumable_running" || holder.Job != run.ID {
-				t.Fatal("non-resumable holder not explained", holder)
+			if holder.Preemptible || holder.PreemptionReason != "minimum_runtime" || holder.Job != run.ID {
+				t.Fatal("protected holder not explained", holder)
 			}
 			later := cpuSpec(1, 1)
 			if dimension == "device" {
@@ -152,9 +156,16 @@ func TestProductionPausePreservesNonResumableAndFencesBackfill(t *testing.T) {
 					t.Fatal("portable queued backfill did not use another host", got)
 				}
 			}
-			finish(t, q, run, true)
+			clock.Advance(q.preemptionGrace())
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if job(t, q, run.ID).State != "stopping" {
+				t.Fatal("production did not reclaim the holder after its grace")
+			}
+			finishInterrupted(t, q, run)
 			if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != demand.ID {
-				t.Fatal("production did not follow natural holder completion", got)
+				t.Fatal("production did not follow exact holder release", got)
 			}
 		})
 	}

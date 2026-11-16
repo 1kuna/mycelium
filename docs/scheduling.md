@@ -382,10 +382,8 @@ losses and checkpoint progress. A successful completion wins over preemption;
 cancellation wins over both. Independent exit/OOM still fails under the shared
 outcome classifier. A deadline authorizes stopping, never assumes cleanup.
 
-Resumable victims get ten seconds by default. Running non-resumable commands
-finish naturally (MY-56); unstarted offers remain reclaimable. History names
-these holders with `non_resumable_running`, and new non-resumable backfill
-cannot deepen ready production's host RAM/CPU deficit. Deadline demand keeps the
+Resumable victims get ten seconds by default, non-resumable commands stop
+immediately. Deadline demand preserves non-resumable commands and keeps the
 120-second grace for resumable commands. `queue --preemption-stop-grace`
 configures the other priority-stop interval; the legacy
 `--production-stop-grace` flag remains an alias. After two displacements, resumed
@@ -395,6 +393,11 @@ are desired state and are restored when capacity permits. Model requests accept
 OpenAI streams emit an SSE error with `type: interruption` and
 `code: priority_preemption`; generic streams use the `X-Myce-Error-Code` trailer.
 Partial output is never transparently replayed.
+
+An already over-budget host still considers useful lower-tier releases against
+its signed RAM debt (MY-56). Backfill cannot deepen ready production's host
+RAM/CPU deficit, including work on another card. The ordinary physical-memory
+and exact-release gates still apply; compatible other hosts remain eligible.
 
 Equal-tier projects share available targets. One machine worker may run CPU
 attempts and one batch attempt per GPU concurrently within the shared ledger. Same-tier work is not stopped

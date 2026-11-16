@@ -56,7 +56,7 @@ func TestIncidentHostRAMPreemptionReplay(t *testing.T) {
 			for i, ram := range []float64{6, 6, 5.2} {
 				s := cpuSpec(2, 0)
 				s.Project = "tests"
-				s.Resumable = true // MY-56 preserves started non-resumable holders; this replay exercises releases.
+				s.Resumable = false
 				s.Needs.HostMemoryGB = ram
 				if i == 0 {
 					s.Priority = "deadline"

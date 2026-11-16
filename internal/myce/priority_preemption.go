@@ -161,11 +161,6 @@ func (q *Queue) batchPreemptible(j *Job, demand Spec) bool {
 	if !batchReservesCapacity(j) || q.comparePriority(j.Spec, demand) <= 0 {
 		return false
 	}
-	// MY-56: priority may reclaim an offer, but cannot discard a running
-	// command's progress. Cooperative attempts use the existing checkpoint stop.
-	if j.StartedAt != nil && !j.Spec.Resumable {
-		return false
-	}
 	// Deadline retains its cooperative-only legacy interruption contract.
 	if demand.Priority == "deadline" && !j.Spec.Resumable {
 		return false

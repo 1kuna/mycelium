@@ -127,13 +127,12 @@ selected worker/session clears the commitment durably and permits replanning
 without releasing cleanup custody.
 A demand with a selected release precedes uncommitted same-tier demand, so each
 waiting batch plans its own target instead of borrowing another demand's release.
-This includes unstarted non-resumable commands, native
+This includes non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
-unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified [scarce-host yield](#scarce-host-yield) case. Production preempts resumable lower-tier work. Resumable accelerator work receives SIGTERM with ten seconds of grace by default,
+unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified [scarce-host yield](#scarce-host-yield) case. Production preempts lower-tier work. Accelerator work, including
+non-resumable work, receives SIGTERM with ten seconds of grace by default,
 capped at fifteen seconds, before SIGKILL if still running. Resumable CPU commands
-receive ten seconds by default to save. Running non-resumable commands finish
-naturally (MY-56); history names the holder and its inability to checkpoint.
-New non-resumable backfill cannot deepen ready production's host resource deficit. Deadline
+receive ten seconds by default to save; non-resumable CPU work stops immediately. Deadline
 demand preserves non-resumable commands and gives resumable CPU commands the
 existing 120-second grace.
 `--preemption-stop-grace` sets the other priority-stop
@@ -141,6 +140,12 @@ grace (`--production-stop-grace` is a compatibility alias). After two planned
 preemptions, each resumed batch, build or desired engine gets at least that grace
 of runtime before another priority stop. Strict higher tiers may still starve
 lower tiers before admission.
+
+Host RAM release planning considers signed reservation debt before deciding
+that demand cannot fit (MY-56). Existing lower-tier releases may repay that
+debt; no stopping attempt counts as free before exact release. Backfill cannot
+deepen ready production's RAM/CPU deficit, including across independent cards
+on one host. Compatible other hosts remain available.
 
 Each planned stop carries `priority_preemption`, exact demand/victim identity
 and policy match/revision. Stop intent never proves delivery or release.

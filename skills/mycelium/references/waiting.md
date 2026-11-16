@@ -210,11 +210,8 @@ authorize a memory-safety yield.
 
 - **Production** is for work a person or customer is waiting on, as the
   project defines it. When it preempts, resumable work gets 10 seconds to save
-  (queue setting `--preemption-stop-grace`) and requeues with its checkpoints,
-  without spending loss or infrastructure-retry budgets. Running non-resumable
-  commands finish naturally; history identifies the holder as
-  `non_resumable_running`. New non-resumable backfill cannot deepen production's
-  RAM/CPU deficit, including on another card of that host. A production job must start within its
+  (queue setting `--preemption-stop-grace`) and non-resumable work stops at once
+  and requeues to start over, uncharged. A production job must start within its
   start window (`start_window`, default 150 s, at most 1 h; `start_by` for an
   absolute time). Waiting for capacity doesn't spend it; a stuck start fails
   visibly. Infrastructure interruptions requeue it at most twice; its own
@@ -223,10 +220,15 @@ authorize a memory-safety yield.
 - **Deadline** needs a real owner-set date (`--class deadline --deadline
   RFC3339`). It stops only resumable lower-tier work, with two minutes to save.
   The date orders work; it is not a completion guarantee.
-- **Experiment** can be checkpoint-stopped by either tier and requeued when
-  resumable, without charging a loss. Running non-resumable commands finish
-  naturally, so make long experiments resumable to let production reclaim
-  capacity. Experiments keep a three-loss limit for real losses.
+- **Experiment** can be stopped by either tier and requeued. A stop is not
+  charged as a loss, but a non-resumable job restarts from scratch, so make long
+  experiments resumable. Experiments keep a three-loss limit for real losses.
+
+Ready production can reclaim useful lower-tier host RAM even when existing
+charges exceed a reduced allowance. Signed debt is repaid before admission,
+not hidden by clamping free RAM to zero. Backfill cannot deepen production's
+host RAM/CPU deficit, including on another card; compatible other hosts remain
+available. Exact cleanup and physical-memory checks still gate replacement.
 
 Within a tier, jobs order by readiness (environment and model), earliest
 deadline, then waiting age, and competing projects share by recent use. There
