@@ -8,19 +8,22 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const ephemeralCapability = "worker_data_ephemeral_v1"
+// v2 also confines native groups and checks frozen extension executions. A v1
+// worker must never receive a newly supported job through a v2 queue.
+const (
+	ephemeralCapability       = "worker_data_ephemeral_v2"
+	ephemeralLegacyCapability = "worker_data_ephemeral_v1"
+)
 
 func (s Spec) ephemeral() bool { return s.WorkerData == "ephemeral" }
 
-// Initial scope deliberately excludes helpers/builders and writable shared
-// runtimes. The policy itself opts into the ci boundary; no second knob is needed.
+// The policy opts into the ci boundary, including extension-owned executions.
 func validateWorkerData(s Spec) error {
 	if s.WorkerData == "" {
 		return nil
@@ -28,28 +31,32 @@ func validateWorkerData(s Spec) error {
 	if !s.ephemeral() {
 		return errors.New("advanced.worker_data must be ephemeral or omitted")
 	}
-	if s.SizeHint != (SizeHint{}) {
+	if !s.extensionJob() && s.SizeHint != (SizeHint{}) {
 		return errors.New("ephemeral plain commands use needs, not extension size_hint")
 	}
-	if s.Resident != nil || s.Resumable || s.ResumeCompatibility != nil || s.extensionJob() || s.Program != nil || len(s.Args) != 0 || s.FanOut != nil || s.After != nil || s.Needs.Model != "" || len(s.ModelSnapshots) != 0 || !reflect.DeepEqual(s.Environment, Environment{}) || s.OutputDelivery != "" || s.Diagnostics != nil || len(s.KeepOnFailure) != 0 || len(s.Run.Sidecars) != 0 || s.Run.MemoryGB != 0 {
-		return errors.New("advanced.worker_data: ephemeral supports non-resumable plain commands with installed tools and declared managed I/O; environments, extensions, model servers/snapshots, sidecars, fan-out, after, diagnostics and alternate output delivery are unsupported")
+	if s.Resumable || s.ResumeCompatibility != nil {
+		return errors.New("ephemeral worker data does not support resumable jobs or resume compatibility")
+	}
+	if s.Program != nil || s.ExtensionCheck != nil {
+		return errors.New("ephemeral worker data does not cover program usage files or extension-check publication")
+	}
+	if s.Needs.Model != "" || len(s.ModelSnapshots) != 0 {
+		return errors.New("ephemeral worker data does not cover model servers or model snapshots")
+	}
+	if s.OutputDelivery != "" || s.Diagnostics != nil || len(s.KeepOnFailure) != 0 {
+		return errors.New("ephemeral worker data does not cover alternate output delivery, diagnostics or keep_on_failure")
+	}
+	if !s.extensionJob() && len(s.Args) != 0 {
+		return errors.New("ephemeral plain commands put arguments in run.command")
 	}
 	if s.Isolation != "" && s.Isolation != nativeIsolationCI {
 		return errors.New("ephemeral worker data requires ci isolation (selected automatically when omitted)")
 	}
-	if s.Run.Workdir != "" && s.Run.Workdir != "{work}" {
-		return errors.New("ephemeral worker data requires the managed {work} directory")
-	}
-	if s.Execution != nil {
-		if len(s.Execution.Sidecars) != 0 || s.Execution.Main.Environment != "" || s.Execution.Main.MemoryGB != 0 || s.Execution.Main.Workdir != "" && s.Execution.Main.Workdir != "{work}" {
-			return errors.New("ephemeral execution cannot use sidecars, environments, member limits or custom workdirs")
-		}
+	if err := validateEphemeralExecution(s); err != nil {
+		return err
 	}
 	if len(s.Outputs) == 0 {
 		return errors.New("ephemeral commands require declared outputs")
-	}
-	if s.Needs.Network {
-		return errors.New("ephemeral commands currently require offline execution")
 	}
 	// Plain commands historically rejected NAS-path inputs before reaching
 	// staging. Apply the same containment and collision checks here explicitly.
@@ -77,6 +84,49 @@ func validateWorkerData(s Spec) error {
 	}
 	if err := paths.validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Check both authored commands and frozen extension lowering before data staging.
+// Environment builders receive only software recipes, never attempt work/data;
+// payloads can read their caches but cannot write them under the ci boundary.
+func validateEphemeralExecution(s Spec) error {
+	if !s.ephemeral() {
+		return nil
+	}
+	if s.Resident != nil {
+		return errors.New("ephemeral worker data does not cover resident model runtimes")
+	}
+	if s.Needs.Network {
+		return errors.New("ephemeral commands currently require offline execution")
+	}
+	if s.Needs.Model != "" {
+		return errors.New("ephemeral worker data does not cover model servers")
+	}
+	if s.Run.Workdir != "" && s.Run.Workdir != "{work}" || s.Execution != nil && s.Execution.Main.Workdir != "" && s.Execution.Main.Workdir != "{work}" {
+		return errors.New("ephemeral worker data requires the managed {work} directory, including extension main and sidecars")
+	}
+	return nil
+}
+
+func validateEphemeralExtensions(s Spec, extensions []Extension) error {
+	if !s.ephemeral() {
+		return nil
+	}
+	for _, e := range extensions {
+		for _, v := range e.Variants {
+			candidate := s
+			if e.Resident != nil {
+				candidate.Resident = e.Resident
+			}
+			candidate.Needs = v.Needs
+			candidate.Run = RunSpec{}
+			candidate.Execution = &v.Execution
+			if err := validateEphemeralExecution(candidate); err != nil {
+				return fmt.Errorf("extension %s: %w", extensionKey(e), err)
+			}
+		}
 	}
 	return nil
 }

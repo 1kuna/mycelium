@@ -150,6 +150,33 @@ func TestReconcileNativeAttemptDeadGroupAndSidecars(t *testing.T) {
 	}
 }
 
+func TestEphemeralNativeReconcileChecksPrivateDataAndLogs(t *testing.T) {
+	j := Job{ID: "private-job", Attempt: 1, Session: "session", Machine: "worker", Spec: ephemeralSpec()}
+	s, _ := nativeReconcileFixture(t, j)
+	want := []string{ephemeralRoot(s.dir, j), filepath.Join(s.dir, ephemeralLogName(j))}
+	for _, held := range want {
+		err := reconcileNativeAttempt(context.Background(), s.dir, s.state.Identity, workerGroupMembers, processBirth, func(_ context.Context, root string) error {
+			if root == held {
+				return errors.New("private handle still open")
+			}
+			return nil
+		})
+		if err == nil || !readNativeReconciled(t, s).Result.ReleasePending {
+			t.Fatal("private handle did not retain custody", held, err)
+		}
+	}
+	var seen []string
+	if err := reconcileNativeAttempt(context.Background(), s.dir, s.state.Identity, workerGroupMembers, processBirth, func(_ context.Context, root string) error {
+		seen = append(seen, root)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(seen, want) || readNativeReconciled(t, s).Result.ReleasePending {
+		t.Fatal("wrong private handle inventory", seen)
+	}
+}
+
 func TestReconcileNativeAttemptLiveProcessKeepsCustody(t *testing.T) {
 	s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
 	pid := os.Getpid()

@@ -266,16 +266,27 @@ The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
 relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
 For data that must leave the execution worker, set
-`advanced: {worker_data: ephemeral}` on an offline, non-resumable command with
-managed inputs and declared outputs, using installed tools. It stages privately
+`advanced: {worker_data: ephemeral}` on an offline, non-resumable command or
+extension with managed inputs and declared outputs. Environments, sidecars,
+`after` inputs and fan-out pieces are supported on v2-capable workers. It stages privately
 without persistent payload caches, retains successful output bytes until durable
 queue acceptance, then verifies removal of local inputs, extracted/shared data,
-scratch/temp/private home, checkpoints, outputs and delivered logs before release.
+scratch/temp/private home (including sidecars), checkpoints, outputs and delivered
+logs before release. Environment caches, extension source and model caches stay
+read-only. Ephemeral attempts never read, pin or populate persistent payload
+caches, even for a warm hash pinned by another job; that other job's independent
+copy stays under its own retention. This does not purge earlier ordinary jobs.
 Check job `worker_data_cleanup` and the attempt-history receipt: `failed` or
 pending cleanup is not a satisfied policy, even if the result succeeded. Retries
 restage inputs; startup recovers process custody and cleanup. Supporting Linux
 namespace workers with file core routing or the qualified Mycelium core router
-are required; other combinations are refused with `job_worker_data_unsupported`.
+advertising `worker_data_ephemeral_v2` are required; v1 workers cannot run the
+expanded scope. Resumability, custom workdirs (including extension workdirs),
+program jobs, extension checks, model servers/snapshots, diagnostics,
+`keep_on_failure` and alternate output delivery remain refused with
+`job_worker_data_unsupported`. Environment recipes, extension source/assets and
+authored settings are shared software/metadata: put customer data only in
+declared managed inputs, never in software recipes, arguments or env values.
 Piped core handlers ignore
 `RLIMIT_CORE`; only Mycelium's qualified router discards ephemeral cores unread
 and records signal/time/attempt metadata. Other piped handlers and older routers

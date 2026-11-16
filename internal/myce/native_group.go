@@ -294,6 +294,12 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 
 func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
 	logName := identity + ".log"
+	if j.Spec.ephemeral() {
+		logName = ephemeralLogName(j)
+		if err := os.MkdirAll(filepath.Join(s.dir, filepath.Dir(logName)), 0700); err != nil {
+			return nil, err
+		}
+	}
 	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
 		return nil, err
@@ -457,7 +463,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		p.mu.Unlock()
 		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
-			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
+			if e := w.publishExtensionFiles(j, attemptStorageRoot(j, g.dir)); e != nil {
 				r = finalizationResult(r, "output_publication", "", e, true)
 			}
 		}
@@ -501,9 +507,11 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	cmd.Stdin = reader
 	cmd.Env = inheritedProcessSessionEnvironment(environmentList(jobBaseEnvironment()))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
+	work := attemptStorageRoot(g.p.job, g.dir)
 	g.namespace = nil
 	if !nativeUnsandboxed(&g.p.job) {
+		g.worker.nativeCI = nativeCIRequired(&g.p.job)
+		g.worker.nativeEphemeral = g.p.job.Spec.ephemeral()
 		g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
 	}
 	if err != nil {
@@ -764,8 +772,20 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	}
 	delete(env, "MYCE_TOKEN")
 	// Helpers and main cannot replace the attempt's temp path through authored env.
-	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
-	tmp, err := attemptTempDir(g.dir, work)
+	work := attemptStorageRoot(g.p.job, g.dir)
+	tempSpool := g.dir
+	if g.p.job.Spec.ephemeral() {
+		tempSpool = "" // Never create an alias outside the verified private tree.
+		// Reapply after sidecar env and environment activation; no helper can
+		// redirect HOME/checkpoint/progress writes outside this attempt.
+		env["HOME"] = filepath.Join(work, ".home")
+		env["MYCE_CHECKPOINT_DIR"] = filepath.Join(ephemeralRoot(g.dir, g.p.job), "checkpoint")
+		env["MYCE_PROGRESS_FILE"] = applicationProgressFile(g.dir, g.p.job)
+		// Program usage is unsupported. An authored helper value must not
+		// create an additional writable grant outside the cleanup inventory.
+		delete(env, "MYCE_USAGE_FILE")
+	}
+	tmp, err := attemptTempDir(tempSpool, work)
 	if err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}

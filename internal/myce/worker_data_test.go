@@ -279,6 +279,15 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ordinaryRelease()
+	// The stored shared entry has the same content hash as a file-cache blob.
+	// An ordinary job pins it while the ephemeral job downloads its own copy.
+	stored := SharedInput{SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	storedPath, storedRelease, err := w.sharedInputs.Acquire(warmCtx, stored, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storedRelease()
+	j.Spec.SharedInputs["stored"] = stored
 	t.Cleanup(func() { _ = removeSharedEntry(w.sharedInputs.cache.Root) })
 	evidence := w.sharedInputs.evidence()
 	ctx := context.WithValue(context.Background(), sharedInputOwnerKey{}, s)
@@ -295,6 +304,9 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(env["MYCE_INPUT_RUNTIME"], "bin/run")); err != nil || string(data) != "hello" {
 		t.Fatal("private archive", string(data), err)
 	}
+	if data, err := os.ReadFile(env["MYCE_INPUT_STORED"]); err != nil || string(data) != "new private input" || env["MYCE_INPUT_STORED"] == storedPath {
+		t.Fatal("stored shared hash did not stage privately", err)
+	}
 	if w.sharedInputs.evidence() != evidence || env["MYCE_INPUT_RUNTIME"] == warmPath {
 		t.Fatal("private input acquired the ordinary cache")
 	}
@@ -306,6 +318,12 @@ func TestEphemeralStoredSharedArchiveAndWarmCacheBypass(t *testing.T) {
 	}
 	if pinned, err := sharedInputPinned(w.sharedInputs.cache.Root, input.key()); err != nil || !pinned {
 		t.Fatal("ordinary consumer lost its pin", pinned, err)
+	}
+	if data, err := os.ReadFile(storedPath); err != nil || string(data) != "new private input" {
+		t.Fatal("ordinary stored shared copy removed", err)
+	}
+	if pinned, err := sharedInputPinned(w.sharedInputs.cache.Root, stored.key()); err != nil || !pinned {
+		t.Fatal("ordinary stored shared pin removed", pinned, err)
 	}
 }
 
@@ -369,7 +387,7 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	if _, err := base.FoldAdvanced(); err != nil || !base.ephemeral() || base.Validate() != nil || AdvancedStatus(&base).WorkerData != "ephemeral" {
 		t.Fatal("advanced policy not normalized", err)
 	}
-	cases := []func(*Spec){func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Environment.Name = "runtime" }, func(s *Spec) { s.Run.Sidecars = []NativeSidecar{{Name: "helper"}} }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
+	cases := []func(*Spec){func(s *Spec) { s.Resumable = true }, func(s *Spec) { s.Run.Workdir = "/tmp/custom" }, func(s *Spec) { s.Needs.Model = "server" }, func(s *Spec) { s.ModelSnapshots = map[string]ModelSnapshot{"model": {}} }, func(s *Spec) { s.WorkerData = "other" }, func(s *Spec) { s.Outputs = nil }, func(s *Spec) { s.Isolation = "unsandboxed"; s.Reason = "test" }, func(s *Spec) { s.Needs.Network = true }}
 	for i, mutate := range cases {
 		s := ephemeralSpec()
 		mutate(&s)
@@ -383,6 +401,12 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	m := machine("old", "fake")
 	if nativeNetworkFits(&j, &m) {
 		t.Fatal("older worker can execute ephemeral job")
+	}
+	m = ephemeralMachine()
+	m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool { return c == ephemeralCapability })
+	m.Capabilities = append(m.Capabilities, "worker_data_ephemeral_v1")
+	if nativeNetworkFits(&j, &m) {
+		t.Fatal("v1 worker can receive v2 ephemeral work")
 	}
 	m = ephemeralMachine()
 	if !nativeNetworkFits(&j, &m) {
@@ -403,6 +427,35 @@ func TestEphemeralValidationAndOlderWorkerFence(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(w.fileCache.Root, ref.SHA256)); err != nil {
 		t.Fatal("ordinary cache behavior changed", err)
+	}
+}
+
+func TestEphemeralManagedCompositionValidation(t *testing.T) {
+	for _, kind := range []string{"environment", "sidecar", "execution", "after", "pieces", "extension"} {
+		t.Run(kind, func(t *testing.T) {
+			s := ephemeralSpec()
+			switch kind {
+			case "environment":
+				s.Environment.Name = "runtime"
+			case "sidecar":
+				s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"true"}}}
+			case "execution":
+				s.Run = RunSpec{}
+				s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"true"}, Environment: "runtime", Workdir: "{work}"}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"true"}}}}
+			case "after":
+				s.After = &PieceDependency{Job: "producer", Outputs: map[string]string{"input": "out"}}
+			case "pieces":
+				s.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "one"}, {Key: "two"}}}
+			case "extension":
+				s.Run = RunSpec{}
+				s.Needs = ResourceNeeds{}
+				s.Extension, s.Args = "sample@1", []string{"argument"}
+				s.SizeHint.MemoryGB = 1
+			}
+			if err := s.Validate(); err != nil {
+				t.Fatal("covered composition refused", err)
+			}
+		})
 	}
 }
 

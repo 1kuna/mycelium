@@ -182,8 +182,14 @@ func reconcileNativeAttempt(ctx context.Context, dir, identity string, members f
 			}
 		}
 	}
-	if err := scratchEmpty(ctx, filepath.Join(dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); err != nil {
-		return err
+	roots := []string{attemptStorageRoot(*j, dir)}
+	if j.Spec.ephemeral() {
+		roots = []string{ephemeralRoot(dir, *j), filepath.Join(dir, ephemeralLogName(*j))}
+	}
+	for _, root := range roots {
+		if err := scratchEmpty(ctx, root); err != nil {
+			return err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
