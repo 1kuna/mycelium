@@ -103,6 +103,7 @@ func (q *Queue) freezeResident(j *Job) error {
 	if err != nil {
 		return err
 	}
+	engine.Model.MaxInFlight = 1 // The frozen budget covers one request activation peak.
 	engine.Model.Name = fmt.Sprintf("resident-%x", sha256.Sum256(identity))
 	j.Spec.Resident = &ResidentBinding{Model: model.Name, Engine: engine}
 	return nil
@@ -378,9 +379,10 @@ func (c *residentConn) SetWriteDeadline(t time.Time) error {
 }
 
 type residentListener struct {
-	conn net.Conn
-	once sync.Once
-	done chan struct{}
+	conn      net.Conn
+	once      sync.Once
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func (l *residentListener) Accept() (net.Conn, error) {
@@ -393,11 +395,7 @@ func (l *residentListener) Accept() (net.Conn, error) {
 	return nil, net.ErrClosed
 }
 func (l *residentListener) Close() error {
-	select {
-	case <-l.done:
-	default:
-		close(l.done)
-	}
+	l.closeOnce.Do(func() { close(l.done) })
 	return l.conn.Close()
 }
 func (l *residentListener) Addr() net.Addr { return l.conn.LocalAddr() }

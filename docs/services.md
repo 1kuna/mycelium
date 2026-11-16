@@ -9,6 +9,79 @@ local secret handling and no replay after streaming output begins. Environment
 locks live in [environments](environments.md); trust limits in
 [native isolation](native-isolation.md).
 
+## Resident engines for independent stage jobs
+
+Use `advanced.resident: {model: catalog-name}` on an entry to reuse a loaded
+catalog engine across independent inputs. A registered extension declares
+`resident: {model: catalog-name}` beside its variants. The catalog model must
+already describe a foreground server, its health check, exact model/runtime,
+locked environment and measured memory budget (see [general servers](#calling-general-model-servers)).
+An arbitrary command that exits cannot become a resident model automatically:
+split model initialization into that server and make the stage command its client.
+
+```yaml
+project: example
+entries:
+  infer:
+    source: {git: HEAD}
+    needs: {platform: cuda, cpu_cores: 1, memory: auto}
+    inputs: {input.bin: samples/input.bin}
+    run:
+      command: [sh, -ec, '"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin > result.json']
+    outputs: {result.json: results}
+    advanced:
+      isolation: sandboxed
+      resident: {model: speech-engine}
+```
+
+Submit with `myce run --entry infer --out accepted .mycelium/adapter.yaml`.
+Use `pieces` for many inputs; each piece remains a separate durable job and
+publishes its own verified outputs. Existing ordinary-producer and per-piece
+`after` dependencies become ready only after exact-attempt output acceptance.
+Keep production target declarations and MY-19 parity checks for the client and
+server contract. This example's CUDA requirement is illustrative; select the
+platforms supported by the catalog runtime and the consumer's qualified code.
+
+The worker supplies `MYCE_RESIDENT_CLIENT`, the path to its matching executable.
+Its `resident` command streams stdin (or `--input FILE`) to `--path /endpoint`,
+with `--method POST` and `--content-type application/octet-stream` by default,
+and writes successful response bytes to stdout. Non-success HTTP status or an
+interrupted exchange fails the command; there is no transport replay. It reads
+only `MYCE_RESIDENT_PIPE` and `MYCE_RESIDENT_KEY`, which grant this attempt access
+to its frozen engine. It never reads installed credentials. Make calls sequentially
+within one attempt; interrupted exchanges require the normal job retry policy.
+Raw HTTP clients can use `myce.ResidentRequest` over the same attempt-owned pipes.
+No network opt-in is required. The existing sandbox stays in force.
+
+Reuse identity includes project, stage/entry or extension, immutable source,
+environment and exact catalog model/runtime. Per-item input bytes, arguments
+and memory-learning keys do not split an entry's engine. A different kind,
+environment or model gets a different identity; each host/card owns its copy.
+The queue admits the cold engine and client together, charging the engine once
+and each client's staging/CPU memory separately. The catalog budget must cover
+weights, runtime and the measured peak of one request, including host RAM.
+Calls serialize per resident engine, so concurrent request activations cannot
+spend that budget twice. The existing enforced ceilings and physical-host ledger
+continue to apply, including conservative unified-memory accounting.
+
+Known queued/running/dependent demand keeps the engine warm. After that demand
+ends, the existing measured load-cost and interarrival policy determines idle
+retention, overriding the catalog's fixed idle interval for this opt-in. Memory
+pressure and higher-priority demand can reclaim it earlier; memory remains
+charged until exact engine unload acknowledgement. Only the engine survives:
+work directories, accepted results, cancellation, retries and release custody
+remain attempt-specific. A failed input does not invalidate accepted siblings;
+engine death interrupts calls without silently replaying their request.
+
+`worker_data: ephemeral` remains unsupported with resident engines and receives
+`job_worker_data_unsupported`: request spools and shared server memory are outside
+attempt-only cleanup. Do not use this bridge to promise shared-server data erasure.
+Workers advertise `resident_jobs_v1`; older workers cannot run these jobs.
+Resident attempts use natural drain during worker upgrade until detached bridge
+custody is qualified. CPU fixture proof does not establish native model parity,
+hardware peaks, coexistence or production load amortization; measure those for
+the exact model/runtime before production adoption.
+
 ## Calling OpenAI models
 
 General speech, OCR, face and other HTTP APIs use [general servers](services.md).

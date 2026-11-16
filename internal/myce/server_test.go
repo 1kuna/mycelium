@@ -51,6 +51,10 @@ func TestGeneralServerChild(t *testing.T) {
 			healthFailed.Store(true)
 			return
 		}
+		if r.URL.Path == "/invalid" {
+			http.Error(w, "invalid fixture input", 422)
+			return
+		}
 		if r.URL.Path == "/exit" {
 			os.Exit(7)
 		}

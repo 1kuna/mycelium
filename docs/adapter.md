@@ -1604,3 +1604,14 @@ runtime libraries even without executable bits; it may include an unused package
 helper. Header/load-command reads do not read symbols or binary sections and add
 no file-size cap, subprocess, network request or queue-lock I/O. Unreadable or
 malformed candidates are unknown, not proof of a missing library.
+
+### Reusing a resident model
+
+Set `advanced: {resident: {model: catalog-name}}` on an independent entry, or
+`resident: {model: catalog-name}` on a registered extension. Its command uses
+`"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin` and writes
+normal declared outputs. The engine remains resident across same-stage jobs;
+its catalog budget covers one request peak, charged once beside client memory.
+See [the complete example and lifecycle contract](services.md#resident-engines-for-independent-stage-jobs).
+Ephemeral worker-data, resumable stages, fan-out waves and CPU fallback are
+refused with this opt-in; independent `pieces` and `after` dependencies work as usual.

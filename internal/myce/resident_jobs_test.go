@@ -2,11 +2,13 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -167,7 +169,15 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	}
 	m.ModelConfigHash = modelConfigHash(q.models)
 	check(t, q, m, nil)
+	storeRoot := t.TempDir()
+	if err := q.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Outputs = map[string]string{"out": "results"}
 	first := residentAssigned(t, q, m, s)
+	if err := q.ConfigurePolicies(map[string]ProjectPolicy{s.Project: {Weight: 1, MaxConcurrent: 1, MaxConcurrentExperiments: 1}}); err != nil {
+		t.Fatal(err)
+	}
 	frozen := first.Spec.Resident.Engine.Model
 	engine := NewModelEngine(frozen, t.TempDir(), RealClock{})
 	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
@@ -187,12 +197,13 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	api := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer api.Close()
 	w := Worker{Client: Client{URL: api.URL, Token: "test"}, Clock: clock}
+	endpoint, expectedStatus, cancelBefore := "/files/a%3Fb%2F%25?x=1", 200, false
 	invoke := func(j *Job, payload string) string {
 		t.Helper()
 		if err := q.Started(result(j, true)); err != nil {
 			t.Fatal(err)
 		}
-		// A short owned path also exercises Unix-domain length limits on macOS.
+		// Pipe names also work under arbitrarily long managed attempt roots.
 		work, err := os.MkdirTemp("", "myce-r-test-")
 		if err != nil {
 			t.Fatal(err)
@@ -203,27 +214,66 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer close()
-		req, _ := http.NewRequestWithContext(ctx, "POST", "http://resident/files/a%3Fb%2F%25?x=1", strings.NewReader(payload))
+		req, _ := http.NewRequestWithContext(ctx, "POST", "http://resident"+endpoint, strings.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+env["MYCE_RESIDENT_KEY"])
 		req.Header.Set("X-Myce-Project", "forged")
+		if cancelBefore {
+			if _, err := q.CancelJob(j.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		response, err := ResidentRequest(ctx, env["MYCE_RESIDENT_PIPE"], env["MYCE_RESIDENT_KEY"], req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer response.Body.Close()
 		data, _ := io.ReadAll(response.Body)
-		if response.StatusCode != 200 {
+		if response.StatusCode != expectedStatus {
 			t.Fatalf("bridge status=%d: %s", response.StatusCode, data)
 		}
 		if strings.Contains(string(data), "test|") {
 			t.Fatal("fleet token reached engine")
 		}
+		if expectedStatus == 200 && !strings.Contains(string(data), "/files/a%3Fb%2F%25?x=1|") {
+			t.Fatalf("escaped endpoint lost: %s", data)
+		}
 		return string(data)
+	}
+	accept := func(j *Job, data string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "out")
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Client.UploadFile(ctx, path, ref); err != nil {
+			t.Fatal(err)
+		}
+		r := result(j, true)
+		r.OutputRefs = FileManifest{"out": ref}
+		if err = q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dependent := pieceConsumer(s, first.ID, "")
+	dependent.Resident = nil
+	consumer := submit(t, q, dependent)
+	if dependencyReady(consumer) {
+		t.Fatal("dependent ready before accepted artifact")
 	}
 	if data := invoke(first, "one"); !strings.HasSuffix(data, "||one") {
 		t.Fatal(data)
 	}
-	finish(t, q, first, true)
+	accept(first, "accepted one")
+	if !dependencyReady(job(t, q, consumer.ID)) {
+		t.Fatal("accepted resident output did not release dependency")
+	}
+	if _, err := q.CancelJob(consumer.ID); err != nil {
+		t.Fatal(err)
+	}
 	second := residentAssigned(t, q, m, s)
 	if data := invoke(second, "two"); !strings.HasSuffix(data, "||two") {
 		t.Fatal(data)
@@ -231,7 +281,40 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	if engine.(*LlamaEngine).cmd.Process.Pid != pid || q.modelMemory(m.ID) != model.MemoryGB {
 		t.Fatal("second job replaced process or double charged")
 	}
-	finish(t, q, second, true)
+	accept(second, "accepted two")
+	bad := residentAssigned(t, q, m, s)
+	endpoint, expectedStatus = "/invalid", 422
+	invoke(bad, "bad input")
+	finish(t, q, bad, false)
+	cancelled := residentAssigned(t, q, m, s)
+	expectedStatus, cancelBefore = 409, true
+	invoke(cancelled, "cancelled input")
+	finish(t, q, cancelled, false)
+	dying := residentAssigned(t, q, m, s)
+	endpoint, expectedStatus, cancelBefore = "/exit", 502, false
+	invoke(dying, "interrupted input")
+	finish(t, q, dying, false)
+	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
+	reports, _ := rt.report()
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports, period: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if job(t, q, first.ID).State != "succeeded" || job(t, q, second.ID).State != "succeeded" || !dependencyReady(job(t, q, consumer.ID)) {
+		t.Fatal("failed/cancelled/dead engine damaged accepted siblings")
+	}
+
+	// Calls are ephemeral; accepted jobs and their frozen dependencies survive reopen.
+	api.Close()
+	q = reopenCancellationQueue(t, q, clock)
+	if err := q.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	api = httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer api.Close()
+	w.Client.URL = api.URL
+	if job(t, q, first.ID).OutputRefs["out"].SHA256 == "" || !dependencyReady(job(t, q, consumer.ID)) {
+		t.Fatal("restart lost accepted artifacts/dependency")
+	}
 	stale := residentAttempt{first.ID, first.Machine, first.Session, first.Attempt}
 	if q.residentAttemptLive(stale) {
 		t.Fatal("completed job retained invocation authority")
@@ -241,5 +324,131 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	}
 	if job(t, q, second.ID).State != "succeeded" {
 		t.Fatal("stale completion damaged accepted sibling")
+	}
+}
+
+func TestResidentJobsIdentityIgnoresPerItemMemory(t *testing.T) {
+	q, _, _, s := residentFixture(t)
+	s.PrepareSource = true
+	s.Files = FileManifest{".myce-source.tar": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
+	a := &Job{Spec: s}
+	if err := q.freezeResident(a); err != nil {
+		t.Fatal(err)
+	}
+	s.ProfileMemory = strings.Repeat("b", 64)
+	s.Run.Command = append(s.Run.Command, "another-recording")
+	s.Files = FileManifest{".myce-source.tar": s.Files[".myce-source.tar"], "input": {SHA256: strings.Repeat("c", 64), SizeBytes: 2}}
+	b := &Job{Spec: s}
+	if err := q.freezeResident(b); err != nil {
+		t.Fatal(err)
+	}
+	if a.Spec.Resident.Engine.Model.Name != b.Spec.Resident.Engine.Model.Name {
+		t.Fatal("per-item arguments/files/memory split the common engine")
+	}
+	s.Files[".myce-source.tar"] = FileRef{SHA256: strings.Repeat("d", 64), SizeBytes: 1}
+	c := &Job{Spec: s}
+	if err := q.freezeResident(c); err != nil {
+		t.Fatal(err)
+	}
+	if a.Spec.Resident.Engine.Model.Name == c.Spec.Resident.Engine.Model.Name {
+		t.Fatal("changed source reused engine")
+	}
+}
+
+func TestResidentJobsLocalAliasBudgets(t *testing.T) {
+	_, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	w := sharedWorker(m, clock)
+	w.Machine.HostMemoryBudgetGB = 12
+	runtime := &modelRuntime{models: map[string]*workerModel{"derived": {model: Model{Name: "derived", MemoryGB: 8, HostMemoryGB: 4}, state: "loading", device: "0"}}}
+	reports, device := runtime.report()
+	if device != 8 {
+		t.Fatal("runtime budget not charged once")
+	}
+	next := Job{Spec: sharedSpec("experiment", 1), AllocatedDevices: []string{"0"}}
+	if err := localAttemptAdmission(w, nil, next, reports); err != nil {
+		t.Fatal("fitting alias allocation refused", err)
+	}
+	w.Machine.HostMemoryBudgetGB = 4
+	if err := localAttemptAdmission(w, nil, next, reports); err == nil {
+		t.Fatal("resident alias missing from host guard")
+	}
+	w.Machine.HostMemoryBudgetGB = 12
+	next.Spec.Needs.MemoryGB = 33
+	if err := localAttemptAdmission(w, nil, next, reports); err == nil || !strings.Contains(err.Error(), "device_budget") {
+		t.Fatal("alias missing from card guard", err)
+	}
+	encoded, _ := json.Marshal(reports)
+	var untrusted []ModelReport
+	_ = json.Unmarshal(encoded, &untrusted)
+	if _, ok := w.localModelBudget(untrusted[0]); ok {
+		t.Fatal("wire report supplied trusted local budget")
+	}
+}
+
+// Runs inside the same kernel boundary as a real stage; pathname sockets are
+// still denied, while the managed request/response pipes are usable.
+func TestResidentJobsPayloadChild(t *testing.T) {
+	if os.Getenv("RESIDENT_PAYLOAD_CHILD") == "" {
+		return
+	}
+	if os.Getenv("MYCE_TOKEN") != "" {
+		os.Exit(8)
+	}
+	req, _ := http.NewRequest("POST", "http://resident/infer", strings.NewReader("sandboxed input"))
+	response, err := ResidentRequest(context.Background(), os.Getenv("MYCE_RESIDENT_PIPE"), os.Getenv("MYCE_RESIDENT_KEY"), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != 200 || string(data) != "accepted response" {
+		t.Fatalf("%s %v", data, err)
+	}
+}
+func TestResidentJobsSandboxedPayload(t *testing.T) {
+	w := recoveryWorker(t)
+	api := httptest.NewServer(workerTestHandler(http.HandlerFunc(func(out http.ResponseWriter, in *http.Request) {
+		if strings.HasPrefix(in.URL.Path, "/api/workers/resident/") {
+			if in.Header.Get("Authorization") != "Bearer worker-private" || in.Header.Get("X-Myce-Job-Attempt") != "1" {
+				t.Error("bridge lost attempt authorization")
+			}
+			data, _ := io.ReadAll(in.Body)
+			if string(data) != "sandboxed input" {
+				t.Error("request body changed")
+			}
+			out.Write([]byte("accepted response"))
+			return
+		}
+		out.Header().Set("Content-Type", "application/json")
+		out.Write([]byte(`{"ok":true,"start_gate":"` + startGateProtocol + `"}`))
+	})))
+	defer api.Close()
+	w.Client = Client{URL: api.URL, Token: "worker-private"}
+	exe, _ := os.Executable()
+	j := recoveryJob(t, []string{exe, "-test.run=^TestResidentJobsPayloadChild$"})
+	j.Spec.Isolation = "sandboxed"
+	j.Spec.Resumable = false
+	j.Spec.Run.Env = map[string]string{"RESIDENT_PAYLOAD_CHILD": "1", "GORACE": "atexit_sleep_ms=0"}
+	j.Spec.Resident = &ResidentBinding{Model: "test", Engine: &ResidentEngine{Model: Model{Name: "derived"}}}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	var p *process
+	await(t, func() bool { p, err = w.start(store, j); return !errors.Is(err, errWorkerCheckpoint) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.stop(w.Clock.Now(), 0, true)
+	select {
+	case finished := <-p.done:
+		if finished.err != nil || !finished.result.Success {
+			data, _ := os.ReadFile(filepath.Join(store.dir, store.state.Log))
+			t.Fatalf("payload: %+v %s", finished, data)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("sandboxed resident payload stalled")
 	}
 }

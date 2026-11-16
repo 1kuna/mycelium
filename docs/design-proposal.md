@@ -1262,7 +1262,14 @@ fan-out](#whole-parent-dependent-fan-out) owns the result-check/dependent-job
 validation boundary; unsupported combinations fail.
 
 Shared servers/models/pins retain their existing endpoint/catalog contracts.
-A native sidecar already fits this file; long-lived server authoring is later
+A native sidecar already fits this file. Independent durable stages can opt into
+existing catalog engines with `advanced.resident: {model: NAME}`; the worker-owned
+attempt pipe invokes queue admission without exposing fleet credentials. The
+engine and environment are frozen by stage identity, its single-request budget
+is charged once, and pending demand participates in measured idle retention.
+Exact job output acceptance, dependencies and engine unload custody remain
+unchanged. See [the consumer contract](services.md#resident-engines-for-independent-stage-jobs).
+Long-lived server authoring is later
 work. This merge does not require rewriting serving consumers. There remains
 one binary, SQLite queue and scheduler.
 

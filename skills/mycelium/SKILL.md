@@ -217,6 +217,39 @@ when the software differs per platform (MLX on Mac, vLLM on CUDA), when a
 service sidecar is part of the job, or for production, which still needs
 explicit targets and MY-19 output parity per kind of machine.
 
+### Keep a model loaded across inputs
+
+For independent stages using the same model, author that model as an existing
+[catalog HTTP server](https://github.com/1kuna/mycelium/blob/main/docs/services.md#resident-engines-for-independent-stage-jobs)
+and opt the entry in:
+
+```yaml
+    advanced: {resident: {model: speech-engine}}
+    run:
+      command: [sh, -ec, '"$MYCE_RESIDENT_CLIENT" resident --path /infer --input input.bin > result.json']
+    outputs: {result.json: results}
+```
+
+Declare the input, supported platform and the client's staging/CPU memory as
+usual. `pieces` still gives one independently accepted result per input. The
+catalog server's measured budget covers model/runtime plus one request peak;
+Mycelium charges it once per host/card and serializes calls to that copy.
+The stage command is a client; move model loading into the server, whose exact
+runtime/environment/model identity Mycelium freezes. A registered extension can
+set `resident: {model: speech-engine}` beside its variants.
+
+The supplied helper uses attempt-owned pipes, grants no fleet credentials or
+raw engine URL, and works without `needs.network`. It accepts `--method`,
+`--path`, `--content-type` and `--input` (stdin by default); stdout is the successful
+response body. A failed request fails the command without transport replay.
+Make requests sequentially within an attempt. Pending same-stage jobs retain
+the loaded engine; otherwise measured load cost/demand spacing determine idle
+release. Memory pressure or production demand can reclaim it earlier through
+acknowledged unload. Failed/cancelled inputs keep their normal isolated result
+and dependency rules. `worker_data: ephemeral` is refused with this opt-in;
+shared server memory and request spools are outside attempt-only cleanup.
+Qualify exact native outputs and load/steady/request memory peaks before production.
+
 ## 6. Inputs
 
 Small files travel with the job: `inputs: {DEST: local/path}` in the entry, or
