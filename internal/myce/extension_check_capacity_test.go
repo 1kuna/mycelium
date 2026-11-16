@@ -24,7 +24,8 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 			if err := q.AddExtension(e); err != nil {
 				t.Fatal(err)
 			}
-			s.Extension = extensionKey(e)
+			s.Extension, s.ExtensionDigest = extensionKey(e), e.Digest
+			s.AllowedMachines = []string{m.ID}
 			sourceMachine := cloneMachine(&m)
 			sourceMachine.ID, sourceMachine.HostID, sourceMachine.Session = "source", "source", "source-session"
 			sourceMachine.CapabilityProfile.Arch = "arm64"
@@ -87,7 +88,7 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 			if math.Abs(sized.Spec.Needs.HostMemoryGB-70.59160131162189) > 1e-9 {
 				t.Fatalf("transfer demand=%+v", sized.MemoryEnvelope)
 			}
-			if scenario == "larger eligible" || scenario == "larger wrong target" {
+			if scenario == "larger wrong target" {
 				larger := cloneMachine(&m)
 				larger.ID, larger.HostID, larger.Session = "larger", "larger", "larger-session"
 				larger.CapabilityProfile.SystemMemoryBytes = 128 << 30
@@ -97,13 +98,16 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				}
 				machineCheck(t, q, larger)
 			}
-			if scenario == "unknown capacity" || scenario == "allowance only" {
+			if scenario == "unknown capacity" || scenario == "allowance only" || scenario == "larger eligible" {
 				if err := q.update(func() error {
 					owner := q.touchMachine(m.ID)
 					profile := *owner.CapabilityProfile
 					profile.SystemMemoryBytes = 0
-					if scenario == "allowance only" {
+					if scenario != "unknown capacity" {
 						profile.SystemMemoryBytes = 128 << 30
+					}
+					if scenario == "larger eligible" {
+						owner.HostMemoryBudgetGB = 128
 					}
 					owner.CapabilityProfile = &profile
 					return nil
@@ -161,6 +165,7 @@ func TestExtensionCheckHoldInDependentSummary(t *testing.T) {
 	checkSpec := s
 	checkSpec.Name, checkSpec.Project = "extension-check", "extension-check"
 	checkSpec.AllowedMachines = []string{eligible.ID}
+	checkSpec.ExtensionDigest = e.Digest
 	checkSpec.ExtensionCheck = &ExtensionCheckRequest{Work: s.workType(), Directory: t.TempDir()}
 	pending := submit(t, q, checkSpec)
 	if err := q.update(func() error {

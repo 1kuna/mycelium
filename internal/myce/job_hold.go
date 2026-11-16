@@ -208,6 +208,9 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				b.retag("native_qualification", "queue", "wait; nothing to do")
 				b.Reason = q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
 				b.Detail = b.Reason
+				if len(declared) > 0 {
+					b.Detail += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
+				}
 				return b
 			}
 		}
