@@ -85,6 +85,10 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 				t.Fatal("production did not acquire released capacity", prod)
 			}
 			finish(t, q, prod, true)
+			if dimension == "over-budget" {
+				// The paused payload itself needs its original allowance to return.
+				m.HostMemoryBudgetGB = 24
+			}
 			resumed := assignedJob(machineCheck(t, q, m))
 			if resumed == nil || resumed.ID != run.ID || resumed.Attempt != run.Attempt+1 || resumed.Checkpoint != run.Checkpoint {
 				t.Fatal("paused work did not resume the same progress", resumed)
