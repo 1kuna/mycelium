@@ -805,7 +805,10 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    Orchestrator reading of MY-55 with MY-35/MY-39: explicit `--urgency critical`
    still tries takeover first; only when takeover is impossible (or the fix
    requires restarting work) does it retain the existing tier-stop behavior.
-   It never escalates a normal update automatically. `stop_requests` records
+   It never escalates a normal update automatically. If the fix requires
+   restarting running work, explicitly use `myce host disable HOST --stop --wait`
+   before the critical upgrade, then resume only the policy you own afterward.
+   `--urgency critical` by itself still prefers takeover. `stop_requests` records
    explicit critical interruptions. Exact release is required after such a
    stop; grace expiry never proves it. Queue-host model calls/streams finish
    before the queue restarts.
