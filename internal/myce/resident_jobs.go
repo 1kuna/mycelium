@@ -212,7 +212,7 @@ func (q *Queue) residentAttemptLive(a residentAttempt) bool {
 	return j != nil && j.Spec.Resident != nil && j.Spec.Resident.Engine != nil && j.State == "running" && !j.ReleaseConfirmed && !cancelled(j) && j.StartedAt != nil && j.Machine == a.Machine && j.Session == a.Session && j.Attempt == a.Attempt
 }
 
-// Fleet authentication stays on the worker side of the socket. A payload can
+// Fleet authentication stays on the worker side of the pipes. A payload can
 // select an inference endpoint, never the engine, project, tier or machine.
 func (a API) residentCall(w http.ResponseWriter, r *http.Request) {
 	n, err := strconv.Atoi(r.Header.Get("X-Myce-Job-Attempt"))
