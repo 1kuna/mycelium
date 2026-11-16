@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -317,38 +318,64 @@ func TestActionableBlockerNativeResolveQualification(t *testing.T) {
 // An unreachable checkpoint root is the scheduler's hold, so the hold, its
 // reason and every read agree instead of status overriding the text.
 func TestCheckpointRootHold(t *testing.T) {
-	q, _ := fixture(t)
-	m := cpuMachine("worker", "worker", "cpu", 8, 16)
-	check(t, q, m, nil)
-	s := cpuSpec(1, 1)
-	j := submit(t, q, s)
-	fakeCheckpointAvailability(t, q, false)
-	if check(t, q, m, nil).Job != nil {
-		t.Fatal("checkpoint-dependent job started without its root")
-	}
-	got, err := q.jobSnapshot(j.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := q.publicSnapshot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var aggregate *Job
-	for _, row := range snapshot.Jobs {
-		if row.ID == j.ID {
-			aggregate = row
+	for _, priority := range []string{"experiment", "deadline", "production"} {
+		for _, resumable := range []bool{false, true} {
+			for _, unavailable := range []string{"queue", "worker", "both"} {
+				t.Run(fmt.Sprintf("%s/resumable=%t/%s", priority, resumable, unavailable), func(t *testing.T) {
+					q, clock := fixture(t)
+					m := cpuMachine("worker", "worker", "cpu", 8, 16)
+					check(t, q, m, nil)
+					s := cpuSpec(1, 1)
+					s.Priority, s.Resumable = priority, resumable
+					if priority == "deadline" {
+						deadline := clock.Now().Add(time.Hour)
+						s.Deadline = &deadline
+					}
+					j := submit(t, q, s)
+					fakeCheckpointAvailability(t, q, unavailable == "worker")
+					m.CheckpointUnavailable = unavailable != "queue"
+					if !resumable {
+						if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
+							t.Fatalf("non-checkpointing %s job blocked by %s checkpoint storage", priority, unavailable)
+						}
+						return
+					}
+					if check(t, q, m, nil).Job != nil {
+						t.Fatal("checkpoint-dependent job started without its root")
+					}
+					got, err := q.jobSnapshot(j.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					snapshot, err := q.publicSnapshot()
+					if err != nil {
+						t.Fatal(err)
+					}
+					var aggregate *Job
+					for _, row := range snapshot.Jobs {
+						if row.ID == j.ID {
+							aggregate = row
+						}
+					}
+					if got.Hold == nil || aggregate == nil || !reflect.DeepEqual(got.Hold, aggregate.Hold) || aggregate.Reason != got.Reason {
+						t.Fatalf("GET=%+v %q aggregate=%+v", got.Hold, got.Reason, aggregate)
+					}
+					if unavailable == "worker" {
+						if !strings.Contains(got.Reason, "waiting for saved progress storage") {
+							t.Fatalf("worker storage hold changed: %+v %q", got.Hold, got.Reason)
+						}
+					} else if got.Hold.Kind != "checkpoint_root" || got.Hold.Reason != "saved progress storage is unavailable" || !strings.HasPrefix(got.Reason, got.Hold.Reason) {
+						t.Fatalf("queue storage hold changed: %+v %q", got.Hold, got.Reason)
+					}
+					fakeCheckpointAvailability(t, q, true)
+					m.CheckpointUnavailable = false
+					clock.Advance(time.Second)
+					if reply := check(t, q, m, nil); reply.Job == nil || reply.Job.ID != j.ID {
+						t.Fatal("restored storage did not release the resumable job")
+					}
+				})
+			}
 		}
-	}
-	if got.Hold == nil || got.Hold.Kind != "checkpoint_root" || got.Reason != "saved progress storage is unavailable" || aggregate == nil || !reflect.DeepEqual(got.Hold, aggregate.Hold) || aggregate.Reason != got.Reason {
-		t.Fatalf("GET=%+v %q aggregate=%+v", got.Hold, got.Reason, aggregate)
-	}
-	fakeCheckpointAvailability(t, q, true)
-	q.mu.Lock()
-	wait := q.waitHold(q.s.Jobs[j.ID])
-	q.mu.Unlock()
-	if wait.Kind == "checkpoint_root" {
-		t.Fatalf("restored root kept its hold: %+v", wait)
 	}
 }
 

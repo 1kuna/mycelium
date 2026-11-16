@@ -269,7 +269,14 @@ none do. `allow_cpu_fallback` is new and exists only under `advanced` (its
 HTTP wire form is `spec.allow_cpu_fallback`).
 
 Attempts get `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`. The last
-points to an attempt-specific folder beneath the stable job folder on the NAS.
+is writable for every job. Non-resumable jobs use an attempt-local folder and
+do not wait for NAS checkpoint storage, regardless of priority. Writes there
+are not restored or published as portable progress. Declare `resumable: true`
+(or `advanced.resumable: true` in an entry) when the job depends on saved progress.
+Resumable jobs use the configured NAS, or verified file-store generations when
+no NAS is configured; `advanced.checkpoint: local_first` is an explicit opt-in
+to local saves with verified publication. NAS-backed resumable jobs keep the
+saved-progress-storage hold while the queue or worker checkpoint root is unavailable.
 The worker also sets `MYCE_PROCESS_ID` for process ownership. It removes
 `MYCE_TOKEN`, even if supplied in `run.env`. These are plain processes with the
 worker user's permissions, not a sandbox.

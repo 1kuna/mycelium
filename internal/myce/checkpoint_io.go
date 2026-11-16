@@ -151,7 +151,9 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 	}
 }
 
-func needsCheckpoint(j *Job) bool { return j.Spec.Priority != "production" || j.Spec.Resumable }
+// Resumable is the checkpoint-use declaration. Other jobs still receive a
+// writable attempt-local directory, but do not restore or publish progress.
+func needsCheckpoint(j *Job) bool { return j.Spec.Resumable }
 
 // Background availability uses the installer's measured per-operation stall
 // backstop: successful CIFS create/unlink calls took 17.73s/23.22s (#234).

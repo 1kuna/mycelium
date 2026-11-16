@@ -1054,6 +1054,15 @@ then sends SIGKILL if necessary. Do not daemonize or leave that group. Save
 periodically too: a machine that loses power cannot save on demand.
 
 Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
+`resumable: true` declares checkpoint use. Without it, the directory is writable
+attempt-local storage: even a command that writes saves there does not restore
+or publish portable progress, and checkpoint-root outages do not delay placement.
+This applies to experiment, deadline and production jobs alike. Declare outputs
+for files that must survive the attempt. NAS-backed resumable jobs still wait
+for saved progress storage when either the queue's or worker's root is unavailable;
+preemption and checkpoint-stop saves retain their existing durability contract.
+
+For NAS-backed resumable jobs, the directory uses the following shared layout.
 Each worker sets `--checkpoint-root` to its own local mount of the same NAS
 checkpoint directory, configured privately per host. For example, use a generic
 `NAS_ROOT/checkpoints` under each machine's verified mount. Queue `--checkpoints`
