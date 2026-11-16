@@ -339,6 +339,8 @@ func TestCheckpointRootHold(t *testing.T) {
 					}
 					if checkpoint == "ephemeral" {
 						s.WorkerData = "ephemeral"
+						s.Outputs = map[string]string{"out.txt": "results"}
+						s.Run.Command = []string{"sh", "-c", "echo done > out.txt"}
 					}
 					if priority == "deadline" {
 						deadline := clock.Now().Add(time.Hour)
