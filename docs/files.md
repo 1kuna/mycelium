@@ -1058,7 +1058,9 @@ Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
 attempt-local storage: even a command that writes saves there does not restore
 or publish portable progress, and checkpoint-root outages do not delay placement.
 This applies to experiment, deadline and production jobs alike. Declare outputs
-for files that must survive the attempt. NAS-backed resumable jobs still wait
+for files that must survive the attempt. Extension qualification checks cannot
+declare resumability and use the same writable worker-local storage.
+NAS-backed resumable jobs still wait
 for saved progress storage when either the queue's or worker's root is unavailable;
 preemption and checkpoint-stop saves retain their existing durability contract.
 

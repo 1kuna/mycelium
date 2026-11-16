@@ -273,6 +273,7 @@ worker checkpoint root is unavailable. Non-resumable jobs at every priority
 can run through that outage; their `MYCE_CHECKPOINT_DIR` is writable attempt-local
 storage, even if the command writes saves there. Those writes are not restored
 or published as portable progress. Declare outputs for files you need back.
+Extension qualification checks are non-resumable and use this local storage too.
 Declared NAS inputs and outputs still require their own storage to be available.
 
 To keep NAS writes off a resumable payload, opt in with
