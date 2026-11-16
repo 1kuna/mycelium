@@ -21,7 +21,7 @@ func productionPauseMachine() Machine {
 }
 
 func TestProductionPauseHostResourcesAndResume(t *testing.T) {
-	for _, dimension := range []string{"memory", "cpu", "device"} {
+	for _, dimension := range []string{"memory", "over-budget", "cpu", "device"} {
 		t.Run(dimension, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := productionPauseMachine()
@@ -51,6 +51,13 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 			}
 			if err := os.WriteFile(saved, []byte("progress=41"), 0600); err != nil {
 				t.Fatal(err)
+			}
+			if dimension == "over-budget" {
+				m.HostMemoryBudgetGB = 12
+				machineCheck(t, q, m, run)
+				if q.s.Machines[m.ID].HostMemoryBudgetStatus() == "" {
+					t.Fatal("fixture did not retain the over-budget holder")
+				}
 			}
 			demand := submit(t, q, high)
 			current := job(t, q, run.ID)
