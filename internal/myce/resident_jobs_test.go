@@ -73,12 +73,14 @@ func TestResidentJobsReuseChargeAndMeasuredIdle(t *testing.T) {
 		t.Fatalf("same stage reloaded or double charged: %+v", slot)
 	}
 	finish(t, q, second, true)
-	clock.Advance(3 * time.Second)
+	// One four-second load sample has a twelve-second retention envelope:
+	// observed cost plus the existing latency policy's initial uncertainty.
+	clock.Advance(11 * time.Second)
 	q.Tick()
 	if slot.State != "ready" {
-		t.Fatal("engine expired before its measured four-second reload cost")
+		t.Fatal("engine expired before the measured retention envelope")
 	}
-	clock.Advance(time.Second) // The observed reload cost, not the configured idle interval.
+	clock.Advance(time.Second) // Twelve measured seconds, not the configured idle interval.
 	q.Tick()
 	if slot.State != "draining" || q.modelMemory(m.ID) != 8 {
 		t.Fatal("idle release must retain charge until acknowledgement")
@@ -234,6 +236,7 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	rt := &modelRuntime{models: map[string]*workerModel{frozen.Name: {model: frozen, engine: engine, state: "ready", attempt: slot.Attempt}}, session: m.Session, token: "test"}
 	worker := workerTestServer(http.HandlerFunc(rt.serve))
 	defer worker.Close()
+	rt.server = worker.Config
 	m.ModelURL = worker.URL
 	clock.Advance(time.Second)
 	residentReport(t, q, m, first, "ready")
@@ -341,7 +344,10 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	endpoint, expectedStatus, cancelBefore = "/exit", 503, false
 	invoke(dying, "interrupted input")
 	finish(t, q, dying, false)
-	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
+	await(t, func() bool {
+		reports, memory := rt.report()
+		return len(reports) == 1 && reports[0].State == "failed" && reports[0].RuntimeFailed && memory == 0
+	})
 	reports, _ := rt.report()
 	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: reports, period: time.Second}); err != nil {
 		t.Fatal(err)
