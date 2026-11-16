@@ -588,6 +588,8 @@ func (q *Queue) waitHolder(o HostObligation, demand *Job, now time.Time) Admissi
 		switch {
 		case q.comparePriority(j.Spec, demand.Spec) <= 0:
 			h.PreemptionReason = "equal_or_higher_tier"
+		case j.StartedAt != nil && !j.Spec.Resumable:
+			h.PreemptionReason = "non_resumable_running"
 		case q.preemptionProtected(j.PreemptionCount, j.StartedAt):
 			h.PreemptionReason = "minimum_runtime"
 		case j.State == "stopping" && !now.Before(q.batchCreditUntil(j)):

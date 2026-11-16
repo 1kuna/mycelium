@@ -67,7 +67,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		jobs := []*Job{}
 		for _, running := range q.liveJobs() {
 			owner := q.s.Machines[running.Machine]
-			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) {
+			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && backfillFiniteExecution(running) && batchReservesCapacity(running) {
 				jobs = append(jobs, running)
 			}
 		}
@@ -168,7 +168,7 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	if fence == nil || j.ID == fence.job.ID {
 		return true
 	}
-	if fence.devicePending && !j.Spec.Needs.cpuOnly() {
+	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0 && !j.Spec.Resumable) {
 		return true // Future device capacity never changes GPU admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first

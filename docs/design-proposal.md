@@ -127,12 +127,13 @@ selected worker/session clears the commitment durably and permits replanning
 without releasing cleanup custody.
 A demand with a selected release precedes uncommitted same-tier demand, so each
 waiting batch plans its own target instead of borrowing another demand's release.
-This includes non-resumable commands, native
+This includes unstarted non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
-unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified [scarce-host yield](#scarce-host-yield) case. Production preempts lower-tier work. Accelerator work, including
-non-resumable work, receives SIGTERM with ten seconds of grace by default,
+unpinned same-tier model cache may be evicted; active same-tier work is preserved except for the qualified [scarce-host yield](#scarce-host-yield) case. Production preempts resumable lower-tier work. Resumable accelerator work receives SIGTERM with ten seconds of grace by default,
 capped at fifteen seconds, before SIGKILL if still running. Resumable CPU commands
-receive ten seconds by default to save; non-resumable CPU work stops immediately. Deadline
+receive ten seconds by default to save. Running non-resumable commands finish
+naturally (MY-56); history names the holder and its inability to checkpoint.
+New non-resumable backfill cannot deepen ready production's host resource deficit. Deadline
 demand preserves non-resumable commands and gives resumable CPU commands the
 existing 120-second grace.
 `--preemption-stop-grace` sets the other priority-stop

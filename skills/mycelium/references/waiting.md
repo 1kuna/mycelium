@@ -210,8 +210,11 @@ authorize a memory-safety yield.
 
 - **Production** is for work a person or customer is waiting on, as the
   project defines it. When it preempts, resumable work gets 10 seconds to save
-  (queue setting `--preemption-stop-grace`) and non-resumable work stops at once
-  and requeues to start over, uncharged. A production job must start within its
+  (queue setting `--preemption-stop-grace`) and requeues with its checkpoints,
+  without spending loss or infrastructure-retry budgets. Running non-resumable
+  commands finish naturally; history identifies the holder as
+  `non_resumable_running`. New non-resumable backfill cannot deepen production's
+  RAM/CPU deficit, including on another card of that host. A production job must start within its
   start window (`start_window`, default 150 s, at most 1 h; `start_by` for an
   absolute time). Waiting for capacity doesn't spend it; a stuck start fails
   visibly. Infrastructure interruptions requeue it at most twice; its own
