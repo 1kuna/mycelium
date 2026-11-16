@@ -3229,6 +3229,18 @@
         "complete": {
           "type": "boolean"
         },
+        "failed_counter": {
+          "type": "string"
+        },
+        "failed_counter_reason": {
+          "type": "string"
+        },
+        "failed_pid": {
+          "type": "integer"
+        },
+        "failed_state": {
+          "type": "string"
+        },
         "final_age_seconds": {
           "type": "number"
         },
