@@ -476,6 +476,9 @@ func (p *process) resourceSnapshot() *AttemptResources {
 	if p == nil {
 		return nil
 	}
+	if p.custodian != nil {
+		return p.custodian.snapshot().Resources
+	}
 	p.mu.Lock()
 	o := p.resources
 	p.mu.Unlock()

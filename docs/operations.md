@@ -748,15 +748,17 @@ To upgrade one machine with a printed invitation line, or to replace a
 ## Rolling fleet upgrades
 
 `myce fleet upgrade` is the one way a release reaches the fleet (MY-21, MY-35,
-MY-49). It does what the per-release rollout scripts did, host by host: drain,
-wait for running work, swap in the verified binary, restart, check health,
-resume, advance. No SSH, and nothing changes on a host except Mycelium's own
+MY-49, MY-55). Host by host it proves live takeover, swaps in the verified
+binary, restarts the worker and checks health. Running attempts keep their
+processes and identity. When takeover cannot be proved it waits for natural
+completion, with a visible reason. No SSH, and nothing changes on a host except Mycelium's own
 binary, restarted under its existing service unit.
 
 Tested fixes deploy without a separate task, bundled one release at a time; roll
 back if the queue is not healthy. Critical updates may deploy during a production
 consumer's run (MY-39); patch time is weighed and is being made quick, but it is
-not a precondition. Ordinary updates wait during a successful run. Fixing a run
+not a precondition. Ordinary updates preserve a successful run through takeover, or wait naturally
+when takeover is unproved. Fixing a run
 failing because of Mycelium is allowed and expected. Orchestrator application:
 announce rollouts to consumer orchestrators. Keep the fleet on a healthy, tested
 release before each scheduled production window. There is no pre-production
@@ -772,7 +774,7 @@ complete history for the after-check: `myce status --history --json > before.jso
 ```sh
 myce fleet upgrade                      # the approved release, normal urgency
 myce fleet upgrade --release vX.Y.Z     # name the approved release explicitly
-myce fleet upgrade --urgency critical   # MY-39: stop running work at a checkpoint
+myce fleet upgrade --urgency critical   # MY-35/MY-39: explicit interruption fallback
 ```
 
 The command returns the operation and exits; the queue runs it. `myce status`
@@ -784,33 +786,32 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    [production lease](#production-leases) or a queued production stage,
    including one still waiting on `after:` (#1387). Its wait names that work;
    the host goes once the work starts, ends, or the lease closes or expires.
-2. **Drains it**, with the operation as drain owner. A host an operator already
-   drained or disabled keeps the operator's policy: it is updated, never resumed.
-   While the operation's drain holds, a production job whose only eligible hosts
-   it drained waits for them instead of failing.
-3. **Waits for its running work.** Normal urgency never stops production or
-   non-resumable work. Once the remaining obligations are all started,
-   resumable non-production attempts with a checkpoint contract (NAS checkpoint
-   directory or file-store transport), it plans a checkpoint stop for each.
-   The natural-completion wait is that job's latest measured planned
-   stop-to-release duration, capped at the existing two-minute checkpoint grace:
-   waiting longer would cost more admission downtime than the stop budget.
-   With no completed measurement it allows one checkpoint grace, preventing an
-   indefinite drain while giving short jobs a chance to finish (MY-34).
-   The fixed plan cannot slide with observations or queue restarts. A remaining
-   non-resumable/production attempt, model obligation or cleanup postpones the
-   plan until it finishes. A job finishing naturally cancels its plan.
-   `planned_stops` shows the exact job/attempt, `reason` (including the wait's
-   basis) and `stop_after`; `stop_requests` records when the stop was requested
-   and its accepted progress. Normal stops use planned-leave SIGTERM with two
-   minutes before SIGKILL, including GPU attempts. They requeue the same job
-   with the completed attempt identity and progress preserved, no loss or retry
-   charge, and `maintenance_resume`; the next execution increments the attempt
-   as usual. With `--urgency critical`, existing immediate stops are unchanged.
-   Exact release of every attempt is still required; an elapsed grace never
-   proves it, and missing release evidence can still delay an update. On the
-   queue's host, new model calls wait while it is updated, because the queue
-   restart ends every model stream.
+2. **Proves takeover.** Each installed batch attempt has an independent
+   custodian with durable exact attempt/session and PID/birth identity, plus
+   its systemd scope (Linux) or launchd job (Darwin). The custodian keeps the
+   existing runner, logs, result writer, memory/RSS guards, cache pins and stop
+   control alive. The new worker adopts publication and release custody under
+   the same queue session and attempt. No completion wait or stop is needed,
+   including production and non-resumable work. A brief cutover fence blocks
+   new placement/launches without taking a host drain.
+3. **Falls back to natural drain when proof is missing.** The `wait` reason
+   explains missing custodian support, identity/attempt mismatch, preparation,
+   resident bridge, Linux shared-host aggregate CPU quota, model or unresolved
+   cleanup custody. Older workers need
+   this first natural drain before their first custodian-capable release.
+   Normal urgency never sends checkpoint stops or SIGKILL for an update; the
+   previous release's undelivered `planned_stops` deadlines are discarded.
+   An operator's drain/disable remains theirs and is never resumed.
+   Orchestrator reading of MY-55 with MY-35/MY-39: explicit `--urgency critical`
+   still tries takeover first; only when takeover is impossible (or the fix
+   requires restarting work) does it retain the existing tier-stop behavior.
+   It never escalates a normal update automatically. If the fix requires
+   restarting running work, explicitly use `myce host disable HOST --stop --wait`
+   before the critical upgrade, then resume only the policy you own afterward.
+   `--urgency critical` by itself still prefers takeover. `stop_requests` records
+   explicit critical interruptions. Exact release is required after such a
+   stop; grace expiry never proves it. Queue-host model calls/streams finish
+   before the queue restarts.
 4. **Updates each Mycelium service on the host**, the worker first and then, on
    the queue's host, the queue. The service fetches the release through the
    queue's authenticated endpoint and checks it against its locally pinned
@@ -820,8 +821,20 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    service. Settings, units and state are untouched.
 5. **Checks health**: a fresh runtime proof from a new process running the
    release's exact bytes, with a healthy service manager and runner smoke,
-   stable for 30 seconds.
-6. **Resumes the drain it took** and moves to the next host.
+   stable for 30 seconds. The replacement proves the same live attempts under
+   the original session. A planned handover retains that exact custody across
+   long restart gaps, queue restart, health failure and rerun; ordinary loss
+   timeouts cannot requeue those jobs. If adoption remains unproved, recover
+   the installed worker and its original spool/session. The cutover fence and
+   charge remain until exact adoption or release; do not erase state or force
+   a fresh session to make an update proceed.
+6. **Clears the cutover fence or resumes the drain it took**, then advances.
+
+For the first deployment from a queue that still implements #1591, the release
+operator must activate the new queue policy through a planned natural-drain
+bootstrap before using normal fleet rollout. Replacing a worker cannot change
+an older running queue's checkpoint-stop policy. Once this queue policy is
+active, older workers take the natural fallback described above.
 
 Services already on the release are not drained or restarted. A drained or
 disabled host without a usable runtime proof is `skipped` and named; rerun once

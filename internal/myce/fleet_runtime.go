@@ -23,6 +23,7 @@ import (
 // installation path. It is separate from enrollment so missing fleet evidence
 // never prevents an ordinary worker joining or finishing its work.
 type FleetRuntimeProof struct {
+	Adoption              *WorkerAdoptionProof `json:"adoption,omitempty"`
 	InstalledSlot         *ReleaseSlotIdentity `json:"installed_slot,omitempty"`
 	SlotMismatch          bool                 `json:"slot_mismatch,omitempty"`
 	SlotError             string               `json:"slot_error,omitempty"`
@@ -156,18 +157,19 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 // Worker-loop-owned state. Background calls receive immutable snapshots and
 // deliver a value through pending; they never write Worker or Machine fields.
 type workerFleetRuntime struct {
-	failureReceipt string
-	config         ServiceConfig
-	client         Client
-	collect        func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error)
-	launch         func(context.Context, ServiceConfig, FleetUpdateInstruction) error
-	pending        chan fleetPollResult
-	proof          *FleetRuntimeProof
-	attempted      string
-	failed         *fleetLaunchFailure
-	clock          Clock
-	generation     uint64
-	acks           map[string]fleetAckRetry
+	adoptionProtocol int
+	failureReceipt   string
+	config           ServiceConfig
+	client           Client
+	collect          func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error)
+	launch           func(context.Context, ServiceConfig, FleetUpdateInstruction) error
+	pending          chan fleetPollResult
+	proof            *FleetRuntimeProof
+	attempted        string
+	failed           *fleetLaunchFailure
+	clock            Clock
+	generation       uint64
+	acks             map[string]fleetAckRetry
 	// From the last check-in reply. Until a reply carries the protocol (a
 	// previous-release queue, or before the first reply) every poll fetches.
 	instructionGated, instructionWaiting bool
@@ -192,6 +194,7 @@ func (r *workerFleetRuntime) noteReply(reply Reply) {
 	}
 	r.instructionGated = reply.FleetInstructionProtocol == fleetInstructionProtocol
 	r.instructionWaiting = reply.FleetInstructionWaiting
+	r.adoptionProtocol = reply.CustodianProtocol
 }
 
 // Delivery state for one acknowledgement body, owned by the worker loop.

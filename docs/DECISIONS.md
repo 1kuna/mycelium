@@ -98,10 +98,10 @@ MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and
 
 </details>
 
-### 6. Tested fixes deploy without asking; critical updates anytime, ordinary ones between runs
+### 6. Tested fixes deploy without asking; binary updates preserve running work
 <a id="my-28"></a><a id="my-33"></a><a id="my-39"></a><a id="my-35"></a><a id="my-21"></a><a id="my-32"></a>
 
-**Tested fixes ship without asking, one release at a time, with rollback if the queue is unhealthy. Critical updates may deploy during a production run; ordinary ones wait until a successful run ends.**
+**Tested fixes ship without asking, one release at a time, with rollback if the queue is unhealthy. Binary updates preserve running work (MY-55); explicit critical updates retain interruption authority (MY-35/MY-39).**
 
 - Tested fixes deploy to the fleet without separate authorization, bundled one release at a time. If the queue is not healthy afterwards, the operator rolls back. Fleet hardware, OS, driver and package changes are outside this authority. (MY-28)
 - No pre-production freeze, customer-window blackout, consumer canary gate, or asking Zach about deploy timing. Before each scheduled production window (twice weekly; schedule in private operator notes) the fleet is on a healthy, tested release. (MY-32, MY-33)
@@ -109,7 +109,7 @@ MY-45, 2026-11-11: “the only machine that should be running... work, 24/7, and
 - Updates roll out automatically with minimal downtime, for example between jobs; a critical update may stop work to apply immediately. “Automatic” means a release already signed and approved with `myce release approve` is applied without an operator stepping through each host. It is never silent: the rollout reports each step. It adds no automatic rollback machinery (MY-03): an unhealthy rollout stops advancing, and the operator rolls back if the queue is unhealthy, otherwise fix forward. (MY-35)
 - Mycelium updates itself without emptying machines: replacing its own binary on a host must not stop or wait for that host's running work, which keeps running and is taken over by the new release. (MY-55)
 - `myce fleet upgrade` is an explicit operator command that replaces only Mycelium's own binary and restarts only its existing service unit on enrolled hosts, for a signed, approved release. Workers fetch and verify the bytes themselves through the authenticated control path; no SSH. No silent updates or downgrades, and no GPU driver, OS, package or other host changes. #183's downgrade credential scope is separate. This is a scoped exception to the design's M4 service/host-change prohibition; its native acceptance still needs separate authorization. (MY-21)
-- Agent defaults (orchestrator, 2026-11-06 and 2026-11-09; not Zach's words): hosts upgrade one at a time as their running work finishes; a critical update checkpoints and requeues resumable work and reports what it interrupted; a rollout verifies health, preservation and custody and stops advancing when a result is unhealthy; use supported rollout paths that preserve running attempts and resumable checkpoints, announce rollouts to consumer orchestrators, and prefer quick rolling updates. This is deployment authority, not a claim that every desired rolling-update mechanism exists.
+- Agent defaults (orchestrator, updated 2026-11-16; not Zach's words): reading MY-55 with MY-35/MY-39, hosts upgrade one at a time by live takeover, without stopping or waiting for their running jobs. When takeover cannot be proved, normal updates wait for natural completion and report why; they never checkpoint-stop or kill at grace. This supersedes #1591's ordinary-update bounded-stop default. Explicit critical updates try takeover first and retain the existing tier stops only when takeover is impossible or the fix needs work restarted; critical is never an automatic fallback. Verify service health, exact attempt preservation and release custody; stop advancement on unhealthy evidence. Announce rollouts to consumer orchestrators. This records the orchestrator's application, not additional maintainer words or a claim of deployed acceptance.
 
 <details><summary>Sources</summary>
 
@@ -200,7 +200,7 @@ Mycelium's product keeps control-plane cost per check-in low, default status out
 - Delete the simulator, the fleet viewer and the Windows host bridge. Git history keeps them, and the bridge comes back when a Windows machine joins.
 - Retire managed Docker (MY-13's supported option) once the one project still using it runs its model jobs natively. Done 2026-11-12, after that project's native run matched its Docker run ([#1456](https://github.com/1kuna/mycelium/issues/1456)).
 - Cut curves, benchmarks, time prediction and batch planning down to the last accepted duration and peak per kind of work. Placement keeps learning from its own measurements (MY-31).
-- Make `myce fleet upgrade` the one rollout path (MY-21, MY-35), reduced to what host-by-host rollouts have proven: drain the host, swap the verified binary, restart, check health. Private per-release rollout scripts go.
+- Make `myce fleet upgrade` the one rollout path (MY-21, MY-35), reduced to what host-by-host rollouts have proven: prove live takeover (natural drain when unproved), swap the verified binary, restart, check health. Private per-release rollout scripts go.
 - Keep finished job records for 14 days after de-duplication, plus a one-line summary and what was learned. Files stay at 3 days (MY-47).
 - Send health problems to the Mycelium inbox as one opening and one closing per host-level problem. Efficiency and recipe findings stay in status only.
 - Consolidate the approved design into its current form, without changing what it says.

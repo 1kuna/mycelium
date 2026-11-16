@@ -50,7 +50,9 @@ type Worker struct {
 
 	// Set only by the installed-service command path, never ordinary join.
 	ServiceConfig *ServiceConfig
-	fleet         *workerFleetRuntime
+	// Internal installed-service entry point; never inherited by payloads.
+	Custodian string
+	fleet     *workerFleetRuntime
 
 	FaultProcessSource      func(map[int]string) ([]int, error)
 	FaultHostSource         func() (map[string]string, []string)
@@ -171,6 +173,7 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	custodian        *attemptCustodian
 	cancelStart      context.CancelFunc // Immutable; cancel before taking a launch-held mutex.
 	stopAdmission    func()
 	resources        *resourceObserver
@@ -244,6 +247,9 @@ func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
 }
 func (p *process) stopService(now time.Time, grace time.Duration) {
+	if p.custodian != nil {
+		return // The service owns the connection, not this detached execution.
+	}
 	p.cancelStarting()
 	if p.stopAdmission != nil {
 		p.stopAdmission()
@@ -287,6 +293,10 @@ func (p *process) refreshEscapers(now time.Time) {
 }
 
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.custodian != nil {
+		p.custodian.stopLocked(p, now, grace, kill)
+		return
+	}
 	if p.stopAdmission != nil {
 		p.stopAdmission()
 	}
@@ -1285,6 +1295,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if w.Custodian != "" {
+		return w.runCustodian(stop)
+	}
 	w.Client.inventoryWire = &atomic.Bool{}
 	w.Client.inventoryWire.Store(true)
 	w.Client.publicationWire = &atomic.Bool{}

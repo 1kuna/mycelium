@@ -304,15 +304,14 @@ process, so a wrapper script must forward it to the process that saves. Checkpoi
 ends; declare outputs for anything you need
 ([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
 
-Normal fleet upgrades may checkpoint-stop resumable non-production jobs after a
-bounded natural-completion wait. The wait uses the job's last measured planned
-stop-to-release cost, capped at the two-minute checkpoint grace (one grace when
-there is no measurement). SIGTERM then gives two minutes to save, including GPU
-work. The same job requeues with its completed attempt identity and checkpoint
-progress preserved, no loss/retry charge, and `maintenance_resume`; the resumed
-execution takes the next attempt number. Non-resumable and production work
-finish naturally in normal upgrades. Fleet status lists planned jobs, reasons
-and deadlines in `planned_stops`, and requested signals in `stop_requests`.
+Normal fleet upgrades preserve running batch attempts through live takeover:
+processes, logs, memory guards and results keep the same attempt identity.
+Where takeover cannot be proved (including older workers and resident bridges
+not yet qualified for detached custody), the update waits for natural completion
+and reports why. Normal updates never checkpoint-stop or kill work. Only an
+explicit critical update retains the existing interruption fallback when takeover
+is unavailable; `stop_requests` records it. Keep the same job and submission key
+through a worker update; resubmitting can duplicate work.
 
 If Mycelium refuses launch before the command starts, the job requeues without
 spending its infrastructure-loss budget, even if the host has recovered before

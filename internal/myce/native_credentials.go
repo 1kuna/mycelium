@@ -37,7 +37,7 @@ func (w Worker) nativeCredentialPaths(spool string, attempt []string) (deny, all
 		return nil, nil, err
 	}
 	roots := []string{filepath.Join(home, ".local", "share", "mycelium")}
-	files := []string{w.SecretRoot}
+	files := []string{w.SecretRoot, custodianDir(spool)}
 	for _, path := range nativeCredentialStores {
 		files = append(files, filepath.Join(home, path))
 	}

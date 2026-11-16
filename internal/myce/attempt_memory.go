@@ -482,7 +482,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		}
 		worstHost.retainPressure(host)
 		if unifiedDelta {
-			root, ok := cgroupResidentGB(a.fs, filepath.Dir(a.path))
+			root, ok := a.accountingResidentGB()
 			unifiedDelta = ok
 			// Unclamped: a sibling attempt that exits raises MemAvailable and
 			// shrinks the root by the same pages, leaving the outside drop.
@@ -492,7 +492,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			rejectHost("cgroup_components_unavailable")
 			return
 		}
-		root, ok := cgroupResidentGB(a.fs, filepath.Dir(a.path))
+		root, ok := a.accountingResidentGB()
 		if !ok || component.HostGB == nil {
 			rejectHost("root_cgroup_components_unavailable")
 			return
@@ -568,7 +568,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			err := a.processIDs(ids)
 			known := map[int]bool{}
 			if err == nil && unifiedCUDA(&w.Machine) {
-				err = (&memoryAttempt{fs: a.fs, path: filepath.Dir(a.path)}).processIDs(known)
+				err = a.accountingProcessIDs(known)
 				for pid := range ids {
 					delete(known, pid)
 				}

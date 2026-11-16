@@ -16,7 +16,7 @@ import (
 )
 
 func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
-	for _, fault := range []string{"open", "state", "inventory"} {
+	for _, fault := range []string{"open", "state", "custody", "inventory"} {
 		t.Run(fault, func(t *testing.T) {
 			f := newFleetInstallFixture(t, "darwin")
 			f.i.StorageDiagnostics = true
@@ -45,14 +45,21 @@ func TestFleetStorageFailureReceiptAndQueue(t *testing.T) {
 				if err := os.MkdirAll(storageProbePath(dir, ".myce-install-probe-", "install"), 0700); err != nil {
 					t.Fatal(err)
 				}
-			case "state":
-				if err := os.Remove(filepath.Join(f.c.ModelCache, FormatMarker)); err != nil {
+			case "state", "custody":
+				root := f.c.ModelCache
+				if fault == "custody" {
+					root = custodianDir(f.c.State)
+				}
+				if err := os.Remove(filepath.Join(root, FormatMarker)); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(f.c.ModelCache, "legacy"), []byte("owned data"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(root, "legacy"), []byte("owned data"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				want.Root, want.Operation, want.Errno = "model_cache", "format", 0
+				if fault == "custody" {
+					want.Root = "custody"
+				}
 			}
 			if err := f.apply(); err == nil || err.Error() != "fleet_storage_preflight_failed" {
 				t.Fatal(err)
