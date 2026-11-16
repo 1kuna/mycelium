@@ -85,7 +85,7 @@ func TestStorageFaultSharedBackingRecoveryHasOneOwner(t *testing.T) {
 	machine := Machine{HostHealth: m.snapshot(nil)}
 	applyHostMountHealth(w, &machine)
 	for _, job := range []*Job{
-		{Spec: Spec{Priority: "experiment"}},
+		{Spec: Spec{Priority: "experiment", Resumable: true}},
 		{Spec: Spec{Priority: "production", Inputs: map[string]string{"asset": "source"}}},
 	} {
 		if storageRootReason(job, &machine) == "" {
@@ -127,7 +127,7 @@ func TestStorageFaultScopesAdmissionAndFencesRecovery(t *testing.T) {
 	}
 	machine := Machine{HostHealth: m.snapshot(nil)}
 	applyHostMountHealth(w, &machine)
-	dependent := &Job{Spec: Spec{Priority: "experiment"}}
+	dependent := &Job{Spec: Spec{Priority: "experiment", Resumable: true}}
 	local := &Job{Spec: Spec{Priority: "production"}}
 	if storageRootReason(dependent, &machine) == "" || storageRootReason(local, &machine) != "" {
 		t.Fatal("fault failed to scope admission", machine.UnavailableRoots)
@@ -426,7 +426,7 @@ func TestStorageFaultDoesNotRecountHostPressure(t *testing.T) {
 	if len(m.health.History) != history || len(m.health.Baseline) != baseline || m.health.Consecutive != 1 || hostHygieneReason(&machine) != "" {
 		t.Fatal("storage faults recounted a cached pressure reading", m.health)
 	}
-	if storageRootReason(&Job{Spec: Spec{Priority: "experiment"}}, &machine) == "" || storageRootReason(&Job{Spec: Spec{Priority: "production"}}, &machine) != "" {
+	if storageRootReason(&Job{Spec: Spec{Priority: "experiment", Resumable: true}}, &machine) == "" || storageRootReason(&Job{Spec: Spec{Priority: "production"}}, &machine) != "" {
 		t.Fatal("mount latch lost dependency-only admission", machine.UnavailableRoots)
 	}
 }
@@ -491,7 +491,7 @@ func TestStorageFaultBlocksPreparationRetryBeforeHeartbeat(t *testing.T) {
 func TestStorageFaultFencesFinalStartAuthorization(t *testing.T) {
 	w, _, _ := storageFaultFixture(t)
 	w.Machine.ID = "test-worker"
-	j := Job{ID: "test-job", Attempt: 1, Spec: Spec{Priority: "experiment"}}
+	j := Job{ID: "test-job", Attempt: 1, Spec: Spec{Priority: "experiment", Resumable: true}}
 	var calls int
 	w.Client = Client{URL: "http://test.invalid", HTTP: &http.Client{Transport: fetchTransport(func(*http.Request) (*http.Response, error) {
 		calls++
@@ -509,7 +509,7 @@ func TestStorageFaultFencesFinalStartAuthorization(t *testing.T) {
 	if err := w.authorizeStart(j, "test-session"); !errors.Is(err, errWorkerStartAuthorization) || calls != 1 {
 		t.Fatal("active fault was not checked before authorization", err, calls)
 	}
-	j.Spec.Priority = "production" // No NAS dependencies.
+	j.Spec.Resumable = false // The same non-resumable job has no NAS dependencies.
 	if err := w.authorizeStart(j, "test-session"); err != nil || calls != 2 {
 		t.Fatal("live mount fault blocked independent local start", err, calls)
 	}
@@ -596,7 +596,7 @@ func TestStorageFaultKeepsNestedBackingIndependent(t *testing.T) {
 			t.Fatal("NAS projection withheld a separate nested backing", machine.UnavailableRoots)
 		}
 	}
-	if w.storageRootReason(&Job{Spec: Spec{Priority: "experiment"}}) == "" {
+	if w.storageRootReason(&Job{Spec: Spec{Priority: "experiment", Resumable: true}}) == "" {
 		t.Fatal("affected checkpoint root lost its hold")
 	}
 	inputJob := Job{Spec: Spec{Priority: "production", Inputs: map[string]string{"asset": "source"}}}

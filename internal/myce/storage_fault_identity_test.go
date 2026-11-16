@@ -137,7 +137,7 @@ func TestStorageFaultQueueCheckpointReplyPublishesIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sent := false
 	reports := make(chan Machine, 1)
-	dependent := &Job{Spec: Spec{Priority: "experiment"}}
+	dependent := &Job{Spec: Spec{Priority: "experiment", Resumable: true}}
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		out := httptest.NewRecorder()
 		switch r.URL.Path {
