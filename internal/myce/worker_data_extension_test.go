@@ -36,7 +36,7 @@ case "$1" in failure) exit 7;; block) while :; do sleep .01; done;; esac
 `)
 			e.Files["side.sh"] = []byte(`
 test -z "$MYCE_TOKEN"
-test "$HOME" = "$(pwd)/.home"
+test "$HOME" -ef .home
 test -z "$MYCE_USAGE_FILE"
 cat input > "$HOME/side"
 cat input > "$TMPDIR/side"
@@ -54,6 +54,10 @@ while :; do sleep .01; done
 				t.Fatal(err)
 			}
 			w := prepareExtensionTestWorker(t, q, e)
+			// This fixture drives check-ins directly, without Worker.Run's host
+			// sampler. Supply the RAM telemetry required by the extension's needs.
+			w.Machine.HostMemoryMeasured, w.Machine.HostAvailableMemoryGB = true, 32
+			w.HostMemorySource = func(context.Context) (float64, error) { return 32, nil }
 			w.ephemeralProbe = func() error { return nil }
 			w.Machine.Capabilities = append(w.Machine.Capabilities, ephemeralCapability, nativeCICapability, "native_isolation_namespace", "native_sidecars")
 			w.environmentCache.Clock = w.Clock
@@ -122,7 +126,8 @@ while :; do sleep .01; done
 			for range pieces {
 				assigned := check(t, q, w.Machine, nil).Job
 				if assigned == nil || assigned.Dependency == nil || assigned.Dependency.Files["input"] != ref || assigned.Spec.WorkerData != "ephemeral" {
-					t.Fatal("after input was not bound", assigned)
+					got := job(t, q, stage.ID)
+					t.Fatalf("after input was not bound: assigned=%+v stage=%s reason=%s dependency=%+v qualified=%t", assigned, got.State, got.Reason, got.Dependency, qualifiedExtension(got, &w.Machine) != nil)
 				}
 				store, err := newAttemptStore(root, *assigned)
 				if err != nil {
