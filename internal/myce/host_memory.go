@@ -104,9 +104,9 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 // m's host: RAM through hostRoomAfter, cores through cpuAfterReleases. The
 // caller's already planned releases are credited the same way, once.
 func (q *Queue) hostReleasesWithVictims(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool, canStop func(*Job) bool) ([]*Job, []*ModelSlot, bool) {
-	if m.HostMemoryBudgetStatus() != "" {
-		return nil, nil, false
-	}
+	// A reduced allowance or growing holder may leave the host over budget.
+	// Its signed ledger debt must be repaid by releases, not used to disable
+	// the very release plan that can make higher-tier demand fit (MY-56).
 	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.EffectiveHostMemoryBudgetGB > 0) {
 		return nil, nil, false
 	}

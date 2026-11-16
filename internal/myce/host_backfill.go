@@ -6,7 +6,7 @@ import (
 )
 
 // CPU and accelerator targets share one physical host ledger. A ready job
-// must not disappear from CPU admission just because existing CPU reservations
+// must not disappear from host admission just because existing reservations
 // currently consume its RAM or cores (#787). This is an admission projection,
 // never a stop plan: running work finishes under its existing contract.
 type hostBackfillDemand struct {
@@ -17,8 +17,9 @@ type hostBackfillDemand struct {
 	// to fit anyway, or nil when unknown.
 	drain bool
 	start *time.Time
-	// Device demand can be next after a finite GPU execution. Only CPU
-	// backfill observes this fence; it grants no accelerator admission.
+	// Device demand can be next after a finite GPU execution. CPU backfill
+	// and lower-tier GPU work observe production's fence;
+	// the projection grants no accelerator admission.
 	devicePending bool
 }
 
@@ -40,7 +41,7 @@ func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, resources map[
 
 // Select one currently usable target per demand, preferring immediate capacity
 // and then ordinary placement value. Cold environments, missing qualification,
-// pressure and stale workers cannot withhold backfill. Finite CPU releases and
+// pressure and stale workers cannot withhold backfill. Finite host releases and
 // queued GPU demand behind finite device executions project host capacity only;
 // actual device admission still requires the ordinary exact-release checks.
 func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfillDemand {
@@ -67,7 +68,7 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		jobs := []*Job{}
 		for _, running := range q.liveJobs() {
 			owner := q.s.Machines[running.Machine]
-			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && running.Spec.Needs.cpuOnly() && backfillFiniteExecution(running) && batchReservesCapacity(running) {
+			if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && backfillFiniteExecution(running) && batchReservesCapacity(running) {
 				jobs = append(jobs, running)
 			}
 		}
@@ -168,8 +169,8 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	if fence == nil || j.ID == fence.job.ID {
 		return true
 	}
-	if fence.devicePending && !j.Spec.Needs.cpuOnly() {
-		return true // Future device capacity never changes GPU admission order.
+	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0) {
+		return true // Other GPU demand keeps ordinary device admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects

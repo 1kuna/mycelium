@@ -224,6 +224,12 @@ authorize a memory-safety yield.
   charged as a loss, but a non-resumable job restarts from scratch, so make long
   experiments resumable. Experiments keep a three-loss limit for real losses.
 
+Ready production can reclaim useful lower-tier host RAM even when existing
+charges exceed a reduced allowance. Signed debt is repaid before admission,
+not hidden by clamping free RAM to zero. Backfill cannot deepen production's
+host RAM/CPU deficit, including on another card; compatible other hosts remain
+available. Exact cleanup and physical-memory checks still gate replacement.
+
 Within a tier, jobs order by readiness (environment and model), earliest
 deadline, then waiting age, and competing projects share by recent use. There
 is no in-tier ordering hint. To order your own work, use `after:` stages, and
