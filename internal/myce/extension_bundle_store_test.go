@@ -308,14 +308,15 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 			continue
 		}
 		checks++
-		// Preview checks use the queue's local checkpoint assignment. Unlike
-		// work/output snapshots, this ledger survives publication and replay.
-		mainMarker := filepath.Join(attemptCheckpoint(*j), "main")
+		// Qualification checks cannot declare resumability. Their writable
+		// checkpoint ledger is worker-local and survives publication/replay.
+		checkpoint := filepath.Join(root, "workers", j.Machine, "checkpoints", j.ID)
+		mainMarker := filepath.Join(checkpoint, fmt.Sprintf("attempt-%d", j.Attempt), "main")
 		ran, readErr := os.ReadFile(mainMarker)
-		attempts, err := os.ReadDir(j.Checkpoint)
+		attempts, err := os.ReadDir(checkpoint)
 		readErr = errors.Join(readErr, err)
 		for _, attempt := range attempts {
-			dir := filepath.Join(j.Checkpoint, attempt.Name())
+			dir := filepath.Join(checkpoint, attempt.Name())
 			if !attempt.IsDir() || !strings.HasPrefix(attempt.Name(), "attempt-") || dir == filepath.Dir(mainMarker) {
 				continue
 			}

@@ -151,7 +151,11 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 	}
 }
 
-func needsCheckpoint(j *Job) bool { return j.Spec.Priority != "production" || j.Spec.Resumable }
+// Resumability or an explicit checkpoint-size declaration requires checkpoint
+// storage. Other jobs still receive a writable attempt-local directory.
+func needsCheckpoint(j *Job) bool {
+	return !j.Spec.ephemeral() && (j.Spec.Resumable || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0)
+}
 
 // Background availability uses the installer's measured per-operation stall
 // backstop: successful CIFS create/unlink calls took 17.73s/23.22s (#234).

@@ -2683,7 +2683,7 @@ no view infers the mechanism from reason text. The record changes no admission
 decision.
 
 Job kinds: `upstream`, `paused`, `checkpoint_root` (the queue's checkpoint
-root is unreachable), `device_fault_last_healthy`, `launch_capacity`,
+root is unreachable for work declaring resumability or checkpoint bytes), `device_fault_last_healthy`, `launch_capacity`,
 `helper_charge` (a launch refused with measured helper memory beyond the
 reservation), `checkpoint_target` (a resume waits for a host of the target
 that wrote its checkpoint), `scarce_host_yield`, `shared_host_backoff`, `storage_root`,

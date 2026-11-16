@@ -75,7 +75,7 @@ advanced:
     scratch_bytes: 64424509440   # peak work dir + TMPDIR, outputs written there included
     input_bytes: 10737418240     # only when input manifests carry no sizes
     output_bytes: 2147483648     # only when output sizes are unknown
-    checkpoint_bytes: 1073741824 # resumable work without a measured resume manifest
+    checkpoint_bytes: 1073741824 # declares checkpoint storage use, even without resumability
 ```
 
 After one accepted run, the measured work dir and `TMPDIR` peak for the same kind of

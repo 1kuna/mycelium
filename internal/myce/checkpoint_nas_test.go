@@ -100,39 +100,80 @@ func TestProductionPreemptsDuringNASLoss(t *testing.T) {
 	}
 }
 
-func TestWorkerProductionWithoutNAS(t *testing.T) {
-	w := recoveryWorker(t)
-	store, err := w.openStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	q, _ := fixture(t)
-	s := spec("production")
-	s.Resumable = false
-	s.Run.Command = []string{"true"}
-	submit(t, q, s)
-	j := check(t, q, w.Machine, nil).Job
-	if j == nil {
-		t.Fatal("production not assigned")
-	}
-	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
-	defer server.Close()
-	w.Client = Client{URL: server.URL, Token: "test"}
-	store.state.Session = j.Session
-	j.Checkpoint = filepath.Join(t.TempDir(), "missing", "job")
-	var p *process
-	// Reuse the pending input copy before checking no-NAS execution.
-	await(t, func() bool {
-		p, err = w.start(store, *j)
-		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
-	})
-	if err != nil {
-		t.Fatalf("production requires NAS: %v", err)
-	}
-	f := <-p.done
-	if !f.result.Success {
-		t.Fatalf("production failed: %+v", f)
+func TestWorkerNonResumableCheckpointStorage(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		for _, priority := range []string{"production", "experiment", "deadline"} {
+			t.Run(fmt.Sprintf("%s/declared=%t", priority, declared), func(t *testing.T) {
+				w := recoveryWorker(t)
+				store, err := w.openStore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer store.close()
+				q, _ := fixture(t)
+				s := spec(priority)
+				s.Resumable = false
+				if declared {
+					s.Disk = &DiskNeeds{CheckpointBytes: 1024}
+				}
+				// Legacy commands may write saves without declaring resumability.
+				// Keep the directory writable, without requiring shared storage.
+				s.Run.Command = []string{"sh", "-ec", `printf '{"myce_checkpoint":{"generation":1},"value":42}' > "$MYCE_CHECKPOINT_DIR/save.json"`}
+				submit(t, q, s)
+				fakeCheckpointAvailability(t, q, false)
+				w.Machine.CheckpointUnavailable = true
+				if declared {
+					if check(t, q, w.Machine, nil).Job != nil {
+						t.Fatal("declared checkpoint writer started without storage")
+					}
+					fakeCheckpointAvailability(t, q, true)
+					w.Machine.CheckpointUnavailable = false
+				}
+				j := check(t, q, w.Machine, nil).Job
+				if j == nil {
+					t.Fatal("non-resumable job not assigned")
+				}
+				server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+				defer server.Close()
+				w.Client = Client{URL: server.URL, Token: "test"}
+				store.state.Session = j.Session
+				j.Checkpoint = filepath.Join(t.TempDir(), "job")
+				w.checkpointPrepare = func(Job) (string, error) {
+					return "", errors.New("undeclared checkpoint writer attempted NAS preparation")
+				}
+				if declared {
+					w = workerWithPreparedCheckpoint(t, w, store, *j)
+				}
+				var p *process
+				// Reuse the pending input copy before checking no-NAS execution.
+				await(t, func() bool {
+					p, err = w.start(store, *j)
+					return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+				})
+				if err != nil {
+					t.Fatalf("non-resumable job requires NAS: %v", err)
+				}
+				f := <-p.done
+				if !f.result.Success {
+					t.Fatalf("non-resumable job failed: %+v", f)
+				}
+				checkpoint := filepath.Join(store.dir, "checkpoints", j.ID, fmt.Sprintf("attempt-%d", j.Attempt))
+				if declared {
+					checkpoint = attemptCheckpoint(*j)
+				}
+				if generation, err := checkpointProgress(checkpoint); err != nil || generation != 1 {
+					t.Fatalf("checkpoint write lost: generation=%d err=%v", generation, err)
+				}
+				if _, err := os.Stat(j.Checkpoint); !declared && !os.IsNotExist(err) {
+					t.Fatalf("non-resumable job touched NAS checkpoint path: %v", err)
+				}
+				portable := *j
+				portable.FileTransport = true
+				if generation, err := w.publishFileCheckpoint(portable, store.dir); err != nil || generation != 0 {
+					t.Fatalf("non-resumable job published portable progress: generation=%d err=%v", generation, err)
+				}
+			})
+		}
 	}
 }
 

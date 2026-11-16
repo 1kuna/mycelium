@@ -473,6 +473,8 @@ func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	h.jobs = []Job{harnessJob(t, "ram-drop", "", "touch {work}/entrypoint")}
 	h.jobs[0].Spec.Needs.HostMemoryGB = 22
+	// This fixture drops RAM during explicitly declared checkpoint preparation.
+	h.jobs[0].Spec.Disk = &DiskNeeds{CheckpointBytes: 1024}
 	w := harnessWorker(t, h)
 	marker := filepath.Join(w.StateDir, "job-files", "ram-drop", "1", "entrypoint")
 	var free atomic.Uint64

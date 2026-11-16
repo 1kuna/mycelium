@@ -267,6 +267,19 @@ per entry ([pieces](https://github.com/1kuna/mycelium/blob/main/docs/jobs.md#pla
 
 ## 8. Checkpoints and resumable work
 
+Declare `advanced: {resumable: true}` when a command depends on saved progress.
+NAS-backed resumable jobs wait for saved progress storage while the queue or
+worker checkpoint root is unavailable. Positive `advanced.disk.checkpoint_bytes` also
+declares checkpoint use and retains that storage hold, even without resumability;
+it does not enable portable file-store saves or resumable preemption.
+Non-resumable jobs without declared checkpoint bytes at every priority
+can run through that outage; their `MYCE_CHECKPOINT_DIR` is writable attempt-local
+storage, even if the command writes saves there. Those writes are not restored
+or published as portable progress. Declare outputs for files you need back.
+Extension qualification checks are non-resumable and use this local storage too.
+Ephemeral worker data always keeps checkpoints local, even with declared bytes.
+Declared NAS inputs and outputs still require their own storage to be available.
+
 To keep NAS writes off a resumable payload, opt in with
 `advanced: {resumable: true, checkpoint: local_first}` and use the updated Python
 `Checkpoint.save(value)` default name. This versioned policy uses managed local
