@@ -8,7 +8,9 @@ import (
 func TestAdmissionWaitExactHolderSamples(t *testing.T) {
 	q, clock := fixture(t)
 	m := cpuMachine("worker", "host", "cpu", 4, 16)
-	low := submit(t, q, cpuSpec(4, 3))
+	spec := cpuSpec(4, 3)
+	spec.Resumable = true // Exercise runtime protection, not MY-56's permanent non-resumable protection.
+	low := submit(t, q, spec)
 	run := check(t, q, m, nil).Job
 	if run == nil || run.ID != low.ID {
 		t.Fatal("missing lower-tier holder")

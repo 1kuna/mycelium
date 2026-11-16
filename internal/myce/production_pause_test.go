@@ -33,8 +33,7 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 				low.Needs.CPUCores, low.Needs.MemoryGB = 8, 1
 			} else if dimension == "device" {
 				low = spec("experiment")
-				low.Needs.HostMemoryGB = 1
-				high.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+				low.Needs.HostMemoryGB, low.Needs.MemoryGB = 1, 30
 			}
 			victim := submit(t, q, low)
 			run := assignedJob(machineCheck(t, q, m))
@@ -43,6 +42,9 @@ func TestProductionPauseHostResourcesAndResume(t *testing.T) {
 			}
 			if err := q.Started(result(run, false)); err != nil {
 				t.Fatal(err)
+			}
+			if dimension == "device" {
+				high.Needs.GPU = &GPUSelection{Devices: slices.Clone(run.AllocatedDevices)}
 			}
 			// This models durable payload progress in the real checkpoint directory.
 			saved := filepath.Join(q.root, run.Checkpoint, "saved")
