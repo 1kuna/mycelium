@@ -278,9 +278,9 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 			}
 			w := prepareExtensionTestWorker(t, q, e)
 			check(t, q, w.Machine, nil)
-			_, err := q.Submit(Spec{Name: "unsupported", Project: "test", Extension: extensionKey(e), WorkerData: "ephemeral", Outputs: map[string]string{"out": "results"}})
-			var refusal *rejectionError
-			if !errors.As(err, &refusal) || refusal.code != "job_worker_data_unsupported" {
+			_, err := w.Client.Submit(context.Background(), Spec{Name: "unsupported", Project: "test", Extension: extensionKey(e), WorkerData: "ephemeral", Outputs: map[string]string{"out": "results"}})
+			var refusal *HTTPError
+			if !errors.As(err, &refusal) || refusal.Code != "job_worker_data_unsupported" {
 				t.Fatal(err)
 			}
 			message := map[string]string{"workdir": "{work}", "network": "offline"}[field]
