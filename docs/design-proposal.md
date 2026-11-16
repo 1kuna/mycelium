@@ -984,7 +984,7 @@ or merge claim.
 
 ### Ephemeral execution-worker data (#1585)
 
-`advanced: {worker_data: ephemeral}` opts a non-resumable plain command with
+`advanced: {worker_data: ephemeral}` opts a non-resumable command or extension with
 managed inputs and declared outputs into synchronous local removal. The worker
 bypasses persistent input caches, confines payload writes to private work,
 temp, home and checkpoint paths, stops and reaps its processes, and preserves
@@ -996,7 +996,13 @@ removal stays visible and holds release. Retry attempts restage authoritative
 inputs. Startup recovery reconciles process custody and repeats cleanup;
 offline/crashed workers remain pending, never presumed clean.
 
-Initial support requires installed tools, offline execution and Linux PID/mount
+Extension/environment-backed commands, sidecars, `after` dependencies and
+fan-out children share the private attempt contract (#1681). Shared software
+caches remain read-only; persistent payload caches are bypassed even on warm,
+concurrently pinned hashes. Frozen extension execution is checked before staging;
+custom workdirs, program/check publication and model servers remain refused.
+This expanded scope requires `worker_data_ephemeral_v2`, so v1 workers cannot
+receive it. Support requires offline execution and Linux PID/mount
 namespaces with a qualified file core route or Mycelium core router. Other
 combinations receive
 `job_worker_data_unsupported`; older workers cannot receive these jobs. The

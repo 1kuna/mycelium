@@ -175,6 +175,9 @@ func attemptStorageRoot(j Job, state string) string {
 // Keep live checkpoint snapshots outside the payload's writable workspace and
 // checkpoint grants, but inside one exact-attempt root for all publication I/O.
 func attemptPublicationRoot(j Job, state string) string {
+	if j.Spec.ephemeral() {
+		return filepath.Join(ephemeralRoot(state, j), "publication")
+	}
 	return filepath.Join(state, "attempt-publication", j.ID, strconv.Itoa(j.Attempt))
 }
 

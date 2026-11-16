@@ -1009,15 +1009,18 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 			return specRejection(err)
 		}
 		if s.ephemeral() {
+			if err := validateEphemeralExtensions(s, extensions); err != nil {
+				return rejectFieldRule("job_worker_data_unsupported", err)
+			}
 			if store == nil {
-				return reject("job_worker_data_unsupported", errors.New("ephemeral worker data requires a queue file store"))
+				return rejectFieldRule("job_worker_data_unsupported", errors.New("ephemeral worker data requires a queue file store"))
 			}
 			capable := false
 			for _, m := range q.s.Machines {
 				capable = capable || !m.Gone && contains(m.Capabilities, ephemeralCapability)
 			}
 			if !capable {
-				return reject("job_worker_data_unsupported", errors.New("no worker advertises worker_data_ephemeral_v1; qualify Linux namespaces and non-piped core routing first"))
+				return rejectFieldRule("job_worker_data_unsupported", errors.New("no worker advertises worker_data_ephemeral_v2; upgrade and qualify Linux namespaces and core routing first"))
 			}
 		}
 		if s.OutputDelivery == asyncNAS {

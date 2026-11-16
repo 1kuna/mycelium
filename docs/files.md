@@ -171,10 +171,20 @@ advanced: {worker_data: ephemeral}
 Upload inputs normally; their authoritative queue copies keep their existing
 retention. `files`, source archives and declared `shared_inputs` (stored or NAS,
 including extracted trees) stage privately, bypassing both cold and warm
-persistent payload caches. No cache entries or pins belonging to ordinary jobs
-are removed. Processing uses the staged local paths. `TMPDIR`, scratch, private
+persistent payload caches. This includes dependency output references resolved
+by `after` and each fan-out child's inputs. Even a hash already pinned by an
+ordinary consumer is downloaded into a new private copy: the ephemeral attempt
+never acquires that shared entry, adds a pin, or inserts a persistent file-cache
+copy. Existing independently owned cache entries/pins remain under their own
+retention; opting in does not purge prior ordinary jobs' copies.
+Processing uses the staged local paths. `TMPDIR`, scratch, private
 `HOME` and non-resumable local checkpoints belong to the same attempt. No
-short-path temp alias is created. Declared outputs return through the queue file
+short-path temp alias is created, including for sidecars. Main and sidecars use
+the same private work tree and one attempt-private stdout/stderr log. Prepared
+environment caches, extension source/assets and model caches stay read-only and
+are retained. Those are software, not a channel for customer inputs: do not put
+customer data in environment recipes, extension bundles or authored settings.
+Declared outputs return through the queue file
 store even when checkpoint storage uses a NAS.
 
 Supply payload through declared managed files. Command text, authored settings,
@@ -211,13 +221,17 @@ transfer before removing its bytes. An offline worker remains cleanup-unknown
 or pending until it returns; queue timeout or a fresh session does not certify
 removal. Failed ephemeral output copies are not retained for manual recovery.
 
-Initial scope: offline non-resumable plain commands, installed tools, managed
-`{work}` and declared outputs. The policy automatically selects `ci` isolation.
-Submission refuses environments/builders, extensions/program jobs, model
-servers/snapshots, sidecars/member limits, custom workdirs, resumability,
-fan-out/dependencies, diagnostics/`keep_on_failure`, alternate output delivery,
-and fleets with no supporting worker, with `job_worker_data_unsupported`.
-Execution requires `worker_data_ephemeral_v1`: Linux PID/mount namespaces and
+Supported scope: offline non-resumable commands and extensions, prepared
+environments, sidecars/member limits, `after` dependencies and fan-out children,
+managed `{work}` and declared outputs. The policy selects the stronger `ci`
+boundary even for an extension registered with a weaker isolation policy.
+Submission checks frozen extension variants as well as the job. It refuses
+program jobs/usage files, extension-check publication, model servers/snapshots,
+custom workdirs (including extension-owned workdirs), resumability,
+diagnostics/`keep_on_failure`, alternate output delivery and fleets with no
+supporting worker, with `job_worker_data_unsupported`. The worker rechecks the
+lowered execution before staging customer inputs.
+Execution requires `worker_data_ephemeral_v2`: Linux PID/mount namespaces and
 a readable file core route, or the qualified Mycelium core router, and an exec
 helper that passed a core-limit probe.
 macOS, unsupported workers and the Linux fallback boundary cannot silently run
@@ -229,7 +243,37 @@ custody and discards ephemeral cores unread, retaining only signal/time/attempt
 metadata in the journal. Other piped handlers (including apport and
 systemd-coredump) and older Mycelium routers remain refused. See the
 [operator switch and rollback](operations.md#linux-core-routing-for-ephemeral-attempts).
-Do not downgrade queue or workers while ephemeral attempts retain custody.
+V1 workers cannot receive the expanded scope; upgrade workers before submitting
+to a v2 queue. Do not downgrade queue or workers while ephemeral attempts retain custody.
+
+### Worker custody inventory
+
+All paths below are relative to the configured worker roots. `PRIVATE` means
+`ephemeral/JOB/ATTEMPT-SESSION_HASH` in worker state. The two receipt roots are
+`PRIVATE` and `ephemeral-logs/JOB-ATTEMPT-SESSION_HASH.log`.
+
+| Data destination | Policy and verification |
+| --- | --- |
+| Stored inputs, source archives, extracted source and `after` output copies | Direct transfer into `PRIVATE/.inputs-*`, atomically published as `PRIVATE/work`; no persistent file-cache lookup/insertion, including warm hashes |
+| NAS inputs and dependency NAS paths | Local copies in the same private input stage/work tree; authoritative source retention is unchanged |
+| Stored/NAS shared inputs, manifests, archives and extracted members | `PRIVATE/shared/NAME/{archive,data,ready.json}` and partial files there; direct population bypasses the shared-input cache and its pins |
+| Shared payload caches, including content-addressed hashes pinned by another job | Never acquired/populated by this attempt. Independently owned entries remain; there is no ephemeral pin to release and no shared deletion that could invalidate another consumer |
+| Extension source used by a payload | Private copy at `PRIVATE/work/.myce-extension`; imports/bytecode and relative writes there are removed too |
+| Main/sidecar work, scratch, home, tool caches, temp and application progress | `PRIVATE/work`, including `.scratch`, `.home`, `.tmp` and progress JSON. Sidecars cannot override reserved temp/home/checkpoint paths. No `job-files` copy or `t` temp alias is made |
+| Non-resumable checkpoint writes | `PRIVATE/checkpoint`, including sidecar writes; no ordinary `checkpoints` or `file-checkpoints` payload copy is created |
+| Original outputs and result collection/transfer spools | Below `PRIVATE/work`; accepted queue hashes must match the exact attempt before unlink. Alternate delivery remains refused |
+| Main/sidecar stdout and stderr, including staging errors | One `ephemeral-logs` file, delivered then unlinked. No ordinary identity-named group log is opened |
+| Software environment caches, extension library/preparation/assets, model caches | Retained shared software; payload content writes denied by `ci` isolation. Builders receive immutable software recipes, not staged job inputs. Shared compiler caches are not acquired by `ci` jobs |
+| Worker attempt/native/result/exit/control records | Retained metadata only: specs, software bundles, logical paths, hashes, numeric progress/resources, process identities, signals and cleanup receipts. Do not put customer payload into command text, env, filenames or software recipes |
+| Linux namespace `/tmp`, `/dev/shm`, process/file handles and crash streams | Private namespace memory and all member/descendant custody end before cleanup; no receipt while writers remain. Qualified core routing suppresses payload dumps; unsupported host routing stays refused |
+| Program usage files, extension-check external publication, resident model runtimes, resumable checkpoints, diagnostics/failure artifacts | Not covered; explicitly refused rather than omitted from cleanup |
+
+The worker inventories private trees, persists the byte census, unlinks them,
+checks absence and syncs the closest existing parents before release. Failures
+remain visible and keep custody. The lifecycle fixture lists every remaining
+worker file after real extension/sidecar execution and dependency staging; shared
+software stays present. Native namespace/core qualification is separate release
+acceptance, not established by a laptop capability seam.
 
 Removal means unlink, **not secure erasure on SSDs**. Full-disk encryption is the
 real at-rest control. This guarantee covers managed worker-local filesystem

@@ -561,6 +561,10 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		unlock()
 		return nil, nil, err
 	}
+	if err := validateEphemeralExecution(j.Spec); err != nil {
+		unlock()
+		return nil, nil, reject("job_worker_data_unsupported", err)
+	}
 	if check := j.Spec.ExtensionCheck; check != nil {
 		if w.environmentCache == nil {
 			unlock()
