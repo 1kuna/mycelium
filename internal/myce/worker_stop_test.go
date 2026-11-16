@@ -53,17 +53,20 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/log" {
 			uploaded.Store(true)
-			if !blockCheckin {
-				once.Do(func() { close(entered); <-release })
-			}
 		}
-		if blockCheckin && uploaded.Load() && r.URL.Path == "/api/workers/checkin" {
-			// Keep the response on the wire blocked after the queue accepts a
-			// fresh inventory. Holding an older request before acceptance can
-			// expire the fake device during bootstrap, preventing any stop from
-			// being planned and testing admission instead of stop delivery.
-			reply := httptest.NewRecorder()
-			api.ServeHTTP(reply, r)
+		block := !blockCheckin && r.URL.Path == "/api/workers/log" || blockCheckin && uploaded.Load() && r.URL.Path == "/api/workers/checkin"
+		if !block {
+			api.ServeHTTP(w, r)
+			return
+		}
+		// Accept the request, but keep its response on the wire blocked.
+		// Both variants need fresh inventory before freezing bootstrap time:
+		// stale hardware withholds production admission and plans no stop.
+		reply := httptest.NewRecorder()
+		api.ServeHTTP(reply, r)
+		poll := time.NewTicker(time.Millisecond)
+		defer poll.Stop()
+		for {
 			bootstrap.Lock()
 			q.mu.Lock()
 			m := q.s.Machines["one"]
@@ -76,15 +79,22 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 			bootstrap.Unlock()
 			if hold {
 				<-release
+				break
 			}
-			for name, values := range reply.Header() {
-				w.Header()[name] = values
+			if fresh {
+				break // Another request already owns the held response.
 			}
-			w.WriteHeader(reply.Code)
-			_, _ = w.Write(reply.Body.Bytes())
-			return
+			select {
+			case <-release:
+				return
+			case <-poll.C:
+			}
 		}
-		api.ServeHTTP(w, r)
+		for name, values := range reply.Header() {
+			w.Header()[name] = values
+		}
+		w.WriteHeader(reply.Code)
+		_, _ = w.Write(reply.Body.Bytes())
 	}))
 	defer server.Close()
 	s := spec("experiment")
