@@ -816,6 +816,10 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 					probe := *rootWorker
 					probe.Machine = probe.storageMachine()
 					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(ctx, probe.CheckpointRoot)
+					if probe.storageHealth != nil {
+						probe.Machine.HostHealth = probe.storageHealth.currentSnapshot()
+						applyHostMountHealth(probe, &probe.Machine)
+					}
 					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}}}
 					if recipe := s.EnvironmentRecipe; recipe != nil {
 						dependency.ModelEnvironmentKey = recipe.Key
