@@ -177,6 +177,7 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	if err := q.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
+	s.Files = FileManifest{"input": putPieceTestFile(t, q, "managed input")}
 	s.Outputs = map[string]string{"out": "results"}
 	first := residentAssigned(t, q, m, s)
 	if err := q.ConfigureProjects(map[string]ProjectPolicy{s.Project: {Weight: 1, MaxConcurrent: 1, MaxConcurrentExperiments: 1}}); err != nil {
@@ -264,14 +265,16 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	}
 	dependent := pieceConsumer(s, first.ID, "")
 	dependent.Resident = nil
+	dependent.Files = nil
 	consumer := submit(t, q, dependent)
 	if dependencyReady(consumer) {
 		t.Fatal("dependent ready before accepted artifact")
 	}
-	if data := invoke(first, "one"); !strings.HasSuffix(data, "||one") {
-		t.Fatal(data)
+	one := invoke(first, "one")
+	if !strings.HasSuffix(one, "||one") {
+		t.Fatal(one)
 	}
-	accept(first, "accepted one")
+	accept(first, one)
 	if !dependencyReady(job(t, q, consumer.ID)) {
 		t.Fatal("accepted resident output did not release dependency")
 	}
@@ -279,13 +282,14 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := residentAssigned(t, q, m, s)
-	if data := invoke(second, "two"); !strings.HasSuffix(data, "||two") {
-		t.Fatal(data)
+	two := invoke(second, "two")
+	if !strings.HasSuffix(two, "||two") {
+		t.Fatal(two)
 	}
 	if engine.(*LlamaEngine).cmd.Process.Pid != pid || q.modelMemory(m.ID) != model.MemoryGB {
 		t.Fatal("second job replaced process or double charged")
 	}
-	accept(second, "accepted two")
+	accept(second, two)
 	bad := residentAssigned(t, q, m, s)
 	endpoint, expectedStatus = "/invalid", 422
 	invoke(bad, "bad input")
@@ -363,7 +367,7 @@ func TestResidentJobsLocalAliasBudgets(t *testing.T) {
 	_, clock := fixture(t)
 	m := sharedUnifiedMachine()
 	w := sharedWorker(m, clock)
-	w.Machine.HostMemoryBudgetGB = 12
+	w.Machine.HostMemoryBudgetGB = 14
 	runtime := &modelRuntime{models: map[string]*workerModel{"derived": {model: Model{Name: "derived", MemoryGB: 8, HostMemoryGB: 4}, state: "loading", device: "0"}}}
 	reports, device := runtime.report()
 	if device != 8 {
@@ -377,7 +381,7 @@ func TestResidentJobsLocalAliasBudgets(t *testing.T) {
 	if err := localAttemptAdmission(w, nil, next, reports); err == nil {
 		t.Fatal("resident alias missing from host guard")
 	}
-	w.Machine.HostMemoryBudgetGB = 12
+	w.Machine.HostMemoryBudgetGB = 14
 	next.Spec.Needs.MemoryGB = 33
 	if err := localAttemptAdmission(w, nil, next, reports); err == nil || !strings.Contains(err.Error(), "device_budget") {
 		t.Fatal("alias missing from card guard", err)
