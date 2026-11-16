@@ -237,7 +237,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 		t.Fatal("status must declare its spec projection")
 	}
 	if a := status.Jobs[0].Advanced; a == nil || a.Resident == nil || a.Resident.Model != "authored-model" || a.Resident.Engine != nil {
-		t.Fatal("status must show resident opt-in without the execution snapshot")
+		t.Fatalf("status must show resident opt-in without the execution snapshot: %s", wireJSON(t, a))
 	}
 	if !slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != "" {
 		t.Error("status must declare submission_key omitted")
