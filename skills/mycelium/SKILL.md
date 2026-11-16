@@ -358,6 +358,8 @@ worker-provided `MYCE_CHECKPOINT_NOTIFY`. Custom JSON-manifest writers can
 Arbitrary writers without it report unknown progress between resume/stop/release/
 finalization events; portable scarce-host yield waits for positive publication
 evidence. There are zero periodic NAS checkpoint walks or root stats per attempt.
+Keep checkpoint saves and manifests outside the top-level output directory;
+checkpoint progress discovery never enters that output tree.
 `local_first` retains its existing local marker and acknowledgement contract.
 
 A stopped job loses everything since its last checkpoint. For anything long,

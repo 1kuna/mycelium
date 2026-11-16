@@ -1,11 +1,12 @@
 # Checkpoint metadata access
 
 **Job status and progress come only from the machine running the job. The NAS
-is never read for status.** This is Zach's direction, relayed by the orchestrator
-and received by the implementation worker on 2026-11-15 (#1670): “shouldnt status
-come from the machine it runs on? not just constantly streamed to the nas for no
-reason?” The queue consumes the worker's check-in; process/liveness observations
-and checkpoint publication signals are local to that attempt.
+is never read for status.** This implements the orchestrator's interpretation of
+Zach's question, relayed and received by the implementation worker on 2026-11-15
+(#1670): “shouldnt status come from the machine it runs on? not just constantly
+streamed to the nas for no reason?” The queue consumes the worker's check-in;
+process/liveness observations and checkpoint publication signals are local to
+that attempt.
 
 ## Save notification
 
@@ -50,6 +51,31 @@ absence of status evidence never proves that its checkpoint folder is empty.
 `local_first` is unchanged: local `generation.json`, cooperative acknowledgement,
 queue-portable generations and asynchronous NAS mirrors keep their protocol.
 Existing no-NAS file-transport capture continues to scan **local** storage.
+
+## Output trees are excluded from checkpoint discovery
+
+A 600-second live trace of r6.19.1 on 2026-11-16 (03:32–03:42 UTC), supplied by
+the orchestrator, attributed 96.55% of one host's CIFS read submissions to its
+worker and queue services: about 297 reads/s, 165 directory reads/s and 378
+opens/s. Nearly all observed progress discovery traversed one running attempt's
+nested output data; NAS disk busy was about 95%. This is a supplied baseline,
+not a measurement of this PR or proof that deployment fixes the NAS hangs.
+
+Neither status consumer opens that tree:
+
+| Consumer | Code and regression evidence |
+| --- | --- |
+| Running worker | `worker_attempts.go` calls `checkpointReport`; its NAS live branch in `checkpoint_progress.go` reads only the local notification and returns unknown without one. `TestCheckpointProgressEventDriven` asserts zero NAS reads through a simulated minute and one local marker read. |
+| Queue check-in (`queue.go`) | `processCheckinContext` leaves the NAS path empty for same-attempt reports. Only an exact known recoverable copy can request a resume comparison. `TestQueueCheckpointProgressFromWorker` fails on any NAS status scan. |
+| Resume and stop/release/finalization, worker and queue | Both use `checkpointProgress` / `scanCheckpointProgressWalk` in `worker_recovery.go`. The scanner prunes the top-level output directory before metadata inspection or enumeration. `TestCheckpointProgressNeverEnumeratesOutput` rejects either operation and verifies output JSON cannot become checkpoint progress, with the production walker too. |
+
+Keep checkpoints outside the top-level output directory. Local-first continues
+to read its local manifest; its protocol is unchanged. Restore copies and
+result publication may read output bytes as part of their requested operation;
+these are not status discovery. Checkpoint reads remain save/resume/recovery or
+stop/release/finalization operations. The separate shared-root health/admission
+probes and explicit input/retention operations below still exist; this PR does
+not claim that every NAS access is a checkpoint lifecycle operation.
 
 ## NAS access audit (#1670)
 

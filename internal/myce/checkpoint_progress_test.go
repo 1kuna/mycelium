@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -32,6 +33,63 @@ func checkpointCountingScan(root string) (*checkpointCountingFS, func(string) (i
 				return visit(filepath.Join(path, name), entry, err)
 			})
 		})
+	}
+}
+
+// Fail before a progress walk can enumerate output or stat its directory.
+// The shared scanner serves worker resume/finalization and queue event checks.
+type checkpointOutputGuardFS struct {
+	fs.FS
+	forbidden atomic.Int64
+}
+
+func (f *checkpointOutputGuardFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == "output" || strings.HasPrefix(name, "output/") {
+		f.forbidden.Add(1)
+		return nil, errors.New("progress enumerated output")
+	}
+	entries, err := fs.ReadDir(f.FS, name)
+	if name == "." {
+		for i, entry := range entries {
+			if entry.Name() == "output" {
+				entries[i] = checkpointOutputGuardEntry{DirEntry: entry, forbidden: &f.forbidden}
+			}
+		}
+	}
+	return entries, err
+}
+
+type checkpointOutputGuardEntry struct {
+	fs.DirEntry
+	forbidden *atomic.Int64
+}
+
+func (e checkpointOutputGuardEntry) Info() (fs.FileInfo, error) {
+	e.forbidden.Add(1)
+	return nil, errors.New("progress inspected output metadata")
+}
+
+func TestCheckpointProgressNeverEnumeratesOutput(t *testing.T) {
+	root := t.TempDir()
+	writeSave(t, root, "7")
+	// This is output, not a checkpoint. A generation here must never win or
+	// make progress invalid, even at a resume/finalization boundary.
+	output := filepath.Join(root, "output", "stage", "nested", "boundaries")
+	writeSave(t, output, "999")
+	guard := &checkpointOutputGuardFS{FS: os.DirFS(root)}
+	value, err := scanCheckpointProgressWalk(root, false, func(_ string, visit fs.WalkDirFunc) error {
+		return fs.WalkDir(guard, ".", func(name string, entry fs.DirEntry, err error) error {
+			return visit(filepath.Join(root, name), entry, err)
+		})
+	})
+	if err != nil || value != 7 || guard.forbidden.Load() != 0 {
+		t.Fatalf("progress touched output: generation=%d forbidden=%d err=%v", value, guard.forbidden.Load(), err)
+	}
+	// Exercise the production walker as well as the enumeration guard.
+	for _, jobRoot := range []bool{false, true} {
+		if value, err := scanCheckpointProgress(root, jobRoot); err != nil || value != 7 {
+			t.Fatalf("production discovery used output: jobRoot=%t generation=%d err=%v", jobRoot, value, err)
+		}
 	}
 }
 

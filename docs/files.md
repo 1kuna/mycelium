@@ -1203,6 +1203,8 @@ publish `{"name":"checkpoint.json","generation":9}` there after syncing its
 JSON save or commit manifest. Use a plain `.json` filename and a positive int64
 generation; replace the local notification atomically. The worker reads the
 local marker once and reports it in its check-in, with no NAS status read.
+Checkpoint discovery excludes the top-level output directory, including nested
+output JSON; keep checkpoint saves and manifests outside that directory.
 Without notifications, live checkpoint progress is unknown (`-1`); Mycelium
 reads durable progress only at resume/stop/release/finalization events. This
 can delay portable scarce-host-yield eligibility until positive publication
