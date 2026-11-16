@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func residentFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
@@ -161,7 +163,38 @@ func TestResidentJobsPendingDemandAndEphemeralRefusal(t *testing.T) {
 	}
 }
 
-// Real HTTP process, queue call admission and attempt socket. Independent
+func TestResidentJobsExtensionAndQualificationBinding(t *testing.T) {
+	q, _, m, _ := residentFixture(t)
+	e := fakeExtension(t)
+	e.Resumable = false
+	e.Resident = &ResidentBinding{Model: "test"}
+	e.Files["extension.yaml"], _ = yaml.Marshal(e)
+	e, err := extensionFromFiles(e.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	s := Spec{Name: "sample-stage", Project: "test", Priority: "experiment", Kind: "sample"}
+	j := submit(t, q, s)
+	if j.Spec.Resident == nil || j.Spec.Resident.Engine == nil || j.Spec.Resident.Model != "test" {
+		t.Fatal("registered extension did not freeze its engine")
+	}
+	// Qualification is a normal independent check attempt. It must be able to
+	// exercise the same client/server contract before useful work is eligible.
+	probe := Spec{Name: "extension-check", Project: "extension-check", Priority: "experiment", Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID}, ExtensionCheck: &ExtensionCheckRequest{Work: "kind:sample", Directory: t.TempDir()}}
+	check := submit(t, q, probe)
+	if check.Spec.Resident == nil || check.Spec.Resident.Engine == nil || check.Spec.Resident.Engine.Model.Name == j.Spec.Resident.Engine.Model.Name {
+		t.Fatal("qualification must inherit the engine with independent stage custody")
+	}
+	s.Resident = &ResidentBinding{Model: "conflicting"}
+	if _, err := q.Submit(s); err == nil {
+		t.Fatal("extension resident contract was overridden")
+	}
+}
+
+// Real HTTP process, queue call admission and attempt pipes. Independent
 // accepted results stay in SQLite; invalid/stale calls cannot affect siblings.
 func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	q, clock, m, s := residentFixture(t)

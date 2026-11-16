@@ -46,7 +46,7 @@ func validateResident(s Spec) error {
 	if s.Resident == nil {
 		return nil
 	}
-	if strings.TrimSpace(s.Resident.Model) == "" || s.Resumable || s.FanOut != nil || s.ExtensionCheck != nil || s.AllowCPUFallback || s.Needs.GPU != nil && s.Needs.GPU.Count != nil && *s.Needs.GPU.Count != 1 {
+	if strings.TrimSpace(s.Resident.Model) == "" || s.Resumable || s.FanOut != nil || s.AllowCPUFallback || s.Needs.GPU != nil && s.Needs.GPU.Count != nil && *s.Needs.GPU.Count != 1 {
 		return errors.New("resident requires a catalog model and independent, non-resumable single-device stage jobs; use pieces for independent inputs")
 	}
 	return nil
@@ -291,7 +291,7 @@ func (w Worker) startResidentBridge(ctx context.Context, j Job, work string) (ma
 		req.Header.Set("X-Myce-Session", j.Session)
 		req.Header.Set("X-Myce-Job-Attempt", strconv.Itoa(j.Attempt))
 		req.ContentLength = in.ContentLength
-		client := *modelHTTPClient
+		client := http.Client{Transport: clientTransport}
 		if w.Client.HTTP != nil {
 			client = *w.Client.HTTP
 		}

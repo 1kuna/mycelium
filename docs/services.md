@@ -41,6 +41,8 @@ publishes its own verified outputs. Existing ordinary-producer and per-piece
 Keep production target declarations and MY-19 parity checks for the client and
 server contract. This example's CUDA requirement is illustrative; select the
 platforms supported by the catalog runtime and the consumer's qualified code.
+An extension's qualification check inherits its resident binding too, so its
+check command can exercise that same client/server contract before useful work.
 
 The worker supplies `MYCE_RESIDENT_CLIENT`, the path to its matching executable.
 Its `resident` command streams stdin (or `--input FILE`) to `--path /endpoint`,
