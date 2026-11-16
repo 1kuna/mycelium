@@ -194,12 +194,13 @@ MY-47, 2026-11-11, maintainer, answering the orchestrator's question after the q
 
 **Mycelium spends as little compute and as few tokens as it can, in the product and in how its agents report.**
 
-For checkpoint status, Zach's direction relayed by the orchestrator on
-2026-11-15 is: “shouldnt status come from the machine it runs on? not just
-constantly streamed to the nas for no reason?” Status and progress come from
-the executing worker's local signals and process view; the NAS is never read
-for status. Checkpoint saves, resume, and stop/release/finalization checks keep
-their durability contract. Received by the event-driven-progress implementation
+For checkpoint status, Zach asked, as relayed by the orchestrator on
+2026-11-15: “shouldnt status come from the machine it runs on? not just
+constantly streamed to the nas for no reason?” The orchestrator's interpretation,
+implemented by this PR, is that status and progress come from the executing
+worker's local signals and process view; the NAS is never read for status.
+Checkpoint saves, resume, and stop/release/finalization checks keep their
+durability contract. Received by the event-driven-progress implementation
 worker; implementation and release evidence belong to [#1670](https://github.com/1kuna/mycelium/issues/1670).
 
 Mycelium's product keeps control-plane cost per check-in low, default status output small, and gives consumer agents one batched wait (#1120, #1053). Mycelium's agents report only on a state change, a fault or a needed decision, plus one final summary.
