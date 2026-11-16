@@ -34,7 +34,7 @@ entries:
       resident: {model: speech-engine}
 ```
 
-Submit with `myce run --entry infer --out accepted .mycelium/adapter.yaml`.
+Submit with `myce run --entry infer --out accepted`.
 Use `pieces` for many inputs; each piece remains a separate durable job and
 publishes its own verified outputs. Existing ordinary-producer and per-piece
 `after` dependencies become ready only after exact-attempt output acceptance.
