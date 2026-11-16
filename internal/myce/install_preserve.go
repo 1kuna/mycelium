@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,8 +48,11 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 			if err != nil {
 				return errors.New("cannot inspect effective service drop-ins")
 			}
-			for _, line := range strings.Split(string(data), "\n") {
-				key, _, ok := strings.Cut(strings.TrimSpace(line), "=")
+			// Unit-file continuations are part of the same assignment.
+			text := strings.ReplaceAll(string(data), "\r\n", "\n")
+			text = strings.ReplaceAll(text, "\\\n", " ")
+			for _, line := range strings.Split(text, "\n") {
+				key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
 				if !ok {
 					continue
 				}
@@ -60,6 +64,12 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 					}
 					continue
 				}
+				if key == "Environment" || key == "PassEnvironment" || key == "UnsetEnvironment" {
+					if err := validateInstallEnvironment(c, key, value); err != nil {
+						return err
+					}
+					continue
+				}
 				if strings.HasPrefix(key, "Exec") || strings.HasPrefix(key, "Condition") || strings.HasPrefix(key, "Assert") || strings.HasPrefix(key, "Environment") || key == "User" || key == "Group" || key == "WorkingDirectory" || key == "RootDirectory" || key == "RootImage" || key == "KillMode" || key == "SendSIGKILL" || key == "Delegate" || key == "Restart" || key == "TimeoutStopSec" {
 					return errors.New("effective service drop-in conflicts with installed service contract; preserve it and resolve before activation")
 				}
@@ -67,6 +77,97 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 		}
 	}
 	return nil
+}
+
+// Credential sources belong to the generated unit, including EnvironmentFile's
+// token path. Extra inline environment assignments may belong to the operator.
+func validateInstallEnvironment(c ServiceConfig, directive, value string) error {
+	owned := map[string]bool{"MYCE_TOKEN": true, "MYCE_QUEUE": true, "MYCE_JOINING_FILE": true}
+	if c.Path != "" {
+		owned["PATH"] = true
+	}
+	if c.Role == "worker" {
+		for _, name := range gpuRuntimeVariables {
+			owned[name] = true
+		}
+	}
+	// Include inline assignments if the generated service gains any later.
+	for _, line := range strings.Split(c.ServiceText(), "\n") {
+		if value, ok := strings.CutPrefix(line, "Environment="); ok {
+			words, err := installEnvironmentWords(value)
+			if err != nil {
+				return errors.New("cannot inspect generated service environment")
+			}
+			for _, word := range words {
+				name, _, _ := strings.Cut(word, "=")
+				owned[name] = true
+			}
+		}
+	}
+	words, err := installEnvironmentWords(value)
+	if err != nil || len(words) == 0 {
+		return errors.New("cannot inspect service drop-in environment assignment")
+	}
+	for _, word := range words {
+		name, _, assignment := strings.Cut(word, "=")
+		if owned[name] || directive == "Environment" && !assignment {
+			return errors.New("service drop-in overrides generated service environment")
+		}
+	}
+	return nil
+}
+
+// systemd Environment= is a whitespace-separated list with single/double quotes
+// and C escapes, not shell expansion. Never include assignment values in errors.
+func installEnvironmentWords(value string) ([]string, error) {
+	var words []string
+	for value = strings.TrimSpace(value); value != ""; value = strings.TrimSpace(value) {
+		var word strings.Builder
+		var quote byte
+		for value != "" {
+			ch := value[0]
+			if quote == 0 && (ch == ' ' || ch == '\t') {
+				break
+			}
+			if ch == '\'' || ch == '"' {
+				if quote == 0 {
+					quote = ch
+					value = value[1:]
+					continue
+				}
+				if quote == ch {
+					quote = 0
+					value = value[1:]
+					continue
+				}
+			}
+			if ch != '\\' {
+				word.WriteByte(ch)
+				value = value[1:]
+				continue
+			}
+			if strings.HasPrefix(value, `\s`) {
+				word.WriteByte(' ')
+				value = value[2:]
+				continue
+			}
+			decodeQuote := byte('"')
+			if strings.HasPrefix(value, `\'`) {
+				decodeQuote = '\''
+			}
+			r, _, rest, err := strconv.UnquoteChar(value, decodeQuote)
+			if err != nil {
+				return nil, errors.New("invalid unit environment quoting")
+			}
+			word.WriteRune(r)
+			value = rest
+		}
+		if quote != 0 {
+			return nil, errors.New("unterminated unit environment quoting")
+		}
+		words = append(words, word.String())
+	}
+	return words, nil
 }
 
 // installFiles is a per-invocation fault seam, never a global filesystem hook.

@@ -387,11 +387,36 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 }
 
 func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
-	for _, body := range []string{"[Service]\nCPUQuota=45%\n", "[Service]\nExecStart=\nExecStart=/usr/bin/true\n", "[Service]\nEnvironment=MYCE_TOKEN=other\n"} {
-		t.Run(strings.Fields(body)[1], func(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		safe       bool
+	}{
+		{"resource policy", "[Service]\nCPUQuota=45%\n", true},
+		{"notifier", "[Service]\nEnvironment=MYCE_HEALTH_NOTIFY=/fixture/notify\nEnvironment=MYCE_HEALTH_NOTIFY_OWNER=fixture\n", true},
+		{"quoted notifier", "[Service]\nEnvironment=\"MYCE_HEALTH_NOTIFY=/fixture/notify --mode health\" 'EXTRA=a \"quote\"'\n", true},
+		{"continued notifier", "[Service]\nEnvironment=EXTRA=one \\\n OTHER=two\n", true},
+		{"exec", "[Service]\nExecStart=\nExecStart=/usr/bin/true\n", false},
+		{"user", "[Service]\nUser=other\n", false},
+		{"kill mode", "[Service]\nKillMode=process\n", false},
+		{"token", "[Service]\nEnvironment=MYCE_TOKEN=other\n", false},
+		{"quoted token", "[Service]\nEnvironment=EXTRA=one \"MYCE_TOKEN=other\"\n", false},
+		{"escaped token", "[Service]\nEnvironment=\\x4dYCE_TOKEN=other\n", false},
+		{"continued token", "[Service]\nEnvironment=EXTRA=one \\\n MYCE_TOKEN=other\n", false},
+		{"path", "[Service]\nEnvironment=PATH=/other\n", false},
+		{"GPU runtime", "[Service]\nEnvironment=CUDA_VISIBLE_DEVICES=other\n", false},
+		{"queue authority", "[Service]\nEnvironment=MYCE_QUEUE=http://other.invalid\n", false},
+		{"joining authority", "[Service]\nEnvironment=MYCE_JOINING_FILE=/other\n", false},
+		{"credential path", "[Service]\nEnvironmentFile=/other\n", false},
+		{"reset credential path", "[Service]\nEnvironmentFile=\n", false},
+		{"unset token", "[Service]\nUnsetEnvironment=MYCE_TOKEN\n", false},
+		{"pass token", "[Service]\nPassEnvironment=MYCE_TOKEN\n", false},
+		{"unset unrelated", "[Service]\nUnsetEnvironment=EXTRA\n", true},
+		{"unterminated quote", "[Service]\nEnvironment=\"EXTRA=one\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			c, source := preserveWorkerFixture(t)
 			path := filepath.Join(t.TempDir(), "override.conf")
-			os.WriteFile(path, []byte(body), 0600)
+			os.WriteFile(path, []byte(tc.body), 0600)
 			enabled := false
 			manager := func(_ context.Context, _ string, args ...string) ([]byte, error) {
 				if strings.Contains(strings.Join(args, " "), "--property=DropInPaths") {
@@ -403,11 +428,11 @@ func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
 				return nil, nil
 			}
 			err := Install(context.Background(), c, source, "synthetic-fixture", manager)
-			safe := strings.Contains(body, "CPUQuota=")
+			safe := tc.safe
 			if (err == nil) != safe || enabled != safe {
 				t.Fatal("wrong service-contract decision", err)
 			}
-			if data, _ := os.ReadFile(path); !bytes.Equal(data, []byte(body)) {
+			if data, _ := os.ReadFile(path); !bytes.Equal(data, []byte(tc.body)) {
 				t.Fatal("consumer drop-in changed")
 			}
 		})
