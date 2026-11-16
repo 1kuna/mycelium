@@ -195,6 +195,9 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				continue
 			}
 			for _, candidate := range extensionJobs(j, t.m, false) {
+				if !memorySizingTargetFits(candidate, t.m) || !q.jobAllowsMachine(candidate, t.m.ID) {
+					continue
+				}
 				if j.Spec.Resumable && !candidate.Extensions[0].Resumable {
 					continue
 				}
@@ -204,6 +207,7 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				}
 				b.retag("native_qualification", "queue", "wait; nothing to do")
 				b.Reason = q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
+				b.Detail = b.Reason
 				return b
 			}
 		}
@@ -279,9 +283,14 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) string
 		switch {
 		case j.State == "running" || j.State == "stopping" || j.State == "assigned":
 			return "its native check " + ShortID(j.ID) + " is running on " + host
-		case j.Reason != "":
-			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(j.Reason)
 		default:
+			// Stored live jobs need not carry the diagnostic projection's
+			// reason. Recompute the check's scheduler hold without recursing
+			// through another jobHold/nativeCheckProgress projection.
+			copy := *j
+			if h := q.waitHold(&copy); h != nil {
+				return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(h.Detail)
+			}
 			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State
 		}
 	}

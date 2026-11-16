@@ -294,6 +294,9 @@ func JobWork(j *Job) string {
 // is authoritative; status only words it for readers.
 func (q *Queue) statusWaitingReason(j *Job) string {
 	j.Hold = q.jobHold(j)
+	if j.Hold != nil && j.Hold.Kind == "native_qualification" {
+		return j.Hold.Reason
+	}
 	return q.statusWaitingReasonDetail(j)
 }
 

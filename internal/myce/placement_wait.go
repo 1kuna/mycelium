@@ -185,7 +185,7 @@ func (q *Queue) maintainDeadEndWaits() {
 	for _, j := range q.liveJobs() {
 		// A fan-out parent is the placement unit until its first piece exists.
 		started := j.Spec.FanOut != nil && j.FanOut != nil && len(j.FanOut.Children) > 0
-		if j.State != "queued" || cancelled(j) || j.Spec.ExtensionCheck != nil || started || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
+		if j.State != "queued" || cancelled(j) || started || j.Batch != nil || !dependencyReady(j) || j.Attempt > 0 && !j.ReleaseConfirmed {
 			continue
 		}
 		reason := q.deadEndReason(j)
@@ -204,6 +204,9 @@ func (q *Queue) maintainDeadEndWaits() {
 const deadEndWait = "dead_end_wait"
 
 func (q *Queue) deadEndReason(j *Job) string {
+	if j.Spec.ExtensionCheck != nil {
+		return q.checkMemoryCapacityDeadEnd(j)
+	}
 	if why := q.oomCapacityDeadEnd(j); why != "" {
 		return why
 	}

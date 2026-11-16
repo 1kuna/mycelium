@@ -511,6 +511,13 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+  A native-qualification wait names the automatic check and its current hold.
+  A check whose conservative memory demand exceeds every eligible host's
+  physical capacity fails with `dead_end_wait` and `cannot fit on any eligible
+  host`; waiting for co-tenants to finish cannot fix it. Read the check's own
+  status for the demand/capacity comparison. The queue keeps accepted memory
+  bounds and OOM floors; reduce the check's requirements or provide capable
+  hardware before retrying qualification.
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only

@@ -183,3 +183,48 @@ func (q *Queue) memorySizingDeadEnd(j *Job) string {
 	slices.Sort(refusals)
 	return "dead end: no host can size this auto-memory job (" + strings.Join(slices.Compact(refusals), "; ") + "); action: resubmit with an explicit memory figure that fits a host, or reduce the workload's memory use"
 }
+
+// A check cannot acquire new local evidence until it runs. In particular, a
+// calibrated transfer can exceed the whole physical host while memoryIntent
+// still fits. Preserve that bound (and OOM floors), but end the impossible
+// check instead of promising that free capacity can recover its evidence.
+func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
+	for _, id := range j.Spec.AllowedMachines {
+		if q.s.Machines[id] == nil {
+			return "" // A named host has not reported its capacity yet.
+		}
+	}
+	var refusals []string
+	possible := false
+	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+		if fit.excluded {
+			return true
+		}
+		for _, dimension := range fit.failed {
+			switch dimension {
+			case "platform", "target", "device", "allow-list", "excluded_machines", "extension", "cores", "card group", "tools", "environment", "native network isolation":
+				return true // Not an eligible execution target.
+			}
+		}
+		accelerator, system, known := jobCapabilityCapacity(candidate, m)
+		if !known || !q.inventoryFresh(q.s.Machines[m.ID]) || inventoryWaitingReason(q.s.Machines[m.ID]) != "" {
+			possible = true // Unknown capacity is not proof of impossibility.
+			return false
+		}
+		need := candidate.Spec.Needs.HostMemoryGB
+		if m.UnifiedMemory && !candidate.Spec.Needs.cpuOnly() {
+			need += candidate.Spec.Needs.MemoryGB
+		}
+		if need <= system && candidate.Spec.Needs.MemoryGB <= accelerator {
+			possible = true // Occupancy/allowances/preparation can still clear.
+			return false
+		}
+		refusals = append(refusals, targetFitReason("hardware capacity", candidate, m)+" on "+m.ID)
+		return true
+	})
+	if possible || len(refusals) == 0 {
+		return ""
+	}
+	slices.Sort(refusals)
+	return "dead end: native check cannot fit on any eligible host (" + strings.Join(slices.Compact(refusals), "; ") + "); action: reduce the check's memory requirements or provide a capable host and retry qualification"
+}
