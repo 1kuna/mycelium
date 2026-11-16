@@ -592,6 +592,11 @@ func (q *Queue) maintainModels() {
 			s.Class, s.Project = c.Class, c.Project
 		} else {
 			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
+			// A still-running client can call again after its idle engine was
+			// reclaimed. Reload the same frozen runtime, never a catalog alias.
+			if c.ResidentAttempt != nil {
+				s.Resident = q.s.Jobs[c.ResidentAttempt.Job].Spec.Resident.Engine
+			}
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)

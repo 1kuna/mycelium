@@ -547,4 +547,19 @@ func TestResidentJobsFrozenEnvironmentRetention(t *testing.T) {
 	if !ok || model.Environment != "engine-env" {
 		t.Fatal("catalog replacement lost frozen model")
 	}
+	if err := q.Started(result(j, true)); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	slot := residentReport(t, q, m, j, "ready")
+	slot.State = "draining" // A memory-pressure reclaim between client calls.
+	residentReport(t, q, m, j, "unloaded")
+	call := &ModelCall{Model: model.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, ResidentAttempt: &residentAttempt{j.ID, j.Machine, j.Session, j.Attempt}}
+	if err := q.addCall(call); err != nil {
+		t.Fatal(err)
+	}
+	plan = q.modelPlan(m.ID)
+	if len(plan) != 1 || plan[0].Resident == nil || plan[0].Resident.Model.Name != model.Name || plan[0].EnvironmentRecipe == nil || plan[0].EnvironmentRecipe.Key != recipe.Key {
+		t.Fatal("client call after reclaim lost its frozen engine/environment", plan)
+	}
 }
