@@ -14,10 +14,11 @@ import (
 
 type cudaProcExitFS struct {
 	memoryFS
-	group  string
-	exited bool
-	slow   bool
-	once   sync.Once
+	group    string
+	exited   bool
+	readable bool
+	slow     bool
+	once     sync.Once
 }
 
 func (f *cudaProcExitFS) ReadFile(path string) ([]byte, error) {
@@ -30,7 +31,7 @@ func (f *cudaProcExitFS) ReadFile(path string) ([]byte, error) {
 				_ = f.memoryFS.WriteFile(filepath.Join(f.group, "cgroup.procs"), nil)
 			}
 		})
-		if f.slow {
+		if f.slow || f.readable {
 			return f.memoryFS.ReadFile(path)
 		}
 		return nil, os.ErrNotExist
@@ -88,6 +89,11 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 			put(filepath.Join(a.path, "memory.stat"), strings.ReplaceAll(stat, "file_writeback 16777216\n", ""))
 		case "missing proc pin":
 			put(filepath.Join(proc, "8/status"), "VmLck: 0 kB\n")
+		case "exited proc status":
+			// Linux proc_pid_status omits task_mem after exit_mm, before
+			// cgroup_exit removes the task. State can still be R, not Z.
+			put(filepath.Join(proc, "8/status"), "State:\tR (running)\nPid:\t8\nKthread:\t0\n")
+			a.fs = &cudaProcExitFS{memoryFS: a.fs, group: filepath.Join(a.path, "sidecar"), exited: true, readable: true}
 		case "missing physical":
 			put(filepath.Join(proc, "meminfo"), strings.ReplaceAll(meminfo, "SReclaimable: 2097152 kB\n", ""))
 		case "missing global pins":
@@ -115,10 +121,10 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 }
 
 func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
-	for _, mode := range []string{"complete", "masked host drop", "exited proc", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
+	for _, mode := range []string{"complete", "masked host drop", "exited proc", "exited proc status", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
 		t.Run(mode, func(t *testing.T) {
 			p := cudaHostFixture(t, mode)
-			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc"
+			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status"
 			if p == nil || (p.NonreclaimableGB != nil) != (complete || mode == "host OOM") {
 				t.Fatalf("wrong complete evidence: %+v", p)
 			}
