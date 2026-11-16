@@ -46,6 +46,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	q.clock = clock
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
+	var checkins sync.Mutex
 	var uploaded atomic.Bool
 	api := API{Queue: q, Token: "test"}.Handler()
 	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,10 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 		}
 		if blockCheckin && uploaded.Load() && r.URL.Path == "/api/workers/checkin" {
 			once.Do(func() { close(entered); <-release })
+		}
+		if r.URL.Path == "/api/workers/checkin" {
+			checkins.Lock()
+			defer checkins.Unlock()
 		}
 		api.ServeHTTP(w, r)
 	}))
@@ -122,7 +127,22 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 			terms <- scanner.Text()
 		}
 	}()
-	submit(t, q, spec("production"))
+	func() {
+		// Bootstrap ticks can expire the worker's last inventory scan. Supply
+		// fixture inventory independently of the held request, at frozen time.
+		// Exclude check-ins through production admission so an older in-flight
+		// report cannot replace it before the queue plans the stop. Event
+		// watching and the held transport remain independent of this lock.
+		checkins.Lock()
+		defer checkins.Unlock()
+		q.mu.Lock()
+		q.s.Machines["one"].InventoryProbe = &InventoryObservation{
+			At: clock.Now(), State: "ready",
+			Probe: &ProbeObservation{PeriodSeconds: 1, CostSeconds: .1, ValidSeconds: 2},
+		}
+		q.mu.Unlock()
+		submit(t, q, spec("production"))
+	}()
 	awaitPhase("TERM while request blocked", func() bool {
 		select {
 		case term := <-terms:
