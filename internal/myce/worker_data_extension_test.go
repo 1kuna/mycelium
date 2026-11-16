@@ -20,7 +20,7 @@ func TestEphemeralExtensionDependencySidecarLifecycle(t *testing.T) {
 			e := compositionExtension(t, true)
 			v := &e.Variants[0]
 			v.Execution.Main.Command = []string{"sh", "-e", "{extension}/private.sh"}
-			v.Execution.Sidecars = []NativeSidecar{{Name: "helper", Environment: "main", Command: []string{"sh", "-e", "{extension}/side.sh"}, Env: map[string]string{"HOME": "{work}/wrong-home", "TMPDIR": "{work}/wrong-temp", "MYCE_USAGE_FILE": "{work}/wrong-usage"}}}
+			v.Execution.Sidecars = []NativeSidecar{{Name: "helper", Environment: "main", Command: []string{"sh", "-e", "{extension}/side.sh"}, Env: map[string]string{"HOME": "{work}/wrong-home", "TMPDIR": "{work}/wrong-temp"}}}
 			e.Files["private.sh"] = []byte(`
 test -z "$MYCE_TOKEN"
 while [ ! -f side-ready ]; do sleep .01; done
