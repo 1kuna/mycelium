@@ -271,6 +271,7 @@ func TestCheckinPlanningOutcomeEquivalence(t *testing.T) {
 			want := map[bool]string{true: "80e3a367392c6882691f3933a050cc97f4fee73a47d37f907a1611a494cb41e8", false: "b447dc5bb5f63376bea5307ca07c56380ea34f96658214e9d79e15ed4c4f2ec6"}[occupied]
 			t.Logf("occupied=%v jobs=%d picks=%d digest=%s", occupied, len(jobs), len(picks), got)
 			if got != want {
+				t.Logf("planning records: %s", data)
 				t.Fatalf("planning outcomes %s, want %s", got, want)
 			}
 		})
