@@ -41,6 +41,9 @@ func (s *workerStore) waitCheckpointPreparation(ctx context.Context) error {
 }
 
 func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job) (*process, error) {
+	if w.detachedAttemptSupported() && w.ServiceConfig != nil && w.ServiceConfig.Config != "" && w.ServiceConfig.Binary != "" && w.Custodian == "" {
+		return w.startCustodian(ctx, s, j)
+	}
 	if err := s.waitCheckpointPreparation(ctx); err != nil {
 		return nil, err
 	}

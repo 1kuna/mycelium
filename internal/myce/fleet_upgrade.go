@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type fleetUpgrade struct {
 	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
+	Takeover       bool       `json:"takeover,omitempty"`
 	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
 	StepAt         time.Time  `json:"step_at,omitempty"`
 	HealthSince    time.Time  `json:"health_since,omitempty"`
@@ -234,6 +236,11 @@ func cloneFleetProof(p *FleetRuntimeProof) *FleetRuntimeProof {
 		return nil
 	}
 	out := *p
+	if p.Adoption != nil {
+		v := *p.Adoption
+		v.Attempts = slices.Clone(v.Attempts)
+		out.Adoption = &v
+	}
 	if p.InstalledSlot != nil {
 		slot := *p.InstalledSlot
 		out.InstalledSlot = &slot
@@ -404,7 +411,7 @@ func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
 			wait = "the queue's host goes last"
 		} else if failure != "" {
 			wait = "waiting for a fresh worker runtime proof"
-		} else if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical && !h.Owned && !q.maintenanceBlocked(h.Host) {
+		} else if reason := q.productionDrainBlocker(h.Host); reason != "" && !critical && !h.Owned && !q.maintenanceBlocked(h.Host) && q.fleetAdoptionReason(h) != "" {
 			wait = "waiting for open production work: " + reason + "; host admission remains enabled"
 		}
 		if wait != h.Wait {
@@ -421,6 +428,11 @@ func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
 // theirs: the operation updates the host but never resumes it.
 func (q *Queue) fleetBeginHost(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	h.Phase, h.ProgressAt = "draining", q.clock.Now()
+	if q.fleetAdoptionReason(h) == "" {
+		h.Takeover = true
+		h.Policy = q.s.HostMaintenance[h.Host]
+		return true
+	}
 	if h.Owned {
 		return true
 	}
@@ -470,6 +482,11 @@ func (q *Queue) maintainFleetUpgrade() {
 		return
 	}
 	if h.Phase == "worker_update" || h.Phase == "worker_health" {
+		if h.Takeover && h.Phase == "worker_update" && q.fleetAdoptionReason(h) != "" {
+			h.Takeover = false
+			q.fleetBeginHost(u, h)
+			return
+		}
 		m := q.s.Machines[h.Machine]
 		if m == nil || m.CapabilityProfile == nil {
 			q.fleetStop(h, "worker_unmanaged")
@@ -533,18 +550,21 @@ func slicesContainsPhase(hosts []*fleetUpgradeHost, phase string) bool {
 	return false
 }
 
-// fleetDrain waits for protected work and custody, checkpoint-stopping eligible
-// normal work after its window (critical: immediately), then starts the worker
-// update followed by the queue. It reports whether draining finished.
+// fleetDrain prefers live takeover. Unproved normal updates wait naturally;
+// only an explicit critical request uses the existing tier-stop policy.
 func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
-	if fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
+	takeover := q.fleetAdoptionReason(h) == ""
+	if takeover {
+		h.Takeover = true
+	}
+	if !takeover && fleetUrgency(u.Urgency) == "critical" && !q.maintainFleetCriticalStops(h) {
 		return false
 	}
-	if fleetUrgency(u.Urgency) == "normal" && !q.maintainFleetNormalStops(h) {
-		return false
-	}
-	if !q.fleetHostQuiet(h) {
-		h.Wait = "waiting for running work on the host to finish"
+	// MY-55 normal fallback never delivers a stop, even after an old release's
+	// persisted planned-stop deadline. Critical interruption remains explicit.
+	h.PlannedStops = nil
+	if !takeover && !q.fleetHostQuiet(h) {
+		h.Wait = "waiting for running work to finish naturally: " + q.fleetAdoptionReason(h)
 		return false
 	}
 	if h.Queue && !h.QueueDone && len(q.calls) > 0 {
@@ -580,7 +600,7 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 // within fleetStepTimeout, stops the operation.
 func (q *Queue) fleetVerify(h *fleetUpgradeHost, p, before *FleetRuntimeProof, goos, arch, role string) bool {
 	fresh := q.fleetProofFresh(p)
-	restarted := fleetProofReady(p) && before != nil && p.Session != before.Session && p.PID != before.PID
+	restarted := fleetProofReady(p) && before != nil && p.PID != before.PID && (p.Session != before.Session || h.Takeover && role == "worker" && q.fleetAdoptionReason(h) == "")
 	current := restarted && q.fleetCurrent(p, goos, arch)
 	if fresh && current {
 		return q.fleetStable(h, p)
@@ -618,7 +638,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 		m := q.s.Machines[machine]
 		ok = h.Phase == "worker_update" && h.Before != nil && h.Before.Session == session && m != nil && m.Session == session && q.fleetProofFresh(m.Fleet)
 	}
-	if !ok || !q.fleetHostQuiet(h) {
+	if !ok || !q.fleetHostQuiet(h) && !(h.Takeover && q.fleetAdoptionReason(h) == "") {
 		return FleetUpdateInstruction{}, nil
 	}
 	return FleetUpdateInstruction{StorageDiagnostics: true, StorageWarnings: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
@@ -651,6 +671,12 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.
 		switch ack.Phase {
 		case "prepared", "installed":
 		case "restarting":
+			if worker && h.Takeover && h.Phase == "worker_update" {
+				if q.fleetAdoptionReason(h) != "" {
+					return fleetError("fleet_takeover_unconfirmed")
+				}
+				q.beginWorkerHandover(h)
+			}
 			h.StorageWarning = sanitizeStorageFailure(ack.StorageWarning)
 			h.Phase = strings.Replace(h.Phase, "_update", "_health", 1)
 			h.ProgressAt = q.clock.Now()

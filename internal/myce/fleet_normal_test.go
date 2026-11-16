@@ -7,65 +7,58 @@ import (
 	"time"
 )
 
-func TestFleetUpgradeNormalWaitBasis(t *testing.T) {
-	for _, cost := range []time.Duration{0, 700 * time.Millisecond, 5 * time.Minute} {
-		t.Run(cost.String(), func(t *testing.T) {
-			q, c, _ := fleetFixture(t, "q")
-			m := m3Machine()
-			m.Fleet = fleetTestProof(c, m.Session, 200, false)
-			s := cpuSpec(1, 1)
-			s.Resumable = true
-			r := fleetRun(t, q, m, s)
-			if cost > 0 {
-				// A retained exact release from the preceding planned stop.
-				released := c.Now().Add(-time.Second)
-				stopped := released.Add(-cost)
-				if err := q.update(func() error {
-					j := q.touchJob(r.ID)
-					j.Copies = append([]Copy{{Attempt: 0, StoppedAt: &stopped, ReleasedAt: &released, ReleaseConfirmed: true, StopCause: maintenanceStopCause}}, j.Copies...)
-					return nil
-				}); err != nil {
-					t.Fatal(err)
+// MY-55 supersedes #1591's bounded checkpoint stops for ordinary updates.
+// Persisted deadlines from the adjacent release are read, but never delivered.
+func TestFleetUpgradeNormalNaturalFallback(t *testing.T) {
+	for _, kind := range []string{"resumable", "non-resumable", "production", "wrong-attempt", "wrong-session", "unready"} {
+		t.Run(kind, func(t *testing.T) {
+			q, c, workers := fleetFixture(t, "q", "a")
+			m := workers[0]
+			s := spec("experiment")
+			s.Resumable = kind != "non-resumable"
+			if kind == "production" {
+				s.Priority = "production"
+			}
+			run := fleetRun(t, q, m, s)
+			if kind == "wrong-attempt" || kind == "wrong-session" || kind == "unready" {
+				proof := &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+				if kind == "wrong-attempt" {
+					proof.Attempts[0].Attempt++
+				}
+				if kind == "unready" {
+					proof.Reason = "custodian process birth unconfirmed"
+				}
+				q.s.Machines[m.ID].Fleet.Adoption = proof
+				if kind == "wrong-session" {
+					q.s.Machines[m.ID].Session = "other-session"
 				}
 			}
 			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			fleetTick(t, q)
-			h := q.fleetActiveHost()
-			wait := StopGrace
-			if cost > 0 {
-				wait = min(cost, StopGrace)
+			h := q.s.FleetUpgrade.Hosts[0]
+			// A production blocker can wait before acquiring the host drain.
+			if kind != "production" {
+				h = q.fleetActiveHost()
+				if h == nil {
+					t.Fatal("no active drain")
+				}
+				h.PlannedStops = []FleetPlannedStop{{StopAfter: c.Now().Add(-time.Hour)}}
 			}
-			deadline := c.Now().Add(wait)
-			if len(h.PlannedStops) != 1 || !h.PlannedStops[0].StopAfter.Equal(deadline) {
-				t.Fatal("wait did not use measured cost or the documented fallback", h)
-			}
-			// Exercise the persisted representation and public status projection.
-			data, err := json.Marshal(q.s.FleetUpgrade)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var saved fleetUpgrade
-			if err := json.Unmarshal(data, &saved); err != nil || !saved.Hosts[0].PlannedStops[0].StopAfter.Equal(deadline) {
-				t.Fatal("plan was not persisted", err)
-			}
-			status, err := json.Marshal(q.fleetUpgradeStatus())
-			if err != nil || !strings.Contains(string(status), r.ID) || !strings.Contains(string(status), "stop_after") || !strings.Contains(string(status), "reason") {
-				t.Fatal("status omitted planned job, reason or deadline", string(status), err)
-			}
-			c.Advance(wait / 2)
-			fleetRefresh(t, q, c)
-			// Reopen the real SQLite state mid-wait: a queue restart must not
-			// grant a fresh window or lose the attempt-specific plan.
+			// Real SQLite reopen preserves the fallback policy across a queue restart.
 			var path string
 			if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.update(func() error { return nil }); err != nil {
 				t.Fatal(err)
 			}
 			root, runtime := q.root, q.fleetQueue
 			if err := q.Close(); err != nil {
 				t.Fatal(err)
 			}
+			var err error
 			q, err = Open(path, root, c)
 			if err != nil {
 				t.Fatal(err)
@@ -73,135 +66,235 @@ func TestFleetUpgradeNormalWaitBasis(t *testing.T) {
 			defer q.Close()
 			fakeCheckpointAvailability(t, q, true)
 			q.fleetQueue = runtime
-			fleetRefresh(t, q, c)
-			h = q.fleetActiveHost()
-			if !h.PlannedStops[0].StopAfter.Equal(deadline) {
-				t.Fatal("observation renewed the bounded wait")
+			for i := 0; i < 30; i++ {
+				c.Advance(StopGrace)
+				fleetRefresh(t, q, c)
 			}
-			c.Advance(wait - wait/2)
-			fleetRefresh(t, q, c)
-			if got := job(t, q, r.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(c.Now().Add(StopGrace)) {
-				t.Fatal("measured wait did not lead to a planned stop", got.State, got.StopAt)
+			got := job(t, q, run.ID)
+			if got.State != "running" || got.StopAt != nil || got.Attempt != run.Attempt || got.Losses != 0 {
+				t.Fatalf("ordinary update interrupted work: %+v", got)
 			}
-		})
-	}
-}
-
-func TestFleetUpgradeNormalMixedWork(t *testing.T) {
-	for _, blocker := range []string{"non-resumable", "production", "missing-contract"} {
-		t.Run(blocker, func(t *testing.T) {
-			q, c, _ := fleetFixture(t, "q")
-			m := m3Machine()
-			m.Fleet = fleetTestProof(c, m.Session, 200, false)
-			s := cpuSpec(1, 1)
-			s.Resumable = true
-			b := s
-			b.Name = "blocker"
-			if blocker == "non-resumable" {
-				b.Resumable = false
+			h = q.s.FleetUpgrade.Hosts[0]
+			if len(h.StopRequests) != 0 || len(h.PlannedStops) != 0 || h.Takeover {
+				t.Fatalf("unproved adoption authorized interruption: %+v", h)
 			}
-			if blocker == "production" {
-				b.Priority, b.StartWindow = "production", "1h"
-			}
-			submit(t, q, b)
-			run := assignedJob(machineCheck(t, q, m))
-			if run == nil {
-				t.Fatal("blocker not assigned")
-			}
-			if err := q.Started(result(run, true)); err != nil {
-				t.Fatal(err)
-			}
-			submit(t, q, s)
-			r := assignedJob(machineCheck(t, q, m, run))
-			if r == nil {
-				t.Fatal("resumable concurrent attempt not assigned")
-			}
-			if err := q.Started(result(r, true)); err != nil {
-				t.Fatal(err)
-			}
-			if blocker == "missing-contract" {
-				if err := q.update(func() error { q.touchJob(run.ID).Checkpoint = ""; return nil }); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
-				t.Fatal(err)
-			}
-			fleetTick(t, q)
-			c.Advance(10 * StopGrace)
-			fleetRefresh(t, q, c)
-			h := q.fleetActiveHost()
-			for _, id := range []string{r.ID, run.ID} {
-				if got := job(t, q, id); got.State != "running" || got.StopAt != nil {
-					t.Fatal("mixed work was stopped", id, got.State, got.StopAt)
-				}
-			}
-			if len(h.PlannedStops) != 0 || len(h.StopRequests) != 0 {
-				t.Fatal("planned a stop while protected work remained", h)
+			status, _ := json.Marshal(q.fleetUpgradeStatus())
+			if !strings.Contains(string(status), "waiting") {
+				t.Fatalf("missing visible fallback reason: %s", status)
 			}
 			finish(t, q, run, true)
 			fleetRefresh(t, q, c)
-			if len(h.PlannedStops) != 1 || !h.PlannedStops[0].StopAfter.Equal(c.Now().Add(StopGrace)) {
-				t.Fatal("remaining resumable work was not given a bounded wait", h)
-			}
-			// A near-finished job may finish naturally during that window.
-			finish(t, q, r, true)
-			fleetRefresh(t, q, c)
-			if h.Phase != "worker_update" || len(h.StopRequests) != 0 || len(h.PlannedStops) != 0 {
-				t.Fatal("natural completion did not cancel the plan", h)
+			if h.Phase != "worker_update" {
+				t.Fatalf("natural completion did not permit update: %+v", h)
 			}
 		})
 	}
 }
 
-func TestFleetUpgradeNormalDeadlineSurvivesNeighborCleanup(t *testing.T) {
-	q, c, _ := fleetFixture(t, "q")
-	m := m3Machine()
-	m.Fleet = fleetTestProof(c, m.Session, 200, false)
-	s := cpuSpec(1, 1)
-	s.Resumable = true
-	run := fleetRun(t, q, m, s)
-	s.Name = "neighbor"
-	submit(t, q, s)
-	neighbor := assignedJob(machineCheck(t, q, m, run))
-	if neighbor == nil {
-		t.Fatal("neighbor was not assigned")
+func runExecution(j *Job) Execution { return Execution{ID: j.ID, Attempt: j.Attempt} }
+
+func TestFleetUpgradeLiveTakeover(t *testing.T) {
+	for _, urgency := range []string{"normal", "critical"} {
+		t.Run(urgency, func(t *testing.T) {
+			q, c, workers := fleetFixture(t, "q", "a")
+			m := workers[0]
+			s := spec("production")
+			s.Resumable = false
+			run := fleetRun(t, q, m, s)
+			q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{Urgency: urgency}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			h := q.fleetActiveHost()
+			if h == nil || !h.Takeover || h.Phase != "worker_update" || h.Owned || q.maintenanceBlocked(m.HostID) {
+				t.Fatalf("live takeover drained or waited: %+v", h)
+			}
+			if q.machineCapacityReason(q.s.Machines[m.ID]) == "" {
+				t.Fatal("new admission not fenced during cutover")
+			}
+			if q.hostSessionOpen(q.s.Machines[m.ID], m.Session) {
+				t.Fatal("new launch not fenced")
+			}
+			i := fleetInstructionFor(t, q)
+			if len(h.StopRequests) != 0 || job(t, q, run.ID).State != "running" {
+				t.Fatal("takeover stopped work")
+			}
+			// A replacement process must prove custody under the retained session.
+			updated := cloneMachine(q.s.Machines[m.ID])
+			updated.Fleet = fleetTestProof(c, m.Session, 777, true)
+			updated.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := q.Checkin(Checkin{Machine: updated, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: true}}}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			for i := 0; i <= int(fleetStableFor/time.Second); i++ {
+				c.Advance(time.Second)
+				fleetRefresh(t, q, c)
+			}
+			got := job(t, q, run.ID)
+			if got.State != "running" || got.Attempt != run.Attempt || got.Session != run.Session || got.Losses != 0 || got.StopAt != nil {
+				t.Fatalf("takeover changed running attempt: %+v", got)
+			}
+			if !h.WorkerDone {
+				t.Fatalf("same-session replacement not verified: %+v", h)
+			}
+		})
 	}
-	if err := q.Started(result(neighbor, true)); err != nil {
-		t.Fatal(err)
-	}
+}
+
+func TestFleetUpgradeLostTakeoverProofFallsBack(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a")
+	m := workers[0]
+	run := fleetRun(t, q, m, spec("experiment"))
+	q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	fleetTick(t, q)
 	h := q.fleetActiveHost()
-	deadline := c.Now().Add(StopGrace)
-	if len(h.PlannedStops) != 2 {
-		t.Fatal("both resumable attempts need plans", h)
-	}
-	c.Advance(StopGrace / 2)
-	completion := result(neighbor, true)
-	completion.ReleasePending = true
-	if err := q.Complete(completion); err != nil {
-		t.Fatal(err)
-	}
-	fleetRefresh(t, q, c)
-	if len(h.PlannedStops) != 1 || h.PlannedStops[0].Obligation.Result.ID != run.ID || !h.PlannedStops[0].StopAfter.Equal(deadline) {
-		t.Fatal("neighbor cleanup discarded or renewed the active attempt deadline", h)
-	}
-	// Even an expired plan cannot signal while the neighbor still owns cleanup.
+	q.s.Machines[m.ID].Fleet.Adoption = nil
+	fleetTick(t, q)
 	c.Advance(StopGrace)
 	fleetRefresh(t, q, c)
-	if got := job(t, q, run.ID); got.State != "running" || got.StopAt != nil || len(h.StopRequests) != 0 {
-		t.Fatal("cleanup did not protect the neighboring attempt", got.State, h)
+	if h.Takeover || !h.Owned || h.Phase != "draining" {
+		t.Fatalf("did not acquire natural fallback drain: %+v", h)
 	}
-	release := result(neighbor, true)
-	release.ReleaseOnly = true
-	if err := q.Complete(release); err != nil {
+	instruction, err := q.fleetInstruction(h.Host, m.ID, m.Session)
+	if err != nil || instruction.Operation != "" || job(t, q, run.ID).StopAt != nil {
+		t.Fatalf("lost proof authorized update/stop: %+v %v", instruction, err)
+	}
+}
+
+// Replacement is a planned custody transfer, even beyond health/loss timeouts
+// and queue restart. A live peer prevents fleet-quiet suppression masking loss.
+func TestFleetUpgradeHandoverRetainsExactCustody(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a", "peer")
+	m, peer := workers[0], workers[1]
+	run := fleetRun(t, q, m, spec("experiment"))
+	q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	fleetRefresh(t, q, c)
-	if got := job(t, q, run.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(c.Now().Add(StopGrace)) || len(h.StopRequests) != 1 {
-		t.Fatal("released cleanup granted a fresh natural-completion wait", got.State, h)
+	fleetTick(t, q)
+	h := q.fleetActiveHost()
+	// The idle peer may precede the running host.
+	for h != nil && h.Host != m.HostID {
+		fleetActivate(t, q, c)
+		fleetTick(t, q)
+		h = q.fleetActiveHost()
+	}
+	i := fleetInstructionFor(t, q)
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	oldPID := q.s.WorkerHandovers[m.ID].PID
+	if oldPID == 0 {
+		t.Fatal("missing durable handover")
+	}
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root, runtime := q.root, q.fleetQueue
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
+	q.fleetQueue = runtime
+	// Exceed the complete operation timeout, maintaining only the other host.
+	for n := 0; n < 20; n++ {
+		c.Advance(time.Minute)
+		peer = cloneMachine(q.s.Machines[peer.ID])
+		peer.Fleet = fleetTestProof(c, peer.Session, 301, true)
+		check(t, q, peer, nil)
+		fleetTick(t, q)
+	}
+	got := job(t, q, run.ID)
+	if got.State != "running" || got.Attempt != run.Attempt || got.Losses != 0 || q.s.Machines[m.ID].Gone || q.networkQuiet {
+		t.Fatalf("handover lost running work: %+v quiet=%v", got, q.networkQuiet)
+	}
+	if !q.fleetTakeoverFence(m.HostID) || !q.retainWorkerHandover(q.s.Machines[m.ID]) {
+		t.Fatal("health timeout discarded unknown custody")
+	}
+	wrong := cloneMachine(q.s.Machines[m.ID])
+	wrong.Session = "replacement-session"
+	wrong.Fleet = fleetTestProof(c, wrong.Session, oldPID+1, true)
+	if _, err := q.Checkin(Checkin{Machine: wrong, Fresh: true, PreviousSession: m.Session}); err == nil {
+		t.Fatal("fresh session superseded unresolved custody")
+	}
+	replacement := cloneMachine(q.s.Machines[m.ID])
+	replacement.Fleet = fleetTestProof(c, m.Session, oldPID+1, true)
+	replacement.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{{ID: run.ID, Attempt: run.Attempt + 1}}}
+	report := Checkin{Machine: replacement, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: true}}}
+	if _, err := q.Checkin(report); err != nil {
+		t.Fatal(err)
+	}
+	if !q.retainWorkerHandover(q.s.Machines[m.ID]) {
+		t.Fatal("wrong attempt proved adoption")
+	}
+	replacement.Fleet.Adoption.Attempts = []Execution{runExecution(run)}
+	replacement.Fleet.ObservationAgeSeconds = (2 * fleetRuntimeFreshFor).Seconds()
+	report.Machine = replacement
+	if _, err := q.Checkin(report); err != nil {
+		t.Fatal(err)
+	}
+	if !q.retainWorkerHandover(q.s.Machines[m.ID]) {
+		t.Fatal("stale proof cleared custody")
+	}
+	replacement.Fleet.ObservedAt = c.Now()
+	replacement.Fleet.ObservationAgeSeconds = 0
+	report.Machine = replacement
+	if _, err := q.Checkin(report); err != nil {
+		t.Fatal(err)
+	}
+	if q.retainWorkerHandover(q.s.Machines[m.ID]) {
+		t.Fatal("exact adoption did not clear handover")
+	}
+	got = job(t, q, run.ID)
+	if got.Attempt != run.Attempt || got.Losses != 0 || got.State != "running" {
+		t.Fatal("adoption changed attempt", got)
+	}
+}
+
+func TestFleetUpgradeRestartAcknowledgementIsIdempotent(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a")
+	m := workers[0]
+	run := fleetRun(t, q, m, spec("experiment"))
+	q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	oldPID := q.s.WorkerHandovers[m.ID].PID
+	replacement := cloneMachine(q.s.Machines[m.ID])
+	replacement.Fleet = fleetTestProof(c, m.Session, oldPID+1, true)
+	replacement.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+	if _, err := q.Checkin(Checkin{Machine: replacement, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := q.s.WorkerHandovers[m.ID]; ok && v.PID != oldPID {
+		t.Fatal("retry replaced original process identity", v)
+	}
+	if q.retainWorkerHandover(q.s.Machines[m.ID]) {
+		t.Fatal("ack retry stranded adopted work")
 	}
 }

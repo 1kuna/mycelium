@@ -86,7 +86,7 @@ func fleetE2EEnv(home string) []string {
 			env = append(env, entry)
 		}
 	}
-	return append(env, "HOME="+home, "PATH="+filepath.Join(home, "bin")+":/usr/bin:/bin:/usr/sbin:/sbin", "GOMAXPROCS=2")
+	return append(env, "HOME="+home, "PATH="+filepath.Join(home, "bin")+":/usr/bin:/bin:/usr/sbin:/sbin", "GOMAXPROCS=2", "MYCE_TEST_CUSTODIANS_DISABLED=1")
 }
 
 func newFleetE2EManager(t *testing.T, c myce.ServiceConfig, home string) *fleetE2EManager {

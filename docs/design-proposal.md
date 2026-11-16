@@ -573,7 +573,9 @@ release acknowledgement or cleanup of the immediately previous worker session
 settles that custody. Timeouts, an empty inventory and service exit alone do not.
 The same cleanup handles native groups and their sidecars.
 
-Drain before an upgrade; use `disable --stop --wait` when active work must stop.
+Worker binary upgrades preserve detached live attempts (MY-55); drain naturally
+when exact takeover cannot be proved. Use `disable --stop --wait` when an
+operator explicitly needs active work stopped.
 Resume explicitly when ready. There is no offline handoff certification: during
 queue outage use separately authorized service/container tools after inspecting
 owned work, preserve pending results, then reconnect for exact reconciliation.
@@ -1749,26 +1751,31 @@ queue's own restart. One host is active at a time: idle hosts first, then busy
 hosts, then hosts running production, and the queue's host last, its worker
 before its queue. For each host the queue:
 
-1. drains it, as the drain owner; a host an operator drained or disabled keeps
-   the operator's policy and is never resumed by the rollout;
-2. waits for its running work (MY-35). Draining withdraws unstarted work and
-   blocks admission. Normal urgency never stops production or non-resumable
-   work. Once only started resumable non-production attempts with a checkpoint
-   contract remain, each gets a fixed natural-completion window based on its
-   last measured planned stop-to-release duration, capped at the existing
-   two-minute checkpoint grace. Without completed evidence, the window is one
-   checkpoint grace: it prevents indefinite admission downtime, at the cost of
-   up to one grace before signalling (MY-34). Waiting longer would cost more
-   downtime than the stop budget; this is no completion forecast (MY-49).
-   At expiry, planned-leave SIGTERM gives two minutes to checkpoint before
-   SIGKILL, including GPU work. The job requeues with its completed attempt and
-   progress preserved, no loss/retry charge, and `maintenance_resume`. Status
-   lists each exact attempt, deadline and basis in `planned_stops`, then signal
-   intent in `stop_requests`. Plans survive restart without extending the wait;
-   natural completion removes them. Preparations, model calls/streams, engines
-   and cleanup still finish naturally, and exact release custody gates every
-   service update even after grace expiry. A normal update leaves a host enabled
-   while draining it would strand open production work (#1387);
+1. proves live takeover of every retained batch attempt. Installed workers run
+   each attempt in an independent custodian: a delegated systemd scope under
+   `myce-jobs.slice` on Linux, or a separate launchd job on Darwin. Worker
+   service teardown cannot reach that custodian. Its existing runner retains
+   process waits, cache pins, memory/RSS guards, stop delivery and durable
+   results. The replacement worker checks the custodian's exact PID and process
+   birth, manager scope/job, attempt and session before adopting logs, result
+   publication and release custody. The queue sees the same execution, without
+   waiting for completion or changing attempt/session (MY-55). A brief admission
+   fence prevents new work racing the final update authorization; it does not
+   drain or stop running attempts. Before restart the queue durably retains the
+   exact session/attempt set. This planned handover survives health timeouts,
+   queue restart and operation reruns without declaring those executions lost
+   or accepting a different session. It ends only on exact replacement adoption
+   or positive release. Unknown custody can therefore hold capacity until the
+   worker is recovered; elapsed time cannot authorize duplicate work;
+2. otherwise drains naturally, reporting why takeover is unproved. Missing
+   custodians on an older release, unverifiable identities, resident-bound
+   commands, Linux shared-host aggregate CPU quotas, model engines/calls,
+   preparations and unresolved cleanup require
+   this fallback. Normal urgency never checkpoint-stops or kills work, including
+   resumable experiments; old undelivered bounded-stop plans are discarded.
+   The operation owns only the drain it took; an operator's drain/disable stays
+   theirs. Open production work keeps admission enabled where a drain would
+   strand it (#1387), until takeover is proved or it finishes;
 3. has each service fetch the release through the queue's authenticated
    endpoint and verify it against its pinned publisher key, the signed size and
    SHA-256, version and protocols, and on macOS its code-signing identity; a
@@ -1779,11 +1786,14 @@ before its queue. For each host the queue:
    enrollment window;
 5. resumes only the drain it took, then advances.
 
-`--urgency critical` (MY-39) uses the planned-maintenance stop on the selected
-host instead of waiting: resumable work checkpoints and is requeued without a
-retry charge, and status lists each stop request. An unhealthy result stops
-the operation with the host's drain kept and later hosts untouched; nothing
-rolls back (MY-03), and a rerun is a new operation that adopts the left drains.
+Orchestrator reading of MY-55 with MY-35/MY-39 (not new maintainer words):
+`--urgency critical` tries takeover first. Only this explicit operator choice
+may use the existing tier stops when takeover is impossible or the fix requires
+running work restarted. It is never an automatic fallback. Resumable work keeps
+its planned-maintenance checkpoint/requeue contract, and status records each
+stop. An unhealthy result stops advancement; there is no automatic rollback
+(MY-03). Reruns adopt operation-owned drains. Existing operator policy survives
+both takeover and natural fallback.
 Decisions use the injected Clock; network, hashing and service probes run
 outside the queue lock. Fake-clock tests cover ordering, drains waiting on
 running work, critical stops, failure-stop and rerun; a real-process

@@ -47,6 +47,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Custodian          string             `json:"custodian,omitempty"`
 	WorkerDataAccepted bool               `json:"worker_data_accepted,omitempty"`
 	WorkerDataCleanup  *WorkerDataCleanup `json:"worker_data_cleanup,omitempty"`
 	StorageDirectory   string             `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
@@ -145,7 +146,7 @@ func (w Worker) StateRoots() ([]string, error) {
 	if fileCache == "" {
 		fileCache = filepath.Join(dir, "file-cache")
 	}
-	return []string{dir, environment, modelCache, fileCache}, nil
+	return []string{dir, environment, modelCache, fileCache, custodianDir(dir)}, nil
 }
 
 func (w Worker) openStore() (*workerStore, error) {

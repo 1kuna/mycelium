@@ -181,6 +181,18 @@ func livenessTreeCPU(data []byte, root int) (float64, string, error) {
 var workerLivenessCPU = localLivenessCPU
 
 func livenessProcessCPU(ctx context.Context, p *process, source func(context.Context, int, string) (float64, string, error)) (float64, string, error) {
+	if p.custodian != nil {
+		v := p.custodian.snapshot().State
+		if v.Cgroup != "" {
+			if cpu, err := livenessCgroupCPU(&memoryAttempt{fs: osMemoryFS{}, path: v.Cgroup}); err == nil {
+				return cpu, "cgroup", nil
+			}
+		}
+		if v.PID == 0 || v.Birth == "" || source == nil {
+			return 0, "", errLivenessUnavailable
+		}
+		return source(ctx, v.PID, v.Birth)
+	}
 	p.mu.Lock()
 	cmd := p.cmd
 	memory := p.memory

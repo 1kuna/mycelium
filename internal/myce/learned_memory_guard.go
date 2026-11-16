@@ -240,6 +240,9 @@ type processResidentSample struct {
 // Shared pages may be counted repeatedly: they can increase a charge, never
 // reduce live growth room. The actor ages this sample through the common path.
 func (p *process) currentProcessHostMemory() *CurrentHostMemory {
+	if p.custodian != nil {
+		return p.custodian.snapshot().Memory
+	}
 	s := p.rssMemory.Load()
 	if s == nil {
 		return nil
