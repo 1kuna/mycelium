@@ -412,6 +412,15 @@ don't find out by losing work.
 
 Production approval names a kind of machine, never a host (MY-51). To let production run on another kind, your project approves it itself after a passing output-comparison check or experiment on a machine of that kind (declare its needs; don't pin a host): `myce parity add --project P --work WORK --evidence JOB_ID` approves the kind it ran as; add `--kind cuda` (or `mac`, `linux,x86`, `linux/amd64/cuda`) for a broader kind it ran as. Every host of an approved kind may then run that production. `myce parity list --project P` shows your kinds; `myce parity remove ... --kind KIND` withdraws one ([details](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md)).
 
+When ready production needs a host's RAM, CPU or device, the existing planner
+reclaims useful lower-tier holders, including when their charges exceed a
+reduced host allowance (MY-56). Resumable work keeps its checkpoints and
+requeues without charging losses or infrastructure retries. Admission waits
+for exact cleanup acknowledgement. Backfill cannot deepen ready production's
+host deficit; compatible other hosts remain eligible. No host is reserved
+while production is absent, and physical headroom still bounds concurrency
+across independent cards.
+
 Equal tiers never preempt each other. Within a tier the queue goes by
 readiness, deadline and age, with no ordering hint, so order your own work with
 the right class, `after:` stages and checkpoints rather than pauses or lock

@@ -141,6 +141,12 @@ preemptions, each resumed batch, build or desired engine gets at least that grac
 of runtime before another priority stop. Strict higher tiers may still starve
 lower tiers before admission.
 
+Host RAM release planning considers signed reservation debt before deciding
+that demand cannot fit (MY-56). Existing lower-tier releases may repay that
+debt; no stopping attempt counts as free before exact release. Backfill cannot
+deepen ready production's RAM/CPU deficit, including across independent cards
+on one host. Compatible other hosts remain available.
+
 Each planned stop carries `priority_preemption`, exact demand/victim identity
 and policy match/revision. Stop intent never proves delivery or release.
 Recorded member facts classify interruption; independent exit/OOM remains a
