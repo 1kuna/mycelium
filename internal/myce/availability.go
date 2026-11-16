@@ -315,6 +315,9 @@ func (q *Queue) machineLimitReason(m *Machine) string {
 }
 
 func (q *Queue) machineCapacityReason(m *Machine) string {
+	if q.fleetTakeoverFence(hostID(m)) {
+		return "worker update in progress; running attempts continue"
+	}
 	if reason := q.hostHygieneReason(m); reason != "" {
 		return reason
 	}

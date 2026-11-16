@@ -7,13 +7,13 @@ import (
 	"time"
 )
 
-// Critical stops at once; normal waits before using planned leave. Both save a
-// checkpoint, requeue without charge and resume it on the updated host. Exact
+// Explicit critical fallback saves a checkpoint, requeues without charge and
+// resumes on the updated host. Ordinary fallback is covered by fleet_normal_test. Exact
 // release custody still gates the update, including past the stop deadline.
 func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 	for _, tc := range []struct{ urgency, priority, backend string }{
 		{"critical", "experiment", "cpu"}, {"critical", "production", "cpu"},
-		{"normal", "experiment", "cpu"}, {"normal", "experiment", "fake"},
+		{"critical", "experiment", "fake"},
 	} {
 		t.Run(tc.urgency+"/"+tc.priority+"/"+tc.backend, func(t *testing.T) {
 			priority := tc.priority
@@ -46,20 +46,12 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			}
 			fleetTick(t, q)
 			h := q.fleetActiveHost()
-			if tc.urgency == "normal" {
-				if got := job(t, q, j.ID); got.State != "running" || len(h.PlannedStops) != 1 || len(h.StopRequests) != 0 || !h.PlannedStops[0].StopAfter.Equal(c.Now().Add(StopGrace)) || h.PlannedStops[0].Reason == "" {
-					t.Fatal("normal stop was not planned before signalling", h)
-				}
-				c.Advance(StopGrace - time.Nanosecond)
-				fleetRefresh(t, q, c)
-				if job(t, q, j.ID).State != "running" {
-					t.Fatal("normal stop before the bounded wait")
-				}
-				c.Advance(time.Nanosecond)
-				fleetRefresh(t, q, c)
+			grace := StopGrace
+			if tc.backend != "cpu" {
+				grace = defaultGPUStopGrace
 			}
-			wantDeadline := c.Now().Add(StopGrace)
-			if h == nil || h.Phase != "draining" || tc.urgency == "critical" && (h.CriticalStopAt == nil || !h.CriticalStopAt.Equal(wantDeadline)) {
+			wantDeadline := c.Now().Add(grace)
+			if h == nil || h.Phase != "draining" || tc.urgency == "critical" && (h.CriticalStopAt == nil || !h.CriticalStopAt.Equal(c.Now().Add(StopGrace))) {
 				t.Fatal("update did not request the maintenance stop", h)
 			}
 			if got := job(t, q, j.ID); got.State != "stopping" || got.StopAt == nil || !got.StopAt.Equal(wantDeadline) || got.InfrastructureRetries != 0 || got.Losses != 0 {
@@ -69,7 +61,7 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 				t.Fatal("stop not reported", h.StopRequests)
 			}
 			reply, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: run.ID, Attempt: run.Attempt, Progress: 9}, Started: true})
-			if err != nil || !reply.Stop || reply.Kill || reply.GraceSeconds != StopGrace.Seconds() {
+			if err != nil || !reply.Stop || reply.Kill || reply.GraceSeconds != grace.Seconds() {
 				t.Fatal("checkpoint grace not delivered through the stop protocol", reply, err)
 			}
 			dir := filepath.Join(run.Checkpoint, "attempt-1")
@@ -89,7 +81,7 @@ func TestFleetUpgradeCriticalCheckpointRequeueAndCustody(t *testing.T) {
 			if got := job(t, q, j.ID); got.State != "queued" || got.Progress != 9 || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Attempt != 1 || got.MaintenanceResume == nil {
 				t.Fatal("planned checkpoint requeue lost progress or charged a retry", got)
 			}
-			if tc.urgency == "critical" && !h.CriticalStopAt.Equal(wantDeadline) || len(h.StopRequests) != 1 {
+			if tc.urgency == "critical" && !h.CriticalStopAt.Equal(wantDeadline.Add(StopGrace-grace)) || len(h.StopRequests) != 1 {
 				t.Fatal("observation renewed grace or duplicated the stop")
 			}
 			if i, err := q.fleetInstruction("host", m.ID, m.Session); err != nil || i.Operation != "" {

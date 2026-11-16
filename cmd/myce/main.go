@@ -234,6 +234,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	serviceConfigPath := f.String("service-config", "", "saved installed service configuration")
+	custodian := f.String("attempt-custodian", "", "internal detached attempt owner")
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
 	var clientConfig string
@@ -795,6 +796,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			w.ServiceConfig = &c
 		}
 		fmt.Printf("Joining as %s\n", w)
+		w.Custodian = *custodian
 		return w.Run(ctx)
 	case "submit":
 		if f.NArg() != 1 {

@@ -849,6 +849,7 @@ type Reply struct {
 	// reached this worker's host. Without the protocol the worker polls.
 	FleetInstructionProtocol string `json:"fleet_instruction_protocol,omitempty"`
 	FleetInstructionWaiting  bool   `json:"fleet_instruction_waiting,omitempty"`
+	CustodianProtocol        int    `json:"custodian_protocol,omitempty"`
 }
 
 // AttemptReport binds heartbeat, progress and Started to an exact execution.

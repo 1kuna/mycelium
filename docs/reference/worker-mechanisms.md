@@ -122,9 +122,24 @@ cannot widen device visibility. These masks are not a hostile-code sandbox.
 Each native attempt has its own control/main/sidecar subtree and verified
 aggregate/member ceilings before exec where supported. Engines have independent
 subtrees. Attempt stop/OOM/cleanup never targets siblings or the worker service.
-Service stop intentionally contains all descendants (`Delegate=memory`,
-`KillMode=mixed`). Unsupported platforms remain admission-only and
-required ceilings refuse them. Core reservations do not enforce CPU time.
+The worker service retains `Delegate=memory` and `KillMode=mixed`, but installed
+batch commands run under an independent per-attempt custodian: a delegated
+systemd scope in `myce-jobs.slice` on Linux or a separate launchd job on Darwin.
+Its runner owns waits, memory/RSS guards, cache pins and durable results while
+the worker owns queue communication and log/result publication. A service stop
+detaches that connection; it does not signal the attempt. Private durable
+records bind the exact attempt/session, custodian PID and kernel birth, and
+manager placement. Startup adopts only verified custody, preserving the
+original queue session; an unverified record stays held, never guessed from
+a PID number. Other legacy recovery still verifies cleanup and replays results.
+Resident bridges and model engines retain worker-bound custody and require
+natural drain for normal upgrades. Linux attribution spans both the worker
+root and detached jobs slice, so siblings remain known Mycelium processes.
+Linux shared-host work retains its worker-bound aggregate CPU quota and
+naturally drains for updates; detaching only batch jobs would split the hard
+cap from resident engines. Unsupported platforms remain admission-only and
+required ceilings refuse them. Core reservations do not otherwise enforce CPU
+time.
 
 One machine heartbeat uses its session's adaptive contact evidence for every
 active class. A genuine worker loss affects every owned attempt independently,

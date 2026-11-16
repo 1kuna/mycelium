@@ -39,6 +39,8 @@ type attemptSupervisor struct {
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
+	detached    bool               // Immutable for recovered actors; new actors publish under mu.
+	custodian   *attemptCustodian  // Published under mu; owns immutable snapshots.
 	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
@@ -194,6 +196,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	}()
 	defer func() {
 		if p != nil {
+			if p.custodian != nil {
+				p.custodian.detach()
+				return
+			}
 			p.stop(initial.Clock.Now(), 0, true)
 			wake := time.NewTicker(10 * time.Millisecond)
 			defer wake.Stop()
@@ -229,6 +235,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		w.Client = w.Client.WithProgressWatch()
 		now := w.Clock.Now()
 		if p != nil {
+			if p.custodian != nil {
+				a.mu.Lock()
+				a.detached = true
+				a.custodian = p.custodian
+				a.mu.Unlock()
+				p.custodian.updateStore(s)
+			}
 			p.enforceGrace(now)
 			p.refreshEscapers(now)
 			select {
@@ -291,7 +304,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			// Local process cleanup and durable result custody survive queue
 			// loss. An unstarted assignment must also remain replayable.
 			connected = false
-			if p == nil && s.state.Result == nil {
+			if p == nil && s.state.Result == nil && s.state.Custodian == "" {
 				s.state.InputWriterPending = s.extensionFiles.inFlight() || s.nasPrepare.inFlight()
 				cause := s.startFailureAt(a.job, launchRefused, context.Canceled, now)
 				result := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, ReleasePending: s.state.InputWriterPending, Error: "worker service stopping before command started"}, cause)
@@ -304,14 +317,19 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		if connected {
 			if p == nil && s.state.Result == nil {
-				if d.Stop {
+				if d.Stop && s.state.Custodian == "" {
 					cause := s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
-				} else if !d.Hold && !admissionBlocked && !now.Before(preparationRetryAt) {
+				} else if s.state.Custodian != "" || !d.Hold && !admissionBlocked && !now.Before(preparationRetryAt) {
 					var err error
 					p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
+					if s.state.Custodian != "" {
+						a.mu.Lock()
+						a.detached = true
+						a.mu.Unlock()
+					}
 					if err != nil && !s.nasPrepare.inFlight() && !s.extensionFiles.inFlight() {
 						// Finished staging/restore failures must not re-walk NAS at
 						// actor speed. Pending copies still get consumed promptly;
@@ -321,7 +339,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					a.mu.Lock()
 					d = a.directive
 					a.mu.Unlock()
-					if p == nil && d.Stop && !errors.Is(err, errWorkerReleasePending) {
+					if p == nil && d.Stop && s.state.Custodian == "" && !errors.Is(err, errWorkerReleasePending) {
 						err = s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					}
 					if errors.Is(err, errWorkerMemory) {
@@ -388,7 +406,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 			s.state.Result = &r
 		}
-		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.native == nil || p.native.started())}
+		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && p.started()}
 
 		if report.Started {
 			a.mu.Lock()
@@ -624,6 +642,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					s.state.PublishedAttempt = published
 				}
 				preparation := s.state.Preparation
+				custodian := s.state.Custodian
 				s.state.Job, s.state.Result, s.state.Preparation = nil, nil, ""
 				// This branch requires confirmed release and queue acknowledgement.
 				// Failed launches may still carry intent or a previously reaped PID.
@@ -631,6 +650,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if e := s.save(); e != nil {
 					finish(e)
 					return
+				}
+				if custodian != "" {
+					cleanupCustodian(custodianDir(s.dir), custodian)
 				}
 				if preparation != "" {
 					if e := os.Remove(filepath.Join(s.dir, preparation)); e != nil && !errors.Is(e, os.ErrNotExist) {
@@ -659,6 +681,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 }
 
 func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
+	if s.state.Custodian != "" {
+		return w.adoptCustodian(s)
+	}
 	if s.state.StorageDirectory != "" || parkedStorage(s.state.Job) {
 		return nil, errors.New(parkedStorageReason)
 	}
@@ -1050,6 +1075,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p, publication: &publicationProgress{}}
 		a.admissionMu, a.worker.stopAdmission = &rt.admissionMu, a.stopAdmission
+		if p != nil && p.custodian != nil {
+			a.detached, a.custodian = true, p.custodian
+		}
 		actors[jobKey(j)] = a
 		// Publish reservations before the actor can reach its final launch gate.
 		rt.mu.Lock()
@@ -1072,6 +1100,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		p, err := w.recoverAttempt(s)
 		if err != nil {
 			return err
+		}
+		if p != nil && p.custodian != nil {
+			delete(recovered, jobKey(*s.state.Job))
 		}
 		spawn(s, p)
 	}
@@ -1152,7 +1183,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Actors retain unacknowledged results for startup replay. Waiting
 			// for remote leave/model plans here kept an idle worker's inventory
 			// alive until systemd's SIGKILL, even with no local custody.
-			if len(jobs) == 0 {
+			if len(jobs) == 0 || custodiansDetached(actors) {
 				return nil
 			}
 			select {
@@ -1202,6 +1233,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			release := CurrentRelease()
 			m.Release = &release
 			m.Fleet = w.fleet.observe(ctx, m, !recovering && !leaving)
+			if m.Fleet != nil && w.fleet.adoptionProtocol == custodianProtocol {
+				m.Fleet.Adoption = workerAdoptionProof(actors, now, w.Interval)
+			}
 			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)

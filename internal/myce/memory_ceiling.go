@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// All paths stay below the worker service: disable confirms the entire subtree.
+// Each execution stays below its delegated owner (worker or detached custodian).
 type memoryFS interface {
 	ReadFile(string) ([]byte, error)
 	ReadDir(string) ([]os.DirEntry, error)
@@ -33,12 +33,14 @@ func (osMemoryFS) Mkdir(p string) error                    { return os.Mkdir(p, 
 func (osMemoryFS) Remove(p string) error                   { return os.Remove(p) }
 
 type memoryCeilings struct {
-	fs       memoryFS
-	root     string
-	pageSize int // Zero uses the host kernel page size.
-	clock    Clock
+	accountingRoots []string // Aggregate worker + detached jobs for sibling attribution.
+	fs              memoryFS
+	root            string
+	pageSize        int // Zero uses the host kernel page size.
+	clock           Clock
 }
 type memoryAttempt struct {
+	accountingRoots  []string
 	currentMu        sync.Mutex
 	currentGrowth    memoryGrowth
 	fs               memoryFS
@@ -115,7 +117,7 @@ func (w *Worker) initMemoryCeilings() {
 					if filepath.Base(p) == "worker" {
 						p = filepath.Dir(p)
 					}
-					if filepath.Base(p) != w.Unit {
+					if filepath.Base(p) != w.Unit && (w.Custodian == "" || filepath.Base(p) != custodianUnit(w.Custodian)) {
 						continue
 					}
 					w.memoryCeilings, err = delegateMemory(osMemoryFS{}, filepath.Join("/sys/fs/cgroup", p), os.Getpid())
@@ -198,7 +200,7 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 	if err != nil {
 		return nil, err
 	}
-	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
+	a := &memoryAttempt{accountingRoots: c.accountingRoots, fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err
 	}
@@ -221,7 +223,7 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 		a.clock = RealClock{}
 	}
 	a.hostBaseline, _ = readGPUHostState(c.fs)
-	if gb, ok := cgroupResidentGB(c.fs, c.root); ok {
+	if gb, ok := a.accountingResidentGB(); ok {
 		a.rootBaseline = &gb
 	}
 	if b, err := c.fs.ReadFile(filepath.Join(a.path, "memory.pressure")); err == nil {
@@ -559,4 +561,32 @@ func memoryEnforcementDiagnostic(value string) string {
 		return "memory ceiling not enforced on this host (worker did not report enforcement)"
 	}
 	return "memory ceiling not enforced on this host (invalid capability report)"
+}
+
+// Limits remain per execution. Attribution includes detached siblings and the
+// worker's engines; subtracting only one scope would blame it for a neighbor.
+func (a *memoryAttempt) accountingPaths() []string {
+	if len(a.accountingRoots) > 0 {
+		return a.accountingRoots
+	}
+	return []string{filepath.Dir(a.path)}
+}
+func (a *memoryAttempt) accountingResidentGB() (float64, bool) {
+	total := 0.0
+	for _, path := range a.accountingPaths() {
+		v, ok := cgroupResidentGB(a.fs, path)
+		if !ok {
+			return 0, false
+		}
+		total += v
+	}
+	return total, true
+}
+func (a *memoryAttempt) accountingProcessIDs(ids map[int]bool) error {
+	for _, path := range a.accountingPaths() {
+		if err := (&memoryAttempt{fs: a.fs, path: path}).processIDs(ids); err != nil {
+			return err
+		}
+	}
+	return nil
 }

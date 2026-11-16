@@ -67,6 +67,7 @@ type state struct {
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	WorkerHandovers        map[string]workerHandover      `json:"worker_handovers,omitempty"`
 	FleetSuperseded        []fleetAbandoned               `json:"fleet_superseded,omitempty"`
 	ProductionLeases       map[string]ProductionLease     `json:"production_leases,omitempty"`
 
@@ -1363,6 +1364,9 @@ func (q *Queue) maintain() {
 	q.networkQuiet = q.fleetQuiet(now, true)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
+		if q.retainWorkerHandover(m) {
+			continue // Service replacement cannot turn live custody into a retry.
+		}
 		grace := unreported && q.inRestartGrace(now)
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && q.workerSuspect(m, now) && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
@@ -1663,6 +1667,9 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if old != nil && old.Session != m.Session && q.retainWorkerHandover(old) {
+			return errors.New("planned worker takeover retains exact prior-session custody; recover that session before replacing it")
+		}
 		q.receiveDeviceRecovery(&m, old)
 		if old != nil && old.Replacement != nil {
 			return q.validateMachineNames([]string{m.ID})
@@ -1826,6 +1833,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		q.maintain()
 		body.next("checkin_attempts")
 		reply.FleetInstructionProtocol, reply.FleetInstructionWaiting = fleetInstructionProtocol, q.fleetInstructionWaiting(hostID(&m))
+		reply.CustodianProtocol = custodianProtocol
 		q.guardSharedGPU(&m)
 		defer func() {
 			body.next("checkin_plans")

@@ -16,6 +16,9 @@ import (
 // inherit synthetic host facts and the same fail-closed probe boundary. Normal
 // builds never include this file or expose a runtime switch for fake hardware.
 func init() {
+	if os.Getenv("MYCE_TEST_CUSTODIANS_DISABLED") == "1" {
+		workerCustodians = false
+	}
 	workerHostHealthSource = nil
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
