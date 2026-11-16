@@ -827,6 +827,12 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    a fresh session to make an update proceed.
 6. **Clears the cutover fence or resumes the drain it took**, then advances.
 
+For the first deployment from a queue that still implements #1591, the release
+operator must activate the new queue policy through a planned natural-drain
+bootstrap before using normal fleet rollout. Replacing a worker cannot change
+an older running queue's checkpoint-stop policy. Once this queue policy is
+active, older workers take the natural fallback described above.
+
 Services already on the release are not drained or restarted. A drained or
 disabled host without a usable runtime proof is `skipped` and named; rerun once
 it is back. Rerunning while the operation runs returns it unchanged; a different
