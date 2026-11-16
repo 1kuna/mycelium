@@ -389,7 +389,8 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(json.loads(notice.read_bytes())["generation"], 1)
                 Checkpoint(Path(folder, "other")).save({"unrelated": True})
                 self.assertEqual(json.loads(notice.read_bytes())["generation"], 1)
-                checkpoint.save({"step": 2})
+                with patch.object(checkpoint, "_saves", side_effect=AssertionError("save reread NAS")):
+                    checkpoint.save({"step": 2})
                 self.assertEqual(json.loads(notice.read_bytes())["generation"], 2)
 
     def test_newest_atomic_and_temp_ignored(self):

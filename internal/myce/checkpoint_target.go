@@ -10,6 +10,8 @@ import (
 // checkpoint generation (#1437). Generations are portable as files, but an
 // application's resume can depend on replay that holds only on the target that
 // wrote them, so resumes stay on it unless the job declares otherwise.
+// Generation zero is a conservative binding to an interrupted writer's target
+// when it supplied no local publication evidence, not an accepted generation.
 type CheckpointOrigin struct {
 	Target     ExecutionTarget `json:"target"`
 	Generation int64           `json:"generation"`

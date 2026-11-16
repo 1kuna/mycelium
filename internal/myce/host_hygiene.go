@@ -253,6 +253,7 @@ type hostHealthMonitor struct {
 	heartbeat        float64
 	source           func(context.Context) (HostHealthReading, error)
 	foreign          func(context.Context) (foreignInventory, error)
+	mountPeriod      time.Duration
 	mounts           map[string]*hostMountProbe
 	disks            map[string]float64
 	done             chan struct{}
@@ -471,10 +472,11 @@ func startWorkerHealth(ctx context.Context, w Worker, root *workerStore) (*hostH
 		m.foreign = func(ctx context.Context) (foreignInventory, error) { return workerForeignConsumers(ctx, dir) }
 	}
 	m.done = make(chan struct{})
+	m.mountPeriod = checkpointMetadataInterval
 	m.readStorageRoots = w.storageRoots
 	m.storageRoots = w.storageRoots()
 	for role, path := range workerHealthMounts(w) {
-		m.mounts[role] = &hostMountProbe{period: checkpointMetadataInterval, root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
+		m.mounts[role] = &hostMountProbe{period: m.mountPeriod, root: role, path: path, clock: m.clock, probe: recoveryMountProbe(w, role, path), storage: m, timing: probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}}
 	}
 	m.timing = probeTiming{base: hostProbeControlPeriod(w.Interval), cores: w.Machine.EffectiveCPUCores}
 	go func() {

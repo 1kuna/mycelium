@@ -13,6 +13,8 @@ The updated Python `mycelium.Checkpoint` writes and syncs its atomic NAS save as
 before, then atomically publishes `{"name":"checkpoint.json","generation":N}`
 to `MYCE_CHECKPOINT_NOTIFY`. This is a session-specific file in the attempt's
 private **local** work directory, owned by its existing retention/cleanup.
+The helper discovers restored generations once and keeps its generation counter
+locally; subsequent saves do not enumerate the checkpoint directory.
 Custom writers can publish the same notification after their atomic JSON save
 or manifest is durable. Names are plain `.json` filenames and generations are
 positive int64s. Use a single writer and atomic local replacement. The worker

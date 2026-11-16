@@ -211,11 +211,9 @@ type recentAvailability struct {
 	observed  bool
 }
 
-// checkpointProbeFreshness is the shortest measured worker check-in period.
-// Each worker probes its own checkpoint mount on every check-in and its report
-// gates admission per machine, so a queue result younger than one check-in is
-// no staler than the fleet's own evidence. Without a measured cadence the
-// queue probes on each transaction, as before (#1545).
+// Idle availability is never refreshed faster than ten measured NAS operation
+// stall allowances. Slower worker cadences can extend it further. This is host
+// admission evidence, never a source of job status or checkpoint progress.
 func (q *Queue) checkpointProbeFreshness() time.Duration {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
@@ -252,11 +250,15 @@ func (q *Queue) recentCheckpointAvailability() bool {
 	available, err := q.nasProbe.runProgress(q.root, func(progress func()) (bool, error) {
 		return probe(q.root, progress), nil
 	})
-	if err == nil {
+	q.nasProbe.mu.Lock()
+	// Retained success during a pending refresh is not a completed observation;
+	// keep checking its operation-progress fence instead of caching it for 5m.
+	if err == nil && q.nasProbe.pending == nil {
 		q.nasRecent.mu.Lock()
 		q.nasRecent.at, q.nasRecent.available, q.nasRecent.observed = q.clock.Now(), available, true
 		q.nasRecent.mu.Unlock()
 	}
+	q.nasProbe.mu.Unlock()
 	return available
 }
 

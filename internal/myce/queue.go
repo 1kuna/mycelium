@@ -1211,9 +1211,12 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// With no local publication, an interrupted NAS writer may have saved
 	// unreported bytes. Preserve its target until resume inspects those bytes;
 	// absence of a live progress report is not proof of an empty checkpoint.
-	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.CheckpointTarget == nil && j.StartedAt != nil {
+	if j.Spec.Resumable && !j.FileTransport && j.Progress < 0 && j.StartedAt != nil {
 		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
-			j.CheckpointTarget = &CheckpointOrigin{Target: jobTargetOn(j, m), Attempt: j.Attempt}
+			target := jobTargetOn(j, m)
+			if j.CheckpointTarget == nil || j.CheckpointTarget.Target != target {
+				j.CheckpointTarget = &CheckpointOrigin{Target: target, Attempt: j.Attempt}
+			}
 		}
 	}
 	// Read the stop cause while the attempt identity still names it.
@@ -1600,7 +1603,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
 				progress.durable = save.Generation
 			}
-		} else if j != nil && j.Spec.Resumable && j.Attempt != report.Attempt {
+		} else if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && j.Spec.Resumable && j.Attempt != report.Attempt {
 			// Only a known recoverable execution can open a resume decision.
 			// Ordinary or already rejected stale heartbeats do no share I/O.
 			for _, copy := range j.Copies {
@@ -2072,7 +2075,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		yieldPath = attemptCheckpoint(*j)
 	}
 	var finalPath string
-	if err == nil && j != nil && j.Spec.Resumable && !j.FileTransport && !r.ReleasePending {
+	if err == nil && j != nil && (j.State == "running" || j.State == "stopping") && j.Spec.Resumable && !j.FileTransport && !r.ReleasePending {
 		finalPath = attemptCheckpoint(*j)
 	}
 	var outputs map[string]string
@@ -2181,6 +2184,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	if err != nil {
 		return err
 	}
+	q.forgetSettledCheckpointProgress(r.ID)
 	return rejected
 }
 func (q *Queue) retainLaunchCapacityRefusal(r Result) {

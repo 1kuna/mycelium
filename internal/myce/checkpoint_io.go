@@ -182,11 +182,13 @@ func (n *checkpointAvailability) periodic(clock Clock, key string, fn func(func(
 	}
 	n.mu.Unlock()
 	value, err := n.runProgress(key, fn)
-	if !errors.Is(err, errCheckpointIOPending) {
-		n.mu.Lock()
+	n.mu.Lock()
+	// runProgress can retain success while a new syscall is pending. Never
+	// cache that provisional success across its per-operation stall fence.
+	if n.pending == nil && !errors.Is(err, errCheckpointIOPending) {
 		n.recentKey, n.recentUntil, n.recentValue = key, clock.Now().Add(checkpointMetadataInterval), value
-		n.mu.Unlock()
 	}
+	n.mu.Unlock()
 	return value, err
 }
 
