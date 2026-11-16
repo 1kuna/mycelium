@@ -126,6 +126,64 @@ func TestHostBackfillAccumulatesForAccelerator(t *testing.T) {
 	}
 }
 
+// A fitting GPU job also consumes the shared host pool. Explain the same
+// accumulation fence as CPU backfill, then place it beside CPU holders once
+// the preceding demand clears (#1701).
+func TestHostBackfillCUDAWithCPUOnlyHolders(t *testing.T) {
+	q, clock := fixture(t)
+	m := backfillMachine("accelerator", 96)
+	m.CapabilityProfile.LogicalCPUs = 20
+	m.MemoryCeilingSlackGB = .125
+	var holders []*Job
+	for range 2 {
+		queued := submit(t, q, cpuSpec(3, 24))
+		run := assignedJob(machineCheck(t, q, m, holders...))
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("CPU holder not assigned", job(t, q, queued.ID).Reason)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		holders = append(holders, run)
+	}
+	large := sharedSpec("experiment", 72)
+	large.Project, large.Needs.HostMemoryGB = "large-gpu", 8
+	large.Needs.Platform = Platform{Required: []string{"cuda"}}
+	demand := submit(t, q, large)
+	clock.Advance(time.Second)
+	small := sharedSpec("experiment", 2)
+	small.Needs.HostMemoryGB, small.Needs.CPUCores = 9, 2
+	small.Needs.Platform = Platform{Required: []string{"cuda"}}
+	later := submit(t, q, small)
+	if got := assignedJob(machineCheck(t, q, m, holders...)); got != nil {
+		t.Fatal("GPU backfill deepened the preceding demand's host RAM deficit", got.ID)
+	}
+	status, err := q.jobSnapshot(later.ID, context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Hold == nil || status.Hold.Kind != "host_backfill" || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demand.ID) {
+		t.Fatalf("GPU accumulation wait not explained: hold=%+v code=%q reason=%q", status.Hold, status.DiagnosticCode, status.Reason)
+	}
+	if !strings.Contains(status.Hold.Reason, "RAM") || status.Attempt != 0 {
+		t.Fatalf("hold omitted RAM or refusal consumed an attempt: hold=%+v attempt=%d", status.Hold, status.Attempt)
+	}
+	// Cancellation here is a local fixture action, never an operator workaround.
+	if err := q.Cancel(demand.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := assignedJob(machineCheck(t, q, m, holders...))
+	if got == nil || got.ID != later.ID || len(got.AllocatedDevices) != 1 || got.AllocatedDevices[0] != "0" {
+		t.Fatal("fitting GPU demand did not place beside CPU holders", got, job(t, q, later.ID).Reason)
+	}
+	for _, run := range holders {
+		current := job(t, q, run.ID)
+		if current.State != "running" || current.StopAt != nil {
+			t.Fatal("GPU demand disturbed CPU holder", current.State, current.Reason)
+		}
+	}
+}
+
 func TestHostBackfillNeedsReadyDemand(t *testing.T) {
 	for _, reason := range []string{"cold", "impossible", "cancelled", "higher-tier"} {
 		t.Run(reason, func(t *testing.T) {

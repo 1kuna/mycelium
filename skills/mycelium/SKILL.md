@@ -53,6 +53,12 @@ work continues. `myce status --sections machines --json` exposes
 queue owner. Worker contact alone does not prove usable accelerator inventory;
 resubmitting the job does not repair that evidence. Report a persistent wait to the queue owner with those fields.
 
+A `host_backfill` hold (`host_capacity_accumulation`) names queued work whose
+resolved host RAM or cores Mycelium is protecting in tier/fair-turn order.
+Even a GPU job that fits now can wait when starting it would deepen that demand's
+capacity deficit. Existing attempts finish normally; the hold clears when the
+named demand starts or no longer withholds capacity. Keep the existing job queued.
+
 A maintenance-interrupted resumable job keeps its job ID. Leave it queued while
 Mycelium restores its checkpoint; a slow copy retains that same attempt and
 writer. Refused copies with proof no payload ran are reclaimed after release.

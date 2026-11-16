@@ -1006,8 +1006,10 @@ environment is not prepared and that the host never builds environments.
 
 `host_capacity_accumulation` names a ready queued job whose host RAM or cores
 would otherwise be repeatedly consumed by smaller backfill (#787). This
-also covers CPU-only demand. New work behind the demand in
-tier/fair-turn order waits on its selected host unless it fits beside the
+also covers CPU-only demand, and both CPU and GPU backfill receive a
+`host_backfill` hold naming the demand. A GPU's free device memory alone does
+not establish spare host RAM, especially on a unified-memory host. New work
+behind the demand in tier/fair-turn order waits on its selected host unless it fits beside the
 demand. Existing attempts finish normally. The projection
 selects one currently ready target per demand, prefers immediate capacity, and
 otherwise uses ordinary placement value. It retains current device capacity,
