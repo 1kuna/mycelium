@@ -103,34 +103,38 @@ func TestResidentJobsSeparateKindsAndFreezeCatalog(t *testing.T) {
 	}
 }
 
-func TestResidentJobsReserveColdLoadAndYieldToProduction(t *testing.T) {
-	q, clock, m, s := residentFixture(t)
-	m.FreeMemoryGB = 8 // Driver alone fits; driver plus cold engine does not.
-	check(t, q, m, nil)
-	j := submit(t, q, s)
-	if r := check(t, q, m, nil); r.Job != nil || len(q.s.ModelSlots) != 0 {
-		t.Fatal("admitted driver without room for engine")
-	}
-	m.FreeMemoryGB = 32
-	r := check(t, q, m, nil)
-	if r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("driver did not start when both allocations fit")
-	}
-	j = r.Job
-	clock.Advance(4 * time.Second)
-	slot := residentReport(t, q, m, j, "ready")
-	finish(t, q, j, true)
-	production := spec("production")
-	production.Needs.MemoryGB = 32
-	production.Needs.HostMemoryGB = 1
-	p := submit(t, q, production)
-	if slot.State != "draining" || q.modelMemory(m.ID) != 8 {
-		t.Fatal("production pressure did not drain engine with custody")
-	}
-	j.State = "succeeded"
-	residentReport(t, q, m, j, "unloaded")
-	if got := job(t, q, p.ID); got.State != "running" && check(t, q, m, nil).Job == nil {
-		t.Fatal("production did not start after unload acknowledgement")
+func TestResidentJobsReserveColdLoadAndYieldUnderPressure(t *testing.T) {
+	for _, priority := range []string{"production", "experiment"} {
+		t.Run(priority, func(t *testing.T) {
+			q, clock, m, s := residentFixture(t)
+			m.FreeMemoryGB = 8 // Driver alone fits; driver plus cold engine does not.
+			check(t, q, m, nil)
+			j := submit(t, q, s)
+			if r := check(t, q, m, nil); r.Job != nil || len(q.s.ModelSlots) != 0 {
+				t.Fatal("admitted driver without room for engine")
+			}
+			m.FreeMemoryGB = 32
+			r := check(t, q, m, nil)
+			if r.Job == nil || r.Job.ID != j.ID {
+				t.Fatal("driver did not start when both allocations fit")
+			}
+			j = r.Job
+			clock.Advance(4 * time.Second)
+			slot := residentReport(t, q, m, j, "ready")
+			finish(t, q, j, true)
+			production := spec(priority)
+			production.Needs.MemoryGB = 32
+			production.Needs.HostMemoryGB = 1
+			p := submit(t, q, production)
+			if slot.State != "draining" || q.modelMemory(m.ID) != 8 {
+				t.Fatal("production pressure did not drain engine with custody")
+			}
+			j.State = "succeeded"
+			residentReport(t, q, m, j, "unloaded")
+			if got := job(t, q, p.ID); got.State != "running" && check(t, q, m, nil).Job == nil {
+				t.Fatal("production did not start after unload acknowledgement")
+			}
+		})
 	}
 }
 
@@ -450,5 +454,39 @@ func TestResidentJobsSandboxedPayload(t *testing.T) {
 		}
 	case <-time.After(testWaitTimeout):
 		t.Fatal("sandboxed resident payload stalled")
+	}
+}
+
+func TestResidentJobsFrozenEnvironmentRetention(t *testing.T) {
+	q, _, m, s := residentFixture(t)
+	recipe := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"engine-env": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	config := q.models
+	config.Models[0].Environment = "engine-env"
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	check(t, q, m, nil)
+	j := residentAssigned(t, q, m, s)
+	plan := q.modelPlan(m.ID)
+	if len(plan) != 1 || plan[0].EnvironmentRecipe == nil || plan[0].EnvironmentRecipe.Key != recipe.Key {
+		t.Fatal("load plan lost frozen recipe")
+	}
+	// The original catalog can change while the frozen job remains live.
+	if err := q.ConfigureModels(ModelConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{}); err != nil {
+		t.Fatal(err)
+	}
+	if !q.environmentReferenced(context.Background(), recipe.Key) {
+		t.Fatal("live resident environment was prunable")
+	}
+	model, ok := q.model(j.Spec.Resident.Engine.Model.Name)
+	if !ok || model.Environment != "engine-env" {
+		t.Fatal("catalog replacement lost frozen model")
 	}
 }

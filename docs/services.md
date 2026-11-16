@@ -50,7 +50,6 @@ interrupted exchange fails the command; there is no transport replay. It reads
 only `MYCE_RESIDENT_PIPE` and `MYCE_RESIDENT_KEY`, which grant this attempt access
 to its frozen engine. It never reads installed credentials. Make calls sequentially
 within one attempt; interrupted exchanges require the normal job retry policy.
-Raw HTTP clients can use `myce.ResidentRequest` over the same attempt-owned pipes.
 No network opt-in is required. The existing sandbox stays in force.
 
 Reuse identity includes project, stage/entry or extension, immutable source,
