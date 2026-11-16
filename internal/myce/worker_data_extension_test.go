@@ -49,10 +49,11 @@ touch side-ready
 while :; do sleep .01; done
 `)
 			e = freezeComposition(t, e)
-			q, w := prepareTestWorker(t, e)
+			q, _ := fixture(t)
 			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "queue-files"), 1<<20, true); err != nil {
 				t.Fatal(err)
 			}
+			w := prepareExtensionTestWorker(t, q, e)
 			w.ephemeralProbe = func() error { return nil }
 			w.Machine.Capabilities = append(w.Machine.Capabilities, ephemeralCapability, nativeCICapability, "native_isolation_namespace", "native_sidecars")
 			w.environmentCache.Clock = w.Clock
@@ -271,10 +272,11 @@ func TestEphemeralExtensionFrozenScopeRefusals(t *testing.T) {
 				v.Needs.Network = true
 			}
 			e = freezeComposition(t, e)
-			q, w := prepareTestWorker(t, e)
+			q, _ := fixture(t)
 			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
 				t.Fatal(err)
 			}
+			w := prepareExtensionTestWorker(t, q, e)
 			check(t, q, w.Machine, nil)
 			_, err := q.Submit(Spec{Name: "unsupported", Project: "test", Extension: extensionKey(e), WorkerData: "ephemeral", Outputs: map[string]string{"out": "results"}})
 			var refusal *rejectionError
