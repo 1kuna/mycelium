@@ -251,6 +251,9 @@ func (q *Queue) noFitDetail(j *Job, idle bool) string {
 		// Reuse fitting at the reported capacity, without making a dispatch choice.
 		fit := false
 		for _, candidate := range q.memoryCandidates(j, &copy) {
+			if !q.jobAllowsMachine(candidate, m.ID) || !memorySizingTargetFits(candidate, &copy) {
+				continue
+			}
 			n := candidate.Spec.Needs
 			if n.Memory == "auto" {
 				detail := fmt.Sprintf("%s needs %.1f GiB free accelerator memory and %.1f GiB host RAM", m.ID, n.MemoryGB, hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))

@@ -253,6 +253,7 @@ func (q *Queue) adaptMemoryTransfer(e *memoryEstimate, j *Job, m *Machine, point
 	}
 	if evidence > 0 && validRate(bound) && (j.Spec.Needs.cpuOnly() || deviceBound > 0) {
 		e.measuredHostGB, e.samples, e.source = bound, evidence, "accepted transfer + measured error"
+		e.transferred = true
 		if e.device != nil && e.device.DeviceGB != nil && *e.device.DeviceGB > 0 {
 			e.deviceFactor = deviceBound / *e.device.DeviceGB
 		}

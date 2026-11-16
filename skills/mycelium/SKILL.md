@@ -511,6 +511,15 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
+  A native-qualification wait names the automatic check and its current hold.
+  When an unrun check's transferred estimate exceeds physical RAM, it uses the
+  ordinary guarded first-run envelope to obtain a native measurement; status
+  says `transferred estimate exceeds physical capacity`. Local measurements,
+  declared member needs and OOM floors remain binding. Only those requirements
+  can fail a check with `dead_end_wait` and `cannot fit on any eligible host`;
+  a transferred extrapolation alone cannot. Read the check's own status for
+  the measured demand/capacity comparison. Reduce genuinely oversized check
+  requirements or provide capable hardware before retrying qualification.
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only

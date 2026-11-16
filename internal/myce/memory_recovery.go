@@ -183,3 +183,91 @@ func (q *Queue) memorySizingDeadEnd(j *Job) string {
 	slices.Sort(refusals)
 	return "dead end: no host can size this auto-memory job (" + strings.Join(slices.Compact(refusals), "; ") + "); action: resubmit with an explicit memory figure that fits a host, or reduce the workload's memory use"
 }
+
+const checkTransferProbe = "exploratory first run; transferred estimate exceeds physical capacity"
+
+// Native qualification obtains the missing target measurement. Even paired
+// transfer ratios can disagree (fixed overhead need not scale with source
+// demand). If their prediction exceeds this host, use its ordinary first-run
+// protocol rather than treating that prediction as a physical lower bound.
+// Actual OOM recovery keeps its separate measured-demand path.
+func (q *Queue) checkTransferNeedsProbe(j *Job, m *Machine, estimate memoryEstimate) bool {
+	if j.Spec.ExtensionCheck == nil || !estimate.transferred || estimate.escalation || j.OOMRetries > 0 {
+		return false
+	}
+	_, system, known := jobCapabilityCapacity(j, m)
+	host := estimate.measuredHostGB
+	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && estimate.device != nil && estimate.device.DeviceGB != nil {
+		host += *estimate.device.DeviceGB * estimate.deviceFactor
+	}
+	return known && host > system
+}
+
+// Only authored requirements, local measurements and durable OOM floors can
+// prove a native check physically impossible. A transferred estimate or an
+// uncertainty forecast can justify a hold/probe, never a terminal verdict.
+func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
+	for _, id := range j.Spec.AllowedMachines {
+		if q.s.Machines[id] == nil {
+			return "" // A named host has not reported its capacity yet.
+		}
+	}
+	var refusals []string
+	possible := false
+	q.evaluateTargetsMemory(j, false, func(fit targetFit, candidate *Job, m *Machine) bool {
+		if fit.excluded {
+			return true
+		}
+		for _, dimension := range fit.failed {
+			switch dimension {
+			case "platform", "target", "device", "allow-list", "excluded_machines", "extension", "cores", "card group", "tools", "environment", "native network isolation":
+				return true // Not an eligible execution target.
+			}
+		}
+		accelerator, system, known := jobCapabilityCapacity(candidate, m)
+		if !known || !q.inventoryFresh(q.s.Machines[m.ID]) || inventoryWaitingReason(q.s.Machines[m.ID]) != "" {
+			possible = true // Unknown capacity is not proof of impossibility.
+			return false
+		}
+		// evaluateTargetsMemory(false) preserves declarations and retry floors,
+		// without installing a prediction. Add measurements on this exact
+		// destination identity, including constrained peaks, but no transfer or
+		// forecast margin. Host evidence can include a currently known sibling;
+		// device demand must have been measured on this exact card.
+		// The intent-only view clears auto sizing. Restore it only on the
+		// identity copy: check memory observations exist only for auto checks.
+		// The demand below still starts from the untouched authored intent.
+		provenance := *candidate
+		provenance.Spec.Needs.Memory = "auto"
+		estimate := q.memoryEstimateFor(&provenance, m, false)
+		if key := estimate.key; key != nil {
+			configuration := memoryConfiguration(candidate.Spec.Needs, candidate.Spec.Args, candidate.Spec.Program)
+			facts := q.memorySizingFacts(candidate, m, key, configuration, false)
+			for _, point := range facts.points {
+				p := point.MemoryPeak
+				if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || q.clock.Now().Before(point.MemoryRecordedAt) || p == nil || p.HostGB == nil || !validRate(*p.HostGB) || point.Key.Target != key.Target || !sameMemoryHost(point.Key, *key, m) || !sameMemoryFamily(*point, *key, memoryLayout(candidate, m)) {
+					continue
+				}
+				candidate.Spec.Needs.HostMemoryGB = max(candidate.Spec.Needs.HostMemoryGB, hostMemoryPeakGB(p))
+				if !candidate.Spec.Needs.cpuOnly() && point.Key.Component == key.Component && p.DeviceGB != nil && validRate(*p.DeviceGB) {
+					candidate.Spec.Needs.MemoryGB = max(candidate.Spec.Needs.MemoryGB, *p.DeviceGB)
+				}
+			}
+		}
+		need := candidate.Spec.Needs.HostMemoryGB
+		if m.UnifiedMemory && !candidate.Spec.Needs.cpuOnly() {
+			need += candidate.Spec.Needs.MemoryGB
+		}
+		if need <= system && candidate.Spec.Needs.MemoryGB <= accelerator {
+			possible = true // Occupancy/allowances/preparation can still clear.
+			return false
+		}
+		refusals = append(refusals, targetFitReason("hardware capacity", candidate, m)+" on "+m.ID)
+		return true
+	})
+	if possible || len(refusals) == 0 {
+		return ""
+	}
+	slices.Sort(refusals)
+	return "dead end: native check cannot fit on any eligible host (" + strings.Join(slices.Compact(refusals), "; ") + "); action: reduce the check's memory requirements or provide a capable host and retry qualification"
+}
