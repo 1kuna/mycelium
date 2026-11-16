@@ -118,12 +118,17 @@ func (q *Queue) freezeResident(j *Job) error {
 }
 
 func (q *Queue) residentModelByName(name string) (Model, bool) {
+	// Ordinary commands have no model. Missing catalog lookups must not scan
+	// retained job history on every scheduling predicate.
+	if !strings.HasPrefix(name, "resident-") {
+		return Model{}, false
+	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.Model == name && slot.Resident != nil {
 			return slot.Resident.Model, true
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if r := j.Spec.Resident; r != nil && r.Engine != nil && r.Engine.Model.Name == name {
 			return r.Engine.Model, true
 		}
@@ -189,6 +194,9 @@ func (q *Queue) reserveResident(j *Job, m *Machine) {
 // Waiting dependencies are real future demand. They protect only this engine's
 // idle retention, never a pin or a priority/memory reclamation exemption.
 func (q *Queue) residentJobDemand(slot *ModelSlot) bool {
+	if slot.Resident == nil {
+		return false
+	}
 	for _, j := range q.liveJobs() {
 		if !ownsResidentSlot(j.Spec, slot) || cancelled(j) || j.ReleaseConfirmed && j.State != "queued" || j.State != "queued" && j.State != "running" {
 			continue
