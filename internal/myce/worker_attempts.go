@@ -337,7 +337,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						// Failed NAS discovery uses the idle probe interval; this
 						// costs delayed recovery instead of repeated share walks.
 						delay := w.Interval
-						if !a.job.FileTransport && !a.job.Spec.localFirst() {
+						// A local input copy can finish just after returning
+						// pending. Its late completion is not a failed NAS
+						// preparation and must remain promptly consumable.
+						if s.checkpointUnavailable && !a.job.FileTransport && !a.job.Spec.localFirst() {
 							delay = max(delay, checkpointMetadataInterval)
 						}
 						preparationRetryAt = w.Clock.Now().Add(delay)
