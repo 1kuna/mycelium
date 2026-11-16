@@ -119,7 +119,11 @@ func AdvancedStatus(s *Spec) *Advanced {
 	if s.Resident == nil && s.CheckpointPolicy == "" && s.WorkerData == "" && !s.AllowCPUFallback && !s.Resumable && !s.Preemptible && s.Isolation == "" && s.Reason == "" && s.WallTime == "" && s.GiveUpAt == nil && s.ExpectedMinutes == 0 && s.StartBy == nil && s.StartWindow == "" && len(s.AllowedMachines) == 0 && len(s.ExcludedMachines) == 0 && !s.Portable && !s.RequireTarget && s.OutputDelivery == "" && len(s.QualityTolerance) == 0 && logs == "" {
 		return nil
 	}
-	return &Advanced{Resident: s.Resident, CheckpointPolicy: s.CheckpointPolicy, WorkerData: s.WorkerData, AllowCPUFallback: s.AllowCPUFallback, Resumable: s.Resumable, Preemptible: s.Preemptible, Isolation: s.Isolation, Reason: s.Reason, WallTime: s.WallTime, GiveUpAt: s.GiveUpAt, ExpectedMinutes: s.ExpectedMinutes, StartBy: s.StartBy, StartWindow: s.StartWindow, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines, Portable: s.Portable, RequireTarget: s.RequireTarget, OutputDelivery: s.OutputDelivery, QualityTolerance: s.QualityTolerance, Logs: logs}
+	var resident *ResidentBinding
+	if s.Resident != nil {
+		resident = &ResidentBinding{Model: s.Resident.Model}
+	}
+	return &Advanced{Resident: resident, CheckpointPolicy: s.CheckpointPolicy, WorkerData: s.WorkerData, AllowCPUFallback: s.AllowCPUFallback, Resumable: s.Resumable, Preemptible: s.Preemptible, Isolation: s.Isolation, Reason: s.Reason, WallTime: s.WallTime, GiveUpAt: s.GiveUpAt, ExpectedMinutes: s.ExpectedMinutes, StartBy: s.StartBy, StartWindow: s.StartWindow, AllowedMachines: s.AllowedMachines, ExcludedMachines: s.ExcludedMachines, Portable: s.Portable, RequireTarget: s.RequireTarget, OutputDelivery: s.OutputDelivery, QualityTolerance: s.QualityTolerance, Logs: logs}
 }
 
 // cpuFallback reports the MY-54 opt-in for plain GPU work. Extension work runs

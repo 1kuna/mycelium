@@ -299,7 +299,8 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 	invoke(cancelled, "cancelled input")
 	finish(t, q, cancelled, false)
 	dying := residentAssigned(t, q, m, s)
-	endpoint, expectedStatus, cancelBefore = "/exit", 502, false
+	// The existing model API reports a lost, non-retryable engine as unavailable.
+	endpoint, expectedStatus, cancelBefore = "/exit", 503, false
 	invoke(dying, "interrupted input")
 	finish(t, q, dying, false)
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
