@@ -122,7 +122,7 @@ func TestProductionPauseFencesBackfill(t *testing.T) {
 			victim := submit(t, q, low)
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil || run.ID != victim.ID {
-				t.Fatal("missing non-resumable holder", run)
+				t.Fatal("missing lower-tier holder", run)
 			}
 			if err := q.Started(result(run, false)); err != nil {
 				t.Fatal(err)
@@ -144,11 +144,10 @@ func TestProductionPauseFencesBackfill(t *testing.T) {
 			if dimension == "device" {
 				later = spec("experiment")
 				later.Needs.HostMemoryGB = 1
-				later.Resumable = false
 			}
 			backfill := submit(t, q, later)
 			if got := assignedJob(machineCheck(t, q, m, run)); got != nil {
-				t.Fatal("more non-resumable work deepened production's deficit", got.ID, backfill.ID)
+				t.Fatal("more backfill deepened production's deficit", got.ID, backfill.ID)
 			}
 			other := cpuMachine("other", "other", "cpu", 8, 24)
 			if dimension != "device" {

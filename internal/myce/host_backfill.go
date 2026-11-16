@@ -18,7 +18,7 @@ type hostBackfillDemand struct {
 	drain bool
 	start *time.Time
 	// Device demand can be next after a finite GPU execution. CPU backfill
-	// and non-resumable lower-tier GPU work observe production's fence;
+	// and lower-tier GPU work observe production's fence;
 	// the projection grants no accelerator admission.
 	devicePending bool
 }
@@ -169,8 +169,8 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	if fence == nil || j.ID == fence.job.ID {
 		return true
 	}
-	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0 && !j.Spec.Resumable) {
-		return true // Reclaimable GPU work keeps ordinary device admission order.
+	if fence.devicePending && !j.Spec.Needs.cpuOnly() && !(fence.job.Spec.Priority == "production" && q.comparePriority(j.Spec, fence.job.Spec) > 0) {
+		return true // Other GPU demand keeps ordinary device admission order.
 	}
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects
