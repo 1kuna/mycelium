@@ -234,16 +234,18 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
-	Device         string `json:"device,omitempty"`
-	Attempt        string `json:"attempt,omitempty"`
-	RuntimeFailed  bool   `json:"runtime_failed,omitempty"`
-	HealthRevision uint64 `json:"health_revision,omitempty"`
-	HealthDegraded bool   `json:"health_degraded,omitempty"`
-	InFlight       int    `json:"calls_in_flight,omitempty"`
-	CallsMeasured  bool   `json:"calls_measured,omitempty"`
-	Name           string `json:"name"`
-	State          string `json:"state"`
-	Error          string `json:"error,omitempty"`
+	memoryGB, hostMemoryGB float64 // Worker-local budgets, never accepted over the wire.
+	resourcesMeasured      bool
+	Device                 string `json:"device,omitempty"`
+	Attempt                string `json:"attempt,omitempty"`
+	RuntimeFailed          bool   `json:"runtime_failed,omitempty"`
+	HealthRevision         uint64 `json:"health_revision,omitempty"`
+	HealthDegraded         bool   `json:"health_degraded,omitempty"`
+	InFlight               int    `json:"calls_in_flight,omitempty"`
+	CallsMeasured          bool   `json:"calls_measured,omitempty"`
+	Name                   string `json:"name"`
+	State                  string `json:"state"`
+	Error                  string `json:"error,omitempty"`
 }
 type ModelCall struct {
 	ResidentAttempt                  *residentAttempt

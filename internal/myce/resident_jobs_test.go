@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -204,15 +203,10 @@ func TestResidentJobsRealCPUProcessAndAttemptBridge(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer close()
-		transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", env["MYCE_RESIDENT_SOCKET"])
-		}}
-		defer transport.CloseIdleConnections()
-		client := &http.Client{Transport: transport}
-		req, _ := http.NewRequestWithContext(ctx, "POST", "http://resident/speech?x=1", strings.NewReader(payload))
+		req, _ := http.NewRequestWithContext(ctx, "POST", "http://resident/files/a%3Fb%2F%25?x=1", strings.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+env["MYCE_RESIDENT_KEY"])
 		req.Header.Set("X-Myce-Project", "forged")
-		response, err := client.Do(req)
+		response, err := ResidentRequest(ctx, env["MYCE_RESIDENT_PIPE"], env["MYCE_RESIDENT_KEY"], req)
 		if err != nil {
 			t.Fatal(err)
 		}

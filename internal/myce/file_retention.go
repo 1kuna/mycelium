@@ -459,6 +459,16 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		for _, e := range j.Extensions {
 			extension(e)
 		}
+		if r := j.Spec.Resident; r != nil && r.Engine != nil {
+			for _, recipe := range r.Engine.Environments {
+				keepFiles("resident_environment", recipe.Assets)
+			}
+			model := r.Engine.Model
+			keepFiles("resident_model", FileManifest{model.Name: {SHA256: model.SHA256}})
+			for _, f := range model.Files {
+				keepFiles("resident_model", FileManifest{"file": {SHA256: f.SHA256}})
+			}
+		}
 		for _, r := range j.EnvironmentRecipes {
 			keepFiles("environment_asset", r.Assets)
 		}
@@ -496,6 +506,16 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
+		if slot.Resident != nil {
+			for _, recipe := range slot.Resident.Environments {
+				keepFiles("resident_environment", recipe.Assets)
+			}
+			model := slot.Resident.Model
+			keepFiles("resident_model", FileManifest{model.Name: {SHA256: model.SHA256}})
+			for _, f := range model.Files {
+				keepFiles("resident_model", FileManifest{"file": {SHA256: f.SHA256}})
+			}
+		}
 		if slot.EnvironmentRecipe != nil {
 			keepFiles("model_environment_asset", slot.EnvironmentRecipe.Assets)
 		}

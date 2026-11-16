@@ -871,12 +871,11 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 	for _, r := range models {
 		if r.State == "ready" || r.State == "draining" || r.State == "loading" {
 			usedCores++
-			for _, m := range w.ModelConfig.Models {
-				if m.Name == r.Name {
-					need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
-					usedRAM += need
-					growth += need
-				}
+			m, ok := w.localModelBudget(r)
+			if ok {
+				need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+				usedRAM += need
+				growth += need
 			}
 		}
 	}
@@ -900,10 +899,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport,
 		}
 		for _, r := range models {
 			if r.State == "ready" || r.State == "draining" || r.State == "loading" {
-				for _, m := range w.ModelConfig.Models {
-					if m.Name == r.Name && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
-						usedGPU += m.MemoryGB
-					}
+				m, ok := w.localModelBudget(r)
+				if ok && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
+					usedGPU += m.MemoryGB
 				}
 			}
 		}
@@ -1606,4 +1604,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		case <-tick.C:
 		}
 	}
+}
+
+func (w Worker) localModelBudget(r ModelReport) (Model, bool) {
+	if r.resourcesMeasured {
+		return Model{Name: r.Name, MemoryGB: r.memoryGB, HostMemoryGB: r.hostMemoryGB, Device: r.Device}, true
+	}
+	for _, m := range w.ModelConfig.Models {
+		if m.Name == r.Name {
+			return m, true
+		}
+	}
+	return Model{}, false
 }

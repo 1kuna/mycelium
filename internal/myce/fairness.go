@@ -205,15 +205,19 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 func (q *Queue) capReason(j *Job) string { return q.capReasonFor(j, nil) }
 func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	p := q.s.Policies[j.Spec.Project]
+	owner := ""
+	if call := q.calls[j.ID]; call != nil && call.ResidentAttempt != nil {
+		owner = call.ResidentAttempt.Job
+	}
 	if p.MaxConcurrent > 0 {
 		count := 0
 		for _, r := range q.liveJobs() {
-			if r.ID != j.ID && r.Spec.Project == j.Spec.Project && (r.State == "running" || r.State == "stopping") {
+			if r.ID != j.ID && r.ID != owner && r.Spec.Project == j.Spec.Project && (r.State == "running" || r.State == "stopping") {
 				count++
 			}
 		}
 		for _, c := range q.calls {
-			if c.ID != j.ID && c.Project == j.Spec.Project && c.Machine != "" && c.Error == "" {
+			if c.ID != j.ID && c.ResidentAttempt == nil && c.Project == j.Spec.Project && c.Machine != "" && c.Error == "" {
 				count++
 			}
 		}
@@ -238,7 +242,9 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	}
 	for _, r := range q.liveJobs() {
 		if r.ID != j.ID && r.Spec.Project == j.Spec.Project && r.Spec.Priority == "experiment" && (r.State == "running" || r.State == "stopping") {
-			count++
+			if r.ID != owner {
+				count++
+			}
 			used += r.Spec.Needs.MemoryGB
 		}
 	}
@@ -246,7 +252,9 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	seen := map[string]bool{}
 	for _, c := range q.calls {
 		if c.Project == j.Spec.Project && c.Priority == "experiment" && c.Machine != "" && c.Error == "" {
-			count++
+			if c.ResidentAttempt == nil && c.ID != j.ID {
+				count++
+			}
 			if j.Spec.Needs.MemoryGB == 0 && j.Spec.Needs.Model == c.Model && (target == nil || target.ID == c.Machine) {
 				need = 0
 			}

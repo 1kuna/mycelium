@@ -1,12 +1,14 @@
 package myce
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +17,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const residentJobsCapability = "resident_jobs_v1"
@@ -83,18 +87,19 @@ func (q *Queue) freezeResident(j *Job) error {
 		extensions = append(extensions, e.Digest)
 	}
 	run, execution, environment := j.Spec.Run, j.Spec.Execution, j.Spec.Environment
-	if j.Spec.ProfileMemory != "" || len(extensions) > 0 {
+	if j.Spec.PrepareSource || len(extensions) > 0 {
 		run, execution, environment = RunSpec{}, nil, Environment{}
 	}
 	identity, err := json.Marshal(struct {
-		Project, Name, Kind, Extension, Profile string
-		Run                                     RunSpec
-		Execution                               *ExecutionSpec
-		Environment                             Environment
-		Recipes                                 map[string]EnvironmentRecipe
-		Extensions                              []string
-		Engine                                  *ResidentEngine
-	}{j.Spec.Project, j.Spec.Name, j.Spec.Kind, j.Spec.ExtensionDigest, j.Spec.ProfileMemory, run, execution, environment, j.EnvironmentRecipes, extensions, engine})
+		Project, Name, Kind, Extension string
+		Source                         FileRef
+		Run                            RunSpec
+		Execution                      *ExecutionSpec
+		Environment                    Environment
+		Recipes                        map[string]EnvironmentRecipe
+		Extensions                     []string
+		Engine                         *ResidentEngine
+	}{j.Spec.Project, j.Spec.Name, j.Spec.Kind, j.Spec.ExtensionDigest, j.Spec.Files[".myce-source.tar"], run, execution, environment, j.EnvironmentRecipes, extensions, engine})
 	if err != nil {
 		return err
 	}
@@ -226,24 +231,31 @@ func (a API) residentCall(w http.ResponseWriter, r *http.Request) {
 	copy := r.Clone(context.WithValue(r.Context(), residentAttemptKey{}, bound))
 	u := *copy.URL
 	u.Path = "/models/" + model + "/" + r.PathValue("path")
-	u.RawPath = ""
+	escaped := strings.TrimPrefix(r.URL.EscapedPath(), "/api/workers/resident/"+url.PathEscape(bound.Job)+"/")
+	u.RawPath = "/models/" + model + "/" + escaped
 	copy.URL = &u
 	copy.Header = headers
 	a.modelCall(w, copy)
 }
 
-// The socket is inside the attempt's managed workdir and kernel boundary; its
-// random per-attempt key also excludes accidental same-user callers. It exposes
+// The pipes are inside the attempt's managed workdir and kernel boundary; their
+// random per-attempt key also excludes accidental same-user callers. The transport
+// needs no network or pathname-socket permission. It exposes
 // neither a fleet credential nor a raw engine URL and makes no transport retry.
 func (w Worker) startResidentBridge(ctx context.Context, j Job, work string) (map[string]string, func(), error) {
 	if j.Spec.Resident == nil {
 		return nil, func() {}, nil
 	}
-	path := filepath.Join(work, ".myce-resident.sock")
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, nil, errors.New("cannot create resident attempt socket")
+	path := filepath.Join(work, ".myce-resident")
+	if err := os.Mkdir(path, 0700); err != nil {
+		return nil, nil, err
 	}
+	conn, err := residentPipes(path, true)
+	if err != nil {
+		os.RemoveAll(path)
+		return nil, nil, err
+	}
+	listener := &residentListener{conn: conn, done: make(chan struct{})}
 	key := ID()
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	server := &http.Server{BaseContext: func(net.Listener) context.Context { return bridgeCtx }}
@@ -282,13 +294,144 @@ func (w Worker) startResidentBridge(ctx context.Context, j Job, work string) (ma
 		out.WriteHeader(response.StatusCode)
 		_, _ = io.Copy(out, response.Body)
 	})
-	if err := os.Chmod(path, 0600); err != nil {
-		listener.Close()
-		cancel()
-		return nil, nil, err
-	}
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
-	close := func() { cancel(); _ = server.Close(); <-done; _ = os.Remove(path) }
-	return map[string]string{"MYCE_RESIDENT_SOCKET": path, "MYCE_RESIDENT_KEY": key, "MYCE_RESIDENT_MODEL": j.Spec.Resident.Engine.Model.Name}, close, nil
+	stop := func() { cancel(); _ = server.Close(); <-done; _ = os.RemoveAll(path) }
+	executable, err := os.Executable()
+	if err != nil {
+		stop()
+		return nil, nil, err
+	}
+	return map[string]string{"MYCE_RESIDENT_PIPE": path, "MYCE_RESIDENT_KEY": key, "MYCE_RESIDENT_MODEL": j.Spec.Resident.Engine.Model.Name, "MYCE_RESIDENT_CLIENT": executable}, stop, nil
 }
+
+// One HTTP connection per attempt, with sequential requests. Unlike a pathname
+// socket, named pipes stay within existing filesystem grants on both platforms.
+// Nonblocking open lets Go's poller interrupt blocked I/O when custody ends.
+type residentConn struct {
+	request, response *os.File
+	server            bool
+}
+
+func residentPipes(path string, create bool) (*residentConn, error) {
+	c := &residentConn{server: create}
+	for n, dest := range map[string]**os.File{"request": &c.request, "response": &c.response} {
+		name := filepath.Join(path, n)
+		if create {
+			if err := unix.Mkfifo(name, 0600); err != nil {
+				c.Close()
+				return nil, err
+			}
+		}
+		fd, err := unix.Open(name, unix.O_RDWR|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			c.Close()
+			return nil, err
+		}
+		*dest = os.NewFile(uintptr(fd), name)
+		info, err := (*dest).Stat()
+		if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			c.Close()
+			return nil, errors.New("invalid resident pipe")
+		}
+	}
+	return c, nil
+}
+func (c *residentConn) Read(p []byte) (int, error) {
+	if c.server {
+		return c.request.Read(p)
+	}
+	return c.response.Read(p)
+}
+func (c *residentConn) Write(p []byte) (int, error) {
+	if c.server {
+		return c.response.Write(p)
+	}
+	return c.request.Write(p)
+}
+func (c *residentConn) Close() error {
+	var a, b error
+	if c.request != nil {
+		a = c.request.Close()
+	}
+	if c.response != nil {
+		b = c.response.Close()
+	}
+	return errors.Join(a, b)
+}
+func (c *residentConn) LocalAddr() net.Addr  { return &net.UnixAddr{Name: "resident", Net: "pipe"} }
+func (c *residentConn) RemoteAddr() net.Addr { return c.LocalAddr() }
+func (c *residentConn) SetDeadline(t time.Time) error {
+	return errors.Join(c.request.SetDeadline(t), c.response.SetDeadline(t))
+}
+func (c *residentConn) SetReadDeadline(t time.Time) error {
+	if c.server {
+		return c.request.SetReadDeadline(t)
+	}
+	return c.response.SetReadDeadline(t)
+}
+func (c *residentConn) SetWriteDeadline(t time.Time) error {
+	if c.server {
+		return c.response.SetWriteDeadline(t)
+	}
+	return c.request.SetWriteDeadline(t)
+}
+
+type residentListener struct {
+	conn net.Conn
+	once sync.Once
+	done chan struct{}
+}
+
+func (l *residentListener) Accept() (net.Conn, error) {
+	var c net.Conn
+	l.once.Do(func() { c = l.conn })
+	if c != nil {
+		return c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+func (l *residentListener) Close() error {
+	select {
+	case <-l.done:
+	default:
+		close(l.done)
+	}
+	return l.conn.Close()
+}
+func (l *residentListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// ResidentRequest is the local payload client. It never reads installed fleet
+// configuration or retries. Callers must make sequential requests per attempt;
+// a failed/interrupted exchange fails that attempt rather than reusing its stream.
+func ResidentRequest(ctx context.Context, path, key string, req *http.Request) (*http.Response, error) {
+	c, err := residentPipes(path, false)
+	if err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	req = req.Clone(ctx)
+	req.Header = req.Header.Clone()
+	req.Header.Set("Authorization", "Bearer "+key)
+	if err = req.Write(c); err != nil {
+		stop()
+		c.Close()
+		return nil, err
+	}
+	response, err := http.ReadResponse(bufio.NewReader(c), req)
+	if err != nil {
+		stop()
+		c.Close()
+		return nil, err
+	}
+	response.Body = &residentResponseBody{ReadCloser: response.Body, close: func() { stop(); c.Close() }}
+	return response, nil
+}
+
+type residentResponseBody struct {
+	io.ReadCloser
+	close func()
+}
+
+func (b *residentResponseBody) Close() error { err := b.ReadCloser.Close(); b.close(); return err }

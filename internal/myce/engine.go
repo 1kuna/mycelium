@@ -661,7 +661,7 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	memory := 0.0
 	for _, m := range rt.models {
 		rt.checkEngineHealth(m)
-		report := ModelReport{Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
+		report := ModelReport{memoryGB: m.model.MemoryGB, hostMemoryGB: m.model.HostMemoryGB, resourcesMeasured: true, Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
 		if m.state == "loading" {
 			report.Error = m.progress.coldReason()
 		}
@@ -821,7 +821,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 						dependency.ModelEnvironmentKey = recipe.Key
 						dependency.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 					}
-					if reason := probe.storageRootReason(dependency); reason != "" {
+					if reason := storageRootReasonForModel(dependency, &probe.Machine, model, s.EnvironmentRecipe); reason != "" {
 						return errors.New(reason)
 					}
 				}

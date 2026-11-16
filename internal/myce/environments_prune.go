@@ -205,6 +205,9 @@ func (q *Queue) environmentReferenced(ctx context.Context, key string) bool {
 	unlock := requestReadLock(ctx, &q.mu)
 	defer unlock()
 	for _, slot := range q.s.ModelSlots {
+		if residentEnvironmentReferenced(slot.Resident, key) {
+			return true
+		}
 		if slot.EnvironmentRecipe != nil && slot.EnvironmentRecipe.Key == key {
 			return true
 		}
@@ -231,6 +234,9 @@ func (q *Queue) environmentReferenced(ctx context.Context, key string) bool {
 	for _, j := range q.s.Jobs {
 		if !mutableJob(j) && !held[j.ID] {
 			continue
+		}
+		if j.Spec.Resident != nil && residentEnvironmentReferenced(j.Spec.Resident.Engine, key) {
+			return true
 		}
 		if j.Spec.Environment.Key() == key {
 			return true
@@ -277,6 +283,17 @@ func (q *Queue) environmentReferenced(ctx context.Context, key string) bool {
 						return true
 					}
 				}
+			}
+		}
+	}
+	return false
+}
+
+func residentEnvironmentReferenced(engine *ResidentEngine, key string) bool {
+	if engine != nil {
+		for _, r := range engine.Environments {
+			if r.Key == key {
+				return true
 			}
 		}
 	}

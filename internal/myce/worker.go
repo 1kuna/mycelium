@@ -1555,10 +1555,8 @@ func (w Worker) Run(stop context.Context) error {
 			used = 0
 			for _, report := range reports {
 				if report.State == "loading" {
-					for _, model := range w.ModelConfig.Models {
-						if model.Name == report.Name {
-							used += model.MemoryGB
-						}
+					if model, ok := w.localModelBudget(report); ok {
+						used += model.MemoryGB
 					}
 				}
 			}

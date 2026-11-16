@@ -40,7 +40,7 @@ func main() {
 	// Version is a read-only probe, including for older fleet helpers that
 	// decode combined stdout/stderr as JSON.
 	versionProbe := len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v")
-	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" {
+	if len(os.Args) > 1 && !versionProbe && !strings.HasPrefix(os.Args[1], "_") && os.Args[1] != "skill" && os.Args[1] != "resident" {
 		localSkillInstaller(os.Stderr).refresh(localSkillDirs())
 	}
 	if err := run(os.Args[1:]); err != nil {
@@ -103,6 +103,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "gpu-telemetry-client" {
 		return gpuTelemetryClientCommand(context.Background(), args[1:], os.Stdout)
+	}
+	if args[0] == "resident" {
+		return residentCommand(args[1:], os.Stdin, os.Stdout)
 	}
 	if args[0] == "fleet" {
 		return fleetCommand(context.Background(), args[1:], os.Stdout)
