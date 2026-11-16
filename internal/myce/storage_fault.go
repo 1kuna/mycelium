@@ -248,7 +248,7 @@ func (m *hostHealthMonitor) latchStorageFault(role string, event *os.PathError, 
 	}
 	if m.mounts[state.owner] == nil {
 		owner := m.storageRoots[state.owner]
-		m.mounts[state.owner] = &hostMountProbe{root: state.owner, path: owner.path, clock: m.clock, probe: healthMountAccess("nas"), storage: m}
+		m.mounts[state.owner] = &hostMountProbe{period: m.mountPeriod, root: state.owner, path: owner.path, clock: m.clock, probe: healthMountAccess("nas"), storage: m}
 	}
 }
 

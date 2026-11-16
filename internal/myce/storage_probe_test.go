@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func probeEntries(t *testing.T, dir string) []string {
@@ -161,10 +160,10 @@ func TestQueueTransactionsReuseRecentCheckpointProbe(t *testing.T) {
 	q.nasProbeIO = func(string, func()) bool { probes.Add(1); return available.Load() }
 
 	check(t, q, machine("probe-worker", "fake"), nil) // Measures a 1s check-in period.
-	if window := q.checkpointProbeFreshness(); window != time.Second {
-		t.Fatalf("freshness window = %s, want the measured 1s check-in period", window)
+	if window := q.checkpointProbeFreshness(); window != checkpointMetadataInterval {
+		t.Fatalf("freshness window = %s, want the measured stall-derived idle interval", window)
 	}
-	clock.Advance(time.Second)
+	clock.Advance(checkpointMetadataInterval)
 	before := probes.Load()
 	for i := 0; i < 10; i++ {
 		if err := q.update(func() error { return nil }); err != nil {
@@ -176,7 +175,7 @@ func TestQueueTransactionsReuseRecentCheckpointProbe(t *testing.T) {
 	}
 
 	available.Store(false)
-	clock.Advance(time.Second)
+	clock.Advance(checkpointMetadataInterval)
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}

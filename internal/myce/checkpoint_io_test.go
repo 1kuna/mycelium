@@ -256,3 +256,59 @@ func TestCheckpointAvailabilityProgressOutlivesAggregateDeadline(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckpointAvailabilityIdleCacheKeepsPendingStallFence(t *testing.T) {
+	for _, role := range []string{"worker", "queue"} {
+		t.Run(role, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				clock := &fakeClock{now: time.Unix(100, 0)}
+				var probe checkpointAvailability
+				var calls atomic.Int32
+				var block bool
+				release := make(chan struct{})
+				defer close(release)
+				fn := func(func()) (bool, error) {
+					calls.Add(1)
+					if block {
+						<-release
+					}
+					return true, nil
+				}
+				poll := func() bool { ok, _ := probe.periodic(clock, "share", fn); return ok }
+				if role == "queue" {
+					q, queueClock := fixture(t)
+					clock = queueClock
+					q.nasRecent.mu.Lock()
+					q.nasRecent.observed = false // The fixture already probed before this counting seam.
+					q.nasRecent.mu.Unlock()
+					q.nasProbeIO = func(_ string, progress func()) bool { ok, _ := fn(progress); return ok }
+					poll = q.recentCheckpointAvailability
+				}
+				if !poll() {
+					t.Fatal("initial success missing")
+				}
+				for i := 0; i < 600; i++ {
+					clock.Advance(100 * time.Millisecond)
+					if !poll() {
+						t.Fatal("idle cache lost")
+					}
+				}
+				if calls.Load() != 1 {
+					t.Fatal("idle probe repeated", calls.Load())
+				}
+				clock.Advance(checkpointMetadataInterval)
+				block = true
+				if !poll() {
+					t.Fatal("progressing refresh lost retained success")
+				}
+				time.Sleep(checkpointAvailabilityStallBudget)
+				if poll() {
+					t.Fatal("idle cache hid a stalled in-flight probe")
+				}
+				if calls.Load() != 2 {
+					t.Fatal("pending probe duplicated", calls.Load())
+				}
+			})
+		})
+	}
+}

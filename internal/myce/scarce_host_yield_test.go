@@ -62,6 +62,7 @@ func yieldFixtureWithStore(t *testing.T, disposable, files bool) (*Queue, *fakeC
 			}
 		} else {
 			saveYieldGeneration(t, job(t, q, j.ID), 1)
+			run.Progress = 1 // The executing worker reports its local publication signal.
 		}
 		machineCheck(t, q, a, run)
 	}
@@ -399,13 +400,13 @@ func TestScarceHostYieldCancelledFinalVerificationKeepsReceipt(t *testing.T) {
 	authorizeYield(t, q, run)
 	saveYieldGeneration(t, job(t, q, run.ID), 2)
 	path := attemptCheckpoint(*job(t, q, run.ID))
-	key := fmt.Sprintf("%s:yield-final:2", path)
+	key := fmt.Sprintf("final:%d:%s", run.Attempt, run.Session)
 	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
 	q.nasProgress.timeout = 5 * time.Millisecond
-	_, err := q.nasProgress.run(key, func() (int64, error) {
+	_, err := q.nasProgress.event(q.clock, key, path, func() (int64, error) {
 		close(entered)
 		<-release
 		close(finished)

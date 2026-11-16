@@ -1,29 +1,173 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// Progress has one consumer per check-in. Reading it on the 100ms actor tick
-// produced ~104 CIFS directory reads per attempt in 5s (#1670). Reuse each
-// observation for the consumer's interval instead: the cost is at most one
-// report interval of progress latency, with no new fixed polling interval.
-// Do not suppress legacy scans using the root mtime: nested/in-place saves do
-// not change it. Local-first's published marker is read on local disk instead.
+// Running NAS attempts use local notifications only. NAS observations are
+// keyed to recovery/finalization events, with single-flight late completion.
+// The time-based reader below is used only for local file-transport checkpoints.
 type checkpointProgressReader struct {
 	checkpointIO[int64]
-	readMu sync.Mutex // Never q.mu; serializes observation publication, not queue state.
-	recent map[string]checkpointProgressObservation
-	scan   func(string) (int64, error) // Defaults to checkpointProgress.
+	readMu     sync.Mutex // Never q.mu; serializes observation publication, not queue state.
+	recent     map[string]checkpointProgressObservation
+	scan       func(string) (int64, error) // Defaults to checkpointProgress.
+	signalInfo os.FileInfo
+	signal     *checkpointSave
+	readSignal func(string, any) error // Local marker counting seam.
 }
 
 type checkpointProgressObservation struct {
+	event   string
 	until   time.Time
 	value   int64
 	err     error
 	pending bool
+}
+
+// A payload publishes this on local storage only after the named atomic save
+// is durable. It is a notification, not trusted evidence of NAS durability.
+type checkpointSave struct {
+	Name       string `json:"name"`
+	Generation int64  `json:"generation"`
+}
+
+func (s *checkpointSave) valid() bool {
+	return s != nil && s.Generation > 0 && filepath.Base(s.Name) == s.Name && !strings.ContainsAny(s.Name, `/\\`) && strings.HasSuffix(s.Name, ".json")
+}
+
+func checkpointSignalFile(spool string, j Job) string {
+	return filepath.Join(attemptStorageRoot(j, spool), ".myce-checkpoint-"+identityHash(j.Session)+".json")
+}
+
+// Open one regular file, without following a symlink or blocking on a FIFO.
+// The same size bound as the checkpoint JSON contract applies to notifications.
+func readCheckpointJSON(path string, value any) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return errors.New("invalid checkpoint marker")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > 1<<20 {
+		return errors.New("checkpoint marker too large")
+	}
+	return json.Unmarshal(data, value)
+}
+
+// Cache by event identity, not elapsed time. Unchanged heartbeats never start
+// I/O, including after an error. A new save/recovery/finalization is fresh work.
+func (n *checkpointProgressReader) event(clock Clock, event, path string, scan func() (int64, error)) (int64, error) {
+	n.readMu.Lock()
+	defer n.readMu.Unlock()
+	old, exists := n.recent[path]
+	if exists && old.event == event && !old.pending {
+		return old.value, old.err
+	}
+	if old.pending && n.inFlight() {
+		return old.value, errCheckpointIOPending
+	}
+	value, err := n.run(path+":"+event, scan)
+	pending := errors.Is(err, errCheckpointIOPending)
+	if pending {
+		value = -1
+		if exists {
+			value = old.value
+		}
+	}
+	if n.recent == nil {
+		n.recent = map[string]checkpointProgressObservation{}
+	}
+
+	n.recent[path] = checkpointProgressObservation{event: event, value: value, err: err, pending: pending, until: clock.Now()}
+	return value, err
+}
+
+// Terminal jobs cannot be recovered. Drop their event observations without
+// expiring a live event into a new heartbeat scan. Caller must not hold q.mu.
+func (q *Queue) forgetSettledCheckpointProgress(id string) {
+	q.mu.Lock()
+	root := ""
+	if j := q.s.Jobs[id]; j != nil && terminal(j.State) {
+		root = j.Checkpoint
+	}
+	q.mu.Unlock()
+	if root == "" {
+		return
+	}
+	q.nasProgress.readMu.Lock()
+	defer q.nasProgress.readMu.Unlock()
+	for path, observation := range q.nasProgress.recent {
+		if filepath.Dir(path) == root && !observation.pending {
+			delete(q.nasProgress.recent, path)
+		}
+	}
+}
+
+// Notifications live in the exact attempt's managed local work directory.
+// Stat local identity each actor tick; read a newly published marker once.
+func (n *checkpointProgressReader) localSignal(path string) *checkpointSave {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	if n.signalInfo != nil && os.SameFile(n.signalInfo, info) && n.signalInfo.ModTime() == info.ModTime() && n.signalInfo.Size() == info.Size() {
+		return n.signal
+	}
+	read := n.readSignal
+	if read == nil {
+		read = readCheckpointJSON
+	}
+	var save checkpointSave
+	n.signalInfo, n.signal = info, nil
+	if read(path, &save) == nil && save.valid() {
+		n.signal = &save
+	}
+	return n.signal
+}
+
+func (s *workerStore) checkpointReport(w Worker, j Job, recovery, final bool) (int64, error) {
+	path := attemptCheckpoint(j)
+	if j.Spec.localFirst() {
+		return s.nasProgress.run(path, func() (int64, error) { return localFirstProgress(path) })
+	}
+	if j.FileTransport { // Local disk; retain existing portable capture behavior.
+		return s.nasProgress.read(w.Clock, w.Interval, path)
+	}
+	if !recovery && !final {
+		if save := s.nasProgress.localSignal(checkpointSignalFile(s.dir, j)); save != nil {
+			return save.Generation, nil
+		}
+		return -1, nil // Arbitrary writes: unknown until an event.
+	}
+	event := "recovery"
+	if final {
+		event = "final"
+	}
+	return s.nasProgress.event(w.Clock, event, path, func() (int64, error) {
+		if s.nasProgress.scan != nil {
+			return s.nasProgress.scan(path)
+		}
+		return checkpointProgress(path)
+	})
 }
 
 func (n *checkpointProgressReader) read(clock Clock, period time.Duration, path string) (int64, error) {
@@ -66,21 +210,4 @@ func (n *checkpointProgressReader) read(clock Clock, period time.Duration, path 
 	}
 	n.recent[path] = observation
 	return value, err
-}
-
-// Use this sender's advertised or learned cadence, including legacy clients.
-// Without cadence evidence, retain the existing scan-on-check-in behavior.
-func (q *Queue) checkpointProgressPeriod(c Checkin) time.Duration {
-	if c.period > 0 {
-		return c.period
-	}
-	q.contactMu.Lock()
-	defer q.contactMu.Unlock()
-	if contact := q.contacts[c.Machine.ID]; contact != nil && contact.session == c.Machine.Session {
-		if contact.period > 0 {
-			return contact.period
-		}
-		return time.Duration(contact.cadence.Mean * float64(time.Second))
-	}
-	return 0
 }

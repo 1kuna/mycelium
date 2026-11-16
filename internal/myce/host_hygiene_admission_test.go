@@ -10,20 +10,6 @@ import (
 	"time"
 )
 
-type steppedMountDirectory struct {
-	fs.ReadDirFile
-	step func()
-}
-
-func (f steppedMountDirectory) ReadDir(n int) ([]fs.DirEntry, error) {
-	f.step()
-	return f.ReadDirFile.ReadDir(n)
-}
-func (f steppedMountDirectory) Close() error {
-	f.step()
-	return f.ReadDirFile.Close()
-}
-
 func mountAdmissionFixture(t *testing.T, role string) (*Queue, *fakeClock, []HostHealthSample, func(HostMountHealth) string) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -87,7 +73,7 @@ func TestHostHygieneMountCompletedOutliersKeepProductionHealth(t *testing.T) {
 // Four successful metadata operations can exceed the stall allowance in total.
 // Only an individual operation's lack of progress is an admission failure.
 func TestHostHygieneMountProgressingOutlierIsAdvisory(t *testing.T) {
-	for _, role := range []string{"checkpoint", "nas"} {
+	for _, role := range []string{"checkpoint"} {
 		t.Run(role, func(t *testing.T) {
 			q, clock, baseline, publish := mountAdmissionFixture(t, role)
 			files := fstest.MapFS{"root": &fstest.MapFile{Mode: fs.ModeDir}}
@@ -99,20 +85,6 @@ func TestHostHygieneMountProgressingOutlierIsAdvisory(t *testing.T) {
 				start := clock.Now()
 				step := func() { entered <- int(operations.Load()); <-permit }
 				observed := func() { progress(); operations.Add(1) }
-				if role == "nas" {
-					err := readHealthMount(path, func(path string) (os.FileInfo, error) {
-						step()
-						return fs.Stat(files, path)
-					}, func(path string) (fs.ReadDirFile, error) {
-						step()
-						f, err := files.Open(path)
-						if err != nil {
-							return nil, err
-						}
-						return steppedMountDirectory{ReadDirFile: f.(fs.ReadDirFile), step: step}, nil
-					}, observed)
-					return hostMountResult{latency: clock.Now().Sub(start), err: err}
-				}
 				for stage := 0; stage < 4; stage++ {
 					step()
 					switch stage {

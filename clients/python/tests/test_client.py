@@ -375,6 +375,24 @@ class LocalFirstCheckpointTests(unittest.TestCase):
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_local_notification_after_durable_save(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder, "nas")
+            notice = Path(folder, "notice.json")
+            with patch.dict(os.environ, {"MYCE_CHECKPOINT_DIR": str(root), "MYCE_CHECKPOINT_NOTIFY": str(notice)}):
+                checkpoint = Checkpoint()
+                checkpoint.save({"step": 1})
+                self.assertEqual(json.loads(notice.read_bytes()), {"name": "checkpoint.json", "generation": 1})
+                with patch("mycelium.checkpoint.os.fsync", side_effect=OSError("save failed")):
+                    with self.assertRaises(OSError):
+                        checkpoint.save({"step": 2})
+                self.assertEqual(json.loads(notice.read_bytes())["generation"], 1)
+                Checkpoint(Path(folder, "other")).save({"unrelated": True})
+                self.assertEqual(json.loads(notice.read_bytes())["generation"], 1)
+                with patch.object(checkpoint, "_saves", side_effect=AssertionError("save reread NAS")):
+                    checkpoint.save({"step": 2})
+                self.assertEqual(json.loads(notice.read_bytes())["generation"], 2)
+
     def test_newest_atomic_and_temp_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
             checkpoint = Checkpoint(folder)
@@ -612,8 +630,13 @@ print('queue accepted local generation', flush=True)
             subprocess.run(["sh", "-ec", "git init -q && git commit -q --allow-empty -m start"],
                            cwd=project, env=environment, check=True)
             for index, block in enumerate(blocks):
-                result = subprocess.run(["sh", "-ec", block], cwd=project, env=environment,
-                                        capture_output=True, text=True, timeout=90)
+                try:
+                    result = subprocess.run(["sh", "-ec", block], cwd=project, env=environment,
+                                            capture_output=True, text=True, timeout=90)
+                except subprocess.TimeoutExpired as error:
+                    self.output.seek(0)
+                    self.fail(f"guide command timed out: {block}\nstdout={error.stdout!r}\nstderr={error.stderr!r}\n"
+                              f"dev status={self.client.status(snapshot=True)!r}\ndev log={self.output.read()}")
                 self.assertEqual(result.returncode, 0, block + result.stdout + result.stderr)
                 if index == 1:
                     self.assertEqual(result.stdout.splitlines()[-1], "mycelium-ease-audit-ok")

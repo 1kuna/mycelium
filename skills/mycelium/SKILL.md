@@ -350,6 +350,18 @@ measured capture/upload tail; unpublished local work cannot survive disk loss.
 See the [full protocol](https://github.com/1kuna/mycelium/blob/main/docs/files.md#local-first-checkpoints-1600).
 
 
+Job status/progress comes from the executing worker, never from reading the
+NAS. Use the updated Python `Checkpoint` helper for live checkpoint progress:
+after a durable NAS save it publishes a tiny local notification through the
+worker-provided `MYCE_CHECKPOINT_NOTIFY`. Custom JSON-manifest writers can
+[implement the same notification](https://github.com/1kuna/mycelium/blob/main/docs/files.md#resumable-jobs).
+Arbitrary writers without it report unknown progress between resume/stop/release/
+finalization events; portable scarce-host yield waits for positive publication
+evidence. There are zero periodic NAS checkpoint walks or root stats per attempt.
+Keep checkpoint saves and manifests outside the top-level output directory;
+checkpoint progress discovery never enters that output tree.
+`local_first` retains its existing local marker and acknowledgement contract.
+
 A stopped job loses everything since its last checkpoint. For anything long,
 save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
 declare `advanced: {resumable: true}`; Python's `mycelium.Checkpoint` and `StopSignal` do

@@ -10,6 +10,8 @@ import (
 // checkpoint generation (#1437). Generations are portable as files, but an
 // application's resume can depend on replay that holds only on the target that
 // wrote them, so resumes stay on it unless the job declares otherwise.
+// Generation zero is a conservative binding to an interrupted writer's target
+// when it supplied no local publication evidence, not an accepted generation.
 type CheckpointOrigin struct {
 	Target     ExecutionTarget `json:"target"`
 	Generation int64           `json:"generation"`
@@ -88,6 +90,9 @@ func (q *Queue) checkpointTargetRefusal(j *Job, m *Machine) string {
 	hosts := q.checkpointTargetHosts(j, c.Target)
 	if len(hosts) == 0 {
 		return ""
+	}
+	if c.Generation == 0 {
+		return fmt.Sprintf("checkpoint progress is unknown on %s; resuming on its writing target (%s)", targetLabel(c.Target), strings.Join(hosts, ", "))
 	}
 	return fmt.Sprintf("checkpoint generation %d was written on %s, not %s; resuming on a host of that target (%s)", c.Generation, targetLabel(c.Target), targetLabel(here), strings.Join(hosts, ", "))
 }

@@ -227,6 +227,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	var publicationRetryAt time.Time
 	var preparationRetryAt time.Time
 	var releaseSent bool
+	recoveryProgress := a.recovering != nil
 	for ctx.Err() == nil {
 		a.mu.Lock()
 		w, d, connected, admissionBlocked := a.worker, a.directive, a.connected, a.admissionBlocked
@@ -333,8 +334,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					if err != nil && !s.nasPrepare.inFlight() && !s.extensionFiles.inFlight() {
 						// Finished staging/restore failures must not re-walk NAS at
 						// actor speed. Pending copies still get consumed promptly;
-						// new work waits for the next report opportunity (#1670).
-						preparationRetryAt = w.Clock.Now().Add(w.Interval)
+						// Failed NAS discovery uses the idle probe interval; this
+						// costs delayed recovery instead of repeated share walks.
+						delay := w.Interval
+						// A local input copy can finish just after returning
+						// pending. Its late completion is not a failed NAS
+						// preparation and must remain promptly consumable.
+						if s.checkpointUnavailable && !a.job.FileTransport && !a.job.Spec.localFirst() {
+							delay = max(delay, checkpointMetadataInterval)
+						}
+						preparationRetryAt = w.Clock.Now().Add(delay)
 					}
 					a.mu.Lock()
 					d = a.directive
@@ -457,13 +466,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			diagnostics.FileTransferError = inputTransferRecoveringReason
 		}
 		if needsCheckpoint(&a.job) {
-			path := attemptCheckpoint(a.job)
 			var err error
-			if a.job.Spec.localFirst() {
-				// The marker is local; save() waits for prompt queue acceptance.
-				report.Progress, err = s.nasProgress.run(path, func() (int64, error) { return localFirstProgress(path) })
-			} else {
-				report.Progress, err = s.nasProgress.read(w.Clock, w.Interval, path)
+			report.Progress, err = s.checkpointReport(w, a.job, recoveryProgress, s.state.Result != nil && !s.state.Result.ReleasePending)
+			if !errors.Is(err, errCheckpointIOPending) {
+				recoveryProgress = false
+			}
+			if !a.job.Spec.localFirst() {
 				w.observeStorageError(err)
 			}
 			if a.job.Spec.localFirst() {
@@ -1336,7 +1344,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 
 			checkpointRoot := root.state.CheckpointRoot
-			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
+			available, _ := root.nasProbe.periodic(w.Clock, checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)
 				probeWorker.observeStorageError(err)
 				return err == nil, err

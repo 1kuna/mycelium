@@ -8,7 +8,7 @@ import (
 // that wrote the checkpoint, waiting while that host is busy. Declared tested
 // resume_compatibility, or that target leaving the fleet, permits another.
 func TestPlannedStopResumesOnCheckpointTarget(t *testing.T) {
-	for _, mode := range []string{"bound", "portable", "left"} {
+	for _, mode := range []string{"bound", "portable", "left", "unreported", "unknown-loss"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _ := fixture(t)
 			a, b := machine("a", "fake", "host-a"), machine("b", "fake", "host-b")
@@ -29,10 +29,33 @@ func TestPlannedStopResumesOnCheckpointTarget(t *testing.T) {
 			if err := q.Started(result(j, false)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := q.Checkin(Checkin{Machine: a, Running: &Execution{ID: j.ID, Attempt: j.Attempt, Progress: 3}, Started: true}); err != nil {
+			progress := int64(3)
+			if mode == "unreported" || mode == "unknown-loss" {
+				progress = -1
+			}
+			if _, err := q.Checkin(Checkin{Machine: a, Running: &Execution{ID: j.ID, Attempt: j.Attempt, Progress: progress}, Started: true}); err != nil {
 				t.Fatal(err)
 			}
-			if got := job(t, q, j.ID).CheckpointTarget; got == nil || got.Target != (ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "fake"}) || got.Generation != 3 {
+			if mode == "unknown-loss" {
+				if err := q.update(func() error { q.retry(q.s.Jobs[j.ID], "machine quiet for loss timeout"); return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if got := job(t, q, j.ID).CheckpointTarget; got == nil || got.Generation != 0 || got.Target != (ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "fake"}) {
+					t.Fatal("unknown writer target discarded on loss", got)
+				}
+				if got := check(t, q, b, nil).Job; got != nil {
+					t.Fatal("unknown checkpoint moved across targets", got)
+				}
+				return
+			}
+
+			if mode == "unreported" {
+				if got := job(t, q, j.ID); got.Progress != -1 || got.CheckpointTarget != nil {
+					t.Fatal("unknown progress not preserved", got)
+				}
+				saveYieldGeneration(t, job(t, q, j.ID), 3)
+			}
+			if got := job(t, q, j.ID).CheckpointTarget; mode != "unreported" && (got == nil || got.Target != (ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "fake"}) || got.Generation != 3) {
 				t.Fatal("checkpoint target not recorded", got)
 			}
 
@@ -50,6 +73,9 @@ func TestPlannedStopResumesOnCheckpointTarget(t *testing.T) {
 				t.Fatal("planned stop did not requeue", got.State, got.InfrastructureRetries)
 			}
 
+			if got := job(t, q, j.ID).CheckpointTarget; got == nil || got.Generation != 3 {
+				t.Fatal("finalization missed checkpoint target", got)
+			}
 			switch mode {
 			case "portable":
 				if got := check(t, q, b, nil).Job; got == nil || got.ID != j.ID {

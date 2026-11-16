@@ -74,9 +74,18 @@ class Checkpoint:
             directory = os.environ["MYCE_CHECKPOINT_DIR"]
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._last_generation: int | None = None
         self.protocol = os.environ.get("MYCE_CHECKPOINT_PROTOCOL", "")
         if self.protocol and self.protocol != _PROTOCOL:
             raise CheckpointError("checkpoint_protocol_unsupported", "unknown checkpoint protocol")
+
+    def _notify(self, name: str, generation: int) -> None:
+        target = os.environ.get("MYCE_CHECKPOINT_NOTIFY")
+        assigned = os.environ.get("MYCE_CHECKPOINT_DIR")
+        # An explicitly different checkpoint directory must not notify the
+        # assigned attempt about unrelated bytes. Do not resolve/stat the NAS.
+        if target and assigned and os.path.abspath(self.directory) == os.path.abspath(assigned):
+            _atomic_local(Path(target), json.dumps({"name": name, "generation": generation}).encode("utf-8"))
 
     def save(self, value: Any, name: str = "checkpoint.json") -> Path:
         """Fsync temp, atomically replace, then sync directory except Linux CIFS."""
@@ -84,7 +93,11 @@ class Checkpoint:
             raise ValueError("checkpoint name must be a plain .json filename")
         if self.protocol:
             return self._save_local(value, name)
-        generation = max((g for g, _, _ in self._saves()), default=0) + 1
+        # Discover restored saves once. A single writer owns this attempt;
+        # subsequent saves never enumerate or read the NAS for generation/status.
+        if self._last_generation is None:
+            self._last_generation = max((g for g, _, _ in self._saves()), default=0)
+        generation = self._last_generation + 1
         if generation >= 2**63:
             raise OverflowError("checkpoint generation exhausted")
         data = json.dumps({"myce_checkpoint": {"generation": generation}, "value": value}, allow_nan=False).encode("utf-8")
@@ -96,12 +109,16 @@ class Checkpoint:
             os.fsync(stream.fileno())
             temporary = Path(stream.name)
         temporary.replace(path)
+        # Retain the published generation even if the following directory sync
+        # or local notification fails; a retry must not reuse an existing number.
+        self._last_generation = generation
         if not _is_linux_cifs(self.directory):
             fd = os.open(self.directory, os.O_RDONLY)
             try:
                 os.fsync(fd)
             finally:
                 os.close(fd)
+        self._notify(name, generation)
         return path
 
     def _generation(self):
@@ -203,7 +220,9 @@ class Checkpoint:
         saves = list(self._saves())
         if not saves:
             return default
-        return max(saves, key=lambda save: save[:2])[2]
+        latest = max(saves, key=lambda save: save[:2])
+        self._last_generation = max(self._last_generation or 0, latest[0])
+        return latest[2]
 
 
 class StopSignal:

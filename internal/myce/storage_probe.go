@@ -21,6 +21,13 @@ import (
 
 const storageProbeContent = "myce storage probe\n"
 
+// Successful NAS operations have taken 17.73s/23.22s (#234); the existing
+// per-operation stall allowance is 30s. Ten allowances between idle probes
+// bounds worst-observed probe duty below 10%, instead of one per heartbeat.
+// Real I/O failures and local OS mount inventory still fence immediately.
+// Cost: an otherwise idle failed share can remain cached for five minutes.
+const checkpointMetadataInterval = 10 * checkpointAvailabilityStallBudget
+
 var storageProbeHost = sync.OnceValue(func() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -204,11 +211,9 @@ type recentAvailability struct {
 	observed  bool
 }
 
-// checkpointProbeFreshness is the shortest measured worker check-in period.
-// Each worker probes its own checkpoint mount on every check-in and its report
-// gates admission per machine, so a queue result younger than one check-in is
-// no staler than the fleet's own evidence. Without a measured cadence the
-// queue probes on each transaction, as before (#1545).
+// Idle availability is never refreshed faster than ten measured NAS operation
+// stall allowances. Slower worker cadences can extend it further. This is host
+// admission evidence, never a source of job status or checkpoint progress.
 func (q *Queue) checkpointProbeFreshness() time.Duration {
 	q.contactMu.Lock()
 	defer q.contactMu.Unlock()
@@ -222,7 +227,7 @@ func (q *Queue) checkpointProbeFreshness() time.Duration {
 			shortest = period
 		}
 	}
-	return shortest
+	return max(checkpointMetadataInterval, shortest)
 }
 
 // recentCheckpointAvailability reuses a completed probe within the freshness
@@ -245,11 +250,15 @@ func (q *Queue) recentCheckpointAvailability() bool {
 	available, err := q.nasProbe.runProgress(q.root, func(progress func()) (bool, error) {
 		return probe(q.root, progress), nil
 	})
-	if err == nil {
+	q.nasProbe.mu.Lock()
+	// Retained success during a pending refresh is not a completed observation;
+	// keep checking its operation-progress fence instead of caching it for 5m.
+	if err == nil && q.nasProbe.pending == nil {
 		q.nasRecent.mu.Lock()
 		q.nasRecent.at, q.nasRecent.available, q.nasRecent.observed = q.clock.Now(), available, true
 		q.nasRecent.mu.Unlock()
 	}
+	q.nasProbe.mu.Unlock()
 	return available
 }
 

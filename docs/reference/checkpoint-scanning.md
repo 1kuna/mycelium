@@ -1,63 +1,135 @@
 # Checkpoint metadata access
 
-Checkpoint progress is consumed once per worker report. Scanning more often
-cannot improve that delivery cadence. Worker actors still observe stop and
-release at up to 100 ms, but NAS progress walks run at most once per configured
-report interval. The queue reuses each attempt's progress verification for the
-sender's advertised or learned check-in interval. Legacy senders without any
-cadence evidence retain scan-on-check-in behavior until a cadence is learned.
+**Job status and progress come only from the machine running the job. The NAS
+is never read for status.** This implements the orchestrator's interpretation of
+Zach's question, relayed and received by the implementation worker on 2026-11-15
+(#1670): “shouldnt status come from the machine it runs on? not just constantly
+streamed to the nas for no reason?” The queue consumes the worker's check-in;
+process/liveness observations and checkpoint publication signals are local to
+that attempt.
 
-An unfinished filesystem call keeps its original single-flight owner. Late
-completion is consumed promptly, without starting another walk; pending refresh
-does not reset already observed progress. Completed errors are also reused for
-the interval so a fast failure cannot turn into a metadata retry loop. No
-checkpoint I/O runs under the queue mutex.
+## Save notification
 
-Root-directory mtime is not a sufficient change signal for arbitrary saves:
-in-place writes and nested-directory publications can leave it unchanged. Those
-checkpoints retain a full scan at the consumer cadence. Local-first uses its
-existing `generation.json` publication on local storage; its prompt capture,
-acknowledgement, queue portability and asynchronous NAS mirror are unchanged.
-Resume source selection and final yield verification still read fresh data;
-final verification does not reuse a heartbeat observation that predates a save.
+The updated Python `mycelium.Checkpoint` writes and syncs its atomic NAS save as
+before, then atomically publishes `{"name":"checkpoint.json","generation":N}`
+to `MYCE_CHECKPOINT_NOTIFY`. This is a session-specific file in the attempt's
+private **local** work directory, owned by its existing retention/cleanup.
+The helper discovers restored generations once and keeps its generation counter
+locally; subsequent saves do not enumerate the checkpoint directory.
+Custom writers can publish the same notification after their atomic JSON save
+or manifest is durable. Names are plain `.json` filenames and generations are
+positive int64s. Use a single writer and atomic local replacement. The worker
+stats only this local file, reads a changed marker once, and sends its generation
+to the queue. Several saves before observation may coalesce to the latest.
+Neither worker nor queue opens a NAS marker or directory to produce status.
+An explicitly different Python checkpoint directory does not signal the attempt.
+
+Arbitrary writers without notifications report progress **unknown** (`-1`)
+between lifecycle events. Root mtime cannot detect nested or in-place writes, so
+it is not polled. There is no periodic checkpoint-root stat either.
+
+Resume discovery, recovered-process reconciliation and stop/release/finalization
+can inspect the exact attempt's durable bytes. The worker retains a single
+outstanding operation, consumes its late completion, and caches by event identity
+rather than elapsed time. Repeated heartbeats cannot restart a completed event,
+even after an error. Queue-side reads are limited to a known recoverable copy's
+resume decision and finalization/release, outside `q.mu`, with identity rechecked
+before acceptance. Finalization does not reuse an observation predating a save.
+
+`report.Progress` supplies status, recovery comparisons, checkpoint-origin
+tracking and the initial scarce-host-yield generation. Same-attempt reports now
+come directly from the worker. Recovery still compares fresh durable progress at
+the resume event. Normal stop/deadline/cancellation decisions do not require
+live checkpoint scans. Arbitrary writers without publication evidence cannot
+be selected for portable scarce-host yield until a positive generation is
+known; the helper supplies that evidence. Yield still requires a newer verified
+final save after stop, plus exact process release. Finalization/release discovers
+unreported saves and records the resume target before retry. If a writer is lost
+while progress is unknown, its last executing target is retained conservatively;
+absence of status evidence never proves that its checkpoint folder is empty.
+
+`local_first` is unchanged: local `generation.json`, cooperative acknowledgement,
+queue-portable generations and asynchronous NAS mirrors keep their protocol.
+Existing no-NAS file-transport capture continues to scan **local** storage.
+
+## Output trees are excluded from checkpoint discovery
+
+A 600-second live trace of r6.19.1 on 2026-11-16 (03:32–03:42 UTC), supplied by
+the orchestrator, attributed 96.55% of one host's CIFS read submissions to its
+worker and queue services: about 297 reads/s, 165 directory reads/s and 378
+opens/s. Nearly all observed progress discovery traversed one running attempt's
+nested output data; NAS disk busy was about 95%. This is a supplied baseline,
+not a measurement of this PR or proof that deployment fixes the NAS hangs.
+
+Neither status consumer opens that tree:
+
+| Consumer | Code and regression evidence |
+| --- | --- |
+| Running worker | `worker_attempts.go` calls `checkpointReport`; its NAS live branch in `checkpoint_progress.go` reads only the local notification and returns unknown without one. `TestCheckpointProgressEventDriven` asserts zero NAS reads through a simulated minute and one local marker read. |
+| Queue check-in (`queue.go`) | `processCheckinContext` leaves the NAS path empty for same-attempt reports. Only an exact known recoverable copy can request a resume comparison. `TestQueueCheckpointProgressFromWorker` fails on any NAS status scan. |
+| Resume and stop/release/finalization, worker and queue | Both use `checkpointProgress` / `scanCheckpointProgressWalk` in `worker_recovery.go`. The scanner prunes the top-level output directory before metadata inspection or enumeration. `TestCheckpointProgressNeverEnumeratesOutput` rejects either operation and verifies output JSON cannot become checkpoint progress, with the production walker too. |
+
+Keep checkpoints outside the top-level output directory. Local-first continues
+to read its local manifest; its protocol is unchanged. Restore copies and
+result publication may read output bytes as part of their requested operation;
+these are not status discovery. Checkpoint reads remain save/resume/recovery or
+stop/release/finalization operations. The separate shared-root health/admission
+probes and explicit input/retention operations below still exist; this PR does
+not claim that every NAS access is a checkpoint lifecycle operation.
 
 ## NAS access audit (#1670)
 
-Here `N` is the configured report interval in seconds, `C` the sender's advertised
-or learned interval, `H` the adaptive host-health sample period (at least the
-worker control/report interval), and `D` the number of directories in the
-attempt. A recursive progress walk enumerates `D` directories, stats entries
-and parses JSON saves. Kernel CIFS calls also include EOF iterations, so they
-are not numerically interchangeable with walks or directory enumerations.
+The #1671 fixture used three directories, a 100 ms actor and five-second reports:
+**36 → 0 NAS directory reads per running attempt per minute** (12 → 0 walks).
+The older r6.19 baseline was 1,800 reads/minute in that fixture. The isolated
+published save causes exactly **one local marker read**, zero NAS reads. These
+are local counting-filesystem results to be qualified, not live CIFS counts.
 
-| Path / consumer | Before | After |
+Idle root probes use five minutes: ten times the existing 30-second operation
+stall allowance, based on observed successful 17.73s/23.22s NAS operations (#234).
+The margin reduces worst-observed idle-probe duty below 10%; mount sampling also
+waits at least ten times its measured whole-sequence cost. Cost: an otherwise
+idle failed share may remain cached for five minutes. Actual I/O failures and
+local OS mount inventory still fence immediately; metadata success cannot clear
+a data-read fault. Pending calls retain one owner and the existing 30s
+no-operation-progress fence. Failed mount probes back off from at least five
+minutes. These admission/host-health checks never inspect job progress.
+
+| Path / consumer | #1671 | This change / remaining rate |
 | --- | --- | --- |
-| Worker NAS attempt progress (`worker_attempts.go`, `worker_recovery.go`) | Up to `1/min(N, 0.1)` walks/s/attempt | At most `1/N` walks/s/attempt; `60D/N` directory enumerations/min |
-| Queue heartbeat durable-progress verification for stale/portable attempts (`queue.go`) | One walk per matching report, including duplicate/rapid reports | At most one walk per path per `C`; ordinary same-attempt nonportable reports need no queue walk |
-| Restore/source discovery and input staging retried by the actor (`worker.go`, `checkpoint_launch.go`) | A completed retryable failure can restart discovery on the next actor tick (up to 10/s with `N >= 0.1`) | Completed failure retries at most once per `N`; pending copies retain one owner and are joined, not restarted |
-| Worker checkpoint admission probe (`worker_attempts.go`, `storage_probe.go`) | One fixed-file create/write/read/close probe per check-in, no directory enumeration | Unchanged: one per check-in |
-| Queue checkpoint availability (`storage_probe.go`) | One single-flight fixed-file probe per shortest measured worker interval; without cadence, per transaction | Unchanged; no directory enumeration |
-| Mount health (`host_hygiene_mount.go`, `host_hygiene.go`) | One single-flight probe per adaptive health sample, at most `1/H`; NAS root uses stat/open/`ReadDir(1)`, checkpoint root uses fixed-file access; failed recovery uses observed-cost backoff | Unchanged; checkpoint health never enumerates the checkpoint root |
-| Requested input-path inspection (`resolve_nas.go`) | One requested path chain per heartbeat; component `Lstat`, no recursive walk | Unchanged; no autonomous share discovery |
-| Shared-input/model staging (`shared_input_cache.go`, `model_files.go`) | Declared paths/manifest entries on cache miss; copies single-flight under the staging/cache owner. Recursive verification walks local staged data | Unchanged on success; actor retries after completed retryable failures now bounded by `N` |
-| Checkpoint shard setup (`checkpoint_layout.go`) | Startup/check-in kick until ready; failed attempts no faster than once/minute; at most 257 metadata operations per setup, no recursive share walk | Unchanged; successful setup is latched |
-| Settled checkpoint retention (`checkpoint_expiry.go`) | Queue uses indexed terminal/release records, no NAS scan. Worker removes only assigned settled folders after 72-hour grace; batches of eight, failed claims wait 30 minutes | Unchanged; no periodic enumeration of the NAS share |
-| Checkpoint/output publication (`checkpoint_local.go`, `output_delivery.go`) | Event/manifest driven per accepted generation/result, one owned asynchronous publisher, failed publications use existing retry pacing | Unchanged; not a progress polling walk |
-| Storage and liveness sampling (`attempt_storage.go`, `attempt_liveness_worker.go`) | Five-second metadata sampling of managed local roots; external checkpoint paths excluded; symlinks not followed | Unchanged; no NAS progress polling |
+| Worker NAS attempt progress | `60D/N` directory reads/minute | **0 periodic NAS accesses**, no checkpoint-root stat; local notification only |
+| Queue same-attempt progress / portable yield status | One verification walk per sender interval | **0 NAS accesses for status**; worker report only |
+| Resume/recovery, stop, release, finalization | Fresh lifecycle reads | Event-only; one owned observation per event, no timed refresh |
+| Restore/source discovery and staging errors before launch | Retry each report interval | Failed NAS preparation retries at most once/5 min; pending copies joined promptly |
+| Worker checkpoint admission (`worker_attempts.go`) | One fixed-file probe/check-in | At most **0.2 fixed-file sequences/minute/worker**, no enumeration |
+| Queue checkpoint availability (`storage_probe.go`) | One fixed-file probe/shortest check-in interval | At most **0.2 fixed-file sequences/minute/queue**, longer if the shortest measured check-in exceeds 5 min |
+| Mount health: NAS root (`host_hygiene_mount.go`) | Stat/open/`ReadDir(1)` each health sample | **0 directory reads**; at most **0.2 root stats/minute/host**, plus local mount-table checks |
+| Mount health: checkpoint root | One fixed-file sequence/health sample | At most **0.2 fixed-file sequences/minute/host**, no enumeration; longer after slow sequences/errors |
+| Requested input inspection (`resolve_nas.go`) | One requested path chain/heartbeat | Request-driven only, no autonomous scan; one `Lstat` per path component and cached diagnostic reply |
+| Shared-input/model staging | Cache-miss declared paths; one copy owner | Event-only on cache miss; verification of copied trees is local |
+| Checkpoint shard setup | Latched startup; failed setup at most once/minute | Unchanged: at most 257 metadata operations/setup, no recurring access once ready |
+| Settled checkpoint retention | Indexed expiry and assigned-folder removal | Unchanged: 72h grace, batches of eight; failed claim retry after 30 min, no share enumeration |
+| Checkpoint/output publication | Event/manifest-driven | Unchanged: payload saves and accepted-generation/result publishing; owned retries under existing publication pacing |
+| Storage/liveness sampling | Five-second samples of managed local roots | Unchanged: external checkpoint paths excluded; no NAS reads |
 
-Installation/onboarding probes are explicit operations, not periodic scans.
-Cache, environment, log and file-store retention enumerate their local managed
-stores; they do not enumerate the configured NAS share. The user-supplied
-checkpoint and NAS roots are the remote paths covered above.
+A fixed-file sequence stats its configured root, opens/writes/closes one fixed
+probe file and reopens/reads/closes it; the queue additionally fsyncs the file.
+The checkpoint-health and worker-admission lanes remain independent and their
+rates add (at most 0.4 sequences/minute/worker). None is per attempt. Installation
+probes are explicit operations. Cache/environment/log/file-store retention uses
+local managed stores. Active I/O fault recovery may reopen the exact failed
+source twice (at most one page per read), at the mount recovery cadence; it never
+walks the share. Payload-authored scans remain the payload's responsibility.
 
 ## Reproducible checks
 
-`TestCheckpointProgressReportCadence` runs the real actor loop with an injected
-clock and a counting filesystem over three local checkpoint directories. It
-compares 600 old-style walks in a simulated minute with a five-second report
-interval, checks every 100 ms prefix for scan bursts, and publishes a new nested
-generation without changing the root mtime. Queue, pending-refresh and existing
-local-first/resume regressions cover the other consumers. It never needs a NAS.
+`TestCheckpointProgressEventDriven` runs the real actor for a simulated minute
+with a counting filesystem and a local marker-read counter. It checks every
+100 ms prefix, compares #1671's 36 reads with zero, publishes a nested save that
+does not change root mtime and observes exactly one local marker read, then
+checks a final arbitrary save at finalization. Queue reports, pending events,
+idle probe cadence and existing resume/stop/local-first tests cover the other
+paths. All filesystem fixtures are local; no test needs a NAS.
 
 The release owner must repeat the existing `kprobe:cifs_readdir` measurement on
 the queue host's worker before and after rollout, using the same running
@@ -82,9 +154,9 @@ END { clear(@reads); }
 
 Keep the per-attempt rows distinct. Baseline: approximately 104 CIFS calls per
 attempt root in five seconds; a separate 30-second window measured 626–627.
-Expected after: scale by `0.1/N` for unchanged directory contents and I/O
-behavior (about two root CIFS calls in five seconds when `N=5` and each walk
-needs a data read plus EOF). Also retain whole-worker and queue totals, report
+Expected steady-state after: zero per-attempt CIFS directory calls, even with
+one-second reports. Saves signal locally and never trigger NAS status reads;
+resume/stop/release/finalization events must be identified separately. Also retain whole-worker and queue totals, report
 interval, attempt identity and directory depth; nested directories add calls.
 This probe observes existing I/O and never initiates a NAS walk. Its exact
 after counts remain release-owner evidence, not a claim from local tests.

@@ -168,6 +168,28 @@ type checkpointAvailability struct {
 	checkpointIO[bool]
 	available   bool // protected by checkpointIO.mu
 	observedKey string
+	recentKey   string
+	recentUntil time.Time
+	recentValue bool
+}
+
+func (n *checkpointAvailability) periodic(clock Clock, key string, fn func(func()) (bool, error)) (bool, error) {
+	n.mu.Lock()
+	if n.recentKey == key && clock.Now().Before(n.recentUntil) {
+		value := n.recentValue
+		n.mu.Unlock()
+		return value, nil
+	}
+	n.mu.Unlock()
+	value, err := n.runProgress(key, fn)
+	n.mu.Lock()
+	// runProgress can retain success while a new syscall is pending. Never
+	// cache that provisional success across its per-operation stall fence.
+	if n.pending == nil && !errors.Is(err, errCheckpointIOPending) {
+		n.recentKey, n.recentUntil, n.recentValue = key, clock.Now().Add(checkpointMetadataInterval), value
+	}
+	n.mu.Unlock()
+	return value, err
 }
 
 func (n *checkpointAvailability) run(key string, fn func() (bool, error)) (bool, error) {

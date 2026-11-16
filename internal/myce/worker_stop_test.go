@@ -35,6 +35,12 @@ func TestWorkerStopAndGraceDuringBlockedCheckin(t *testing.T) {
 }
 func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	t.Helper()
+	awaitPhase := func(phase string, ready func() bool) {
+		t.Helper()
+		t.Logf("await phase: %s", phase)
+		await(t, ready)
+		t.Logf("completed phase: %s", phase)
+	}
 	q, _ := fixture(t)
 	clock := &workerFakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 	q.clock = clock
@@ -72,7 +78,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 		}
 		close(release)
 		cancel()
-		await(t, func() bool {
+		awaitPhase("worker shutdown", func() bool {
 			clock.Advance(time.Millisecond)
 			select {
 			case err := <-done:
@@ -87,7 +93,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	}()
 	// Launch and first upload are asynchronous I/O. Advance bootstrap time only
 	// until the held request enters; all stop assertions below freeze time.
-	await(t, func() bool {
+	awaitPhase("blocked request entered", func() bool {
 		clock.Advance(time.Millisecond)
 		select {
 		case <-entered:
@@ -117,7 +123,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 		}
 	}()
 	submit(t, q, spec("production"))
-	await(t, func() bool {
+	awaitPhase("TERM while request blocked", func() bool {
 		select {
 		case term := <-terms:
 			if term != "term" {
@@ -143,7 +149,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	// Keep fake time fixed at the deadline and network release held until the
 	// forced result is durably published. Blocking stop behind upload/check-in
 	// can never satisfy this fence, regardless of real scheduling latency.
-	await(t, func() bool { _, err := os.Stat(resultPath); return err == nil })
+	awaitPhase("forced result at grace deadline", func() bool { _, err := os.Stat(resultPath); return err == nil })
 }
 
 func TestWorkerStopEventPreservesQueueDeadline(t *testing.T) {

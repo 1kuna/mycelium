@@ -792,6 +792,11 @@ func scanCheckpointProgressWalk(dir string, jobRoot bool, walk func(string, fs.W
 		if err != nil {
 			return err
 		}
+		// Outputs are not checkpoints. Prune before Info or enumeration so
+		// worker and queue lifecycle discovery never reads the output tree.
+		if filepath.Dir(path) == dir && e.IsDir() && e.Name() == "output" {
+			return filepath.SkipDir
+		}
 		if jobRoot && filepath.Dir(path) == dir && e.IsDir() && strings.HasPrefix(e.Name(), "attempt-") {
 			return filepath.SkipDir
 		}
