@@ -404,6 +404,7 @@ func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
 		{"continued token", "[Service]\nEnvironment=EXTRA=one \\\n MYCE_TOKEN=other\n", false},
 		{"path", "[Service]\nEnvironment=PATH=/other\n", false},
 		{"GPU runtime", "[Service]\nEnvironment=CUDA_VISIBLE_DEVICES=other\n", false},
+		{"new GPU runtime", "[Service]\nEnvironment=CUDA_VISIBLE_DEVICES=other\n", true},
 		{"queue authority", "[Service]\nEnvironment=MYCE_QUEUE=http://other.invalid\n", false},
 		{"joining authority", "[Service]\nEnvironment=MYCE_JOINING_FILE=/other\n", false},
 		{"credential path", "[Service]\nEnvironmentFile=/other\n", false},
@@ -415,6 +416,16 @@ func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, source := preserveWorkerFixture(t)
+			if err := os.MkdirAll(filepath.Dir(c.GPUEnvironmentFile()), 0700); err != nil {
+				t.Fatal(err)
+			}
+			runtime := "PATH=/fixture/bin\n"
+			if tc.name == "GPU runtime" {
+				runtime += "CUDA_VISIBLE_DEVICES=0\n"
+			}
+			if err := os.WriteFile(c.GPUEnvironmentFile(), []byte(runtime), 0600); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join(t.TempDir(), "override.conf")
 			os.WriteFile(path, []byte(tc.body), 0600)
 			enabled := false

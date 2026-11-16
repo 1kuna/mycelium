@@ -87,8 +87,22 @@ func validateInstallEnvironment(c ServiceConfig, directive, value string) error 
 		owned["PATH"] = true
 	}
 	if c.Role == "worker" {
-		for _, name := range gpuRuntimeVariables {
-			owned[name] = true
+		// This is the generated unit's runtime file, not the credential file.
+		// Only assignments actually present there are owned by that source.
+		path := c.GPUEnvironmentFile()
+		st, err := os.Stat(path)
+		if err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+			return errors.New("cannot inspect generated service runtime environment")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return errors.New("cannot inspect generated service runtime environment")
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			name, _, assignment := strings.Cut(strings.TrimSpace(line), "=")
+			if assignment && !strings.HasPrefix(name, "#") {
+				owned[name] = true
+			}
 		}
 	}
 	// Include inline assignments if the generated service gains any later.
