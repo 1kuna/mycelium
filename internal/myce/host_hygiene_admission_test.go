@@ -34,6 +34,7 @@ func mountAdmissionFixture(t *testing.T, role string) (*Queue, *fakeClock, []Hos
 	m := cpuMachine("worker", "host", "cpu", 2, 8)
 	w := Worker{ServiceConfig: &ServiceConfig{NAS: "/share"}, JobFileRoot: "/share/inputs"}
 	dependent := &Job{Spec: cpuSpec(1, 1)}
+	dependent.Spec.Resumable = role == "checkpoint" // This role gates checkpoint users, independent of priority.
 	if role == "nas" {
 		dependent.Spec.Priority = "production"
 		dependent.Spec.SharedInputs = map[string]SharedInput{"data": {NAS: "data", SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
