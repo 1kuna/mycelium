@@ -15,6 +15,34 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 	for _, scenario := range []string{"transfer", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
+			e := registeredExtension(t, q, s.Extension)
+			e.Version = "transfer-capacity"
+			v := e.Variants[0]
+			v.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
+			e.Variants = append(e.Variants, v)
+			e = freezeComposition(t, e)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			s.Extension = extensionKey(e)
+			sourceMachine := cloneMachine(&m)
+			sourceMachine.ID, sourceMachine.HostID, sourceMachine.Session = "source", "source", "source-session"
+			sourceMachine.CapabilityProfile.Arch = "arm64"
+			sourceMachine.CapabilityProfile.MemoryLayout = "unified"
+			sourceMachine.CapabilityProfile.SystemMemoryBytes = 128 << 30
+			sourceMachine.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 31 << 30}}
+			sourceMachine.HostMemoryBudgetGB, sourceMachine.HostAvailableMemoryGB = 128, 128
+			for i := range sourceMachine.Devices {
+				sourceMachine.Devices[i].Platform, sourceMachine.Devices[i].MemoryMode = "cuda", "unified"
+				sourceMachine.Devices[i].UnifiedMemory = true
+			}
+			machineCheck(t, q, sourceMachine)
+			sourceTarget := sourceMachine.Devices[0].machine(*q.s.Machines[sourceMachine.ID])
+			sourceKey, why := memoryReferenceKey(e, &sourceTarget, "extension:sample")
+			if sourceKey == nil {
+				t.Fatal(why)
+			}
+			sourceKey.Check = true
 			s.Workload = nil
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
@@ -29,20 +57,18 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 			}
 			if err := q.update(func() error {
 				configuration := memoryConfiguration(candidate.Spec.Needs, candidate.Spec.Args, candidate.Spec.Program)
-				add := func(k ObservationKey, layout string, host, growth float64) {
+				add := func(k ObservationKey, configuration, layout string, host, growth float64) {
 					device := 1.0
-					q.s.WorkObservations[identityHash(k)] = WorkObservation{Key: k, Source: "accepted work", Samples: 1, MemorySamples: 1, RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: layout, MemoryConfiguration: configuration, MemoryPeak: &AttemptMemoryPeak{HostGB: &host, GrowthGB: &growth, DeviceGB: &device}}
+					q.putWorkObservation(identityHash(k), WorkObservation{Key: k, Source: "accepted work", Samples: 1, MemorySamples: 1, RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: layout, MemoryConfiguration: configuration, MemoryPeak: &AttemptMemoryPeak{HostGB: &host, GrowthGB: &growth, DeviceGB: &device}})
 				}
-				source := *key
-				source.Host, source.Hardware, source.Fingerprint, source.Environment = "source", "source-card", "source-driver", "source-environment"
-				source.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
-				add(source, "unified", 17.72748565673828, .6516458962226749)
+				source := *sourceKey
+				add(source, configuration, "unified", 17.72748565673828, .6516458962226749)
 				// Two paired work identities calibrate max(ratio) + observed spread.
 				for i, pair := range [][2]float64{{5.060905456542969, 10.790241241455078}, {21.220745086669922, 8.982704162597656}} {
 					from, to := source, *key
-					from.Work, to.Work = []string{"calibration-a", "calibration-b"}[i], []string{"calibration-a", "calibration-b"}[i]
-					add(from, "unified", pair[0], 0)
-					add(to, "separate", pair[1]-minimumHostMemoryGB, 0)
+					from.Configuration, to.Configuration = []string{"calibration-a", "calibration-b"}[i], []string{"calibration-a", "calibration-b"}[i]
+					add(from, from.Configuration, "unified", pair[0], 0)
+					add(to, to.Configuration, "separate", pair[1]-minimumHostMemoryGB, 0)
 				}
 				q.memoryObservationIndex = nil
 				q.evidenceGeneration++
@@ -145,7 +171,7 @@ func TestExtensionCheckHoldInDependentSummary(t *testing.T) {
 		j.Reason = ""
 		floor := 70.59160131162189
 		j.Spec.Needs.Memory = "auto"
-		j.MemoryOOMFloor = &SizeHint{MemoryGB: 1, HostMemoryGB: floor}
+		j.MemoryFallback = &SizeHint{MemoryGB: 1, HostMemoryGB: floor}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
