@@ -147,6 +147,7 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		respondOperation(w, report, e, "usage_unavailable")
 	})
 	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
+	mux.HandleFunc("/api/workers/resident/{id}/{path...}", a.residentCall)
 	mux.HandleFunc("GET /api/workers/{id}/events", a.workerEvent)
 	mux.HandleFunc("POST /api/models/sync", func(w http.ResponseWriter, r *http.Request) {
 		var s SyncRequest

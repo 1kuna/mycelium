@@ -40,7 +40,7 @@ func (q *Queue) callExcludes(c *ModelCall, machine string, device ...string) boo
 
 func (q *Queue) callAttemptLive(c *ModelCall) bool {
 	s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]
-	return c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
+	return (c.ResidentAttempt == nil || q.residentAttemptLive(*c.ResidentAttempt)) && c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
 }
 
 func (q *Queue) engineAttemptLost(c *ModelCall) bool {

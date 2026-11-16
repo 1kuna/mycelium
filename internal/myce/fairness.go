@@ -343,7 +343,7 @@ type batchResourceRoom struct {
 
 func resourceKey(j *Job) batchResourceKey {
 	id := ""
-	if len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
+	if j.Spec.Resident != nil || len(j.LaunchCapacityWait) > 0 || len(j.Spec.RequirementReasons) > 0 || len(j.Extensions) > 0 {
 		id = j.ID
 	}
 	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, id, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j), fanOutDeviceSharing(j)}
@@ -365,7 +365,7 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 		// Share ordinary release work; capacity deficits and the yield fallback
 		// retain exact-demand identity.
 		ordinaryKey := key
-		if len(j.LaunchCapacityWait) == 0 {
+		if len(j.LaunchCapacityWait) == 0 && j.Spec.Resident == nil {
 			ordinaryKey.yieldDemand = ""
 		}
 		var ok bool
@@ -385,7 +385,7 @@ func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batc
 			resources[key] = room
 		}
 	}
-	return q.admissionPass(j, m, room.ok, predicateReleasePlan) && q.admissionPass(j, m, fitsResources(j, &room.machine, room.memory), predicateResources)
+	return q.admissionPass(j, m, room.ok, predicateReleasePlan) && q.admissionPass(j, m, fitsResources(j, &room.machine, room.memory) && q.residentJobFits(j, &room.machine), predicateResources)
 }
 func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	plan, yield := q.ordinaryRoomPlan(j, m, true)
@@ -467,7 +467,7 @@ func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
-	if best != nil && (!q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB), predicateResources) || !q.admissionGate(best, m, environmentReady(best, m), predicateEnvironment)) {
+	if best != nil && (!q.admissionGate(best, m, !q.preemptionReleasesPending(best), predicateReleasePending) || !q.admissionGate(best, m, !q.preparationActive(m), predicatePreparationActive) || !q.admissionGate(best, m, !q.preparationStopping(m), predicatePreparationStopping) || !q.admissionGate(best, m, q.calls[best.ID] == nil, predicateModelCall) || !q.admissionGate(best, m, fits(best, m, m.FreeMemoryGB) && q.residentJobFits(best, m), predicateResources) || !q.admissionGate(best, m, environmentReady(best, m), predicateEnvironment)) {
 		return nil
 	}
 	return best

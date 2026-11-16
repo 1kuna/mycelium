@@ -31,7 +31,7 @@ func validateWorkerData(s Spec) error {
 	if s.SizeHint != (SizeHint{}) {
 		return errors.New("ephemeral plain commands use needs, not extension size_hint")
 	}
-	if s.Resumable || s.ResumeCompatibility != nil || s.extensionJob() || s.Program != nil || len(s.Args) != 0 || s.FanOut != nil || s.After != nil || s.Needs.Model != "" || len(s.ModelSnapshots) != 0 || !reflect.DeepEqual(s.Environment, Environment{}) || s.OutputDelivery != "" || s.Diagnostics != nil || len(s.KeepOnFailure) != 0 || len(s.Run.Sidecars) != 0 || s.Run.MemoryGB != 0 {
+	if s.Resident != nil || s.Resumable || s.ResumeCompatibility != nil || s.extensionJob() || s.Program != nil || len(s.Args) != 0 || s.FanOut != nil || s.After != nil || s.Needs.Model != "" || len(s.ModelSnapshots) != 0 || !reflect.DeepEqual(s.Environment, Environment{}) || s.OutputDelivery != "" || s.Diagnostics != nil || len(s.KeepOnFailure) != 0 || len(s.Run.Sidecars) != 0 || s.Run.MemoryGB != 0 {
 		return errors.New("advanced.worker_data: ephemeral supports non-resumable plain commands with installed tools and declared managed I/O; environments, extensions, model servers/snapshots, sidecars, fan-out, after, diagnostics and alternate output delivery are unsupported")
 	}
 	if s.Isolation != "" && s.Isolation != nativeIsolationCI {

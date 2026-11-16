@@ -1346,7 +1346,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", scarceHostYieldCapability, localFirstProtocol)
+			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1", residentJobsCapability, scarceHostYieldCapability, localFirstProtocol)
 			if w.modelSnapshots != nil {
 				// Any worker with a snapshot cache fetches missing snapshots itself.
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)

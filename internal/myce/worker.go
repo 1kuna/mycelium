@@ -688,7 +688,17 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
+	residentEnv, residentClose, residentErr := w.startResidentBridge(ctx, j, executionWork)
+	if residentErr != nil {
+		return nil, s.startFailure(j, launchRefused, residentErr)
+	}
+	oldSharedRelease := sharedRelease
+	sharedRelease = func() { residentClose(); oldSharedRelease() }
+	s.sharedRelease = sharedRelease
 	env := jobBaseEnvironment()
+	for k, v := range residentEnv {
+		env[k] = v
+	}
 	if compilerPath != "" {
 		env["GOCACHE"] = compilerPath
 	}

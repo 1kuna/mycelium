@@ -243,7 +243,7 @@ func adapterProfile(a projectAdapter, name string, platform ...string) (executio
 	}
 	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References) > 0
 	if native {
-		x := myce.Extension{RequirementReasons: e.RequirementReasons, Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
+		x := myce.Extension{Resident: e.Resident, RequirementReasons: e.RequirementReasons, Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
 		for name := range e.Outputs {
 			x.Outputs = append(x.Outputs, name)
 		}

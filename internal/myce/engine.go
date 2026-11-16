@@ -762,6 +762,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 				model = m
 			}
 		}
+		if s.Resident != nil {
+			model = s.Resident.Model
+		}
 		if s.Placement != nil {
 			model.Project = s.Placement.Project
 		}
