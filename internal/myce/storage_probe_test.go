@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func probeEntries(t *testing.T, dir string) []string {
