@@ -360,6 +360,12 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		hostFloor := memberHostFloor(j, m)
 		floorRun := q.chargesFirstRunFloor(j, m)
 		estimate := q.memoryEstimate(j, m)
+		if q.checkTransferNeedsProbe(j, m, estimate) {
+			// A foreign prediction is not a measurement of this native check.
+			// Use ordinary guarded first-run sizing, retaining destination lower
+			// bounds and the per-job OOM floors applied below.
+			estimate = memoryEstimate{key: estimate.key, constrainedGB: estimate.constrainedGB, source: checkTransferProbe}
+		}
 		refusal = estimate.refusal
 		if estimate.source == spentMemoryExploration {
 			refusal = spentMemoryExploration + "; " + memoryCapacityRemedies
@@ -629,6 +635,7 @@ type memoryEstimate struct {
 	exact                    bool // Device evidence is this exact work on this target.
 	uncalibrated             bool
 	deviceUncalibrated       bool
+	transferred              bool // Host demand predicted from another target, not measured here.
 	refusal                  string
 	escalation               bool
 	measuredHostGB           float64

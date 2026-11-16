@@ -9,14 +9,22 @@ import (
 
 // Replay #1686's calibrated transfer. The check never ran on the destination:
 // a later accepted source check changed a physical first run into a transfer
-// larger than the destination's entire RAM. A larger unrelated target must not
-// hide the dead end. No floor or learned bound is reduced to make it fit.
+// larger than the destination's entire RAM. That prediction must not refuse a
+// first measurement. Actual local peaks, authored needs and OOM floors still
+// prove impossibility, and an unrelated larger target cannot hide that verdict.
 func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
-	for _, scenario := range []string{"transfer", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
+	for _, scenario := range []string{"transfer", "local accepted", "local constrained", "declared", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
+			capacity := 31.206165313720703
+			m.CapabilityProfile.SystemMemoryBytes = uint64(capacity * (1 << 30))
+			m.HostAvailableMemoryGB = 11.36440658569336
+			machineCheck(t, q, m)
 			e := registeredExtension(t, q, s.Extension)
 			e.Version = "transfer-capacity"
+			if scenario == "declared" {
+				e.Variants[0].Execution.Main.MemoryGB = 70.59160131162189
+			}
 			v := e.Variants[0]
 			v.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
 			e.Variants = append(e.Variants, v)
@@ -71,9 +79,17 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 					add(from, from.Configuration, "unified", pair[0], 0)
 					add(to, to.Configuration, "separate", pair[1]-minimumHostMemoryGB, 0)
 				}
+				if scenario == "local accepted" || scenario == "local constrained" {
+					add(*key, configuration, "separate", 70.59160131162189, 0)
+					if scenario == "local constrained" {
+						point := q.s.WorkObservations[identityHash(*key)]
+						point.MemoryPeak.Constrained = true
+						q.putWorkObservation(identityHash(*key), point)
+					}
+				}
 				q.memoryObservationIndex = nil
 				q.evidenceGeneration++
-				if scenario == "OOM floor" {
+				if scenario == "OOM floor" || scenario == "larger eligible" || scenario == "larger wrong target" || scenario == "unknown capacity" || scenario == "allowance only" {
 					j := q.touchJob(queued.ID)
 					j.OOMRetries = 1
 					j.MemoryOOMFloor = &SizeHint{MemoryGB: 1, HostMemoryGB: 70.59160131162189}
@@ -83,19 +99,25 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				t.Fatal(err)
 			}
 			q.mu.Lock()
+			// Retain proof of the original prediction; revised sizing must not
+			// install it as a local physical requirement.
+			estimate := q.memoryEstimate(candidate, &target)
 			sized := q.memoryCandidate(candidate, &target)
 			q.mu.Unlock()
-			if math.Abs(sized.Spec.Needs.HostMemoryGB-70.59160131162189) > 1e-9 {
-				t.Fatalf("transfer demand=%+v", sized.MemoryEnvelope)
+			if scenario == "transfer" {
+				if math.Abs(estimate.measuredHostGB-70.59160131162189) > 1e-9 {
+					t.Fatalf("fixture no longer reproduces transfer: %+v", estimate)
+				}
+				if e := sized.MemoryEnvelope; e.HostGB < 10.790241241455078 || e.HostGB > 12 || e.Basis != "exploratory" || e.Refusal != "" || !strings.Contains(e.Source, checkTransferProbe) || e.Enforcement != m.MemoryEnforcement {
+					t.Fatalf("weak transfer still blocks guarded native measurement: %+v", e)
+				}
 			}
 			if scenario == "larger wrong target" {
 				larger := cloneMachine(&m)
 				larger.ID, larger.HostID, larger.Session = "larger", "larger", "larger-session"
 				larger.CapabilityProfile.SystemMemoryBytes = 128 << 30
 				larger.HostMemoryBudgetGB, larger.HostAvailableMemoryGB = 128, 128
-				if scenario == "larger wrong target" {
-					larger.CapabilityProfile.Arch = "arm64"
-				}
+				larger.CapabilityProfile.Arch = "arm64"
 				machineCheck(t, q, larger)
 			}
 			if scenario == "unknown capacity" || scenario == "allowance only" || scenario == "larger eligible" {
@@ -120,7 +142,7 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := job(t, q, queued.ID)
-			wantDead := scenario == "transfer" || scenario == "OOM floor" || scenario == "larger wrong target"
+			wantDead := scenario == "local accepted" || scenario == "local constrained" || scenario == "declared" || scenario == "OOM floor" || scenario == "larger wrong target"
 			if wantDead {
 				if got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "cannot fit on any eligible host") || got.Starts != 0 {
 					t.Fatalf("impossible check did not terminate: %+v", got)
@@ -134,6 +156,30 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				}
 			} else if got.State != "queued" {
 				t.Fatalf("possible/unknown check terminated: %+v", got)
+			}
+			if scenario == "transfer" {
+				run := assignedJob(machineCheck(t, q, m))
+				if run == nil || run.ID != queued.ID || run.MemoryEnvelope.HostGB > 12 {
+					t.Fatalf("guarded native check not runnable: %+v; %s", run, job(t, q, queued.ID).Reason)
+				}
+				if err := q.Started(result(run, false)); err != nil {
+					t.Fatal(err)
+				}
+				// A real failure after the probe becomes negative evidence. Its
+				// floor survives restart; the transfer fallback cannot erase it.
+				clock.Advance(time.Second)
+				r := result(run, false)
+				peak := run.Spec.Needs.HostMemoryGB
+				r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true, Events: &MemoryEventCounts{OOM: 1}}
+				r.OutOfMemory = true
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				q = memoryFactsRestart(t, q, clock)
+				recovered := job(t, q, queued.ID)
+				if recovered.MemoryOOMFloor == nil || recovered.MemoryOOMFloor.HostMemoryGB < peak || recovered.OOMRetries == 0 {
+					t.Fatalf("real OOM lost after guarded probe: %+v", recovered.MemoryOOMFloor)
+				}
 			}
 		})
 	}

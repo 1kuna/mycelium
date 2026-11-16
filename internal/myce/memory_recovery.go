@@ -184,10 +184,28 @@ func (q *Queue) memorySizingDeadEnd(j *Job) string {
 	return "dead end: no host can size this auto-memory job (" + strings.Join(slices.Compact(refusals), "; ") + "); action: resubmit with an explicit memory figure that fits a host, or reduce the workload's memory use"
 }
 
-// A check cannot acquire new local evidence until it runs. In particular, a
-// calibrated transfer can exceed the whole physical host while memoryIntent
-// still fits. Preserve that bound (and OOM floors), but end the impossible
-// check instead of promising that free capacity can recover its evidence.
+const checkTransferProbe = "exploratory first run; transferred estimate exceeds physical capacity"
+
+// Native qualification obtains the missing target measurement. Even paired
+// transfer ratios can disagree (fixed overhead need not scale with source
+// demand). If their prediction exceeds this host, use its ordinary first-run
+// protocol rather than treating that prediction as a physical lower bound.
+// Actual OOM recovery keeps its separate measured-demand path.
+func (q *Queue) checkTransferNeedsProbe(j *Job, m *Machine, estimate memoryEstimate) bool {
+	if j.Spec.ExtensionCheck == nil || !estimate.transferred || estimate.escalation || j.OOMRetries > 0 {
+		return false
+	}
+	_, system, known := jobCapabilityCapacity(j, m)
+	host := estimate.measuredHostGB
+	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && estimate.device != nil && estimate.device.DeviceGB != nil {
+		host += *estimate.device.DeviceGB * estimate.deviceFactor
+	}
+	return known && host > system
+}
+
+// Only authored requirements, local measurements and durable OOM floors can
+// prove a native check physically impossible. A transferred estimate or an
+// uncertainty forecast can justify a hold/probe, never a terminal verdict.
 func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
 	for _, id := range j.Spec.AllowedMachines {
 		if q.s.Machines[id] == nil {
@@ -196,7 +214,7 @@ func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
 	}
 	var refusals []string
 	possible := false
-	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+	q.evaluateTargetsMemory(j, false, func(fit targetFit, candidate *Job, m *Machine) bool {
 		if fit.excluded {
 			return true
 		}
@@ -210,6 +228,26 @@ func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
 		if !known || !q.inventoryFresh(q.s.Machines[m.ID]) || inventoryWaitingReason(q.s.Machines[m.ID]) != "" {
 			possible = true // Unknown capacity is not proof of impossibility.
 			return false
+		}
+		// evaluateTargetsMemory(false) preserves declarations and retry floors,
+		// without installing a prediction. Add measurements on this exact
+		// destination identity, including constrained peaks, but no transfer or
+		// forecast margin. Host evidence can include a currently known sibling;
+		// device demand must have been measured on this exact card.
+		estimate := q.memoryEstimateFor(candidate, m, false)
+		if key := estimate.key; key != nil {
+			configuration := memoryConfiguration(candidate.Spec.Needs, candidate.Spec.Args, candidate.Spec.Program)
+			facts := q.memorySizingFacts(candidate, m, key, configuration, false)
+			for _, point := range facts.points {
+				p := point.MemoryPeak
+				if !memoryIdentityUsable(*point) || point.MemoryRecordedAt.IsZero() || q.clock.Now().Before(point.MemoryRecordedAt) || p == nil || p.HostGB == nil || !validRate(*p.HostGB) || point.Key.Target != key.Target || !sameMemoryHost(point.Key, *key, m) || !sameMemoryFamily(*point, *key, memoryLayout(candidate, m)) {
+					continue
+				}
+				candidate.Spec.Needs.HostMemoryGB = max(candidate.Spec.Needs.HostMemoryGB, hostMemoryPeakGB(p))
+				if point.Key.Component == key.Component && p.DeviceGB != nil && validRate(*p.DeviceGB) {
+					candidate.Spec.Needs.MemoryGB = max(candidate.Spec.Needs.MemoryGB, *p.DeviceGB)
+				}
+			}
 		}
 		need := candidate.Spec.Needs.HostMemoryGB
 		if m.UnifiedMemory && !candidate.Spec.Needs.cpuOnly() {
