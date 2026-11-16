@@ -100,7 +100,7 @@ var holdKinds = map[string]holdKind{
 	"memory":                   {ownerQueue, "waiting for memory on an eligible host", "enough measured memory is free", "wait; keep other work moving"},
 	"host_memory_headroom":     {ownerQueue, "waiting for host memory on an eligible host", "enough measured host memory is free", "wait; keep other work moving"},
 	memoryEvidenceRecovering:   {ownerQueue, "waiting for safe capacity or fresh comparable memory evidence", "a host fits with safe capacity, or comparable memory evidence arrives", "wait; keep other work moving"},
-	"host_backfill":            {ownerQueue, "waiting for host CPU capacity", "enough host cores are free", "wait; keep other work moving"},
+	"host_backfill":            {ownerQueue, "host RAM or cores are accumulating for queued work", "the queued demand starts or no longer withholds capacity", "wait; keep other work moving"},
 	"cpu_isolation":            {ownerOperator, "an eligible host cannot keep CPU work off its accelerators", "the host qualifies accelerator isolation, or another host fits", "check the host's installed CUDA/XPU runtimes"},
 	"shared_input":             {ownerQueue, "waiting for a shared input to stage", "the shared input is staged on an eligible host", "wait; nothing to do"},
 	"shared_input_unreported":  {ownerQueue, "waiting for workers to report shared-input cache capacity", "an eligible worker reports its cache capacity", "wait; nothing to do"},

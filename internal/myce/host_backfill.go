@@ -196,9 +196,6 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 }
 
 func (q *Queue) hostBackfillWaitingReason(j *Job, scan *placementScan) string {
-	if !j.Spec.Needs.cpuOnly() {
-		return ""
-	}
 	var demand *Job
 	for _, m := range scan.machines {
 		if !q.placementLiveness(scan)[m.ID] || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || !environmentReady(j, m) || q.preparationActive(m) || q.preparationStopping(m) {

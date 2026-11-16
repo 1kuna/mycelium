@@ -717,10 +717,8 @@ func (q *Queue) waitHold(j *Job, scans ...*placementScan) *Hold {
 	if h := q.memoryWait(j, machines); h != nil {
 		return h
 	}
-	if j.Spec.Needs.cpuOnly() {
-		if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
-			return newHold("host_backfill", reason)
-		}
+	if reason := q.hostBackfillWaitingReason(j, q.placementScan(scans...)); reason != "" {
+		return newHold("host_backfill", reason)
 	}
 	h := waitingHold(j, machines, q.s.Jobs)
 	if h.Kind == "waiting_for_worker" || h.Kind == "no_eligible_host" {
