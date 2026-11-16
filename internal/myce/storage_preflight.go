@@ -83,7 +83,7 @@ func sanitizeStorageFailure(detail *StoragePreflightFailure) *StoragePreflightFa
 	}
 	out := *detail
 	switch out.Root {
-	case "state", "environment_cache", "model_cache", "file_cache", "queue_state", "queue_uploads", "queue_files", "queue_joining", "nas", "checkpoint", "model", "environment":
+	case "state", "custody", "environment_cache", "model_cache", "file_cache", "queue_state", "queue_uploads", "queue_files", "queue_joining", "nas", "checkpoint", "model", "environment":
 	default:
 		out.Root = "unknown"
 	}
@@ -110,7 +110,7 @@ func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command f
 		} else if c.Role == "queue" {
 			name = []string{"state", "queue_state", "queue_uploads", "queue_uploads", "queue_files", "queue_joining"}[i]
 		} else if c.Role == "worker" {
-			name = []string{"state", "environment_cache", "model_cache", "file_cache"}[i]
+			name = []string{"state", "environment_cache", "model_cache", "file_cache", "custody"}[i]
 		}
 		started := time.Now()
 		if err := CheckStateRoots(root); err != nil {

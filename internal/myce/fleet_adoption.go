@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // No local PIDs or paths enter this proof. The worker verifies private process
 // births/scope records; the queue compares only exact execution obligations.
@@ -15,12 +18,16 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 	for _, a := range actors {
 		a.mu.Lock()
 		g, released := a.custodian, a.released || a.finished
+		shared := a.worker.Machine.SharedHost != nil
 		a.mu.Unlock()
 		if released {
 			continue
 		}
 		if g == nil {
 			proof.Reason = "attempt has no detached custodian"
+			if runtime.GOOS == "linux" && shared {
+				proof.Reason = "Linux shared-host aggregate CPU quota requires natural drain"
+			}
 			return proof
 		}
 		g.mu.Lock()
@@ -42,6 +49,10 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 	}
 	proof := m.Fleet.Adoption
 	if proof.Reason != "" {
+		switch proof.Reason {
+		case "attempt has no detached custodian", "Linux shared-host aggregate CPU quota requires natural drain", "detached attempt readiness or release is unconfirmed":
+			return proof.Reason
+		}
 		return "worker cannot prove detached attempt readiness"
 	}
 	for _, p := range q.hostObligations(h.Host) {

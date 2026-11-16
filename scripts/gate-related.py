@@ -130,6 +130,17 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/install_manager.go'] = (
     'install_matrix_test.go', 'install_launchd_wait_test.go')
 
 
+# Detached custody uses shared platform-independent failure/control tests plus
+# an opt-in native-manager journey. Fleet policy lives in the normal-path tests.
+for source in ('worker_custodian', 'worker_custodian_darwin',
+               'worker_custodian_linux', 'worker_custodian_gate'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'worker_custodian_unit_test.go', 'worker_custodian_test.go')
+for source in ('fleet_adoption', 'fleet_handover'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = (
+        'fleet_normal_test.go', 'fleet_critical_test.go')
+
+
 PYTHON_CLIENT = ('@python-client', 'test_client.DevTests.test_consumer_skill_examples')
 
 

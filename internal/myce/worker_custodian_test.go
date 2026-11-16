@@ -91,6 +91,9 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 func custodianNativeReplacement(t *testing.T, next, mode string) {
 	q, _ := fixture(t)
 	q.clock = RealClock{}
+	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{Queue: q, Token: "custodian-test"}.Handler())
 	defer server.Close()
 	dir := t.TempDir()
@@ -201,7 +204,10 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	defer stop()
 	s := cpuSpec(1, 1)
 	s.Resumable = false
-	s.Run.Command = []string{"/bin/sh", "-c", `printf 'before\n'; echo $$ > "$MYCE_CHECKPOINT_DIR/payload-pid"; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do printf 'tick\n'; sleep 0.05; done; printf 'after\n'; printf 'accepted\n' > "$MYCE_CHECKPOINT_DIR/output"`}
+	_, input := retentionUpload(t, Client{URL: server.URL, Token: "custodian-test"}, "fixture input")
+	s.Files = FileManifest{"input": input}
+	s.Outputs = map[string]string{"out.txt": "results"}
+	s.Run.Command = []string{"/bin/sh", "-c", `printf 'before\n'; echo $$ > "$MYCE_CHECKPOINT_DIR/payload-pid"; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do printf 'tick\n'; sleep 0.05; done; printf 'after\n'; printf 'accepted\n' > "$MYCE_CHECKPOINT_DIR/output"; printf 'accepted\n' > out.txt`}
 	if mode == "native" {
 		s.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: 0.25, Command: []string{"/bin/sleep", "600"}}}
 	}
@@ -292,6 +298,14 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		t.Fatalf("execution identity changed: %+v", after)
 	}
 	if mode != "memory" && mode != "cancel" {
+		accepted := filepath.Join(dir, "accepted.txt")
+		client := Client{URL: server.URL, Token: "custodian-test"}
+		if err := client.DownloadResult(context.Background(), j.ID, "out.txt", accepted); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(accepted); err != nil || string(b) != "accepted\n" {
+			t.Fatalf("published artifact lost: %q %v", b, err)
+		}
 		if b, e := os.ReadFile(filepath.Join(checkpoint, "output")); e != nil || string(b) != "accepted\n" {
 			t.Fatalf("output lost: %s %v", b, e)
 		}
