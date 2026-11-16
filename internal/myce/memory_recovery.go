@@ -234,7 +234,12 @@ func (q *Queue) checkMemoryCapacityDeadEnd(j *Job) string {
 		// destination identity, including constrained peaks, but no transfer or
 		// forecast margin. Host evidence can include a currently known sibling;
 		// device demand must have been measured on this exact card.
-		estimate := q.memoryEstimateFor(candidate, m, false)
+		// The intent-only view clears auto sizing. Restore it only on the
+		// identity copy: check memory observations exist only for auto checks.
+		// The demand below still starts from the untouched authored intent.
+		provenance := *candidate
+		provenance.Spec.Needs.Memory = "auto"
+		estimate := q.memoryEstimateFor(&provenance, m, false)
 		if key := estimate.key; key != nil {
 			configuration := memoryConfiguration(candidate.Spec.Needs, candidate.Spec.Args, candidate.Spec.Program)
 			facts := q.memorySizingFacts(candidate, m, key, configuration, false)

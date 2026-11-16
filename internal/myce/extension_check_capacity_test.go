@@ -32,6 +32,15 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 			if err := q.AddExtension(e); err != nil {
 				t.Fatal(err)
 			}
+			// The native check must cross ordinary preparation before it can
+			// run; the fixture's original report names the previous version.
+			for i := range m.Devices {
+				target := m.Devices[i].machine(m)
+				report := newExtensionReport(e, &target, "extension:sample")
+				report.Setup = true
+				m.Devices[i].ExtensionReports = []ExtensionReport{report}
+			}
+			machineCheck(t, q, m)
 			s.Extension, s.ExtensionDigest = extensionKey(e), e.Digest
 			s.AllowedMachines = []string{m.ID}
 			sourceMachine := cloneMachine(&m)
