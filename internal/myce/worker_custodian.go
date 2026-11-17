@@ -148,15 +148,6 @@ func readCustodianJSON(dir, name string, out any) error {
 
 func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*process, error) {
 	if s.state.Custodian != "" {
-		// Stop preparation even if adoption has not yet observed the helper.
-		// The durable exact-attempt control is consumed once startup completes.
-		if ctx.Err() != nil {
-			now := w.Clock.Now()
-			control := custodianControl{ID: s.state.Custodian, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, StopAt: &now, Kill: true}
-			if err := saveWorkerJSON(custodianDir(s.dir), custodianName(s.state.Custodian, "control"), control); err != nil {
-				return nil, fmt.Errorf("%w: stop delivery pending", errWorkerCheckpoint)
-			}
-		}
 		p, err := w.adoptCustodian(s) // An uncertain launch is never repeated.
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
@@ -194,6 +185,28 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 		return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
 	}
 	return p, nil
+}
+
+// A queue stop is authority to interrupt an unadopted helper; cancellation of
+// the worker's own context is not (service replacement must leave it running).
+func persistUnadoptedCustodianStop(s *workerStore, j Job, d AttemptDirective, now time.Time) error {
+	if !d.Stop || s.state.Custodian == "" {
+		return nil
+	}
+	id := s.state.Custodian
+	control := custodianControl{ID: id, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
+	var previous custodianControl
+	if readCustodianJSON(custodianDir(s.dir), custodianName(id, "control"), &previous) == nil && previous.ID == id && previous.Execution == control.Execution && previous.Session == j.Session {
+		control = previous
+	}
+	deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
+	if control.StopAt == nil || deadline.Before(*control.StopAt) {
+		control.StopAt = &deadline
+	}
+	control.Kill = control.Kill || d.Kill
+	control.UserCancel = control.UserCancel || d.UserCancel
+	control.PriorityStop = d.PriorityStop
+	return saveWorkerJSON(custodianDir(s.dir), custodianName(id, "control"), control)
 }
 
 func (w Worker) adoptCustodian(s *workerStore) (*process, error) {

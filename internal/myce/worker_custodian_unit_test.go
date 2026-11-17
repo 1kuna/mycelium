@@ -297,6 +297,9 @@ func TestCustodianUnadoptedCancellationPersistsControl(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	clock := &workerFakeClock{now: time.Unix(100, 0)}
+	if err := persistUnadoptedCustodianStop(s, j, AttemptDirective{Stop: true, Kill: true, UserCancel: true}, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := (Worker{Clock: clock}).startCustodian(ctx, s, j); !errors.Is(err, errWorkerCheckpoint) {
 		t.Fatal(err)
 	}
@@ -304,7 +307,22 @@ func TestCustodianUnadoptedCancellationPersistsControl(t *testing.T) {
 	if err := readCustodianJSON(custodianDir(dir), custodianName(id, "control"), &c); err != nil {
 		t.Fatal(err)
 	}
-	if c.ID != id || c.Execution != runExecution(&j) || c.Session != j.Session || c.StopAt == nil || !c.StopAt.Equal(clock.Now()) || !c.Kill {
+	if c.ID != id || c.Execution != runExecution(&j) || c.Session != j.Session || c.StopAt == nil || !c.StopAt.Equal(clock.Now()) || !c.Kill || !c.UserCancel {
 		t.Fatalf("cancellation lost: %+v", c)
+	}
+}
+
+func TestCustodianWorkerReplacementDoesNotStopUnadoptedAttempt(t *testing.T) {
+	dir, id := t.TempDir(), ID()
+	if err := os.Mkdir(custodianDir(dir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
+	s := &workerStore{dir: dir, state: workerState{Job: &j, Session: j.Session, Custodian: id}}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _ = (Worker{}).startCustodian(ctx, s, j)
+	if _, err := os.Stat(filepath.Join(custodianDir(dir), custodianName(id, "control"))); !os.IsNotExist(err) {
+		t.Fatal("worker context cancellation stopped detached work", err)
 	}
 }
