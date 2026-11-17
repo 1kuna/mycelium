@@ -85,7 +85,7 @@ func TestPreemptedWorkSkipsHostBetweenProductionStages(t *testing.T) {
 // A refused production attempt must keep the preemption commitment while its
 // helpers release and the retry prepares, even after queue Started commits.
 func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
-	for _, boundary := range []string{"command-start", "release", "cancel", "restart"} {
+	for _, boundary := range []string{"command-start", "release", "cancel", "restart", "refused-again", "other-host"} {
 		t.Run(boundary, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := cpuMachine("worker", "host", "fake", 8, 32)
@@ -129,6 +129,33 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 				}
 				return r
 			}
+			// A delayed report for the released attempt cannot end the new claim.
+			if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol,
+				Attempts: []AttemptReport{{Execution: Execution{ID: offer.ID, Attempt: 1}, Session: offer.Session, Started: true},
+					{Execution: Execution{ID: offer.ID, Attempt: offer.Attempt}, Session: offer.Session}}}); err != nil {
+				t.Fatal(err)
+			}
+			if boundary == "refused-again" {
+				if err := q.Complete(capacityResult(offer, true)); err != nil {
+					t.Fatal(err)
+				}
+				if next := assignedJob(pull(false)); next != nil {
+					t.Fatal("retry bypassed helper release", next.ID)
+				}
+				r := result(offer, false)
+				r.ReleaseOnly = true
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				m.HostAvailableMemoryGB++
+				offer = assignedJob(machineCheck(t, q, m))
+				if offer == nil || offer.ID != demand.ID || offer.Attempt != 3 {
+					t.Fatal("lost production claim after second refusal", offer)
+				}
+				if err := q.Started(result(offer, false)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for range 3 {
 				clock.Advance(time.Second)
 				if next := assignedJob(pull(false)); next != nil {
@@ -147,9 +174,19 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch boundary {
-			case "command-start", "restart":
+			case "command-start", "restart", "refused-again":
 				if next := assignedJob(pull(true)); next == nil || next.ID != low.ID {
 					t.Fatal("worker command start did not return spare room", next)
+				}
+				if err := q.Complete(result(offer, true)); err != nil {
+					t.Fatal(err)
+				}
+				requireState(t, q, demand.ID, "succeeded")
+			case "other-host":
+				otherHost := cpuMachine("elsewhere", "other-host", "fake", 8, 32)
+				otherHost.Devices = []MachineDevice{}
+				if next := assignedJob(machineCheck(t, q, otherHost)); next == nil || next.ID != low.ID {
+					t.Fatal("claim withheld another host", next)
 				}
 			case "release":
 				r := result(offer, false)
@@ -169,5 +206,26 @@ func TestLaunchCapacityPreemptionKeepsRoomUntilCommandStart(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPreemptionClaimTransfersToFanOutExecution(t *testing.T) {
+	q, _, m, s := fanOutFixture(t, 1)
+	s.Priority = "production"
+	parent := submit(t, q, s)
+	// The planner has paid for this target. Materialization must transfer
+	// that turn to the exact child, without retaining a parent-wide hold.
+	if err := q.update(func() error {
+		q.touchJob(parent.ID).PreemptionPlacement = &PreemptionPlacement{Machine: m.ID, Session: m.Session, Device: m.Device}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	child := assignedJob(machineCheck(t, q, m))
+	if child == nil || child.Batch == nil || child.Batch.Parent != parent.ID {
+		t.Fatal("missing child", child)
+	}
+	if job(t, q, parent.ID).PreemptionPlacement != nil || job(t, q, child.ID).PreemptionPlacement == nil {
+		t.Fatal("preparation claim did not transfer to execution")
 	}
 }

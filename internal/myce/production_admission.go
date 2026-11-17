@@ -77,7 +77,7 @@ func productionBackoffInterval(j *Job, m *Machine) time.Duration {
 // evicted again, churning memory while that stage prepared. A queued job that
 // production preempted on this host stays off it while outranking production
 // work that could start here is pending: a ready queued stage (until it is
-// placed or its start deadline ends it) or an open production lease (only
+// command starts or its claim releases) or an open production lease (only
 // within one back-off interval of the preemption, so a lease never reserves a
 // host indefinitely). Other hosts are unaffected, so the job places elsewhere.
 func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
