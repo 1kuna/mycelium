@@ -77,7 +77,7 @@ func productionBackoffInterval(j *Job, m *Machine) time.Duration {
 // evicted again, churning memory while that stage prepared. A queued job that
 // production preempted on this host stays off it while outranking production
 // work that could start here is pending: a ready queued stage (until it is
-// placed or its start deadline ends it) or an open production lease (only
+// command starts or its claim releases) or an open production lease (only
 // within one back-off interval of the preemption, so a lease never reserves a
 // host indefinitely). Other hosts are unaffected, so the job places elsewhere.
 func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
@@ -86,7 +86,17 @@ func (q *Queue) productionGapReason(j *Job, m *Machine, host string) string {
 		return ""
 	}
 	for _, d := range q.liveJobs() {
-		if d == j || d.State != "queued" || d.Spec.Priority != "production" || cancelled(d) || !dependencyReady(d) || q.comparePriority(j.Spec, d.Spec) <= 0 {
+		if d == j || d.Spec.Priority != "production" || cancelled(d) || !dependencyReady(d) || q.comparePriority(j.Spec, d.Spec) <= 0 {
+			continue
+		}
+		// Assignment must not reopen the capacity this demand just paid to
+		// vacate. Its placement survives Started authorization and a refused
+		// launch; only a worker command-start report or exact release ends the
+		// assigned attempt's claim. Only previously yielded work is held here.
+		if p := d.PreemptionPlacement; p != nil && (d.State == "running" || d.State == "stopping") && !d.ReleaseConfirmed && q.executionHost(p.Machine) == host {
+			return fmt.Sprintf("host %s: production attempt %s/%d preparing after preemption; placing elsewhere", host, d.ID, d.Attempt)
+		}
+		if d.State != "queued" {
 			continue
 		}
 		if d.FanOut != nil && d.Spec.FanOut != nil && d.FanOut.Next >= len(d.Spec.FanOut.Pieces) {

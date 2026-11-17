@@ -3196,6 +3196,9 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	retainStagingTimings(j, report.StagingTimings)
+	if report.Started && j.State == "running" && !j.ReleaseConfirmed {
+		j.PreemptionPlacement = nil
+	}
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
@@ -3281,15 +3284,23 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	q.touchJob(j.ID)
 	values := q.placementValues(q.placementScan(scans...))
 	if j.Spec.FanOut != nil {
+		placement := q.s.Jobs[j.ID].PreemptionPlacement
 		q.touchJob(j.ID).PreemptionPlacement = nil
 		j = q.assignFanOut(j, m)
+		// The materialized execution, rather than its dispatched parent,
+		// now owns the paid-for preparation turn.
+		j.PreemptionPlacement = placement
 	}
 	estimate, measured := q.estimateCompletion(j, m)
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
 	selected := j
 	j = q.touchJob(selected.ID)
-	j.PreemptionPlacement = nil
+	// Keep the paid-for placement through preparation and the final worker
+	// launch check. Started is authorization, not proof the command ran.
+	if p := j.PreemptionPlacement; p != nil && (p.Machine != m.ID || p.Session != m.Session || p.Device != m.Device) {
+		j.PreemptionPlacement = nil // The original target was lost or no longer fit.
+	}
 	j.Spec.Needs = selected.Spec.Needs
 	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback

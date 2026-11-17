@@ -7,7 +7,8 @@ import (
 
 const priorityPreemptionCause = "priority_preemption"
 
-// A batch that paid for release keeps that exact target until assignment.
+// A batch that paid for release keeps that exact target until the worker
+// reports its command started. Queue Started only authorizes the exec gate.
 // A lost worker/session ends the commitment; cleanup custody remains separate.
 type PreemptionPlacement struct {
 	Machine  string   `json:"machine"`
