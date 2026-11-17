@@ -127,6 +127,29 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	if resolve().Targets[0].NASInputs[0].State != "pending" {
 		t.Fatal("expired signal reused")
 	}
+	// A pending check also expires. Even fresh intervening heartbeats cannot
+	// make a report for the retired ID observable; a new check must complete.
+	// This is why the metadata round-trip fixture above freezes elapsed time.
+	checks = cache.checkin(Checkin{Machine: m})
+	if len(checks) != 1 {
+		t.Fatal(checks)
+	}
+	for range 2 {
+		clock.Advance(2 * time.Minute)
+		check(t, q, m, nil)
+	}
+	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{{ID: checks[0].ID, State: "missing"}}})
+	if got := resolve().Targets[0]; got.Freshness != "fresh" || got.NASInputs[0].State != "pending" || !got.NASInputs[0].ObservedAt.IsZero() {
+		t.Fatal("expired pending report reused or worker unexpectedly stale", got)
+	}
+	next := cache.checkin(Checkin{Machine: m})
+	if len(next) != 1 || next[0].ID == checks[0].ID {
+		t.Fatal("expired check identity reused", next)
+	}
+	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{{ID: next[0].ID, State: "missing"}}})
+	if got := resolve().Targets[0]; got.Eligible || got.NASInputs[0].State != "missing" || got.NASInputs[0].ObservedAt.IsZero() {
+		t.Fatal("fresh replacement report lost", got)
+	}
 }
 
 func TestResolveNASWorkerChecksAreConfinedAndCached(t *testing.T) {
