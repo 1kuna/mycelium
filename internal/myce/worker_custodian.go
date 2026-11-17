@@ -417,6 +417,11 @@ func (w Worker) runCustodian(stop context.Context) error {
 	w.Machine, w.Clock = req.Machine, RealClock{}
 	w.Client.Clock = w.Clock
 	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
+	// Linux adoption requires the delegated worker leaf. Refuse before the first
+	// snapshot if setup fails, so a helper can never wait at an unserviceable gate.
+	if runtime.GOOS == "linux" {
+		w.RequireMemoryCeilings = true
+	}
 	w.initMemoryCeilings()
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
