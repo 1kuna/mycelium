@@ -24,7 +24,13 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	// Even 60s of 5ms await polls advances at most 12s of the fixture's 60s
 	// freshness window. Heartbeats still become due, without expiring evidence.
 	// TestResolveNASCacheFreshnessAndSession separately exercises expiration.
-	w := Worker{Clock: clock, EnvironmentLimit: 1 << 30, StateDir: t.TempDir(), CheckpointRoot: q.root, Client: client, Machine: machine("worker", "cpu", "fixture-worker-host"), Interval: 10 * time.Millisecond}
+	w := Worker{
+		Clock: clock, EnvironmentLimit: 1 << 30, StateDir: t.TempDir(),
+		CheckpointRoot: q.root, Client: client,
+		Machine: machine("worker", "cpu", "fixture-worker-host"), Interval: 10 * time.Millisecond,
+		// Match StartDev's fake CPU isolation; metadata needs no host hardware.
+		CPUIsolationProbe: func(context.Context) error { return nil },
+	}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		cancel()
