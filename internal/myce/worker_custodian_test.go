@@ -81,11 +81,14 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 		t.Skip("native service-manager tier")
 	}
 	dir := t.TempDir()
-	next := filepath.Join(dir, "next-worker")
-	build := exec.Command("go", "test", "-c", "-p", "1", "-ldflags", "-X mycelium/internal/myce.BuildVersion=my55-next", "-o", next, ".")
-	build.Env = append(os.Environ(), "GOMAXPROCS=2")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build replacement: %v\n%s", err, out)
+	next := os.Getenv("MYCE_NATIVE_REPLACEMENT_BINARY")
+	if next == "" {
+		next = filepath.Join(dir, "next-worker")
+		build := exec.Command("go", "test", "-c", "-p", "1", "-ldflags", "-X mycelium/internal/myce.BuildVersion=my55-next", "-o", next, ".")
+		build.Env = append(os.Environ(), "GOMAXPROCS=2")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build replacement: %v\n%s", err, out)
+		}
 	}
 	for _, mode := range []string{"plain", "native", "cancel", "memory"} {
 		t.Run(mode, func(t *testing.T) { custodianNativeReplacement(t, next, mode) })
@@ -232,6 +235,24 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		b, e := os.ReadFile(files[0])
 		return e == nil && json.Unmarshal(b, &before) == nil && before.Started
 	})
+	if runtime.GOOS == "linux" {
+		if err := verifyCustodianIsolation(before.ID, before.PID, before.Cgroup); err != nil {
+			t.Fatal(err)
+		}
+		var gate custodianGate
+		var receipt custodianGateReceipt
+		var ledger custodianLedger
+		for kind, value := range map[string]any{"gate": &gate, "gate-receipt": &receipt, "ledger": &ledger} {
+			if err := readCustodianJSON(custodianDir(c.State), custodianName(before.ID, kind), value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if gate.Nonce == "" || receipt.Nonce != gate.Nonce || receipt.Error != "" {
+			t.Fatalf("launch gate not serviced: %+v %+v", gate, receipt)
+		}
+		t.Log("real systemd worker service -> scope/worker -> exact gate receipt and ledger -> command started")
+	}
+	await(t, func() bool { return job(t, q, j.ID).StartedAt != nil })
 	assigned := job(t, q, j.ID)
 	original := assigned.Attempt
 	session := assigned.Session
