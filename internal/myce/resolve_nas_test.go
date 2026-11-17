@@ -20,22 +20,29 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	// This checks the real HTTP/worker metadata round trip, not elapsed-time
 	// freshness. A pending check and its report span two heartbeats; the dev
 	// fixture's 10ms cadence gave them a load-dependent expiry while await polled.
-	// Freeze both clocks so neither the pending ID nor its observation ages out.
+	// Drive both clocks in explicit 1ms test steps, independent of host I/O.
+	// Even 60s of 5ms await polls advances at most 12s of the fixture's 60s
+	// freshness window. Heartbeats still become due, without expiring evidence.
 	// TestResolveNASCacheFreshnessAndSession separately exercises expiration.
 	w := Worker{Clock: clock, EnvironmentLimit: 1 << 30, StateDir: t.TempDir(), CheckpointRoot: q.root, Client: client, Machine: machine("worker", "cpu", "fixture-worker-host"), Interval: 10 * time.Millisecond}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Error(err)
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+				return true
+			default:
+				return false
 			}
-		case <-time.After(testWaitTimeout):
-			t.Error("NAS inspection worker did not stop")
-		}
+		})
 	}()
 	await(t, func() bool {
+		clock.Advance(time.Millisecond)
 		snap, err := q.Snapshot()
 		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
 	})
@@ -44,6 +51,7 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	var report ResolveReport
 	request := ResolveRequest{Spec: s, InspectNAS: true}
 	await(t, func() bool {
+		clock.Advance(time.Millisecond)
 		report = ResolveReport{}
 		if err := client.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
 			t.Fatal(err)
@@ -129,7 +137,7 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	}
 	// A pending check also expires. Even fresh intervening heartbeats cannot
 	// make a report for the retired ID observable; a new check must complete.
-	// This is why the metadata round-trip fixture above freezes elapsed time.
+	// This is why the metadata round-trip fixture above controls elapsed time.
 	checks = cache.checkin(Checkin{Machine: m})
 	if len(checks) != 1 {
 		t.Fatal(checks)
