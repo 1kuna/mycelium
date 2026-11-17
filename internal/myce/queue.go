@@ -2390,6 +2390,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if launchCapacityRefusal(r) {
 		q.waitLaunchCapacity(j, r)
+	} else if !r.Success && !oomFailure && cancelledPreparation(r) {
+		// Started is an authorization fence, not proof main executed. A worker
+		// lifecycle cancellation with exact no-main evidence spends no budget.
+		q.requeue(j, "requeued: "+j.ExecutionCause.String(), false)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == launchRefused || r.Interrupted && j.ExecutionCause.Operation == "input_staging") {

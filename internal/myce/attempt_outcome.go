@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -177,6 +178,22 @@ func startFailureOutcome(owner Result, err error) Result {
 			owner.Error = execFormatMessage
 		}
 	}
+	// Several preparation paths return ordinary Go errors rather than recorded
+	// member facts. Retain their safe operation/errno even without diagnostics.
+	if owner.ExecutionCause == nil {
+		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", err))
+	}
+	// Worker shutdown and stop delivery cancel preparation too. Positive proof
+	// that main never ran makes this a withdrawn launch, not a command failure.
+	// Missing/restored evidence must not manufacture that proof.
+	e, c := safeExecutionEvidence(owner.ExecutionEvidence, owner.Attempt), owner.ExecutionCause
+	if errors.Is(err, context.Canceled) && !owner.OutOfMemory && e != nil && e.Main == executionNotStarted && c != nil && c.Operation == "launch" {
+		switch c.Class {
+		case "cancelled", launchRefused, launchFailed, environmentFailed:
+			owner.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: launchRefused, Predicate: "preparation_cancelled"})
+			owner.Interrupted = true
+		}
+	}
 	return owner
 }
 
@@ -275,6 +292,12 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	return withStopProvenance(result, facts.PriorityStop)
 }
 
+func cancelledPreparation(r Result) bool {
+	e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt)
+	c := r.ExecutionCause
+	return r.Interrupted && c != nil && c.Operation == "launch" && c.Class == launchRefused && c.Predicate == "preparation_cancelled" && e != nil && e.Main == executionNotStarted
+}
+
 // Planned intent can annotate a proven interruption, never manufacture one.
 func withStopProvenance(result Result, stop *PriorityPreemption) Result {
 	result.PriorityStop = nil
@@ -313,6 +336,7 @@ func operatorOutcome(result Result, stopped bool) Result {
 // Only these fixed predicates/messages cross the worker boundary. Never derive
 // public text from Error(), paths, submitted commands or environment values.
 var launchPredicateMessages = map[string]string{
+	"preparation_cancelled":                 "worker preparation was cancelled before the main command started",
 	deviceFaultRecoveryTimeout:              "no eligible device recovery within the maximum production start window",
 	"no_eligible_host_enabled":              "no eligible host is enabled",
 	"native_workdir_containment":            rejectionMessages["native_workdir_containment"],

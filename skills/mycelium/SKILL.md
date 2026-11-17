@@ -533,6 +533,14 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   submit again. A failed job stays bound to its submission key: submitting the
   same key returns that failed job (`submission_reused`), and `myce resume` only
   resumes paused jobs, so submit the repeat with a new `--key`.
+  `execution_evidence` applies only to its named attempt: an earlier
+  `command_started: true` does not mean the final attempt ran. Supporting
+  workers preserve startup error classes without optional diagnostics and
+  requeue cancelled preparation with positive no-main-execution evidence
+  without spending retry budget. `prelaunch_cause_missing` means Mycelium
+  retained proof main did not start but lost the cause; give the queue owner
+  the job ID and attempt for lifecycle/result inspection. It is not proof of
+  a payload failure or of a particular maintenance/shutdown cause.
 - **Waiting:** read `myce status JOB_ID` once. Its line gives one reason and one
   `next:` action (`--history` adds the evidence). On releases with staging phase
   telemetry, `myce status JOB_ID --history --json` retains `staging_timings` per
