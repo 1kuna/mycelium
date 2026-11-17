@@ -22,9 +22,13 @@ func launchCustodian(ctx context.Context, c ServiceConfig, dir, id string) error
 	cmd.Env = withoutMyceToken(os.Environ())
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
+		_ = RecordCustodianStartupFailure(c.State, id)
 		return err
 	}
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		_ = cmd.Wait()
+		_ = RecordCustodianStartupFailure(c.State, id)
+	}()
 	return waitCustodian(ctx, dir, id)
 }
 
@@ -32,6 +36,13 @@ func ownCustodianIsolation(id string) (string, error) {
 	b, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		return "", err
+	}
+	return custodianCgroup(b, id)
+}
+
+func custodianCgroup(b []byte, id string) (string, error) {
+	if !validCustodianID(id) {
+		return "", errors.New("invalid detached attempt identity")
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		if !strings.HasPrefix(line, "0::/") {

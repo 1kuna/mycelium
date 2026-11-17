@@ -34,10 +34,11 @@ type Detection struct {
 	GPU        string  `json:"gpu"`
 }
 type MachineProbe struct {
-	Files    fs.FS // Entire filesystem view for injected probes.
-	OS, Arch string
-	Info     func(string) // Optional informational diagnostics; never inventory output.
-	Command  func(context.Context, string, ...string) ([]byte, error)
+	infoState *probeInfoState // Shared by local probes; diagnostics change, capacity is always reprobed.
+	Files     fs.FS           // Entire filesystem view for injected probes.
+	OS, Arch  string
+	Info      func(string) // Optional informational diagnostics; never inventory output.
+	Command   func(context.Context, string, ...string) ([]byte, error)
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 	Glob       func(string) ([]string, error)
@@ -105,7 +106,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return stdout.Bytes(), err
 	}
-	return MachineProbe{XeActivity: nativeXeActivity, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{infoState: &localProbeInfo, XeActivity: nativeXeActivity, Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }

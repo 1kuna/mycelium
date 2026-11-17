@@ -290,3 +290,54 @@ func TestConsolidatedSparkAbsentXPUHealthy(t *testing.T) {
 		t.Fatalf("CUDA-only host unhealthy: %+v %v", status, err)
 	}
 }
+
+// Inventory and launch verification may scan faster after an upgrade. Keep
+// negative-family diagnostics on change without caching hardware or failures.
+func TestConsolidatedProbeInfoOnChange(t *testing.T) {
+	for _, platform := range []string{"cuda", "xpu"} {
+		t.Run(platform, func(t *testing.T) {
+			vendor := "0x10de"
+			if platform == "xpu" {
+				vendor = "0x8086"
+			}
+			p := consolidatedProbe(t, pciFixture{"0000:01:00.0", vendor, "1", "generic", "", true})
+			p.infoState = &probeInfoState{}
+			var notes []string
+			p.Info = func(note string) { notes = append(notes, note) }
+			command := p.Command
+			bad := true
+			calls := 0
+			p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				calls++
+				if platform == "xpu" && name == "nvidia-smi" {
+					if bad {
+						return nil, errors.New("driver has no devices")
+					}
+					return nil, nil
+				}
+				return command(ctx, name, args...)
+			}
+			for i := 0; i < 3; i++ {
+				before := calls
+				if devices, err := p.Accelerators(t.Context()); err != nil || len(devices) != 1 {
+					t.Fatal(devices, err)
+				}
+				if calls <= before {
+					t.Fatal("diagnostic suppression cached hardware capacity")
+				}
+			}
+			if len(notes) != 1 {
+				t.Fatalf("unchanged absence logged repeatedly: %v", notes)
+			}
+			if platform == "xpu" {
+				bad = false
+				_, _ = p.Accelerators(t.Context())
+				bad = true
+				_, _ = p.Accelerators(t.Context())
+				if len(notes) != 2 {
+					t.Fatalf("changed diagnosis not logged: %v", notes)
+				}
+			}
+		})
+	}
+}

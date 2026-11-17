@@ -1333,6 +1333,23 @@ data stays protected. For a slow queue, capture
 [live queue profiles](reference/queue-maintenance.md#opt-in-live-queue-profiling)
 and read the [queue timing log lines](reference/queue-maintenance.md#outages-and-control-timing).
 
+### Detached owner startup failures
+
+Installed workers launch each non-resident attempt in an independent manager
+scope. The CLI validates that exact attempt identity separately from the worker
+service allowlist. An exiting service entry point (or its reaped Linux launcher)
+can publish `custodian_startup_failed` only before the first custodian snapshot,
+which is committed before staging or payload execution. Normal adoption and
+completion then acknowledge the exact attempt's refusal and release, including
+accepted cancellation. An existing snapshot, even corrupt, retains custody.
+
+A missing snapshot or absent scope alone is not release proof. Preserve the
+request and diagnostics, diagnose through the read-only worker journal and
+custodian log, and leave recovery to the rollout owner. Restarting an unchanged
+worker or deleting its request does not repair a startup refusal. Older failed
+launches without a positive refusal receipt remain unresolved custody; upgrading
+alone does not prove their release.
+
 ## Native cleanup custody
 
 If an installed worker retains a finished native attempt after a transient process
