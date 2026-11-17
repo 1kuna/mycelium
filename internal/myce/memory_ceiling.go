@@ -105,7 +105,7 @@ func (w *Worker) initMemoryCeilings() {
 	reason := "requires Linux cgroup v2"
 	if runtime.GOOS == "linux" {
 		reason = "requires a delegated worker service; foreground join is admission-only"
-		if ValidWorkerUnit(w.Unit) {
+		if ValidWorkerUnit(w.Unit) || validCustodianID(w.Custodian) {
 			b, err := os.ReadFile("/proc/self/cgroup")
 			if err == nil {
 				reason = "cgroup v2 service membership unavailable"
