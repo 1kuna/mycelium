@@ -3196,6 +3196,9 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	q.retainAttemptResources(j, report.Resources)
 	retainInputsStagedAt(j, report.InputsStagedAt)
 	retainStagingTimings(j, report.StagingTimings)
+	if report.Started && j.State == "running" && !j.ReleaseConfirmed {
+		j.PreemptionPlacement = nil
+	}
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
@@ -3289,7 +3292,8 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// reservation on the live attempt before charging any resources.
 	selected := j
 	j = q.touchJob(selected.ID)
-	j.PreemptionPlacement = nil
+	// Keep the paid-for placement through preparation and the final worker
+	// launch check. Started is authorization, not proof the command ran.
 	j.Spec.Needs = selected.Spec.Needs
 	j.CPUFallbackFrom = selected.CPUFallbackFrom
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback

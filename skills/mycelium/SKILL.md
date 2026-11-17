@@ -65,6 +65,12 @@ writer. Refused copies with proof no payload ran are reclaimed after release.
 Older orphan copies under a cancelled job expire with its whole checkpoint
 folder, normally 72 hours after the job ends, once every attempt is released.
 
+Work yielded to production stays off that host while the production attempt
+prepares its command, including a launch-capacity retry. Queue start
+authorization alone does not end this hold: the worker must report command
+start or confirm release. Other compatible hosts and unrelated work using spare
+capacity remain eligible; keep the existing job queued.
+
 Job JSON timestamps preserve nanoseconds. `start_latency_seconds` is the wall-time
 difference from `queued` to `started_at`, or from `dependency.ready_at` for a
 dependent job. It uses the timestamps exposed by the API, not process-local
