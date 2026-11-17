@@ -113,6 +113,12 @@ func RecordCustodianStartupFailure(spool, id string) error {
 	j := *req.State.Job
 	s := &workerStore{dir: spool, state: req.State}
 	cause := s.startFailure(j, launchRefused, errCustodianStartup)
+	// A refusal without its durable launch cause must not become a finished
+	// result: ordinary replay could otherwise charge/lose a resumable experiment.
+	var recorded *recordedStartError
+	if !errors.As(cause, &recorded) {
+		return cause
+	}
 	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
 	s.state.Result = &r
 	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})
@@ -398,6 +404,9 @@ func (w Worker) runCustodian(stop context.Context) error {
 		return err
 	}
 	defer unlock()
+	if _, err := os.Lstat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("detached attempt already has custody; refusing repeated launch")
+	}
 	var req custodianRequest
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
