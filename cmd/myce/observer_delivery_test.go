@@ -16,10 +16,32 @@ import (
 	"mycelium/internal/myce"
 )
 
+// Each completed notifier contributes one virtual service unit. Keep the real
+// process/receipt path, but make pacing independent of shell startup and host load.
+type observerDeliveryClock struct {
+	waitClock
+	events    string
+	delivered int
+}
+
+func (c *observerDeliveryClock) Now() time.Time {
+	data, err := os.ReadFile(c.events)
+	if err != nil && !os.IsNotExist(err) {
+		panic(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Discovery also measures local work; give it deterministic nonzero cost.
+	c.now = c.now.Add(time.Millisecond)
+	c.delivered = max(c.delivered, bytes.Count(data, []byte{'\n'}))
+	return c.now.Add(time.Duration(c.delivered) * time.Second)
+}
+
 func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 	root := t.TempDir()
 	events := filepath.Join(root, "events")
-	finished := time.Now().Add(-time.Hour)
+	clock := &observerDeliveryClock{waitClock: waitClock{now: time.Now()}, events: events}
+	finished := clock.Now().Add(-time.Hour)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/wait" {
 			var req myce.WaitRequest
@@ -36,9 +58,9 @@ func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 	defer server.Close()
 	for _, binding := range []string{"a", "b"} {
 		hook := filepath.Join(root, "notify-"+binding)
-		// A measured nonzero delivery cost supplies the pacing signal; no production
-		// rate is tuned to this fixture. Other bindings must still finish this pass.
-		if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat >> "+shellArg(events)+"\nprintf '\\n' >> "+shellArg(events)+"\nsleep 0.03\n"), 0700); err != nil {
+		// The completed event supplies the virtual service cost. Other bindings
+		// must still finish this pass.
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat >> "+shellArg(events)+"\nprintf '\\n' >> "+shellArg(events)+"\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
 		count := 1
@@ -55,7 +77,7 @@ func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 			if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 				t.Fatal(err)
 			}
-			reg := sharedProfileRegistration{Directory: dir, Observer: profileObserver{Queue: server.URL, Notify: hook}, Token: "fixture", Expires: time.Now().Add(time.Hour)}
+			reg := sharedProfileRegistration{Directory: dir, Observer: profileObserver{Queue: server.URL, Notify: hook}, Token: "fixture", Expires: clock.Now().Add(time.Hour)}
 			if err := saveProfileJSON(filepath.Join(root, fmt.Sprintf("%s-%d.json", binding, i)), reg); err != nil {
 				t.Fatal(err)
 			}
@@ -66,17 +88,23 @@ func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	pauses := 0
-	err = runSharedProfileLoop(ctx, root, lock, myce.RealClock{}, func(ctx context.Context, delay time.Duration) error {
+	sawPacedDelivery := false
+	err = runSharedProfileLoop(ctx, root, lock, clock, func(ctx context.Context, delay time.Duration) error {
 		pauses++
 		var state observerDiagnostic
 		if err := readProfileJSON(filepath.Join(root, "observer.status"), &state); err != nil {
 			t.Fatal(err)
 		}
-		if delay <= time.Nanosecond && state.NextDeliveryAt.After(time.Now()) {
+		if delay <= time.Nanosecond && state.NextDeliveryAt.After(clock.Now()) {
 			t.Fatal("paced delivery kept an expired read timer and would busy-poll")
+		}
+		if pauses > 4 {
+			t.Fatal("four completions did not retire after their scheduled delivery passes")
+		}
+		if state.NextDeliveryAt.After(clock.Now()) {
+			sawPacedDelivery = true
 		}
 		if pauses == 1 {
 			data, e := os.ReadFile(events)
@@ -92,10 +120,16 @@ func TestObserverRecoveryPacesEachBinding(t *testing.T) {
 				t.Fatal("paced binding blocked independent delivery", e)
 			}
 		}
-		return waitPause(ctx, 10*time.Millisecond)
+		// Reads are already terminal. Jump directly to the next delivery wake,
+		// including when discovery would otherwise wake earlier.
+		clock.advance(max(delay, state.NextDeliveryAt.Sub(clock.Now())))
+		return ctx.Err()
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !sawPacedDelivery {
+		t.Fatal("nonzero delivery service cost did not pace the backlog")
 	}
 	data, err := os.ReadFile(events)
 	if err != nil {
