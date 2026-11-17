@@ -11,15 +11,45 @@ import (
 )
 
 func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
-	root := t.TempDir()
-	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
+	q, clock := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "resolve-nas-fixture"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "resolve-nas-fixture"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// This checks the real HTTP/worker metadata round trip, not elapsed-time
+	// freshness. A pending check and its report span two heartbeats; the dev
+	// fixture's 10ms cadence gave them a load-dependent expiry while await polled.
+	// Drive both clocks in explicit 1ms test steps, independent of host I/O.
+	// Even 60s of 5ms await polls advances at most 12s of the fixture's 60s
+	// freshness window. Heartbeats still become due, without expiring evidence.
+	// TestResolveNASCacheFreshnessAndSession separately exercises expiration.
+	w := Worker{
+		Clock: clock, EnvironmentLimit: 1 << 30, StateDir: t.TempDir(),
+		CheckpointRoot: q.root, Client: client,
+		Machine: machine("worker", "cpu", "fixture-worker-host"), Interval: 10 * time.Millisecond,
+		// Match StartDev's fake CPU isolation; metadata needs no host hardware.
+		CPUIsolationProbe: func(context.Context) error { return nil },
 	}
-	defer d.Close()
-	client := Client{URL: d.URL, Token: "resolve-nas-fixture"}
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		cancel()
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error(err)
+				}
+				return true
+			default:
+				return false
+			}
+		})
+	}()
 	await(t, func() bool {
-		snap, err := d.Queue.Snapshot()
+		clock.Advance(time.Millisecond)
+		snap, err := q.Snapshot()
 		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
 	})
 	s := cpuResolveSpec()
@@ -27,6 +57,7 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	var report ResolveReport
 	request := ResolveRequest{Spec: s, InspectNAS: true}
 	await(t, func() bool {
+		clock.Advance(time.Millisecond)
 		report = ResolveReport{}
 		if err := client.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
 			t.Fatal(err)
@@ -36,9 +67,9 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	if len(report.Targets) != 1 || report.Targets[0].Eligible || report.Targets[0].NASInputs[0].State != "missing" || report.Targets[0].NASInputs[0].ObservedAt.IsZero() {
 		t.Fatalf("missing source appeared ready: %+v", report)
 	}
-	d.Queue.mu.Lock()
-	jobs, reservations := len(d.Queue.s.Jobs), len(d.Queue.s.Reservations)
-	d.Queue.mu.Unlock()
+	q.mu.Lock()
+	jobs, reservations := len(q.s.Jobs), len(q.s.Reservations)
+	q.mu.Unlock()
 	if jobs+reservations != 0 {
 		t.Fatal("inspection submitted or reserved work")
 	}
@@ -109,6 +140,29 @@ func TestResolveNASCacheFreshnessAndSession(t *testing.T) {
 	check(t, q, m, nil)
 	if resolve().Targets[0].NASInputs[0].State != "pending" {
 		t.Fatal("expired signal reused")
+	}
+	// A pending check also expires. Even fresh intervening heartbeats cannot
+	// make a report for the retired ID observable; a new check must complete.
+	// This is why the metadata round-trip fixture above controls elapsed time.
+	checks = cache.checkin(Checkin{Machine: m})
+	if len(checks) != 1 {
+		t.Fatal(checks)
+	}
+	for range 2 {
+		clock.Advance(2 * time.Minute)
+		check(t, q, m, nil)
+	}
+	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{{ID: checks[0].ID, State: "missing"}}})
+	if got := resolve().Targets[0]; got.Freshness != "fresh" || got.NASInputs[0].State != "pending" || !got.NASInputs[0].ObservedAt.IsZero() {
+		t.Fatal("expired pending report reused or worker unexpectedly stale", got)
+	}
+	next := cache.checkin(Checkin{Machine: m})
+	if len(next) != 1 || next[0].ID == checks[0].ID {
+		t.Fatal("expired check identity reused", next)
+	}
+	cache.checkin(Checkin{Machine: m, NASPathReports: []NASPathReport{{ID: next[0].ID, State: "missing"}}})
+	if got := resolve().Targets[0]; got.Eligible || got.NASInputs[0].State != "missing" || got.NASInputs[0].ObservedAt.IsZero() {
+		t.Fatal("fresh replacement report lost", got)
 	}
 }
 
