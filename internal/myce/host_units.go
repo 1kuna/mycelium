@@ -26,7 +26,16 @@ func ValidWorkerUnit(unit string) bool {
 	return true
 }
 
-func CurrentWorkerUnit() (string, error) {
+// A custodian is deliberately outside the worker service. Validate its exact
+// manager identity rather than broadening the worker-service allowlist.
+func CurrentWorkerUnit(custodian string) (string, error) {
+	if custodian != "" {
+		if !validCustodianID(custodian) {
+			return "", errors.New("invalid detached attempt identity")
+		}
+		_, err := ownCustodianIsolation(custodian)
+		return "", err
+	}
 	if os.Getenv("INVOCATION_ID") == "" {
 		return "", nil
 	}

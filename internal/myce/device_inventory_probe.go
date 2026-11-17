@@ -7,12 +7,41 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// One process may enumerate for inventory, fingerprints and launch verification.
+// Suppress unchanged diagnostics across all those callers, never the probes.
+var localProbeInfo probeInfoState
+
+type probeInfoState struct {
+	mu       sync.Mutex
+	previous map[string]bool
+}
+
+func (s *probeInfoState) report(notes []string, emit func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]bool, len(notes))
+	for _, note := range notes {
+		if !s.previous[note] && !next[note] {
+			emit(note)
+		}
+		next[note] = true
+	}
+	s.previous = next
+}
 
 // Accelerators is the single device probe for onboarding, refresh and launch.
 // Physical PCI facts establish vendors/topology; runtimes establish usability.
 func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error) {
 	p = p.withFilesystem()
+	if p.infoState != nil && p.Info != nil {
+		emit := p.Info
+		var notes []string
+		p.Info = func(note string) { notes = append(notes, note) }
+		defer func() { p.infoState.report(notes, emit) }()
+	}
 	if p.OS != "linux" && p.OS != "darwin" || p.Arch != "amd64" && p.Arch != "arm64" {
 		return nil, preflightError("hardware_unsupported", "host", "supported Linux/macOS architecture required")
 	}

@@ -419,7 +419,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	workerUnit := ""
 	if args[0] == "join" {
 		var e error
-		workerUnit, e = myce.CurrentWorkerUnit()
+		workerUnit, e = myce.CurrentWorkerUnit(*custodian)
 		if e != nil {
 			return e
 		}

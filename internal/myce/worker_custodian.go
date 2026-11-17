@@ -86,6 +86,38 @@ func custodianUnit(id string) string       { return "myce-attempt-" + id + ".sco
 // read another execution's control, result or adoption authority.
 func custodianDir(spool string) string { return spool + ".custody" }
 
+var errCustodianStartup = errors.New("custodian_startup_failed: detached owner exited before startup")
+
+// RecordCustodianStartupFailure is called by the exiting service entry point,
+// or after its launcher has been reaped. runCustodian commits its first snapshot
+// before any input writer or payload can run. Missing/corrupt evidence otherwise
+// remains uncertain custody; a log line or missing PID never proves release.
+func RecordCustodianStartupFailure(spool, id string) error {
+	if !validCustodianID(id) {
+		return errors.New("invalid detached attempt identity")
+	}
+	dir := custodianDir(spool)
+	if _, err := os.Stat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("detached startup is not proven unstarted")
+	}
+	var req custodianRequest
+	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
+		return err
+	}
+	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.State.Session != req.State.Job.Session || req.Machine.ID != req.State.Job.Machine {
+		return errors.New("custodian request identity mismatch")
+	}
+	if req.State.PID != 0 || req.State.CustodyID != "" || req.State.LaunchPending || len(req.State.Groups) != 0 || req.State.Preparation != "" || req.State.Cgroup != "" || req.State.Custodian != "" {
+		return errors.New("detached request retains prior execution custody")
+	}
+	j := *req.State.Job
+	s := &workerStore{dir: spool, state: req.State}
+	cause := s.startFailure(j, launchRefused, errCustodianStartup)
+	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: runExecution(&j), Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
+	s.state.Result = &r
+	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})
+}
+
 func waitCustodian(ctx context.Context, dir, id string) error {
 	// Same one-minute activation allowance as an installed service. Expiry
 	// leaves durable custody; it never kills or repeats the accepted launch.
@@ -116,6 +148,15 @@ func readCustodianJSON(dir, name string, out any) error {
 
 func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*process, error) {
 	if s.state.Custodian != "" {
+		// Stop preparation even if adoption has not yet observed the helper.
+		// The durable exact-attempt control is consumed once startup completes.
+		if ctx.Err() != nil {
+			now := w.Clock.Now()
+			control := custodianControl{ID: s.state.Custodian, Execution: runExecution(&j), Session: j.Session, StopAt: &now, Kill: true}
+			if err := saveWorkerJSON(custodianDir(s.dir), custodianName(s.state.Custodian, "control"), control); err != nil {
+				return nil, fmt.Errorf("%w: stop delivery pending", errWorkerCheckpoint)
+			}
+		}
 		p, err := w.adoptCustodian(s) // An uncertain launch is never repeated.
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)

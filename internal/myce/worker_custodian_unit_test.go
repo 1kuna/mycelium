@@ -182,3 +182,129 @@ func TestCustodianPreparationFailureRetainsHelperCustody(t *testing.T) {
 		t.Fatal("missing helper receipt incorrectly proved release")
 	}
 }
+
+// The service entry point can fail before runCustodian publishes its first
+// snapshot (#1709). A reaped pre-snapshot launch must become an exact finished
+// refusal, so the ordinary adoption/completion path releases even a cancelled
+// assignment. Missing observation alone must never manufacture that proof.
+func TestCustodianStartupFailureReleasesCancelledAssignment(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	submit(t, q, spec("experiment"))
+	j := check(t, q, m, nil).Job
+	if j == nil {
+		t.Fatal("no assignment")
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	dir, id := t.TempDir(), ID()
+	custody := custodianDir(dir)
+	if err := os.Mkdir(custody, 0700); err != nil {
+		t.Fatal(err)
+	}
+	req := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: m, State: workerState{Job: j, Session: j.Session}}
+	if err := saveWorkerJSON(custody, custodianName(id, "request"), req); err != nil {
+		t.Fatal(err)
+	}
+	store := &workerStore{dir: dir, state: req.State}
+	store.state.Custodian = id
+	w := Worker{Clock: clock}
+	if _, err := w.adoptCustodian(store); err == nil {
+		t.Fatal("missing snapshot released uncertain custody")
+	}
+	if err := RecordCustodianStartupFailure(dir, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitCustodian(t.Context(), custody, id); err != nil {
+		t.Fatal(err)
+	}
+	p, err := w.adoptCustodian(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.custodian.detach()
+	select {
+	case f := <-p.done:
+		r := f.result
+		if r.ReleasePending || r.ExecutionCause == nil || !r.ExecutionCause.PrelaunchRefused || r.ExecutionEvidence == nil || r.ExecutionEvidence.Main != executionNotStarted || r.Error != errCustodianStartup.Error() {
+			t.Fatalf("startup failure lost refusal/release evidence: %+v", r)
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		got := job(t, q, j.ID)
+		if got.State != "cancelled" || !got.ReleaseConfirmed || got.CommandStarted != nil && *got.CommandStarted {
+			t.Fatalf("cancel remained pending: %+v", got)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("finished startup refusal did not release promptly")
+	}
+}
+
+func TestCustodianStartupFailurePreservesExistingCustody(t *testing.T) {
+	for _, kind := range []string{"live", "finished", "corrupt", "wrong-request"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, id := t.TempDir(), ID()
+			custody := custodianDir(dir)
+			if err := os.Mkdir(custody, 0700); err != nil {
+				t.Fatal(err)
+			}
+			j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
+			req := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: Machine{ID: j.Machine}, State: workerState{Job: &j, Session: j.Session}}
+			if kind == "wrong-request" {
+				req.ID = ID()
+			}
+			if err := saveWorkerJSON(custody, custodianName(id, "request"), req); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(custody, custodianName(id, "snapshot"))
+			var before []byte
+			if kind != "wrong-request" {
+				before = []byte(`{"finished":false}`)
+				if kind == "finished" {
+					before = []byte(`{"finished":true}`)
+				}
+				if kind == "corrupt" {
+					before = []byte(`{`)
+				}
+				if err := os.WriteFile(path, before, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := RecordCustodianStartupFailure(dir, id); err == nil {
+				t.Fatal("uncertain custody overwritten")
+			}
+			after, err := os.ReadFile(path)
+			if kind == "wrong-request" {
+				if !os.IsNotExist(err) {
+					t.Fatal("wrong identity published", err)
+				}
+			} else if string(after) != string(before) {
+				t.Fatal("snapshot changed")
+			}
+		})
+	}
+}
+
+func TestCustodianUnadoptedCancellationPersistsControl(t *testing.T) {
+	dir, id := t.TempDir(), ID()
+	if err := os.Mkdir(custodianDir(dir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
+	s := &workerStore{dir: dir, state: workerState{Job: &j, Session: j.Session, Custodian: id}}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	clock := &workerFakeClock{now: time.Unix(100, 0)}
+	if _, err := (Worker{Clock: clock}).startCustodian(ctx, s, j); !errors.Is(err, errWorkerCheckpoint) {
+		t.Fatal(err)
+	}
+	var c custodianControl
+	if err := readCustodianJSON(custodianDir(dir), custodianName(id, "control"), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.ID != id || c.Execution != runExecution(&j) || c.Session != j.Session || c.StopAt == nil || !c.StopAt.Equal(clock.Now()) || !c.Kill {
+		t.Fatalf("cancellation lost: %+v", c)
+	}
+}

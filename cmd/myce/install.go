@@ -445,7 +445,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	fmt.Println("Installed. Run myce doctor to verify prerequisites.")
 	return nil
 }
-func serviceCommand(args []string) error {
+func serviceCommand(args []string) (serviceErr error) {
 	f := flag.NewFlagSet("service", flag.ContinueOnError)
 	path := f.String("config", "", "private installed configuration")
 	custodian := f.String("attempt-custodian", "", "internal detached attempt owner")
@@ -467,6 +467,13 @@ func serviceCommand(args []string) error {
 	if e != nil {
 		return e
 	}
+	defer func() {
+		if serviceErr != nil && *custodian != "" {
+			// Only a pre-snapshot failure can prove no payload began. Never
+			// include config contents, paths or subprocess errors in the receipt.
+			_ = myce.RecordCustodianStartupFailure(c.State, *custodian)
+		}
+	}()
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
 	}
