@@ -48,10 +48,14 @@ func TestCustodianServiceHelper(t *testing.T) {
 	if err = json.Unmarshal(data, &c); err != nil {
 		t.Fatal(err)
 	}
+	unit, err := CurrentWorkerUnit(id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := machine(c.Name, "fake", c.HostID)
 	m.HostMemoryBudgetGB, m.HostMemoryMeasured = 8, true
 	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
-	w := Worker{EnvironmentLimit: 1 << 28, Clock: RealClock{}, StateDir: c.State, ServiceConfig: &c, Custodian: id, Unit: c.Service, Client: Client{URL: c.Queue, Token: "custodian-test"}, Machine: m, Interval: 25 * time.Millisecond, CPUIsolationProbe: func(context.Context) error { return nil }}
+	w := Worker{EnvironmentLimit: 1 << 28, Clock: RealClock{}, StateDir: c.State, ServiceConfig: &c, Custodian: id, Unit: unit, Client: Client{URL: c.Queue, Token: "custodian-test"}, Machine: m, Interval: 25 * time.Millisecond, CPUIsolationProbe: func(context.Context) error { return nil }}
 	if runtime.GOOS == "darwin" {
 		probeguard.Before = nil // Explicit native RSS sensor tier; inventory stays synthetic.
 		w.processMemory = localProcessMemory()

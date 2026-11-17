@@ -86,6 +86,38 @@ func custodianUnit(id string) string       { return "myce-attempt-" + id + ".sco
 // read another execution's control, result or adoption authority.
 func custodianDir(spool string) string { return spool + ".custody" }
 
+var errCustodianStartup = errors.New("custodian_startup_failed: detached owner exited before startup")
+
+// RecordCustodianStartupFailure is called by the exiting service entry point,
+// or after its launcher has been reaped. runCustodian commits its first snapshot
+// before any input writer or payload can run. Missing/corrupt evidence otherwise
+// remains uncertain custody; a log line or missing PID never proves release.
+func RecordCustodianStartupFailure(spool, id string) error {
+	if !validCustodianID(id) {
+		return errors.New("invalid detached attempt identity")
+	}
+	dir := custodianDir(spool)
+	if _, err := os.Stat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("detached startup is not proven unstarted")
+	}
+	var req custodianRequest
+	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
+		return err
+	}
+	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.State.Session != req.State.Job.Session || req.Machine.ID != req.State.Job.Machine {
+		return errors.New("custodian request identity mismatch")
+	}
+	if req.State.PID != 0 || req.State.CustodyID != "" || req.State.LaunchPending || len(req.State.Groups) != 0 || req.State.Preparation != "" || req.State.Cgroup != "" || req.State.Custodian != "" {
+		return errors.New("detached request retains prior execution custody")
+	}
+	j := *req.State.Job
+	s := &workerStore{dir: spool, state: req.State}
+	cause := s.startFailure(j, launchRefused, errCustodianStartup)
+	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
+	s.state.Result = &r
+	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})
+}
+
 func waitCustodian(ctx context.Context, dir, id string) error {
 	// Same one-minute activation allowance as an installed service. Expiry
 	// leaves durable custody; it never kills or repeats the accepted launch.
@@ -153,6 +185,28 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 		return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)
 	}
 	return p, nil
+}
+
+// A queue stop is authority to interrupt an unadopted helper; cancellation of
+// the worker's own context is not (service replacement must leave it running).
+func persistUnadoptedCustodianStop(s *workerStore, j Job, d AttemptDirective, now time.Time) error {
+	if !d.Stop || s.state.Custodian == "" {
+		return nil
+	}
+	id := s.state.Custodian
+	control := custodianControl{ID: id, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}
+	var previous custodianControl
+	if readCustodianJSON(custodianDir(s.dir), custodianName(id, "control"), &previous) == nil && previous.ID == id && previous.Execution == control.Execution && previous.Session == j.Session {
+		control = previous
+	}
+	deadline := now.Add(time.Duration(max(0, d.GraceSeconds) * float64(time.Second)))
+	if control.StopAt == nil || deadline.Before(*control.StopAt) {
+		control.StopAt = &deadline
+	}
+	control.Kill = control.Kill || d.Kill
+	control.UserCancel = control.UserCancel || d.UserCancel
+	control.PriorityStop = d.PriorityStop
+	return saveWorkerJSON(custodianDir(s.dir), custodianName(id, "control"), control)
 }
 
 func (w Worker) adoptCustodian(s *workerStore) (*process, error) {

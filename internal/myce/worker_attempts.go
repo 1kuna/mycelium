@@ -325,7 +325,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					s.state.Result = &r
 				} else if s.state.Custodian != "" || !d.Hold && !admissionBlocked && !now.Before(preparationRetryAt) {
 					var err error
-					p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
+					if err = persistUnadoptedCustodianStop(s, a.job, d, now); err == nil {
+						p, err = w.startAssignedAttempt(prepareCtx, s, a.job)
+					} else {
+						err = fmt.Errorf("%w: detached stop persistence pending", errWorkerCheckpoint)
+					}
 					if s.state.Custodian != "" {
 						a.mu.Lock()
 						a.detached = true

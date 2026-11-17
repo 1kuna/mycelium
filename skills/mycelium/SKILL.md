@@ -572,6 +572,10 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   its resources are released (75 while release is pending); `command_started:
   false` means no command began. `myce pause JOB_ID --reason TEXT` holds your
   own queued job, and `myce resume JOB_ID` keeps its place.
+  A `custodian_startup_failed` finding means the detached command owner exited
+  before staging or payload launch; supporting workers release that exact
+  assignment through normal completion. Missing custodian observations alone
+  retain custody and need the queue owner's diagnosis; keep the existing job ID.
 
 Finished jobs' files are kept for 3 days by default, then expire
 (`result_expired`); download results within that window. The job record itself
