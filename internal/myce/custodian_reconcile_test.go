@@ -39,7 +39,7 @@ func TestCustodianStartupRecovery(t *testing.T) {
 			m := machine("worker", "fake")
 			submitted := submit(t, q, spec("experiment"))
 			// Model progress retained from a prior attempt, not this unstarted launch.
-			q.s.Jobs[submitted.ID].Progress = 0.5
+			q.s.Jobs[submitted.ID].Progress = 5
 			j := check(t, q, m, nil).Job
 			if j == nil {
 				t.Fatal("missing assignment")
