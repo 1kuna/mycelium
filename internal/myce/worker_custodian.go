@@ -113,7 +113,7 @@ func RecordCustodianStartupFailure(spool, id string) error {
 	j := *req.State.Job
 	s := &workerStore{dir: spool, state: req.State}
 	cause := s.startFailure(j, launchRefused, errCustodianStartup)
-	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: runExecution(&j), Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
+	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
 	s.state.Result = &r
 	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})
 }
@@ -152,7 +152,7 @@ func (w Worker) startCustodian(ctx context.Context, s *workerStore, j Job) (*pro
 		// The durable exact-attempt control is consumed once startup completes.
 		if ctx.Err() != nil {
 			now := w.Clock.Now()
-			control := custodianControl{ID: s.state.Custodian, Execution: runExecution(&j), Session: j.Session, StopAt: &now, Kill: true}
+			control := custodianControl{ID: s.state.Custodian, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, StopAt: &now, Kill: true}
 			if err := saveWorkerJSON(custodianDir(s.dir), custodianName(s.state.Custodian, "control"), control); err != nil {
 				return nil, fmt.Errorf("%w: stop delivery pending", errWorkerCheckpoint)
 			}
