@@ -11,15 +11,32 @@ import (
 )
 
 func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
-	root := t.TempDir()
-	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), NASCheckpoints: true, Token: "resolve-nas-fixture", Interval: 10 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	client := Client{URL: d.URL, Token: "resolve-nas-fixture"}
+	q, clock := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "resolve-nas-fixture"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "resolve-nas-fixture"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// This checks the real HTTP/worker metadata round trip, not elapsed-time
+	// freshness. A pending check and its report span two heartbeats; the dev
+	// fixture's 10ms cadence gave them a load-dependent expiry while await polled.
+	// Freeze both clocks so neither the pending ID nor its observation ages out.
+	// TestResolveNASCacheFreshnessAndSession separately exercises expiration.
+	w := Worker{Clock: clock, EnvironmentLimit: 1 << 30, StateDir: t.TempDir(), CheckpointRoot: q.root, Client: client, Machine: machine("worker", "cpu", "fixture-worker-host"), Interval: 10 * time.Millisecond}
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(testWaitTimeout):
+			t.Error("NAS inspection worker did not stop")
+		}
+	}()
 	await(t, func() bool {
-		snap, err := d.Queue.Snapshot()
+		snap, err := q.Snapshot()
 		return err == nil && len(snap.Machines) > 0 && snap.Machines[0].SharedInputCache != nil
 	})
 	s := cpuResolveSpec()
@@ -36,9 +53,9 @@ func TestResolveNASMissingWorkerPathBeforeSubmission(t *testing.T) {
 	if len(report.Targets) != 1 || report.Targets[0].Eligible || report.Targets[0].NASInputs[0].State != "missing" || report.Targets[0].NASInputs[0].ObservedAt.IsZero() {
 		t.Fatalf("missing source appeared ready: %+v", report)
 	}
-	d.Queue.mu.Lock()
-	jobs, reservations := len(d.Queue.s.Jobs), len(d.Queue.s.Reservations)
-	d.Queue.mu.Unlock()
+	q.mu.Lock()
+	jobs, reservations := len(q.s.Jobs), len(q.s.Reservations)
+	q.mu.Unlock()
 	if jobs+reservations != 0 {
 		t.Fatal("inspection submitted or reserved work")
 	}
