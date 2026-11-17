@@ -47,6 +47,11 @@ func jobFinding(j *Job, rawReason string) *JobFinding {
 	case "failed":
 		return failedJobFinding(j, rawReason)
 	case "queued", "running", "stopping", "paused":
+		if c := j.ExecutionCause; c != nil && c.Operation == "launch" && c.Predicate == "preparation_cancelled" {
+			return &JobFinding{"launch_interrupted", findingOwnerMycelium,
+				"Mycelium cancelled preparation before your command started; the job requeued without charging a command failure or infrastructure loss.",
+				"keep the same job and key; report a persistent interruption to the queue owner."}
+		}
 		if f := checkpointStorageFinding(j); f != nil {
 			return f
 		}
@@ -127,8 +132,22 @@ func failedJobFinding(j *Job, raw string) *JobFinding {
 	if f := signalFinding(j); f != nil {
 		return f
 	}
+	if cause != nil {
+		boundary := ""
+		if e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt); e != nil && e.Main == executionNotStarted {
+			boundary = " before the main command started"
+		}
+		return &JobFinding{"recorded_failure", findingOwnerUnknown,
+			fmt.Sprintf("Mycelium recorded a failure at %s (%s)%s; these facts alone do not establish who caused it.", cause.Operation, cause.Class, boundary),
+			"report the job ID and attempt to the queue owner to inspect the recorded boundary and worker lifecycle evidence."}
+	}
 	if !strings.HasPrefix(raw, "command failed: ") && !strings.HasPrefix(raw, "execution failed") {
 		return nil // Lifecycle decisions with their own plain reason (deadlines, checks).
+	}
+	if e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt); e != nil && e.Main == executionNotStarted {
+		return &JobFinding{"prelaunch_cause_missing", findingOwnerMycelium,
+			"The attempt failed before your main command started, but Mycelium did not retain the startup failure cause; this is missing infrastructure evidence, not a recorded payload exit.",
+			"report the job ID and attempt to the queue owner to inspect worker lifecycle logs and the saved result; optional diagnostics are not required for startup causes."}
 	}
 	return &JobFinding{"cause_unknown", findingOwnerUnknown,
 		"The attempt failed, but Mycelium recorded no exit code, signal, guard stop or infrastructure fault for it.",
@@ -304,6 +323,10 @@ func launchFinding(c *RuntimeCause) *JobFinding {
 		return &JobFinding{"launch_" + c.Predicate, findingOwnerJob,
 			"Your command never started: " + c.Reason + ".",
 			"fix the command or environment declaration, then resubmit."}
+	case c.Operation == "launch":
+		return &JobFinding{"launch_failed", findingOwnerUnknown,
+			fmt.Sprintf("Mycelium recorded a startup failure at %s before the main command started (%s); no payload exit is established.", c.Operation, c.Class),
+			"report the job ID and attempt to the queue owner to inspect startup and worker lifecycle evidence."}
 	}
 	return nil
 }

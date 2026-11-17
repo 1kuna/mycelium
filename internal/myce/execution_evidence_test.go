@@ -11,9 +11,114 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// #1688: worker-root cancellation returned from startup without a recorded
+// member fact. Restart replay published it as a terminal command failure.
+func TestExecutionEvidencePreparationCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name, priority          string
+		authorized, environment bool
+	}{
+		{"unstarted", "experiment", false, false},
+		{"authorized", "experiment", true, false},
+		{"environment", "production", false, true},
+		{"authorized_environment", "production", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			j := submit(t, q, spec(tc.priority))
+			for range 4 { // More interruptions than the infrastructure retry budget.
+				offer := check(t, q, m, nil).Job
+				if offer == nil || offer.ID != j.ID {
+					t.Fatal("missing retry", offer)
+				}
+				if tc.authorized {
+					if err := q.Started(result(offer, false)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				store := &workerStore{dir: t.TempDir()}
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				_, err := (Worker{Clock: clock}).startContext(ctx, store, *offer)
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("missing startup cancellation", err)
+				}
+				r := startFailureOutcome(result(offer, false), err)
+				if tc.environment {
+					r = startFailureOutcome(result(offer, false), &executionEvidenceError{store.startFailureAt(*offer, environmentFailed, context.Canceled, clock.Now()), r.ExecutionEvidence})
+				}
+				if !cancelledPreparation(r) {
+					t.Fatalf("lost boundary/cause: %+v", r)
+				}
+				// Durable result replay after restart must keep the typed cause.
+				data, err := json.Marshal(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &r); err != nil {
+					t.Fatal(err)
+				}
+				clock.Advance(time.Second)
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				got := job(t, q, j.ID)
+				if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+					t.Fatalf("lifecycle cancellation spent retry budget: %+v", got)
+				}
+				last := got.AttemptHistory[len(got.AttemptHistory)-1]
+				if !last.Interrupted || last.ExecutionCause == nil || last.ExecutionCause.Predicate != "preparation_cancelled" || last.ExecutionEvidence.Main != executionNotStarted {
+					t.Fatal("history lost cause", last)
+				}
+				if f := statusJobValue(got).Finding; f == nil || f.Code != "launch_interrupted" || f.Owner != findingOwnerMycelium {
+					t.Fatal("status lost cause", f)
+				}
+			}
+		})
+	}
+}
+
+func TestExecutionEvidenceStartupErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{"storage", &os.PathError{Op: "mkdir", Path: "/private/startup", Err: syscall.ENOSPC}, "storage_full"},
+		{"permissions", &os.PathError{Op: "mkdir", Path: "/private/startup", Err: syscall.EACCES}, "permission_denied"},
+		{"missing", os.ErrNotExist, "not_found"},
+		{"cancelled_without_proof", context.Canceled, "cancelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}}, tc.err)
+			if c := safeRuntimeCause(r.ExecutionCause); c == nil || c.Operation != "launch" || c.Class != tc.class || r.Interrupted {
+				t.Fatalf("lost error or invented interruption: %+v", r)
+			}
+			f := statusJobValue(&Job{Attempt: 2, State: "failed", Reason: "command failed: " + tc.err.Error(), ExecutionCause: r.ExecutionCause}).Finding
+			if f == nil || f.Code != "launch_failed" || strings.Contains(f.Text(), "/private") {
+				t.Fatal(f)
+			}
+		})
+	}
+	for _, state := range []string{executionUnknown, executionMayHaveRun} {
+		e := unstartedExecution(2)
+		e.Main = state
+		r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}}, &executionEvidenceError{context.Canceled, e})
+		if r.Interrupted || cancelledPreparation(r) {
+			t.Fatal("invented no-main proof", r)
+		}
+	}
+	r := startFailureOutcome(Result{Execution: Execution{Attempt: 2}, ExecutionEvidence: unstartedExecution(1)}, context.Canceled)
+	if r.Interrupted || cancelledPreparation(r) {
+		t.Fatal("stale no-main proof changed outcome", r)
+	}
+}
 
 func TestExecutionEvidenceDisabledHost(t *testing.T) {
 	q, _ := fixture(t)

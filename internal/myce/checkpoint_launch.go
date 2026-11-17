@@ -40,7 +40,12 @@ func (s *workerStore) waitCheckpointPreparation(ctx context.Context) error {
 	}
 }
 
-func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job) (*process, error) {
+func (w Worker) startAssignedAttempt(ctx context.Context, s *workerStore, j Job) (p *process, startErr error) {
+	defer func() {
+		if startErr != nil {
+			startErr = &executionEvidenceError{startErr, safeExecutionEvidence(s.startExecutionEvidence(j), j.Attempt)}
+		}
+	}()
 	// Resident bridges depend on the check-in worker's model runtime. This
 	// includes qualification attempts carrying the frozen resident binding.
 	if j.Spec.Resident == nil && w.detachedAttemptSupported() && w.ServiceConfig != nil && w.ServiceConfig.Config != "" && w.ServiceConfig.Binary != "" && w.Custodian == "" {

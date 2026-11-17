@@ -10,6 +10,7 @@ import (
 // copy worker text (the "/private" marker) into it.
 func TestJobFindingsFixtures(t *testing.T) {
 	zero, three := 0, 3
+	started := true
 	private := "/private/worker/path secret-ish text"
 	for _, tc := range []struct {
 		name, code, owner string
@@ -34,6 +35,9 @@ func TestJobFindingsFixtures(t *testing.T) {
 		{"segfault", "signal_crash", findingOwnerJob, Job{State: "failed", Attempt: 1, Reason: "command failed: " + private,
 			AttemptHistory: []AttemptOutcome{{Attempt: 1, SignalEvidence: &SignalEvidence{Signal: "SIGSEGV", Attribution: "payload_pid"}}}}},
 		{"untyped failure", "cause_unknown", findingOwnerUnknown, Job{State: "failed", Reason: "command failed: " + private}},
+		{"unstarted missing cause", "prelaunch_cause_missing", findingOwnerMycelium, Job{State: "failed", Attempt: 7, CommandStarted: &started, Reason: "command failed: " + private, ExecutionEvidence: unstartedExecution(7)}},
+		{"stale unstarted evidence", "cause_unknown", findingOwnerUnknown, Job{State: "failed", Attempt: 7, Reason: "command failed: " + private, ExecutionEvidence: unstartedExecution(6)}},
+		{"typed startup boundary", "recorded_failure", findingOwnerUnknown, Job{State: "failed", Attempt: 7, Reason: "command failed: " + private, ExecutionEvidence: unstartedExecution(7), ExecutionCause: &RuntimeCause{Operation: "start_handoff", Class: "timeout"}}},
 		{"upstream failed", "upstream_failed", findingOwnerJob, Job{State: "failed", DiagnosticCode: "upstream_failed", Reason: "producer piece has no accepted outputs"}},
 		{"healthy", "", "", Job{State: "succeeded", Losses: 1}},
 		{"cancelled", "", "", Job{State: "cancelled", Reason: "cancel requested"}},
