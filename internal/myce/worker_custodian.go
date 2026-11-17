@@ -113,6 +113,12 @@ func RecordCustodianStartupFailure(spool, id string) error {
 	j := *req.State.Job
 	s := &workerStore{dir: spool, state: req.State}
 	cause := s.startFailure(j, launchRefused, errCustodianStartup)
+	// A refusal without its durable launch cause must not become a finished
+	// result: ordinary replay could otherwise charge/lose a resumable experiment.
+	var recorded *recordedStartError
+	if !errors.As(cause, &recorded) {
+		return cause
+	}
 	r := startFailureOutcome(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: errCustodianStartup.Error()}, &executionEvidenceError{cause, unstartedExecution(j.Attempt)})
 	s.state.Result = &r
 	return saveWorkerJSON(dir, custodianName(id, "snapshot"), custodianSnapshot{Protocol: custodianProtocol, ID: id, Finished: true, State: s.state})

@@ -94,7 +94,7 @@ func TestCustodianStartupRecovery(t *testing.T) {
 }
 
 func TestCustodianStartupRecoveryRetainsUncertainty(t *testing.T) {
-	for _, kind := range []string{"missing-log", "substring", "extra-log", "bad-time", "snapshot", "corrupt-snapshot", "dangling-snapshot", "staging", "state-mismatch", "duplicate", "request-custody", "worker-custody", "writer", "manager", "worker-lock", "owner-lock", "expired"} {
+	for _, kind := range []string{"missing-log", "substring", "extra-log", "bad-time", "snapshot", "corrupt-snapshot", "dangling-snapshot", "staging", "state-mismatch", "duplicate", "request-custody", "worker-custody", "writer", "manager", "outcome-write", "worker-lock", "owner-lock", "expired"} {
 		t.Run(kind, func(t *testing.T) {
 			j := &Job{ID: ID(), Attempt: 3, Machine: "worker", Session: "session"}
 			dir, id := custodianRecoveryFixture(t, j)
@@ -172,6 +172,10 @@ func TestCustodianStartupRecoveryRetainsUncertainty(t *testing.T) {
 				}
 				r.State.Preparation = "builder"
 				if err := saveWorkerJSON(custody, custodianName(id, "request"), r); err != nil {
+					t.Fatal(err)
+				}
+			case "outcome-write":
+				if err := os.Mkdir(filepath.Join(dir, "launch-"+j.ID+"-3.outcome.json"), 0700); err != nil {
 					t.Fatal(err)
 				}
 			case "manager":
