@@ -75,6 +75,8 @@ func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
 
 // A momentarily stale authorization (a late proof) is asked again within the
 // launch; a persistent one leaves no receipt and the next poll refetches.
+// f3a9fded uses this same control flow: exhausting typed stale responses does
+// not become fleet_authorization_refused, and precedes artifact download.
 func TestFleetFailureStaleAuthorizationRetriesThenRefetches(t *testing.T) {
 	f := newFleetInstallFixture(t, "darwin")
 	f.denyAt, f.denyCode = 1, "fleet_instruction_stale"
@@ -94,9 +96,13 @@ func TestFleetFailureStaleAuthorizationRetriesThenRefetches(t *testing.T) {
 	launch := func(ctx context.Context, c ServiceConfig, i FleetUpdateInstruction) error {
 		return launchFleetUpdate(ctx, c, i, f.deps)
 	}
+	started := f.deps.health.Clock.Now()
 	result := pollFleetRuntime(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, "", nil)
-	if result.attempted != "" || result.failed != nil || f.launches != 0 || len(f.acks) != 0 {
+	if result.attempted != "" || result.failed != nil || f.launches != 0 || f.fetches != 0 || len(f.acks) != 0 {
 		t.Fatal("stale authorization poisoned the operation or launched a helper", result, f.acks)
+	}
+	if elapsed := f.deps.health.Clock.Now().Sub(started); elapsed != fleetRuntimeFreshFor || f.authorizations != 5 {
+		t.Fatalf("legacy retry window changed: calls=%d elapsed=%s", f.authorizations, elapsed)
 	}
 	if _, err := os.Lstat(filepath.Join(f.c.State, fleetUpdateReceiptFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("stale authorization wrote a receipt", err)
