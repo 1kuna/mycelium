@@ -26,3 +26,11 @@ func TestResolveCustodianStartupCLIRequiresExactCustody(t *testing.T) {
 		t.Fatal("operator assertion accepted", err)
 	}
 }
+
+func TestCustodianHandleInspectorCLIIsReadOnlyAndExact(t *testing.T) {
+	for _, args := range [][]string{nil, {"--state-dir", "/unused", "--custodian-id", "../escape", "--owner-uid", "1"}, {"--state-dir", "/unused", "--custodian-id", "0123456789abcdef0123456789abcdef", "--owner-uid", "0"}, {"--confirm-gone"}} {
+		if err := inspectCustodianHandlesCommand(args); err == nil {
+			t.Fatal("invalid internal inspector accepted", args)
+		}
+	}
+}

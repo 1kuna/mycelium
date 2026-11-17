@@ -32,6 +32,10 @@ for _variant in ('fake', 'real'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/fleet_stability_{_variant}.go'] = (
         'fleet_upgrade_test.go',)
 
+# Privileged descriptor inspection and its CLI still exercise ordinary recovery.
+SUPPLEMENTAL_CONSUMERS['internal/myce/custodian_handles_linux.go'] = (
+    'custodian_reconcile_test.go', 'custodian_reconcile_linux_test.go')
+
 # Both platform recovery entry points share the exact-custody refusal tests.
 for platform in ('linux', 'darwin'):
     SUPPLEMENTAL_CONSUMERS[f'internal/myce/custodian_reconcile_{platform}.go'] = (
