@@ -398,6 +398,9 @@ func (w Worker) runCustodian(stop context.Context) error {
 		return err
 	}
 	defer unlock()
+	if _, err := os.Lstat(filepath.Join(dir, custodianName(id, "snapshot"))); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("detached attempt already has custody; refusing repeated launch")
+	}
 	var req custodianRequest
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
