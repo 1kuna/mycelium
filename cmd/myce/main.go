@@ -26,6 +26,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_inspect-custodian-handles" {
+		if err := inspectCustodianHandlesCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_native-exec" {
 		if err := myce.NativeExec(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -70,6 +77,9 @@ func run(args []string) error {
 const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|init|run|profile|submit|spec|policy|parity|status|efficiency|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-custodian-startup|dev|version|release|skill|file|extension|env|portability|detect|service|model|resident|telemetry|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
 
 func runWithProbe(args []string, probe myce.MachineProbe) error {
+	if len(args) > 0 && args[0] == "_inspect-custodian-handles" {
+		return inspectCustodianHandlesCommand(args[1:])
+	}
 	if len(args) > 0 && args[0] == "_native-exec" {
 		return myce.NativeExec(args[1:])
 	}

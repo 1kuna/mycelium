@@ -1372,6 +1372,27 @@ and no request/log descriptor remains open (`lsof` required). Inspector failures
 extra log output, active launchers and any ambiguity retain custody. Absence now
 does not assert a scope never existed: the scope preceded the refused CLI entry.
 
+If account-wide `lsof` reports inaccessible mounts or protected processes,
+its refusal means inspection is incomplete, not that a target handle was found.
+Do not stop unrelated services or hide its warnings. On Linux the operator can
+explicitly use existing non-interactive sudo inspection authority:
+
+```sh
+NEW_MYCE resolve-custodian-startup --state-dir WORKER_SPOOL --custodian-id CUSTODIAN_ID --privileged-inspection
+```
+
+Recovery remains in the ordinary account with all existing locks and identity,
+refusal, scope, launcher and snapshot fences. Only the signed binary's internal
+read-only inspector runs through `sudo -n`. It scans kernel descriptor and mapping
+metadata across process owners for the exact regular request/log device and inode,
+including hard links, renamed/unlinked handles and closed-descriptor mappings.
+It reads no configuration or file contents and performs no signal, write or queue
+operation. Any matching PID/descriptor/mapping, incomplete inspection, replaced
+target, unavailable sudo authority or invalid inspector response retains custody.
+The default inspector remains strict; no mount warning is ignored. Have a holder's
+owner finish its operation, then repeat the supported command. A diagnostic's
+empty inventory alone is not a recovery receipt.
+
 Success publishes the evidenced `custodian_startup_failed` no-execution outcome
 for that request. It never changes queue state, progress, checkpoints, cancellation
 or maintenance, and never launches/signals work. Restart the patched worker through

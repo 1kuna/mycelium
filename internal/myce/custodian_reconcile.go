@@ -15,14 +15,18 @@ const legacyCustodianRefusal = "systemd worker invocation has no allowed worker 
 // ReconcileCustodianStartup settles only the old, pre-entry Linux refusal. It
 // neither contacts the queue nor launches/signals anything. The stopped worker
 // subsequently adopts the finished no-execution result through normal replay.
-func ReconcileCustodianStartup(ctx context.Context, dir, id string) error {
+func ReconcileCustodianStartup(ctx context.Context, dir, id string, privilegedInspection bool) error {
 	if runtime.GOOS != "linux" {
 		return errors.New("custodian startup recovery is Linux-only")
 	}
 	if os.Geteuid() == 0 {
 		return ErrHostIdentity
 	}
-	return reconcileCustodianStartup(ctx, dir, id, fenceCustodianStartup)
+	fence := fenceCustodianStartup
+	if privilegedInspection {
+		fence = privilegedCustodianStartupFence
+	}
+	return reconcileCustodianStartup(ctx, dir, id, fence)
 }
 
 func reconcileCustodianStartup(ctx context.Context, dir, id string, fence func(context.Context, string, string) error) error {

@@ -599,6 +599,8 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   The installation owner can recover the exact legacy Linux pre-entry refusal
   offline with `resolve-custodian-startup` under the [operations runbook](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#recover-the-legacy-pre-entry-refusal).
   Consumers keep their existing jobs and checkpoints; do not resubmit or edit custody.
+  An inspection refusal is not a detected holder: the installation owner diagnoses
+  it and may use the runbook's explicit privileged read-only Linux inspector.
 
 Finished jobs' files are kept for 3 days by default, then expire
 (`result_expired`); download results within that window. The job record itself

@@ -13,6 +13,17 @@ import (
 )
 
 func fenceCustodianStartup(ctx context.Context, dir, id string) error {
+	return fenceCustodianStartupWithHandles(ctx, dir, id, func(ctx context.Context, dir, id string) error {
+		for _, name := range []string{custodianName(id, "request"), "custodian-" + id + ".log"} {
+			if err := nativeScratchEmpty(ctx, filepath.Join(custodianDir(dir), name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func fenceCustodianStartupWithHandles(ctx context.Context, dir, id string, handles func(context.Context, string, string) error) error {
 	// Not-found is required, not merely inactive. A loaded scope/job can still
 	// contain or dispatch a helper. Inspector errors never prove absence.
 	cmd := exec.CommandContext(ctx, "systemctl", "--user", "show", custodianUnit(id), "--property=LoadState,ActiveState,SubState,Job,ControlGroup")
@@ -62,14 +73,9 @@ func fenceCustodianStartup(ctx context.Context, dir, id string) error {
 			return errors.New("custodian launcher/helper remains live; custody retained")
 		}
 	}
-	// Also reject an inherited open request/log descriptor, including unlinked
-	// files. Other attempts' independent helpers do not prevent exact recovery.
-	for _, name := range []string{custodianName(id, "request"), "custodian-" + id + ".log"} {
-		if err := nativeScratchEmpty(ctx, filepath.Join(custodianDir(dir), name)); err != nil {
-			return err
-		}
-	}
-	return nil
+	// The handle inspector is still mandatory; callers may explicitly choose
+	// the privileged kernel inspector when account-wide lsof is incomplete.
+	return handles(ctx, dir, id)
 }
 
 func absentCustodianScope(output string) error {
