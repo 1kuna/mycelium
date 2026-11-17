@@ -15,8 +15,8 @@ import (
 
 // #1710: replacing a normal operation's drain with an operator checkpoint
 // stop, then starting a successor while the disable is held. This sequence
-// alone must not refuse authorization. The historical worker and queue used
-// the same readiness predicates and protocol constants as this test.
+// alone must not refuse authorization. This is a queue/HTTP unit test; exact
+// historical process compatibility needs a separate cross-version dev run.
 func TestFleetAuthorizationOperatorDisabledSuccessor(t *testing.T) {
 	q, clock, workers := fleetFixture(t, "queue", "already-current", "worker")
 	current := workers[0]
@@ -99,6 +99,7 @@ func TestFleetAuthorizationDiagnostics(t *testing.T) {
 		{name: "session_mismatch", cause: "proof_session_mismatch", mutate: func(p *FleetRuntimeProof) { p.Session = "private-value" }},
 		{name: "typed_http", cause: "HTTP 401 code=authentication_required", status: 401, body: `{"code":"authentication_required","error":"private-value"}`},
 		{name: "untrusted_http", cause: "HTTP 400 code=request_failed", status: 400, body: `{"code":"private-value","error":"private-value"}`},
+		{name: "untrusted_well_formed_code", cause: "HTTP 400 code=request_failed", status: 400, body: `{"code":"private_value","error":"private-value"}`},
 		{name: "decode", cause: "response_decode_failed", body: `{"pid":"private-value"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,7 +124,7 @@ func TestFleetAuthorizationDiagnostics(t *testing.T) {
 			if err == nil || err.Error() != "fleet_authorization_refused" {
 				t.Fatalf("lost stable failure code: %v", err)
 			}
-			if out := logs.String(); !strings.Contains(out, `event=fleet_authorization side=worker`) || !strings.Contains(out, `cause="`+tc.cause+`"`) || strings.Contains(out, "private-value") {
+			if out := logs.String(); !strings.Contains(out, `event=fleet_authorization side=worker`) || !strings.Contains(out, `cause="`+tc.cause+`"`) || strings.Contains(out, "private-value") || strings.Contains(out, "private_value") {
 				t.Fatalf("missing or unsafe diagnostic: %s", out)
 			}
 		})

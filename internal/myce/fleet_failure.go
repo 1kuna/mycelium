@@ -3,6 +3,7 @@ package myce
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // Fixed predicate names only: never include received field values. Keep this
@@ -39,6 +40,19 @@ func fleetAuthorizationCause(err error, p *FleetRuntimeProof, session string) st
 		var stall *QueueStalledError
 		if errors.As(err, &stall) {
 			return "queue_stalled"
+		}
+		var rejection *HTTPError
+		if errors.As(err, &rejection) {
+			// A syntactically valid server code can still contain private
+			// text. Retain only codes this control endpoint is known to emit.
+			code := "request_failed"
+			switch rejection.Code {
+			case "fleet_instruction_stale", "fleet_ack_stale", "fleet_maintenance_changed",
+				"authentication_required", "request_invalid", "queue_stopping",
+				"status_unavailable", "request_capacity_unavailable":
+				code = rejection.Code
+			}
+			return fmt.Sprintf("HTTP %d code=%s", rejection.Status, code)
 		}
 		return ClientErrorCause(err)
 	}

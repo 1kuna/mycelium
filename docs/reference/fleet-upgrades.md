@@ -163,6 +163,9 @@ typed `HTTP STATUS code=CODE`, a classified transport/decode failure (for exampl
 unchanged. Received values, server messages, credentials and raw bodies are not
 logged.
 
+HTTP codes use a fixed allowlist for this endpoint; an unknown code becomes
+`request_failed` while retaining the numeric HTTP status.
+
 A supporting queue independently logs `side=queue cause="ready"` or its
 classified refusal, plus `caller=active`, `cancelled` or `timeout`. This is useful
 when an older worker reports only the generic failure. A queue's ready decision
