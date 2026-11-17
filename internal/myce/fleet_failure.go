@@ -1,6 +1,55 @@
 package myce
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
+
+// Fixed predicate names only: never include received field values. Keep this
+// shared with fleetProofReady so diagnostics describe the actual readiness gate.
+func fleetProofFailure(p *FleetRuntimeProof) string {
+	switch {
+	case p == nil:
+		return "proof_missing"
+	case p.PID <= 0:
+		return "proof_pid_missing"
+	case p.Session == "":
+		return "proof_session_missing"
+	case !validPin(p.SHA256):
+		return "proof_sha256_invalid"
+	case !p.ServiceHealthy:
+		return "proof_service_unhealthy"
+	case !p.RunnerSmoke:
+		return "proof_runner_smoke_failed"
+	case p.StartGate != startGateProtocol:
+		return "proof_start_gate_mismatch"
+	case p.AttemptProtocol != keyedAttemptProtocol:
+		return "proof_attempt_protocol_mismatch"
+	}
+	return ""
+}
+
+func fleetAuthorizationCause(err error, p *FleetRuntimeProof, session string) string {
+	if err != nil {
+		var syntax *json.SyntaxError
+		var mismatch *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &mismatch) {
+			return "response_decode_failed"
+		}
+		var stall *QueueStalledError
+		if errors.As(err, &stall) {
+			return "queue_stalled"
+		}
+		return ClientErrorCause(err)
+	}
+	if why := fleetProofFailure(p); why != "" {
+		return why
+	}
+	if p.Session != session {
+		return "proof_session_mismatch"
+	}
+	return "ready"
+}
 
 // Never project arbitrary receipt text, OS output or queue error messages. This
 // allow-list is shared by live reporting, durable replay and queue status; each

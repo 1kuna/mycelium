@@ -275,7 +275,7 @@ func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) strin
 	return ""
 }
 func fleetProofReady(p *FleetRuntimeProof) bool {
-	return p != nil && p.PID > 0 && p.Session != "" && validPin(p.SHA256) && p.ServiceHealthy && p.RunnerSmoke && p.StartGate == startGateProtocol && p.AttemptProtocol == keyedAttemptProtocol
+	return fleetProofFailure(p) == ""
 }
 
 // fleetStable requires the same healthy process for fleetStableFor, the
