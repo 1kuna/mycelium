@@ -12,7 +12,7 @@ import (
 func custodianRecoveryFixture(t *testing.T, j *Job) (string, string) {
 	t.Helper()
 	dir, id := t.TempDir(), ID()
-	if err := os.Mkdir(custodianDir(dir), 0700); err != nil {
+	if err := PrepareStateRoots(dir, custodianDir(dir)); err != nil {
 		t.Fatal(err)
 	}
 	req := custodianRequest{Protocol: custodianProtocol, ID: id, Machine: Machine{ID: j.Machine}, State: workerState{Job: j, Session: j.Session}}
