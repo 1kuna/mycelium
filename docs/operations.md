@@ -1350,6 +1350,38 @@ worker or deleting its request does not repair a startup refusal. Older failed
 launches without a positive refusal receipt remain unresolved custody; upgrading
 alone does not prove their release.
 
+### Recover the legacy pre-entry refusal
+
+`resolve-native` cannot resolve an old detached launch without a finished result.
+For the exact Linux pre-entry failure above, the release operator may use a staged
+patched binary as the ordinary worker account during an authorized offline window:
+
+```sh
+NEW_MYCE resolve-custodian-startup --state-dir WORKER_SPOOL --custodian-id CUSTODIAN_ID
+```
+
+Preserve the worker spool and its sibling custody directory first. Stop the worker
+through its service manager only when authorized, preserving all other running
+work. Select each exact custodian ID from its saved assignment, not a job ID.
+The command exclusively locks the offline spool and that owner. It requires one
+matching request/assignment, no snapshot (including corrupt or symlink entries),
+no attempt staging or execution custody, and exactly the legacy timestamped CLI
+refusal in its private log. It verifies that systemd reports the scope not found
+with no job/cgroup, no same-account process has the exact owner ID in its arguments,
+and no request/log descriptor remains open (`lsof` required). Inspector failures,
+extra log output, active launchers and any ambiguity retain custody. Absence now
+does not assert a scope never existed: the scope preceded the refused CLI entry.
+
+Success publishes the evidenced `custodian_startup_failed` no-execution outcome
+for that request. It never changes queue state, progress, checkpoints, cancellation
+or maintenance, and never launches/signals work. Restart the patched worker through
+the authorized service manager; ordinary exact-attempt completion requeues the
+experiment without charging a lost execution, keeps its checkpoint/progress, and
+finishes an accepted cancellation. Verify exact old-copy release and the freed
+allowance in queue status before claiming recovery. Preserve evidence on refusal;
+do not delete custody or substitute operator assertions. Repeated recovery after
+success refuses the existing snapshot: inspect it and let normal replay finish.
+
 ## Native cleanup custody
 
 If an installed worker retains a finished native attempt after a transient process

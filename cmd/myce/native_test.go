@@ -15,3 +15,14 @@ func TestResolveNativeCLIRequiresExactCustody(t *testing.T) {
 		t.Fatal("operator assertion bypass accepted", err)
 	}
 }
+
+func TestResolveCustodianStartupCLIRequiresExactCustody(t *testing.T) {
+	for _, args := range [][]string{nil, {"--state-dir", t.TempDir()}, {"--state-dir", t.TempDir(), "--custodian-id", "../escape"}, {"--state-dir", t.TempDir(), "--custodian-id", "exact", "--timeout", "0s"}} {
+		if err := resolveCustodianStartupCommand(args); err == nil {
+			t.Fatal("accepted invalid recovery", args)
+		}
+	}
+	if err := run([]string{"resolve-custodian-startup", "--confirm-gone"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatal("operator assertion accepted", err)
+	}
+}
