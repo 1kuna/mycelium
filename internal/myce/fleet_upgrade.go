@@ -459,7 +459,10 @@ func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
 // theirs: the operation updates the host but never resumes it.
 func (q *Queue) fleetBeginHost(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	h.Phase, h.ProgressAt = "draining", q.clock.Now()
-	if q.fleetAdoptionReason(h) == "" {
+	if h.Queue && h.WorkerDone || q.fleetAdoptionReason(h) == "" {
+		// Once its worker is accepted, replacing only the queue service
+		// cannot replace that worker's command owners. Keep those jobs;
+		// fleetDrain still waits for model HTTP calls/streams to finish.
 		h.Takeover = true
 		h.Policy = q.s.HostMaintenance[h.Host]
 		return true
@@ -606,7 +609,7 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 		h.Phase, h.StepAt = "worker_start", q.clock.Now()
 		return true
 	}
-	takeover := q.fleetAdoptionReason(h) == ""
+	takeover := h.Queue && h.WorkerDone || q.fleetAdoptionReason(h) == ""
 	if takeover {
 		h.Takeover = true
 	}
