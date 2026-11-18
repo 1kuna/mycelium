@@ -100,7 +100,21 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			j := submit(t, q, s)
 			run := workerFixture(t, q)
 			if mode == "cancel" {
-				nativeFile(t, nativeWorkerWork(t, run.state), "started")
+				// Preparation and heartbeat retries use the injected clock, even
+				// while this test waits for real payload I/O.
+				await(t, func() bool {
+					clock.Advance(time.Millisecond)
+					data, err := readSingleAttemptState(filepath.Join(run.state, "state.json"))
+					if err != nil {
+						return false
+					}
+					var state workerState
+					if json.Unmarshal(data, &state) != nil || state.Job == nil || !filepath.IsAbs(state.Job.Spec.Run.Workdir) {
+						return false
+					}
+					_, err = os.Stat(filepath.Join(state.Job.Spec.Run.Workdir, "started"))
+					return err == nil
+				})
 				if err := q.Cancel(j.ID); err != nil {
 					t.Fatal(err)
 				}
@@ -151,13 +165,17 @@ func TestBatchLogsDefaultCapture(t *testing.T) {
 	// Explicit "keep" is distinguished only by validation (TestBatchLogPolicyValidation);
 	// the worker and queue branch only on "none", so the default covers it.
 	q, _ := fixture(t)
-	q.clock = &workerFakeClock{now: q.clock.Now()}
+	clock := &workerFakeClock{now: q.clock.Now()}
+	q.clock = clock
 	s := spec("experiment")
 	s.Resumable = false
 	s.Run.Command = []string{"sh", "-c", "echo synthetic-stdout; echo synthetic-stderr >&2"}
 	j := submit(t, q, s)
 	run := workerFixture(t, q)
-	await(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		return job(t, q, j.ID).State == "succeeded"
+	})
 	logs, err := q.Logs(j.ID, 0)
 	if err != nil {
 		t.Fatal(err)
