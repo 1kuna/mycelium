@@ -33,6 +33,9 @@ func TestFleetUpgradeStartProofIdleHost(t *testing.T) {
 	if len(q.s.Jobs) != 1 {
 		t.Fatal("idle host did not get exactly one queue-owned probe")
 	}
+	if probe := q.s.Jobs[h.StartProbe]; !probe.Spec.Needs.cpuOnly() || probe.Spec.Needs.MemoryGB != 0 || probe.Spec.Needs.HostMemoryGB != 0.125 {
+		t.Fatal("start probe must use normalized CPU resources", probe.Spec.Needs)
+	}
 	// A stale service/session cannot supply acceptance for this probe.
 	j := job(t, q, h.StartProbe)
 	stale := result(j, true)
@@ -48,6 +51,33 @@ func TestFleetUpgradeStartProofIdleHost(t *testing.T) {
 	fleetTick(t, q)
 	if next := q.fleetActiveHost(); next == nil || next.Host != "b" {
 		t.Fatal("verified start did not advance to next host", next)
+	}
+}
+
+func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
+	q, c, h := fleetAtStartProbe(t)
+	probe, operation := h.StartProbe, q.s.FleetUpgrade.Operation
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	fakeCheckpointAvailability(t, restarted, true)
+	h = restarted.fleetActiveHost()
+	if h == nil || h.StartProbe != probe || h.WorkerDone || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
+		t.Fatal("restart lost or duplicated unaccepted probe", restarted.fleetUpgradeStatus())
+	}
+	fleetRefresh(t, restarted, c)
+	if !h.WorkerDone || job(t, restarted, probe).StartedAt == nil {
+		t.Fatal("restarted queue did not accept exact probe", restarted.fleetUpgradeStatus())
 	}
 }
 

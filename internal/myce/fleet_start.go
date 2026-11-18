@@ -3,7 +3,7 @@ package myce
 import "fmt"
 
 func fleetStartProbeSpec(machine string) Spec {
-	return Spec{Name: "fleet-start-probe", Project: "mycelium", Class: "maintenance", Priority: "experiment", AllowedMachines: []string{machine}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
+	return Spec{Name: "fleet-start-probe", Project: "mycelium", Class: "maintenance", Priority: "experiment", AllowedMachines: []string{machine}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
 }
 
 // Health and RunnerSmoke qualify the service process, not its detached

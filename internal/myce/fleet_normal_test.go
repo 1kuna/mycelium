@@ -128,6 +128,9 @@ func TestFleetUpgradeLiveTakeover(t *testing.T) {
 			}
 			// A replacement process must prove custody under the retained session.
 			updated := cloneMachine(q.s.Machines[m.ID])
+			// The current worker can admit the CPU probe beside retained GPU
+			// work. The pre-upgrade legacy fixture had only one execution slot.
+			updated.Devices = m3Machine().Devices[:1]
 			updated.Fleet = fleetTestProof(c, m.Session, 777, true)
 			updated.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
 			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
