@@ -13,7 +13,7 @@ import (
 // first measurement. Actual local peaks, authored needs and OOM floors still
 // prove impossibility, and an unrelated larger target cannot hide that verdict.
 func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
-	for _, scenario := range []string{"transfer", "local fitting", "local constrained fits", "local accepted", "local constrained", "declared", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
+	for _, scenario := range []string{"transfer", "workload transfer", "local fitting", "local constrained fits", "local accepted", "local constrained", "declared", "OOM floor", "larger eligible", "larger wrong target", "unknown capacity", "allowance only"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
 			capacity := 31.206165313720703
@@ -38,6 +38,9 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				target := m.Devices[i].machine(m)
 				report := newExtensionReport(e, &target, "extension:sample")
 				report.Setup = true
+				if scenario == "workload transfer" {
+					report.Qualified, report.CheckID = true, "check"
+				}
 				m.Devices[i].ExtensionReports = []ExtensionReport{report}
 			}
 			machineCheck(t, q, m)
@@ -61,8 +64,10 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				t.Fatal(why)
 			}
 			sourceKey.Check = true
-			s.Workload = nil
-			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			if scenario != "workload transfer" {
+				s.Workload = nil
+				s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			}
 			s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
 			queued := submit(t, q, s)
 			target := m.Devices[0].machine(*q.s.Machines[m.ID])
@@ -84,6 +89,7 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 				// Two paired work identities calibrate max(ratio) + observed spread.
 				for i, pair := range [][2]float64{{5.060905456542969, 10.790241241455078}, {21.220745086669922, 8.982704162597656}} {
 					from, to := source, *key
+					to.Check = true
 					from.Configuration, to.Configuration = []string{"calibration-a", "calibration-b"}[i], []string{"calibration-a", "calibration-b"}[i]
 					add(from, from.Configuration, "unified", pair[0], 0)
 					add(to, to.Configuration, "separate", pair[1]-minimumHostMemoryGB, 0)
@@ -119,7 +125,7 @@ func TestExtensionCheckMemoryCapacityDeadEnd(t *testing.T) {
 			estimate := q.memoryEstimate(candidate, &target)
 			sized := q.memoryCandidate(candidate, &target)
 			q.mu.Unlock()
-			if scenario == "transfer" {
+			if scenario == "transfer" || scenario == "workload transfer" {
 				if math.Abs(estimate.measuredHostGB-70.59160131162189) > 1e-9 {
 					t.Fatalf("fixture no longer reproduces transfer: %+v", estimate)
 				}

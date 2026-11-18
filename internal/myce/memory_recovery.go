@@ -186,21 +186,25 @@ func (q *Queue) memorySizingDeadEnd(j *Job) string {
 
 const checkTransferProbe = "exploratory first run; transferred estimate exceeds physical capacity"
 
-// Native qualification obtains the missing target measurement. Even paired
+// Native work obtains the missing target measurement. Even paired
 // transfer ratios can disagree (fixed overhead need not scale with source
 // demand). If their prediction exceeds this host, use its ordinary first-run
 // protocol rather than treating that prediction as a physical lower bound.
 // Actual OOM recovery keeps its separate measured-demand path.
-func (q *Queue) checkTransferNeedsProbe(j *Job, m *Machine, estimate memoryEstimate) bool {
-	if j.Spec.ExtensionCheck == nil || !estimate.transferred || estimate.escalation || j.OOMRetries > 0 {
+func (q *Queue) transferNeedsProbe(j *Job, m *Machine, estimate memoryEstimate) bool {
+	if j.Spec.ExtensionCheck == nil && j.Spec.Needs.cpuOnly() || !estimate.transferred || estimate.escalation || j.OOMRetries > 0 {
 		return false
 	}
-	_, system, known := jobCapabilityCapacity(j, m)
+	accelerator, system, known := jobCapabilityCapacity(j, m)
 	host := estimate.measuredHostGB
-	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && estimate.device != nil && estimate.device.DeviceGB != nil {
-		host += *estimate.device.DeviceGB * estimate.deviceFactor
+	device := 0.0
+	if !j.Spec.Needs.cpuOnly() && estimate.device != nil && estimate.device.DeviceGB != nil {
+		device = *estimate.device.DeviceGB * estimate.deviceFactor
+		if m.UnifiedMemory {
+			host += device
+		}
 	}
-	return known && host > system
+	return known && (host > system || device > accelerator)
 }
 
 // Only authored requirements, local measurements and durable OOM floors can
