@@ -50,6 +50,10 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 	heartbeats := 0
 	recovered := false
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api/workers/"+w.Machine.ID+"/leave" {
+			_ = json.NewEncoder(rw).Encode(map[string]bool{"ok": true})
+			return
+		}
 		if req.URL.Path != "/api/workers/checkin" {
 			http.NotFound(rw, req)
 			return
