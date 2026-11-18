@@ -28,8 +28,10 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
   classes and same-named policy tiers, including when the fleet is full. Submit
   those classes normally; no host exclusion is needed to protect the agents
   workstation. Light work still uses its measured allowances. Queued GPU work
-  protects its resolved CPU/RAM needs from CPU backfill, including while a finite
-  GPU execution finishes; no fixed core reserve or CUDA-host exclusion is needed.
+  protects its resolved CPU/RAM needs from CPU backfill, including internal
+  extension checks, CPU maintenance resumes, and waits for a finite GPU execution
+  to finish. Freed capacity accumulates toward that demand; portable queued CPU
+  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.

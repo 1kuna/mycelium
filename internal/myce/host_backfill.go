@@ -23,10 +23,12 @@ type hostBackfillDemand struct {
 	devicePending bool
 }
 
-// Piece executions finish too. Parents describe demand; they never own
-// execution capacity.
+// Piece executions and native extension checks finish too. Checks must protect
+// their resolved host vector while queued, including guarded first runs that
+// cannot fit beside CPU holders yet (#1717). Parents describe demand; they
+// never own execution capacity.
 func backfillFiniteExecution(j *Job) bool {
-	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil && j.Spec.ExtensionCheck == nil
+	return j.Spec.Needs.Model == "" && j.Spec.FanOut == nil
 }
 
 func (q *Queue) backfillCandidates(j *Job, m, projected *Machine, resources map[batchResourceKey]batchResourceRoom) []*Job {
@@ -158,11 +160,22 @@ func (q *Queue) hostBackfillFences(scan *placementScan) map[string]*hostBackfill
 		choice.order = set
 		host := hostID(choice.machine)
 		previous := scan.hostBackfill[host]
-		if previous == nil || q.beforeWithFair(choice.job, previous.job, q.s.Machines[choice.machine.ID], set.score, set.active) {
+		if previous == nil || q.hostBackfillBefore(choice.job, previous.job, choice.machine, set) {
 			scan.hostBackfill[host] = choice
 		}
 	}
 	return scan.hostBackfill
+}
+
+// Host RAM is shared by CPU and device views. Apply accelerator-first backfill
+// ordering consistently on both, including CPU maintenance resumes. Resume
+// promotion must not refill the RAM a queued accelerator needs. Tiers and an
+// already selected preemption release retain their existing precedence.
+func (q *Queue) hostBackfillBefore(a, b *Job, m *Machine, order *candidateSet) bool {
+	if q.comparePriority(a.Spec, b.Spec) == 0 && (a.PreemptionPlacement != nil) == (b.PreemptionPlacement != nil) && a.Spec.Needs.cpuOnly() != b.Spec.Needs.cpuOnly() {
+		return !a.Spec.Needs.cpuOnly()
+	}
+	return q.beforeWithFair(a, b, m, order.score, order.active)
 }
 
 func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand) bool {
@@ -175,7 +188,7 @@ func (q *Queue) hostBackfillAllows(j *Job, m *Machine, fence *hostBackfillDemand
 	// Keep the existing tier and fair-turn order, including accelerator-first
 	// ordering across CPU/device views of the same worker. A demand protects
 	// capacity only against work behind it, never against its own admission.
-	if q.beforeWithFair(j, fence.job, q.s.Machines[m.ID], fence.order.score, fence.order.active) {
+	if q.hostBackfillBefore(j, fence.job, m, fence.order) {
 		return true
 	}
 	d := fence.job.Spec.Needs
