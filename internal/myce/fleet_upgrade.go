@@ -696,7 +696,11 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 		m := q.s.Machines[machine]
 		ok = h.Phase == "worker_update" && h.Before != nil && h.Before.Session == session && m != nil && m.Session == session && q.fleetProofFresh(m.Fleet)
 	}
-	if !ok || !q.fleetHostQuiet(h) && !(h.Takeover && q.fleetAdoptionReason(h) == "") {
+	// Updating only the queue cannot replace the already accepted worker or
+	// its command owners. Keep the ordinary worker takeover/custody fence;
+	// queue calls/streams are independently fenced in the role check above.
+	takeoverReady := h.Takeover && (machine == "@queue" && h.WorkerDone || q.fleetAdoptionReason(h) == "")
+	if !ok || !q.fleetHostQuiet(h) && !takeoverReady {
 		return FleetUpdateInstruction{}, nil
 	}
 	return FleetUpdateInstruction{StorageDiagnostics: true, StorageWarnings: true, Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
