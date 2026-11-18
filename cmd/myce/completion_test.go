@@ -192,6 +192,9 @@ func TestCompletionSameKeyProfileWaitDoesNotRearmSavedNotifier(t *testing.T) {
 	defer d.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
+	if err := d.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
 	c := d.Client()
 	profiles := filepath.Join(root, ".mycelium", "profiles")
 	if err := os.MkdirAll(profiles, 0700); err != nil {

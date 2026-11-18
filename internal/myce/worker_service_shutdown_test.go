@@ -321,6 +321,7 @@ func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
 				}
 			}()
 			await(t, func() bool {
+				clock.Advance(time.Millisecond)
 				logs, _ := q.Logs(j.ID, 0)
 				for _, l := range logs {
 					if strings.Contains(l.Text, "ready") {
