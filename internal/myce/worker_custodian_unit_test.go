@@ -19,6 +19,9 @@ func TestCustodianGPUStarted(t *testing.T) {
 	for _, device := range []string{"0", "1"} {
 		t.Run(device, func(t *testing.T) {
 			q, clock := fixture(t)
+			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
 			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 			defer server.Close()
 			m := m3Machine()
@@ -29,7 +32,7 @@ func TestCustodianGPUStarted(t *testing.T) {
 			spec.Needs.GPU = &GPUSelection{Devices: []string{device}}
 			proof := t.TempDir()
 			spec.Run.Env = map[string]string{"PROOF_DIR": proof}
-			spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; printf '%s' "$MYCE_DEVICES" > "$PROOF_DIR/device"; while [ ! -f "$PROOF_DIR/finish" ]; do sleep 0.01; done`}
+			spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/assets/proof")" = custodian-asset || exit 98; printf '%s' "$MYCE_DEVICES" > "$PROOF_DIR/device"; while [ ! -f "$PROOF_DIR/finish" ]; do sleep 0.01; done`}
 			pending := submit(t, q, spec)
 			assigned := assignedJob(machineCheck(t, q, m))
 			if assigned == nil || assigned.ID != pending.ID || !slices.Equal(assigned.AllocatedDevices, []string{device}) {
@@ -38,6 +41,10 @@ func TestCustodianGPUStarted(t *testing.T) {
 			assigned.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 			w := recoveryWorker(t)
 			w.Machine, w.Clock, w.Client = m, clock, Client{URL: server.URL, Token: "test", Clock: clock}
+			// Worker.Run also installs the asset transport. Exercise that skipped
+			// dependency through the detached entry rather than a primed cache.
+			_, asset := retentionUpload(t, w.Client, "custodian-asset")
+			assigned.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": {Key: asset.SHA256, Assets: FileManifest{"proof": asset}}}
 			w.Custodian, w.ServiceConfig = ID(), &ServiceConfig{}
 			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			if runtime.GOOS == "linux" {

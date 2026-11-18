@@ -478,7 +478,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(spool, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Fetch: w.fileCache.copyTo}
 	w.environmentCache.budget = w.diskBudget
 	w.environmentCache.references = w.environmentReferenced
 	if err := w.environmentCache.initStorage(); err != nil {
