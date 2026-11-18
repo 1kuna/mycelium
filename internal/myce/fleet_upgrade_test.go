@@ -476,7 +476,10 @@ func TestFleetUpgradeCleansUpAbandonedOperations(t *testing.T) {
 		fleetActivate(t, q, c)
 	}
 	fleetTick(t, q)
-	if q.s.FleetUpgrade.State != "complete" || q.maintenanceBlocked("a") || q.maintenanceBlocked("b") || q.s.HostMaintenance["c"].DrainOwner != "operator" {
+	// The abandoned operation drains were accepted and resumed. The unrelated
+	// operator drain now correctly stops assignment acceptance, without being
+	// adopted or resumed just to finish the rollout.
+	if q.s.FleetUpgrade.State != "stopped" || q.s.FleetUpgrade.Hosts[2].Failure != "worker_start_maintenance_blocked" || q.maintenanceBlocked("a") || q.maintenanceBlocked("b") || q.s.HostMaintenance["c"].DrainOwner != "operator" {
 		t.Fatalf("abandoned drains not adopted and resumed: %+v %+v", q.fleetUpgradeStatus(), q.s.HostMaintenance)
 	}
 	data, err := json.Marshal(q.s)
