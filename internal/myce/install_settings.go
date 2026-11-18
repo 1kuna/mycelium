@@ -216,6 +216,12 @@ func InstallSettings() []InstallSetting {
 		installPath("checkpoint-root", "Checkpoints", "worker checkpoint root", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("checkpoints", "Checkpoints", "queue checkpoint root (alias of checkpoint-root)", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("model-root", "ModelRoot", "model source/acquisition root (mounted NAS or verified local disk)", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
+		installSetting("secret-root", "SecretRoot", "worker-local named secrets directory (absolute; empty clears)", func(c *ServiceConfig) *string { return &c.SecretRoot }, func(p string) error {
+			if p != "" && (!filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n\r")) {
+				return errors.New("secret root must be absolute and single-line")
+			}
+			return nil
+		}),
 		installSetting("native-read-root", "NativeReadRoots", "operator-granted native read-only root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeReadRoots }, validateNativeRootPaths),
 		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
 		installSetting("gpu-telemetry-helper", "GPUTelemetryHelper", "optional read-only GPU telemetry executable (absolute path; empty disables helper)", func(c *ServiceConfig) *string { return &c.GPUTelemetryHelper }, validateGPUTelemetryHelper),

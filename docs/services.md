@@ -731,7 +731,11 @@ current fences; workers recheck them. Pre-copy and pins obey the same fences.
 `env` is a map of non-secret literals, applied to start and stop commands.
 `secret_env` maps environment-variable names to local secret names. Provision
 one regular **mode-0600 file** per name in a **mode-0700 directory**, then pass
-`myce join --secret-root SECRET_DIRECTORY`. Directory traversal, symlink files,
+`myce join --secret-root SECRET_DIRECTORY` for a foreground worker. For installed
+workers, use `myce install worker --config WORKER_CONFIG --secret-root DIR`.
+The installer saves only the absolute directory path and does not create or read
+secret files. Omit the flag to preserve it on reinstall; `--secret-root=` clears
+it. Directory traversal, symlink files,
 missing files and permissive modes refuse loading. Files may contain up to
 64 KiB; one trailing LF or CRLF is stripped. No remote secret service is used.
 

@@ -224,7 +224,11 @@ file, and shares one download between jobs on that host. Hosts that already hold
 it skip the download and are preferred. A host without disk room isn't chosen;
 the job waits with `disk_headroom`. Gated or private repositories need the hub
 token provisioned once per worker as local secret `hf_token`; never put a token
-in a job. Refusals: `model_snapshot_revision` (no such revision),
+in a job. For installed workers, use
+`myce install worker --config WORKER_CONFIG --secret-root DIR`, with `hf_token`
+a regular mode-0600 file inside that mode-0700 directory. The installer saves
+only the absolute directory path; provision the secret separately on the worker.
+Refusals: `model_snapshot_revision` (no such revision),
 `model_snapshot_access` (gated, private or nonexistent repository),
 `model_snapshot_mismatch` (bytes failed verification).
 

@@ -13,7 +13,7 @@ func TestNativeIsolationReadGrantPrivateSubtrees(t *testing.T) {
 	home, nas := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
 	state := filepath.Join(home, ".local/share/mycelium/worker/state")
-	w := Worker{JobFileRoot: nas, CheckpointRoot: filepath.Join(nas, "checkpoints"), SecretRoot: filepath.Join(state, "secrets"), ServiceConfig: &ServiceConfig{State: state}}
+	w := Worker{JobFileRoot: nas, CheckpointRoot: filepath.Join(nas, "checkpoints"), SecretRoot: filepath.Join(t.TempDir(), "secrets"), ServiceConfig: &ServiceConfig{State: state}}
 	for _, private := range []string{
 		filepath.Join(state, "job-files/sibling/1/.tmp/secret"),
 		filepath.Join(state, "file-checkpoints/sibling/attempt-1/save"),
