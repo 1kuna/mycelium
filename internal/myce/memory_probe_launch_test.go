@@ -30,18 +30,25 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			m.MemoryObservation = &observation
 			machineCheck(t, q, m)
 			queued := submit(t, q, s)
+			// HostMemorySource supplies the worker's reserve-subtracted room.
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return launch, nil }, HostMemoryReserveGB: reserve}
 			if !history {
 				// Older hosts can lack qualified idle history. An exact-session
 				// refused launch measures the same gap without guessing a size.
-				if err := q.update(func() error {
-					j := q.touchJob(queued.ID)
-					launchAvailable := launch
-					d := &AdmissionDetail{Subcheck: "live_host_growth", Required: available - minimumHostMemoryGB, Available: &launchAvailable, EnvelopeHostGB: available - minimumHostMemoryGB}
-					j.LaunchCapacityWait = map[string]LaunchCapacityWait{m.ID + "/0": {Machine: m.ID, Session: m.Session, Admission: d, Evidence: "previous-offer"}}
-					return nil
-				}); err != nil {
+				first := assignedJob(machineCheck(t, q, m))
+				if first == nil || first.ID != queued.ID || first.MemoryEnvelope.HostGB <= launch {
+					t.Fatalf("fixture did not reproduce the original near-miss: %+v", first)
+				}
+				err := localAttemptAdmission(w, nil, *first, nil)
+				if err == nil {
+					t.Fatal("worker accepted the original oversized offer")
+				}
+				r := capacityResult(first, false)
+				r.ExecutionCause.Admission = admissionDetail(err, *first)
+				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
+				clock.Advance(time.Second)
 			}
 			run := assignedJob(machineCheck(t, q, m))
 			if run == nil || run.ID != queued.ID || len(run.AllocatedDevices) != 1 {
@@ -50,8 +57,6 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			if e := run.MemoryEnvelope; e.Refusal != "" || e.Basis != "exploratory" || e.HostGB > launch || e.HostGB < launch-2*minimumHostMemoryGB {
 				t.Fatalf("probe did not fit the measured launch room: %+v", e)
 			}
-			// HostMemorySource supplies the worker's reserve-subtracted room.
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return launch, nil }, HostMemoryReserveGB: reserve}
 			if err := localAttemptAdmission(w, nil, *run, nil); err != nil {
 				t.Fatalf("near-miss still refused at worker launch: %v", err)
 			}
