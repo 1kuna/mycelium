@@ -532,8 +532,14 @@ func (q *Queue) maintainFleetUpgrade() {
 			return
 		}
 		h.WorkerDone = true
-		if h.Phase = "draining"; !q.fleetDrain(u, h) {
-			return
+		h.Phase = "verified"
+		if h.Queue && !h.QueueDone {
+			// Start acceptance resumed ordinary admission. Re-enter host
+			// selection's normal takeover/drain path for the queue service.
+			h.Owned = false
+			if !q.fleetBeginHost(u, h) || !q.fleetDrain(u, h) {
+				return
+			}
 		}
 	}
 	if h.Phase == "queue_update" || h.Phase == "queue_health" {
