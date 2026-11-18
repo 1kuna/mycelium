@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,7 +57,10 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 			submitted := false
 			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
 				switch req.URL.Path {
-				case "/api/inspection":
+				case "/api/status":
+					if req.URL.RawQuery != "view=snapshot" {
+						t.Fatalf("unbounded inventory request: %s", req.URL)
+					}
 					return response(Snapshot{Machines: []*Machine{&m}})
 				case "/api/extensions":
 					return response(nil)
@@ -484,7 +488,7 @@ func TestExtensionCheckProductionHoldStillQueues(t *testing.T) {
 // Drive the real check client and queue synchronously; only the command result
 // is synthetic. Queue/admission/preparation and execution use the fake clock.
 func TestExtensionCheckExecutionTimeout(t *testing.T) {
-	for _, mode := range []string{"qualifies after occupancy", "never admitted", "never admitted cleanup fails", "preparation never starts", "execution exceeds timeout"} {
+	for _, mode := range []string{"qualifies after occupancy", "qualifies with retained history", "never admitted", "never admitted cleanup fails", "preparation never starts", "execution exceeds timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			e := compositionExtension(t, false)
@@ -508,6 +512,34 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 			// The target fits when idle, but live host RAM is occupied.
 			m.HostAvailableMemoryGB, m.HostMemoryMeasured = .01, true
 			check(t, q, m, nil)
+			if mode == "qualifies with retained history" {
+				// A small measured request share fits current inventory, but not
+				// the retained history which used to block check submission (#1722).
+				q.mu.Lock()
+				for i := range 3000 {
+					id := fmt.Sprintf("history-%05d", i)
+					q.s.Jobs[id] = &Job{ID: id, State: "succeeded", ReleaseConfirmed: true,
+						Queued: clock.Now(), Spec: spec("experiment")}
+				}
+				q.mu.Unlock()
+				if err := q.update(func() error { return nil }); err != nil {
+					t.Fatal(err)
+				}
+				budgetHost(q, 48<<20, 3)
+			}
+			handler := (API{Queue: q, Token: "test"}).Handler()
+			read := func(req *http.Request) *httptest.ResponseRecorder {
+				req.Header.Set("Authorization", "Bearer test")
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				return w
+			}
+			if mode == "qualifies with retained history" {
+				w := read(httptest.NewRequest("GET", "/api/inspection", nil))
+				if w.Code != 503 || !strings.Contains(w.Body.String(), "projection_capacity_exceeded") {
+					t.Fatalf("full inspection did not exceed projection share: %d %s", w.Code, w.Body.String())
+				}
+			}
 			var submitted *Job
 			var scratch string
 			response := func(v any) (*http.Response, error) {
@@ -519,8 +551,11 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 			}
 			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
 				switch {
-				case req.URL.Path == "/api/inspection":
-					return response(Snapshot{Machines: []*Machine{&m}})
+				case req.URL.Path == "/api/status":
+					if req.URL.RawQuery != "view=snapshot" {
+						t.Fatalf("unbounded inventory request: %s", req.URL)
+					}
+					return read(req).Result(), nil
 				case req.URL.Path == "/api/extensions":
 					if err := q.AddExtension(e); err != nil {
 						t.Fatal(err)
@@ -533,6 +568,9 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					}
 					scratch = s.ExtensionCheck.Directory
 					submitted = submit(t, q, s)
+					if s.SubmissionKey == "" || !reflect.DeepEqual(s.AllowedMachines, []string{m.ID}) {
+						t.Fatalf("check lost keyed local worker selection: %+v", s)
+					}
 					if submitted.Spec.Priority == "production" || submitted.Spec.ExtensionCheck.Timeout != "3m0s" {
 						t.Fatalf("wrong check budget/priority: %+v", submitted.Spec)
 					}
@@ -629,7 +667,7 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 			}
 			got := job(t, q, submitted.ID)
 			saved := readExtensionReports(root, e, "fake")
-			if mode == "qualifies after occupancy" {
+			if mode == "qualifies after occupancy" || mode == "qualifies with retained history" {
 				if err != nil || !reports[0].Qualified || len(saved) != 1 || !saved[0].Qualified || got.State != "succeeded" {
 					t.Fatalf("waiting check did not qualify: report=%+v job=%+v err=%v", reports, got, err)
 				}
