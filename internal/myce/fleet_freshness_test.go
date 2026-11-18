@@ -68,6 +68,7 @@ func (f *slowProofFleet) second(t *testing.T) {
 		f.q.fleetQueue.Proof.ObservedAt = f.c.Now()
 	}
 	fleetTick(t, f.q)
+	fleetCompleteStartProbe(t, f.q)
 }
 
 func (f *slowProofFleet) oldestProofAge() time.Duration {

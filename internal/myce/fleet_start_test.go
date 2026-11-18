@@ -1,0 +1,191 @@
+package myce
+
+import (
+	"testing"
+	"time"
+)
+
+func fleetAtStartProbe(t *testing.T) (*Queue, *fakeClock, *fleetUpgradeHost) {
+	t.Helper()
+	q, c, _ := fleetFixture(t, "q", "a", "b")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	fleetRestart(t, q, c, i, true)
+	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
+		fleetRefreshWithoutStart(t, q, c)
+		c.Advance(time.Second)
+	}
+	h := q.fleetActiveHost()
+	if h == nil || h.Phase != "worker_start" || h.StartProbe == "" || h.WorkerDone {
+		t.Fatalf("health alone did not leave a pending start proof: %+v", h)
+	}
+	if q.s.FleetUpgrade.Hosts[1].Phase != "pending" || q.maintenanceBlocked("b") {
+		t.Fatal("advanced before start proof")
+	}
+	return q, c, h
+}
+
+func TestFleetUpgradeStartProofIdleHost(t *testing.T) {
+	q, _, h := fleetAtStartProbe(t)
+	if len(q.s.Jobs) != 1 {
+		t.Fatal("idle host did not get exactly one queue-owned probe")
+	}
+	if probe := q.s.Jobs[h.StartProbe]; !probe.Spec.Needs.cpuOnly() || probe.Spec.Needs.MemoryGB != 0 || probe.Spec.Needs.HostMemoryGB != 0.125 {
+		t.Fatal("start probe must use normalized CPU resources", probe.Spec.Needs)
+	}
+	// A stale service/session cannot supply acceptance for this probe.
+	j := job(t, q, h.StartProbe)
+	stale := result(j, true)
+	stale.Session = "previous-session"
+	if err := q.Started(stale); err == nil || job(t, q, j.ID).StartedAt != nil {
+		t.Fatal("stale start accepted", err)
+	}
+	fleetCompleteStartProbe(t, q)
+	proof := job(t, q, j.ID)
+	if !h.WorkerDone || h.Phase != "complete" || proof.StartedAt == nil || proof.State != "succeeded" || !proof.ReleaseConfirmed || proof.Session != q.s.Machines[h.Machine].Session {
+		t.Fatalf("idle worker failed assignment acceptance: %+v %+v", h, proof)
+	}
+	fleetTick(t, q)
+	if next := q.fleetActiveHost(); next == nil || next.Host != "b" {
+		t.Fatal("verified start did not advance to next host", next)
+	}
+}
+
+func TestFleetUpgradeStartProofUsesUsefulAssignment(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a", "b")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	s := spec("production")
+	s.AllowedMachines = []string{workers[0].ID}
+	useful := submit(t, q, s)
+	fleetRestart(t, q, c, i, true)
+	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
+		fleetRefreshWithoutStart(t, q, c)
+		c.Advance(time.Second)
+	}
+	h := q.fleetActiveHost()
+	assigned := job(t, q, useful.ID)
+	if h == nil || h.Phase != "worker_start" || assigned.Attempt != 1 || assigned.StartedAt != nil {
+		t.Fatal("useful work did not win normal admission", h, assigned)
+	}
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if !h.WorkerDone || h.StartAccepted != useful.ID || job(t, q, useful.ID).State != "running" || !cancelled(job(t, q, h.StartProbe)) {
+		t.Fatal("fresh useful start not accepted without interrupting it", h)
+	}
+}
+
+func TestFleetUpgradeStartProbeNeverPlansStops(t *testing.T) {
+	q, _, h := fleetAtStartProbe(t)
+	probe := q.s.Jobs[h.StartProbe]
+	plan := &placementPlan{stops: 1}
+	// Both uncached/preparation and cached shared-vector paths are covered.
+	m := q.s.Machines[h.Machine]
+	set := &candidateSet{q: q, m: m, resources: map[batchResourceKey]batchResourceRoom{resourceKey(probe): {plan: plan}}}
+	if q.fleetStartPlan(probe, plan) != nil || set.batchPlan(probe) != nil {
+		t.Fatal("smoke borrowed a cached plan that stops useful work")
+	}
+	if q.fleetStartPlan(&Job{ID: "customer"}, plan) != plan {
+		t.Fatal("ordinary customer preemption changed")
+	}
+}
+
+func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
+	q, c, h := fleetAtStartProbe(t)
+	probe, operation := h.StartProbe, q.s.FleetUpgrade.Operation
+	machine := cloneMachine(q.s.Machines[h.Machine])
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	fakeCheckpointAvailability(t, restarted, true)
+	h = restarted.fleetActiveHost()
+	if h == nil || h.StartProbe != probe || h.WorkerDone || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
+		t.Fatal("restart lost or duplicated unaccepted probe", restarted.fleetUpgradeStatus())
+	}
+	check(t, restarted, machine, nil)
+	fleetCompleteStartProbe(t, restarted)
+	if !h.WorkerDone || job(t, restarted, probe).StartedAt == nil {
+		t.Fatal("restarted queue did not accept exact probe", restarted.fleetUpgradeStatus())
+	}
+}
+
+func TestFleetUpgradeHealthyWorkerNeverStartsStops(t *testing.T) {
+	q, c, h := fleetAtStartProbe(t)
+	probe := h.StartProbe
+	// #1709: service health and check-ins continue, but every assignment
+	// remains before Started. Queue time, not a sleep, exhausts the bound.
+	for q.s.FleetUpgrade.State == "running" {
+		c.Advance(fleetRuntimeFreshFor / 2)
+		fleetRefreshWithoutStart(t, q, c)
+	}
+	if h.Failure != "worker_start_not_verified" || h.WorkerDone || job(t, q, probe).StartedAt != nil || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
+		t.Fatalf("healthy never-started worker accepted: %+v", q.fleetUpgradeStatus())
+	}
+	if p := q.s.HostMaintenance[h.Host]; p.Mode != "drained" || p.DrainOwner != q.s.FleetUpgrade.Operation {
+		t.Fatal("operation-owned drain not restored", p)
+	}
+	if !cancelled(job(t, q, probe)) {
+		t.Fatal("failed operation left its probe runnable")
+	}
+	// A same-release rerun retains the debt rather than skipping current bytes.
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	next := q.fleetActiveHost()
+	if next == nil || next.Host != h.Host || next.WorkerDone || next.StartIdentity == "" || next.Phase != "worker_start" || next.StartProbe == probe {
+		t.Fatalf("rerun skipped failed acceptance: %+v", q.fleetUpgradeStatus())
+	}
+}
+
+func TestFleetUpgradeStartProofRuntimeChangeAndFailure(t *testing.T) {
+	for _, mode := range []string{"process", "session", "failed-command", "maintenance"} {
+		t.Run(mode, func(t *testing.T) {
+			q, _, h := fleetAtStartProbe(t)
+			want := "worker_start_runtime_changed"
+			switch mode {
+			case "process":
+				q.s.Machines[h.Machine].Fleet.PID++
+			case "session":
+				q.s.Machines[h.Machine].Session = "unproved-session"
+			case "failed-command":
+				j := job(t, q, h.StartProbe)
+				if err := q.Started(result(j, true)); err != nil {
+					t.Fatal(err)
+				}
+				finish(t, q, j, false)
+				want = "worker_start_probe_failed"
+			case "maintenance":
+				if _, err := q.ChangeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "disable"}); err != nil {
+					t.Fatal(err)
+				}
+				want = "maintenance_changed"
+			}
+			fleetTick(t, q)
+			if q.s.FleetUpgrade.State != "stopped" || h.Failure != want || h.WorkerDone || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
+				t.Fatalf("start failure advanced: %+v", q.fleetUpgradeStatus())
+			}
+			if mode == "maintenance" && q.s.HostMaintenance[h.Host].Mode != "disabled" {
+				t.Fatal("operator policy overwritten")
+			}
+		})
+	}
+}

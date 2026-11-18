@@ -828,7 +828,31 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    the installed worker and its original spool/session. The cutover fence and
    charge remain until exact adoption or release; do not erase state or force
    a fresh session to make an update proceed.
-6. **Clears the cutover fence or resumes the drain it took**, then advances.
+6. **Proves assignment startup** (`worker_start`). After the worker's health
+   and takeover checks pass, clears the cutover fence or resumes only the drain
+   this operation owns. Ordinary admission resumes on that host while later
+   hosts wait. The queue creates one `mycelium/maintenance` CPU job named
+   `fleet-start-probe`, pinned to the upgraded worker: one core, 128 MiB, no
+   environment, network or GPU, and a shell check that fleet credentials were
+   stripped. The ordinary scheduler, detached custodian, start gate and result
+   path must record Started, success and confirmed release on that exact
+   replacement PID/session/image before advancement. If useful work wins
+   admission first, a newly assigned attempt reaching Started on that verified
+   worker also proves startup; the upgrade never waits for that customer's job
+   to finish. Attempts already present when health passed cannot supply this
+   proof, even if the replacement retains their session. The unused smoke is
+   cancelled normally. Idle hosts get the same
+   probe; no customer assignment or operator acknowledgement is needed.
+   The `wait` field names its job ID. All normal policy and resource checks
+   apply, and the smoke never plans stops to make room. This CPU fallback does
+   not qualify GPU execution or application environments. A completed host's
+   `wait` field identifies the assignment that proved startup.
+7. **Advances** only after the probe passes (and, on the queue host, the queue
+   update passes). The start check has its own 15-minute queue-clock budget,
+   reusing the existing service-step bound. A full or policy-blocked host waits
+   within that budget; the upgrade never interrupts running work to make room.
+   An operator-owned drain or disable stops with
+   `worker_start_maintenance_blocked`; it is never resumed for a probe.
 
 For the first deployment from a queue that still implements #1591, the release
 operator must activate the new queue policy through a planned natural-drain
@@ -841,8 +865,13 @@ disabled host without a usable runtime proof is `skipped` and named; rerun once
 it is back. Rerunning while the operation runs returns it unchanged; a different
 release or urgency is refused until it finishes or stops.
 
-**When a host is unhealthy**, the operation stops (`state: stopped`), that host
-keeps its drain, and later hosts are untouched. The host's `failure` says why:
+**When a host is unhealthy**, the operation stops (`state: stopped`) and later
+hosts are untouched. An existing drain stays. After start acceptance has resumed
+an operation-owned drain, a failure cancels only the probe and restores that drain
+if the policy still matches and no newly opened production work prevents it;
+otherwise admission stays as current policy requires. Takeover hosts that never
+needed a drain remain enabled. Inspect `myce host status HOST` before recovery.
+The host's `failure` says why:
 a code from the service's updater, a new process running other bytes
 (`worker_running_hash_mismatch`, `queue_running_hash_mismatch`), no healthy new
 process within 15 minutes (`worker_update_not_verified`,
@@ -858,7 +887,10 @@ Older installed updaters omit this evidence; see the private local receipt.
 Nothing rolls back. Fix forward, then rerun `myce fleet upgrade` (with
 `--release NEWER` once a fixed release is approved). A rerun is a new operation:
 it takes over the drains the stopped operation left, verifies those hosts and
-resumes them, and skips services already on the release. If the queue itself is
+resumes them, and skips services already on the release, except that a worker
+whose previous start check failed must prove a new probe even on the same release.
+This gate ships in the **queue**; updating only workers cannot enable it.
+If the queue itself is
 unhealthy, roll it back as in
 [queue-only rollback](#queue-only-rollback-to-the-previous-release).
 

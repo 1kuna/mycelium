@@ -228,13 +228,13 @@ func (s *candidateSet) pick(excluded map[string]bool) *Job {
 
 func (s *candidateSet) batchPlan(j *Job) *placementPlan {
 	if len(s.q.s.PreparationPlans) != 0 {
-		return s.q.roomPlan(j, s.m, true)
+		return s.q.fleetStartPlan(j, s.q.roomPlan(j, s.m, true))
 	}
 	key := resourceKey(j)
 	if room, ok := s.resources[key]; ok {
-		return room.plan
+		return s.q.fleetStartPlan(j, room.plan)
 	}
 	plan := s.q.roomPlan(j, s.m, true)
 	s.resources[key] = batchResourceRoom{plan: plan}
-	return plan
+	return s.q.fleetStartPlan(j, plan)
 }

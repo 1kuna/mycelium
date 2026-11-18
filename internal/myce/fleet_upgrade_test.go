@@ -82,6 +82,11 @@ func fleetRestart(t *testing.T, q *Queue, c *fakeClock, i FleetUpdateInstruction
 // fleetActivate updates the active service and waits out its stability window.
 func fleetActivate(t *testing.T, q *Queue, c *fakeClock) string {
 	t.Helper()
+	if h := q.fleetActiveHost(); h != nil && h.Phase == "worker_start" {
+		host := h.Host + "/" + h.Machine
+		fleetCompleteStartProbe(t, q)
+		return host
+	}
 	i := fleetInstructionFor(t, q)
 	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
 		t.Fatal(err)
@@ -112,6 +117,47 @@ func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
 // fleetRefresh delivers one current check-in from every worker, with its
 // running attempts, and fresh proofs, then ticks.
 func fleetRefresh(t *testing.T, q *Queue, c *fakeClock) {
+	t.Helper()
+	fleetRefreshWithoutStart(t, q, c)
+	fleetCompleteStartProbe(t, q)
+}
+
+func fleetCompleteStartProbe(t *testing.T, q *Queue) {
+	t.Helper()
+	h := q.fleetActiveHost()
+	if h == nil || h.Phase != "worker_start" || q.s.FleetUpgrade.State != "running" {
+		return
+	}
+	j := q.s.Jobs[h.StartProbe]
+	if j == nil {
+		t.Fatal("missing start probe", h)
+	}
+	if j.Attempt == 0 {
+		q.clock.(*fakeClock).Advance(time.Nanosecond)
+		reply := check(t, q, *q.s.Machines[h.Machine], nil)
+		// The ordinary scheduler can prefer useful resumed work. Its fresh
+		// Started is equally valid proof; do not finish that customer's job.
+		if offered := reply.Job; offered != nil && offered.ID != j.ID {
+			if err := q.Started(result(offered, true)); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			return
+		}
+	}
+	j = q.s.Jobs[h.StartProbe]
+	if j.Attempt != 1 || j.Machine != h.Machine || j.State != "running" {
+		t.Fatalf("start probe not assigned: %+v", j)
+	}
+	r := cloneJob(j)
+	if err := q.Started(result(&r, true)); err != nil {
+		t.Fatal(err)
+	}
+	finish(t, q, &r, true)
+	fleetTick(t, q)
+}
+
+func fleetRefreshWithoutStart(t *testing.T, q *Queue, c *fakeClock) {
 	t.Helper()
 	drainAdmissionWait(t, q)
 	for _, m := range q.s.Machines {
@@ -348,8 +394,8 @@ func TestFleetUpgradeRerunAndAlreadyCurrent(t *testing.T) {
 	}
 }
 
-// A host the operator drained or disabled is updated but stays theirs; one
-// out of service without a usable runtime proof is skipped, visibly.
+// Operator maintenance is never overridden to manufacture start acceptance.
+// A host without usable runtime proof is still skipped visibly.
 func TestFleetUpgradeOperatorMaintenanceStaysOperators(t *testing.T) {
 	q, c, w := fleetFixture(t, "q", "a", "b")
 	if _, err := q.ChangeHostMaintenance("a", HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
@@ -366,11 +412,8 @@ func TestFleetUpgradeOperatorMaintenanceStaysOperators(t *testing.T) {
 	if got := fleetActivate(t, q, c); got != "a/worker-a" {
 		t.Fatal(got)
 	}
-	fleetTick(t, q)
-	fleetActivate(t, q, c)
-	fleetTick(t, q)
 	status := q.fleetUpgradeStatus()
-	if status.State != "complete" || status.Hosts[1].Phase != "skipped" || status.Hosts[1].Failure != "worker_unmanaged" {
+	if status.State != "stopped" || status.Hosts[0].Failure != "worker_start_maintenance_blocked" || status.Hosts[1].Phase != "skipped" || status.Hosts[1].Failure != "worker_unmanaged" {
 		t.Fatalf("out-of-service host not skipped visibly: %+v", status)
 	}
 	if p := q.s.HostMaintenance["a"]; p.Mode != "drained" || p.DrainOwner != "operator" {
@@ -433,7 +476,10 @@ func TestFleetUpgradeCleansUpAbandonedOperations(t *testing.T) {
 		fleetActivate(t, q, c)
 	}
 	fleetTick(t, q)
-	if q.s.FleetUpgrade.State != "complete" || q.maintenanceBlocked("a") || q.maintenanceBlocked("b") || q.s.HostMaintenance["c"].DrainOwner != "operator" {
+	// The abandoned operation drains were accepted and resumed. The unrelated
+	// operator drain now correctly stops assignment acceptance, without being
+	// adopted or resumed just to finish the rollout.
+	if q.s.FleetUpgrade.State != "stopped" || q.s.FleetUpgrade.Hosts[2].Failure != "worker_start_maintenance_blocked" || q.maintenanceBlocked("a") || q.maintenanceBlocked("b") || q.s.HostMaintenance["c"].DrainOwner != "operator" {
 		t.Fatalf("abandoned drains not adopted and resumed: %+v %+v", q.fleetUpgradeStatus(), q.s.HostMaintenance)
 	}
 	data, err := json.Marshal(q.s)
