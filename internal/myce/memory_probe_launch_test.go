@@ -15,7 +15,7 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
 			const available = 16.94316864013672
 			const launch = 16.929885864257812
-			const total = 31.206165313720703
+			const total = 33507364864.0 / (1 << 30)
 			const reserve = 4.0
 			m.CapabilityProfile.SystemMemoryBytes = uint64(total * (1 << 30))
 			m.HostAvailableMemoryGB = available
