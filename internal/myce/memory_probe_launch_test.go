@@ -50,12 +50,13 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 			if e := run.MemoryEnvelope; e.Refusal != "" || e.Basis != "exploratory" || e.HostGB > launch || e.HostGB < launch-2*minimumHostMemoryGB {
 				t.Fatalf("probe did not fit the measured launch room: %+v", e)
 			}
-			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return launch + reserve, nil }, HostMemoryReserveGB: reserve}
+			// HostMemorySource supplies the worker's reserve-subtracted room.
+			w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return launch, nil }, HostMemoryReserveGB: reserve}
 			if err := localAttemptAdmission(w, nil, *run, nil); err != nil {
 				t.Fatalf("near-miss still refused at worker launch: %v", err)
 			}
 			// Containment is still strict, even one byte below the offer.
-			w.HostMemorySource = func(context.Context) (float64, error) { return run.MemoryEnvelope.HostGB + reserve - 1.0/(1<<30), nil }
+			w.HostMemorySource = func(context.Context) (float64, error) { return run.MemoryEnvelope.HostGB - 1.0/(1<<30), nil }
 			if err := localAttemptAdmission(w, nil, *run, nil); err == nil {
 				t.Fatal("launch accepted a physical deficit")
 			}
