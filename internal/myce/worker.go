@@ -518,7 +518,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	phaseDone = stagingMeasure(ctx, stageExtensionEnvironment)
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
-		return nil, extensionErr
+		return nil, s.startFailure(j, environmentFailed, extensionErr)
 	}
 	extensionStarted := false
 	defer func() {
@@ -606,7 +606,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
 	if extensionErr != nil {
-		return nil, extensionErr
+		return nil, s.startFailure(j, environmentFailed, extensionErr)
 	}
 	if executionWorkdir != "" {
 		j.Spec.Run.Workdir = executionWorkdir
@@ -1359,15 +1359,7 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	defer s.close()
-	w.diskBudget = newWorkerDiskBudget(w.Clock, w.DiskProbe)
-	w.diskBudget.inventoryDir = s.dir
-	w.diskBudget.add(diskBudgetRoot{name: "attempts", path: s.dir})
-	w.compilerCache = &workerCompilerCache{cache: EnvironmentCache{Root: filepath.Join(s.dir, "compiler-cache"), Clock: w.Clock}}
-	if err := w.compilerCache.cache.initStorage(); err != nil {
-		return err
-	}
-	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates})
-	if err = w.initFileTransfers(stop, s); err != nil {
+	if err = w.initAttemptRuntime(stop, s); err != nil {
 		return err
 	}
 	if w.Machine.CapabilityProfile == nil {
@@ -1378,16 +1370,9 @@ func (w Worker) Run(stop context.Context) error {
 		w.Machine.CapabilityProfile = &profile
 	}
 
-	if w.EnvironmentRoot == "" {
-		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
-	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit, growToNeed: w.devEnvironmentSizing}
-	w.environmentCache.budget = w.diskBudget
-	w.environmentCache.references = w.environmentReferenced
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
-	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.environmentCache.Root, candidates: w.environmentCache.budgetCandidates})
 	environments := &environmentRuntime{authorize: w.authorizeLaunchContext, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {
 		return err
@@ -1580,9 +1565,6 @@ func (w Worker) Run(stop context.Context) error {
 		free = max(0, free-used)
 		return free, e
 	}
-	if w.ExtensionRoot == "" {
-		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
-	}
 	probeCtx, cancel := context.WithTimeout(stop, 15*time.Second)
 	w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
 	cancel()
@@ -1590,7 +1572,6 @@ func (w Worker) Run(stop context.Context) error {
 	probeCtx, cancel = context.WithTimeout(stop, 15*time.Second)
 	w.Machine.CPUExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, "cpu", "")
 	cancel()
-	w.environmentCache.Fetch = w.fileCache.copyTo
 	return w.runAttempts(stop, s, stores, rt, environments, rawMemory, requestRetention)
 }
 
