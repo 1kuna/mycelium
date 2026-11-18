@@ -82,5 +82,5 @@ func (q *Queue) fleetTakeoverFence(host string) bool {
 		}
 	}
 	h := q.fleetActiveHost()
-	return h != nil && h.Host == host && h.Takeover
+	return h != nil && h.Host == host && h.Takeover && h.Phase != "worker_start"
 }

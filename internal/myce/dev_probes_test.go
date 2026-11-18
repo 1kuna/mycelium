@@ -46,6 +46,38 @@ func probeWait(t testing.TB, ctx context.Context, condition func() bool) {
 	}
 }
 
+// The fleet gate's exact payload is an ordinary job: real API, command runner,
+// start authorization and release, with fake inventory and no native manager.
+func TestDevProbeFleetStartAssignment(t *testing.T) {
+	d, _, ctx := devProbe(t)
+	var machine string
+	probeWait(t, ctx, func() bool {
+		s, err := d.Queue.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(s.Machines) == 0 {
+			return false
+		}
+		machine = s.Machines[0].ID
+		return true
+	})
+	j, err := d.Client().Submit(ctx, fleetStartProbeSpec(machine))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeWait(t, ctx, func() bool {
+		j, err = d.Client().GetJob(ctx, j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return terminal(j.State) && j.ReleaseConfirmed
+	})
+	if j.State != "succeeded" || j.StartedAt == nil || j.Machine != machine || j.Attempt != 1 {
+		t.Fatalf("dev start probe did not prove execution and release: %+v", j)
+	}
+}
+
 func TestDevProbeQueueRestart(t *testing.T) {
 	d, c, ctx := devProbe(t)
 	s := spec("experiment")

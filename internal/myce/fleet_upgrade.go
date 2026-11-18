@@ -51,6 +51,8 @@ type fleetUpgrade struct {
 	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
+	StartProbe     string     `json:"start_probe,omitempty"`
+	StartIdentity  string     `json:"start_identity,omitempty"`
 	Takeover       bool       `json:"takeover,omitempty"`
 	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
 	StepAt         time.Time  `json:"step_at,omitempty"`
@@ -197,6 +199,16 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 				continue
 			}
 			h.WorkerDone = q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch)
+			// A stopped start check is not acceptance. Rerunning the same
+			// release must prove this worker, even though its bytes are current.
+			if h.WorkerDone && previous != nil {
+				for _, old := range previous.Hosts {
+					if old.Host == h.Host && old.StartIdentity != "" && !old.WorkerDone {
+						h.WorkerDone = false
+						h.StartIdentity = fleetHealthIdentity(m.Fleet)
+					}
+				}
+			}
 		}
 		// Abandoned operations' drains belong to this operation now: it
 		// verifies those hosts and then resumes them.
@@ -330,6 +342,17 @@ func (q *Queue) fleetPolicyMatches(h *fleetUpgradeHost) bool {
 // fleetStop records an unhealthy or refused step and stops advancing. The
 // host keeps its drain; the operator fixes forward and reruns.
 func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
+	if probe := q.s.Jobs[h.StartProbe]; probe != nil && !terminal(probe.State) {
+		q.cancelJob(probe)
+	}
+	// Start acceptance uses ordinary admission, so an operation-owned drain
+	// was resumed. Restore it if still ours and safe; never stop customer work
+	// or override an operator's policy or a newly opened production pipeline.
+	if h.Phase == "worker_start" && h.Owned && h.Policy.Mode == "enabled" && q.fleetPolicyMatches(h) {
+		if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: h.Policy.Mode, IfUpdatedAt: &h.Policy.UpdatedAt, DrainOwner: q.s.FleetUpgrade.Operation}); err == nil {
+			h.Policy = q.s.HostMaintenance[h.Host]
+		}
+	}
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
@@ -498,6 +521,13 @@ func (q *Queue) maintainFleetUpgrade() {
 		if !q.fleetVerify(h, m.Fleet, h.Before, m.CapabilityProfile.OS, m.CapabilityProfile.Arch, "worker") {
 			return
 		}
+		h.StartIdentity = fleetHealthIdentity(m.Fleet)
+		h.Phase, h.StepAt = "worker_start", q.clock.Now()
+	}
+	if h.Phase == "worker_start" {
+		if !q.fleetVerifyStart(h) {
+			return
+		}
 		h.WorkerDone = true
 		if h.Phase = "draining"; !q.fleetDrain(u, h) {
 			return
@@ -519,7 +549,7 @@ func (q *Queue) maintainFleetUpgrade() {
 		h.QueueDone, h.Phase = true, "verified"
 	}
 	if h.Phase == "verified" {
-		if h.Owned {
+		if h.Owned && h.Policy.Mode == "drained" {
 			if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &h.Policy.UpdatedAt, IfDrainOwner: h.Policy.DrainOwner}); err != nil {
 				q.fleetStop(h, "resume_conflict")
 				return
@@ -575,6 +605,8 @@ func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	// The pre-update identity comes from a fresh proof only; a late one is
 	// captured once it arrives, before any instruction can be issued.
 	switch {
+	case h.StartIdentity != "" && !h.WorkerDone:
+		h.Phase = "worker_start"
 	case h.Machine != "" && !h.WorkerDone:
 		h.Phase, h.Before = "worker_update", nil
 		if m := q.s.Machines[h.Machine]; m != nil && q.fleetProofFresh(m.Fleet) {

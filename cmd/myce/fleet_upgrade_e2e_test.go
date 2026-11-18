@@ -566,6 +566,24 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		poll(name+" updated, verified and resumed", func() bool {
 			return status() && host(name).Phase == "complete" && starts(name) == 2
 		})
+		var proofJobs myce.Snapshot
+		if err := client.Call(ctx, "GET", "/api/status?jobs=all&limit=100", nil, &proofJobs); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, summary := range proofJobs.Jobs {
+			if summary.Spec.Name != "fleet-start-probe" || summary.Machine != name {
+				continue
+			}
+			proof, err := client.GetJob(ctx, summary.ID)
+			if err != nil || proof.State != "succeeded" || proof.StartedAt == nil || !proof.ReleaseConfirmed || proof.Attempt != 1 || proof.Session == before[name].Session {
+				t.Fatalf("host advanced without a new-session assignment proof: %+v %v", proof, err)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatal("host advanced without a queue-owned start probe", name)
+		}
 	}
 	assertAttempts := func() {
 		t.Helper()
