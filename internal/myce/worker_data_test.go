@@ -572,7 +572,29 @@ func TestEphemeralCrashRecoveryReapsBeforeRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.stop(c.Now(), 0, true)
+	// Recovery runs in this process, unlike a real worker crash. Keep the old
+	// command waiter alive through recovery to exercise its late receipt writes,
+	// then join it before TempDir cleanup can remove the state directory (#1720).
+	resumeFinalizer := make(chan struct{})
+	p.mu.Lock()
+	saveOutcome := p.saveOutcome
+	p.saveOutcome = func(facts memberOutcome) error {
+		<-resumeFinalizer
+		return saveOutcome(facts)
+	}
+	p.mu.Unlock()
+	defer func() {
+		close(resumeFinalizer)
+		p.stop(c.Now(), 0, true)
+		select {
+		case finished := <-p.done:
+			if finished.err != nil {
+				t.Error("original command finalization:", finished.err)
+			}
+		case <-time.After(testWaitTimeout):
+			t.Error("original command finalizer did not exit")
+		}
+	}()
 	await(t, func() bool {
 		_, err := os.Stat(filepath.Join(attemptStorageRoot(j, s.dir), "ready"))
 		return err == nil
