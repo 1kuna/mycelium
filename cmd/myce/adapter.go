@@ -341,7 +341,10 @@ func checkedAdapterCommand(command, check []string) []string {
 	for i := range check {
 		fmt.Fprintf(&script, "myce_check_%d=$1; shift\n", i)
 	}
-	script.WriteString("\"$@\"\n")
+	// Keep the wrapper alive until the foreground command finishes its stop
+	// handler. The worker signals the payload too; forwarding here would send
+	// TERM twice on whole-session stops and could interrupt a checkpoint save.
+	script.WriteString("trap ':' TERM\n\"$@\"\n")
 	for i := range check {
 		if i > 0 {
 			script.WriteByte(' ')

@@ -86,6 +86,23 @@ func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
 	if _, e = os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(e) {
 		t.Fatal("argv evaluated as shell")
 	}
+	// Catching TERM must retain stdin, the failing command exit code, and
+	// the rule that checks run only after command success.
+	cmd = checkedAdapterCommand([]string{"sh", "-c", `read value; [ "$value" = input ]; exit 7`}, []string{"touch", "checked"})
+	run = exec.Command(cmd[0], cmd[1:]...)
+	run.Dir, run.Stdin = root, strings.NewReader("input\n")
+	if b, err := run.CombinedOutput(); exitCodeForTest(err) != 7 {
+		t.Fatalf("command failure status: %v %s", err, b)
+	}
+	if _, err := os.Stat(filepath.Join(root, "checked")); !os.IsNotExist(err) {
+		t.Fatal("checks ran after command failure")
+	}
+	cmd = checkedAdapterCommand([]string{"cat"}, []string{"true"})
+	run = exec.Command(cmd[0], cmd[1:]...)
+	run.Stdin = strings.NewReader("input\n")
+	if b, err := run.CombinedOutput(); err != nil || string(b) != "input\n" {
+		t.Fatalf("command stdin: %q %v", b, err)
+	}
 }
 
 // #1650 exercises myce run's frozen source and dependency through the real

@@ -188,11 +188,7 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) {
 	g.signalLockedUsing(member, signal, func(delivered func()) error {
 		if member != nil {
-			if err := member.signal(signal); err != nil {
-				return err
-			}
-			delivered()
-			return nil
+			return signalNativeMemberTree(member, signal, delivered)
 		}
 		return signalWorkerSession(g.supervisor.Process.Pid, signal, delivered)
 	})
