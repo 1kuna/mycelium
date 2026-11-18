@@ -1,9 +1,31 @@
 package myce
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 func fleetStartProbeSpec(machine string) Spec {
-	return Spec{Name: "fleet-start-probe", Project: "mycelium", Class: "maintenance", Priority: "experiment", AllowedMachines: []string{machine}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
+	return Spec{Name: "fleet-start-probe", Project: "mycelium", Class: "maintenance", AllowedMachines: []string{machine}, Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: 0.125}, Run: RunSpec{Command: []string{"sh", "-c", `test "${MYCE_TOKEN+x}" != x`}}}
+}
+
+// Even an owner policy that ranks maintenance highly cannot make an upgrade
+// smoke interrupt useful work. Apply this after the shared resource-plan cache:
+// another job's identical resource vector must not lend it interruption power.
+func (q *Queue) fleetStartPlan(j *Job, plan *placementPlan) *placementPlan {
+	if h := q.fleetActiveHost(); h != nil && j.ID == h.StartProbe && plan != nil && plan.stops > 0 {
+		return nil
+	}
+	return plan
+}
+
+func (q *Queue) fleetSnapshotStarts(h *fleetUpgradeHost) {
+	h.StartBefore = nil
+	for _, j := range q.liveJobs() {
+		if j.Machine == h.Machine && j.Attempt > 0 {
+			h.StartBefore = append(h.StartBefore, Execution{ID: j.ID, Attempt: j.Attempt})
+		}
+	}
 }
 
 // Health and RunnerSmoke qualify the service process, not its detached
@@ -23,6 +45,19 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 	if !q.fleetProofFresh(m.Fleet) {
 		h.Wait = "waiting for the upgraded worker's next healthy runtime proof before accepting its start probe"
 		return false
+	}
+	// Useful work may win ordinary admission ahead of the smoke. A newly
+	// assigned execution reaching Started on this verified session proves the
+	// same start path without waiting for customer work to finish. Retained
+	// pre-upgrade attempts and their replays cannot supply this evidence.
+	for _, j := range q.liveJobs() {
+		if j.ID != h.StartProbe && j.Machine == m.ID && j.Session == m.Session && j.StartedAt != nil && !slices.Contains(h.StartBefore, Execution{ID: j.ID, Attempt: j.Attempt}) {
+			if probe := q.s.Jobs[h.StartProbe]; probe != nil && !terminal(probe.State) {
+				q.cancelJob(probe)
+			}
+			h.StartAccepted = j.ID
+			return true
+		}
 	}
 	if h.StartProbe == "" {
 		if h.Owned && h.Policy.Mode == "drained" {
@@ -49,6 +84,7 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 		return false
 	}
 	if j.State == "succeeded" && j.StartedAt != nil && j.ReleaseConfirmed {
+		h.StartAccepted = j.ID
 		return true
 	}
 	// A blocked/full host waits within the finite service-step budget rather

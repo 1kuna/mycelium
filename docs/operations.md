@@ -836,10 +836,17 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    environment, network or GPU, and a shell check that fleet credentials were
    stripped. The ordinary scheduler, detached custodian, start gate and result
    path must record Started, success and confirmed release on that exact
-   replacement PID/session/image before advancement. Idle hosts get the same
+   replacement PID/session/image before advancement. If useful work wins
+   admission first, a newly assigned attempt reaching Started on that verified
+   worker also proves startup; the upgrade never waits for that customer's job
+   to finish. Attempts already present when health passed cannot supply this
+   proof, even if the replacement retains their session. The unused smoke is
+   cancelled normally. Idle hosts get the same
    probe; no customer assignment or operator acknowledgement is needed.
    The `wait` field names its job ID. All normal policy and resource checks
-   apply; this does not qualify GPU execution or application environments.
+   apply, and the smoke never plans stops to make room. This CPU fallback does
+   not qualify GPU execution or application environments. A completed host's
+   `wait` field identifies the assignment that proved startup.
 7. **Advances** only after the probe passes (and, on the queue host, the queue
    update passes). The start check has its own 15-minute queue-clock budget,
    reusing the existing service-step bound. A full or policy-blocked host waits

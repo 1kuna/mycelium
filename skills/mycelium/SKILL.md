@@ -713,7 +713,8 @@ need; keep intentional situational pins. It also compares typed
 - [Owner operations](references/owner-operations.md): queue-owner writes.
   Supporting queues hold fleet advancement in `worker_start` until a small
   queue-owned CPU `fleet-start-probe` starts, succeeds and releases on the
-  upgraded worker, even when there is no customer work. Normal admission resumes
+  upgraded worker, or a newly assigned real job reaches Started there. Existing
+  retained attempts cannot prove new startup. Idle workers get the smoke. Normal admission resumes
   on that host during the check. A failed check stops later hosts; it does not
   authorize consumer retries, maintenance changes or checkpoint edits. Keep
   existing job IDs and let the installation owner repair and rerun. This needs

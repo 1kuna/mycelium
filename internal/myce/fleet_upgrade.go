@@ -51,13 +51,15 @@ type fleetUpgrade struct {
 	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
-	StartProbe     string     `json:"start_probe,omitempty"`
-	StartIdentity  string     `json:"start_identity,omitempty"`
-	Takeover       bool       `json:"takeover,omitempty"`
-	CriticalStopAt *time.Time `json:"critical_stop_at,omitempty"`
-	StepAt         time.Time  `json:"step_at,omitempty"`
-	HealthSince    time.Time  `json:"health_since,omitempty"`
-	HealthIdentity string     `json:"health_identity,omitempty"`
+	StartBefore    []Execution `json:"start_before,omitempty"`
+	StartAccepted  string      `json:"start_accepted,omitempty"`
+	StartProbe     string      `json:"start_probe,omitempty"`
+	StartIdentity  string      `json:"start_identity,omitempty"`
+	Takeover       bool        `json:"takeover,omitempty"`
+	CriticalStopAt *time.Time  `json:"critical_stop_at,omitempty"`
+	StepAt         time.Time   `json:"step_at,omitempty"`
+	HealthSince    time.Time   `json:"health_since,omitempty"`
+	HealthIdentity string      `json:"health_identity,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -412,6 +414,9 @@ func (q *Queue) fleetSelectHost(u *fleetUpgrade) *fleetUpgradeHost {
 		if a.Queue != b.Queue {
 			return !a.Queue
 		}
+		if (a.StartIdentity != "") != (b.StartIdentity != "") {
+			return a.StartIdentity != "" // Retry unaccepted current bytes first.
+		}
 		if production[a] != production[b] {
 			return !production[a]
 		}
@@ -525,6 +530,7 @@ func (q *Queue) maintainFleetUpgrade() {
 			return
 		}
 		h.StartIdentity = fleetHealthIdentity(m.Fleet)
+		q.fleetSnapshotStarts(h)
 		h.Phase, h.StepAt = "worker_start", q.clock.Now()
 	}
 	if h.Phase == "worker_start" {
@@ -565,6 +571,9 @@ func (q *Queue) maintainFleetUpgrade() {
 			}
 		}
 		h.Phase, h.Wait, h.ProgressAt = "complete", "", q.clock.Now()
+		if h.StartAccepted != "" {
+			h.Wait = "assignment start verified by " + h.StartAccepted
+		}
 		if !slicesContainsPhase(u.Hosts, "pending") && q.fleetActiveHost() == nil {
 			u.State = "complete"
 		}
@@ -592,6 +601,11 @@ func slicesContainsPhase(hosts []*fleetUpgradeHost, phase string) bool {
 // fleetDrain prefers live takeover. Unproved normal updates wait naturally;
 // only an explicit critical request uses the existing tier-stop policy.
 func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
+	if h.StartIdentity != "" && !h.WorkerDone {
+		q.fleetSnapshotStarts(h)
+		h.Phase, h.StepAt = "worker_start", q.clock.Now()
+		return true
+	}
 	takeover := q.fleetAdoptionReason(h) == ""
 	if takeover {
 		h.Takeover = true

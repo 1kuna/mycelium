@@ -133,7 +133,17 @@ func fleetCompleteStartProbe(t *testing.T, q *Queue) {
 		t.Fatal("missing start probe", h)
 	}
 	if j.Attempt == 0 {
-		check(t, q, *q.s.Machines[h.Machine], nil)
+		q.clock.(*fakeClock).Advance(time.Nanosecond)
+		reply := check(t, q, *q.s.Machines[h.Machine], nil)
+		// The ordinary scheduler can prefer useful resumed work. Its fresh
+		// Started is equally valid proof; do not finish that customer's job.
+		if offered := reply.Job; offered != nil && offered.ID != j.ID {
+			if err := q.Started(result(offered, true)); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			return
+		}
 	}
 	j = q.s.Jobs[h.StartProbe]
 	if j.Attempt != 1 || j.Machine != h.Machine || j.State != "running" {

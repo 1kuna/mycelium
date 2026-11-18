@@ -111,6 +111,18 @@ A stopped operation keeps every drain it holds. A rerun is a new operation; it
 adopts drains left by the stopped operation (and by operations from releases
 before this path), verifies those hosts and then resumes them.
 
+Worker health is followed by `worker_start`: a queue-owned CPU smoke must start,
+succeed and release, or a newly assigned useful job must reach Started on the
+verified replacement process/session/image. The queue snapshots existing attempt
+identities when this check begins; retained attempts cannot pass it by replaying
+Started. The snapshot and pending probe survive queue restart. Ordinary admission
+resumes during this stage; no resource/policy bypass or smoke-induced stop is
+allowed. A failed check stops later hosts, cancels only its smoke and restores an
+operation-owned drain when current policy and open production work allow it.
+The stage reuses the 15-minute service-step budget. A same-release rerun retries
+unaccepted current bytes before other pending workers. Successful status names
+the proving assignment in `wait`. This is queue-side behavior.
+
 ## Failure codes and repairs
 
 Apply repairs locally through the authorized owner, then rerun

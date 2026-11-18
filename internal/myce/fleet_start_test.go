@@ -54,9 +54,54 @@ func TestFleetUpgradeStartProofIdleHost(t *testing.T) {
 	}
 }
 
+func TestFleetUpgradeStartProofUsesUsefulAssignment(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a", "b")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	s := spec("production")
+	s.AllowedMachines = []string{workers[0].ID}
+	useful := submit(t, q, s)
+	fleetRestart(t, q, c, i, true)
+	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
+		fleetRefreshWithoutStart(t, q, c)
+		c.Advance(time.Second)
+	}
+	h := q.fleetActiveHost()
+	assigned := job(t, q, useful.ID)
+	if h == nil || h.Phase != "worker_start" || assigned.Attempt != 1 || assigned.StartedAt != nil {
+		t.Fatal("useful work did not win normal admission", h, assigned)
+	}
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if !h.WorkerDone || h.StartAccepted != useful.ID || job(t, q, useful.ID).State != "running" || !cancelled(job(t, q, h.StartProbe)) {
+		t.Fatal("fresh useful start not accepted without interrupting it", h)
+	}
+}
+
+func TestFleetUpgradeStartProbeNeverPlansStops(t *testing.T) {
+	q, _, h := fleetAtStartProbe(t)
+	probe := q.s.Jobs[h.StartProbe]
+	plan := &placementPlan{stops: 1}
+	// Both uncached/preparation and cached shared-vector paths are covered.
+	m := q.s.Machines[h.Machine]
+	set := &candidateSet{q: q, m: m, resources: map[batchResourceKey]batchResourceRoom{resourceKey(probe): {plan: plan}}}
+	if q.fleetStartPlan(probe, plan) != nil || set.batchPlan(probe) != nil {
+		t.Fatal("smoke borrowed a cached plan that stops useful work")
+	}
+	if q.fleetStartPlan(&Job{ID: "customer"}, plan) != plan {
+		t.Fatal("ordinary customer preemption changed")
+	}
+}
+
 func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
 	q, c, h := fleetAtStartProbe(t)
 	probe, operation := h.StartProbe, q.s.FleetUpgrade.Operation
+	machine := cloneMachine(q.s.Machines[h.Machine])
 	var path string
 	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
 		t.Fatal(err)
@@ -75,7 +120,8 @@ func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
 	if h == nil || h.StartProbe != probe || h.WorkerDone || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
 		t.Fatal("restart lost or duplicated unaccepted probe", restarted.fleetUpgradeStatus())
 	}
-	fleetRefresh(t, restarted, c)
+	check(t, restarted, machine, nil)
+	fleetCompleteStartProbe(t, restarted)
 	if !h.WorkerDone || job(t, restarted, probe).StartedAt == nil {
 		t.Fatal("restarted queue did not accept exact probe", restarted.fleetUpgradeStatus())
 	}
