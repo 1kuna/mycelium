@@ -18,7 +18,8 @@ including a stage waiting on `after:`, with no other enabled host able to start
 it. It uses the same predicate as `myce host drain` (`production_work_open`).
 A critical update does not wait for that work (MY-39).
 
-Each host goes through `draining`, then `worker_update` and `worker_health` for
+Each host goes through `draining`, then `worker_update`, `worker_health` and
+`worker_start` for
 its worker, then `queue_update` and `queue_health` for the queue on the queue's
 host, then `complete`. `skipped` marks an out-of-service host without a usable
 runtime proof. The queue issues the update instruction only while the host is
@@ -119,6 +120,10 @@ Apply repairs locally through the authorized owner, then rerun
 | --- | --- |
 | `worker_running_hash_mismatch`, `queue_running_hash_mismatch` | A new process runs other bytes. Compare the running and installed hashes in status; reinstall the release or approve a fixed one. |
 | `worker_update_not_verified`, `queue_update_not_verified` | No healthy new process in 15 minutes. Check the service is online, its updater's receipt (`fleet-update.json` in the state directory) and the service manager. |
+| `worker_start_not_verified` | The upgraded worker did not prove its CPU probe started, succeeded and released within 15 minutes after health passed. Inspect the job ID in `wait` and the `fleet-start-probe` job history, start/custody records and admission holds. Keep existing jobs and checkpoints; fix forward, then rerun. |
+| `worker_start_probe_failed` | The probe failed, was cancelled, retried/lost or executed on another session. Inspect its exact attempt's finding and retained release obligations; rerun only after repair. |
+| `worker_start_runtime_changed` | The verified replacement process/session/image changed before acceptance. Restore healthy runtime evidence and rerun. An old probe never accepts a replacement process. |
+| `worker_start_maintenance_blocked` | An operator-owned drain or disable prevents ordinary probe admission. Keep that policy; its owner must resolve it before rerunning. |
 | `maintenance_changed` | Someone changed the host's maintenance during the update; their policy is kept. Rerun when ready. |
 | `drain_conflict`, `resume_conflict`, `maintenance_unavailable` | The host's maintenance policy changed between read and write. Check `myce host status HOST`, then rerun. |
 | `worker_unmanaged`, `worker_target_incompatible`, `worker_downgrade_refused` | The worker has no fresh runtime proof, no artifact for its platform, or is newer than the release. |

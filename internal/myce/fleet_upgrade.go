@@ -356,6 +356,9 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
+	if h.StartProbe != "" {
+		h.Wait += "; inspect start probe " + h.StartProbe
+	}
 	h.ProgressAt = q.clock.Now()
 }
 func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {

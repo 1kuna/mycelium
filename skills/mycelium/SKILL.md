@@ -710,7 +710,14 @@ need; keep intentional situational pins. It also compares typed
   upgrades refresh it ([setup](setup-project.md#install-the-agent-skill)).
 - [Setup](setup-project.md), [harness](harness-binding.md) and
   [T3 binding](t3-binding.md): adoption, skill install, notifiers.
-- [Owner operations](references/owner-operations.md): queue-owner writes. Transient
+- [Owner operations](references/owner-operations.md): queue-owner writes.
+  Supporting queues hold fleet advancement in `worker_start` until a small
+  queue-owned CPU `fleet-start-probe` starts, succeeds and releases on the
+  upgraded worker, even when there is no customer work. Normal admission resumes
+  on that host during the check. A failed check stops later hosts; it does not
+  authorize consumer retries, maintenance changes or checkpoint edits. Keep
+  existing job IDs and let the installation owner repair and rerun. This needs
+  a queue release; worker-only installs do not enable it. Transient
   NAS failures warn without blocking install or fleet upgrade. Receipts retain
   `storage_warning` (root/operation/errno, duration and timeout); capable queues
   also show it in fleet status. Runtime root health still gates dependent work
