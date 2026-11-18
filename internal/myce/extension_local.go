@@ -516,7 +516,7 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, releaseOut func(), errOut error) {
 	defer func() {
 		if errOut != nil {
-			errOut = fmt.Errorf("%w: %v", errExtensionUnavailable, errOut)
+			errOut = fmt.Errorf("%w: %w", errExtensionUnavailable, errOut)
 		}
 	}()
 	if !j.Spec.extensionJob() {

@@ -129,7 +129,8 @@ shown):
 
 | Code | Next step |
 | --- | --- |
-| `fleet_authorization_refused`, `fleet_instruction_stale`, `fleet_ack_stale`, `fleet_maintenance_changed` | The queue no longer authorizes this operation or session. Check the operation's state and the host's maintenance. |
+| `fleet_authorization_refused` | The authorization call failed, or its returned proof failed readiness/session checks. This code alone does not establish a queue refusal. Inspect the sanitized authorization diagnostics below. |
+| `fleet_instruction_stale`, `fleet_ack_stale`, `fleet_maintenance_changed` | The queue no longer authorizes this operation or session. Check the operation's state and the host's maintenance. |
 | `fleet_ack_failed` | Restore authenticated queue connectivity. |
 | `fleet_artifact_download_failed`, `fleet_artifact_transfer_failed` | Restore connectivity to the queue and its publisher; check local disk space. |
 | `fleet_artifact_refused` | The bytes did not match the signed size or hash, or the publisher refused. Repair publication or approve a corrected release. |
@@ -148,3 +149,27 @@ shown):
 | `fleet_receipt_write_failed` | Repair the state directory's space or permissions. |
 | `fleet_restart_failed`, `fleet_health_failed` | The restart or the new process failed. Fix forward with a corrected release; old bytes are never restored automatically. |
 | `fleet_failure_code_missing`, `fleet_failure_code_unrecognized` | The service sent no code, or one this queue does not know (for example from an older updater). Inspect its receipt locally. |
+
+### Authorization diagnostics
+
+Service logs record `event=fleet_authorization`. A worker's `cause` retains a
+typed `HTTP STATUS code=CODE`, a classified transport/decode failure (for example
+`timeout` or `response_decode_failed`), or the failed readiness/session predicate:
+`proof_pid_missing`, `proof_session_missing`, `proof_sha256_invalid`,
+`proof_service_unhealthy`, `proof_runner_smoke_failed`,
+`proof_start_gate_mismatch`, `proof_attempt_protocol_mismatch`, or
+`proof_session_mismatch`. The public failure code stays
+`fleet_authorization_refused`; stale-control codes and their retry policy stay
+unchanged. Received values, server messages, credentials and raw bodies are not
+logged.
+
+HTTP codes use a fixed allowlist for this endpoint; an unknown code becomes
+`request_failed` while retaining the numeric HTTP status.
+
+A supporting queue independently logs `side=queue cause="ready"` or its
+classified refusal, plus `caller=active`, `cancelled` or `timeout`. This is useful
+when an older worker reports only the generic failure. A queue's ready decision
+does not prove that the caller received its answer. Correlate the worker and
+queue records at the failing call; a later request or a healthy status snapshot
+cannot establish a historical failure's cause. Existing binaries do not acquire
+these diagnostics when a candidate release is published.

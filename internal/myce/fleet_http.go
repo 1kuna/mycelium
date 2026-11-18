@@ -79,6 +79,14 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 			}
 			return nil
 		}, nil)
+		// Older helpers collapse transport/HTTP/proof failures to one code.
+		// Retain the queue's decision independently of the helper version, and
+		// record caller cancellation without claiming the answer was delivered.
+		caller := "active"
+		if e := r.Context().Err(); e != nil {
+			caller = ClientErrorCause(e)
+		}
+		log.Printf("event=fleet_authorization side=queue cause=%q caller=%s", fleetAuthorizationCause(err, proof, v.Get("session")), caller)
 		respond(w, proof, err)
 	})
 	mux.HandleFunc("POST /api/fleet/ack", func(w http.ResponseWriter, r *http.Request) {

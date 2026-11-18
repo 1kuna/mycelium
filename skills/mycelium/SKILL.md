@@ -28,8 +28,10 @@ closings go to the installation owner's Mycelium inbox when its hook is configur
   classes and same-named policy tiers, including when the fleet is full. Submit
   those classes normally; no host exclusion is needed to protect the agents
   workstation. Light work still uses its measured allowances. Queued GPU work
-  protects its resolved CPU/RAM needs from CPU backfill, including while a finite
-  GPU execution finishes; no fixed core reserve or CUDA-host exclusion is needed.
+  protects its resolved CPU/RAM needs from CPU backfill, including internal
+  extension checks, CPU maintenance resumes, and waits for a finite GPU execution
+  to finish. Freed capacity accumulates toward that demand; portable queued CPU
+  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
@@ -563,6 +565,9 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   a transferred extrapolation alone cannot. Read the check's own status for
   the measured demand/capacity comparison. Reduce genuinely oversized check
   requirements or provide capable hardware before retrying qualification.
+  Qualified GPU work also probes one card when only a transferred qualification
+  estimate exceeds native capacity. Cold probes fit observed idle headroom and
+  retain exact-session prelaunch deficits; keep the same queued job and key.
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only
@@ -596,6 +601,8 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   before staging or payload launch; supporting workers release that exact
   assignment through normal completion. Missing custodian observations alone
   retain custody and need the queue owner's diagnosis; keep the existing job ID.
+  Supporting workers also reconcile an initialized, never-started helper after
+  restart when exact helper death, manager absence and no launch custody are proven.
   The installation owner can recover the exact legacy Linux pre-entry refusal
   offline with `resolve-custodian-startup` under the [operations runbook](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#recover-the-legacy-pre-entry-refusal).
   Consumers keep their existing jobs and checkpoints; do not resubmit or edit custody.

@@ -126,6 +126,106 @@ func TestHostBackfillAccumulatesForAccelerator(t *testing.T) {
 	}
 }
 
+// #1717: a partial CPU release must accumulate toward older native checks,
+// rather than immediately admitting a new CPU attempt. Check first-run sizing
+// uses physical headroom, so a check can remain unfitting while CPU work fits.
+func TestHostBackfillAccumulatesForExtensionChecks(t *testing.T) {
+	for _, alternate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("alternate=%v", alternate), func(t *testing.T) {
+			q, clock, m, probe := gpuHostFixture(t)
+			m.HostAvailableMemoryGB = 20
+			machineCheck(t, q, m)
+			var holders []*Job
+			for range 2 {
+				j := submit(t, q, cpuSpec(1, 8))
+				run := assignedJob(machineCheck(t, q, m, holders...))
+				if run == nil || run.ID != j.ID {
+					t.Fatal("missing initial CPU holder", run)
+				}
+				if err := q.Started(result(run, false)); err != nil {
+					t.Fatal(err)
+				}
+				holders = append(holders, run)
+			}
+			probe.Workload = nil
+			probe.ExtensionDigest = registeredExtension(t, q, probe.Extension).Digest
+			probe.Project = "extension-check"
+			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			probe.AllowedMachines = []string{m.ID}
+			var demands []*Job
+			for _, device := range []string{"0", "1"} {
+				probe.Needs.GPU = &GPUSelection{Devices: []string{device}}
+				demands = append(demands, submit(t, q, probe))
+				clock.Advance(time.Second)
+			}
+			later := submit(t, q, cpuSpec(1, 8))
+			finish(t, q, holders[0], true)
+			if got := assignedJob(machineCheck(t, q, m, holders[1])); got != nil {
+				t.Fatalf("partial release admitted %s before older extension checks", got.ID)
+			}
+			status, err := q.jobSnapshot(later.ID, context.Background())
+			if err != nil || status.DiagnosticCode != "host_capacity_accumulation" || !strings.Contains(status.Reason, demands[0].ID) {
+				t.Fatalf("missing check accumulation hold: %v, %v", status, err)
+			}
+			if alternate {
+				peer := cpuMachine("general", "general", "cpu", 8, 32)
+				peer.Devices = []MachineDevice{}
+				if got := assignedJob(machineCheck(t, q, peer)); got == nil || got.ID != later.ID {
+					t.Fatal("portable CPU work did not use another eligible host", got)
+				}
+			}
+			if current := job(t, q, holders[1].ID); current.State != "running" || current.StopAt != nil || current.ScarceHostYield != nil {
+				t.Fatal("same-tier holder was preempted")
+			}
+			finish(t, q, holders[1], true)
+			for _, demand := range demands {
+				run := assignedJob(machineCheck(t, q, m))
+				if run == nil || run.ID != demand.ID {
+					t.Fatal("older extension check did not acquire accumulated memory", run, job(t, q, demand.ID).Reason)
+				}
+				finish(t, q, run, true)
+			}
+		})
+	}
+}
+
+func TestHostBackfillExtensionCheckBeforeMaintenanceCPU(t *testing.T) {
+	q, clock, m, probe := gpuHostFixture(t)
+	m.HostAvailableMemoryGB = 20
+	cpu := submit(t, q, cpuSpec(1, 8))
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != cpu.ID {
+		t.Fatal("missing CPU execution", running)
+	}
+	if err := q.Started(result(running, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	probe.Workload = nil
+	probe.ExtensionDigest = registeredExtension(t, q, probe.Extension).Digest
+	probe.AllowedMachines = []string{m.ID}
+	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	demand := submit(t, q, probe)
+	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+		t.Fatal(err)
+	}
+	finishInterrupted(t, q, running)
+	r := result(running, true)
+	r.ReleaseOnly = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if !maintenanceResume(job(t, q, cpu.ID)) {
+		t.Fatal("fixture lost maintenance resume priority")
+	}
+	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != demand.ID {
+		t.Fatal("CPU maintenance resume took queued accelerator check's memory", got)
+	}
+}
+
 // A fitting GPU job also consumes the shared host pool. Explain the same
 // accumulation fence as CPU backfill, then place it beside CPU holders once
 // the preceding demand clears (#1701).

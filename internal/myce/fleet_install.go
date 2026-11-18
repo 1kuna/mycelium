@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -182,6 +183,7 @@ func fleetAuthorize(ctx context.Context, client Client, i FleetUpdateInstruction
 		if err == nil && fleetProofReady(&proof) && proof.Session == i.Session {
 			return proof, nil
 		}
+		log.Printf("event=fleet_authorization side=worker cause=%q", fleetAuthorizationCause(err, &proof, i.Session))
 		err = fleetControlFailure(err, "fleet_authorization_refused")
 		if !fleetStaleControl(err) || tries >= 4 || wait(ctx, fleetRuntimeFreshFor/4) != nil {
 			return proof, err

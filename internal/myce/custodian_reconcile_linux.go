@@ -24,6 +24,13 @@ func fenceCustodianStartup(ctx context.Context, dir, id string) error {
 }
 
 func fenceCustodianStartupWithHandles(ctx context.Context, dir, id string, handles func(context.Context, string, string) error) error {
+	if err := custodianManagerAbsent(ctx, id); err != nil {
+		return err
+	}
+	return fenceCustodianProcesses(ctx, dir, id, handles)
+}
+
+func custodianManagerAbsent(ctx context.Context, id string) error {
 	// Not-found is required, not merely inactive. A loaded scope/job can still
 	// contain or dispatch a helper. Inspector errors never prove absence.
 	cmd := exec.CommandContext(ctx, "systemctl", "--user", "show", custodianUnit(id), "--property=LoadState,ActiveState,SubState,Job,ControlGroup")
@@ -35,9 +42,10 @@ func fenceCustodianStartupWithHandles(ctx context.Context, dir, id string, handl
 	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) || diagnostic.Len() != 0 || ctx.Err() != nil {
 		return errors.New("custodian manager inspection failed; custody retained")
 	}
-	if err := absentCustodianScope(out.String()); err != nil {
-		return err
-	}
+	return absentCustodianScope(out.String())
+}
+
+func fenceCustodianProcesses(ctx context.Context, dir, id string, handles func(context.Context, string, string) error) error {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
@@ -222,7 +223,12 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	}
 	g := &attemptCustodian{dir: custodianDir(s.dir), id: id}
 	if err := g.read(*s.state.Job); err != nil {
-		return nil, fmt.Errorf("detached attempt adoption unconfirmed; custody retained: %w", err)
+		if recoveryErr := w.recoverUnstartedCustodian(s); recoveryErr != nil {
+			return nil, fmt.Errorf("detached attempt adoption unconfirmed; custody retained: %w", errors.Join(err, recoveryErr))
+		}
+		if err := g.read(*s.state.Job); err != nil {
+			return nil, fmt.Errorf("detached attempt recovery unconfirmed; custody retained: %w", err)
+		}
 	}
 	g.updateStore(s)
 	p := &process{job: *s.state.Job, custodian: g, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
@@ -389,6 +395,36 @@ func custodiansDetached(actors map[attemptKey]*attemptSupervisor) bool {
 	return true
 }
 
+// initAttemptRuntime is shared by the coordinator and detached entry. Keep
+// launch dependencies here; coordinator-only loops and retention stay in Run.
+func (w *Worker) initAttemptRuntime(stop context.Context, s *workerStore) error {
+	if w.ExtensionRoot == "" {
+		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
+	}
+	w.diskBudget = newWorkerDiskBudget(w.Clock, w.DiskProbe)
+	w.diskBudget.inventoryDir = s.dir
+	w.diskBudget.add(diskBudgetRoot{name: "attempts", path: s.dir})
+	w.compilerCache = &workerCompilerCache{cache: EnvironmentCache{Root: filepath.Join(s.dir, "compiler-cache"), Clock: w.Clock}}
+	if err := w.compilerCache.cache.initStorage(); err != nil {
+		return err
+	}
+	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates})
+	if err := w.initFileTransfers(stop, s); err != nil {
+		return err
+	}
+	if w.EnvironmentRoot == "" {
+		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
+	}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Fetch: w.fileCache.copyTo, Run: w.environmentRun, sizeLimit: w.environmentSizeLimit, growToNeed: w.devEnvironmentSizing}
+	w.environmentCache.budget = w.diskBudget
+	w.environmentCache.references = w.environmentReferenced
+	if err := w.environmentCache.initStorage(); err != nil {
+		return err
+	}
+	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.EnvironmentRoot, candidates: w.environmentCache.budgetCandidates})
+	return nil
+}
+
 func (w Worker) runCustodian(stop context.Context) error {
 	if w.ServiceConfig == nil || !validCustodianID(w.Custodian) {
 		return errors.New("custodian requires installed worker configuration and exact identity")
@@ -411,10 +447,17 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if err := readCustodianJSON(dir, custodianName(id, "request"), &req); err != nil {
 		return err
 	}
-	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.Machine.ID != w.Machine.ID || req.State.Job.Machine != w.Machine.ID || req.State.Session != req.State.Job.Session {
+	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.Machine.ID != w.Machine.ID || req.State.Job.Machine != w.Machine.ID || req.State.Session != req.State.Job.Session || req.State.Custodian != "" || !custodianUnstarted(req.State) {
 		return errors.New("custodian request identity mismatch")
 	}
-	w.Machine, w.Clock = req.Machine, RealClock{}
+	w.Machine = req.Machine
+	if w.Clock == nil {
+		w.Clock = RealClock{}
+	}
+	if w.Interval <= 0 {
+		w.Interval = time.Second
+	}
+	w.initInventoryProbe()
 	w.Client.Clock = w.Clock
 	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	// Linux adoption requires the delegated worker leaf. Refuse before the first
@@ -437,7 +480,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 			return max(0, n-w.HostMemoryReserveGB), e
 		}
 	}
-	s := &workerStore{dir: spool, stateName: custodianName(id, "state"), state: req.State}
+	s := &workerStore{dir: spool, stateName: custodianName(id, "state"), state: req.State, liveEvidence: unstartedExecution(req.State.Job.Attempt), liveEvidenceKey: jobKey(*req.State.Job)}
 	w.checkpointExpiry = newWorkerCheckpointExpiry()
 	w.checkNativeSeqpacketStartup()
 	if w.memoryCeilings != nil {
@@ -452,33 +495,19 @@ func (w Worker) runCustodian(stop context.Context) error {
 		}
 		return ledger.Charge, ledger.Pending
 	}
-	w.diskBudget = newWorkerDiskBudget(w.Clock, w.DiskProbe)
-	w.diskBudget.inventoryDir = spool
-	w.diskBudget.add(diskBudgetRoot{name: "attempts", path: spool})
-	w.compilerCache = &workerCompilerCache{cache: EnvironmentCache{Root: filepath.Join(spool, "compiler-cache"), Clock: w.Clock}}
-	if err := w.compilerCache.cache.initStorage(); err != nil {
+	if err := w.initAttemptRuntime(stop, s); err != nil {
 		return err
 	}
-	w.diskBudget.add(diskBudgetRoot{name: "compiler", path: w.compilerCache.cache.Root, candidates: w.compilerCache.budgetCandidates})
-	if err := w.initFileTransfers(stop, s); err != nil {
-		return err
-	}
-	if w.EnvironmentRoot == "" {
-		w.EnvironmentRoot = filepath.Join(spool, "environment-cache")
-	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock}
-	w.environmentCache.budget = w.diskBudget
-	w.environmentCache.references = w.environmentReferenced
-	if err := w.environmentCache.initStorage(); err != nil {
-		return err
-	}
-	w.diskBudget.add(diskBudgetRoot{name: "environments", path: w.EnvironmentRoot, candidates: w.environmentCache.budgetCandidates})
 	pid := os.Getpid()
 	birth, err := processBirth(pid)
 	if err != nil {
 		return err
 	}
-	cgroup, err := ownCustodianIsolation(id)
+	isolation := w.custodianIsolation
+	if isolation == nil {
+		isolation = ownCustodianIsolation
+	}
+	cgroup, err := isolation(id)
 	if err != nil {
 		return err
 	}
@@ -567,7 +596,10 @@ func (w Worker) runCustodian(stop context.Context) error {
 	for p == nil && s.state.Result == nil {
 		p, err = w.startAssignedAttempt(prepareCtx, s, *req.State.Job)
 		if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
-			r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: req.State.Session, Execution: Execution{ID: req.State.Job.ID, Attempt: req.State.Job.Attempt}, Error: err.Error(), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+			r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: req.State.Session, Execution: Execution{ID: req.State.Job.ID, Attempt: req.State.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+			if cause := safeRuntimeCause(r.ExecutionCause); cause != nil {
+				log.Printf("event=attempt_start_failed job=%s attempt=%d cause=%s", r.ID, r.Attempt, cause.String())
+			}
 			s.state.Result = &r
 		}
 		if p == nil && s.state.Result == nil {
