@@ -185,6 +185,7 @@ type ServiceConfig struct {
 	NAS                    string    `json:"nas"`
 	Checkpoints            string    `json:"checkpoint_root"`
 	ModelRoot              string    `json:"model_root"`
+	SecretRoot             string    `json:"secret_root,omitempty"`
 	ModelCatalog           string    `json:"model_catalog"`
 	EnvironmentCatalog     string    `json:"environment_catalog"`
 	State                  string    `json:"state_dir"`
@@ -860,6 +861,9 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--job-file-root", c.NAS, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
+		if c.SecretRoot != "" {
+			args = append(args, "--secret-root", c.SecretRoot)
+		}
 		if c.FileCacheBytes > 0 {
 			args = append(args, "--file-cache-bytes", strconv.FormatInt(c.FileCacheBytes, 10))
 		}

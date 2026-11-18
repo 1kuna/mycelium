@@ -62,6 +62,76 @@ func TestGPUTelemetryHelperInstallConfig(t *testing.T) {
 	}
 }
 
+func TestSecretRootInstallConfig(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			c, err := PlanInstall("worker", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: platform, Platform: "fake", MemoryMode: "fixed", MemoryGB: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			overlay := func(base ServiceConfig, args ...string) (ServiceConfig, error) {
+				values := ServiceConfig{}
+				f := flag.NewFlagSet("install", flag.ContinueOnError)
+				RegisterInstallFlags(f, &values)
+				if err := f.Parse(args); err != nil {
+					return ServiceConfig{}, err
+				}
+				return OverlayInstallFlags(f, base, values)
+			}
+			// This path does not exist: installation must not provision secrets.
+			root := filepath.Join(t.TempDir(), "named secrets")
+			c, err = overlay(c, "--secret-root", root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(root); !os.IsNotExist(err) {
+				t.Fatal("installer created or required the secret directory")
+			}
+			data, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(t.TempDir(), "worker.json")
+			if err := os.WriteFile(config, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := ReadServiceConfig(config)
+			if err != nil || !reflect.DeepEqual(saved, c) {
+				t.Fatalf("saved secret root changed configuration: %v", err)
+			}
+			unchanged, err := overlay(saved, "--heartbeat=19s")
+			if err != nil || unchanged.SecretRoot != root {
+				t.Fatal("unrelated override discarded saved secret root", err)
+			}
+			args := saved.Args()
+			i := slices.Index(args, "--secret-root")
+			if i < 0 || i+1 >= len(args) || args[i+1] != root {
+				t.Fatal("worker args omitted or split secret root")
+			}
+			if platform == "linux" && !strings.Contains(saved.ServiceText(), unitQuote("--secret-root")+" "+unitQuote(root)) {
+				t.Fatal("systemd unit omitted secret root")
+			}
+			// launchd invokes service --config; service reads saved.Args().
+			if platform == "darwin" && !strings.Contains(saved.ServiceText(), "<string>service</string><string>--config</string><string>"+saved.Config+"</string>") {
+				t.Fatal("launchd did not reference the saved worker configuration")
+			}
+			cleared, err := overlay(saved, "--secret-root=")
+			if err != nil || cleared.SecretRoot != "" || slices.Contains(cleared.Args(), "--secret-root") {
+				t.Fatal("explicit empty flag did not clear secret root", err)
+			}
+			for _, invalid := range []string{"relative", "/fixture/secrets\nother", "/fixture/secrets\x00other"} {
+				if _, err := overlay(saved, "--secret-root", invalid); err == nil {
+					t.Fatal("accepted invalid secret root")
+				}
+				saved.SecretRoot = invalid
+				if err := saved.ValidateInstall(); err == nil {
+					t.Fatal("accepted invalid saved secret root")
+				}
+			}
+		})
+	}
+}
+
 func TestInstallQueueFileStoreDefaults(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
 		t.Run(platform, func(t *testing.T) {
@@ -180,6 +250,8 @@ func installTestFlagValue(s InstallSetting, zero bool) string {
 			return "/fixture/changed"
 		}
 		switch s.Flag {
+		case "secret-root":
+			return "/fixture/changed"
 		case "discovery-listen":
 			return "127.0.0.1:7443"
 		case "queue":
@@ -241,6 +313,7 @@ func TestInstallSettingsOverlayMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			base.HostID = "fixture-host"
+			base.SecretRoot = "/fixture/saved-secrets"
 			// Omitted optional paths and nil pointers are values too, never defaults.
 			base.EnvironmentRoot = ""
 			base.EnvironmentCatalog = "/fixture/catalog/catalog.yaml"

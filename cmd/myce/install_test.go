@@ -76,7 +76,7 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				p.OS = "darwin"
 				p.Arch = "arm64"
 			}
-			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", filepath.Join(home, "nas"), "--dry-run", "--environment-cache-bytes", "1048576"}, p, home); e != nil {
+			if e := setupCommandWithProbe([]string{"install", "worker", "--nas", filepath.Join(home, "nas"), "--dry-run", "--environment-cache-bytes", "1048576", "--secret-root", filepath.Join(home, "named secrets")}, p, home); e != nil {
 				t.Fatal(e)
 			}
 			entries, _ := os.ReadDir(home)
