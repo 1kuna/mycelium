@@ -167,6 +167,8 @@ type Worker struct {
 	MemoryMeasured              bool
 	FixedAcceleratorMemory      bool
 	batchMemory                 *atomic.Uint64
+	custodianIsolation          func(string) (string, error)        // Test seam for native manager membership only.
+	custodianAbsent             func(context.Context, string) error // Test seam for exact native manager absence.
 }
 type workerFinish struct {
 	result Result

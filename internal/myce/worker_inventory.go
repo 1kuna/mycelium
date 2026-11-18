@@ -126,21 +126,31 @@ func deviceAllowance(value string) ([]string, error) {
 	return out, nil
 }
 
+// Capture operator configuration before an attempt projects one selected card.
+// Detached custodians need the same direct launch probe as the check-in worker,
+// without refreshing or rewriting that worker's durable inventory.
+func (w *Worker) initInventoryProbe() {
+	if w.InventoryProbe == nil {
+		if w.Machine.GPU == "fake" {
+			devices := slices.Clone(w.Machine.Devices)
+			if devices == nil {
+				devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-0", Fingerprint: "fake", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: w.Machine.FreeMemoryGB, BudgetGB: w.Machine.FreeMemoryGB, FreeMemoryGB: w.Machine.FreeMemoryGB}}
+			}
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return slices.Clone(devices), nil }
+		} else {
+			// Capture operator configuration before any scalar device projection.
+			w.InventoryProbe = w.localInventory
+		}
+	}
+}
+
 func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 	var err error
 	w.inventoryAllowance, err = deviceAllowance(w.Machine.Device)
 	if err != nil {
 		return err
 	}
-	if w.InventoryProbe == nil {
-		if w.Machine.GPU == "fake" {
-			d := MachineDevice{ID: "0", Platform: "fake", Identity: "fake-0", Fingerprint: "fake", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: w.Machine.FreeMemoryGB, BudgetGB: w.Machine.FreeMemoryGB, FreeMemoryGB: w.Machine.FreeMemoryGB}
-			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{d}, nil }
-		} else {
-			// Capture operator configuration before any scalar device projection.
-			w.InventoryProbe = w.localInventory
-		}
-	}
+	w.initInventoryProbe()
 	devices := slices.Clone(w.Machine.Devices)
 	var probeErr error
 	if devices == nil {
