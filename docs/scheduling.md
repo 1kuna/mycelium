@@ -13,6 +13,18 @@ remaining capacity. An immediately usable production destination takes precedenc
 over a different host's projected releases. Projections never authorize an early
 start or release existing custody; withdrawal removes the admission fence.
 
+Queued accelerator extension checks also protect their resolved host RAM and
+cores, including guarded first measurements. A partial CPU release accumulates
+toward that demand instead of admitting another CPU attempt into its deficit.
+The same host fence applies to CPU maintenance resumes: within a tier, CPU
+backfill uses only capacity beyond queued accelerator demand. Higher tiers and
+already committed preemption releases retain precedence. Other eligible hosts
+and excess capacity remain usable; there is no fixed or whole-host reserve.
+Running equal-tier attempts are not stopped by this admission fence. Existing
+checkpoint/requeue relocation still requires proven portability and a qualified,
+currently admissible destination (MY-18/MY-26); queued CPU work uses those other
+hosts directly without first occupying the scarce host.
+
 - [Placement and memory](#placement-without-hardware-requirements-v3)
 - [Owner priority policy](#owner-priority-policy)
 - [Fair sharing and usage](#sharing-gpus-and-measuring-the-pool)
@@ -418,6 +430,8 @@ else the last accepted duration of the same work, ends no later than the
 projected point at which enough running attempts have finished for the resume
 to fit. Running attempts are never stopped for it, and when an attempt it needs
 has no bound or measurement, nothing backfills past it.
+CPU resumes still observe the queued accelerator host-capacity fence above;
+their resume promotion does not consume an accelerator's accumulating RAM/cores.
 
 ## Sharing GPUs and measuring the pool
 
