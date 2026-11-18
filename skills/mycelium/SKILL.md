@@ -565,6 +565,9 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   a transferred extrapolation alone cannot. Read the check's own status for
   the measured demand/capacity comparison. Reduce genuinely oversized check
   requirements or provide capable hardware before retrying qualification.
+  Qualified GPU work also probes one card when only a transferred qualification
+  estimate exceeds native capacity. Cold probes fit observed idle headroom and
+  retain exact-session prelaunch deficits; keep the same queued job and key.
   A hold with `runs_now_on` names platforms that would run the job now: add
   them to its targets and environment rather than naming a host.
 - **Environment builds (r6.16+):** one worker's package failure excludes only

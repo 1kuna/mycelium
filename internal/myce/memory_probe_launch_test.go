@@ -36,8 +36,8 @@ func TestMemoryProbeLaunchNearMiss(t *testing.T) {
 				if err := q.update(func() error {
 					j := q.touchJob(queued.ID)
 					launchAvailable := launch
-					d := &AdmissionDetail{Subcheck: "live_host_growth", Required: available - minimumHostMemoryGB, Available: &launchAvailable}
-					j.LaunchCapacityWait = map[string]LaunchCapacityWait{m.ID + "/0": {Machine: m.ID, Session: m.Session, Admission: d}}
+					d := &AdmissionDetail{Subcheck: "live_host_growth", Required: available - minimumHostMemoryGB, Available: &launchAvailable, EnvelopeHostGB: available - minimumHostMemoryGB}
+					j.LaunchCapacityWait = map[string]LaunchCapacityWait{m.ID + "/0": {Machine: m.ID, Session: m.Session, Admission: d, Evidence: "previous-offer"}}
 					return nil
 				}); err != nil {
 					t.Fatal(err)

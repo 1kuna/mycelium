@@ -360,8 +360,8 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		hostFloor := memberHostFloor(j, m)
 		floorRun := q.chargesFirstRunFloor(j, m)
 		estimate := q.memoryEstimate(j, m)
-		if q.checkTransferNeedsProbe(j, m, estimate) {
-			// A foreign prediction is not a measurement of this native check.
+		if q.transferNeedsProbe(j, m, estimate) {
+			// A foreign prediction is not a measurement of this native work.
 			// Use ordinary guarded first-run sizing, retaining destination lower
 			// bounds and the per-job OOM floors applied below.
 			estimate = memoryEstimate{key: estimate.key, constrainedGB: estimate.constrainedGB, source: checkTransferProbe}
@@ -965,6 +965,35 @@ func (q *Queue) physicalProbeMemoryStatus(j *Job, m *Machine) (float64, string, 
 		}
 	}
 	room := min(q.hostRoomAfter(m, jobs, slots), allowance)
+	liveRoom := room
+	// A cold probe offers capacity, not measured demand. Do not fill a high
+	// inventory sample when this host has already demonstrated less idle room.
+	// Replace the current idle footprint by its observed high water; the same
+	// physical reserve is subtracted once, just as in live admission.
+	if h := q.externalMemoryStatus(hostID(m)); h != nil && h.Quiescent != nil && h.Quiescent.Week.Samples > 0 && validHostMemoryObservation(m.MemoryObservation) {
+		total := m.MemoryObservation.TotalGB
+		if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 {
+			total = min(total, float64(p.SystemMemoryBytes)/(1<<30))
+		}
+		room = min(room, max(0, total-h.Quiescent.Week.MaxGB-q.hostMemoryMargin(m, m)))
+	}
+	// Without idle history, a refused prelaunch still measures how much room
+	// disappeared. Keep that exact-session gap for this job's next cold offer;
+	// an unchanged heartbeat must not recreate the same near-miss forever.
+	gap := 0.0
+	for _, w := range j.LaunchCapacityWait {
+		d := w.Admission
+		if w.Machine == m.ID && w.Session == m.Session && d != nil && !d.Unavailable && d.Available != nil && (d.Subcheck == "live_host_growth" || d.Subcheck == "live_host_ram") {
+			deficit := d.Required - *d.Available
+			if d.EnvelopeHostGB > 0 {
+				// Keep earlier offer reductions when a second refusal reports
+				// only the remaining deficit, including launch-helper growth.
+				deficit += max(0, liveRoom-d.EnvelopeHostGB)
+			}
+			gap = max(gap, deficit)
+		}
+	}
+	room = min(room, liveRoom-gap)
 	// hostNeed adds ceiling slack back. Leave the named drift margin unused
 	// between the inventory snapshot and the strict launch check.
 	slack := m.MemoryCeilingSlackGB + drift
