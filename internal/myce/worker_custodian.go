@@ -222,7 +222,12 @@ func (w Worker) adoptCustodian(s *workerStore) (*process, error) {
 	}
 	g := &attemptCustodian{dir: custodianDir(s.dir), id: id}
 	if err := g.read(*s.state.Job); err != nil {
-		return nil, fmt.Errorf("detached attempt adoption unconfirmed; custody retained: %w", err)
+		if recoveryErr := w.recoverUnstartedCustodian(s); recoveryErr != nil {
+			return nil, fmt.Errorf("detached attempt adoption unconfirmed; custody retained: %w", errors.Join(err, recoveryErr))
+		}
+		if err := g.read(*s.state.Job); err != nil {
+			return nil, fmt.Errorf("detached attempt recovery unconfirmed; custody retained: %w", err)
+		}
 	}
 	g.updateStore(s)
 	p := &process{job: *s.state.Job, custodian: g, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
@@ -414,7 +419,14 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if req.Protocol != custodianProtocol || req.ID != id || req.State.Job == nil || req.Machine.ID != w.Machine.ID || req.State.Job.Machine != w.Machine.ID || req.State.Session != req.State.Job.Session {
 		return errors.New("custodian request identity mismatch")
 	}
-	w.Machine, w.Clock = req.Machine, RealClock{}
+	w.Machine = req.Machine
+	if w.Clock == nil {
+		w.Clock = RealClock{}
+	}
+	if w.Interval <= 0 {
+		w.Interval = time.Second
+	}
+	w.initInventoryProbe()
 	w.Client.Clock = w.Clock
 	w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
 	// Linux adoption requires the delegated worker leaf. Refuse before the first
@@ -466,7 +478,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(spool, "environment-cache")
 	}
-	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Fetch: w.fileCache.copyTo}
 	w.environmentCache.budget = w.diskBudget
 	w.environmentCache.references = w.environmentReferenced
 	if err := w.environmentCache.initStorage(); err != nil {
@@ -478,7 +490,11 @@ func (w Worker) runCustodian(stop context.Context) error {
 	if err != nil {
 		return err
 	}
-	cgroup, err := ownCustodianIsolation(id)
+	isolation := w.custodianIsolation
+	if isolation == nil {
+		isolation = ownCustodianIsolation
+	}
+	cgroup, err := isolation(id)
 	if err != nil {
 		return err
 	}

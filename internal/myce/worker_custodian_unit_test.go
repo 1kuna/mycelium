@@ -3,12 +3,105 @@ package myce
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 )
+
+// Exercise the installed helper entry, not an already initialized Worker.Run.
+// Only native manager membership, host sensors and GPUs are synthetic; queue
+// authorization, final custodian gate, command execution and receipts are real.
+func TestCustodianGPUStarted(t *testing.T) {
+	for _, device := range []string{"0", "1"} {
+		t.Run(device, func(t *testing.T) {
+			q, clock := fixture(t)
+			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			defer server.Close()
+			m := m3Machine()
+			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+			spec := spec("experiment")
+			spec.Resumable = false
+			spec.Needs.MemoryGB, spec.Needs.HostMemoryGB = 0.125, 0.25
+			spec.Needs.GPU = &GPUSelection{Devices: []string{device}}
+			proof := t.TempDir()
+			spec.Run.Env = map[string]string{"PROOF_DIR": proof}
+			spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/assets/proof")" = custodian-asset || exit 98; printf '%s' "$MYCE_DEVICES" > "$PROOF_DIR/device"; while [ ! -f "$PROOF_DIR/finish" ]; do sleep 0.01; done`}
+			pending := submit(t, q, spec)
+			assigned := assignedJob(machineCheck(t, q, m))
+			if assigned == nil || assigned.ID != pending.ID || !slices.Equal(assigned.AllocatedDevices, []string{device}) {
+				t.Fatal("missing pinned GPU assignment", assigned)
+			}
+			assigned.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
+			w := recoveryWorker(t)
+			w.Machine, w.Clock, w.Client = m, clock, Client{URL: server.URL, Token: "test", Clock: clock}
+			// Worker.Run also installs the asset transport. Exercise that skipped
+			// dependency through the detached entry rather than a primed cache.
+			_, asset := retentionUpload(t, w.Client, "custodian-asset")
+			assigned.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": {Key: asset.SHA256, Assets: FileManifest{"proof": asset}}}
+			w.Custodian, w.ServiceConfig = ID(), &ServiceConfig{}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+			if runtime.GOOS == "linux" {
+				w.memoryCeilings = fakeCeilings(t)
+			} else {
+				w.processMemory = workerDevProcessMemory()
+			}
+			w.custodianIsolation = func(string) (string, error) { return "", nil }
+			roots, err := w.StateRoots()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := PrepareStateRoots(roots...); err != nil {
+				t.Fatal(err)
+			}
+			for _, root := range roots {
+				if err := os.MkdirAll(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dir := custodianDir(roots[0])
+			req := custodianRequest{Protocol: custodianProtocol, ID: w.Custodian, Machine: m, State: workerState{Job: assigned, Session: assigned.Session, Identity: ID()}}
+			if err := saveWorkerJSON(dir, custodianName(w.Custodian, "request"), req); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- w.runCustodian(ctx) }()
+			defer func() { cancel(); <-done }()
+			g := &attemptCustodian{dir: dir, id: w.Custodian}
+			parent := Worker{hostChargesExcept: func(attemptKey) (float64, float64) { return 0, 0 }}
+			var snapshot custodianSnapshot
+			await(t, func() bool {
+				parent.serveCustodianGate(ctx, g, *assigned)
+				return readCustodianJSON(dir, custodianName(w.Custodian, "snapshot"), &snapshot) == nil && (snapshot.Started || snapshot.Finished)
+			})
+			if !snapshot.Started || job(t, q, pending.ID).StartedAt == nil {
+				t.Fatal("GPU helper did not reach Started", snapshot.State.Result)
+			}
+			path := filepath.Join(proof, "device")
+			await(t, func() bool { data, err := os.ReadFile(path); return err == nil && string(data) == device })
+			if data, err := os.ReadFile(path); err != nil || string(data) != device {
+				t.Fatalf("selected device: %q, %v", data, err)
+			}
+			if err := os.WriteFile(filepath.Join(proof, "finish"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			await(t, func() bool {
+				return readCustodianJSON(dir, custodianName(w.Custodian, "snapshot"), &snapshot) == nil && snapshot.Finished
+			})
+			if snapshot.State.Result == nil || !snapshot.State.Result.Success {
+				t.Fatal("GPU helper did not complete", snapshot.State.Result)
+			}
+			t.Logf("GPU %s: real custodian Started, queue started_at=%s, successful completion (%s)", device, job(t, q, pending.ID).StartedAt.Format(time.RFC3339Nano), runtime.GOOS)
+		})
+	}
+}
 
 func TestCustodianRejectsUnprovedIdentity(t *testing.T) {
 	j := Job{ID: ID(), Attempt: 2, Machine: "worker", Session: "session"}

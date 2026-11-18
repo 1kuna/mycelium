@@ -576,6 +576,8 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   before staging or payload launch; supporting workers release that exact
   assignment through normal completion. Missing custodian observations alone
   retain custody and need the queue owner's diagnosis; keep the existing job ID.
+  Supporting workers also reconcile an initialized, never-started helper after
+  restart when exact helper death, manager absence and no launch custody are proven.
   The installation owner can recover the exact legacy Linux pre-entry refusal
   offline with `resolve-custodian-startup` under the [operations runbook](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#recover-the-legacy-pre-entry-refusal).
   Consumers keep their existing jobs and checkpoints; do not resubmit or edit custody.
