@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -36,12 +37,11 @@ func TestCustodianExtensionRefusalDiagnostic(t *testing.T) {
 
 // Prepare the parent's frozen extension, environment and exact device report.
 // The helper is deliberately given neither ExtensionRoot nor EnvironmentRoot.
-func custodianExtensionFixture(t *testing.T, q *Queue, clock Clock, w Worker, m Machine, device, proof string) (Extension, Machine) {
+func custodianExtensionFixture(t *testing.T, q *Queue, clock Clock, w Worker, m Machine, device string) (Extension, Machine) {
 	t.Helper()
 	e := compositionExtension(t, true)
 	v := &e.Variants[0]
-	v.Execution.Main.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/bin/proof")" = custodian-environment || exit 98; printf '%s' "$MYCE_DEVICES" > "$PROOF_DIR/device"; while [ ! -f "$PROOF_DIR/finish" ]; do sleep 0.01; done`}
-	v.Execution.Main.Env = map[string]string{"PROOF_DIR": proof}
+	v.Execution.Main.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/bin/proof")" = custodian-environment || exit 98; printf '%s' "$MYCE_DEVICES" > "$MYCE_CHECKPOINT_DIR/device"; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep 0.01; done`}
 	e = freezeComposition(t, e)
 	if err := q.AddExtension(e); err != nil {
 		t.Fatal(err)
@@ -104,12 +104,10 @@ func testCustodianStarted(t *testing.T, device, kind string) {
 	spec.Resumable = false
 	spec.Needs.MemoryGB, spec.Needs.HostMemoryGB = 0.125, 0.25
 	spec.Needs.GPU = &GPUSelection{Devices: []string{device}}
-	proof := t.TempDir()
-	spec.Run.Env = map[string]string{"PROOF_DIR": proof}
-	spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/assets/proof")" = custodian-asset || exit 98; printf '%s' "$MYCE_DEVICES" > "$PROOF_DIR/device"; while [ ! -f "$PROOF_DIR/finish" ]; do sleep 0.01; done`}
+	spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN+x}" || exit 97; test "$(cat "$MYCE_ENVIRONMENT_DIR/assets/proof")" = custodian-asset || exit 98; printf '%s' "$MYCE_DEVICES" > "$MYCE_CHECKPOINT_DIR/device"; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep 0.01; done`}
 	var extension Extension
 	if kind != "command" {
-		extension, m = custodianExtensionFixture(t, q, clock, w, m, device, proof)
+		extension, m = custodianExtensionFixture(t, q, clock, w, m, device)
 		spec.Extension, spec.Kind, spec.Run = extensionKey(extension), "sample", RunSpec{}
 		spec.Needs = ResourceNeeds{} // Frozen extension owns reservations; only this card is qualified.
 	}
@@ -118,9 +116,6 @@ func testCustodianStarted(t *testing.T, device, kind string) {
 	if assigned == nil || assigned.ID != pending.ID || !slices.Equal(assigned.AllocatedDevices, []string{device}) {
 		t.Fatal("missing pinned GPU assignment", assigned)
 	}
-	// The native extension may write only its work/checkpoint roots. Keep the
-	// handshake in that declared writable root, including under Linux Landlock.
-	assigned.Checkpoint = proof
 	w.Machine, w.Clock, w.Client = m, clock, Client{URL: server.URL, Token: "test", Clock: clock}
 	// Worker.Run also installs the asset transport. Exercise that skipped
 	// dependency through the detached entry rather than a primed cache.
@@ -140,6 +135,9 @@ func testCustodianStarted(t *testing.T, device, kind string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Nonresumable jobs use the worker-owned attempt checkpoint, not the
+	// assignment's NAS checkpoint. Match MYCE_CHECKPOINT_DIR under isolation.
+	proof := filepath.Join(roots[0], "checkpoints", assigned.ID, "attempt-"+strconv.Itoa(assigned.Attempt))
 	if err := PrepareStateRoots(roots...); err != nil {
 		t.Fatal(err)
 	}
