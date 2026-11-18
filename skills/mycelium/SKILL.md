@@ -381,9 +381,13 @@ save state atomically into `$MYCE_CHECKPOINT_DIR`, restore from it at start, and
 declare `advanced: {resumable: true}`; Python's `mycelium.Checkpoint` and `StopSignal` do
 the saving and the signal. A stop sends SIGTERM, then SIGKILL to the whole
 process group 10 seconds (production preemption) or two minutes (deadline,
-planned leave) later, so also save periodically. A GPU or device job's whole
-group gets the SIGTERM; a CPU-only job's SIGTERM goes only to the launched
-process, so a wrapper script must forward it to the process that saves. Checkpoints are kept 72 hours after the job
+planned leave) later, so also save periodically. Plain commands receive TERM
+across their session. Native CPU groups signal the main process and its
+descendants, keeping sibling checkpoint sidecars available. The adapter's result-check
+wrapper waits for the command to finish before running checks after success;
+adding `checks.result` preserves save-on-stop. Your own wrappers must also wait
+for their saving children before exiting; forwarding TERM again can interrupt
+a save that already received the worker's signal. Checkpoints are kept 72 hours after the job
 ends; declare outputs for anything you need
 ([checkpoints](references/submit.md#inputs-checkpoints-and-pieces)).
 
