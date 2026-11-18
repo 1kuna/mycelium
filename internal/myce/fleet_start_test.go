@@ -157,13 +157,15 @@ func TestFleetUpgradeHealthyWorkerNeverStartsStops(t *testing.T) {
 }
 
 func TestFleetUpgradeStartProofRuntimeChangeAndFailure(t *testing.T) {
-	for _, mode := range []string{"process", "failed-command", "maintenance"} {
+	for _, mode := range []string{"process", "session", "failed-command", "maintenance"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _, h := fleetAtStartProbe(t)
 			want := "worker_start_runtime_changed"
 			switch mode {
 			case "process":
 				q.s.Machines[h.Machine].Fleet.PID++
+			case "session":
+				q.s.Machines[h.Machine].Session = "unproved-session"
 			case "failed-command":
 				j := job(t, q, h.StartProbe)
 				if err := q.Started(result(j, true)); err != nil {

@@ -34,7 +34,7 @@ func (q *Queue) fleetSnapshotStarts(h *fleetUpgradeHost) {
 // resource, maintenance, custody or start-authorization exception for the probe.
 func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 	m := q.s.Machines[h.Machine]
-	if m == nil || m.CapabilityProfile == nil || m.Fleet != nil && (!q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch) || fleetHealthIdentity(m.Fleet) != h.StartIdentity) {
+	if m == nil || m.CapabilityProfile == nil || m.Fleet != nil && (m.Fleet.Session != m.Session || !q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch) || fleetHealthIdentity(m.Fleet) != h.StartIdentity) {
 		q.fleetStop(h, "worker_start_runtime_changed")
 		return false
 	}
