@@ -47,6 +47,8 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "late-mount", "checkpoints")
 	w := recoveryWorker(t)
 	w.EnvironmentLimit, w.CheckpointRoot = 1<<20, root
+	clock := &workerFakeClock{now: w.Clock.Now()}
+	w.Clock = clock
 	heartbeats := 0
 	recovered := false
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -71,6 +73,9 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 			if err := os.MkdirAll(root, 0700); err != nil {
 				t.Error(err)
 			}
+			// Failed metadata probes are cached for five minutes. Exercise
+			// the next normal observation without outrunning the I/O deadline.
+			clock.Advance(checkpointMetadataInterval)
 		}
 		if heartbeats > 2 && !c.Machine.CheckpointUnavailable {
 			recovered = true
@@ -82,9 +87,24 @@ func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
-	defer cancel()
-	if err := w.Run(ctx); err != nil {
-		t.Fatal(err)
+	done := make(chan struct{})
+	var runErr error
+	go func() { runErr = w.Run(ctx); close(done) }()
+	wait := func() {
+		await(t, func() bool {
+			clock.Advance(w.Interval)
+			select {
+			case <-done:
+				return true
+			default:
+				return false
+			}
+		})
+	}
+	defer func() { cancel(); wait() }()
+	wait()
+	if runErr != nil {
+		t.Fatal(runErr)
 	}
 	if !recovered || heartbeats < 3 {
 		t.Fatal("same worker did not heartbeat through mount recovery")
