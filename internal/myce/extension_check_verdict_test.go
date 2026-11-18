@@ -54,7 +54,10 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 			}
 			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
 				switch {
-				case req.URL.Path == "/api/inspection":
+				case req.URL.Path == "/api/status":
+					if req.URL.RawQuery != "view=snapshot" {
+						t.Fatalf("unbounded inventory request: %s", req.URL)
+					}
 					return response(Snapshot{Machines: []*Machine{&m}})
 				case req.URL.Path == "/api/extensions":
 					if err := q.AddExtension(e); err != nil {
