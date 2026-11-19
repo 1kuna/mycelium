@@ -145,9 +145,9 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		image, _ := os.ReadFile(filepath.Join(c.State, "worker-image"))
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		s := q.s.ModelSlots[slotKey(c.Name, "test")]
+		s := q.s.ModelSlots[slotKey(c.Name, "test", before.Execution.Device)]
 		worker := q.s.Machines[c.Name]
-		adoptionObservation = fmt.Sprintf("image=%q worker=%+v slot=%+v expected_execution=%+v expected_url=%q expected_custodian=%s", image, worker, s, before.Execution, before.URL, before.ID)
+		adoptionObservation = fmt.Sprintf("image=%q worker_present=%t slot=%+v expected_execution=%+v expected_url=%q expected_custodian=%s", image, worker != nil, s, before.Execution, before.URL, before.ID)
 		return string(image) == "my55-next" && worker != nil && worker.LastSeen.After(stoppedAt) && s != nil && s.State == "ready" && s.Attempt == before.Execution.Attempt && s.Session == before.Execution.Session && s.URL == before.URL && validModelCustody(s.Custody) && s.Custody.ID == before.ID
 	})
 	var after modelCustodianSnapshot
@@ -172,7 +172,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 	await(t, func() bool {
 		q.mu.Lock()
 		defer q.mu.Unlock()
-		s := q.s.ModelSlots[slotKey(c.Name, "test")]
+		s := q.s.ModelSlots[slotKey(c.Name, "test", before.Execution.Device)]
 		return len(q.calls) == 0 && s != nil && s.InFlight == 0 && len(q.s.Pins) == 1
 	})
 	paths, _ = filepath.Glob(filepath.Join(dir, "*.model-request.json"))
