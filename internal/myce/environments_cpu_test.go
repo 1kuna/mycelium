@@ -150,6 +150,11 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 			defer stopWait()
 			got, err := w.Client.Wait(waitCtx, j.ID)
 			if err != nil || got.State != "succeeded" || !got.ReleaseConfirmed || len(got.AllocatedDevices) != 0 {
+				q.mu.Lock()
+				for _, machine := range q.s.Machines {
+					t.Logf("worker inventory: %+v", machine.InventoryProbe)
+				}
+				q.mu.Unlock()
 				t.Fatalf("CPU environment job: %+v, %v", got, err)
 			}
 			logs, err := q.Logs(j.ID, 0)
