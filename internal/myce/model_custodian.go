@@ -28,9 +28,8 @@ type ModelCustody struct {
 }
 
 var (
-	workerModelCustodians     = true
-	modelCustodianMembership  = verifyCustodianIsolation
-	currentCustodianIsolation = ownCustodianIsolation
+	workerModelCustodians    = true
+	modelCustodianMembership = verifyCustodianIsolation
 )
 
 func validModelCustody(v *ModelCustody) bool {
@@ -392,7 +391,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	}
 	isolation := w.custodianIsolation
 	if isolation == nil {
-		isolation = currentCustodianIsolation
+		isolation = ownCustodianIsolation
 	}
 	cgroup, err := isolation(id)
 	if err != nil {

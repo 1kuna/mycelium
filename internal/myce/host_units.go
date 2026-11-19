@@ -57,7 +57,7 @@ func CurrentWorkerUnit(custodian string) (string, error) {
 		if !validCustodianID(custodian) {
 			return "", errors.New("invalid detached attempt identity")
 		}
-		_, err := currentCustodianIsolation(custodian)
+		_, err := ownCustodianIsolation(custodian)
 		return "", err
 	}
 	if os.Getenv("INVOCATION_ID") == "" {
