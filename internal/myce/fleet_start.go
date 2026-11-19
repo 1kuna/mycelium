@@ -13,8 +13,12 @@ func fleetStartProbeSpec(machine string) Spec {
 // smoke interrupt useful work. Apply this after the shared resource-plan cache:
 // another job's identical resource vector must not lend it interruption power.
 func (q *Queue) fleetStartPlan(j *Job, plan *placementPlan) *placementPlan {
-	if h := q.fleetActiveHost(); h != nil && j.ID == h.StartProbe && plan != nil && plan.stops > 0 {
-		return nil
+	if u := q.s.FleetUpgrade; u != nil && plan != nil && plan.stops > 0 {
+		for _, h := range u.Hosts {
+			if j.ID == h.StartProbe {
+				return nil
+			}
+		}
 	}
 	return plan
 }
@@ -38,12 +42,20 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 		q.fleetStop(h, "worker_start_runtime_changed")
 		return false
 	}
-	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
-		q.fleetStop(h, "worker_start_not_verified")
+	if m.Fleet != nil && fleetProofFailure(m.Fleet) != "" {
+		q.fleetStop(h, "worker_start_runtime_changed")
 		return false
 	}
 	if !q.fleetProofFresh(m.Fleet) {
+		if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+			q.fleetStop(h, "worker_start_not_verified")
+			return false
+		}
 		h.Wait = "waiting for the upgraded worker's next healthy runtime proof before accepting its start probe"
+		return false
+	}
+	j := q.s.Jobs[h.StartProbe]
+	if h.StartProbe != "" && !q.fleetStartProbeValid(h, m, j) {
 		return false
 	}
 	// Useful work may win ordinary admission ahead of the smoke. A newly
@@ -78,17 +90,76 @@ func (q *Queue) fleetVerifyStart(h *fleetUpgradeHost) bool {
 		h.StartProbe = id
 		h.ProgressAt = now
 	}
-	j := q.s.Jobs[h.StartProbe]
-	if j == nil || cancelled(j) || j.Attempt > 1 || j.Starts > 1 || j.InfrastructureRetries > 0 || j.Losses > 0 || terminal(j.State) && j.State != "succeeded" || j.Attempt > 0 && (j.Machine != m.ID || j.Session != m.Session) {
-		q.fleetStop(h, "worker_start_probe_failed")
+	j = q.s.Jobs[h.StartProbe]
+	if !q.fleetStartProbeValid(h, m, j) {
 		return false
 	}
 	if j.State == "succeeded" && j.StartedAt != nil && j.ReleaseConfirmed {
 		h.StartAccepted = j.ID
 		return true
 	}
-	// A blocked/full host waits within the finite service-step budget rather
-	// than interrupting existing work to manufacture rollout acceptance.
+	if reason := q.fleetStartAdmissionReason(m, j); reason != "" {
+		h.Phase, h.Outcome, h.DeferredReason = "deferred", FleetHostDeferred, reason
+		h.Wait = fmt.Sprintf("start probe %s deferred: %s; will revisit after the other hosts", h.StartProbe, reason)
+		h.ProgressAt = q.clock.Now()
+		return false
+	}
+	// Once offered, a never-starting launcher still needs a finite failure
+	// budget. Keep the existing service-step bound for this liveness check;
+	// measured admission pressure above consumes no such budget.
+	if q.clock.Now().Sub(h.StepAt) >= fleetStepTimeout {
+		q.fleetStop(h, "worker_start_not_verified")
+		return false
+	}
 	h.Wait = fmt.Sprintf("waiting for start probe %s on upgraded worker session to start, succeed and release", h.StartProbe)
 	return false
+}
+
+// Deferral never excuses an execution failure, retry or stale runtime fence.
+func (q *Queue) fleetStartProbeValid(h *fleetUpgradeHost, m *Machine, j *Job) bool {
+	if j == nil || cancelled(j) || j.Attempt > 1 || j.Starts > 1 || j.InfrastructureRetries > 0 || j.Losses > 0 || terminal(j.State) && j.State != "succeeded" || j.Attempt > 0 && (j.Machine != m.ID || j.Session != m.Session) {
+		q.fleetStop(h, "worker_start_probe_failed")
+		return false
+	}
+	return true
+}
+
+// Use current scheduler accounting, never asynchronous diagnostic snapshots.
+// Only measured owner pressure or an occupied CPU/RAM budget can defer a
+// never-assigned probe. Unknown telemetry and structural/policy refusals retain
+// the ordinary failure path. All work here is in-memory under the queue lock.
+func (q *Queue) fleetStartAdmissionReason(m *Machine, j *Job) string {
+	if j.State != "queued" || j.Attempt != 0 || j.StartedAt != nil || j.Starts != 0 {
+		return ""
+	}
+	q.refreshHostMemory()
+	m = cpuMachineView(m)
+	if !m.HostMemoryMeasured || m.HostMemoryError != "" || m.CPUCapacityReason != "" {
+		return ""
+	}
+	pressure := m.SharedHost != nil && q.sharedPressureFresh(m) && m.SharedHostYieldReason != "" && m.SharedHostReason == q.hostPressureReason(m)
+	if why := q.sharedHostAdmissionRefusal(j, m); why != "" && !pressure {
+		return ""
+	}
+	copy := *m
+	if pressure {
+		copy.SharedHostReason = ""
+	}
+	var fit targetFit
+	fitsResourcesChecked(j, &copy, copy.FreeMemoryGB, &fit)
+	for _, failed := range fit.failed {
+		if failed != "cores" || !m.cpuLedger || m.EffectiveCPUCores <= 0 || m.FreeCPUCores >= j.Spec.Needs.cores() {
+			return ""
+		}
+	}
+	if pressure {
+		return "shared_host_owner_pressure: " + m.SharedHostYieldReason
+	}
+	if why := hostFitFailure(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); why == "host memory" {
+		return fmt.Sprintf("no_capacity: start probe needs %.3f GiB host RAM; %.3f GiB admissible", hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), m.FreeHostMemoryGB)
+	}
+	if len(fit.failed) > 0 {
+		return fmt.Sprintf("no_capacity: start probe needs %d CPU core; %d admissible", j.Spec.Needs.cores(), m.FreeCPUCores)
+	}
+	return ""
 }

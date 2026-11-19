@@ -25,7 +25,7 @@ func TestFleetUpgradeCLICriticalIntent(t *testing.T) {
 		}
 		status := myce.FleetUpgradeStatus{Urgency: request.Urgency, Operation: "fixture-operation"}
 		if request.Urgency == "normal" {
-			status.Hosts = []myce.FleetHostStatus{{Host: "worker", Phase: "draining", PlannedStops: []myce.FleetPlannedStop{plan}}}
+			status.Hosts = []myce.FleetHostStatus{{Host: "worker", Phase: "draining", PlannedStops: []myce.FleetPlannedStop{plan}}, {Host: "deferred-worker", Phase: "deferred", Outcome: myce.FleetHostDeferred, DeferredReason: "no_capacity: host RAM occupied"}}
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	}))
@@ -51,8 +51,11 @@ func TestFleetUpgradeCLICriticalIntent(t *testing.T) {
 				t.Fatal("CLI lost returned durable intent", err)
 			}
 			if urgency == "normal" {
-				if len(response.Hosts) != 1 || len(response.Hosts[0].PlannedStops) != 1 {
+				if len(response.Hosts) != 2 || len(response.Hosts[0].PlannedStops) != 1 {
 					t.Fatal("CLI omitted planned stop", out.String())
+				}
+				if h := response.Hosts[1]; h.Outcome != myce.FleetHostDeferred || h.DeferredReason != "no_capacity: host RAM occupied" {
+					t.Fatal("CLI omitted typed deferral and its reason", out.String())
 				}
 				got := response.Hosts[0].PlannedStops[0]
 				if got.Obligation.Result.ID != plan.Obligation.Result.ID || got.Obligation.Result.Attempt != 2 || got.Reason != plan.Reason || !got.StopAfter.Equal(deadline) {
