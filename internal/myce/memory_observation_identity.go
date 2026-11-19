@@ -151,31 +151,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	}
 	k := *key
 	if memoryOnly {
-		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-		layout := memoryLayout(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
-		for _, id := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
-			point := q.s.WorkObservations[id]
-			if j.MemoryEnvelope != nil && boundedMemorySource(j.MemoryEnvelope.Source) && (point.Key.Target.OS != k.Target.OS || !j.Spec.Needs.cpuOnly() && !sameMemoryFamily(point, k, layout)) {
-				continue // A target-family probe cannot disprove the transferred prior.
-			}
-			if sameMemoryWork(point, k, configuration) {
-				old := point
-				if point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryRecordedAt.IsZero() {
-					point.MemoryEscalation = &MemoryEscalationPrior{Peak: point.MemoryPeak, RecordedAt: point.MemoryRecordedAt}
-				}
-				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
-				point.MemoryRange, point.MemorySamples = nil, 0
-				point.GPUHostRange = nil
-				point.DeviceRange = nil
-				if !oomFailure && r.MemoryPeak.constrained() {
-					// Keep the existing diagnostic as invalidation provenance,
-					// never as a learned estimate or a new class-level bound.
-					point.MemoryPeak = r.MemoryPeak
-				}
-				q.putWorkObservation(id, point)
-				q.recordMemoryInvalidation(j, old, point)
-			}
-		}
+		q.invalidateWorkMemory(j, r, k, oomFailure, time.Time{})
 		return // Memory invalidation does not forbid the duration record.
 	}
 	id := identityHash(k)
@@ -191,6 +167,55 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
 	q.putWorkObservation(id, p)
+}
+
+// Repair the successful native completions older queues did not invalidate.
+// Use retained exact-attempt facts, and never erase a later clean measurement.
+func (q *Queue) repairSuccessfulConstrainedMemory() {
+	for _, id := range slices.Sorted(maps.Keys(q.s.Jobs)) {
+		j := q.s.Jobs[id]
+		f := learnedMemoryFactOf(j)
+		if f == nil {
+			continue
+		}
+		for _, facts := range j.MemoryAttempts {
+			if facts.Attempt != j.Timing.Execution.Attempt || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || facts.LearningReason != "constrained" || !facts.MemoryPeak.constrained() || facts.MemoryPeak.Source == processGroupMemorySource {
+				continue
+			}
+			q.invalidateWorkMemory(j, Result{MemoryPeak: facts.MemoryPeak}, f.Key, false, f.Ended)
+		}
+	}
+}
+
+func (q *Queue) invalidateWorkMemory(j *Job, r Result, k ObservationKey, oomFailure bool, through time.Time) {
+	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+	layout := memoryLayout(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
+	for _, id := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
+		point := q.s.WorkObservations[id]
+		if !through.IsZero() && (point.MemoryRecordedAt.IsZero() || point.MemoryRecordedAt.After(through)) {
+			continue
+		}
+		if j.MemoryEnvelope != nil && boundedMemorySource(j.MemoryEnvelope.Source) && (point.Key.Target.OS != k.Target.OS || !j.Spec.Needs.cpuOnly() && !sameMemoryFamily(point, k, layout)) {
+			continue // A target-family probe cannot disprove the transferred prior.
+		}
+		if sameMemoryWork(point, k, configuration) {
+			old := point
+			if point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryRecordedAt.IsZero() {
+				point.MemoryEscalation = &MemoryEscalationPrior{Peak: point.MemoryPeak, RecordedAt: point.MemoryRecordedAt}
+			}
+			point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
+			point.MemoryRange, point.MemorySamples = nil, 0
+			point.GPUHostRange = nil
+			point.DeviceRange = nil
+			if !oomFailure && r.MemoryPeak.constrained() {
+				// Keep the existing diagnostic as invalidation provenance,
+				// never as a learned estimate or a new class-level bound.
+				point.MemoryPeak = r.MemoryPeak
+			}
+			q.putWorkObservation(id, point)
+			q.recordMemoryInvalidation(j, old, point)
+		}
+	}
 }
 
 // Identity fences only. Throughput age (RecordedAt) and memory age

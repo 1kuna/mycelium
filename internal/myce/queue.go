@@ -440,6 +440,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
+		q.repairSuccessfulConstrainedMemory()
 		return nil
 	}); err != nil {
 		db.Close()

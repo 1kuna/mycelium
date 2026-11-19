@@ -356,7 +356,7 @@ func (q *Queue) recordWorkLearning(j *Job, old WorkObservation, exists bool, poi
 }
 
 // recordMemoryInvalidation binds each comparable memory key rewritten by a
-// failed attempt to that attempt's ledger, without adding an accepted sample.
+// constrained or OOM attempt to its ledger, without adding an accepted sample.
 func (q *Queue) recordMemoryInvalidation(j *Job, old, point WorkObservation) {
 	before, after := workMeasurementDigest(old), workMeasurementDigest(point)
 	if before == after {

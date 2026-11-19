@@ -643,7 +643,9 @@ With no unconstrained accepted estimate, the host reservation is 14 GiB from
 `submitter hint`; an invalidated recovery prior cannot override it. Constrained,
 OOM and failed attempts never count as accepted evidence. Native ceiling pressure
 clears comparable learned memory even on success, retaining measured lower bounds
-and OOM floors. Those floors, physical capacity, device capacity and production
+and OOM floors. Queue startup repairs stale accepted aggregates from retained
+older successful constrained attempts without clearing newer clean peaks.
+Those floors, physical capacity, device capacity and production
 protection still bind, so a hint can wait or be refused. Omit optional member caps
 that would censor the measurement. Top-level `size_hint` remains equivalent for
 its one compatibility release; prefer `advanced:`. A clean unconstrained run

@@ -1147,6 +1147,8 @@ work, including a successful attempt with nonzero ceiling events. The censored
 peak is diagnostic lower-bound evidence, never an accepted sample or an upper
 bound. Earlier accepted peaks may remain recovery priors with zero accepted
 evidence; they do not take precedence over a submitter host hint.
+On startup, the queue also repairs older retained successful constrained
+completions that left a stale accepted aggregate, preserving newer clean peaks.
 
 For a measurement run after ceiling pressure, keep the same extension, work,
 arguments and input shape and set `needs: {memory: auto}` with

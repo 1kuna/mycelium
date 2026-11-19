@@ -3,6 +3,7 @@ package myce
 import (
 	"bytes"
 	"encoding/json"
+	"maps"
 	"math"
 	"net/http/httptest"
 	"os"
@@ -257,7 +258,7 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 		}
 		return report
 	}
-	for _, history := range []string{"workload", "qualification", "none"} {
+	for _, history := range []string{"workload", "stored workload", "qualification", "none"} {
 		for _, outcome := range []string{"constrained success", "legacy max success", "constrained failure", "OOM", "failed"} {
 			for _, placement := range []string{"advanced", "legacy"} {
 				t.Run(history+"/"+outcome+"/"+placement, func(t *testing.T) {
@@ -305,6 +306,7 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 					}
 
 					clock.Advance(600 * time.Second)
+					stored := maps.Clone(q.s.WorkObservations)
 					peak = 9.1
 					r := result(first, strings.HasSuffix(outcome, "success"))
 					r.OutOfMemory = outcome == "OOM"
@@ -315,6 +317,19 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 					}
 					if err := q.Complete(r); err != nil {
 						t.Fatal(err)
+					}
+					if history == "stored workload" && r.Success {
+						// Older queues preserved this aggregate after a successful
+						// constrained completion. Reopen that exact persisted shape.
+						if err := q.update(func() error {
+							for id, point := range stored {
+								q.putWorkObservation(id, point)
+							}
+							return nil
+						}); err != nil {
+							t.Fatal(err)
+						}
+						q = memoryFactsRestart(t, q, clock)
 					}
 					if outcome == "OOM" {
 						if err := q.Cancel(first.ID); err != nil {
@@ -330,7 +345,7 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 					if outcome == "failed" {
 						// An ordinary failure teaches nothing and does not disprove a clean peak.
 						want := 0
-						if history == "workload" {
+						if strings.HasSuffix(history, "workload") {
 							want = 1
 						}
 						if accepted != want {
@@ -368,7 +383,7 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 						}
 					}
 
-					if history == "workload" && outcome == "constrained success" {
+					if strings.HasSuffix(history, "workload") && outcome == "constrained success" {
 						cli := cliResolve(t, q, s)
 						if cli.Hold == nil || !strings.Contains(cli.Hold.FullText(), "14.0 GiB needed") || !strings.Contains(cli.Hold.FullText(), "submitter hint") {
 							t.Errorf("CLI did not resolve 14 GiB from hint: %+v", cli.Hold)
@@ -415,6 +430,27 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 					}
 					if eligible != 2 {
 						t.Errorf("wanted two eligible single-card targets: %+v", report.Targets)
+					}
+					if history == "stored workload" && outcome == "constrained success" {
+						// Startup repair must be idempotent and leave later clean evidence.
+						s = folded
+						m.HostAvailableMemoryGB = 24
+						machineCheck(t, q, m)
+						clean := start()
+						clock.Advance(time.Second)
+						host, device := 10.0, 20.0
+						r = result(clean, true)
+						r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}}
+						if err := q.Complete(r); err != nil {
+							t.Fatal(err)
+						}
+						q = memoryFactsRestart(t, q, clock)
+						machineCheck(t, q, m)
+						target = m.Devices[0].machine(*q.s.Machines[m.ID])
+						next := submit(t, q, folded)
+						if e := seedMemoryCandidate(t, q, next, &target).MemoryEnvelope; e.Evidence == 0 || e.Basis != "learned" {
+							t.Errorf("startup repair erased newer clean evidence: %+v", e)
+						}
 					}
 				})
 			}
