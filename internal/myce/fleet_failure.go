@@ -102,6 +102,13 @@ func fleetControlFailure(err error, fallback string) error {
 	return errors.New(fallback)
 }
 
+// Preserve the typed pre-intent stall for the runtime's next-poll recovery,
+// while helpers after intent retain the stable, durable failure code.
+type fleetAuthorizationStalled struct{ cause error }
+
+func (*fleetAuthorizationStalled) Error() string   { return "fleet_authorization_refused" }
+func (e *fleetAuthorizationStalled) Unwrap() error { return e.cause }
+
 // Launch yields to the next runtime poll while a helper still runs or the
 // queue's answer was momentarily stale; the instruction is fetched again.
 type fleetInstructionRefetchError struct{}

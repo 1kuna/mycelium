@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These are the public diagnostics emitted by launch/apply, including failures
@@ -70,6 +71,119 @@ func TestFleetFailureCodesSurviveReceiptAndQueue(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #1710: only a typed stall before durable helper intent may yield. The next
+// ordinary poll must refetch, authorize all identities again, and launch once.
+func TestFleetFailureAuthorizationStallRefetches(t *testing.T) {
+	for _, outcome := range []string{"ready", "session", "unready", "refused"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newFleetInstallFixture(t, "darwin")
+			clock := f.deps.health.Clock.(*fakeClock)
+			client, err := f.deps.client(f.c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls, instructions := 0, 0
+			client.watch = false // The typed result is injected at the HTTP boundary.
+			client.Clock = clock
+			client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/api/fleet/instruction" {
+					instructions++
+				}
+				if r.URL.Path == "/api/fleet/authorize" {
+					calls++
+					if calls == 1 {
+						clock.Advance(4 * clientRecoveryPeriod)
+						return nil, &QueueStalledError{Method: r.Method, Path: r.URL.Path, Window: 4 * clientRecoveryPeriod}
+					}
+					if outcome == "refused" {
+						return &http.Response{StatusCode: 401, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"code":"authentication_required"}`))}, nil
+					}
+					if outcome == "session" || outcome == "unready" {
+						proof := fleetTestProof(clock, f.i.Session, f.runtimePID, false)
+						if outcome == "session" {
+							proof.Session = "different-session"
+						} else {
+							proof.RunnerSmoke = false
+						}
+						data, _ := json.Marshal(proof)
+						return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(data)))}, nil
+					}
+				}
+				return http.DefaultTransport.RoundTrip(r)
+			})}
+			f.deps.client = func(ServiceConfig) (Client, error) { return client, nil }
+			collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
+				return fleetTestProof(clock, f.i.Session, f.runtimePID, false), nil
+			}
+			launch := func(ctx context.Context, c ServiceConfig, i FleetUpdateInstruction) error {
+				return launchFleetUpdate(ctx, c, i, f.deps)
+			}
+			poll := func(prior fleetPollResult) fleetPollResult {
+				return pollFleetRuntimeAt(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, prior, clock)
+			}
+			first := poll(fleetPollResult{})
+			if first.attempted != "" || first.failed != nil || f.launches != 0 || f.fetches != 0 || len(f.acks) != 0 {
+				t.Fatalf("pre-intent stall became terminal: %+v", first)
+			}
+			if _, err := os.Lstat(filepath.Join(f.c.State, fleetUpdateReceiptFile)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("stall wrote helper intent", err)
+			}
+			clock.Advance(time.Second) // ordinary runtime cadence, no tight retry loop
+			second := poll(first)
+			if instructions != 2 || calls != 2 || second.attempted != fleetInstructionKey(f.i) {
+				t.Fatalf("instruction was not refetched: calls=%d instructions=%d result=%+v", calls, instructions, second)
+			}
+			if outcome == "ready" {
+				if f.launches != 1 || len(f.failureCodes) != 0 {
+					t.Fatal("ready answer did not advance", f.launches, f.failureCodes)
+				}
+				if err := f.apply(); err != nil || f.restarts != 1 {
+					t.Fatal("recovered update did not restart once", err, f.restarts)
+				}
+			} else if f.launches != 0 || len(f.failureCodes) != 1 || f.failureCodes[0] != "fleet_authorization_refused" {
+				t.Fatal("real refusal did not fail closed", f.launches, f.failureCodes)
+			}
+			_ = poll(second)
+			if instructions != 3 || calls != 2 && outcome != "ready" || f.launches > 1 {
+				t.Fatal("terminal or accepted instruction relaunched", calls, f.launches)
+			}
+		})
+	}
+}
+
+// Discovery used to consume the launch's shared ten-second context. Advance
+// the injected clock during discovery and ensure launch retains owner authority.
+func TestFleetFailureDiscoveryDoesNotOwnLaunchDeadline(t *testing.T) {
+	f := newFleetInstallFixture(t, "darwin")
+	client, err := f.deps.client(f.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := f.deps.health.Clock.(*fakeClock)
+	client.watch = false
+	client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/fleet/instruction" {
+			clock.Advance(10 * time.Second)
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
+		return fleetTestProof(clock, f.i.Session, f.runtimePID, false), nil
+	}
+	launched := false
+	launch := func(ctx context.Context, _ ServiceConfig, _ FleetUpdateInstruction) error {
+		if _, ok := ctx.Deadline(); ok {
+			t.Error("launch inherited discovery's deadline")
+		}
+		launched = true
+		return nil
+	}
+	_ = pollFleetRuntimeAt(context.Background(), f.c, client, collect, launch, f.i.Host, f.i.Machine, f.i.Session, true, fleetPollResult{}, clock)
+	if !launched {
+		t.Fatal("instruction did not reach launch")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -68,7 +69,16 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 	mux.HandleFunc("GET /api/fleet/authorize", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var proof *FleetRuntimeProof
-		err := a.Queue.updateRequest(r.Context(), func() error {
+		// Authorization changes no state. Do not queue a writer or persist
+		// accounting just to read the operation and clone its runtime proof.
+		// Keep the decision and proof in one read section; encode after unlock.
+		unlock := requestReadLock(r.Context(), &a.Queue.mu)
+		err := func() error {
+			u := a.Queue.s.FleetUpgrade
+			revision, e := strconv.Atoi(v.Get("revision"))
+			if e != nil || u == nil || revision != u.Revision {
+				return fleetError("fleet_instruction_stale")
+			}
 			if e := a.Queue.authorizeFleetUpdate(v.Get("operation"), v.Get("host"), v.Get("machine"), v.Get("session")); e != nil {
 				return e
 			}
@@ -78,7 +88,8 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 				proof = cloneFleetProof(m.Fleet)
 			}
 			return nil
-		}, nil)
+		}()
+		unlock()
 		// Older helpers collapse transport/HTTP/proof failures to one code.
 		// Retain the queue's decision independently of the helper version, and
 		// record caller cancellation without claiming the answer was delivered.

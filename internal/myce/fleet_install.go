@@ -184,6 +184,10 @@ func fleetAuthorize(ctx context.Context, client Client, i FleetUpdateInstruction
 			return proof, nil
 		}
 		log.Printf("event=fleet_authorization side=worker cause=%q", fleetAuthorizationCause(err, &proof, i.Session))
+		var stall *QueueStalledError
+		if errors.As(err, &stall) {
+			return proof, &fleetAuthorizationStalled{err}
+		}
 		err = fleetControlFailure(err, "fleet_authorization_refused")
 		if !fleetStaleControl(err) || tries >= 4 || wait(ctx, fleetRuntimeFreshFor/4) != nil {
 			return proof, err
@@ -275,7 +279,11 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 	defer client.HTTP.CloseIdleConnections()
 	proof, err := fleetAuthorize(ctx, client, i, d.health.Wait)
 	if err != nil {
-		if fleetStaleControl(err) {
+		var stall *QueueStalledError
+		if fleetStaleControl(err) || errors.As(err, &stall) {
+			// Nothing was prepared or launched. Yield instead of sending a
+			// terminal failed ack; the next ordinary poll refetches all fences.
+			// The queue's existing service-step deadline bounds this recovery.
 			return &fleetInstructionRefetchError{}
 		}
 		return err

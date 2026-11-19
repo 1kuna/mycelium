@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -25,6 +27,98 @@ func TestFleetHTTPRequestTiming(t *testing.T) {
 			}
 		}), mux.patterns).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", path, nil))
 	}
+}
+
+// #1710: the authorization predicate and returned proof need no SQLite write.
+// A log prune holding the sole connection must not stall authorization or reads.
+func TestFleetAuthorizationAvoidsWriter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _, _ := fleetFixture(t, "queue", "worker")
+		if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		fleetTick(t, q)
+		i := fleetInstructionFor(t, q)
+		writer, err := q.db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer writer.Close()
+		before := q.db.Stats().WaitCount
+		mux := newRequestMux()
+		API{Queue: q}.registerFleetUpgrade(mux)
+		v := url.Values{"operation": {i.Operation}, "revision": {strconv.Itoa(i.Revision)}, "host": {i.Host}, "machine": {i.Machine}, "session": {i.Session}}
+		response := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			mux.ServeHTTP(response, httptest.NewRequest("GET", "/api/fleet/authorize?"+v.Encode(), nil))
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Error("authorization waited for SQLite")
+		}
+		waiting := q.db.Stats().WaitCount != before
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+		var proof FleetRuntimeProof
+		if waiting || response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &proof) != nil || proof.Session != i.Session || !fleetProofReady(&proof) {
+			t.Fatalf("authorization: waiting=%t status=%d proof=%+v", waiting, response.Code, proof)
+		}
+	})
+}
+
+// Ping must answer even while the memory-admission probe is stuck. This is
+// the full authenticated handler, so moving only the leaf handler cannot pass.
+func TestFleetProgressPingIndependentOfMemoryAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _ := fixture(t)
+		started, release := make(chan struct{}), make(chan struct{})
+		q.requestBudgets.memory = func(context.Context) (int64, error) {
+			close(started)
+			<-release
+			return 1 << 30, nil
+		}
+		measured := make(chan struct{})
+		go func() {
+			defer close(measured)
+			_, _ = q.requestBudgets.measureMemory(context.Background())
+		}()
+		<-started
+		handler := (API{Queue: q, Token: "fixture"}).Handler()
+		response := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			r := httptest.NewRequest("GET", "/api/ping", nil)
+			r.Header.Set("Authorization", "Bearer fixture")
+			handler.ServeHTTP(response, r)
+		}()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Error("liveness probe waited on memory admission")
+		}
+		close(release)
+		<-measured
+		<-done
+		var ping struct {
+			Progress *QueueProgress `json:"queue_progress"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &ping) != nil || ping.Progress == nil {
+			t.Fatalf("missing liveness evidence: %d %s", response.Code, response.Body.String())
+		}
+		unauthorized := httptest.NewRecorder()
+		handler.ServeHTTP(unauthorized, httptest.NewRequest("GET", "/api/ping", nil))
+		if unauthorized.Code != http.StatusUnauthorized {
+			t.Fatal("ping bypassed authentication")
+		}
+	})
 }
 
 // Reproduce a log prune owning the sole connection outside q.mu. An inactive

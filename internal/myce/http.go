@@ -539,6 +539,14 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 			w.Header().Set(faultEvidenceHeader, faultEvidenceProtocol)
 			w.Header().Set(stagingPhasesHeader, stagingPhasesProtocol)
 		}
+		// Liveness is a fixed-size authenticated response, not a projection.
+		// A progress probe must not wait on the OS memory observation used to
+		// admit growing request/response allocations: that would let the probe
+		// time out while the control request it watches is still progressing.
+		if r.Method == http.MethodGet && r.URL.Path == "/api/ping" {
+			mux.ServeHTTP(w, r)
+			return
+		}
 		var finishBudget func()
 		var budgetErr error
 		r, finishBudget, budgetErr = a.Queue.withRequestBudget(w, r)

@@ -130,6 +130,37 @@ func TestClientProgressWatchWithoutEvidence(t *testing.T) {
 	}
 }
 
+// #1710: the progress probe can fail as the main response arrives. A fully
+// received response must win that race, including a real authorization refusal.
+func TestClientProgressWatchCompletedResponseWinsStall(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusConflict} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			clock := &fakeClock{now: time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)}
+			c := Client{URL: "http://fixture.invalid", Clock: clock, Pause: func(_ context.Context, d time.Duration) error {
+				clock.Advance(d)
+				return nil
+			}, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/api/ping" {
+					return nil, context.DeadlineExceeded
+				}
+				// Model a response already buffered when the watcher cancels.
+				<-r.Context().Done()
+				return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"code":"fleet_instruction_stale"}`))}, nil
+			})}}.WithProgressWatch()
+			var out map[string]string
+			err := c.Call(context.Background(), "GET", "/api/fleet/authorize", nil, &out)
+			var refusal *HTTPError
+			if status == http.StatusOK {
+				if err != nil || out["code"] != "fleet_instruction_stale" {
+					t.Fatalf("completed answer lost to probe: %v %+v", err, out)
+				}
+			} else if !errors.As(err, &refusal) || refusal.Code != "fleet_instruction_stale" {
+				t.Fatalf("real refusal lost to probe: %v", err)
+			}
+		})
+	}
+}
+
 func TestClientReplaySafePostRetriesOverload(t *testing.T) {
 	for _, path := range []string{"/api/resolve", "/api/files/preflight", "/api/extensions"} {
 		clock := &fakeClock{now: time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)}
