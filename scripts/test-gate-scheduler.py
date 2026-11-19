@@ -87,6 +87,7 @@ class SchedulerTests(unittest.TestCase):
         entries = ['pkg/tests\t^TestA$', 'pkg/tests\t^TestB$', 'pkg/empty\t.*', '@python-client\t']
         with tempfile.TemporaryDirectory() as folder:
             def info(command, **kwargs):
+                self.assertIn('-race', command)
                 package = command[-1]
                 return json.dumps(dict(Dir='/package', ImportPath=package,
                                        TestGoFiles=['a_test.go'] if package == 'pkg/tests' else []))
@@ -123,6 +124,11 @@ class SchedulerTests(unittest.TestCase):
             root = Path(folder)
             (root / 'go.mod').write_text('module fixture.invalid/gate\n\ngo 1.25\n')
             (root / 'fixture.txt').write_text('package cwd')
+            no_race = root / 'no_race'
+            no_race.mkdir()
+            (no_race / 'gate.go').write_text('package no_race\n')
+            (no_race / 'gate_test.go').write_text('//go:build !race\n\npackage no_race\n'
+                'import "testing"\nfunc TestNoRace(t *testing.T) { t.Fatal("excluded under race") }\n')
             (root / 'gate_test.go').write_text('''package gate
 import ("fmt"; "os"; "testing")
 func TestPass(t *testing.T) { t.Run("child", func(t *testing.T) {
@@ -145,7 +151,8 @@ func Example() { fmt.Println("example"); /* Output: example */ }
             build = '''import importlib.util, sys
 spec=importlib.util.spec_from_file_location('scheduler', sys.argv[1])
 m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.compile_packages(['fixture.invalid/gate\\t.*'], sys.argv[2])
+images=m.compile_packages(['fixture.invalid/gate\\t.*', 'fixture.invalid/gate/no_race\\t.*'], sys.argv[2])
+assert set(images) == {'fixture.invalid/gate'}, images
 '''
             compiled = subprocess.run([sys.executable, '-c', build, str(SCHEDULER.resolve()), str(root / 'bin')],
                                       cwd=root, env=env, capture_output=True, text=True, timeout=60)

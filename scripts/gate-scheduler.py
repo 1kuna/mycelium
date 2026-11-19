@@ -114,7 +114,7 @@ def compile_packages(entries, folder):
         # Resolve the package cwd that `go test` ordinarily chooses. Relative
         # fixture paths and TestMain's package-directory hygiene depend on it.
         info = json.loads(subprocess.check_output(
-            ['go', 'list', '-json', package], text=True))
+            ['go', 'list', '-race', '-json', package], text=True))
         if not info.get('TestGoFiles') and not info.get('XTestGoFiles'):
             continue  # Preserve `go test`'s ordinary no-test package result.
         image = folder / (hashlib.sha256(package.encode()).hexdigest() + '.test')
