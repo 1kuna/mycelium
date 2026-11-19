@@ -22,6 +22,24 @@ budget = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(budget)
 
 
+def make_gate_fixture(scripts, *, nested_regressions):
+    """Keep miniature shell fixtures in sync with the gate's preflight contract."""
+    source = Path(__file__).resolve().parent
+    for name in ('gate.sh', 'gate-scheduler.py', 'gate-progress.py', 'gate-budget.py',
+                 'gate-handles.py', 'gate-capacity.py', 'gate-cache.py',
+                 'gate-default-cache.py', 'gate-memory.py'):
+        shutil.copyfile(source / name, scripts / name)
+    for name in ('test-gate-progress.py', 'test-gate-scheduler.py'):
+        if nested_regressions:
+            shutil.copyfile(source / name, scripts / name)
+        else:
+            (scripts / name).write_text('# isolated termination fixture\n')
+    # These trees contain synthetic commands, not project documentation. The
+    # real gate runs both checks against the complete project independently.
+    for name in ('test-check-doc-links.py', 'check-doc-links.py'):
+        (scripts / name).write_text('# isolated shell fixture\n')
+
+
 class GateBudgetTests(unittest.TestCase):
     def test_complete_handle_inventory_keeps_new_fixtures_and_excludes_older_helpers(self):
         uid = os.getuid()
@@ -358,15 +376,7 @@ class GateBudgetTests(unittest.TestCase):
             root = Path(folder)
             scripts = root / 'scripts'
             scripts.mkdir()
-            shutil.copyfile(Path(__file__).with_name('gate.sh'), scripts / 'gate.sh')
-            for name in ('gate-scheduler.py', 'test-gate-scheduler.py'):
-                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
-            shutil.copyfile(Path(__file__).with_name('gate-progress.py'), scripts / 'gate-progress.py')
-            shutil.copyfile(Path(__file__).with_name('gate-budget.py'), scripts / 'gate-budget.py')
-            shutil.copyfile(Path(__file__).with_name('gate-handles.py'), scripts / 'gate-handles.py')
-            for name in ('gate-capacity.py', 'gate-cache.py', 'gate-memory.py'):
-                shutil.copyfile(Path(__file__).with_name(name), scripts / name)
-            shutil.copyfile(Path(__file__).with_name('test-gate-progress.py'), scripts / 'test-gate-progress.py')
+            make_gate_fixture(scripts, nested_regressions=True)
             (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
             bin_dir = root / 'bin'
             bin_dir.mkdir()
@@ -621,21 +631,11 @@ with patch.object(subprocess.Popen, 'wait', wait):
             root = Path(folder)
             (root / "scripts").mkdir()
             (root / "bin").mkdir()
-            (root / "scripts/gate.sh").write_bytes((scripts / "gate.sh").read_bytes())
-            for name in ("gate-scheduler.py", "test-gate-scheduler.py"):
-                shutil.copyfile(scripts / name, root / "scripts" / name)
-            shutil.copyfile(scripts / "gate-progress.py", root / "scripts/gate-progress.py")
-            shutil.copyfile(scripts / "gate-budget.py", root / "scripts/gate-budget.py")
-            shutil.copyfile(scripts / "gate-handles.py", root / "scripts/gate-handles.py")
-            for name in ("gate-capacity.py", "gate-cache.py", "gate-memory.py"):
-                shutil.copyfile(scripts / name, root / "scripts" / name)
-            shutil.copyfile(scripts / "test-gate-progress.py", root / "scripts/test-gate-progress.py")
             # This fixture exercises shell/budget termination, not nested
             # regression suites. Their real child-process timing consumes the
             # readiness/cleanup deadline before the fake build is reached.
             # The suites run independently in the gate and validation batch.
-            for name in ("test-gate-progress.py", "test-gate-scheduler.py"):
-                (root / "scripts" / name).write_text('# isolated termination fixture\n')
+            make_gate_fixture(root / 'scripts', nested_regressions=False)
             (root / "scripts/gate-related.py").write_text("")
             go = root / "bin/go"
             go.write_text(f'''#!{sys.executable}
