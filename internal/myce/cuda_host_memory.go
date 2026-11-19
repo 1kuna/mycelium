@@ -42,6 +42,17 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 		}
 		var values map[string]uint64
 		values, err = memoryKiBCounters(b, "VmPin", "VmLck")
+		if err != nil && procStatusNoMM(b, pid, pid) {
+			// cgroup.procs lists leaders, including dying leaders whose
+			// siblings still own the shared mm. Read that mm through a thread.
+			var threadErr error
+			values, threadErr = a.cudaThreadGroupPins(pid)
+			if threadErr == nil {
+				err = nil
+			} else if detail := (cudaProcPinReadError{}); errors.As(threadErr, &detail) {
+				err = threadErr
+			}
+		}
 		if err != nil {
 			// exit_mm can remove these fields before cgroup_exit and before
 			// the status file disappears. As for ENOENT, skip only after a
@@ -53,9 +64,13 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 				err = nil
 				continue
 			}
-			var counter memoryKiBCounterError
-			errors.As(err, &counter)
-			err = hostMemoryReadError{"cuda_proc_pin_counters", cudaProcPinReadError{pid, procStatusState(b), counter}}
+			var detail cudaProcPinReadError
+			if !errors.As(err, &detail) {
+				var counter memoryKiBCounterError
+				errors.As(err, &counter)
+				detail = cudaProcPinReadError{pid, procStatusState(b), counter}
+			}
+			err = hostMemoryReadError{"cuda_proc_pin_counters", detail}
 			return
 		}
 		// May overlap one another, cgroup anon and inherited mappings. Never
@@ -130,6 +145,89 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 	// exits cannot hide driver pages through a net MemAvailable delta.
 	driver = physical - min(before, after) + pinned
 	return
+}
+
+// Only a complete userspace status with no Vm* fields proves get_task_mm
+// returned NULL. A missing/malformed pin field on a task with an mm is still
+// a coverage failure, as is an unknown/truncated status or a kernel thread.
+func procStatusNoMM(b []byte, pid, tid int) bool {
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if strings.HasPrefix(f[0], "Vm") || strings.HasPrefix(f[0], "Rss") || f[0] == "HugetlbPages:" {
+			return false
+		}
+		switch f[0] {
+		case "Tgid:", "Pid:", "Kthread:", "voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:":
+			if len(f) != 2 || fields[f[0]] != "" {
+				return false
+			}
+			fields[f[0]] = f[1]
+		}
+	}
+	// These mandatory fields follow task_mem in proc_pid_status. Their
+	// absence could mean truncated data rather than an mm-less task.
+	for _, name := range []string{"voluntary_ctxt_switches:", "nonvoluntary_ctxt_switches:"} {
+		if _, err := strconv.ParseUint(fields[name], 10, 64); err != nil {
+			return false
+		}
+	}
+	return fields["Tgid:"] == strconv.Itoa(pid) && fields["Pid:"] == strconv.Itoa(tid) && fields["Kthread:"] == "0" && procStatusState(b) != "unknown"
+}
+
+func (a *memoryAttempt) cudaThreadGroupPins(pid int) (map[string]uint64, error) {
+	path := filepath.Join("/proc", strconv.Itoa(pid), "task")
+	entries, err := a.fs.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	noMM := map[string]bool{}
+	for _, entry := range entries {
+		tid, e := strconv.Atoi(entry.Name())
+		if e != nil || tid <= 0 || !entry.IsDir() {
+			return nil, errAttemptMemoryUnsupported
+		}
+		b, e := a.fs.ReadFile(filepath.Join(path, entry.Name(), "status"))
+		if e != nil {
+			// Even ENOENT is inconclusive: a sibling could have created
+			// another thread before exiting. Never turn failed I/O into zero.
+			return nil, e
+		}
+		values, e := memoryKiBCounters(b, "VmPin", "VmLck")
+		if e == nil {
+			// CLONE_THREAD requires CLONE_VM: one mm's counters, not a sum
+			// across siblings. Healthy leaders never need this extra I/O.
+			return values, nil
+		}
+		if !procStatusNoMM(b, pid, tid) {
+			var counter memoryKiBCounterError
+			errors.As(e, &counter)
+			return nil, cudaProcPinReadError{tid, procStatusState(b), counter}
+		}
+		noMM[entry.Name()] = true
+	}
+	// Userspace tasks cannot acquire another mm after exit_mm. Re-enumerate
+	// so a sibling created during the first inventory cannot be silently lost.
+	// Empty/unreadable inventories are not proof that a listed leader is empty.
+	if !noMM[strconv.Itoa(pid)] {
+		return nil, errAttemptMemoryUnsupported
+	}
+	entries, err = a.fs.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, errAttemptMemoryUnsupported
+	}
+	for _, entry := range entries {
+		if !noMM[entry.Name()] {
+			return nil, errAttemptMemoryUnsupported
+		}
+	}
+	return map[string]uint64{"VmPin": 0, "VmLck": 0}, nil
 }
 
 // Only fixed field names/classes and the single-letter state leave the worker;
