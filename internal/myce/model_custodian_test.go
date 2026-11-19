@@ -41,9 +41,10 @@ func testModelCustodian(t *testing.T) (*modelCustodian, string) {
 	spool := t.TempDir()
 	model := serverTestModel(t, "ready")
 	model.Name = "test"
+	model.HostMemoryGB = 0.25
 	machine := machine("model-worker", "fake")
 	machine.HostMemoryBudgetGB = 32
-	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
+	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
 	g.verify = func(_ string, _ int, scope string) error {
 		if scope != "test-independent" {
 			return errors.New("wrong test scope")
@@ -122,6 +123,14 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	old.models[engineKey(e.Model, e.Device)] = &workerModel{model: g.request.Original, engine: g, state: "ready", attempt: e.Attempt, inflight: 1}
+	// An adjacent-release queue still routes through the worker's original
+	// listener. New worker + old queue must preserve that call path too.
+	legacy := detachedModelRequest(t, old.url, e.Session, e.Attempt, "/echo")
+	data, readErr := io.ReadAll(legacy.Body)
+	legacy.Body.Close()
+	if legacy.StatusCode != 200 || readErr != nil || !strings.Contains(string(data), "input") {
+		t.Fatalf("adjacent queue route failed: %d %s %v", legacy.StatusCode, data, readErr)
+	}
 	if err := old.close(); err != nil {
 		t.Fatal(err)
 	}
