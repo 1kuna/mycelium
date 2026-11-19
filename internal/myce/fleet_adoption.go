@@ -60,7 +60,10 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 	}
 	for _, p := range q.hostObligations(h.Host) {
 		if p.Engine != nil || p.Call != nil {
-			return "model, preparation or cleanup custody requires natural drain"
+			if reason := q.modelAdoptionReason(m, p); reason != "" {
+				return reason
+			}
+			continue
 		}
 		if p.Launch != nil || p.Preparation {
 			// Standalone background preparation belongs to the worker's

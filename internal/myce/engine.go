@@ -497,6 +497,7 @@ type workerModel struct {
 	engine             Engine
 	state, err         string
 	inflight           int
+	proxyFlight        int // Adjacent-release calls still traversing the worker bridge.
 	queueFlight        int
 	recipe             *EnvironmentRecipe
 	releaseEnvironment func()
@@ -636,6 +637,10 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if w.ModelAdvertise != "" {
 		rt.url = w.ModelAdvertise
 	}
+	if e = rt.restoreModelCustodians(); e != nil {
+		ln.Close()
+		return nil, e
+	}
 	rt.server = &http.Server{Handler: http.HandlerFunc(rt.serve), ReadHeaderTimeout: 5 * time.Second}
 	rt.wg.Add(1)
 	go func() {
@@ -664,8 +669,15 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	out := []ModelReport{}
 	memory := 0.0
 	for _, m := range rt.models {
+		if g, ok := m.engine.(*modelCustodian); ok {
+			g.refreshModel(m)
+		}
 		rt.checkEngineHealth(m)
 		report := ModelReport{memoryGB: m.model.MemoryGB, hostMemoryGB: m.model.HostMemoryGB, resourcesMeasured: true, Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
+		if g, ok := m.engine.(*modelCustodian); ok {
+			report.Custody, report.URL = g.proof(), g.bridgeURL()
+			report.CallsMeasured = report.Custody != nil
+		}
 		if m.state == "loading" {
 			report.Error = m.progress.coldReason()
 		}
@@ -745,7 +757,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			if m.state == "ready" {
 				m.state = "draining"
 			}
-			if m.state == "draining" && m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
+			if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
 				rt.unload(m)
 			}
 		}
@@ -996,6 +1008,11 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		e = checkLaunchGate(ctx)
 	}
 	if e == nil {
+		if rt.detachedModelSupported(model) {
+			rt.mu.Lock()
+			m.engine = rt.newModelCustodian(m, model)
+			rt.mu.Unlock()
+		}
 		e = m.engine.Load(ctx, model)
 	}
 	if e == nil && ctx.Err() != nil {
@@ -1032,7 +1049,7 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		// request instead of exposing that engine as ready until another heartbeat.
 		if rt.closing || m.drainRequested {
 			m.state = "draining"
-			if m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
+			if m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
 				rt.unload(m)
 			}
 		}
@@ -1356,12 +1373,21 @@ func (rt *modelRuntime) close() error {
 	rt.mu.Lock()
 	rt.closing = true
 	for _, m := range rt.models {
+		if _, detached := m.engine.(*modelCustodian); detached && rt.worker != nil && rt.worker.serviceStop != nil && rt.worker.serviceStop.Err() != nil {
+			// The detached bridge owns existing response sockets and the engine.
+			// Service replacement releases only this coordinator's references.
+			if m.releaseEnvironment != nil {
+				m.releaseEnvironment()
+				m.releaseEnvironment = nil
+			}
+			continue
+		}
 		if m.cancel != nil {
 			m.cancel()
 		}
 		if m.state == "ready" || m.state == "draining" {
 			m.state = "draining"
-			if m.inflight == 0 {
+			if m.inflight == 0 && m.proxyFlight == 0 {
 				rt.unload(m)
 			}
 		}
@@ -1459,7 +1485,12 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 503, "model is not ready")
 		return
 	}
-	m.inflight++
+	_, detached := m.engine.(*modelCustodian)
+	if detached {
+		m.proxyFlight++
+	} else {
+		m.inflight++
+	}
 	// A routed call can arrive before the next queue check-in. Pause any idle
 	// copy immediately when the worker receives actual inference work.
 	for _, copy := range rt.copies {
@@ -1469,8 +1500,12 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
-		m.inflight--
-		if m.state == "draining" && m.inflight == 0 && (m.queueFlight == 0 || rt.closing) {
+		if detached {
+			m.proxyFlight--
+		} else {
+			m.inflight--
+		}
+		if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 && (m.queueFlight == 0 || rt.closing) {
 			rt.unload(m)
 		}
 	}()
@@ -1574,7 +1609,7 @@ func (rt *modelRuntime) withdrawLocalAvailability() {
 		if m.state == "ready" {
 			m.state = "draining"
 		}
-		if m.state == "draining" && m.inflight == 0 {
+		if m.state == "draining" && m.inflight == 0 && m.proxyFlight == 0 {
 			rt.unload(m)
 		}
 	}
