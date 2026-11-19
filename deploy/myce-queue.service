@@ -5,6 +5,7 @@ After=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
+TimeoutStartSec=infinity
 WorkingDirectory=%h/.local/share/myce
 PrivateDevices=no
 NoNewPrivileges=yes
