@@ -376,6 +376,46 @@ func TestCustodianPreparationFailureRetainsHelperCustody(t *testing.T) {
 	}
 }
 
+func TestCustodianPreparationHeartbeat(t *testing.T) {
+	c := &fakeClock{now: time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)}
+	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
+	id, dir := ID(), t.TempDir()
+	v := custodianSnapshot{Protocol: custodianProtocol, ID: id, At: c.Now(), State: workerState{Job: &j, Session: j.Session}}
+	if err := saveWorkerJSON(dir, custodianName(id, "snapshot"), v); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Clock: c, Interval: time.Millisecond}
+	stop := w.keepCustodianPreparationLive(dir, id)
+	defer func() {
+		if stop != nil {
+			stop()
+		}
+	}()
+	// Simulate staging for longer than the adoption freshness bound. The
+	// heartbeat owns a decoded snapshot; the runner may mutate its own state.
+	j.Progress = 17
+	c.Advance(2 * attemptLivenessMaxAge)
+	await(t, func() bool {
+		return readCustodianJSON(dir, custodianName(id, "snapshot"), &v) == nil && v.At.Equal(c.Now())
+	})
+	if v.State.Job.Progress != 0 || v.Started || v.Finished || v.State.Job.Attempt != j.Attempt {
+		t.Fatal("heartbeat read mutable runner state or changed execution", v)
+	}
+	stop()
+	stop = nil
+	// Publication after the join must remain the last writer, even after more
+	// fake time elapses and the ordinary heartbeat would have been due.
+	v.Started = true
+	v.State.Job.Progress = 1
+	if err := saveWorkerJSON(dir, custodianName(id, "snapshot"), v); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Hour)
+	if err := readCustodianJSON(dir, custodianName(id, "snapshot"), &v); err != nil || !v.Started || v.State.Job.Progress != 1 {
+		t.Fatalf("stale preparation overwrote launch: %+v %v", v, err)
+	}
+}
+
 // The service entry point can fail before runCustodian publishes its first
 // snapshot (#1709). A reaped pre-snapshot launch must become an exact finished
 // refusal, so the ordinary adoption/completion path releases even a cancelled
