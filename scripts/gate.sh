@@ -130,12 +130,24 @@ if [[ -f scripts/test-gate-default-cache.py ]]; then
 fi
 step docs-links-regressions python3 scripts/test-check-doc-links.py
 step docs-links python3 scripts/check-doc-links.py
-step build go build -o "$scratch/bin/myce" ./cmd/myce
+# The CLI used to enumerate targets is also the native release image. Match
+# that target's CGO setting so the matrix can reuse its exact linked bytes.
+# The race-enabled CLI and package tests still build native CGO below.
+host_os=$(go env GOHOSTOS)
+host_arch=$(go env GOHOSTARCH)
+native_cgo=0
+if [[ $host_os == darwin ]]; then native_cgo=1; fi
+step build env CGO_ENABLED="$native_cgo" go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
 while read -r os arch cgo; do
-  if [[ $cgo == 1 && $os != $(go env GOHOSTOS) ]]; then
+  if [[ $cgo == 1 && $os != $host_os ]]; then
     echo "build-$os-$arch: skipped (native CGO toolchain required; verify on $os)"
+    continue
+  fi
+  if [[ $os == $host_os && $arch == $host_arch && $cgo == $native_cgo ]]; then
+    echo "build-$os-$arch: reusing native release image"
+    step "build-$os-$arch" cp "$scratch/bin/myce" "$scratch/bin/myce-$os-$arch"
     continue
   fi
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
