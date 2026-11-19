@@ -116,3 +116,17 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		t.Fatal("--full lost full job IDs")
 	}
 }
+
+func TestCompactStatusKeepsDeferredFleetHostsAfterCompletion(t *testing.T) {
+	s := myce.Snapshot{FleetUpgrade: &myce.FleetUpgradeStatus{Operation: "upgrade", State: "complete", Hosts: []myce.FleetHostStatus{{Host: "worker", Phase: "deferred", Outcome: myce.FleetHostDeferred, DeferredReason: "no_capacity: host RAM occupied"}}}}
+	var compact bytes.Buffer
+	printCompactStatus(&compact, s, false)
+	detail := captureJoiningOutput(t, func() error { printStatus(s, true); return nil })
+	for _, output := range []string{compact.String(), detail} {
+		for _, want := range []string{"host worker", "outcome=deferred", "deferred_reason=no_capacity: host RAM occupied"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("status lost deferred host field %q: %s", want, output)
+			}
+		}
+	}
+}

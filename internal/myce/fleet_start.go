@@ -134,6 +134,9 @@ func (q *Queue) fleetStartAdmissionReason(m *Machine, j *Job) string {
 	}
 	q.refreshHostMemory()
 	m = cpuMachineView(m)
+	if !m.HostMemoryMeasured || m.HostMemoryError != "" || m.CPUCapacityReason != "" {
+		return ""
+	}
 	pressure := m.SharedHost != nil && q.sharedPressureFresh(m) && m.SharedHostYieldReason != "" && m.SharedHostReason == q.hostPressureReason(m)
 	if why := q.sharedHostAdmissionRefusal(j, m); why != "" && !pressure {
 		return ""
