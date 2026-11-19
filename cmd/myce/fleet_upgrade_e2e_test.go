@@ -680,7 +680,8 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	}
 	for _, m := range snapshot.Machines {
 		old := before[m.ID]
-		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {
+		preservedModelSession := m.ID == "worker-2"
+		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || (m.Session == old.Session) != preservedModelSession || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {
 			t.Errorf("worker did not activate actual target runtime: %+v", m)
 		}
 		data, err := commandFixtureAppendBytes(filepath.Join(commandCheckpoint[m.ID], "starts-"+m.ID))

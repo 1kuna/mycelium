@@ -297,7 +297,7 @@ func modelRequests(dir string) ([]modelCustodianRequest, error) {
 			return nil, errors.New("invalid detached model record")
 		}
 		var v modelCustodianSnapshot
-		if readCustodianJSON(filepath.Dir(path), custodianName(r.ID, "snapshot"), &v) == nil && v.ID == r.ID && v.Execution == r.Execution && v.Finished && (v.Report.State == "failed" || v.Report.State == "unloaded") {
+		if readCustodianJSON(filepath.Dir(path), custodianName(r.ID, "snapshot"), &v) == nil && v.Protocol == custodianProtocol && v.ID == r.ID && v.Execution == r.Execution && v.Report.Name == r.Execution.Model && v.Report.Device == r.Execution.Device && v.Report.Attempt == r.Execution.Attempt && v.Finished && (v.Report.State == "failed" || v.Report.State == "unloaded") {
 			continue
 		}
 		requests = append(requests, r)
