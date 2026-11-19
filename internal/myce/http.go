@@ -11,6 +11,8 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -752,7 +754,13 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		}
 		var api *HTTPError
 		safe := method == "GET" || method == "HEAD" || method == "POST" && replaySafePost[path]
-		if c.singleAttempt || !safe || !errors.As(err, &api) || (api.Status != 429 && api.Status != 503) {
+		var transport *url.Error
+		var stalled *QueueStalledError
+		_, streaming := out.(io.Writer)
+		// Never replay a response whose bytes have already reached a caller.
+		broken := !streaming && !errors.As(err, &stalled) && !IsTLSIdentityError(err) && (errors.As(err, &transport) || errors.Is(err, io.ErrUnexpectedEOF))
+		overload := errors.As(err, &api) && (api.Status == 429 || api.Status == 503)
+		if c.singleAttempt || !safe || (!broken && !overload) {
 			if last != nil && ctx.Err() != nil {
 				return &clientRetryStopped{last, ctx.Err()}
 			}
@@ -837,6 +845,17 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if out != nil {
 		if stream, ok := out.(io.Writer); ok {
 			return copyJSONDocument(stream, res.Body)
+		}
+		// A truncated reply must not leave fields that leak into the retry's
+		// complete reply when the replacement omits them.
+		dest := reflect.ValueOf(out)
+		if dest.Kind() == reflect.Pointer && !dest.IsNil() {
+			next := reflect.New(dest.Elem().Type())
+			if err := json.NewDecoder(res.Body).Decode(next.Interface()); err != nil {
+				return err
+			}
+			dest.Elem().Set(next.Elem())
+			return nil
 		}
 		return json.NewDecoder(res.Body).Decode(out)
 	}

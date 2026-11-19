@@ -127,7 +127,9 @@ func TestQueueShutdownShedsBlockedObservations(t *testing.T) {
 		requests.Add(1)
 		go func() {
 			defer requests.Done()
-			_ = client.Call(context.Background(), "GET", path, nil, nil)
+			// This test observes one shed request, not the consumer's reconnect
+			// loop (which intentionally survives until a replacement is ready).
+			_ = client.WithoutRetries().Call(context.Background(), "GET", path, nil, nil)
 		}()
 	}
 	client := Client{URL: server.URL, Token: "test"}

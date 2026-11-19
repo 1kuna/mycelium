@@ -379,10 +379,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
 	if err == nil {
 		q.s.FairUsageVersion = 0
-		data, err = readQueueState(db, data)
-		if err == nil {
-			err = json.Unmarshal(data, &q.s)
-		}
+		err = q.readStartupState(data)
 	}
 	if err != nil && err != sql.ErrNoRows {
 		db.Close()

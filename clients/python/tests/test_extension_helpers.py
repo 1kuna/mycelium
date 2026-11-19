@@ -182,12 +182,13 @@ class ExtensionClientTests(unittest.TestCase):
     def test_lost_response_retries_same_key_but_conflict_does_not(self):
         client = Client(token="fixture")
         spec = {"project": "demo", "submission_key": "stable"}
-        with patch.object(client, "submit", side_effect=[URLError("lost response"), {"id": "original"}]) as submit:
+        # Retry ownership now lives in submit itself, shared by both entry points.
+        with patch.object(client, "_call", side_effect=[URLError("lost response"), {"id": "original"}]) as submit:
             with patch.object(client, "wait", return_value={"id": "original", "state": "succeeded"}):
                 client.submit_and_wait(spec)
                 self.assertEqual(submit.call_count, 2)
                 self.assertEqual(submit.call_args_list[0], submit.call_args_list[1])
-        with patch.object(client, "submit", side_effect=APIError(409, "conflict")) as submit:
+        with patch.object(client, "_call", side_effect=APIError(409, "conflict")) as submit:
             with self.assertRaises(APIError):
                 client.submit_and_wait(spec)
             self.assertEqual(submit.call_count, 1)
