@@ -70,6 +70,10 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 	s.Custody = nil
 	if validModelCustody(r.Custody) && validModelBridgeURL(r.URL) {
 		v := *r.Custody
+		v.WorkerPID = 0
+		if m := q.s.Machines[s.Machine]; m != nil && m.Fleet != nil {
+			v.WorkerPID = m.Fleet.PID
+		}
 		s.Custody, s.URL = &v, r.URL
 	}
 	q.expireEngineLoad(s)

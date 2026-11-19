@@ -22,6 +22,9 @@ import (
 type ModelCustody struct {
 	Protocol int    `json:"protocol"`
 	ID       string `json:"id"`
+	// Queue-stamped coordinator identity, already public in FleetRuntimeProof.
+	// A replacement must present its own exact model report before activation.
+	WorkerPID int `json:"worker_pid,omitempty"`
 }
 
 func validModelCustody(v *ModelCustody) bool {
@@ -519,6 +522,9 @@ func (q *Queue) modelAdoptionReason(m *Machine, p HostObligation) string {
 	s := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]
 	if s == nil || s.Session != e.Session || s.Attempt != e.Attempt || !validModelCustody(s.Custody) || !validModelBridgeURL(s.URL) {
 		return "model engine or response bridge has no detached custody"
+	}
+	if m.Fleet == nil || m.Fleet.PID == 0 || s.Custody.WorkerPID != m.Fleet.PID {
+		return "current worker has not proved adoption of the detached model"
 	}
 	if s.State != "ready" && s.State != "draining" {
 		return "detached model readiness or release is unconfirmed"

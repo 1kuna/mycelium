@@ -216,7 +216,7 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			if s == nil {
 				t.Fatal("missing pinned slot")
 			}
-			s.State, s.Custody, s.URL = "ready", &ModelCustody{Protocol: custodianProtocol, ID: ID()}, "http://127.0.0.1:1235"
+			s.State, s.Custody, s.URL = "ready", &ModelCustody{Protocol: custodianProtocol, ID: ID(), WorkerPID: m.Fleet.PID}, "http://127.0.0.1:1235"
 			before := *s
 			if kind == "legacy" {
 				s.Custody = nil
@@ -268,6 +268,12 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 			updated := cloneMachine(q.s.Machines[m.ID])
 			updated.Fleet = fleetTestProof(clock, m.Session, 777, true)
 			updated.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol}
+			// A new PID carrying only the previous coordinator's stored receipt
+			// cannot claim adoption; its own exact report is required.
+			q.s.Machines[m.ID] = &updated
+			if !q.retainWorkerHandover(q.s.Machines[m.ID]) {
+				t.Fatal("replacement accepted old coordinator's model receipt")
+			}
 			reports := []ModelReport{{Name: s.Model, Attempt: s.Attempt, State: "ready", Custody: s.Custody, URL: s.URL, InFlight: s.InFlight, CallsMeasured: true}}
 			if _, err := q.Checkin(Checkin{Machine: updated, ModelReports: reports, period: time.Second}); err != nil {
 				t.Fatal(err)
