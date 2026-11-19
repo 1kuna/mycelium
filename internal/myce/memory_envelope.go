@@ -460,12 +460,6 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				n.MemoryGB = j.Spec.Needs.MemoryGB
 			}
 			source, basis = "submitter hint", "hint"
-			// Censored peaks are lower bounds, never accepted sizing evidence.
-			// A hint may replace a recovery prior, but cannot erase known demand.
-			n.HostMemoryGB = max(n.HostMemoryGB, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
-			if estimate.escalation && estimate.host != nil {
-				n.HostMemoryGB = max(n.HostMemoryGB, hostMemoryPeakGB(estimate.host))
-			}
 			if !n.cpuOnly() && n.HostMemoryGB == 0 {
 				n.HostMemoryGB = j.Spec.Needs.HostMemoryGB
 			}
@@ -496,6 +490,12 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				}
 				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !m.UnifiedMemory)), why
 				source = "submitter hint; exploratory host"
+			}
+			// Censored peaks are lower bounds, never accepted sizing evidence.
+			// A hint may replace a recovery prior, but cannot erase known demand.
+			n.HostMemoryGB = max(n.HostMemoryGB, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
+			if estimate.escalation && estimate.host != nil {
+				n.HostMemoryGB = max(n.HostMemoryGB, hostMemoryPeakGB(estimate.host))
 			}
 		default:
 			source, basis = "exploratory first run", "exploratory"

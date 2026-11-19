@@ -389,6 +389,12 @@ func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
 					if e := seedMemoryCandidate(t, q, &low, &target).MemoryEnvelope; e.HostGB < 9.1 {
 						t.Errorf("small hint erased measured floor: %+v", e)
 					}
+					partial := *queued
+					partial.Spec.SizeHint = SizeHint{MemoryGB: 30}
+					partial.MemoryFallback = &partial.Spec.SizeHint
+					if e := seedMemoryCandidate(t, q, &partial, &target).MemoryEnvelope; e.HostGB <= peak {
+						t.Errorf("device-only hint stopped host exploration: %+v", e)
+					}
 					high := low
 					high.Spec.SizeHint = SizeHint{HostMemoryGB: 40, MemoryGB: 30}
 					high.MemoryFallback = &high.Spec.SizeHint
