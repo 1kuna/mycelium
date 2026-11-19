@@ -11,77 +11,10 @@ Mycelium runs your commands on a fleet of CPU and GPU machines through one
 queue. You say what the work needs; Mycelium picks the machine, runs it and
 hands back verified files. Climb the ladder only as far as your work needs.
 
-Default `myce status` puts unhealthy hosts, holds and waiting work first; alerts
-are one trailing count. Use `myce status --sections alerts` for records or
-`myce efficiency` for sizing and placement findings. Host health openings and
-closings go to the installation owner's Mycelium inbox when its hook is configured.
-
-## Ground rules
-
-- Use the installed `myce` CLI or Python `Client.from_installed()`; both find
-  their own credentials. Never open, print, copy, pass or set fleet credentials.
-  A missing CLI or refused authority is a hold for the installation owner: keep
-  its typed refusal and keep heavy work off your own machine.
-- Describe what the work needs, never which machine: `--gpu cuda` finds CUDA
-  hardware. Pin hardware only for a [real requirement](references/submit.md#explicit-placement-restrictions).
-- Shared interactive hosts refuse `batch`, `test`, `ci`, `rollout` and `eval`
-  classes and same-named policy tiers, including when the fleet is full. Submit
-  those classes normally; no host exclusion is needed to protect the agents
-  workstation. Light work still uses its measured allowances. Queued GPU work
-  protects its resolved CPU/RAM needs from CPU backfill, including internal
-  extension checks, CPU maintenance resumes, and waits for a finite GPU execution
-  to finish. Freed capacity accumulates toward that demand; portable queued CPU
-  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
-  Existing CPU work keeps its stop/checkpoint contract and may need to finish.
-- `myce COMMAND --help` is the flag reference. A field your installed queue or
-  worker doesn't return is unknown, not false.
-
-For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
-`host_memory_ledger` on supporting queues. Compare physical room
-(`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
-at that snapshot's timestamp. Charges alone do not explain live occupancy;
-do not combine an earlier wait with a later machine reading. Missing ledgers
-on older records are unknown, not zero usage. On supporting unified CUDA
-workers, fresh exact-attempt single-process device evidence also earns resident
-credit through max(all credited host pages, one device process counter). Device
-counters are never summed for this credit. Missing/stale/ambiguous evidence and
-older workers retain conservative pending growth; this does not reduce charges
-or qualify native coexistence.
-
-Detached workers retain their owner's device sample and sensor age in the parent
-heartbeat. An attribution-uncertain warning remains a separate sharing refusal
-even when charges fit. CUDA physical bounds can include unknown external use;
-a small RSS peak alone does not justify clearing larger accepted history.
-
-When status says `waiting for fresh accelerator inventory`, leave the existing
-job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
-work continues. `myce status --sections machines --json` exposes
-`inventory_probe.state`, `operation`, `pending_seconds` and `error_class` for the
-queue owner. Worker contact alone does not prove usable accelerator inventory;
-resubmitting the job does not repair that evidence. Report a persistent wait to the queue owner with those fields.
-
-A `host_backfill` hold (`host_capacity_accumulation`) names queued work whose
-resolved host RAM or cores Mycelium is protecting in tier/fair-turn order.
-Even a GPU job that fits now can wait when starting it would deepen that demand's
-capacity deficit. Existing attempts finish normally; the hold clears when the
-named demand starts or no longer withholds capacity. Keep the existing job queued.
-
-A maintenance-interrupted resumable job keeps its job ID. Leave it queued while
-Mycelium restores its checkpoint; a slow copy retains that same attempt and
-writer. Refused copies with proof no payload ran are reclaimed after release.
-Older orphan copies under a cancelled job expire with its whole checkpoint
-folder, normally 72 hours after the job ends, once every attempt is released.
-
-Work yielded to production stays off that host while the production attempt
-prepares its command, including a launch-capacity retry. Queue start
-authorization alone does not end this hold: the worker must report command
-start or confirm release. Other compatible hosts and unrelated work using spare
-capacity remain eligible; keep the existing job queued.
-
-Job JSON timestamps preserve nanoseconds. `start_latency_seconds` is the wall-time
-difference from `queued` to `started_at`, or from `dependency.ready_at` for a
-dependent job. It uses the timestamps exposed by the API, not process-local
-monotonic clock readings.
+If a non-interactive shell cannot find `myce`, use the installed-path
+[setup step](setup-project.md#find-the-installed-cli) before treating it as missing.
+To try this without a fleet or credentials, see the
+[laptop journey](setup-project.md#try-a-fresh-project-on-a-laptop).
 
 ## 1. One command
 
@@ -120,18 +53,40 @@ key when intent is unchanged. Inline commands need an explicit `--key` to re-att
 by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
 
 
+## Ground rules
+
+- Use the installed `myce` CLI or Python `Client.from_installed()`; both find
+  their own credentials. Never open, print, copy, pass or set fleet credentials.
+  A missing CLI or refused authority is a hold for the installation owner: keep
+  its typed refusal and keep heavy work off your own machine.
+- Describe what the work needs, never which machine: `--gpu cuda` finds CUDA
+  hardware. Pin hardware only for a [real requirement](references/submit.md#explicit-placement-restrictions).
+- Shared interactive hosts refuse `batch`, `test`, `ci`, `rollout` and `eval`
+  classes and same-named policy tiers, including when the fleet is full. Submit
+  those classes normally; no host exclusion is needed to protect the agents
+  workstation. Light work still uses its measured allowances. Queued GPU work
+  protects its resolved CPU/RAM needs from CPU backfill, including internal
+  extension checks, CPU maintenance resumes, and waits for a finite GPU execution
+  to finish. Freed capacity accumulates toward that demand; portable queued CPU
+  work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
+  Existing CPU work keeps its stop/checkpoint contract and may need to finish.
+- `myce COMMAND --help` is the flag reference. A field your installed queue or
+  worker doesn't return is unknown, not false.
+
 ## 3. A reusable entry
 
 To send your project's code, its inputs and environment, give the work an entry.
-From the project root:
+From the Git project root (`git init` first for a new folder):
 
 ```sh
-myce init --entry hello -- sh -c "printf 'mycelium-ease-audit-ok\n' > result.txt"
+myce init --entry hello --output result.txt -- sh -c "printf 'mycelium-ease-audit-ok\n' > result.txt"
 ```
 
-`myce init` writes `.mycelium/adapter.yaml` with one entry. With no command it
-runs `python -m pytest`, and it uses a `pixi.lock` or `uv.lock` it finds as the
-entry's environment. Add the files you want back:
+`myce init` writes `.mycelium/adapter.yaml` with one entry and the declared
+outputs. Repeat `--output` for files, folders or quoted globs. It uses a
+`pixi.lock` or `uv.lock` it finds as the environment; with a lock and no command,
+it defaults to `python -m pytest`. Without a lock, supply the command. The
+example creates this entry (with your folder name as `project`):
 
 ```yaml
 project: example
@@ -537,6 +492,58 @@ A submitted production stage counts as open production work while it waits on
 can't submit ahead.
 
 ## When a job fails or waits
+
+Default `myce status` puts unhealthy hosts, holds and waiting work first; alerts
+are one trailing count. Use `myce status --sections alerts` for records or
+`myce efficiency` for sizing and placement findings. Host health openings and
+closings go to the installation owner's Mycelium inbox when its hook is configured.
+
+For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
+`host_memory_ledger` on supporting queues. Compare physical room
+(`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
+at that snapshot's timestamp. Charges alone do not explain live occupancy;
+do not combine an earlier wait with a later machine reading. Missing ledgers
+on older records are unknown, not zero usage. On supporting unified CUDA
+workers, fresh exact-attempt single-process device evidence also earns resident
+credit through max(all credited host pages, one device process counter). Device
+counters are never summed for this credit. Missing/stale/ambiguous evidence and
+older workers retain conservative pending growth; this does not reduce charges
+or qualify native coexistence.
+
+Detached workers retain their owner's device sample and sensor age in the parent
+heartbeat. An attribution-uncertain warning remains a separate sharing refusal
+even when charges fit. CUDA physical bounds can include unknown external use;
+a small RSS peak alone does not justify clearing larger accepted history.
+
+When status says `waiting for fresh accelerator inventory`, leave the existing
+job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
+work continues. `myce status --sections machines --json` exposes
+`inventory_probe.state`, `operation`, `pending_seconds` and `error_class` for the
+queue owner. Worker contact alone does not prove usable accelerator inventory;
+resubmitting the job does not repair that evidence. Report a persistent wait to the queue owner with those fields.
+
+A `host_backfill` hold (`host_capacity_accumulation`) names queued work whose
+resolved host RAM or cores Mycelium is protecting in tier/fair-turn order.
+Even a GPU job that fits now can wait when starting it would deepen that demand's
+capacity deficit. Existing attempts finish normally; the hold clears when the
+named demand starts or no longer withholds capacity. Keep the existing job queued.
+
+A maintenance-interrupted resumable job keeps its job ID. Leave it queued while
+Mycelium restores its checkpoint; a slow copy retains that same attempt and
+writer. Refused copies with proof no payload ran are reclaimed after release.
+Older orphan copies under a cancelled job expire with its whole checkpoint
+folder, normally 72 hours after the job ends, once every attempt is released.
+
+Work yielded to production stays off that host while the production attempt
+prepares its command, including a launch-capacity retry. Queue start
+authorization alone does not end this hold: the worker must report command
+start or confirm release. Other compatible hosts and unrelated work using spare
+capacity remain eligible; keep the existing job queued.
+
+Job JSON timestamps preserve nanoseconds. `start_latency_seconds` is the wall-time
+difference from `queued` to `started_at`, or from `dependency.ready_at` for a
+dependent job. It uses the timestamps exposed by the API, not process-local
+monotonic clock readings.
 
 For a preservation snapshot, `myce status --history --json` streams one complete
 document from a consistent committed publication, with bounded job projection

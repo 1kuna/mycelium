@@ -81,6 +81,13 @@ entries:
     run: {command: [python3, -m, pytest]}
 ```
 
+Generate an entry with `myce init --output report.json -- COMMAND ARGS`.
+Repeat `--output` for files, folders (`plots/`) or quoted globs (`"logs/*.txt"`);
+all use the ordinary verified result transport. With no outputs, `myce init`
+leaves the output map out. It preserves an existing adapter. With no command,
+it defaults to `python -m pytest` only when a project lock exists; otherwise
+supply the command. See the [fresh-project journey](../skills/mycelium/setup-project.md#try-a-fresh-project-on-a-laptop).
+
 Every other field is optional. The defaults are:
 
 | Field | Default |
