@@ -323,6 +323,7 @@ func TestDetachedModelQueueRoute(t *testing.T) {
 	req, _ := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/models/test/stream", nil)
 	req.Header.Set("Authorization", "Bearer test")
 	req.Header.Set("X-Myce-Project", "test")
+	req.Header.Set("X-Myce-Priority", "experiment")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

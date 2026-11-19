@@ -475,6 +475,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	tick := time.NewTicker(custodianInterval(w.Interval))
 	defer tick.Stop()
 	loading, stopping := true, false
+	stopDone := stop.Done()
 	for {
 		select {
 		case err := <-loaded:
@@ -489,7 +490,8 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 				m.state = "ready"
 			}
 			rt.mu.Unlock()
-		case <-stop.Done():
+		case <-stopDone:
+			stopDone = nil
 			cancel()
 			stopping = true
 		case <-tick.C:
