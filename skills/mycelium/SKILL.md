@@ -62,7 +62,6 @@ and `memory_gb` for exploratory sizing; measured lower bounds and retry floors
 still apply. Preview with `myce spec check --resolve --json SPEC`; eligible
 hardware does not reserve capacity or clear a separate execution-sharing hold.
 
-
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
