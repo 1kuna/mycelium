@@ -43,10 +43,11 @@ func TestTransportQueueCutover(t *testing.T) {
 				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					mu.Lock()
 					defer mu.Unlock()
+					target := operation == "submit" && r.Method == "POST" && r.URL.Path == "/api/jobs" || operation == "status" && r.URL.Path == "/api/status" || operation == "wait" && (r.URL.Path == "/api/jobs/"+id || r.URL.Path == "/api/wait")
 					// The replacement can accept connections before transient GC/host
 					// pressure clears. Preserve the real typed capacity signal here;
 					// request-budget tests exercise its zero-headroom origin.
-					if cut && !capacityRefused {
+					if target && cut && !capacityRefused {
 						capacityRefused = true
 						w.Header().Set("Content-Type", "application/json")
 						w.Header().Set("Retry-After", "1")
@@ -56,7 +57,6 @@ func TestTransportQueueCutover(t *testing.T) {
 					}
 					reply := httptest.NewRecorder()
 					myce.API{Queue: q, Token: "synthetic"}.Handler().ServeHTTP(reply, r)
-					target := operation == "submit" && r.Method == "POST" && r.URL.Path == "/api/jobs" || operation == "status" && r.URL.Path == "/api/status" || operation == "wait" && (r.URL.Path == "/api/jobs/"+id || r.URL.Path == "/api/wait")
 					if target && !cut && reply.Code == 200 {
 						cut = true
 						q.BeginShutdown()
