@@ -36,7 +36,7 @@ func TestDetachedModelCustodianHelper(t *testing.T) {
 	}
 }
 
-func testModelCustodian(t *testing.T) (*modelCustodian, string) {
+func testModelCustodian(t *testing.T, execution ...HostEngineExecution) (*modelCustodian, string) {
 	t.Helper()
 	spool := t.TempDir()
 	model := serverTestModel(t, "ready")
@@ -45,6 +45,11 @@ func testModelCustodian(t *testing.T) (*modelCustodian, string) {
 	machine := machine("model-worker", "fake")
 	machine.HostMemoryBudgetGB = 32
 	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
+	if len(execution) != 0 {
+		g.request.Execution = execution[0]
+		g.request.Machine.ID, g.request.Machine.Session = execution[0].Machine, execution[0].Session
+	}
+
 	g.verify = func(_ string, _ int, scope string) error {
 		if scope != "test-independent" {
 			return errors.New("wrong test scope")
@@ -302,25 +307,32 @@ func TestFleetUpgradeDetachedModelsAndLateCall(t *testing.T) {
 // The real queue HTTP path must route directly to the detached bridge. A
 // worker listener can disappear without owning any part of the response.
 func TestDetachedModelQueueRoute(t *testing.T) {
-	g, _ := testModelCustodian(t)
 	q, _, m := modelFixture(t)
-	e := g.request.Execution
+	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
+		t.Fatal(err)
+	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
 	if s == nil {
-		if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
-			t.Fatal(err)
-		}
-		s = q.s.ModelSlots[slotKey(m.ID, "test")]
+		t.Fatal("pin did not assign an engine")
 	}
-	// This fixture's queue owns the same exact model attempt/session.
-	m.Session, s.Session, s.Attempt, s.State, s.URL = e.Session, e.Session, e.Attempt, "ready", g.bridgeURL()
-	q.s.Machines[m.ID].Session = e.Session
-	q.models.Models[0].Engine = "server"
-	q.models.Models[0].RetrySafe = false
-	q.models.Models[0].RequestTimeout = time.Minute
+	g, _ := testModelCustodian(t, HostEngineExecution{Machine: m.ID, Session: m.Session, Model: s.Model, Device: s.Device, Attempt: s.Attempt})
+	e := g.request.Execution
+	// Reconcile through the worker protocol, preserving the queue's assigned
+	// attempt and all placement/accounting state. The worker URL is deliberately
+	// unreachable: the exact slot's independent bridge must own this response.
+	g.mu.Lock()
+	report := g.last.Report
+	g.mu.Unlock()
+	report.URL = g.bridgeURL()
+	report.Custody = &ModelCustody{Protocol: custodianProtocol, ID: g.request.ID}
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{report}}); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	req, _ := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/models/test/stream", nil)
+	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/models/test/stream", nil)
 	req.Header.Set("Authorization", "Bearer test")
 	req.Header.Set("X-Myce-Project", "test")
 	req.Header.Set("X-Myce-Priority", "experiment")

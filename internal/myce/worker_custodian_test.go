@@ -251,7 +251,11 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 				t.Fatal(err)
 			}
 		} else {
-			command(append(nativeCustodianStartArgs(c), c.Binary, "service", "--config", c.Config)...)
+			args := nativeCustodianStartArgs(c)
+			if mode == "model" {
+				args = append(args, "--property=StandardOutput=append:"+filepath.Join(dir, "worker.log"), "--property=StandardError=inherit")
+			}
+			command(append(args, c.Binary, "service", "--config", c.Config)...)
 		}
 	}
 	stop := func() {

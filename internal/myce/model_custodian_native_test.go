@@ -76,6 +76,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		defer q.mu.Unlock()
 		return q.s.Machines[c.Name] != nil
 	})
+	t.Log("model worker checked in; assigning pin")
 	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: c.Name}); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +89,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		id := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(paths[0]), "custodian-"), ".model-request.json")
 		return readCustodianJSON(dir, custodianName(id, "snapshot"), &before) == nil && before.Report.State == "ready"
 	})
+	t.Log("detached model ready; verifying native membership")
 	if err := verifyCustodianIsolation(before.ID, before.PID, before.Cgroup); err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +130,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 	if first, err := stream.ReadString('\n'); response.StatusCode != 200 || err != nil || first != "first\n" {
 		t.Fatalf("stream did not start: HTTP %d %q %v", response.StatusCode, first, err)
 	}
+	t.Log("queue-routed model stream open; replacing worker image")
 	stop()
 	stoppedAt := q.clock.Now()
 	writeImage(next)
