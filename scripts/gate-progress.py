@@ -115,8 +115,15 @@ def run(label, command, cache, report, clock=time.monotonic):
     path = cache / (hashlib.sha256(json.dumps(identity).encode()).hexdigest() + '.json')
     history = load_history(path)
     expected = history['expected_seconds'] if history else None
-    is_test = command[:2] == ['go', 'test']
-    if is_test:
+    compiled = command[:1] == ['--test-binary']
+    is_test = compiled or command[:2] == ['go', 'test'] and '-c' not in command[2:]
+    directory = None
+    if compiled:
+        _, package, image, directory, *arguments = command
+        command = ['go', 'tool', 'test2json', '-t', '-p', package, image,
+                   '-test.v=test2json', '-test.paniconexit0',
+                   '-test.timeout=0' if history else '-test.timeout=1h', *arguments]
+    elif is_test:
         # Cold runs retain the existing toolchain backstop. Warm runs can take
         # arbitrarily long provided they keep making progress.
         command = [*command[:2], '-timeout=0' if history else '-timeout=1h', *command[2:]]
@@ -145,7 +152,15 @@ def run(label, command, cache, report, clock=time.monotonic):
             private = temporary / 'gate_test_cli_binary'
             shutil.copy2(source, private)
             child_env['GATE_TEST_CLI_BINARY'] = str(private)
-    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=child_env)
+        if compiled:
+            # Self-exec helpers and env-scrubbed descendants must retain this
+            # shard's executable-path custody, not a shared image's identity.
+            private = temporary / 'package.test'
+            shutil.copy2(image, private)
+            command[6] = str(private)
+            child_env['PWD'] = directory
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=child_env, cwd=directory)
     status = 1
     try:
         with selectors.DefaultSelector() as selector:

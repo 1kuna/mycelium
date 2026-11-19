@@ -30,12 +30,16 @@ def partition(names: list[str], durations: dict[str, float], count: int) -> list
     return [sorted(group) for group in bins]
 
 
-def native_roots(package: str) -> list[str]:
+def native_roots(package: str, binary=None) -> list[str]:
     """Use Go's compiled inventory under the same race tags and fixture custody."""
     progress = Path(__file__).with_name('gate-progress.py')
-    command = [sys.executable, str(progress), 'inventory:' + package,
-               'go', 'test', '-race', '-vet=off', '-json', '-p', '1',
-               '-list', '.', '-run', '^$', package]
+    command = [sys.executable, str(progress), 'inventory:' + package]
+    if binary:
+        image, directory = binary
+        command += ['--test-binary', package, image, directory, '-test.list=.', '-test.run=^$']
+    else:
+        command += ['go', 'test', '-race', '-vet=off', '-json', '-p', '1',
+                    '-list', '.', '-run', '^$', package]
     # The watchdog owns HOME/temp and joins TestMain's helpers before returning.
     child = subprocess.Popen(command, stdout=subprocess.PIPE)
     try:
@@ -70,7 +74,7 @@ def native_roots(package: str) -> list[str]:
     return names
 
 
-def plan(entries: list[str], cores: int) -> list[str]:
+def plan(entries: list[str], cores: int, binaries=None) -> list[str]:
     """Balance CLI/core chunks together so a finished process can refill."""
     if cores < 1:
         raise ValueError('core allocation must be positive')
@@ -85,7 +89,7 @@ def plan(entries: list[str], cores: int) -> list[str]:
         package, expression = entry.split('\t', 1)
         if package not in hints or expression != '.*':
             continue
-        names = native_roots(package)
+        names = native_roots(package, binaries[package]) if binaries and package in binaries else native_roots(package)
         if not names:
             raise ValueError('empty native inventory for sharded package ' + package)
         inventories[package] = names

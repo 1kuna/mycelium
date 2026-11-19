@@ -111,6 +111,12 @@ class ShardTests(unittest.TestCase):
         self.assertIn('-race', command)
         self.assertEqual(command[2], 'inventory:' + package)
         self.assertEqual(command[-1], package)
+        with patch.object(shards.subprocess, 'Popen', return_value=child) as run:
+            self.assertEqual(shards.native_roots(package, ('/image.test', '/package')),
+                             ['TestOne', 'Example', 'FuzzSeed'])
+        command = run.call_args.args[0]
+        self.assertEqual(command[3:7], ['--test-binary', package, '/image.test', '/package'])
+        self.assertIn('-test.list=.', command)
 
     def test_inventory_custody_failure_stops_plan(self):
         child = Mock(returncode=125)
