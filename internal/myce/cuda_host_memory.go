@@ -63,17 +63,24 @@ func (a *memoryAttempt) cudaHostMemory() (driver, pinned, physical float64, seen
 		pinned += (float64(values["VmPin"]) + float64(values["VmLck"])) / (1 << 20)
 	}
 	root := func() (float64, error) {
-		b, e := a.fs.ReadFile(filepath.Join(filepath.Dir(a.path), "memory.stat"))
-		if e != nil {
-			return 0, e
+		// Detached scopes are siblings, not children of this attempt's
+		// parent. Use the same disjoint worker/jobs roots as delta attribution,
+		// retaining only anon/shmem: kernel and pins still belong in the bound.
+		total := 0.0
+		for _, path := range a.accountingPaths() {
+			b, e := a.fs.ReadFile(filepath.Join(path, "memory.stat"))
+			if e != nil {
+				return 0, e
+			}
+			stats := memoryCounters(b)
+			anon, aok := stats["anon"]
+			shmem, sok := stats["shmem"]
+			if !aok || !sok {
+				return 0, errAttemptMemoryUnsupported
+			}
+			total += (float64(anon) + float64(shmem)) / (1 << 30)
 		}
-		stats := memoryCounters(b)
-		anon, aok := stats["anon"]
-		shmem, sok := stats["shmem"]
-		if !aok || !sok {
-			return 0, errAttemptMemoryUnsupported
-		}
-		return (float64(anon) + float64(shmem)) / (1 << 30), nil
+		return total, nil
 	}
 	before, e := root()
 	if e != nil {

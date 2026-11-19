@@ -87,6 +87,26 @@ func TestUnifiedCUDACalibrationCoverageGapRetainedShape(t *testing.T) {
 		t.Fatal("small experiment plus measured production envelope fits", reason)
 	}
 	t.Logf("incoming production %.12f, remaining room %.12f, residual %.12f; experiment plus protected production %.12f exceeds room", want, m.FreeHostMemoryGB, m.FreeHostMemoryGB-want, 2*want)
+
+	// Later accepted runs restored a range. The historical physical maximum
+	// still binds; correcting detached collection cannot retroactively prove
+	// that an older upper bound belonged to another owner.
+	b, err = os.ReadFile("testdata/unified-cuda-retained-bound.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &rows); err != nil {
+		t.Fatal(err)
+	}
+	samples = 0
+	for _, row := range rows {
+		samples += max(1, row.MemorySamples)
+	}
+	host, device, physical, ok = unifiedCUDACalibration(rows, .125)
+	const retained = 51.557701110839844 // 51.307701110839844 + .125 drift + .125 launch slack.
+	if len(rows) != 17 || samples != 180 || !ok || math.Abs(host+device+.125-retained) > 1e-9 || device != 22.443359375 || physical < 51.307701110839844 {
+		t.Fatalf("retained physical protection changed: rows=%d samples=%d charge=%.12f physical=%.12f device=%.12f calibrated=%t", len(rows), samples, host+device+.125, physical, device, ok)
+	}
 }
 
 // Installed per-job history, 2026-11-14 22:04-23:03Z. Only numeric memory

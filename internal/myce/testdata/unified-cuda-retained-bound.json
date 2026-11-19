@@ -1,0 +1,319 @@
+[
+  {
+    "memory_samples": 17,
+    "memory_peak": {
+      "host_gb": 2.0512237548828125,
+      "cgroup_gb": 2.49072265625,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.6674899484209373,
+      "device_growth_gb": 22.20998077743442
+    }
+  },
+  {
+    "memory_samples": 2,
+    "memory_peak": {
+      "host_gb": 2.075927734375,
+      "cgroup_gb": 2.493396759033203,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.4865771643013241,
+      "device_growth_gb": 0.02362513773737751
+    }
+  },
+  {
+    "memory_samples": 76,
+    "memory_peak": {
+      "host_gb": 2.0943984985351562,
+      "cgroup_gb": 20.391857147216797,
+      "device_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 3,
+    "memory_peak": {
+      "host_gb": 2.0519371032714844,
+      "cgroup_gb": 2.056110382080078,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.61826335865128,
+      "device_growth_gb": 5.406510253705772
+    }
+  },
+  {
+    "memory_samples": 1,
+    "memory_peak": {
+      "host_gb": 2.0415267944335938,
+      "cgroup_gb": 2.051727294921875,
+      "device_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 11,
+    "memory_peak": {
+      "host_gb": 2.0770950317382812,
+      "nonreclaimable_gb": 2.0770950317382812,
+      "cgroup_gb": 2.1793289184570312,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5444480926739336,
+      "device_growth_gb": 22.3046875,
+      "combined_host_gb": 29.112167358398438,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 1.3728790283203125,
+        "physical_gb": 49.20512390136719,
+        "sibling_adjusted": true,
+        "driver_gb": 27.035072326660156,
+        "host_drop_gb": 26.19104766845703,
+        "outside_gb": 27.035072326660156
+      }
+    },
+    "memory_range": {
+      "samples": 4,
+      "min_gb": 2.0473480224609375,
+      "max_gb": 2.0770950317382812
+    },
+    "gpu_host_range": {
+      "samples": 4,
+      "min_gb": 28.33005142211914,
+      "max_gb": 29.112167358398438
+    },
+    "device_range": {
+      "samples": 11,
+      "min_gb": 22.318359375,
+      "max_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 9,
+    "memory_peak": {
+      "host_gb": 2.0768280029296875,
+      "cgroup_gb": 2.3618011474609375,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.6254291063317742,
+      "device_growth_gb": 22.38138045766146
+    }
+  },
+  {
+    "memory_samples": 1,
+    "memory_peak": {
+      "host_gb": 2.051372528076172,
+      "cgroup_gb": 2.0560531616210938,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.4511400438264038,
+      "device_growth_gb": 0.01369227312383406
+    }
+  },
+  {
+    "memory_samples": 2,
+    "memory_peak": {
+      "host_gb": 2.0554733276367188,
+      "cgroup_gb": 2.0601806640625,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5282223833551937,
+      "device_growth_gb": 5.192433051822248
+    }
+  },
+  {
+    "memory_samples": 3,
+    "memory_peak": {
+      "host_gb": 2.0779342651367188,
+      "cgroup_gb": 18.089984893798828,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5053221356898339,
+      "device_growth_gb": 17.05375457043944
+    }
+  },
+  {
+    "memory_samples": 14,
+    "memory_peak": {
+      "host_gb": 2.0768661499023438,
+      "nonreclaimable_gb": 2.0768661499023438,
+      "cgroup_gb": 15.620189666748047,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5745727238777686,
+      "device_growth_gb": 22.3046875,
+      "combined_host_gb": 51.307701110839844,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 1.7509994506835938,
+        "physical_gb": 58.05169677734375,
+        "sibling_adjusted": true,
+        "driver_gb": 49.2567253112793,
+        "host_drop_gb": 47.90059280395508,
+        "outside_gb": 49.2567253112793
+      }
+    },
+    "memory_range": {
+      "samples": 3,
+      "min_gb": 2.0470046997070312,
+      "max_gb": 2.0768661499023438
+    },
+    "gpu_host_range": {
+      "samples": 3,
+      "min_gb": 27.80377197265625,
+      "max_gb": 28.92230224609375
+    },
+    "device_range": {
+      "samples": 14,
+      "min_gb": 22.318359375,
+      "max_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 1,
+    "memory_peak": {
+      "host_gb": 2.0392112731933594,
+      "cgroup_gb": 2.046039581298828,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.4340695264182519,
+      "device_growth_gb": 0.013684811904380319
+    }
+  },
+  {
+    "memory_samples": 1,
+    "memory_peak": {
+      "host_gb": 2.0659332275390625,
+      "nonreclaimable_gb": 2.0659332275390625,
+      "cgroup_gb": 2.2135543823242188,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5374181540157117,
+      "device_growth_gb": 22.28515625,
+      "combined_host_gb": 28.613994598388672,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 1.2314529418945312,
+        "physical_gb": 48.84929656982422,
+        "sibling_adjusted": true,
+        "driver_gb": 26.54806137084961,
+        "host_drop_gb": 24.77237319946289,
+        "outside_gb": 26.54806137084961
+      }
+    },
+    "memory_range": {
+      "samples": 1,
+      "min_gb": 2.0659332275390625,
+      "max_gb": 2.0659332275390625
+    },
+    "gpu_host_range": {
+      "samples": 1,
+      "min_gb": 28.613994598388672,
+      "max_gb": 28.613994598388672
+    },
+    "device_range": {
+      "samples": 1,
+      "min_gb": 22.318359375,
+      "max_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 3,
+    "memory_peak": {
+      "host_gb": 2.061737060546875,
+      "nonreclaimable_gb": 2.063068389892578,
+      "cgroup_gb": 2.510181427001953,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.6458392349808054,
+      "device_growth_gb": 22.3046875,
+      "combined_host_gb": 29.42377471923828,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 1.3224906921386719,
+        "physical_gb": 40.978153228759766,
+        "sibling_adjusted": true,
+        "driver_gb": 27.360706329345703,
+        "host_drop_gb": 25.141544342041016,
+        "outside_gb": 27.360706329345703
+      }
+    },
+    "memory_range": {
+      "samples": 1,
+      "min_gb": 2.063068389892578,
+      "max_gb": 2.063068389892578
+    },
+    "gpu_host_range": {
+      "samples": 1,
+      "min_gb": 29.42377471923828,
+      "max_gb": 29.42377471923828
+    },
+    "device_range": {
+      "samples": 3,
+      "min_gb": 22.318359375,
+      "max_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 2,
+    "memory_peak": {
+      "host_gb": 2.047565460205078,
+      "cgroup_gb": 2.053180694580078,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.536806324379316,
+      "device_growth_gb": 0.01673056679507872
+    }
+  },
+  {
+    "memory_samples": 29,
+    "memory_peak": {
+      "host_gb": 2.0846290588378906,
+      "nonreclaimable_gb": 2.086139678955078,
+      "cgroup_gb": 20.368648529052734,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.701148799778808,
+      "device_growth_gb": 22.3046875,
+      "combined_host_gb": 51.161136627197266,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 1.7509994506835938,
+        "physical_gb": 52.7132682800293,
+        "sibling_adjusted": true,
+        "driver_gb": 49.113975524902344,
+        "host_drop_gb": 47.06620788574219,
+        "outside_gb": 49.113975524902344
+      }
+    },
+    "memory_range": {
+      "samples": 1,
+      "min_gb": 2.0488548278808594,
+      "max_gb": 2.0488548278808594
+    },
+    "gpu_host_range": {
+      "samples": 1,
+      "min_gb": 28.408828735351562,
+      "max_gb": 28.408828735351562
+    },
+    "device_range": {
+      "samples": 29,
+      "min_gb": 22.318359375,
+      "max_gb": 22.318359375
+    }
+  },
+  {
+    "memory_samples": 5,
+    "memory_peak": {
+      "host_gb": 2.0768661499023438,
+      "nonreclaimable_gb": 2.0768661499023438,
+      "cgroup_gb": 19.59505844116211,
+      "device_gb": 22.318359375,
+      "growth_gb": 0.5703918769492697,
+      "device_growth_gb": 4.278925085881423,
+      "combined_host_gb": 29.533607482910156,
+      "gpu_host": {
+        "source": "CUDA proc physical upper bound",
+        "pinned_gb": 0.8754997253417969,
+        "physical_gb": 44.63888931274414,
+        "sibling_adjusted": true,
+        "driver_gb": 27.484813690185547,
+        "host_drop_gb": 25.732406616210938,
+        "outside_gb": 27.484813690185547
+      }
+    },
+    "memory_range": {
+      "samples": 2,
+      "min_gb": 2.066253662109375,
+      "max_gb": 2.0768661499023438
+    },
+    "gpu_host_range": {
+      "samples": 2,
+      "min_gb": 28.72954559326172,
+      "max_gb": 28.814437866210938
+    }
+  }
+]

@@ -429,23 +429,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			a.mu.Unlock()
 		}
 		if p != nil && (report.Started || p.native != nil) {
-			var memory *memoryAttempt
-			switch {
-			case p.native != nil:
-				memory = p.native.memory
-			case p.memory != nil:
-				memory = p.memory
-			case s.state.Cgroup != "":
-				var fs memoryFS = osMemoryFS{}
-				if w.memoryCeilings != nil {
-					fs = w.memoryCeilings.fs
-				}
-				memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
-			}
-			report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
-			if memory == nil && w.reportsProcessSample(a.job) {
-				report.CurrentHostMemory = p.currentProcessHostMemory()
-			}
+			report.CurrentHostMemory = w.currentAttemptHostMemory(p, a.job, s.state.Cgroup)
 		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
@@ -690,6 +674,34 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		case <-tick.C:
 		}
 	}
+}
+
+func (w Worker) currentAttemptHostMemory(p *process, j Job, cgroup string) *CurrentHostMemory {
+	if p.custodian != nil {
+		// The detached owner sampled both cgroup and device counters. A new
+		// reader of its cgroup has no device sampler and loses that evidence.
+		return p.currentProcessHostMemory()
+	}
+	var memory *memoryAttempt
+	switch {
+	case p.native != nil:
+		memory = p.native.memory
+	case p.memory != nil:
+		memory = p.memory
+	case cgroup != "":
+		var fs memoryFS = osMemoryFS{}
+		if w.memoryCeilings != nil {
+			fs = w.memoryCeilings.fs
+		}
+		memory = &memoryAttempt{fs: fs, path: cgroup}
+	}
+	if memory != nil {
+		return memory.currentHostMemory(w.Clock)
+	}
+	if w.reportsProcessSample(j) {
+		return p.currentProcessHostMemory()
+	}
+	return nil
 }
 
 func (w Worker) recoverAttempt(s *workerStore) (*process, error) {

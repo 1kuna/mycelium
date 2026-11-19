@@ -48,6 +48,11 @@ counters are never summed for this credit. Missing/stale/ambiguous evidence and
 older workers retain conservative pending growth; this does not reduce charges
 or qualify native coexistence.
 
+Detached workers retain their owner's device sample and sensor age in the parent
+heartbeat. An attribution-uncertain warning remains a separate sharing refusal
+even when charges fit. CUDA physical bounds can include unknown external use;
+a small RSS peak alone does not justify clearing larger accepted history.
+
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
