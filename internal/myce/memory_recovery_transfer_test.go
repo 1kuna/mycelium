@@ -20,7 +20,15 @@ func TestMemoryRecoveryLocalPriorBeforeUnknownTransfer(t *testing.T) {
 	owner := q.s.Machines[m.ID]
 	owner.HostMemoryBudgetGB, owner.EffectiveHostMemoryBudgetGB = 96, 96
 	owner.HostAvailableMemoryGB = capacity
+	policy := q.s.HostMaintenance[hostID(owner)]
+	budget, err := hostMemoryAllowance(96)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.MemoryBudget = &budget
+	q.s.HostMaintenance[hostID(owner)] = policy
 	owner.Devices[0].TotalMemoryGB = capacity
+	owner.Devices[0].ReserveMemoryGB = 0
 	owner.Devices[0].BudgetGB, owner.Devices[0].FreeMemoryGB = capacity, capacity
 	target := owner.Devices[0].machine(*owner)
 	physical := q.qualificationCapacity(&target)
