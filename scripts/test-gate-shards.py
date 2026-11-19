@@ -178,7 +178,7 @@ class ShardTests(unittest.TestCase):
                     self.assertEqual(scheduler.main(), 0)
                 self.assertEqual(run.call_args.args[1], 18)
                 self.assertIsNone(run.call_args.args[3])
-                self.assertEqual(os.environ['GOFLAGS'], '-p=18')
+                self.assertEqual(os.environ['GOFLAGS'], '-trimpath -p=18')
 
 
 if __name__ == '__main__':
