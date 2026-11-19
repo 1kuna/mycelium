@@ -778,7 +778,19 @@ myce fleet upgrade --urgency critical   # MY-35/MY-39: explicit interruption fal
 ```
 
 The command returns the operation and exits; the queue runs it. `myce status`
-shows each host's `phase`, `wait` and `failure`. For each host in turn the queue:
+shows each host's `phase`, `wait` and `failure`. At operation creation, a
+worker with a managed identity/protocol proof that is temporarily stale or
+unhealthy is `deferred`, with `outcome: deferred` and a measured runtime reason.
+Other hosts proceed. Before updating the queue host, the same operation revisits
+these initially unavailable workers: a fresh healthy proof allows the normal
+update and startup checks; a worker still unavailable remains deferred at
+completion. Its existing binary and maintenance policy stay untouched until it
+recovers. No managed proof, an incompatible target, legacy siblings, and
+unsupported identity/protocol evidence still refuse operation creation. Runtime
+failures after a host begins updating or startup verification still stop the
+operation.
+
+For each host in turn the queue:
 
 1. **Picks the host.** Hosts idle now go first, hosts running production after,
    and the queue's own host last. A normal update leaves a host enabled while
@@ -847,10 +859,27 @@ shows each host's `phase`, `wait` and `failure`. For each host in turn the queue
    apply, and the smoke never plans stops to make room. This CPU fallback does
    not qualify GPU execution or application environments. A completed host's
    `wait` field identifies the assignment that proved startup.
-7. **Advances** only after the probe passes (and, on the queue host, the queue
-   update passes). The start check has its own 15-minute queue-clock budget,
-   reusing the existing service-step bound. A full or policy-blocked host waits
-   within that budget; the upgrade never interrupts running work to make room.
+7. **Advances** after the probe passes (and, on the queue host, the queue
+   update passes), or **defers** a never-assigned probe when current scheduler
+   accounting shows shared-host owner pressure or insufficient CPU/RAM capacity.
+   A deferred host retains its upgraded binary, exact runtime identity and
+   maintenance policy. Its probe uses ordinary admission and never stops useful
+   work. Other hosts advance in their usual order, with the queue host last;
+   the same operation then revisits each deferred host, reusing its probe.
+   A recovered host must still prove startup. If capacity remains unavailable
+   on that return pass, the operation finishes `complete` with that host's
+   `phase: deferred`, typed `outcome: deferred`, and `deferred_reason` in the
+   upgrade response and status, including default status after completion.
+   This is incomplete host acceptance, not a healthy-start claim or a rollout
+   failure. The queue cancels only its unused probes; rerun after capacity
+   recovers to discharge the retained start-proof debt.
+
+   The existing 15-minute queue-clock service-step budget still detects a
+   launcher that was offered work but never proves startup, and unexplained
+   or policy-blocked waits. It does not bound measured admission pressure:
+   deferral and the return pass add no timer or retry cap. A probe that started
+   and failed, changed runtime identity, unhealthy service proof or changed
+   maintenance policy still stops advancement, including while deferred.
    An operator-owned drain or disable stops with
    `worker_start_maintenance_blocked`; it is never resumed for a probe.
 
