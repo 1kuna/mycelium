@@ -212,6 +212,13 @@ func (c Client) callWatched(ctx context.Context, method, path string, in, out an
 	err := c.callOnce(ctx, method, path, in, out)
 	cancel(nil)
 	<-stopped
+	// A completed response is authoritative even if a parallel probe timed
+	// out at the same instant. Never replace success or an actual refusal
+	// with an inference about queue liveness.
+	var refusal *HTTPError
+	if err == nil || errors.As(err, &refusal) {
+		return err
+	}
 	var stall *QueueStalledError
 	if errors.As(context.Cause(ctx), &stall) {
 		return stall

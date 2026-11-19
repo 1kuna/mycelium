@@ -44,6 +44,19 @@ the service fetches it and, in its own process:
    transient job (`systemd-run --user` or `launchctl submit`), outside the
    service's process group so the restart cannot kill it.
 
+Authorization reads the operation, revision, maintenance, session and fresh
+runtime proof in one queue read section; it does not run a write transaction
+or persist accounting. Instruction discovery's deadline is not shared with
+launch authorization. Before a receipt exists, a typed `queue_stalled` yields
+to the next ordinary runtime poll, which refetches the instruction and rechecks
+all fences. It sends no failed acknowledgement and launches no helper on that
+attempt. Recovery uses the existing 15-minute service-step deadline below;
+authorization attempts never renew it. There is no new retry count or delay.
+Definitive refusals and invalid returned proofs keep their existing behavior;
+stale-control responses still use the existing short freshness retry/refetch.
+Once helper intent exists, a failure remains durable and never relaunches or
+repeats a restart automatically.
+
 The transient updater, holding the local update lock:
 
 1. runs the installer's own preflight and storage checks and checks the existing
@@ -176,7 +189,8 @@ typed `HTTP STATUS code=CODE`, a classified transport/decode failure (for exampl
 `proof_service_unhealthy`, `proof_runner_smoke_failed`,
 `proof_start_gate_mismatch`, `proof_attempt_protocol_mismatch`, or
 `proof_session_mismatch`. The public failure code stays
-`fleet_authorization_refused`; stale-control codes and their retry policy stay
+`fleet_authorization_refused` for terminal failures; a pre-intent `queue_stalled`
+is pending as described above. Stale-control codes and their retry policy stay
 unchanged. Received values, server messages, credentials and raw bodies are not
 logged.
 
@@ -190,3 +204,14 @@ does not prove that the caller received its answer. Correlate the worker and
 queue records at the failing call; a later request or a healthy status snapshot
 cannot establish a historical failure's cause. Existing binaries do not acquire
 these diagnostics when a candidate release is published.
+
+The authenticated `/api/ping` response bypasses memory-capacity admission: its
+fixed scalar liveness data must not wait for the OS memory probe that admits
+growing requests. A completed control response, including an HTTP refusal, wins
+a simultaneous client progress-probe failure. These queue and client changes
+address separate boundaries: a queue upgrade removes avoidable ping and
+authorization delays for existing workers, but cannot repair their installed
+client's classification or recovery. The worker changes take effect only after
+that worker upgrades. Publishing the release alone does not unblock a stopped
+operation, and a queue-only update cannot guarantee an older worker's next
+authorization succeeds. Leave live acceptance to the rollout owner.

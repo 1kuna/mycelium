@@ -362,8 +362,10 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	if receiptPending || err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
 		return result
 	}
-	// Match the existing client's control-request budget even for injected HTTP
-	// clients without a timeout. A stalled control path never stalls heartbeats.
+	// Bound instruction discovery even for injected clients without a timeout.
+	// Launch has its own progress-watched client and bounded manager commands;
+	// discovery must not consume its authorization budget. This runs off the
+	// heartbeat path, with at most one outstanding poll.
 	request, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if failed := result.failed; failed != nil {
@@ -410,7 +412,7 @@ func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client
 	if !bytes.Equal(key, instruction.PublisherKey) {
 		launchErr = errors.New("fleet_publisher_mismatch")
 	} else {
-		launchErr = launch(request, config, instruction)
+		launchErr = launch(ctx, config, instruction)
 	}
 	if launchErr != nil {
 		var refetch *fleetInstructionRefetchError
