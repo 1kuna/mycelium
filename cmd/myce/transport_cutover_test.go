@@ -38,10 +38,22 @@ func TestTransportQueueCutover(t *testing.T) {
 				}
 				var mu sync.Mutex
 				cut := false
+				capacityRefused := false
 				var cutErr error
 				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					mu.Lock()
 					defer mu.Unlock()
+					// The replacement can accept connections before transient GC/host
+					// pressure clears. Preserve the real typed capacity signal here;
+					// request-budget tests exercise its zero-headroom origin.
+					if cut && !capacityRefused {
+						capacityRefused = true
+						w.Header().Set("Content-Type", "application/json")
+						w.Header().Set("Retry-After", "1")
+						w.WriteHeader(http.StatusServiceUnavailable)
+						w.Write([]byte(`{"code":"request_capacity_unavailable","error":"queue has no measured request memory capacity; fitting wire bytes=0; retry after headroom recovers"}`))
+						return
+					}
 					reply := httptest.NewRecorder()
 					myce.API{Queue: q, Token: "synthetic"}.Handler().ServeHTTP(reply, r)
 					target := operation == "submit" && r.Method == "POST" && r.URL.Path == "/api/jobs" || operation == "status" && r.URL.Path == "/api/status" || operation == "wait" && (r.URL.Path == "/api/jobs/"+id || r.URL.Path == "/api/wait")
@@ -113,8 +125,8 @@ else: assert c.wait(sys.argv[3],timeout=20)["state"]=="succeeded"
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if !cut || cutErr != nil {
-					t.Fatalf("cutover=%t error=%v", cut, cutErr)
+				if !cut || !capacityRefused || cutErr != nil {
+					t.Fatalf("cutover=%t capacity refusal=%t error=%v", cut, capacityRefused, cutErr)
 				}
 				snapshot, err := q.Snapshot()
 				if err != nil {
