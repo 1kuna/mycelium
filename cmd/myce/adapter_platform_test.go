@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,7 +206,17 @@ func TestAdapterPlatformDev(t *testing.T) {
 			t.Fatalf("execute %s: %+v %v", platform, job, err)
 		}
 	}
-	out, err := invoke("spec", "check", "--resolve", "--entry", "work", "--platform", "fake", "--queue", d.URL, path)
+	// Resolution tests the narrowed declaration, not the real dev worker's
+	// wall-clock heartbeat cadence. Keep its inventory on a fixed queue clock.
+	resolveQueue, resolveClock, _, _ := waitQueue(t)
+	m := *snapshot.Machines[0]
+	m.InventoryProbe = nil
+	if _, err := currentCLICheckin(resolveQueue, resolveClock, myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	resolveServer := httptest.NewServer(myce.API{Queue: resolveQueue, Token: "platform-fixture"}.Handler())
+	defer resolveServer.Close()
+	out, err := invoke("spec", "check", "--resolve", "--entry", "work", "--platform", "fake", "--queue", resolveServer.URL, path)
 	if err != nil {
 		t.Fatalf("resolve narrowed entry: %v %s", err, out)
 	}
