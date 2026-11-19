@@ -778,7 +778,19 @@ myce fleet upgrade --urgency critical   # MY-35/MY-39: explicit interruption fal
 ```
 
 The command returns the operation and exits; the queue runs it. `myce status`
-shows each host's `phase`, `wait` and `failure`. For each host in turn the queue:
+shows each host's `phase`, `wait` and `failure`. At operation creation, a
+worker with a managed identity/protocol proof that is temporarily stale or
+unhealthy is `deferred`, with `outcome: deferred` and a measured runtime reason.
+Other hosts proceed. Before updating the queue host, the same operation revisits
+these initially unavailable workers: a fresh healthy proof allows the normal
+update and startup checks; a worker still unavailable remains deferred at
+completion. Its existing binary and maintenance policy stay untouched until it
+recovers. No managed proof, an incompatible target, legacy siblings, and
+unsupported identity/protocol evidence still refuse operation creation. Runtime
+failures after a host begins updating or startup verification still stop the
+operation.
+
+For each host in turn the queue:
 
 1. **Picks the host.** Hosts idle now go first, hosts running production after,
    and the queue's own host last. A normal update leaves a host enabled while

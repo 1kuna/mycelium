@@ -359,6 +359,10 @@ and reports why. Normal updates never checkpoint-stop or kill work. Only an
 explicit critical update retains the existing interruption fallback when takeover
 is unavailable; `stop_requests` records it. Keep the same job and submission key
 through a worker update; resubmitting can duplicate work.
+A rollout may also defer an initially stale/unhealthy worker with a managed
+proof, revisit it in the same operation, and leave it visibly deferred if it
+never recovers. A never-managed worker or an incompatible target still refuses
+the operation. Initially deferred hosts keep their existing binary until healthy.
 A rollout may defer a host whose startup probe has never been assigned because
 of measured owner pressure or CPU/RAM capacity, upgrade the others, then revisit
 it in the same operation. A completed rollout can retain `outcome: deferred`

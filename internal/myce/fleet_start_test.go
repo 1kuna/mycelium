@@ -389,3 +389,93 @@ func TestFleetUpgradeDeferredProbeAssignedAtCompletionStillNeedsProof(t *testing
 		t.Fatal("late-admitted probe did not finish its proof", h)
 	}
 }
+
+func TestFleetUpgradeInitialRuntimeDefersAndReturns(t *testing.T) {
+	for _, kind := range []string{"stale", "unhealthy"} {
+		for _, recovers := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/recovers=%t", kind, recovers), func(t *testing.T) {
+				q, c, workers := fleetFixture(t, "q", "a", "b")
+				m := q.s.Machines[workers[0].ID]
+				if kind == "stale" {
+					m.Fleet.ObservedAt = c.Now().Add(-37 * time.Second)
+				} else {
+					m.Fleet.ServiceHealthy = false
+				}
+				status, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+				if err != nil {
+					t.Fatal("temporarily unavailable managed worker refused whole operation", err)
+				}
+				h := q.s.FleetUpgrade.Hosts[0]
+				if status.State != "running" || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || !strings.HasPrefix(h.DeferredReason, "worker_runtime_unavailable:") || h.StartProbe != "" || h.StartIdentity != "" || h.Before == nil {
+					t.Fatalf("missing visible initial deferral: %+v", status)
+				}
+				if kind == "stale" && !recovers {
+					// Subsequent reports carry the same stopped probe's increasing
+					// age, beyond the existing filesystem-stall proof ceiling.
+					q.s.Machines[h.Machine].Fleet.ObservationAgeSeconds = (fleetProofMaxAge + 37*time.Second).Seconds()
+				}
+				operation := status.Operation
+				var order []string
+				for n := 0; n < 10 && q.s.FleetUpgrade.State == "running"; n++ {
+					fleetTick(t, q)
+					active := q.fleetActiveHost()
+					if active == nil {
+						continue
+					}
+					if active.Host == "b" && recovers {
+						live := q.s.Machines[h.Machine]
+						live.Fleet.ObservedAt, live.Fleet.ObservationAgeSeconds, live.Fleet.ServiceHealthy = c.Now(), 0, true
+					}
+					order = append(order, fleetActivate(t, q, c))
+				}
+				if q.s.FleetUpgrade.State != "complete" || q.s.FleetUpgrade.Operation != operation || !h.StartRevisited {
+					t.Fatalf("initial deferral never returned/finished: %+v", q.fleetUpgradeStatus())
+				}
+				if recovers {
+					if !h.WorkerDone || h.Phase != "complete" || h.Outcome != "" || h.StartAccepted == "" {
+						t.Fatal("recovered managed host skipped update/start proof", h)
+					}
+					if !reflect.DeepEqual(order, []string{"b/worker-b", "a/worker-a", "q/@queue"}) {
+						t.Fatal("recovered initial host did not preserve queue-host-last", order)
+					}
+				} else {
+					if h.WorkerDone || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.Failure != "" || h.Before.Version != "v1.0.0" {
+						t.Fatal("unrecovered initial host falsely accepted or failed whole operation", h)
+					}
+					if !reflect.DeepEqual(order, []string{"b/worker-b", "q/@queue"}) {
+						t.Fatal("initial deferral blocked/reordered healthy hosts", order)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFleetUpgradeInitialDeferralStillRefusesInvalidWorkers(t *testing.T) {
+	for _, kind := range []string{"unmanaged", "protocol", "incompatible", "siblings"} {
+		t.Run(kind, func(t *testing.T) {
+			q, c, workers := fleetFixture(t, "q", "a")
+			m := q.s.Machines[workers[0].ID]
+			m.Fleet.ObservedAt = c.Now().Add(-37 * time.Second)
+			want := "fleet_worker_unmanaged"
+			switch kind {
+			case "unmanaged":
+				m.Fleet = nil
+			case "protocol":
+				m.Fleet.StartGate = "unsupported"
+			case "incompatible":
+				m.CapabilityProfile.OS = "unsupported"
+				want = "fleet_worker_target_incompatible"
+			case "siblings":
+				copy := cloneMachine(m)
+				copy.ID = "sibling"
+				q.s.Machines[copy.ID] = &copy
+				want = "fleet_legacy_siblings"
+			}
+			_, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+			if err == nil || !strings.Contains(err.Error(), want) || q.s.FleetUpgrade != nil {
+				t.Fatalf("invalid worker was deferred instead of refused: %v; %+v", err, q.fleetUpgradeStatus())
+			}
+		})
+	}
+}

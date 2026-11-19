@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"errors"
 	"testing"
 	"time"
 )
@@ -207,16 +206,23 @@ func TestFleetProofFreshnessFollowsMeasuredCadence(t *testing.T) {
 			t.Fatal("failed host lost its drain", p)
 		}
 	})
-	t.Run("silent worker refuses start", func(t *testing.T) {
+	t.Run("silent managed worker defers before update", func(t *testing.T) {
 		f := newSlowProofFleet(t)
 		learn(t, f)
 		f.workers["worker-b"].alive = false
 		f.c.Advance(fleetProofMaxAge)
 		f.second(t)
-		_, err := f.q.StartFleetUpgrade(FleetUpgradeRequest{})
-		var refusal *HTTPError
-		if !errors.As(err, &refusal) || refusal.Code != "fleet_worker_unmanaged" {
-			t.Fatal("a silent worker's last proof still authorized the rollout", err)
+		status, err := f.q.StartFleetUpgrade(FleetUpgradeRequest{})
+		if err != nil {
+			t.Fatal("silent managed worker refused the healthy remainder", err)
+		}
+		h := f.q.s.FleetUpgrade.Hosts[1]
+		if status.State != "running" || h.Host != "b" || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.StartProbe != "" || h.Before == nil {
+			t.Fatal("silent worker was not visibly deferred before update", status)
+		}
+		i, err := f.q.fleetInstruction(h.Host, h.Machine, h.Before.Session)
+		if err != nil || i.Operation != "" || f.q.maintenanceBlocked(h.Host) {
+			t.Fatal("stale proof authorized updating or draining the silent worker", i, err)
 		}
 	})
 }
