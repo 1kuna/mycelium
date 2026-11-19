@@ -235,8 +235,10 @@ func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
 			}
 			want := []string{"b/worker-b", "q/@queue"}
 			if recovers {
-				want = append(want, "a/worker-a")
-				if !h.WorkerDone || h.Phase != "complete" || h.Outcome != "" || h.DeferredReason != "" || h.StartAccepted != probe {
+				if len(order) > 2 {
+					want = append(want, "a/worker-a")
+				}
+				if !h.StartRevisited || !h.WorkerDone || h.Phase != "complete" || h.Outcome != "" || h.DeferredReason != "" || h.StartAccepted != probe {
 					t.Fatalf("recovered probe did not prove same worker: %+v", h)
 				}
 			} else {
@@ -300,5 +302,62 @@ func TestFleetUpgradeDeferredProbeStillStopsOnFailure(t *testing.T) {
 				t.Fatalf("deferred failure advanced rollout: %+v", q.fleetUpgradeStatus())
 			}
 		})
+	}
+}
+
+func TestFleetUpgradeStartProbeAdmissionReasons(t *testing.T) {
+	t.Run("owner pressure requires measured evidence", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := sharedHostFixture(t, q)
+		m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+		m.SharedHostPressure.MemoryLevel = 2
+		check(t, q, m, nil)
+		probe := &Job{Spec: fleetStartProbeSpec(m.ID), State: "queued"}
+		if why := q.fleetStartAdmissionReason(q.s.Machines[m.ID], probe); !strings.HasPrefix(why, "shared_host_owner_pressure:") {
+			t.Fatal("measured owner pressure not deferrable", why)
+		}
+		// A policy refusal cannot borrow a simultaneous owner-pressure reason.
+		probe.Spec.Class = "test"
+		if why := q.fleetStartAdmissionReason(q.s.Machines[m.ID], probe); why != "" {
+			t.Fatal("structural refusal became admission deferral", why)
+		}
+		probe.Spec.Class = "maintenance"
+		m.SharedHostPressure = nil
+		check(t, q, m, nil)
+		if why := q.fleetStartAdmissionReason(q.s.Machines[m.ID], probe); why != "" {
+			t.Fatal("unknown pressure evidence became deferral", why)
+		}
+	})
+	t.Run("occupied CPU capacity", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := cpuMachine("worker", "host", "cpu", 1, 8)
+		check(t, q, m, nil)
+		fleetRun(t, q, m, cpuSpec(1, 1))
+		probe := &Job{Spec: fleetStartProbeSpec(m.ID), State: "queued"}
+		if why := q.fleetStartAdmissionReason(q.s.Machines[m.ID], probe); !strings.HasPrefix(why, "no_capacity:") || !strings.Contains(why, "CPU") {
+			t.Fatal("occupied CPU capacity not deferrable", why)
+		}
+	})
+}
+
+func TestFleetUpgradeDeferredProbePersistsAcrossQueueRestart(t *testing.T) {
+	q, c, h := fleetAtStartProbe(t, 0)
+	probe, identity, operation := h.StartProbe, h.StartIdentity, q.s.FleetUpgrade.Operation
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	h = restarted.s.FleetUpgrade.Hosts[0]
+	if h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.DeferredReason == "" || h.StartProbe != probe || h.StartIdentity != identity || h.WorkerDone || h.StartRevisited || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
+		t.Fatalf("restart lost deferred fences or return debt: %+v", h)
 	}
 }
