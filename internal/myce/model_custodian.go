@@ -27,6 +27,12 @@ type ModelCustody struct {
 	WorkerPID int `json:"worker_pid,omitempty"`
 }
 
+var (
+	workerModelCustodians     = true
+	modelCustodianMembership  = verifyCustodianIsolation
+	currentCustodianIsolation = ownCustodianIsolation
+)
+
 func validModelCustody(v *ModelCustody) bool {
 	return v != nil && v.Protocol == custodianProtocol && validCustodianID(v.ID)
 }
@@ -80,7 +86,7 @@ func (rt *modelRuntime) detachedModelSupported(m Model) bool {
 	// Local approvals and owner-withdrawal currently gate the worker bridge.
 	// Preserve those gates until they also have independent custody. The Linux
 	// shared-host aggregate must not be split between worker and helper scopes.
-	return workerCustodians && rt.worker != nil && rt.worker.ServiceConfig != nil && rt.worker.Custodian == "" && rt.engineFactory == nil && m.LocalSource == "" && !rt.worker.DailyUse && !rt.worker.Laptop && !rt.worker.Desktop && !(runtime.GOOS == "linux" && rt.memoryMachine.SharedHost != nil)
+	return workerModelCustodians && rt.worker != nil && rt.worker.ServiceConfig != nil && rt.worker.Custodian == "" && rt.engineFactory == nil && m.LocalSource == "" && !rt.worker.DailyUse && !rt.worker.Laptop && !rt.worker.Desktop && !(runtime.GOOS == "linux" && rt.memoryMachine.SharedHost != nil)
 }
 
 func (rt *modelRuntime) newModelCustodian(m *workerModel, prepared Model) *modelCustodian {
@@ -92,7 +98,7 @@ func (rt *modelRuntime) newModelCustodian(m *workerModel, prepared Model) *model
 		r.EnvironmentKey = m.recipe.Key
 		r.EnvironmentRoot = rt.environmentCache.Root
 	}
-	return &modelCustodian{dir: custodianDir(rt.dir), request: r, clock: rt.clock, interval: rt.worker.Interval, service: *rt.worker.ServiceConfig, token: rt.token, launch: launchCustodian, verify: verifyCustodianIsolation}
+	return &modelCustodian{dir: custodianDir(rt.dir), request: r, clock: rt.clock, interval: rt.worker.Interval, service: *rt.worker.ServiceConfig, token: rt.token, launch: launchCustodian, verify: modelCustodianMembership}
 }
 
 func (g *modelCustodian) read() error {
@@ -312,7 +318,7 @@ func retainedModelSession(dir, machine string) (string, error) {
 }
 
 func (rt *modelRuntime) restoreModelCustodians() error {
-	return rt.restoreModelCustodiansWith(verifyCustodianIsolation)
+	return rt.restoreModelCustodiansWith(modelCustodianMembership)
 }
 
 func (rt *modelRuntime) restoreModelCustodiansWith(verify func(string, int, string) error) error {
@@ -386,7 +392,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	}
 	isolation := w.custodianIsolation
 	if isolation == nil {
-		isolation = ownCustodianIsolation
+		isolation = currentCustodianIsolation
 	}
 	cgroup, err := isolation(id)
 	if err != nil {

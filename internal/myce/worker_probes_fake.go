@@ -18,6 +18,14 @@ import (
 func init() {
 	if os.Getenv("MYCE_TEST_CUSTODIANS_DISABLED") == "1" {
 		workerCustodians = false
+		workerModelCustodians = false
+	}
+	if os.Getenv("MYCE_TEST_MODEL_CUSTODIANS") == "1" {
+		// The HTTP fake manager owns real helper processes. Only their native
+		// systemd/launchd membership is synthetic, just like fake GPU inventory.
+		workerModelCustodians = true
+		currentCustodianIsolation = func(string) (string, error) { return "synthetic-model-scope", nil }
+		modelCustodianMembership = func(string, int, string) error { return nil }
 	}
 	workerHostHealthSource = nil
 	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }

@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -35,6 +36,12 @@ func TestFleetUpgradeModelStreamCommand(t *testing.T) {
 		t.Fatal("model server inherited fleet authority")
 	}
 	port, dir := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
+	f, err := os.OpenFile(filepath.Join(dir, "model-loads"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("loaded\n")
+	_ = f.Close()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"status":"ok"}`) })
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +72,24 @@ func TestFleetUpgradeModelStreamCommand(t *testing.T) {
 // cannot terminate its updater. No native service manager is invoked.
 const fleetFakeManagerPrefix = `#!/bin/sh
 set -eu
+if test "$(basename "$0")" = systemd-run; then
+  prev=
+  for arg in "$@"; do
+    if test "$prev" = --attempt-custodian; then
+      /usr/bin/curl --noproxy '*' --fail --silent --show-error --request POST "$(cat "$HOME/fake-manager.url")/model?id=$arg"
+      exit
+    fi
+    prev=$arg
+  done
+fi
+if test "$(basename "$0")" = launchctl && test "$1" = bootstrap; then
+  case "$3" in
+    *custodian-*.plist)
+      id=$(basename "$3"); id=${id#custodian-}; id=${id%.plist}
+      /usr/bin/curl --noproxy '*' --fail --silent --show-error --request POST "$(cat "$HOME/fake-manager.url")/model?id=$id"
+      exit;;
+  esac
+fi
 if test "$(basename "$0")" = systemd-run || { test "$(basename "$0")" = launchctl && test "$1" = submit; }; then
   /usr/bin/curl --noproxy '*' --fail --silent --show-error --request POST "$(cat "$HOME/fake-manager.url")/helper"
   exit
@@ -75,6 +100,7 @@ type fleetE2EManager struct {
 	*enrollmentTestManager
 	config  myce.ServiceConfig
 	helpers []*enrollmentTestChild
+	models  []*enrollmentTestChild
 	starts  int
 }
 
@@ -86,7 +112,7 @@ func fleetE2EEnv(home string) []string {
 			env = append(env, entry)
 		}
 	}
-	return append(env, "HOME="+home, "PATH="+filepath.Join(home, "bin")+":/usr/bin:/bin:/usr/sbin:/sbin", "GOMAXPROCS=2", "MYCE_TEST_CUSTODIANS_DISABLED=1")
+	return append(env, "HOME="+home, "PATH="+filepath.Join(home, "bin")+":/usr/bin:/bin:/usr/sbin:/sbin", "GOMAXPROCS=2", "MYCE_TEST_CUSTODIANS_DISABLED=1", "MYCE_TEST_MODEL_CUSTODIANS=1")
 }
 
 func newFleetE2EManager(t *testing.T, c myce.ServiceConfig, home string) *fleetE2EManager {
@@ -126,6 +152,12 @@ func newFleetE2EManager(t *testing.T, c myce.ServiceConfig, home string) *fleetE
 			if err == nil {
 				m.helpers = append(m.helpers, child)
 			}
+		case "/model":
+			var child *enrollmentTestChild
+			child, err = m.spawn("service", "--config", c.Config, "--attempt-custodian", r.URL.Query().Get("id"))
+			if err == nil {
+				m.models = append(m.models, child)
+			}
 		default:
 			w.WriteHeader(404)
 			return
@@ -151,6 +183,16 @@ func newFleetE2EManager(t *testing.T, c myce.ServiceConfig, home string) *fleetE
 		m.mu.Lock()
 		if err := m.stop(); err != nil {
 			t.Error(err)
+		}
+		for _, child := range m.models {
+			_ = child.cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-child.done:
+			case <-time.After(30 * time.Second):
+				_ = child.cmd.Process.Kill()
+				<-child.done
+				t.Error("model custodian did not clean up")
+			}
 		}
 		for _, child := range m.children {
 			select {
@@ -553,10 +595,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 		fleetE2EWrite(t, filepath.Join(commandWork[name], "finish-"+name), []byte("finish naturally\n"), 0600)
 		if name == "worker-2" {
-			// Its model stream holds the host too; the queue's host waits behind it.
-			poll("worker-2 waits for its model stream", func() bool {
-				return status() && strings.Contains(host("worker-2").Wait, "running work") && starts("worker-2") == 1
+			// The command used the adjacent non-detached path and drained.
+			// Its detached model stream must remain live across the binary swap.
+			poll("worker-2 upgrades while its model stream is still serving", func() bool {
+				return status() && host("worker-2").Phase == "complete" && starts("worker-2") == 2
 			})
+			if data, err := os.ReadFile(filepath.Join(dir, "model-loads")); err != nil || string(data) != "loaded\n" {
+				t.Fatalf("binary swap reloaded the resident model: %q %v", data, err)
+			}
 			fleetE2EWrite(t, filepath.Join(dir, "finish-stream"), []byte("finish naturally\n"), 0600)
 			rest, err := io.ReadAll(stream)
 			if err != nil || !bytes.Contains(rest, []byte("stream finished naturally")) || !bytes.Contains(rest, []byte("[DONE]")) {
@@ -576,7 +622,8 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 				continue
 			}
 			proof, err := client.GetJob(ctx, summary.ID)
-			if err != nil || proof.State != "succeeded" || proof.StartedAt == nil || !proof.ReleaseConfirmed || proof.Attempt != 1 || proof.Session == before[name].Session {
+			preservedModelSession := name == "worker-2"
+			if err != nil || proof.State != "succeeded" || proof.StartedAt == nil || !proof.ReleaseConfirmed || proof.Attempt != 1 || (proof.Session == before[name].Session) != preservedModelSession {
 				t.Fatalf("host advanced without a new-session assignment proof: %+v %v", proof, err)
 			}
 			found = true
