@@ -7,6 +7,30 @@ import (
 	"strings"
 )
 
+func (c ServiceConfig) workerSlice() string {
+	if c.Slice == "" {
+		return "myce.slice"
+	}
+	return c.Slice
+}
+
+func (c ServiceConfig) custodianSlice() string {
+	return strings.TrimSuffix(c.workerSlice(), ".slice") + "-jobs.slice"
+}
+
+func (c ServiceConfig) validateWorkerSlice() error {
+	name := strings.TrimSuffix(c.workerSlice(), ".slice")
+	if name == c.workerSlice() || name == "" || strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") || strings.Contains(name, "--") {
+		return errors.New("invalid worker slice name")
+	}
+	for _, ch := range name {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_') {
+			return errors.New("invalid worker slice name")
+		}
+	}
+	return nil
+}
+
 func ValidWorkerUnit(unit string) bool {
 	if unit == "myce-worker.service" {
 		return true

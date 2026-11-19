@@ -3,6 +3,7 @@ package myce
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,13 +41,15 @@ func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "systemd-run"), []byte("#!/bin/sh\nexit 23\n"), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "systemd-run"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MYCE_TEST_LAUNCH_ARGS\"\nexit 23\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
+	argsPath := filepath.Join(dir, "launcher-args")
+	t.Setenv("MYCE_TEST_LAUNCH_ARGS", argsPath)
 	j := Job{ID: ID(), Attempt: 1, Machine: "worker", Session: "session"}
 	s := &workerStore{dir: dir, stateName: "attempt.json", state: workerState{Job: &j, Session: j.Session}}
-	w := Worker{Clock: RealClock{}, Machine: Machine{ID: j.Machine}, ServiceConfig: &ServiceConfig{State: dir, Binary: "/unused", Config: "/unused"}}
+	w := Worker{Clock: RealClock{}, Machine: Machine{ID: j.Machine}, ServiceConfig: &ServiceConfig{State: dir, Binary: "/unused", Config: "/unused", Slice: "mycetest0123456789abcdef0123456789abcdef.slice"}}
 	p, err := w.startCustodian(t.Context(), s, j)
 	if err != nil {
 		t.Fatal(err)
@@ -59,5 +62,9 @@ func TestCustodianLauncherExitProducesRefusal(t *testing.T) {
 		}
 	case <-time.After(testWaitTimeout):
 		t.Fatal("launcher exit was retained as uncertain startup")
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil || !strings.Contains(string(args), "--slice="+w.ServiceConfig.custodianSlice()+"\n") || strings.Contains(string(args), "--slice=myce-jobs.slice") {
+		t.Fatalf("custodian escaped configured slice: %s %v", args, err)
 	}
 }

@@ -182,6 +182,9 @@ func InstallConfigDiff(old, new ServiceConfig) string {
 }
 
 func (c ServiceConfig) ValidateInstall() error {
+	if err := c.validateWorkerSlice(); err != nil {
+		return err
+	}
 	if _, err := deviceAllowance(c.Device); err != nil {
 		return err
 	}

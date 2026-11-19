@@ -156,6 +156,7 @@ type ServiceConfig struct {
 	CPUQuota              string        `json:"cpu_quota"`
 	IOWeight              int           `json:"io_weight,omitempty"`
 	MemoryMax             string        `json:"memory_max"`
+	Slice                 string        `json:"slice,omitempty"`
 	TasksMax              string        `json:"tasks_max"`
 
 	RequireMemoryCeilings    bool    `json:"require_memory_ceilings"`
@@ -312,7 +313,7 @@ func (c ServiceConfig) ServiceText() string {
 			// TERM must go through the worker's recorded stop path. Direct TERM
 			// to payloads races their exit observation and looks like command failure.
 			// mixed retains the bounded final KILL of every delegated descendant.
-			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nSlice=myce.slice\nMemoryAccounting=yes\nOOMPolicy=continue\nDelegate=memory cpu\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
+			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nSlice=" + c.workerSlice() + "\nMemoryAccounting=yes\nOOMPolicy=continue\nDelegate=memory cpu\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
 		}
 		settings := ""
 		if c.IOWeight != 0 {
@@ -636,6 +637,9 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}{ServiceConfig: &c})
 	if e == nil {
 		_, e = deviceAllowance(c.Device)
+	}
+	if e == nil {
+		e = c.validateWorkerSlice()
 	}
 	if e == nil && (c.Version < 0 || c.Version > 1) {
 		return c, errors.New("unsupported installed config version")

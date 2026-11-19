@@ -448,7 +448,7 @@ func setAttemptOOMScore(fs memoryFS, pid, score int) error {
 }
 
 // The systemd slice contains both the worker (including model engines) and
-// myce-jobs.slice's detached custodians. A service-only cap misses the latter.
+// detached custodians in its jobs sub-slice. A service-only cap misses the latter.
 // Apply the existing queue allowance before consuming assignments, including
 // changes returned during rolling upgrades. systemd owns the slice controls;
 // never try to delegate or relocate another owner's running processes.
@@ -460,7 +460,14 @@ func (w Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBud
 	if _, real := c.fs.(osMemoryFS); !real {
 		return nil
 	}
-	root, err := jointMemoryRoot(c.root)
+	config := ServiceConfig{}
+	if w.ServiceConfig != nil {
+		config = *w.ServiceConfig
+	}
+	if err := config.validateWorkerSlice(); err != nil {
+		return err
+	}
+	root, err := jointMemoryRoot(c.root, config.workerSlice())
 	if err != nil {
 		return err
 	}
@@ -474,13 +481,13 @@ func (w Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBud
 	})
 }
 
-func jointMemoryRoot(root string) (string, error) {
+func jointMemoryRoot(root, slice string) (string, error) {
 	for p := filepath.Clean(root); p != "." && p != string(filepath.Separator); p = filepath.Dir(p) {
-		if filepath.Base(p) == "myce.slice" {
+		if filepath.Base(p) == slice {
 			return p, nil
 		}
 	}
-	return "", errors.New("worker is outside myce.slice; upgrade its installed service unit")
+	return "", fmt.Errorf("worker is outside configured slice %s; upgrade its installed service unit", slice)
 }
 
 func (c *memoryCeilings) setJointMemoryLimit(ctx context.Context, root string, budget HostMemoryBudget, swap int64, command func(context.Context, ...string) error) error {
@@ -509,7 +516,7 @@ func (c *memoryCeilings) setJointMemoryLimit(ctx context.Context, root string, b
 		if bytes == 0 { // Existing uncapped installations remain uncapped.
 			limit, swapLimit = "infinity", "infinity"
 		}
-		if err := command(ctx, "--user", "set-property", "--runtime", "myce.slice", "MemoryMax="+limit, "MemorySwapMax="+swapLimit); err != nil {
+		if err := command(ctx, "--user", "set-property", "--runtime", filepath.Base(root), "MemoryMax="+limit, "MemorySwapMax="+swapLimit); err != nil {
 			c.jointConfirmed = false
 			return err
 		}
