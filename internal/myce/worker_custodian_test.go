@@ -264,13 +264,21 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			t.Fatal("fixture did not hold input preparation")
 		}
 		stop()
+		// Only the parent proxy publishes the admission ledger. Requiring a
+		// new ledger after the old service exits proves the replacement has
+		// adopted this preparing custodian before its input is released.
+		ledger := filepath.Join(custodianDir(c.State), custodianName(before.ID, "ledger"))
+		if err := os.Remove(ledger); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
 		writeImage(next)
 		start()
 		await(t, func() bool {
 			image, _ := os.ReadFile(filepath.Join(c.State, "worker-image"))
 			b, e := readSingleAttemptState(filepath.Join(c.State, "state.json"))
+			_, ledgerErr := os.Stat(ledger)
 			var st workerState
-			return string(image) == "my55-next" && e == nil && json.Unmarshal(b, &st) == nil && st.Custodian == before.ID
+			return string(image) == "my55-next" && e == nil && json.Unmarshal(b, &st) == nil && st.Custodian == before.ID && ledgerErr == nil
 		})
 		var after custodianSnapshot
 		if err := readCustodianJSON(custodianDir(c.State), custodianName(before.ID, "snapshot"), &after); err != nil || after.PID != before.PID || after.Birth != before.Birth || after.Started || after.Finished {
