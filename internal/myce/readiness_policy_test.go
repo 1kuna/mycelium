@@ -21,7 +21,7 @@ func TestAdaptiveReadinessProgressClock(t *testing.T) {
 			clock := &manualWorkerClock{now: time.Unix(1, 0)}
 			history := readinessHistory{}
 			history.Load.observe(host.gap)
-			p := newReadinessProgress(clock, history)
+			p := newReadinessProgressClocks(clock, clock, history)
 			output := &modelReadinessOutput{output: io.Discard, progress: p}
 			for i := 1; i <= 100; i++ {
 				clock.Advance(host.gap)
@@ -43,6 +43,23 @@ func TestAdaptiveReadinessProgressClock(t *testing.T) {
 				t.Fatal("new stage did not renew progress")
 			}
 		})
+	}
+}
+
+func TestAdaptiveReadinessTransportClock(t *testing.T) {
+	clock := &manualWorkerClock{now: time.Unix(1, 0)}
+	transport := &manualWorkerClock{now: time.Unix(1, 0)}
+	history := readinessHistory{}
+	history.Load.observe(2 * time.Millisecond)
+	p := newReadinessProgressClocks(clock, transport, history)
+	budget, _ := p.state()
+	transport.Advance(budget)
+	if _, stalled := p.state(); !stalled {
+		t.Fatal("stationary primary clock hid transport silence")
+	}
+	p.record([]byte(`{"stage":1,"completed":1,"total":2}`))
+	if _, stalled := p.state(); stalled {
+		t.Fatal("progress did not renew transport silence")
 	}
 }
 

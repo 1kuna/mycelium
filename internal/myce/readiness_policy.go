@@ -111,6 +111,7 @@ type readinessProgress struct {
 	realStarted      time.Time
 	mu               sync.Mutex
 	clock            Clock
+	transportClock   Clock
 	started, last    time.Time
 	realLast         time.Time // transport I/O must also terminate when a test Clock is stationary
 	gap              time.Duration
@@ -121,6 +122,12 @@ type readinessProgress struct {
 }
 
 func newReadinessProgress(clock Clock, history readinessHistory) *readinessProgress {
+	return newReadinessProgressClocks(clock, RealClock{}, history)
+}
+
+// The transport clock bounds I/O even when the primary clock is stationary.
+// Tests control both clocks so scheduler pauses are not synthetic load silence.
+func newReadinessProgressClocks(clock, transportClock Clock, history readinessHistory) *readinessProgress {
 	if clock == nil {
 		clock = RealClock{}
 	}
@@ -129,7 +136,7 @@ func newReadinessProgress(clock Clock, history readinessHistory) *readinessProgr
 	if history.Load.Mean > 0 {
 		budget = max(history.Load.budget(), history.Gap)
 	}
-	return &readinessProgress{clock: clock, started: now, last: now, realLast: RealClock{}.Now(), realStarted: RealClock{}.Now(), budget: budget}
+	return &readinessProgress{clock: clock, started: now, last: now, realLast: transportClock.Now(), realStarted: transportClock.Now(), transportClock: transportClock, budget: budget}
 }
 
 func (p *readinessProgress) advance() {
@@ -140,10 +147,10 @@ func (p *readinessProgress) advance() {
 	defer p.mu.Unlock()
 	now := p.clock.Now()
 	if !p.suspended {
-		p.gap = max(p.gap, now.Sub(p.last), RealClock{}.Now().Sub(p.realLast))
+		p.gap = max(p.gap, now.Sub(p.last), p.transportClock.Now().Sub(p.realLast))
 	}
 	p.last = now
-	p.realLast = RealClock{}.Now()
+	p.realLast = p.transportClock.Now()
 	p.revision++
 	p.inactive = false
 }
@@ -153,12 +160,12 @@ func (p *readinessProgress) advance() {
 func (p *readinessProgress) pause() func() {
 	p.mu.Lock()
 	wasSuspended := p.suspended
-	pausedAt, realPausedAt := p.clock.Now(), RealClock{}.Now()
+	pausedAt, realPausedAt := p.clock.Now(), p.transportClock.Now()
 	p.suspended = true
 	p.mu.Unlock()
 	return func() {
 		p.mu.Lock()
-		p.last, p.realLast = p.clock.Now(), RealClock{}.Now()
+		p.last, p.realLast = p.clock.Now(), p.transportClock.Now()
 		if !wasSuspended {
 			p.started = p.started.Add(p.last.Sub(pausedAt))
 			p.realStarted = p.realStarted.Add(p.realLast.Sub(realPausedAt))
@@ -204,14 +211,14 @@ func (p *readinessProgress) state() (time.Duration, bool) {
 	if budget > 0 {
 		budget = max(budget, scaleReadinessDuration(p.gap, 2), scaleReadinessDuration(p.activityPeriod, 2))
 	}
-	return budget, budget > 0 && !p.suspended && max(p.clock.Now().Sub(p.last), RealClock{}.Now().Sub(p.realLast)) >= budget
+	return budget, budget > 0 && !p.suspended && max(p.clock.Now().Sub(p.last), p.transportClock.Now().Sub(p.realLast)) >= budget
 }
 
 func (p *readinessProgress) result() readinessHistory {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	h := readinessHistory{Gap: max(p.gap, p.clock.Now().Sub(p.last), RealClock{}.Now().Sub(p.realLast))}
-	h.Load.observe(max(p.clock.Now().Sub(p.started), RealClock{}.Now().Sub(p.realStarted)))
+	h := readinessHistory{Gap: max(p.gap, p.clock.Now().Sub(p.last), p.transportClock.Now().Sub(p.realLast))}
+	h.Load.observe(max(p.clock.Now().Sub(p.started), p.transportClock.Now().Sub(p.realStarted)))
 	return h
 }
 
