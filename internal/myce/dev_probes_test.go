@@ -122,7 +122,9 @@ func TestDevProbeQueueRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.wg.Wait()
-	if err := d.Client().Call(ctx, "GET", "/api/status", nil, nil); err == nil {
+	// Observe one failed request while the queue is deliberately offline; the
+	// consumer's retry loop would otherwise outlive this test-owned outage.
+	if err := d.Client().WithoutRetries().Call(ctx, "GET", "/api/status", nil, nil); err == nil {
 		t.Fatal("queue outage not exercised")
 	}
 	if err := d.Client().Call(ctx, "POST", "/api/hosts/dev-host/maintenance", HostMaintenanceRequest{Action: "disable", Stop: true}, nil); err == nil {
