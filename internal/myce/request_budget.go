@@ -208,9 +208,6 @@ func (a *requestAllocation) close() {
 	a.retained = 0
 }
 func budgetRefusal(limit int64) error {
-	if limit <= 0 {
-		return &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: "queue has no measured request memory capacity; fitting wire bytes=0; retry after headroom recovers"}
-	}
 	return &HTTPError{Status: 413, Code: "request_too_large", Message: fmt.Sprintf("request exceeds measured queue memory capacity; fitting wire bytes=%d (decoded payload allocations also charged); split the request or retry with more headroom", max(0, limit))}
 }
 func (q *Queue) withRequestBudget(w http.ResponseWriter, r *http.Request) (*http.Request, func(), error) {
@@ -219,7 +216,7 @@ func (q *Queue) withRequestBudget(w http.ResponseWriter, r *http.Request) (*http
 		return r, func() {}, err
 	}
 	if n <= 0 {
-		return r, func() {}, budgetRefusal(n)
+		return r, func() {}, &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: "queue has no measured request memory capacity; fitting wire bytes=0; retry after headroom recovers"}
 	}
 	if r.Header.Get("X-Myce-Request-Budgets") == requestBudgetProtocol && r.Header.Get("X-Myce-Max-Response-Bytes") != "" {
 		peer, parseErr := strconv.ParseInt(r.Header.Get("X-Myce-Max-Response-Bytes"), 10, 64)
