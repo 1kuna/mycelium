@@ -53,6 +53,16 @@ heartbeat. An attribution-uncertain warning remains a separate sharing refusal
 even when charges fit. CUDA physical bounds can include unknown external use;
 a small RSS peak alone does not justify clearing larger accepted history.
 
+For `memory_evidence_recovering`, `hardware capacity ... need` describes one
+resolved candidate, not the batch total or current host occupancy. Unified
+memory adds its host and device vectors. Auto sizing prefers retained exact
+local recovery evidence over an uncalibrated transfer from another accelerator
+family. Extension jobs can supply `advanced.size_hint` with `host_memory_gb`
+and `memory_gb` for exploratory sizing; measured lower bounds and retry floors
+still apply. Preview with `myce spec check --resolve --json SPEC`; eligible
+hardware does not reserve capacity or clear a separate execution-sharing hold.
+
+
 When status says `waiting for fresh accelerator inventory`, leave the existing
 job queued: Mycelium holds GPU placement until a fresh scan arrives, while CPU
 work continues. `myce status --sections machines --json` exposes
