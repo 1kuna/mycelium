@@ -4,14 +4,68 @@ Adopting Mycelium is the project's work, and Mycelium keeps it small: one
 `.mycelium/adapter.yaml`, one command per run. A dependency lock does not
 establish application compatibility or production output parity.
 
+## Find the installed CLI
+
+A non-interactive shell can omit user bin directories even when Mycelium is
+installed. Check `command -v myce`. For the default installation, add its
+stable binary directories to this shell's PATH, then check again:
+
+```sh
+export PATH="$HOME/.local/bin:$HOME/.local/share/mycelium/worker:$HOME/.local/share/mycelium/queue:$PATH"
+command -v myce
+```
+
+These paths keep pointing at the installed binary after an upgrade. This changes
+only the current shell; a task runner can use the same PATH or the absolute
+binary path. For a custom install root or Linux worker instance, the installation
+owner supplies that binary's path. If none exists, keep the missing-CLI hold for
+the installation owner. Do not inspect credential files or start a local queue
+as a substitute for authorized fleet work.
+
 ## New project
 
 From the project root, `myce init` writes one entry and picks up `pixi.lock` or
 `uv.lock` (`--lock` chooses when both exist, `--python 3.X` sets uv's Python).
-Add `outputs`, commit the source the entry runs, ignore `.mycelium/receipts/`
+Without a lock, pass the command after `--`. Run `git init` first for a new folder.
+Pass repeatable `--output FILE_OR_FOLDER` flags, commit the source the entry runs, ignore `.mycelium/receipts/`
 and your `--out` folder, then `myce run --entry NAME --wait --out DIR`. The
 [guide](SKILL.md) walks through it; [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md)
 has every field.
+
+## Try a fresh project on a laptop
+
+Use a built or installed `myce` on PATH (build instructions are in
+[Start here](https://github.com/1kuna/mycelium/blob/main/docs/START-HERE.md#five-minute-start)).
+Create a throwaway folder with `input.txt` containing `fresh project` and this
+`report.sh`:
+
+```sh
+set -eu
+mkdir -p output/nested
+tr a-z A-Z < input.txt > output/result.txt
+printf 'done\n' > output/nested/receipt.txt
+```
+
+From that folder, start `myce dev -- sh`. It waits for two fake workers and opens
+a shell connected only to its temporary local queue; it sets no fleet defaults.
+Run these six steps, with no submit/wait/fetch script:
+
+```sh
+git init -q
+myce init --entry report --output output/ -- sh report.sh
+printf 'accepted/\n.mycelium/receipts/\n' >> .gitignore
+git add . && git commit -qm "Run report on Mycelium"
+myce run --entry report --out accepted
+cat accepted/output/result.txt accepted/output/nested/receipt.txt
+```
+
+Expect `FRESH PROJECT` and `done`. `--out` implies `--wait`: exit 0 means the
+accepted outputs were downloaded and size/SHA-256 verified. Repeat the same
+`myce run` command: its saved receipt adopts the same job and verifies the files
+again. `git status --porcelain` stays empty because receipts and downloads are
+ignored. Exit the shell to stop dev and remove its queue and worker scratch;
+the project and accepted files remain. This proves the real API and command
+runner with fake inventory, not live-fleet deployment or native qualification.
 
 ## Existing project
 

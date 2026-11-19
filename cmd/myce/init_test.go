@@ -46,16 +46,18 @@ func TestSmallestAdapterEntryDefaults(t *testing.T) {
 
 func TestInitWritesOneEntryFromTheLock(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		files map[string]string
-		args  []string
-		want  myce.Environment
-		argv  []string
+		name    string
+		files   map[string]string
+		args    []string
+		want    myce.Environment
+		argv    []string
+		outputs map[string]string
 	}{
-		{"uv", map[string]string{"uv.lock": "version = 1\n", "pyproject.toml": "[project]\nname = 'tiny'\nrequires-python = '>=3.12'\n"}, nil, myce.Environment{LockFile: "uv.lock", Python: "3.12"}, []string{"python", "-m", "pytest"}},
-		{"uv-python-version", map[string]string{"uv.lock": "version = 1\n", "pyproject.toml": "[project]\nname = 'tiny'\n", ".python-version": "3.13.1\n"}, []string{"--", "python", "run.py"}, myce.Environment{LockFile: "uv.lock", Python: "3.13"}, []string{"python", "run.py"}},
-		{"pixi", map[string]string{"pixi.lock": "version: 6\n", "pixi.toml": "[workspace]\nname = 'tiny'\n"}, nil, myce.Environment{Backend: "pixi", LockFile: "pixi.lock"}, []string{"python", "-m", "pytest"}},
-		{"installed-tools", nil, []string{"--", "sh", "test.sh"}, myce.Environment{}, []string{"sh", "test.sh"}},
+		{"uv", map[string]string{"uv.lock": "version = 1\n", "pyproject.toml": "[project]\nname = 'tiny'\nrequires-python = '>=3.12'\n"}, nil, myce.Environment{LockFile: "uv.lock", Python: "3.12"}, []string{"python", "-m", "pytest"}, nil},
+		{"uv-python-version", map[string]string{"uv.lock": "version = 1\n", "pyproject.toml": "[project]\nname = 'tiny'\n", ".python-version": "3.13.1\n"}, []string{"--", "python", "run.py"}, myce.Environment{LockFile: "uv.lock", Python: "3.13"}, []string{"python", "run.py"}, nil},
+		{"pixi", map[string]string{"pixi.lock": "version: 6\n", "pixi.toml": "[workspace]\nname = 'tiny'\n"}, nil, myce.Environment{Backend: "pixi", LockFile: "pixi.lock"}, []string{"python", "-m", "pytest"}, nil},
+		{"installed-tools", nil, []string{"--", "sh", "test.sh"}, myce.Environment{}, []string{"sh", "test.sh"}, nil},
+		{"outputs", nil, []string{"--output", "result.txt", "--output", "tree/", "--output", "logs/*.txt", "--", "sh", "test.sh"}, myce.Environment{}, []string{"sh", "test.sh"}, map[string]string{"result.txt": "results", "tree/": "results", "logs/*.txt": "results"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "tiny")
@@ -89,8 +91,17 @@ func TestInitWritesOneEntryFromTheLock(t *testing.T) {
 			if a.Project != "tiny" || !reflect.DeepEqual(e.Run.Command, tc.argv) || !reflect.DeepEqual(e.Environment, tc.want) {
 				t.Fatalf("starter:\n%s", data)
 			}
+			if !reflect.DeepEqual(e.Outputs, tc.outputs) {
+				t.Fatalf("outputs = %v, want %v", e.Outputs, tc.outputs)
+			}
 			if !strings.Contains(out.String(), "myce run --entry test") {
 				t.Fatal(out.String())
+			}
+			if tc.outputs != nil && (!strings.Contains(out.String(), "--out accepted") || !strings.Contains(out.String(), "accepted/")) {
+				t.Fatal("output entry did not explain collection and ignores", out.String())
+			}
+			if tc.outputs == nil && !strings.Contains(out.String(), "--wait") {
+				t.Fatal("command entry did not explain foreground completion", out.String())
 			}
 			if err := initCommand(tc.args, &out, &out); err == nil {
 				t.Fatal("existing adapter overwritten")
@@ -99,6 +110,14 @@ func TestInitWritesOneEntryFromTheLock(t *testing.T) {
 	}
 	root := t.TempDir()
 	t.Chdir(root)
+	for _, name := range []string{"/absolute", "../escape", "tree/../escape", "logs/[", ""} {
+		if err := initCommand([]string{"--output", name, "--", "true"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid output %q accepted", name)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".mycelium")); !os.IsNotExist(err) {
+			t.Fatal("invalid output created adapter directory", err)
+		}
+	}
 	if err := initCommand(nil, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "myce init -- COMMAND") {
 		t.Fatal("no lock and no command accepted", err)
 	}

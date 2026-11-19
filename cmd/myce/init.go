@@ -25,6 +25,14 @@ func initCommand(args []string, out, errOut io.Writer) error {
 	entry := f.String("entry", "test", "entry name")
 	lock := f.String("lock", "", "lock file to use when the project has both pixi.lock and uv.lock")
 	python := f.String("python", "", "Python version for a uv lock (default: .python-version, then requires-python)")
+	outputs := map[string]string{}
+	f.Func("output", "file, folder/ or glob to return (repeatable; quote globs)", func(name string) error {
+		if !myce.ValidOutputDeclaration(name) {
+			return errors.New("init: --output must be a clean relative file, folder/ or glob")
+		}
+		outputs[name] = "results"
+		return nil
+	})
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -61,6 +69,7 @@ func initCommand(args []string, out, errOut io.Writer) error {
 	type initEntry struct {
 		Run         initRun           `yaml:"run,flow"`
 		Environment *myce.Environment `yaml:"environment,omitempty,flow"`
+		Outputs     map[string]string `yaml:"outputs,omitempty"`
 	}
 	var buffer bytes.Buffer
 	encoder := yaml.NewEncoder(&buffer)
@@ -68,7 +77,7 @@ func initCommand(args []string, out, errOut io.Writer) error {
 	if err = encoder.Encode(struct {
 		Project string               `yaml:"project"`
 		Entries map[string]initEntry `yaml:"entries"`
-	}{project, map[string]initEntry{*entry: {initRun{command}, environment}}}); err != nil {
+	}{project, map[string]initEntry{*entry: {initRun{command}, environment, outputs}}}); err != nil {
 		return err
 	}
 	data := buffer.Bytes()
@@ -80,7 +89,11 @@ func initCommand(args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("adapter_invalid: %w", err)
 	}
-	if err = p.Spec.Validate(); err != nil {
+	// decodeAdapter already validates output declarations. As in profile init,
+	// transport validation waits until run attaches the source file manifest.
+	validation := p.Spec
+	validation.Outputs = nil
+	if err = validation.Validate(); err != nil {
 		return fmt.Errorf("adapter_invalid: %w", err)
 	}
 	path := filepath.Join(".mycelium", "adapter.yaml")
@@ -102,7 +115,13 @@ func initCommand(args []string, out, errOut io.Writer) error {
 	if environment != nil {
 		using = environment.LockFile
 	}
-	fmt.Fprintf(out, "Created %s: entry %s runs %s using %s.\nIt runs on any machine type the lock and platform fit; production needs explicit targets.\nIgnore .mycelium/receipts/ and commit the source to run.\nRun: myce run --entry %s\n", path, *entry, strings.Join(command, " "), using, *entry)
+	next := " --wait"
+	ignore := ".mycelium/receipts/"
+	if len(outputs) > 0 {
+		next = " --out accepted"
+		ignore += " and accepted/"
+	}
+	fmt.Fprintf(out, "Created %s: entry %s runs %s using %s.\nIt runs on any machine type the lock and platform fit; production needs explicit targets.\nAdd %s to .gitignore, then commit the source (git init first in a new project).\nRun: myce run --entry %s%s\n", path, *entry, strings.Join(command, " "), using, ignore, *entry, next)
 	return nil
 }
 

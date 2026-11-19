@@ -33,7 +33,10 @@ func workerAdoptionProof(actors map[attemptKey]*attemptSupervisor, now time.Time
 		g.mu.Lock()
 		v, observed := g.last, g.observed
 		g.mu.Unlock()
-		if !observed || (!v.Started && !v.Finished) || now.Sub(v.At) > max(3*interval, attemptLivenessMaxAge) || v.State.Result != nil && v.State.Result.ReleasePending {
+		// The independent owner exists before input staging or environment
+		// acquisition begins. Started describes the payload, not adoptability:
+		// g.read already verified the exact custodian birth and manager scope.
+		if !observed || now.Sub(v.At) > max(3*interval, attemptLivenessMaxAge) || v.State.Result != nil && v.State.Result.ReleasePending {
 			proof.Reason = "detached attempt readiness or release is unconfirmed"
 			return proof
 		}
@@ -56,8 +59,13 @@ func (q *Queue) fleetAdoptionReason(h *fleetUpgradeHost) string {
 		return "worker cannot prove detached attempt readiness"
 	}
 	for _, p := range q.hostObligations(h.Host) {
-		if p.Launch != nil || p.Engine != nil || p.Call != nil || p.Preparation {
+		if p.Engine != nil || p.Call != nil {
 			return "model, preparation or cleanup custody requires natural drain"
+		}
+		if p.Launch != nil || p.Preparation {
+			// Standalone background preparation belongs to the worker's
+			// goroutine/cache writer, unlike staging inside an exact attempt.
+			return "preparation has no detached custodian"
 		}
 		if p.Result.Machine != m.ID || p.Result.Session != m.Session {
 			return "an older or different worker session retains execution custody"

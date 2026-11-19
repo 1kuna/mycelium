@@ -50,6 +50,7 @@ class ProgressTests(unittest.TestCase):
             code = progress.run('package:selection', command or ['go', 'test', './pkg'],
                                 cache, report, clock=lambda: now[0])
         self.launched_environment = launch.call_args.kwargs.get('env')
+        self.launched_directory = launch.call_args.kwargs.get('cwd')
         return code, launch.call_args.args[0], json.loads(report.read_text().splitlines()[-1])
 
     def test_slow_progressing_run_outlives_old_wall_budget(self):
@@ -136,6 +137,40 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(self.launched_environment[key], private)
                 self.assertFalse(Path(private).exists())
             self.assertEqual(source.read_bytes(), b'fixture executable bytes')
+
+    def test_compiled_shard_keeps_lifecycle_deadline_cwd_and_private_image(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / 'shared.test'
+            image.write_bytes(b'compiled race test image')
+            image.chmod(0o755)
+            command = ['--test-binary', 'fixture/pkg', str(image), str(root),
+                       '-test.run=^TestBlocked$', '-test.count=1', '-test.parallel=1']
+            code, launched, record = self.execute(root, [
+                (0, b'{"Action":"run","Test":"TestBlocked"}\n'),
+                (10, b'{"Action":"output","Output":"reconnect"}\n'),
+                (30, b'{"Action":"output","Output":"reconnect"}\n')],
+                expected=10, command=command)
+            self.assertEqual(code, 124)
+            self.assertEqual(record['active_tests'], ['TestBlocked'])
+            self.assertEqual(launched[:6], ['go', 'tool', 'test2json', '-t', '-p', 'fixture/pkg'])
+            self.assertEqual(self.launched_directory, str(root))
+            self.assertEqual(self.launched_environment['PWD'], str(root))
+            self.assertNotEqual(launched[6], str(image))
+            self.assertFalse(Path(launched[6]).exists())
+            self.assertEqual(image.read_bytes(), b'compiled race test image')
+            for flag in ('-test.timeout=0', '-test.v=test2json', '-test.paniconexit0',
+                         '-test.count=1', '-test.parallel=1', '-test.run=^TestBlocked$'):
+                self.assertIn(flag, launched)
+
+    def test_compile_only_is_not_learned_as_a_running_test_package(self):
+        with tempfile.TemporaryDirectory() as folder:
+            code, command, record = self.execute(Path(folder), [(20, b'')],
+                command=['go', 'test', '-c', '-race', '-o', 'fixture.test', './pkg'])
+        self.assertEqual(code, 0)
+        self.assertNotIn('-timeout=1h', command)
+        self.assertIsNone(self.launched_environment)
+        self.assertEqual(record['progress_kind'], 'output')
 
     def test_nested_execution_quota_limits_parallelism(self):
         files = {'/proc/self/cgroup': '0::/worker/job',

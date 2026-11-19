@@ -2,6 +2,7 @@
 """Admit packages in selection order as any watchdog finishes custody cleanup."""
 from pathlib import Path
 import importlib.util
+import hashlib
 import json
 import os
 import queue
@@ -101,6 +102,30 @@ def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
+def compile_packages(entries, folder):
+    """Link each selected test package once; execution never uses Go's result cache."""
+    folder = Path(folder).resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    binaries = {}
+    for entry in entries:
+        package = entry.split('\t', 1)[0]
+        if package.startswith('@') or package in binaries:
+            continue
+        # Resolve the package cwd that `go test` ordinarily chooses. Relative
+        # fixture paths and TestMain's package-directory hygiene depend on it.
+        info = json.loads(subprocess.check_output(
+            ['go', 'list', '-race', '-json', package], text=True))
+        if not info.get('TestGoFiles') and not info.get('XTestGoFiles'):
+            continue  # Preserve `go test`'s ordinary no-test package result.
+        image = folder / (hashlib.sha256(package.encode()).hexdigest() + '.test')
+        label = 'compile-test:' + package
+        subprocess.run([sys.executable, str(Path(__file__).with_name('gate-progress.py')),
+                        label, 'go', 'test', '-c', '-race', '-vet=off', '-p', '1',
+                        '-o', str(image), info['ImportPath']], check=True)
+        binaries[package] = (str(image), info['Dir'])
+    return binaries
+
+
 def main():
     for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signum, interrupted)
@@ -108,11 +133,19 @@ def main():
     entries = Path(selection).read_text().splitlines()
     slots = int(cores)
     environment = None
+    binaries = {}
+    if mode == 'full' and (folder := os.environ.get('GATE_TEST_BINARY_DIR')):
+        # Full reuses the images for inventory and every shard. Quick has no
+        # repeated shards, so retain its overlapping Go build/test execution.
+        try:
+            binaries = compile_packages(entries, folder)
+        except subprocess.CalledProcessError as error:
+            return merge_status(0, error.returncode)
     if mode == 'full':
         spec = importlib.util.spec_from_file_location('gate_shards', Path(__file__).with_name('gate-shards.py'))
         shards = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(shards)
-        entries = shards.plan(entries, slots)
+        entries = shards.plan(entries, slots, binaries) if binaries else shards.plan(entries, slots)
         # Cross-release proof owns a normal slot and the same watchdog/custody
         # as the tests. Start it early so it overlaps rather than extends them.
         # The Python client suite (one shared myce dev start) also starts early.
@@ -132,11 +165,18 @@ def main():
                                      str(Path(__file__).with_name('upgrade-compat.py')), 'run']
         if package == '@python-client':
             return python_client_command(names)
+        binary = binaries.get(package)
         if mode != 'full':
             package = subprocess.check_output(['go', 'list', './' + package.removeprefix('./')],
                                               text=True).strip()
         print(f'{mode} {package}: {names}', flush=True)
         label = f'test:{package}:{names}'
+        if binary:
+            image, directory = binary
+            return label, [sys.executable, str(Path(__file__).with_name('gate-progress.py')),
+                           label, '--test-binary', package, image, directory,
+                           '-test.parallel=' + ('1' if mode == 'full' else cores),
+                           '-test.count=1', '-test.run=' + names]
         return label, [sys.executable, str(Path(__file__).with_name('gate-progress.py')),
                        label, 'go', 'test', '-race', '-vet=off', '-json', '-p', '1',
                        '-parallel', '1' if mode == 'full' else cores,

@@ -9,6 +9,15 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+
+
+def scheduler_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('scheduler_module', SCHEDULER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 SCHEDULER = Path(__file__).with_name('gate-scheduler.py')
@@ -73,6 +82,101 @@ sys.exit(int(behavior) if behavior.isdigit() else 0)
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_links_each_package_once_and_retains_no_test_packages(self):
+        module = scheduler_module()
+        entries = ['pkg/tests\t^TestA$', 'pkg/tests\t^TestB$', 'pkg/empty\t.*', '@python-client\t']
+        with tempfile.TemporaryDirectory() as folder:
+            def info(command, **kwargs):
+                self.assertIn('-race', command)
+                package = command[-1]
+                return json.dumps(dict(Dir='/package', ImportPath=package,
+                                       TestGoFiles=['a_test.go'] if package == 'pkg/tests' else []))
+            with (patch.object(module.subprocess, 'check_output', side_effect=info),
+                  patch.object(module.subprocess, 'run') as compile):
+                binaries = module.compile_packages(entries, folder)
+            self.assertEqual(list(binaries), ['pkg/tests'])
+            self.assertEqual(binaries['pkg/tests'][1], '/package')
+            command = compile.call_args.args[0]
+            self.assertEqual(compile.call_count, 1)
+            self.assertEqual(command[3:10], ['go', 'test', '-c', '-race', '-vet=off', '-p', '1'])
+            self.assertIn(binaries['pkg/tests'][0], command)
+            self.assertTrue(compile.call_args.kwargs['check'])
+
+    def test_compiler_custody_refusal_starts_no_tests(self):
+        module = scheduler_module()
+        with tempfile.TemporaryDirectory() as folder:
+            selection = Path(folder) / 'selection'
+            selection.write_text('pkg/tests\t.*\n')
+            with (patch.dict(os.environ, GATE_TEST_BINARY_DIR=folder),
+                  patch.object(sys, 'argv', ['scheduler', 'full', '2', str(selection)]),
+                  patch.object(module, 'compile_packages', side_effect=subprocess.CalledProcessError(125, ['compile'])),
+                  patch.object(module, 'run') as run):
+                self.assertEqual(module.main(), 125)
+            run.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get('GATE_TEST_BINARY_INTEGRATION') == '1',
+                         'full gate; targeted: GATE_TEST_BINARY_INTEGRATION=1 python3 scripts/test-gate-scheduler.py')
+    def test_compiled_binary_runs_in_package_with_examples_fuzz_failures_and_race(self):
+        # Exercise the Go tool boundary, not just argument construction. Keep
+        # this tiny module outside the repository's recursive package inventory.
+        module = scheduler_module()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'go.mod').write_text('module fixture.invalid/gate\n\ngo 1.25\n')
+            (root / 'fixture.txt').write_text('package cwd')
+            no_race = root / 'no_race'
+            no_race.mkdir()
+            (no_race / 'gate.go').write_text('package no_race\n')
+            (no_race / 'gate_test.go').write_text('//go:build !race\n\npackage no_race\n'
+                'import "testing"\nfunc TestNoRace(t *testing.T) { t.Fatal("excluded under race") }\n')
+            (root / 'gate_test.go').write_text('''package gate
+import ("fmt"; "os"; "testing")
+func TestPass(t *testing.T) { t.Run("child", func(t *testing.T) {
+ if _, err := os.ReadFile("fixture.txt"); err != nil { t.Fatal(err) }
+ cwd, err := os.Getwd(); if err != nil || os.Getenv("PWD") != cwd { t.Fatal("package PWD", cwd, err) }
+}) }
+func TestFail(t *testing.T) { t.Fatal("expected fixture failure") }
+func TestExitZero(t *testing.T) { os.Exit(0) }
+func TestRace(t *testing.T) {
+ value := 0; done := make(chan struct{})
+ go func() { for i:=0;i<1000;i++ { value++ }; close(done) }()
+ for i:=0;i<1000;i++ { value++ }; <-done
+}
+func FuzzSeeds(f *testing.F) { f.Add("seed"); f.Fuzz(func(t *testing.T, s string) {}) }
+func Example() { fmt.Println("example"); /* Output: example */ }
+''')
+            env = dict(os.environ, GOMAXPROCS='1', GORACE='atexit_sleep_ms=0',
+                       GATE_TIMING_CACHE=str(root / 'cache'), GATE_TIMING_REPORT=str(root / 'report'))
+            # compile_packages resolves cwd via go list; run it as a small
+            # subprocess so this unittest never changes its own process cwd.
+            build = '''import importlib.util, sys
+spec=importlib.util.spec_from_file_location('scheduler', sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+images=m.compile_packages(['fixture.invalid/gate\\t.*', 'fixture.invalid/gate/no_race\\t.*'], sys.argv[2])
+assert set(images) == {'fixture.invalid/gate'}, images
+'''
+            compiled = subprocess.run([sys.executable, '-c', build, str(SCHEDULER.resolve()), str(root / 'bin')],
+                                      cwd=root, env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            image = next((root / 'bin').glob('*.test'))
+            progress = SCHEDULER.with_name('gate-progress.py').resolve()
+            for expression, expected in [('^(TestPass|Example|FuzzSeeds)$', 0),
+                                         ('^TestFail$', 1), ('^TestExitZero$', 1), ('^TestRace$', 1)]:
+                with self.subTest(expression=expression):
+                    result = subprocess.run([sys.executable, str(progress), expression, '--test-binary',
+                        'fixture.invalid/gate', str(image), str(root), '-test.count=1',
+                        '-test.parallel=1', '-test.run=' + expression], env=env,
+                        capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+                    if expected == 0:
+                        passed = {e.get('Test') for e in events if e.get('Action') == 'pass'}
+                        self.assertTrue({'TestPass', 'TestPass/child', 'FuzzSeeds', 'FuzzSeeds/seed#0', 'Example'} <= passed)
+                    else:
+                        self.assertTrue(any(e['Action'] == 'fail' for e in events), result.stdout)
+                    if expression == '^TestRace$':
+                        self.assertIn('DATA RACE', result.stdout)
+
     def test_python_client_command_runs_suite_or_named_tests(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('scheduler_module', SCHEDULER)
