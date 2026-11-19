@@ -51,6 +51,7 @@ type modelCustodianRequest struct {
 	EnvironmentPath string              `json:"environment_path,omitempty"`
 	EnvironmentKey  string              `json:"environment_key,omitempty"`
 	EnvironmentRoot string              `json:"environment_root,omitempty"`
+	OOMScore        int                 `json:"oom_score"`
 }
 
 type modelCustodianSnapshot struct {
@@ -58,6 +59,13 @@ type modelCustodianSnapshot struct {
 	Execution HostEngineExecution `json:"execution"`
 	URL       string              `json:"url"`
 	Report    ModelReport         `json:"report"`
+	OOMScore  int                 `json:"oom_score"`
+}
+
+type modelCustodianPolicy struct {
+	ID        string              `json:"id"`
+	Execution HostEngineExecution `json:"execution"`
+	OOMScore  int                 `json:"oom_score"`
 }
 
 type modelCustodianStop struct {
@@ -68,17 +76,19 @@ type modelCustodianStop struct {
 // The coordinator is a proxy for control and accounting only. Response sockets,
 // engine Wait, logs, health monitoring and memory containment live in the helper.
 type modelCustodian struct {
-	mu       sync.Mutex
-	dir      string
-	request  modelCustodianRequest
-	clock    Clock
-	interval time.Duration
-	service  ServiceConfig
-	token    string
-	last     modelCustodianSnapshot
-	verified bool
-	launch   func(context.Context, ServiceConfig, string, string) error
-	verify   func(string, int, string) error
+	mu            sync.Mutex
+	dir           string
+	request       modelCustodianRequest
+	clock         Clock
+	interval      time.Duration
+	service       ServiceConfig
+	token         string
+	last          modelCustodianSnapshot
+	verified      bool
+	policyWritten bool
+	policyScore   int
+	launch        func(context.Context, ServiceConfig, string, string) error
+	verify        func(string, int, string) error
 }
 
 func (rt *modelRuntime) detachedModelSupported(m Model) bool {
@@ -90,6 +100,9 @@ func (rt *modelRuntime) detachedModelSupported(m Model) bool {
 
 func (rt *modelRuntime) newModelCustodian(m *workerModel, prepared Model) *modelCustodian {
 	r := modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Execution: HostEngineExecution{Machine: rt.machine, Session: rt.session, Model: m.model.Name, Device: m.device, Attempt: m.attempt}, Machine: rt.memoryMachine, Original: m.model, Prepared: prepared, EnvironmentPath: prepared.EnvironmentPath}
+	if owned, ok := m.engine.(*LlamaEngine); ok {
+		r.OOMScore = int(owned.memoryOOMScore.Load())
+	}
 	if m.bound != nil {
 		r.Machine = m.bound.Machine
 	}
@@ -281,6 +294,25 @@ func (g *modelCustodian) bridgeURL() string {
 	return g.last.URL
 }
 
+func (g *modelCustodian) updateOOMScore(score int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Compare the latest requested policy, not a possibly delayed snapshot.
+	// A new coordinator always writes its own first exact policy after adoption.
+	if g.policyWritten && g.policyScore == score {
+		return nil
+	}
+	if err := PrepareStateRoots(g.dir); err != nil {
+		return err
+	}
+	v := modelCustodianPolicy{g.request.ID, g.request.Execution, score}
+	if err := saveWorkerJSON(g.dir, custodianName(g.request.ID, "model-policy"), v); err != nil {
+		return err
+	}
+	g.policyWritten, g.policyScore = true, score
+	return nil
+}
+
 func modelRequests(dir string) ([]modelCustodianRequest, error) {
 	paths, err := filepath.Glob(filepath.Join(custodianDir(dir), "custodian-*.model-request.json"))
 	if err != nil {
@@ -381,6 +413,9 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	if r.ID != id || r.Protocol != custodianProtocol || r.Execution.Machine != w.Machine.ID || r.Machine.ID != w.Machine.ID || r.Execution.Session == "" || r.Execution.Attempt == "" || r.Original.Name != r.Execution.Model || r.Prepared.Name != r.Execution.Model {
 		return errors.New("model custodian request identity mismatch")
 	}
+	if r.OOMScore != 0 && r.OOMScore != 1000 {
+		return errors.New("invalid model custodian OOM policy")
+	}
 	w.Machine = r.Machine
 	if w.Clock == nil {
 		w.Clock = RealClock{}
@@ -440,6 +475,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	engine := NewModelEngine(r.Prepared, engineDir, w.Clock)
 	if owned, ok := engine.(*LlamaEngine); ok {
 		owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
+		owned.memoryOOMScore.Store(int32(r.OOMScore))
 	}
 	ctx, cancel := context.WithCancel(stop)
 	defer cancel()
@@ -449,12 +485,17 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 	defer server.Close()
 	go server.Serve(ln)
 	v := modelCustodianSnapshot{custodianSnapshot: custodianSnapshot{Protocol: custodianProtocol, ID: id, PID: os.Getpid(), Birth: birth, Cgroup: cgroup}, Execution: r.Execution, URL: bridge}
+	oomScore := r.OOMScore
 	publish := func() error {
 		rt.mu.Lock()
 		rt.checkEngineHealth(m)
 		v.Report = ModelReport{Name: r.Original.Name, Device: m.device, Attempt: m.attempt, State: m.state, Error: m.err, InFlight: m.inflight, CallsMeasured: true, RuntimeFailed: m.runtimeFailed}
-		if owned, ok := engine.(*LlamaEngine); ok && m.state == "ready" {
-			_, v.Report.HealthRevision, v.Report.HealthDegraded = owned.runtimeHealth()
+		v.OOMScore = oomScore
+		if owned, ok := engine.(*LlamaEngine); ok {
+			v.OOMScore = int(owned.memoryOOMScore.Load())
+			if m.state == "ready" {
+				_, v.Report.HealthRevision, v.Report.HealthDegraded = owned.runtimeHealth()
+			}
 		}
 		v.Started, v.Finished = m.state == "ready", m.state == "failed" || m.state == "unloaded"
 		rt.mu.Unlock()
@@ -494,6 +535,17 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 			cancel()
 			stopping = true
 		case <-tick.C:
+		}
+		var policy modelCustodianPolicy
+		if !stopping && readCustodianJSON(dir, custodianName(id, "model-policy"), &policy) == nil && policy.ID == id && policy.Execution == r.Execution && (policy.OOMScore == 0 || policy.OOMScore == 1000) {
+			rt.mu.Lock()
+			if err := updateModelOOMScore(m, policy.OOMScore); err != nil {
+				m.err, m.runtimeFailed = "model OOM priority update failed", true
+				rt.unload(m)
+			} else {
+				oomScore = policy.OOMScore
+			}
+			rt.mu.Unlock()
 		}
 		var control modelCustodianStop
 		if !stopping && readCustodianJSON(dir, custodianName(id, "model-stop"), &control) == nil && control.ID == id && control.Execution == r.Execution {

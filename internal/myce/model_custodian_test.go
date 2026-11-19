@@ -44,7 +44,7 @@ func testModelCustodian(t *testing.T, execution ...HostEngineExecution) (*modelC
 	model.HostMemoryGB = 0.25
 	machine := machine("model-worker", "fake")
 	machine.HostMemoryBudgetGB = 32
-	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
+	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, OOMScore: 1000, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
 	if len(execution) != 0 {
 		g.request.Execution = execution[0]
 		g.request.Machine.ID, g.request.Machine.Session = execution[0].Machine, execution[0].Session
@@ -121,6 +121,9 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	}
 	await(t, func() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.read() == nil && g.last.Report.InFlight == 1 })
 	before := g.last
+	if before.OOMScore != 1000 {
+		t.Fatal("initial lower-tier OOM policy was lost", before.OOMScore)
+	}
 	serviceStop, cancel := context.WithCancel(context.Background())
 	cancel()
 	old, err := startModels(Worker{Machine: g.request.Machine, Clock: RealClock{}, Client: Client{Token: "test"}, serviceStop: serviceStop}, t.TempDir())
@@ -153,6 +156,43 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	if adopted.last.PID != before.PID || adopted.last.Birth != before.Birth {
 		t.Fatal("replacement restarted the model owner")
 	}
+	policy := ModelSlot{Model: e.Model, Device: e.Device, Attempt: e.Attempt, Session: e.Session, State: "ready", Class: "production"}
+	next.sync([]ModelSlot{policy})
+	// Replace an unacknowledged update before the helper publishes a snapshot.
+	policy.Class = "test"
+	next.sync([]ModelSlot{policy})
+	var pending modelCustodianPolicy
+	if err := readCustodianJSON(adopted.dir, custodianName(adopted.request.ID, "model-policy"), &pending); err != nil || pending.OOMScore != 1000 {
+		t.Fatalf("latest unacknowledged OOM policy was lost: %+v %v", pending, err)
+	}
+	policy.Class = "production"
+	next.sync([]ModelSlot{policy})
+	await(t, func() bool {
+		adopted.mu.Lock()
+		defer adopted.mu.Unlock()
+		return adopted.read() == nil && adopted.last.OOMScore == 0
+	})
+	stale := modelCustodianPolicy{ID: adopted.request.ID, Execution: e, OOMScore: 1000}
+	stale.Execution.Session = "stale-session"
+	if err := saveWorkerJSON(adopted.dir, custodianName(adopted.request.ID, "model-policy"), stale); err != nil {
+		t.Fatal(err)
+	}
+	written := adopted.clock.Now()
+	await(t, func() bool {
+		adopted.mu.Lock()
+		defer adopted.mu.Unlock()
+		return adopted.read() == nil && adopted.last.At.After(written)
+	})
+	if adopted.last.OOMScore != 0 {
+		t.Fatal("stale-session policy reached the resident engine")
+	}
+	policy.Class = "test"
+	next.sync([]ModelSlot{policy})
+	await(t, func() bool {
+		adopted.mu.Lock()
+		defer adopted.mu.Unlock()
+		return adopted.read() == nil && adopted.last.OOMScore == 1000
+	})
 	for _, pair := range [][2]string{{"stale-session", e.Attempt}, {e.Session, "stale-attempt"}} {
 		stale := detachedModelRequest(t, before.URL, pair[0], pair[1], "/echo")
 		stale.Body.Close()

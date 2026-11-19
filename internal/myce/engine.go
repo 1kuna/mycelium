@@ -723,15 +723,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		s, ok := desired[name]
 		m.queueFlight = s.InFlight
 		if ok && s.Attempt == m.attempt && s.Session == rt.session {
-			if owned, yes := m.engine.(*LlamaEngine); yes {
-				score := modelOOMScore(s)
-				owned.memoryOOMScore.Store(int32(score))
-				if (m.state == "ready" || m.state == "draining") && owned.memoryAttempt != nil {
-					if err := owned.memoryAttempt.updateOOMScore(score); err != nil {
-						m.err, m.runtimeFailed = err.Error(), true
-						rt.unload(m)
-					}
-				}
+			if err := updateModelOOMScore(m, modelOOMScore(s)); err != nil {
+				m.err, m.runtimeFailed = err.Error(), true
+				rt.unload(m)
 			}
 		}
 		replaced := ok && s.Attempt != "" && m.attempt != "" && s.Attempt != m.attempt
@@ -876,6 +870,19 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			rt.load(ctx, m)
 		}()
 	}
+}
+
+func updateModelOOMScore(m *workerModel, score int) error {
+	switch owned := m.engine.(type) {
+	case *LlamaEngine:
+		owned.memoryOOMScore.Store(int32(score))
+		if (m.state == "ready" || m.state == "draining") && owned.memoryAttempt != nil {
+			return owned.memoryAttempt.updateOOMScore(score)
+		}
+	case *modelCustodian:
+		return owned.updateOOMScore(score)
+	}
+	return nil
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
