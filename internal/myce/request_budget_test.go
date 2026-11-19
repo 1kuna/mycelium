@@ -232,6 +232,7 @@ func TestRequestBudgetSharedCapacityAndRecovery(t *testing.T) {
 		r := httptest.NewRequest(endpoint.method, endpoint.path, nil)
 		r.Header.Set("Authorization", "Bearer test")
 		r.Body = unreadBody{}
+		r.ContentLength = 1
 		w := httptest.NewRecorder()
 		API{q, "test"}.Handler().ServeHTTP(w, r)
 		if w.Code != 503 || !strings.Contains(w.Body.String(), `"code":"request_capacity_unavailable"`) {
