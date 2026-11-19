@@ -162,13 +162,14 @@ class ShardTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             selection = Path(directory) / 'selection'
             selection.write_text('mycelium/internal/probeguard\t.*\n')
-            with patch.dict(os.environ, GOFLAGS='-p=18', GOMAXPROCS='18'):
+            with patch.dict(os.environ, GOFLAGS='-trimpath -p=18', GOMAXPROCS='18'):
                 with patch.object(sys, 'argv', ['scheduler', 'full', '18', str(selection)]), \
                      patch.object(scheduler, 'run', return_value=0) as run:
                     self.assertEqual(scheduler.main(), 0)
                 entries, slots, command, environment = run.call_args.args
                 self.assertEqual(slots, 9)
-                self.assertEqual(environment['GOFLAGS'], '-p=1')
+                self.assertIn('-trimpath', environment['GOFLAGS'].split())
+                self.assertEqual(environment['GOFLAGS'].split()[-1], '-p=1')
                 self.assertEqual(environment['GOMAXPROCS'], '1')
                 self.assertEqual(environment['GATE_TEST_SLOTS'], '9')
                 self.assertIn('-parallel', command(entries[0])[1])
@@ -177,7 +178,7 @@ class ShardTests(unittest.TestCase):
                     self.assertEqual(scheduler.main(), 0)
                 self.assertEqual(run.call_args.args[1], 18)
                 self.assertIsNone(run.call_args.args[3])
-                self.assertEqual(os.environ['GOFLAGS'], '-p=18')
+                self.assertEqual(os.environ['GOFLAGS'], '-trimpath -p=18')
 
 
 if __name__ == '__main__':

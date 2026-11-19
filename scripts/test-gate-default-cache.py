@@ -14,6 +14,29 @@ NOW = 1_000_000.0
 
 
 class DefaultCacheTests(unittest.TestCase):
+    def test_gate_owned_cache_reuses_headroom_policy_and_keeps_recent_objects(self):
+        spec = importlib.util.spec_from_file_location(
+            'gate_cache', pathlib.Path(__file__).with_name('gate-cache.py'))
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'ab').mkdir()
+            old = root / 'ab' / ('a' * 64 + '-d')
+            recent = root / 'ab' / ('b' * 64 + '-a')
+            old.write_bytes(b'x' * 40)
+            recent.write_bytes(b'x' * 20)
+            os.utime(old, (NOW - 3 * cache.GO_MTIME_INTERVAL,) * 2)
+            os.utime(recent, (NOW - 60,) * 2)
+            evidence = root / 'timings.json'
+            evidence.write_text('retained')
+            self.assertEqual(gate.trim_cache(root, floor=50, free=100, now=NOW), 60)
+            self.assertTrue(old.exists())
+            self.assertEqual(gate.trim_cache(root, floor=50, free=40, now=NOW), 20)
+            self.assertFalse(old.exists())
+            self.assertTrue(recent.exists())
+            self.assertEqual(evidence.read_text(), 'retained')
+
     def test_budget_restores_floor_plus_measured_hour_oldest_first(self):
         hour = cache.GO_MTIME_INTERVAL
         found = [(NOW - 3 * hour, 4 * GIB, 'old'), (NOW - 2 * hour, 4 * GIB, 'older-middle'),

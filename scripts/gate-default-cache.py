@@ -6,7 +6,8 @@ usage: scripts/gate-default-cache.py [--dry-run]
 Workers' direct `go test` runs use the default GOCACHE, which nothing else trims.
 On 2026-11-11 it grew to 51 GB (about 10 GB/h) and pushed the host below the
 local gate's disk entry floor, blocking every gate. The local gate calls
-trim_default_cache at entry and exit, beside its own 12 GiB trim_cache.
+trim_default_cache at entry and exit, beside its gate-owned cache's matching
+headroom-based trim_cache.
 
 Budget: keep free disk at least the gate entry floor plus one hour of this
 cache's measured writes, so an hour of ordinary work cannot push the next gate
@@ -88,7 +89,7 @@ def trim_default_cache(floor, disk_root, *, skip=(), dry_run=False, now=None, ca
         if cache is None or not cache.is_dir() or cache.is_symlink():
             return None
         if any(cache.resolve() == Path(other).resolve() for other in skip):
-            return None  # The gate's own cache has its own fixed trim.
+            return None  # The gate-owned cache has already applied this policy.
         if cache.stat().st_dev != Path(disk_root).stat().st_dev:
             return None  # Evicting another filesystem cannot restore the floor.
         free = shutil.disk_usage(disk_root).free

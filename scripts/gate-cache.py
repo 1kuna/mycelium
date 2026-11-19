@@ -132,15 +132,15 @@ def _trim_backups(directory, *, now, limit, count, age):
             remaining -= 1
 
 
-def trim_cache(cache: Path, limit: int = 12 * 1024 ** 3) -> int:
-    """Remove oldest rebuildable Go objects, including during concurrent gates.
+def trim_cache(cache: Path, limit=None, *, floor=0, free=None, now=None) -> int:
+    """Retain warm Go objects while measured disk headroom covers growth.
 
     Keep timing/compatibility records and module downloads. Go transparently
     rebuilds evicted objects. Never scan or trim another project's normal cache.
-    Concurrent writers can grow it again; gate entry and exit enforce the limit
-    on the objects in each scan.
+    The normal budget uses the same measured growth and in-use protection as
+    the default Go cache. An explicit limit is available for targeted cleanup.
     """
-    if limit < 0:
+    if limit is not None and limit < 0:
         raise ValueError('cache limit must be nonnegative')
     if cache.is_symlink():
         raise ValueError('refusing symlinked gate cache')
@@ -158,6 +158,18 @@ def trim_cache(cache: Path, limit: int = 12 * 1024 ** 3) -> int:
             if stat.S_ISREG(info.st_mode):
                 files.append((info.st_mtime, info.st_size, path))
     total = sum(size for _, size, _ in files)
+    if limit is None:
+        spec = importlib.util.spec_from_file_location(
+            'gate_default_cache', Path(__file__).with_name('gate-default-cache.py'))
+        planner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(planner)
+        available = shutil.disk_usage(cache).free if free is None else free
+        budget, removals = planner.plan(files, available, floor,
+                                       time.time() if now is None else now)
+        for size, path in removals:
+            path.unlink(missing_ok=True)
+            total -= size
+        return total
     for _, size, path in sorted(files):
         if total <= limit:
             break

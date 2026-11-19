@@ -266,7 +266,7 @@ def main():
         cache = Path.home() / 'Library/Caches/mycelium/gates/go-build'
         cache.mkdir(parents=True, exist_ok=True)
         # Reclaim rebuildable objects before admission checks disk headroom.
-        trim_cache(cache)
+        trim_cache(cache, floor=capacity.ENTRY_FLOOR)
         trim_default_cache(capacity.ENTRY_FLOOR, repo, skip=(cache,))
         slot = capacity.acquire(repo, mode=args.mode, priority=args.priority, cores=args.cores,
                                 wait=True, after_pid=args.after_pid,
@@ -315,7 +315,7 @@ def main():
             slot.release(stopped=bool(folder) and receipts.confirmed(folder / 'overall-cleanup.json', identity))
             capacity._cache.trim_backups(slot.directory.parent / 'selfheal-backups')
         if cache is not None:
-            trim_cache(cache)
+            trim_cache(cache, floor=capacity.ENTRY_FLOOR)
             trim_default_cache(capacity.ENTRY_FLOOR, repo, skip=(cache,))
         if folder:
             print('local gate receipts:', folder, flush=True)
