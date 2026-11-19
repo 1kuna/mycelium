@@ -187,11 +187,17 @@ func TestWorkerStagingCancellationAndPreemption(t *testing.T) {
 				}
 				a.update(w, reply.Attempts[0], true, false)
 			}
-			select {
-			case <-a.done:
-			case <-time.After(testWaitTimeout):
-				t.Fatal("blocked source retained attempt reservation")
-			}
+			// A copy can finish just after the actor sees it pending. Its
+			// preparation/publication retry is paced by this injected clock.
+			await(t, func() bool {
+				clock.Advance(w.Interval)
+				select {
+				case <-a.done:
+					return true
+				default:
+					return false
+				}
+			})
 			_, _, _, err = a.snapshot()
 			if err != nil {
 				t.Fatal(err)
