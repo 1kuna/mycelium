@@ -344,7 +344,16 @@ print('finished',flush=True)
 	}
 	mark("install_start")
 	installDone := make(chan error, 1)
-	go func() { installDone <- install(); mark("install_return") }()
+	go func() {
+		err := install()
+		mark("install_return")
+		if err == nil && os.Getenv("MYCE_TEST_EXPECT_READY") == "1" {
+			if err = read(); err != nil {
+				err = fmt.Errorf("install returned before API readiness: %w", err)
+			}
+		}
+		installDone <- err
+	}()
 	// Sample user-visible availability and old-process exit independently of
 	// systemctl (Type=simple can return before the listener exists).
 	failed := false

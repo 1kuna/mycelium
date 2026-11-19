@@ -729,9 +729,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		go func() { errs <- q.Run(ctx) }()
 		fmt.Printf("Mycelium queue: http://%s\n", listener.Addr())
 		startupPhase("listener_ready")
-		select {
-		case <-ctx.Done():
-		case err = <-errs:
+		if err = notifyQueueReady(); err == nil {
+			select {
+			case <-ctx.Done():
+			case err = <-errs:
+			}
 		}
 		q.BeginShutdown()
 		stop()

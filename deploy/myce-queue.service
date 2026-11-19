@@ -3,7 +3,8 @@ Description=Mycelium v2 CPU queue
 After=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 WorkingDirectory=%h/.local/share/myce
 PrivateDevices=no
 NoNewPrivileges=yes

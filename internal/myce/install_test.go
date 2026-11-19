@@ -474,6 +474,12 @@ func TestUserUnitLiteralPaths(t *testing.T) {
 		c, _ := PlanInstall(role, "/tmp/home%test", "", "/tmp/nas", "http://queue:7331", "test", Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "dedicated"})
 		c.EnvironmentFile = "/tmp/fleet%test.env"
 		text := c.ServiceText()
+		if role == "queue" && (!strings.Contains(text, "Type=notify\n") || !strings.Contains(text, "NotifyAccess=main\n")) {
+			t.Fatal("queue activation must wait for readiness")
+		}
+		if role == "worker" && strings.Contains(text, "Type=notify\n") {
+			t.Fatal("worker activation contract changed")
+		}
 		for _, path := range []string{c.EnvironmentFile, c.GPUEnvironmentFile()} {
 			if role == "queue" && path == c.GPUEnvironmentFile() {
 				continue

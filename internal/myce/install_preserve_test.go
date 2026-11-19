@@ -397,6 +397,8 @@ func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
 		{"continued notifier", "[Service]\nEnvironment=EXTRA=one \\\n OTHER=two\n", true},
 		{"exec", "[Service]\nExecStart=\nExecStart=/usr/bin/true\n", false},
 		{"user", "[Service]\nUser=other\n", false},
+		{"activation type", "[Service]\nType=simple\n", false},
+		{"notification owner", "[Service]\nNotifyAccess=none\n", false},
 		{"kill mode", "[Service]\nKillMode=process\n", false},
 		{"token", "[Service]\nEnvironment=MYCE_TOKEN=other\n", false},
 		{"quoted token", "[Service]\nEnvironment=EXTRA=one \"MYCE_TOKEN=other\"\n", false},
