@@ -89,9 +89,11 @@ done
 # Go's race runtime otherwise sleeps one second on EVERY helper-process exit.
 # Tests join workers explicitly; keep instrumentation, omit that artificial wait.
 export GORACE=atexit_sleep_ms=0
+# Frozen source folders differ across jobs/checkouts. Trim source paths so
+# identical inputs reuse Go's shared content-addressed build cache there too.
 # Compile parallelism follows affinity/quota and any GOMAXPROCS contract.
 # TestMain fixtures retain private HOME/temp roots and fake inventory/daemons.
-export GOFLAGS=-p=$cores
+export GOFLAGS="-trimpath -p=$cores"
 step() {
   local name=$1
   shift

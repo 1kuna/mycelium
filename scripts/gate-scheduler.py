@@ -155,7 +155,9 @@ def main():
         slots = min(9, slots)
         # Limit aggregate CPU pressure instead of giving every process the
         # entire host. Go compilation within a shard also inherits this budget.
-        environment = dict(os.environ, GOMAXPROCS='1', GOFLAGS='-p=1', GATE_TEST_SLOTS=str(slots))
+        environment = dict(os.environ, GOMAXPROCS='1',
+                           GOFLAGS=(os.environ.get('GOFLAGS', '') + ' -p=1').strip(),
+                           GATE_TEST_SLOTS=str(slots))
 
     def command(entry):
         package, names = entry.split('\t', 1)

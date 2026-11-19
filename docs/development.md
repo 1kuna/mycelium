@@ -33,10 +33,11 @@ when evidence contains mixed packages or C files. Keep this file local with the
 evidence. New scratch directories can instead start with `.` or `_`, which Go
 also skips. Do not delete evidence to make tooling pass.
 
-The local gate trims its dedicated Go build cache to 12 GiB at every entry and
-exit, including overlapping runs. It evicts oldest Go object files only; Go
-rebuilds them on demand. Concurrent compilation can temporarily grow the cache
-between these scans. Module downloads, timing and compatibility records, and
+The local gate retains its dedicated Go build cache while measured free disk
+covers the entry floor plus recent cache growth. Entry and exit scans evict
+only the shortfall, oldest Go object files first, preserving objects inside
+Go's mtime protection interval. There is no fixed cache size cap. Go rebuilds
+evicted objects on demand. Module downloads, timing and compatibility records, and
 custody receipts are retained; symlinked directories are never traversed.
 After affirmative cleanup, successful and failed runs both remove their frozen
 source tree and source/runtime archives. Unconfirmed cleanup retains the tree
@@ -205,7 +206,11 @@ and Python 3 are current laptop prerequisites. Install prerequisites separately:
 the gate runs offline and never downloads tools or modules. Seed dependencies
 with your usual `go mod download` before running a first gate. The gate shares
 Go's normal build and module caches (Go locks them safely across concurrent
-runs); only HOME, TMPDIR and GOPATH point inside an ignored `.gate/run.*`
+runs). Ordinary fleet jobs receive the worker's durable per-host Go build cache;
+the gate preserves that path across HOME isolation. Gate builds use `-trimpath`
+so identical packages reuse content-addressed objects when a later job or
+worktree has a different source directory. Tests still execute with `count=1`;
+cached test results cannot replace a fresh verdict. Only HOME, TMPDIR and GOPATH point inside an ignored `.gate/run.*`
 workspace, which is deleted on exit because it holds only rebuildable test state.
 Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
@@ -470,9 +475,10 @@ or supervisor death retain capacity; exit status alone never releases it. These 
 and recovery after the 2026-11-02/03 saturation incident.
 
 Darwin development uses a gate-owned Go build cache shared across checkouts.
-Only idle gate-owned build objects are automatically evicted above 12 GiB;
-module downloads, compatibility sources and timing history are retained. Linux
-uses persistent guest build/module caches and the same idle eviction policy.
+Cache retention follows measured free disk and recent growth; only old
+rebuildable objects are evicted when headroom is short. Module downloads,
+compatibility sources and timing history are retained. Linux uses persistent
+guest build/module caches with idle eviction based on free disk and growth.
 No other project's cache is trimmed. Qualified hosts use a private
 `gate-capacity.json` memory measurement: native sampled peak plus observed
 available-memory variation as headroom; Linux/both use the larger of native
@@ -484,8 +490,8 @@ A profile-declared Linux need is explicitly provisional until a real four-core
 Linux measurement replaces it. Unqualified hosts retain the initial 22 GiB
 entry value (16 GiB starting reserve plus profile-declared 6 GiB); that fallback
 is not a measured execution envelope. Compressed pages receive no free-memory
-credit. The 12 GiB build-cache ceiling is an initial storage budget;
-`.reports/gate-local.jsonl` records actual growth.
+credit. `.reports/gate-local.jsonl` records actual growth; cache retention has
+no fixed size ceiling.
 
 The guest guardian publishes custody before cache readiness, and channel EOF
 revokes its owned work, including when the host transport dies. Guest cache use

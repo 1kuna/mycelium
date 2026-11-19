@@ -1060,7 +1060,7 @@ sys.exit(m.main())
                 slot = Mock(directory=root / 'lane', owner={})
                 run_folder = None
                 events = []
-                def trim(cache):
+                def trim(cache, **kwargs):
                     events.append('trim')
                 def admit(*args, **kwargs):
                     self.assertEqual(events, ['trim'])

@@ -146,6 +146,7 @@ func FuzzSeeds(f *testing.F) { f.Add("seed"); f.Fuzz(func(t *testing.T, s string
 func Example() { fmt.Println("example"); /* Output: example */ }
 ''')
             env = dict(os.environ, GOMAXPROCS='1', GORACE='atexit_sleep_ms=0',
+                       GOFLAGS='-trimpath -p=1',
                        GATE_TIMING_CACHE=str(root / 'cache'), GATE_TIMING_REPORT=str(root / 'report'))
             # compile_packages resolves cwd via go list; run it as a small
             # subprocess so this unittest never changes its own process cwd.
