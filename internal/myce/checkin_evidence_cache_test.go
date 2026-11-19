@@ -35,6 +35,8 @@ func largeRetainedHistoryFixture(t testing.TB, retained int) (*Queue, []Machine)
 // including the next pass after new evidence and changed inventory identity.
 // The guarded fixture now charges cold CPU work its small startup seed. These
 // digests retain every other admission field and all 660 decision records.
+// Constrained host peaks also floor submitter hints: after the 200 GiB update,
+// 108 hinted GPU target records retain that need and fail host-memory admission.
 func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 	q, _ := largeRetainedHistoryFixture(t, incidentRetainedJobs)
 	type decision struct {
@@ -96,9 +98,15 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 			if d.Oversized {
 				oversized++
 			}
+			if stage == "new evidence" && d.Envelope != nil && d.Envelope.Basis == "hint" {
+				if d.Needs.HostMemoryGB != 200 || d.Envelope.HostGB != 200 {
+					t.Errorf("%s/%s: hint hid the 200 GiB constrained host peak: needs=%g envelope=%g", d.Job, d.Target, d.Needs.HostMemoryGB, d.Envelope.HostGB)
+				}
+			}
 		}
 		t.Logf("%s: %d decisions, %d oversized; digest %s", stage, len(decisions), oversized, got)
 		if got != want {
+			t.Logf("%s admission records: %s", stage, data)
 			t.Errorf("%s decision digest %s, want %s", stage, got, want)
 		}
 	}
@@ -121,7 +129,7 @@ func TestCheckinRetainedEvidenceDecisionEquivalence(t *testing.T) {
 		}
 	}
 	q.memoryObservationIndex = nil
-	compare("new evidence", "b200eb7ead08eaaa0d070e69f17ef3130d5e83c997e8ce7efbb2002c98bf54ac")
+	compare("new evidence", "96a82003362a1930af5c043b17721a6ac0fc76309a256756615847e8e18b560b")
 	for _, m := range q.s.Machines {
 		m.ExtensionFingerprint, m.CPUExtensionFingerprint = "changed-identity", "changed-identity"
 		for i := range m.Devices {
