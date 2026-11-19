@@ -150,6 +150,7 @@ func TestFleetAuthorizationQueueDiagnostics(t *testing.T) {
 		operation, session string
 		revision           string
 		unready, cancelled bool
+		stopping           bool
 	}{
 		{name: "authorized", cause: "ready", operation: i.Operation, session: i.Session},
 		{name: "operation", cause: "HTTP 409 code=fleet_instruction_stale", operation: "private-value", session: i.Session},
@@ -157,6 +158,7 @@ func TestFleetAuthorizationQueueDiagnostics(t *testing.T) {
 		{name: "session", cause: "HTTP 409 code=fleet_instruction_stale", operation: i.Operation, session: "private-value"},
 		{name: "unready", cause: "HTTP 409 code=fleet_instruction_stale", operation: i.Operation, session: i.Session, unready: true},
 		{name: "cancelled", cause: "ready", operation: i.Operation, session: i.Session, cancelled: true},
+		{name: "stopping", cause: "HTTP 503 code=queue_stopping", operation: i.Operation, session: i.Session, stopping: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs testLogBuffer
@@ -164,6 +166,8 @@ func TestFleetAuthorizationQueueDiagnostics(t *testing.T) {
 			log.SetOutput(&logs)
 			defer log.SetOutput(old)
 			q.s.Machines[i.Machine].Fleet.RunnerSmoke = !tc.unready
+			q.stopping.Store(tc.stopping)
+			defer q.stopping.Store(false)
 			revision := tc.revision
 			if revision == "" {
 				revision = strconv.Itoa(i.Revision)

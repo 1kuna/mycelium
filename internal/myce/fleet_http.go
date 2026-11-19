@@ -74,6 +74,9 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		// Keep the decision and proof in one read section; encode after unlock.
 		unlock := requestReadLock(r.Context(), &a.Queue.mu)
 		err := func() error {
+			if a.Queue.stopping.Load() {
+				return queueStopping()
+			}
 			u := a.Queue.s.FleetUpgrade
 			revision, e := strconv.Atoi(v.Get("revision"))
 			if e != nil || u == nil || revision != u.Revision {
