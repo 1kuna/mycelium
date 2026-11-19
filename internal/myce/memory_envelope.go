@@ -778,11 +778,18 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	estimate := q.memoryEstimateForState(j, m, key, configuration, false)
-	if estimate.host != nil {
+	if estimate.host != nil && !estimate.uncalibrated {
 		return estimate
 	}
 	prior := q.memoryEstimateForState(j, m, key, configuration, true)
 	if prior.host == nil || prior.source == spentMemoryExploration {
+		return estimate
+	}
+	// Unknown transfer error offers physical headroom, not measured demand.
+	// It must not hide retained exact-target recovery evidence. Keep other
+	// transfers on their existing path; only a locally measured prior can
+	// replace a nonempty, uncalibrated estimate.
+	if estimate.host != nil && (!prior.exact || prior.uncalibrated || prior.deviceUncalibrated) {
 		return estimate
 	}
 	// Reserve observed demand plus the measured overshoot/sampling error.
