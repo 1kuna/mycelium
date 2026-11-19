@@ -80,6 +80,14 @@ func TestQueueInstalledCutover(t *testing.T) {
 		v.MemoryRecordedAt = now
 		q.s.WorkObservations[k] = v
 	}
+	retainedShape := os.Getenv("MYCE_TEST_RETAINED_SHAPE") == "1"
+	paddingKiB, err := strconv.Atoi(envTestDefault("MYCE_TEST_RECORD_PADDING_KIB", "0"))
+	if err != nil || paddingKiB < 0 || paddingKiB > 8 {
+		t.Fatal("record padding must be between 0 and 8 KiB")
+	}
+	if retainedShape {
+		shapeRetainedInstallFixture(t, q, now, paddingKiB)
+	}
 	for i := range workers {
 		workers[i].HostHealth = &HostHealth{DrainReason: "host_memory_pressure"}
 		q.s.Machines[workers[i].ID].LastSeen = now
@@ -92,7 +100,14 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if err := q.db.QueryRow("PRAGMA database_list").Scan(&seq, &dbname, &db); err != nil {
 		t.Fatal(err)
 	}
-	jobs, history := len(q.s.Jobs), len(q.s.WorkObservations)
+	jobs, history, submissions := len(q.s.Jobs), len(q.s.WorkObservations), len(q.s.Submissions)
+	var stateBytes int64
+	if err := q.db.QueryRow("SELECT COALESCE(SUM(length(data)),0) FROM queue_state").Scan(&stateBytes); err != nil {
+		t.Fatal(err)
+	}
+	if retainedShape {
+		seedRetainedInstallLogs(t, q)
+	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +125,15 @@ func TestQueueInstalledCutover(t *testing.T) {
 	c.EnvironmentFile = filepath.Join(root, "synthetic.env")
 	c.RequireMountedNAS = false
 	c.ModelCatalog, c.EnvironmentCatalog = "", ""
+	if retainedShape {
+		c.LogRetention = 7 * 24 * time.Hour
+	}
 	// Bound the manager-launched process as well as the harness. Fresh queues
 	// have no CPU/memory limit; these explicit test limits fit the fleet job.
 	c.CPUQuota, c.MemoryMax = "200%", "1G"
+	if paddingKiB > 0 {
+		c.MemoryMax = "4G"
+	} // Explicit footprint sweep; its fleet profile must allow this.
 	if quota := os.Getenv("MYCE_TEST_QUEUE_CPU_QUOTA"); quota != "" {
 		c.CPUQuota = quota
 	}
@@ -199,7 +220,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 		t.Fatal(err)
 	} // Bootstrap is outside the measured trial.
 	client := Client{URL: c.Queue, Token: "synthetic", HTTP: &http.Client{Timeout: time.Second}, singleAttempt: true}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	read := func() error { var j Job; return client.Call(ctx, "GET", "/api/jobs/running-0?view=wait", nil, &j) }
 	for read() != nil {
@@ -290,7 +311,7 @@ def sent(self,*args,**kwargs):
     if args[1].startswith('/api/wait'): print('sent',flush=True)
 http.client.HTTPConnection.connect=connected
 http.client.HTTPConnection.request=sent
-j=Client(sys.argv[1],token='synthetic',timeout=60).wait('running-0',timeout=60)
+j=Client(sys.argv[1],token='synthetic',timeout=240).wait('running-0',timeout=240)
 assert j['state']=='succeeded', j
 print('finished',flush=True)
 `, c.Queue)
@@ -480,6 +501,26 @@ print('finished',flush=True)
 	if len(restored.s.Jobs) != jobs || len(restored.s.WorkObservations) != history {
 		t.Fatalf("record loss/duplication: jobs=%d history=%d", len(restored.s.Jobs), len(restored.s.WorkObservations))
 	}
+	if len(restored.s.Submissions) != submissions {
+		t.Fatal("keyed answer loss or duplication")
+	}
+	for _, r := range restored.s.Submissions {
+		if r.Job != restored.s.Jobs[r.JobID] {
+			t.Fatal("keyed answer identity changed")
+		}
+	}
+	if retainedShape {
+		var fresh, expired int
+		if err := restored.db.QueryRow("SELECT count(*) FROM logs WHERE text='synthetic-fresh-cutover'").Scan(&fresh); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.db.QueryRow("SELECT count(*) FROM logs WHERE text='synthetic-expired-cutover'").Scan(&expired); err != nil {
+			t.Fatal(err)
+		}
+		if fresh != 6201 || expired != 0 {
+			t.Fatalf("log retention or preservation changed: fresh=%d expired=%d", fresh, expired)
+		}
+	}
 	for i, m := range workers {
 		j := restored.s.Jobs[fmt.Sprintf("running-%d", i)]
 		want := "running"
@@ -495,7 +536,7 @@ print('finished',flush=True)
 		t.Fatal(err)
 	}
 	mu.Lock()
-	result := map[string]any{"marks_ns": marks, "jobs": jobs, "history": history, "workers": len(workers), "cpu_quota": c.CPUQuota, "preserved": true}
+	result := map[string]any{"marks_ns": marks, "jobs": jobs, "history": history, "submissions": submissions, "state_bytes": stateBytes, "retained_shape": retainedShape, "padding_kib": paddingKiB, "log_retention_hours": c.LogRetention.Hours(), "workers": len(workers), "cpu_quota": c.CPUQuota, "preserved": true}
 	data, err = json.Marshal(result)
 	mu.Unlock()
 	if err != nil {
@@ -504,6 +545,75 @@ print('finished',flush=True)
 	t.Logf("installed_cutover=%s", data)
 	for _, line := range strings.Split(strings.TrimSpace(string(managerEvents)), "\n") {
 		t.Logf("installed_manager=%s", line)
+	}
+}
+
+func envTestDefault(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// Match known production dimensions without reading production records. The
+// aged fraction, keyed coverage and optional padding are explicit stress axes,
+// not claims about production's unmeasured age/byte distributions.
+func shapeRetainedInstallFixture(t *testing.T, q *Queue, now time.Time, paddingKiB int) {
+	t.Helper()
+	for i := 1400; i < 4464; i++ {
+		v := q.s.WorkObservations[strconv.Itoa(i%1400)]
+		v.Key.Configuration = fmt.Sprintf("synthetic-shape-%d", i)
+		q.s.WorkObservations[strconv.Itoa(i)] = v
+	}
+	q.s.Submissions = map[string]*submissionRecord{}
+	for _, j := range q.s.Jobs {
+		if terminal(j.State) {
+			i, err := strconv.Atoi(strings.TrimPrefix(j.ID, "retained-"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i%2 == 0 {
+				old := now.Add(-8 * 24 * time.Hour)
+				j.FinishedAt = &old
+				j.StartedAt = &old
+			}
+			if paddingKiB > 0 {
+				j.Reason = "synthetic record-size sweep " + strings.Repeat("p", paddingKiB*1024)
+			}
+		}
+		j.Spec.SubmissionKey = "cutover-" + j.ID
+		fingerprint, err := submissionFingerprint(j.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: j.Spec.Project, Key: j.Spec.SubmissionKey, Fingerprint: fingerprint, JobID: j.ID, Job: j, Created: &now}
+	}
+}
+
+func seedRetainedInstallLogs(t *testing.T, q *Queue) {
+	t.Helper()
+	tx, err := q.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, j := range q.s.Jobs {
+		if !terminal(j.State) {
+			continue
+		}
+		text := "synthetic-fresh-cutover"
+		if q.clock.Now().Sub(*j.FinishedAt) > 7*24*time.Hour {
+			text = "synthetic-expired-cutover"
+		}
+		if _, err := tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", j.ID, j.Attempt, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec("INSERT INTO logs(job,attempt,text) VALUES('running-0',1,'synthetic-fresh-cutover')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
 

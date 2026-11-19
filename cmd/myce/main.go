@@ -635,16 +635,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
+		startupPhase("catalogs_and_host_policy")
 		if err = q.ConfigureLogRetention(*logRetention); err != nil {
 			return err
 		}
+		startupPhase("log_retention")
 		if err = q.ConfigureUploadSpool(*uploadSpoolDir, *uploadSpoolBytes); err != nil {
 			return err
 		}
+		startupPhase("upload_spool")
 		if err = q.ConfigureEnvironments(ec); err != nil {
 			return err
 		}
-		startupPhase("storage_and_environments")
+		startupPhase("environments")
 		if err = q.ConfigureModels(mc); err != nil {
 			return err
 		}
