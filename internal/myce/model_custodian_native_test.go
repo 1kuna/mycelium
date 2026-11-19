@@ -3,6 +3,7 @@ package myce
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -46,7 +47,8 @@ func configureNativeModel(t *testing.T, q *Queue, c *ServiceConfig) {
 
 // This mode shares the existing native-manager harness and its two real worker
 // images. The queue HTTP response stays open while the manager stops the old
-// service and starts the replacement. No model or service membership is faked.
+// service and starts the replacement. Engine processes and service membership
+// are real; GPU inventory is synthetic.
 func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, queue, next string, start, stop func(), writeImage func(string)) {
 	t.Helper()
 	dir := custodianDir(c.State)
@@ -65,7 +67,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 			if runtime.GOOS == "linux" {
 				_ = exec.Command("systemctl", "--user", "stop", custodianUnit(r.ID)).Run()
 			} else {
-				_ = exec.Command("launchctl", "bootout", custodianDomain()+"/"+custodianLabel(r.ID)).Run()
+				_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d/local.mycelium.attempt.%s", os.Getuid(), r.ID)).Run()
 			}
 		}
 	}()
