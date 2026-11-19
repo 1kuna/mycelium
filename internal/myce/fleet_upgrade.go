@@ -351,9 +351,12 @@ func (q *Queue) fleetPolicyMatches(h *fleetUpgradeHost) bool {
 // fleetStop records an unhealthy or refused step and stops advancing. The
 // host keeps its drain; the operator fixes forward and reruns.
 func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
-	if probe := q.s.Jobs[h.StartProbe]; probe != nil && !terminal(probe.State) {
-		q.cancelJob(probe)
+	for _, host := range q.s.FleetUpgrade.Hosts {
+		if probe := q.s.Jobs[host.StartProbe]; probe != nil && !terminal(probe.State) {
+			q.cancelJob(probe)
+		}
 	}
+	h.Outcome, h.DeferredReason = "", ""
 	// Start acceptance uses ordinary admission, so an operation-owned drain
 	// was resumed. Restore it if still ours and safe; never stop customer work
 	// or override an operator's policy or a newly opened production pipeline.
@@ -535,7 +538,7 @@ func (q *Queue) maintainFleetUpgrade() {
 			// One return pass in the same operation. Reuse the exact probe and
 			// runtime identity; never reinstall, redrain, or erase acceptance debt.
 			for _, deferred := range u.Hosts {
-				if deferred.Phase == "deferred" && !deferred.StartRevisited {
+				if deferred.Phase == "deferred" && (!deferred.StartRevisited || q.s.Jobs[deferred.StartProbe].Attempt > 0) {
 					h = deferred
 					h.StartRevisited = true
 					h.Phase, h.StepAt = "worker_start", q.clock.Now()
@@ -630,6 +633,8 @@ func (q *Queue) maintainFleetUpgrade() {
 // Finishing with deferred hosts is partial acceptance, not an unhealthy rollout.
 // Cancel only this operation's never-assigned probes; retain binary, policy,
 // runtime identity and WorkerDone=false so a later operation retries the debt.
+// An assigned probe re-enters verification above even if it was already revisited:
+// admission racing the final pass must not cancel an execution as "deferred".
 func (q *Queue) fleetFinishDeferred(u *fleetUpgrade) {
 	for _, h := range u.Hosts {
 		if h.Phase == "deferred" {

@@ -276,6 +276,7 @@ func TestFleetUpgradeDeferredProbeStillStopsOnFailure(t *testing.T) {
 	for _, mode := range []string{"started-failed", "health", "session", "maintenance"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _, h := fleetAtStartProbe(t, 0)
+			phaseBeforeFailure := q.s.FleetUpgrade.Hosts[1].Phase
 			switch mode {
 			case "started-failed":
 				q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
@@ -287,6 +288,7 @@ func TestFleetUpgradeDeferredProbeStillStopsOnFailure(t *testing.T) {
 				if err := q.Started(result(j, true)); err != nil {
 					t.Fatal(err)
 				}
+				phaseBeforeFailure = q.s.FleetUpgrade.Hosts[1].Phase
 				finish(t, q, j, false)
 			case "health":
 				q.s.Machines[h.Machine].Fleet.ServiceHealthy = false
@@ -298,7 +300,7 @@ func TestFleetUpgradeDeferredProbeStillStopsOnFailure(t *testing.T) {
 				}
 			}
 			fleetTick(t, q)
-			if q.s.FleetUpgrade.State != "stopped" || h.Failure == "" || h.WorkerDone || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
+			if q.s.FleetUpgrade.State != "stopped" || h.Failure == "" || h.WorkerDone || q.s.FleetUpgrade.Hosts[1].Phase != phaseBeforeFailure {
 				t.Fatalf("deferred failure advanced rollout: %+v", q.fleetUpgradeStatus())
 			}
 		})
@@ -359,5 +361,31 @@ func TestFleetUpgradeDeferredProbePersistsAcrossQueueRestart(t *testing.T) {
 	h = restarted.s.FleetUpgrade.Hosts[0]
 	if h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.DeferredReason == "" || h.StartProbe != probe || h.StartIdentity != identity || h.WorkerDone || h.StartRevisited || restarted.s.FleetUpgrade.Operation != operation || len(restarted.s.Jobs) != 1 {
 		t.Fatalf("restart lost deferred fences or return debt: %+v", h)
+	}
+}
+
+func TestFleetUpgradeDeferredProbeAssignedAtCompletionStillNeedsProof(t *testing.T) {
+	q, _, h := fleetAtStartProbe(t, 0)
+	// Replay the boundary after one return pass deferred this host, while a
+	// different deferred host was still being verified. Ordinary admission
+	// can assign this probe before the final completion transaction.
+	h.StartRevisited = true
+	q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
+	check(t, q, *q.s.Machines[h.Machine], nil)
+	if job(t, q, h.StartProbe).Attempt != 1 {
+		t.Fatal("probe not assigned at completion boundary")
+	}
+	for _, other := range q.s.FleetUpgrade.Hosts {
+		if other != h {
+			other.Phase = "complete"
+		}
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.State != "running" || h.Phase != "worker_start" || cancelled(job(t, q, h.StartProbe)) {
+		t.Fatal("assigned probe was cancelled or accepted as a capacity deferral", h)
+	}
+	fleetCompleteStartProbe(t, q)
+	if q.s.FleetUpgrade.State != "complete" || !h.WorkerDone || h.Outcome != "" {
+		t.Fatal("late-admitted probe did not finish its proof", h)
 	}
 }
