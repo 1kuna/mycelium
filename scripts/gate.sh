@@ -112,7 +112,13 @@ fi
 if [[ -f scripts/test-gate-reconcile.py ]]; then
   step gate-reconcile-regressions python3 scripts/test-gate-reconcile.py
 fi
-step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
+if [[ $mode == full ]]; then
+  # The real compiled-image boundary includes intentional races and a panic;
+  # quick retains the inexpensive selector, custody and watchdog regressions.
+  step gate-scheduler-regressions env GATE_TEST_BINARY_INTEGRATION=1 python3 scripts/test-gate-scheduler.py
+else
+  step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
+fi
 if [[ -f scripts/test-gate-shards.py ]]; then
   step gate-shards-regressions python3 scripts/test-gate-shards.py
 fi
@@ -138,6 +144,7 @@ done < <("$scratch/bin/myce" release build-targets)
 # gate, devTestBinary still builds its own image for ordinary go test users.
 step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
 export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
+export GATE_TEST_BINARY_DIR="$scratch/bin/packages"
 if [[ $mode == full ]]; then
   step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must
