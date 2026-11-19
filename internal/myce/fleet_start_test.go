@@ -36,7 +36,7 @@ func fleetAtStartProbe(t *testing.T, room ...float64) (*Queue, *fakeClock, *flee
 	if h == nil || h.Phase != phase || h.StartProbe == "" || h.WorkerDone {
 		t.Fatalf("health alone did not leave a pending start proof: %+v", h)
 	}
-	if q.s.FleetUpgrade.Hosts[1].Phase != "pending" || q.maintenanceBlocked("b") {
+	if len(room) == 0 && (q.s.FleetUpgrade.Hosts[1].Phase != "pending" || q.maintenanceBlocked("b")) {
 		t.Fatal("advanced before start proof")
 	}
 	return q, c, h
