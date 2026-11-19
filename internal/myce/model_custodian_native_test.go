@@ -135,12 +135,19 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 	stoppedAt := q.clock.Now()
 	writeImage(next)
 	start()
+	var adoptionObservation string
+	defer func() {
+		if t.Failed() {
+			t.Log("replacement adoption observation:", adoptionObservation)
+		}
+	}()
 	await(t, func() bool {
 		image, _ := os.ReadFile(filepath.Join(c.State, "worker-image"))
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		s := q.s.ModelSlots[slotKey(c.Name, "test")]
 		worker := q.s.Machines[c.Name]
+		adoptionObservation = fmt.Sprintf("image=%q worker=%+v slot=%+v expected_execution=%+v expected_url=%q expected_custodian=%s", image, worker, s, before.Execution, before.URL, before.ID)
 		return string(image) == "my55-next" && worker != nil && worker.LastSeen.After(stoppedAt) && s != nil && s.State == "ready" && s.Attempt == before.Execution.Attempt && s.Session == before.Execution.Session && s.URL == before.URL && validModelCustody(s.Custody) && s.Custody.ID == before.ID
 	})
 	var after modelCustodianSnapshot
