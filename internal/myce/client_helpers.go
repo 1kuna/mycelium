@@ -44,7 +44,7 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 		}
 		var transport *url.Error
 		var api *HTTPError
-		retry := errors.As(err, &transport) && !IsTLSIdentityError(err) || errors.As(err, &api) && (api.Status == 429 || api.Status == 503)
+		retry := !IsTLSIdentityError(err) && (errors.As(err, &transport) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) || errors.As(err, &api) && (api.Status == 429 || api.Status == 503)
 		if spec.SubmissionKey == "" || !retry || ctx.Err() != nil {
 			return nil, err
 		}

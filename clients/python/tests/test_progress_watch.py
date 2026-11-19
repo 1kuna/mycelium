@@ -35,7 +35,7 @@ class ProgressWatchTests(unittest.TestCase):
             return Reply({"ok": True})
         client._urlopen = respond
         try:
-            return client._call("GET", path, retry=False), clock.now, pings
+            return client._call("GET", path), clock.now, pings
         finally:
             finished.set()
 

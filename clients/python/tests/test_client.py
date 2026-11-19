@@ -191,9 +191,10 @@ class ClientTests(unittest.TestCase):
         client = Client(token="test-only")
         with patch.object(client, "_urlopen", side_effect=lambda *_, **__: bodies.pop(0)), patch("mycelium.client.time.sleep"):
             self.assertEqual(client.wait("fixture")["state"], "succeeded")
-        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: Reply(short, len(short) + 2)):
-            with self.assertRaises(IncompleteReplyError):
-                client.get("fixture")
+        # Ordinary reads now share wait's cutover recovery policy.
+        bodies = [Dropped(), Reply(short, len(short) + 2), Reply(b'{"id":"fixture","state":"succeeded"}')]
+        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: bodies.pop(0)), patch("mycelium.client.time.sleep"):
+            self.assertEqual(client.get("fixture")["state"], "succeeded")
 
     def test_job_reply_unauthorized_truncated_body_not_retried(self):
         class Dropped(io.BytesIO):

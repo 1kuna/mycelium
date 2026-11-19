@@ -73,6 +73,11 @@ by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
 
+Status reads, waits and keyed submissions ride through a queue restart within
+the caller's timeout or cancellation budget. Keep the same submission key when
+retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
+identity refusals still stop immediately.
+
 ## 3. A reusable entry
 
 To send your project's code, its inputs and environment, give the work an entry.

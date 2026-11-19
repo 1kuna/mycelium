@@ -21,6 +21,108 @@ type queueRecordReader interface {
 	Query(string, ...any) (*sql.Rows, error)
 }
 
+// Decode each logical record once. Rebuilding one giant JSON document scanned
+// retained jobs repeatedly and copied live keyed answers into it a second time.
+// Retain the original bytes as the writer's comparison base: disk format and
+// adjacent-release compatibility are unchanged.
+func (q *Queue) readStartupState(marker []byte) error {
+	if !bytes.Equal(marker, normalizedQueueMarker) {
+		return fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v3")
+	}
+	records, err := readQueueRecords(q.db)
+	if err != nil {
+		return err
+	}
+	base := records["state"]
+	if len(base) == 0 || bytes.Equal(bytes.TrimSpace(base), []byte("null")) {
+		return fmt.Errorf("queue state fragment missing")
+	}
+	if err := json.Unmarshal(base, &q.s); err != nil {
+		return err
+	}
+	q.s.Jobs, q.s.Machines = map[string]*Job{}, map[string]*Machine{}
+	events := map[int]HealthAlert{}
+	for key, data := range records {
+		if key == "state" {
+			continue
+		}
+		group, id, ok := strings.Cut(key, "/")
+		if !ok {
+			return fmt.Errorf("unknown queue state fragment")
+		}
+		switch group {
+		case "jobs":
+			data, err = expandJobRecord(data)
+			if err == nil {
+				err = decodeQueueRecord(q.s.Jobs, id, data)
+			}
+		case "machines":
+			err = decodeQueueRecord(q.s.Machines, id, data)
+		case "submissions":
+			if q.s.Submissions == nil {
+				q.s.Submissions = map[string]*submissionRecord{}
+			}
+			err = decodeQueueRecord(q.s.Submissions, id, data)
+		case "extensions":
+			if q.s.Extensions == nil {
+				q.s.Extensions = map[string]Extension{}
+			}
+			err = decodeQueueRecord(q.s.Extensions, id, data)
+		case "work_observations":
+			if q.s.WorkObservations == nil {
+				q.s.WorkObservations = map[string]WorkObservation{}
+			}
+			err = decodeQueueRecord(q.s.WorkObservations, id, data)
+		case "storage_observations":
+			if q.s.StorageObservations == nil {
+				q.s.StorageObservations = map[string]StorageObservation{}
+			}
+			err = decodeQueueRecord(q.s.StorageObservations, id, data)
+		case "external_memory":
+			if q.s.ExternalMemory == nil {
+				q.s.ExternalMemory = map[string]*externalMemoryRing{}
+			}
+			err = decodeQueueRecord(q.s.ExternalMemory, id, data)
+		case "health_events":
+			index, e := strconv.Atoi(id)
+			if e != nil || index < 0 {
+				return fmt.Errorf("invalid health evidence index")
+			}
+			err = decodeQueueRecord(events, index, data)
+		default:
+			return fmt.Errorf("unknown queue state fragment")
+		}
+		if err != nil {
+			return fmt.Errorf("decode queue fragment %s: %w", group, err)
+		}
+	}
+	if len(events) > 0 {
+		q.s.Health.Events = make([]HealthAlert, len(events))
+		for index, event := range events {
+			if index >= len(events) {
+				return fmt.Errorf("invalid health evidence index")
+			}
+			q.s.Health.Events[index] = event
+		}
+	}
+	for _, record := range q.s.Submissions {
+		if record != nil && record.Job == nil {
+			record.Job = q.s.Jobs[record.JobID]
+		}
+	}
+	q.persisted = records
+	return nil
+}
+
+func decodeQueueRecord[K comparable, V any](records map[K]V, key K, data []byte) error {
+	var value V
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	records[key] = value
+	return nil
+}
+
 func readQueueState(db queueRecordReader, data []byte) ([]byte, error) {
 	if !bytes.Equal(data, normalizedQueueMarker) {
 		return nil, fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v3")
@@ -304,21 +406,11 @@ func (q *Queue) persistState(tx *sql.Tx, measured *queuePersistenceTiming) (*que
 }
 
 func (q *Queue) loadPersistedState() error {
-	var marker []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&marker); err == sql.ErrNoRows {
+	if q.persisted == nil {
 		return nil
-	} else if err != nil {
-		return err
 	}
-	if !bytes.Equal(marker, normalizedQueueMarker) {
-		return fmt.Errorf("unsupported queue persistence format")
-	}
-	records, err := readQueueRecords(q.db)
-	if err != nil {
-		return err
-	}
-	q.persisted = records
-	q.persistedStateFields, err = persistenceFields(records["state"], q.persistencePageBytes)
+	var err error
+	q.persistedStateFields, err = persistenceFields(q.persisted["state"], q.persistencePageBytes)
 	if err != nil {
 		return err
 	}

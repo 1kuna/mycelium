@@ -13,6 +13,43 @@ import (
 	"time"
 )
 
+// The startup fast path must reconstruct exactly the state read by the
+// adjacent-release document decoder, including keyed answers and split fields.
+func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
+	q, _ := candidateCostFixture(t)
+	s := cpuSpec(1, 1)
+	s.SubmissionKey = "cutover-key"
+	if _, err := q.Submit(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error {
+		q.appendHealthAlert(HealthAlert{Kind: "storage_unavailable", Store: "synthetic", At: q.clock.Now()})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readQueueState(q.db, normalizedQueueMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected state
+	if err := json.Unmarshal(data, &expected); err != nil {
+		t.Fatal(err)
+	}
+	q.s = state{}
+	if err := q.readStartupState(normalizedQueueMarker); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(expected, q.s) {
+		t.Fatal("record decoding changed the durable state")
+	}
+	for _, record := range q.s.Submissions {
+		if record.Job != q.s.Jobs[record.JobID] {
+			t.Fatal("keyed answer did not reuse committed job")
+		}
+	}
+}
+
 func TestQueuePersistenceRetiredDockerJob(t *testing.T) {
 	q, clock := fixture(t)
 	// An actual pre-retirement job row, not a new submission: validation must

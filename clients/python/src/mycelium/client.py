@@ -333,6 +333,8 @@ class Client:
 
     @staticmethod
     def _retryable(error: Exception, policy: str) -> bool:
+        if isinstance(error, QueueStalledError):
+            return False
         cause = error.reason if isinstance(error, URLError) else error
         if isinstance(cause, ssl.SSLError):
             # Only known broken-record/connection failures are recoverable.
@@ -351,7 +353,7 @@ class Client:
             if policy == "wait":
                 return error.code != "job_reply_invalid" and (error.status in {408, 429} or error.status >= 500)
             return error.status in {429, 503} and error.code != "file_blob_unavailable"
-        return policy in {"keyed", "upload", "wait"}
+        return policy in {"read", "keyed", "upload", "wait"}
 
     def _pause(self, pace: Pace, *, end: float | None = None,
                event: float | None = None, error: Exception | None = None,
@@ -417,7 +419,8 @@ class Client:
         def attempt(remaining: float | None) -> Any:
             def run() -> Any:
                 with self._open_request(request, timeout=remaining) as response:
-                    return _read_reply(response) if raw else json.load(response)
+                    reply = _read_reply(response)
+                    return reply if raw else json.loads(reply)
             return self._watched(method, path, run)
         return self._request(attempt, policy="read" if retry and method in {"GET", "HEAD"} else "none", end=end)
 
@@ -506,17 +509,21 @@ class Client:
         # extension readers keep theirs. A label copied from a Job reply is replaced.
         if spec.get("authoring_origin") not in _READER_ORIGINS:
             spec["authoring_origin"] = "python"
-        options = {} if timeout is None else {"timeout": timeout}
-        try:
-            return self._call("POST", "/api/jobs", spec, **options)
-        except APIError as error:
-            # A queue older than the python label rejects it before creating
-            # anything; it records the submission as api instead.
-            if (spec["authoring_origin"] != "python" or error.code != "job_execution_invalid"
-                    or "authoring_origin" not in error.body):
-                raise
-            del spec["authoring_origin"]
-            return self._call("POST", "/api/jobs", spec, **options)
+        budget = self.timeout if timeout is None else timeout
+        end = None if budget is None else self._clock.monotonic() + budget
+        def attempt(remaining):
+            try:
+                return self._call("POST", "/api/jobs", spec, timeout=remaining)
+            except APIError as error:
+                # The previous queue may reject the label before creating work.
+                if (spec.get("authoring_origin") != "python" or error.code != "job_execution_invalid"
+                        or "authoring_origin" not in error.body):
+                    raise
+                del spec["authoring_origin"]
+                remaining = None if end is None else max(0, end - self._clock.monotonic())
+                return self._call("POST", "/api/jobs", spec, timeout=remaining)
+        return self._request(attempt, policy="keyed" if spec.get("submission_key") else "none", end=end,
+                             expired=lambda: TimeoutError("timed out submitting keyed job; retry the same key"))
 
     def submit_yaml(self, source: str | Path, *, timeout: float | None = None) -> dict[str, Any]:
         """Load YAML safely. Pass Path for a file, str for YAML text."""
@@ -541,10 +548,7 @@ class Client:
             raise ValueError("submit_and_wait requires submission_key")
         spec = _normalize(job)
         end = None if timeout is None else self._clock.monotonic() + timeout
-        submitted = self._request(
-            lambda remaining: self.submit(spec) if remaining is None else self.submit(spec, timeout=remaining),
-            policy="keyed", end=end,
-            expired=lambda: TimeoutError("timed out submitting keyed job; retry the same key"))
+        submitted = self.submit(spec, timeout=timeout)
         remaining = None if end is None else max(0, end - self._clock.monotonic())
         return self.wait(submitted["id"], timeout=remaining)
 
