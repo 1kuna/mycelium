@@ -156,8 +156,8 @@ done < <("$scratch/bin/myce" release build-targets)
 # gate, devTestBinary still builds its own image for ordinary go test users.
 step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
 export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
-export GATE_TEST_BINARY_DIR="$scratch/bin/packages"
 if [[ $mode == full ]]; then
+  export GATE_TEST_BINARY_DIR="$scratch/bin/packages"
   step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must
   # already be local/cached; this gate remains offline.
