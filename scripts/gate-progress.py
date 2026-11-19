@@ -158,6 +158,7 @@ def run(label, command, cache, report, clock=time.monotonic):
             private = temporary / 'package.test'
             shutil.copy2(image, private)
             command[6] = str(private)
+            child_env['PWD'] = directory
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=child_env, cwd=directory)
     status = 1

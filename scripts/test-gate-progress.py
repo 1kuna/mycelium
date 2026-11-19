@@ -155,6 +155,7 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(record['active_tests'], ['TestBlocked'])
             self.assertEqual(launched[:6], ['go', 'tool', 'test2json', '-t', '-p', 'fixture/pkg'])
             self.assertEqual(self.launched_directory, str(root))
+            self.assertEqual(self.launched_environment['PWD'], str(root))
             self.assertNotEqual(launched[6], str(image))
             self.assertFalse(Path(launched[6]).exists())
             self.assertEqual(image.read_bytes(), b'compiled race test image')

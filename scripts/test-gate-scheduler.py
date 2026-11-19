@@ -133,6 +133,7 @@ class SchedulerTests(unittest.TestCase):
 import ("fmt"; "os"; "testing")
 func TestPass(t *testing.T) { t.Run("child", func(t *testing.T) {
  if _, err := os.ReadFile("fixture.txt"); err != nil { t.Fatal(err) }
+ cwd, err := os.Getwd(); if err != nil || os.Getenv("PWD") != cwd { t.Fatal("package PWD", cwd, err) }
 }) }
 func TestFail(t *testing.T) { t.Fatal("expected fixture failure") }
 func TestExitZero(t *testing.T) { os.Exit(0) }
