@@ -159,19 +159,30 @@ print(json.dumps(slot.owner),flush=True);signal.pause()
                     'm=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ); f.close(); '
                     'os.environ.clear(); print("ready",flush=True); signal.pause()',
                     str(scratch / 'held')], cwd='/', stdout=subprocess.PIPE, text=True)
+                check_output = subprocess.check_output
+                def fixture_inventory(command, *args, **kwargs):
+                    output = check_output(command, *args, **kwargs)
+                    if command[:2] == ['ps', 'eww']:
+                        # Exercise real ownership and mapped-file inspection on
+                        # our fixture. Unrelated non-dumpable same-user processes
+                        # may legitimately defer a complete host-wide inventory.
+                        output = ''.join(line for line in output.splitlines(keepends=True)
+                                         if line.split(None, 1)[:1] == [str(fixture.pid)])
+                    return output
                 try:
                     self.assertEqual(fixture.stdout.readline().strip(), 'ready')
-                    slot.release(stopped=False)
-                    self.assertFalse(slot.directory.exists())
-                    self.assertTrue(scratch.exists())
-                    next_gate = capacity.acquire(root)
-                    next_gate.release()
-                    self.assertIsNone(fixture.poll())
-                    fixture.terminate()
-                    fixture.wait(timeout=5)
-                    next_gate = capacity.acquire(root)
-                    next_gate.release()
-                    self.assertFalse(scratch.exists())
+                    with patch.object(subprocess, 'check_output', side_effect=fixture_inventory):
+                        slot.release(stopped=False)
+                        self.assertFalse(slot.directory.exists())
+                        self.assertTrue(scratch.exists())
+                        next_gate = capacity.acquire(root)
+                        next_gate.release()
+                        self.assertIsNone(fixture.poll())
+                        fixture.terminate()
+                        fixture.wait(timeout=5)
+                        next_gate = capacity.acquire(root)
+                        next_gate.release()
+                        self.assertFalse(scratch.exists())
                 finally:
                     if fixture.poll() is None:
                         fixture.kill()
