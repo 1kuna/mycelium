@@ -97,10 +97,10 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 	if d := s.HealthAlertDelivery; d != nil && d.Pending > 0 {
 		c.AlertDelivery = d
 	}
-	if u := s.FleetUpgrade; u != nil && u.State != "complete" {
+	if u := s.FleetUpgrade; u != nil && (u.State != "complete" || slices.ContainsFunc(u.Hosts, func(h FleetHostStatus) bool { return h.Outcome == FleetHostDeferred })) {
 		c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("fleet upgrade %s: release=%s state=%s", u.Operation, u.Release, u.State))
 		for _, h := range u.Hosts {
-			c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("host %s: phase=%s wait=%s failure=%s", h.Host, h.Phase, h.Wait, h.Failure))
+			c.FleetUpgrade = append(c.FleetUpgrade, fmt.Sprintf("host %s: phase=%s wait=%s failure=%s outcome=%s deferred_reason=%s", h.Host, h.Phase, h.Wait, h.Failure, h.Outcome, h.DeferredReason))
 		}
 	}
 	for host, state := range s.HostStates {

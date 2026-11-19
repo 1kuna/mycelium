@@ -1,11 +1,15 @@
 package myce
 
 import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
-func fleetAtStartProbe(t *testing.T) (*Queue, *fakeClock, *fleetUpgradeHost) {
+func fleetAtStartProbe(t *testing.T, room ...float64) (*Queue, *fakeClock, *fleetUpgradeHost) {
 	t.Helper()
 	q, c, _ := fleetFixture(t, "q", "a", "b")
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
@@ -14,12 +18,22 @@ func fleetAtStartProbe(t *testing.T) (*Queue, *fakeClock, *fleetUpgradeHost) {
 	fleetTick(t, q)
 	i := fleetInstructionFor(t, q)
 	fleetRestart(t, q, c, i, true)
+	if len(room) > 0 {
+		q.s.Machines[i.Machine].HostAvailableMemoryGB = room[0]
+	}
 	for n := 0; n <= int(fleetStableFor/time.Second); n++ {
 		fleetRefreshWithoutStart(t, q, c)
+		if q.s.FleetUpgrade.Hosts[0].Phase == "deferred" {
+			break
+		}
 		c.Advance(time.Second)
 	}
-	h := q.fleetActiveHost()
-	if h == nil || h.Phase != "worker_start" || h.StartProbe == "" || h.WorkerDone {
+	h := q.s.FleetUpgrade.Hosts[0]
+	phase := "worker_start"
+	if len(room) > 0 {
+		phase = "deferred"
+	}
+	if h == nil || h.Phase != phase || h.StartProbe == "" || h.WorkerDone {
 		t.Fatalf("health alone did not leave a pending start proof: %+v", h)
 	}
 	if q.s.FleetUpgrade.Hosts[1].Phase != "pending" || q.maintenanceBlocked("b") {
@@ -185,6 +199,105 @@ func TestFleetUpgradeStartProofRuntimeChangeAndFailure(t *testing.T) {
 			}
 			if mode == "maintenance" && q.s.HostMaintenance[h.Host].Mode != "disabled" {
 				t.Fatal("operator policy overwritten")
+			}
+		})
+	}
+}
+
+// Real check-ins and scheduler accounting refuse this never-assigned probe;
+// fake queue time drives all upgrade decisions, including the return pass.
+func TestFleetUpgradeStartProbeDefersAndReturns(t *testing.T) {
+	for _, recovers := range []bool{true, false} {
+		t.Run(fmt.Sprint(recovers), func(t *testing.T) {
+			q, c, h := fleetAtStartProbe(t, 0)
+			probe, identity, policy, operation := h.StartProbe, h.StartIdentity, h.Policy, q.s.FleetUpgrade.Operation
+			if h.Outcome != FleetHostDeferred || !strings.HasPrefix(h.DeferredReason, "no_capacity:") || h.WorkerDone || job(t, q, probe).Attempt != 0 {
+				t.Fatalf("unadmitted probe not deferred: %+v", h)
+			}
+			// Deferral cannot lend this probe another host's stop plan.
+			if q.fleetStartPlan(q.s.Jobs[probe], &placementPlan{stops: 1}) != nil {
+				t.Fatal("deferred probe may interrupt useful work")
+			}
+			var order []string
+			for n := 0; n < 10 && q.s.FleetUpgrade.State == "running"; n++ {
+				fleetTick(t, q)
+				active := q.fleetActiveHost()
+				if active == nil {
+					continue
+				}
+				if active.Host == "b" && recovers {
+					q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
+				}
+				order = append(order, fleetActivate(t, q, c))
+			}
+			if q.s.FleetUpgrade.State != "complete" || q.s.FleetUpgrade.Operation != operation || h.StartProbe != probe || h.StartIdentity != identity || !reflect.DeepEqual(h.Policy, policy) {
+				t.Fatalf("return pass lost operation/fence or failed to finish: %+v", q.fleetUpgradeStatus())
+			}
+			want := []string{"b/worker-b", "q/@queue"}
+			if recovers {
+				want = append(want, "a/worker-a")
+				if !h.WorkerDone || h.Phase != "complete" || h.Outcome != "" || h.DeferredReason != "" || h.StartAccepted != probe {
+					t.Fatalf("recovered probe did not prove same worker: %+v", h)
+				}
+			} else {
+				if h.WorkerDone || h.Phase != "deferred" || h.Outcome != FleetHostDeferred || h.Failure != "" || !cancelled(job(t, q, probe)) {
+					t.Fatalf("persistent pressure became rollout failure or false acceptance: %+v", h)
+				}
+				status := q.fleetUpgradeStatus()
+				data, err := json.Marshal(status)
+				if err != nil || !strings.Contains(string(data), `"outcome":"deferred"`) || !strings.Contains(string(data), `"deferred_reason":"no_capacity:`) {
+					t.Fatal("fleet upgrade response hid typed deferral", string(data), err)
+				}
+				compact := NewCompactStatus(Snapshot{FleetUpgrade: status})
+				if !strings.Contains(strings.Join(compact.FleetUpgrade, "\n"), "no_capacity:") {
+					t.Fatal("completed rollout hid deferred host", compact.FleetUpgrade)
+				}
+				// Same-release reruns must not skip the remaining start debt.
+				q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
+				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				fleetTick(t, q)
+				next := q.fleetActiveHost()
+				if next == nil || next.Host != h.Host || next.WorkerDone || next.StartIdentity == "" || next.StartProbe == probe {
+					t.Fatal("rerun skipped deferred acceptance debt", next)
+				}
+			}
+			if !reflect.DeepEqual(order, want) {
+				t.Fatalf("host/queue order %v, want %v", order, want)
+			}
+		})
+	}
+}
+
+func TestFleetUpgradeDeferredProbeStillStopsOnFailure(t *testing.T) {
+	for _, mode := range []string{"started-failed", "health", "session", "maintenance"} {
+		t.Run(mode, func(t *testing.T) {
+			q, _, h := fleetAtStartProbe(t, 0)
+			switch mode {
+			case "started-failed":
+				q.s.Machines[h.Machine].HostAvailableMemoryGB = 32
+				check(t, q, *q.s.Machines[h.Machine], nil)
+				j := job(t, q, h.StartProbe)
+				if j.Attempt != 1 {
+					t.Fatal("recovered deferred probe not assigned", j)
+				}
+				if err := q.Started(result(j, true)); err != nil {
+					t.Fatal(err)
+				}
+				finish(t, q, j, false)
+			case "health":
+				q.s.Machines[h.Machine].Fleet.ServiceHealthy = false
+			case "session":
+				q.s.Machines[h.Machine].Session = "stale-session"
+			case "maintenance":
+				if _, err := q.ChangeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "disable"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fleetTick(t, q)
+			if q.s.FleetUpgrade.State != "stopped" || h.Failure == "" || h.WorkerDone || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
+				t.Fatalf("deferred failure advanced rollout: %+v", q.fleetUpgradeStatus())
 			}
 		})
 	}

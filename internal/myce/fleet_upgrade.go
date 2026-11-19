@@ -26,7 +26,13 @@ type FleetUpgradeStatus struct {
 	State     string            `json:"state"`
 	Hosts     []FleetHostStatus `json:"hosts"`
 }
+type FleetHostOutcome string
+
+const FleetHostDeferred FleetHostOutcome = "deferred"
+
 type FleetHostStatus struct {
+	Outcome        FleetHostOutcome         `json:"outcome,omitempty"`
+	DeferredReason string                   `json:"deferred_reason,omitempty"`
 	StorageWarning *StoragePreflightFailure `json:"storage_warning,omitempty"`
 	PlannedStops   []FleetPlannedStop       `json:"planned_stops,omitempty"`
 	StorageFailure *StoragePreflightFailure `json:"storage_failure,omitempty"`
@@ -51,6 +57,7 @@ type fleetUpgrade struct {
 	CreatedAt    time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
+	StartRevisited bool        `json:"start_revisited,omitempty"`
 	StartBefore    []Execution `json:"start_before,omitempty"`
 	StartAccepted  string      `json:"start_accepted,omitempty"`
 	StartProbe     string      `json:"start_probe,omitempty"`
@@ -330,7 +337,7 @@ func (q *Queue) fleetProduction(host string) bool {
 func (q *Queue) fleetActiveHost() *fleetUpgradeHost {
 	if u := q.s.FleetUpgrade; u != nil {
 		for _, h := range u.Hosts {
-			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "skipped" {
+			if h.Phase != "pending" && h.Phase != "complete" && h.Phase != "skipped" && h.Phase != "deferred" {
 				return h
 			}
 		}
@@ -350,7 +357,7 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	// Start acceptance uses ordinary admission, so an operation-owned drain
 	// was resumed. Restore it if still ours and safe; never stop customer work
 	// or override an operator's policy or a newly opened production pipeline.
-	if h.Phase == "worker_start" && h.Owned && h.Policy.Mode == "enabled" && q.fleetPolicyMatches(h) {
+	if (h.Phase == "worker_start" || h.Phase == "deferred") && h.Owned && h.Policy.Mode == "enabled" && q.fleetPolicyMatches(h) {
 		if err := q.changeHostMaintenance(h.Host, HostMaintenanceRequest{Action: "drain", IfMode: h.Policy.Mode, IfUpdatedAt: &h.Policy.UpdatedAt, DrainOwner: q.s.FleetUpgrade.Operation}); err == nil {
 			h.Policy = q.s.HostMaintenance[h.Host]
 		}
@@ -495,15 +502,51 @@ func (q *Queue) maintainFleetUpgrade() {
 	if u == nil || u.State != "running" {
 		return
 	}
-	h := q.fleetActiveHost()
-	if h == nil {
-		if h = q.fleetSelectHost(u); h == nil {
-			if !slicesContainsPhase(u.Hosts, "pending") {
-				u.State = "complete"
-			}
+	// Deferred hosts keep their exact policy/process/probe fences while other
+	// hosts advance. Unhealthy evidence still stops the entire operation.
+	for _, deferred := range u.Hosts {
+		if deferred.Phase != "deferred" {
+			continue
+		}
+		if !q.fleetPolicyMatches(deferred) {
+			q.fleetStop(deferred, "maintenance_changed")
 			return
 		}
-		if !q.fleetBeginHost(u, h) {
+		m := q.s.Machines[deferred.Machine]
+		if m == nil || m.CapabilityProfile == nil || m.Fleet == nil || m.Fleet.Session != m.Session || !q.fleetCurrent(m.Fleet, m.CapabilityProfile.OS, m.CapabilityProfile.Arch) || fleetHealthIdentity(m.Fleet) != deferred.StartIdentity || fleetProofFailure(m.Fleet) != "" {
+			q.fleetStop(deferred, "worker_start_runtime_changed")
+			return
+		}
+		if age, ok := q.fleetProofAge(m.Fleet); !ok || age >= fleetProofMaxAge {
+			q.fleetStop(deferred, "worker_start_not_verified")
+			return
+		}
+		if !q.fleetStartProbeValid(deferred, m, q.s.Jobs[deferred.StartProbe]) {
+			return
+		}
+	}
+	h := q.fleetActiveHost()
+	if h == nil {
+		if h = q.fleetSelectHost(u); h != nil {
+			if !q.fleetBeginHost(u, h) {
+				return
+			}
+		} else if !slicesContainsPhase(u.Hosts, "pending") {
+			// One return pass in the same operation. Reuse the exact probe and
+			// runtime identity; never reinstall, redrain, or erase acceptance debt.
+			for _, deferred := range u.Hosts {
+				if deferred.Phase == "deferred" && !deferred.StartRevisited {
+					h = deferred
+					h.StartRevisited = true
+					h.Phase, h.StepAt = "worker_start", q.clock.Now()
+					break
+				}
+			}
+			if h == nil {
+				q.fleetFinishDeferred(u)
+				return
+			}
+		} else {
 			return
 		}
 	}
@@ -541,6 +584,7 @@ func (q *Queue) maintainFleetUpgrade() {
 			return
 		}
 		h.WorkerDone = true
+		h.Outcome, h.DeferredReason = "", ""
 		h.Phase = "verified"
 		if h.Queue && !h.QueueDone {
 			// Start acceptance resumed ordinary admission. Re-enter host
@@ -577,10 +621,25 @@ func (q *Queue) maintainFleetUpgrade() {
 		if h.StartAccepted != "" {
 			h.Wait = "assignment start verified by " + h.StartAccepted
 		}
-		if !slicesContainsPhase(u.Hosts, "pending") && q.fleetActiveHost() == nil {
+		if !slicesContainsPhase(u.Hosts, "pending") && !slicesContainsPhase(u.Hosts, "deferred") && q.fleetActiveHost() == nil {
 			u.State = "complete"
 		}
 	}
+}
+
+// Finishing with deferred hosts is partial acceptance, not an unhealthy rollout.
+// Cancel only this operation's never-assigned probes; retain binary, policy,
+// runtime identity and WorkerDone=false so a later operation retries the debt.
+func (q *Queue) fleetFinishDeferred(u *fleetUpgrade) {
+	for _, h := range u.Hosts {
+		if h.Phase == "deferred" {
+			if probe := q.s.Jobs[h.StartProbe]; probe != nil && !terminal(probe.State) {
+				q.cancelJob(probe)
+			}
+			h.Wait = "start proof still deferred: " + h.DeferredReason + "; rerun myce fleet upgrade when capacity recovers"
+		}
+	}
+	u.State = "complete"
 }
 
 func (q *Queue) fleetOthersPending(u *fleetUpgrade, self *fleetUpgradeHost) bool {

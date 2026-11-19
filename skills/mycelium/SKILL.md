@@ -359,6 +359,13 @@ and reports why. Normal updates never checkpoint-stop or kill work. Only an
 explicit critical update retains the existing interruption fallback when takeover
 is unavailable; `stop_requests` records it. Keep the same job and submission key
 through a worker update; resubmitting can duplicate work.
+A rollout may defer a host whose startup probe has never been assigned because
+of measured owner pressure or CPU/RAM capacity, upgrade the others, then revisit
+it in the same operation. A completed rollout can retain `outcome: deferred`
+and `deferred_reason` per host: that host's new binary is installed but startup
+is still unproved. Status keeps these hosts visible; the release owner reruns
+`myce fleet upgrade` when capacity recovers. Failed probes and runtime health
+failures still stop advancement.
 
 If Mycelium refuses launch before the command starts, the job requeues without
 spending its infrastructure-loss budget, even if the host has recovered before
