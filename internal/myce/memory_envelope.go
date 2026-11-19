@@ -420,7 +420,7 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 			if estimate.escalation {
 				source = estimate.source
 			}
-		case estimate.host != nil:
+		case estimate.host != nil && !(estimate.escalation && memoryHostHint(j) > 0):
 			source, basis, evidence = estimate.source, "learned", estimate.samples
 			if evidence == 0 || estimate.source == priorVersionMemorySource || estimate.uncalibrated || estimate.deviceUncalibrated || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
 				basis = "exploratory"
@@ -490,6 +490,12 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				}
 				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host, q.constrainedMemoryLowerFor(j, estimate, !m.UnifiedMemory)), why
 				source = "submitter hint; exploratory host"
+			}
+			// Censored peaks are lower bounds, never accepted sizing evidence.
+			// A hint may replace a recovery prior, but cannot erase known demand.
+			n.HostMemoryGB = max(n.HostMemoryGB, q.constrainedMemoryLowerFor(j, estimate, !n.cpuOnly() && !m.UnifiedMemory))
+			if estimate.escalation && estimate.host != nil {
+				n.HostMemoryGB = max(n.HostMemoryGB, hostMemoryPeakGB(estimate.host))
 			}
 		default:
 			source, basis = "exploratory first run", "exploratory"
@@ -720,6 +726,19 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	estimate := q.memoryEstimateFor(j, m, false)
 	if estimate.host != nil || estimate.key == nil || !j.Spec.extensionJob() {
 		return estimate
+	}
+	// A first censored workload can have no accepted row to invalidate. Its
+	// retained attempt facts still disprove reusing a qualification/predecessor
+	// seed as an upper bound. A host hint can supply the measurement envelope;
+	// the retained demand remains a floor on it.
+	if lower := q.constrainedMemoryLowerFor(j, estimate, !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory); lower > 0 {
+		estimate.constrainedGB = max(estimate.constrainedGB, lower)
+		if estimate.source == "" {
+			estimate.source = "exploratory (previous peak constrained)"
+		}
+		if memoryHostHint(j) > 0 {
+			return estimate
+		}
 	}
 	// Current-version qualification evidence supersedes historical workload
 	// evidence. Keep the existing invalidation and spent-exploration fences.

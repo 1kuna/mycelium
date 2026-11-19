@@ -1081,7 +1081,9 @@ optional:
 extension: example.stage@1
 needs: {memory: auto}
 workload: {input_shape: recording-v1, units: 1500}
-# Optional: size_hint: {host_memory_gb: 24, memory_gb: 8}
+# Optional submitter hint:
+advanced:
+  size_hint: {host_memory_gb: 14, memory_gb: 30}
 ```
 
 A matching variant reference enables accepted slice-1 observations. Prefer
@@ -1139,14 +1141,28 @@ and file-backed working sets with low resident-only use. Older-worker results
 and stored curves with these counters cannot supply accepted memory estimates.
 This supersedes #184's cache exception; file-heavy jobs may reserve more or
 explore again to avoid repeatedly learning a binding ceiling. Ceiling-bound peaks
-from explicit-memory runs cannot seed auto estimates. An auto OOM or constrained
+from explicit-memory runs cannot seed auto estimates. An auto OOM or native constrained
 attempt clears comparable learned memory across machines without forbidding the
-work. For a measured-need run, submit the same comparable work with `memory: auto`
-and no `size_hint`: the next run explores available headroom, with source
-`exploratory (previous peak constrained)` when a constrained peak invalidated
-the measurement. Omit binding optional
-member caps so the job can measure its need within the shared envelope. A
-successful unconstrained run teaches a new peak. Ceiling pressure alone leaves
+work, including a successful attempt with nonzero ceiling events. The censored
+peak is diagnostic lower-bound evidence, never an accepted sample or an upper
+bound. Earlier accepted peaks may remain recovery priors with zero accepted
+evidence; they do not take precedence over a submitter host hint.
+On startup, the queue also repairs older retained successful constrained
+completions that left a stale accepted aggregate, preserving newer clean peaks.
+
+For a measurement run after ceiling pressure, keep the same extension, work,
+arguments and input shape and set `needs: {memory: auto}` with
+`advanced: {size_hint: {host_memory_gb: 14, memory_gb: 30}}`, choosing figures
+appropriate to the work. With no unconstrained accepted estimate, this uses a
+hint-sourced 14 GiB host reservation, subject to retained measured lower bounds,
+member caps, OOM retry floors and normal host/device admission. The deprecated
+top-level `size_hint` form has the same behavior during its compatibility
+release. A hint cannot bypass insufficient physical capacity or production
+protection. Omit optional member caps that would censor the measurement.
+Without a hint, the next run uses recovery evidence or explores available
+headroom; a constrained invalidation can report
+`exploratory (previous peak constrained)`. A successful unconstrained run teaches
+a new peak. Ceiling pressure alone leaves
 the job outcome unchanged; an OOM retains a job-local host floor for one retry
 with 25% more room, without persisting a floor for later jobs.
 Verified stopped members with a vanished parent release custody with unknown

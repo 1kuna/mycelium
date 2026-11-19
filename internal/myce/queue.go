@@ -440,6 +440,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		q.migrateParityKinds()
 		q.mirrorProjectParity()
 		q.convertJobRecords()
+		q.repairSuccessfulConstrainedMemory()
 		return nil
 	}); err != nil {
 		db.Close()
@@ -2352,10 +2353,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	// Failed ceiling-bound attempts can hide true need. Successful constrained
-	// samples are diagnostic only: they cannot invalidate accepted neighbours.
+	// Native ceiling pressure censors true need even when the payload succeeds.
+	// Invalidate comparable memory without changing that successful outcome.
 	// Unenforced process-group pressure never invalidates; a real OOM still does.
-	if oomFailure || !r.Success && r.MemoryPeak != nil && r.MemoryPeak.Constrained && r.MemoryPeak.Source != processGroupMemorySource {
+	if oomFailure || r.MemoryPeak.constrained() && r.MemoryPeak.Source != processGroupMemorySource {
 		q.recordWorkOOM(j, r, oomFailure)
 	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted

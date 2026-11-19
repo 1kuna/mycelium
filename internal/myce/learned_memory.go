@@ -127,8 +127,18 @@ type familyMemoryBound struct {
 	evidence int
 }
 
+func memoryHostHint(j *Job) float64 {
+	if j.MemoryFallback == nil || !j.MemoryFallback.valid() {
+		return 0
+	}
+	if j.Spec.Needs.cpuOnly() {
+		return max(j.MemoryFallback.HostMemoryGB, j.MemoryFallback.MemoryGB)
+	}
+	return j.MemoryFallback.HostMemoryGB
+}
+
 func (q *Queue) familyMemoryOverHint(j *Job, m *Machine, estimate memoryEstimate, floor float64, out *familyMemoryBound) bool {
-	if j.MemoryFallback == nil || !j.MemoryFallback.valid() || !j.Spec.Needs.cpuOnly() {
+	if j.MemoryFallback == nil || !j.MemoryFallback.valid() || !j.Spec.Needs.cpuOnly() || q.constrainedMemoryLower(j, estimate) > 0 {
 		return false
 	}
 	host, source, evidence, ok := q.coldMemoryBound(j, m, estimate, floor)
