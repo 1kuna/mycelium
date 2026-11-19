@@ -52,6 +52,9 @@ SUPPLEMENTAL_CONSUMERS['cmd/myce/binary_test.go'] = ('dev_probes_test.go',)
 # Observer teardown helpers are exercised by the real adapter journey.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/observer_fixture_test.go'] = ('adapter_test.go',)
 
+# Queue startup/readiness is exercised through the actual installed process.
+SUPPLEMENTAL_CONSUMERS['cmd/myce/queue_startup.go'] = ('install_test.go',)
+
 # `result recover` is dispatched through resultCommand; its dev regressions live there.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/result_recover.go'] = ('result_test.go',)
 
