@@ -89,6 +89,16 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 		put(filepath.Join(c.root, "memory.stat"), strings.Replace(stat, "anon 2147483648", "anon 10737418240", 1))
 		put(filepath.Join(proc, "meminfo"), strings.Replace(meminfo, "MemAvailable: 50331648", "MemAvailable: 47185920", 1))
 		switch mode {
+		case "detached siblings", "missing detached root":
+			// Parent scope now contains only this attempt; detached siblings
+			// and worker engines live under separate accounting roots.
+			other := t.TempDir()
+			put(filepath.Join(c.root, "memory.stat"), stat)
+			put(filepath.Join(other, "memory.stat"), "anon 8589934592\nkernel 1073741824\nshmem 0\n")
+			a.accountingRoots = []string{c.root, other}
+			if mode == "missing detached root" {
+				put(filepath.Join(other, "memory.stat"), "anon 8589934592\nkernel 1073741824\n")
+			}
 		case "missing cgroup":
 			put(filepath.Join(a.path, "memory.stat"), strings.ReplaceAll(stat, "file_writeback 16777216\n", ""))
 		case "missing proc pin":
@@ -137,10 +147,10 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 }
 
 func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
-	for _, mode := range []string{"complete", "masked host drop", "exited proc", "exited proc status", "failed exit inventory", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing live lock", "malformed pin", "malformed lock", "zombie leader", "kernel thread", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
+	for _, mode := range []string{"complete", "detached siblings", "missing detached root", "masked host drop", "exited proc", "exited proc status", "failed exit inventory", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing live lock", "malformed pin", "malformed lock", "zombie leader", "kernel thread", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
 		t.Run(mode, func(t *testing.T) {
 			p := cudaHostFixture(t, mode)
-			complete := mode == "complete" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status"
+			complete := mode == "complete" || mode == "detached siblings" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status"
 			if p == nil || (p.NonreclaimableGB != nil) != (complete || mode == "host OOM") {
 				t.Fatalf("wrong complete evidence: %+v", p)
 			}

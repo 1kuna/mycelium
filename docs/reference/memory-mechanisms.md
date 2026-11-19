@@ -98,6 +98,15 @@ growth margins remain separate and are added once to the host charge. Retained i
 cannot establish a physical union or justify subtracting cache or device
 overlap. Native coexistence and output proof remain separate from calibration.
 
+Detached CUDA attempts subtract anon/shmem across both disjoint accounting
+roots (worker engines and all detached jobs), using the smaller aggregate read
+around the physical snapshot. Subtracting only the attempt's scope would charge
+its siblings' host pages again. Missing root counters reject completeness;
+kernel, pins and unknown external occupancy remain in the conservative bound.
+The parent forwards the custodian's paired host/device sample and original
+timestamps. Re-reading only its cgroup would lose device attribution and force
+exclusivity. Stale or explicitly uncertain samples still prohibit sharing.
+
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted whole-attempt peaks ([comparable

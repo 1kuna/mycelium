@@ -204,6 +204,50 @@ func TestHelperMemoryHeartbeatFreezesDeviceBeforeAvailability(t *testing.T) {
 	}
 }
 
+func TestCustodianMemoryHeartbeatPreservesDeviceAttribution(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	j := Job{ID: "detached", Attempt: 1, Session: m.Session, Machine: m.ID, State: "running", Spec: sharedSpec("experiment", 2)}
+	c := fakeCeilings(t)
+	group, err := c.create("detached", 8<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, footprint := 2.0, 1.0
+	sample := &CurrentHostMemory{NonreclaimableGB: 1, FootprintGB: &footprint, GrowthObserved: true,
+		DeviceGB: &device, DeviceResidentGB: &device, sampledAt: clock.Now(), deviceSampledAt: clock.Now()}
+	p := &process{custodian: &attemptCustodian{last: custodianSnapshot{Memory: sample}}}
+	w := Worker{Machine: m, Clock: clock, memoryCeilings: c,
+		HostMemorySource: func(context.Context) (float64, error) { return 118, nil }}
+	// A detached Linux actor also retains its cgroup path. Reconstructing a
+	// reader there loses the independent device sampler owned by its custodian.
+	r := AttemptReport{Execution: runExecution(&j), Session: j.Session, Started: true,
+		CurrentHostMemory: w.currentAttemptHostMemory(p, j, group.path)}
+	a := &attemptSupervisor{job: j, report: r}
+	reports := []AttemptReport{r}
+	clock.Advance(time.Second)
+	w.sampleHeartbeatMemory(t.Context(), &m, nil, reports, map[attemptKey]*attemptSupervisor{jobKey(j): a})
+	got := reports[0].CurrentHostMemory
+	if got == nil || got.DeviceGB == nil || *got.DeviceGB != device || got.DeviceResidentGB == nil || *got.DeviceResidentGB != device || got.DeviceAgeSeconds != 1 || got.AgeSeconds != 1 {
+		t.Fatalf("custodian device evidence lost at parent heartbeat: %+v", got)
+	}
+	q.s.Machines[m.ID], q.s.Jobs[j.ID] = &m, &j
+	q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{m.ID: currentHostMemorySamples(reports, clock.Now())}
+	next := &Job{ID: "next", Spec: j.Spec}
+	card := allocationMachine(&m, []string{"0"})
+	j.AllocatedDevices = []string{"0"}
+	if _, ok := q.deviceCoTenants(card, next, true); !ok {
+		t.Fatal("fresh detached sample still forced exclusive execution")
+	}
+	clock.Advance(deviceMemorySampleFreshFor)
+	if _, ok := q.deviceCoTenants(card, next, true); ok {
+		t.Fatal("custodian transport renewed an expired device sample")
+	}
+	if sample.AgeSeconds != 0 || sample.DeviceAgeSeconds != 0 {
+		t.Fatal("parent mutated the custodian's publication")
+	}
+}
+
 func TestUnifiedLaunchMemoryDoesNotCreditSummedDeviceCounters(t *testing.T) {
 	_, clock := fixture(t)
 	m := unifiedCUDAAdmissionMachine()
