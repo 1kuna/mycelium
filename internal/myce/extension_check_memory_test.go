@@ -1,7 +1,13 @@
 package myce
 
 import (
+	"bytes"
+	"encoding/json"
 	"math"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +212,206 @@ func TestExtensionCheckMemoryLearnsFromChecksNotWorkload(t *testing.T) {
 	}
 	if e := work.MemoryEnvelope; e == nil || e.Source != "accepted peak + measured uncertainty" || work.Spec.Needs.HostMemoryGB != workloadHost+minimumHostMemoryGB || work.Spec.Needs.MemoryGB != workloadDevice+minimumHostMemoryGB {
 		t.Fatalf("check peaks changed the workload's envelope: host=%.2f device=%.2f GiB %+v", work.Spec.Needs.HostMemoryGB, work.Spec.Needs.MemoryGB, e)
+	}
+}
+
+// A successful ceiling-bound workload must not leave an older accepted host
+// estimate ahead of an explicit measurement hint. Qualification stays valid.
+func TestExtensionHintMeasurementAfterConstrained(t *testing.T) {
+	binary := os.Getenv("GATE_TEST_CLI_BINARY")
+	binaryRoot := t.TempDir()
+	cliResolve := func(t *testing.T, q *Queue, s Spec) ResolveReport {
+		t.Helper()
+		if binary == "" {
+			binary = filepath.Join(binaryRoot, "myce")
+			build := exec.CommandContext(t.Context(), "go", "build", "-p", "1", "-o", binary, "../../cmd/myce")
+			if out, err := build.CombinedOutput(); err != nil {
+				t.Fatalf("build CLI: %v\n%s", err, out)
+			}
+		}
+		server := httptest.NewServer(API{Queue: q, Token: "local-test-token"}.Handler())
+		defer server.Close()
+		path := filepath.Join(t.TempDir(), "measurement.json")
+		data, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(t.Context(), binary, "spec", "check", "--resolve", "--json", "--queue", server.URL, "--token", "local-test-token", path)
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, "MYCE_") {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("spec check --resolve: %v\n%s\n%s", err, out, stderr.String())
+		}
+		var report ResolveReport
+		if err := json.Unmarshal(out, &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	for _, history := range []string{"workload", "qualification", "none"} {
+		for _, outcome := range []string{"constrained success", "legacy max success", "constrained failure", "OOM", "failed"} {
+			for _, placement := range []string{"advanced", "legacy"} {
+				t.Run(history+"/"+outcome+"/"+placement, func(t *testing.T) {
+					q, clock, m, s := gpuHostFixture(t)
+					start := func() *Job {
+						t.Helper()
+						queued := submit(t, q, s)
+						run := assignedJob(machineCheck(t, q, m))
+						if run == nil || run.ID != queued.ID {
+							t.Fatalf("not assigned: %s", job(t, q, queued.ID).Reason)
+						}
+						if err := q.Started(result(run, false)); err != nil {
+							t.Fatal(err)
+						}
+						return run
+					}
+
+					peak := 9.1 - minimumHostMemoryGB
+					if history != "none" {
+						work := s
+						if history == "qualification" {
+							s.Workload = nil
+							s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+							s.ExtensionCheck = &ExtensionCheckRequest{Work: s.workType(), Directory: t.TempDir()}
+							s.AllowedMachines = []string{m.ID}
+						}
+						seed := start()
+						clock.Advance(time.Second)
+						r := result(seed, true)
+						// A host-only accepted sample produces the exploratory diagnostic from
+						// the report without treating the following censored peak as accepted.
+						r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, Events: &MemoryEventCounts{}}
+						if err := q.Complete(r); err != nil {
+							t.Fatal(err)
+						}
+						s = work
+					}
+					first := start()
+					wantEvidence := 1
+					if history == "none" {
+						wantEvidence = 0
+					}
+					if e := first.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != wantEvidence || history != "none" && math.Abs(e.HostGB-9.1) > 1e-9 {
+						t.Fatalf("wrong reproduction envelope: %+v", e)
+					}
+
+					clock.Advance(600 * time.Second)
+					peak = 9.1
+					r := result(first, strings.HasSuffix(outcome, "success"))
+					r.OutOfMemory = outcome == "OOM"
+					r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak, Events: &MemoryEventCounts{}}
+					if outcome != "failed" {
+						r.MemoryPeak.Constrained = outcome != "legacy max success"
+						r.MemoryPeak.Events.Max = 5014
+					}
+					if err := q.Complete(r); err != nil {
+						t.Fatal(err)
+					}
+					if outcome == "OOM" {
+						if err := q.Cancel(first.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+					accepted := 0
+					for _, point := range q.s.WorkObservations {
+						if !point.Key.Check && q.acceptedMemoryPoint(&point) {
+							accepted += max(1, point.MemorySamples)
+						}
+					}
+					if outcome == "failed" {
+						// An ordinary failure teaches nothing and does not disprove a clean peak.
+						want := 0
+						if history == "workload" {
+							want = 1
+						}
+						if accepted != want {
+							t.Fatalf("failed result altered accepted count: %d", accepted)
+						}
+						return
+					}
+					if accepted != 0 {
+						t.Errorf("ceiling-bound result left %d accepted samples", accepted)
+					}
+					s.SizeHint = SizeHint{HostMemoryGB: 14, MemoryGB: 30}
+					if placement == "advanced" {
+						s.Advanced = &Advanced{SizeHint: s.SizeHint}
+						s.SizeHint = SizeHint{}
+					}
+					m.HostAvailableMemoryGB = 12 // The resolve hold exposes the required host envelope.
+					machineCheck(t, q, m)        // Refresh inventory after the 600-second attempt.
+					folded := s
+					if _, err := folded.FoldAdvanced(); err != nil {
+						t.Fatal(err)
+					}
+					report, err := q.Resolve(ResolveRequest{Spec: folded})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(report.Targets) == 0 {
+						t.Fatalf("no resolve targets: %+v", report)
+					}
+					if report.Hold == nil {
+						t.Errorf("missing 14 GiB admission wait: %+v", report)
+					} else {
+						t.Logf("resolve hold: %s", report.Hold.FullText())
+						if !strings.Contains(report.Hold.FullText(), "submitter hint") {
+							t.Errorf("hinted resolve retained old source: %s", report.Hold.FullText())
+						}
+					}
+
+					if history == "workload" && outcome == "constrained success" {
+						cli := cliResolve(t, q, s)
+						if cli.Hold == nil || !strings.Contains(cli.Hold.FullText(), "14.0 GiB needed") || !strings.Contains(cli.Hold.FullText(), "submitter hint") {
+							t.Errorf("CLI did not resolve 14 GiB from hint: %+v", cli.Hold)
+						}
+					}
+					queued := submit(t, q, folded)
+					target := m.Devices[0].machine(*q.s.Machines[m.ID])
+					candidate := seedMemoryCandidate(t, q, queued, &target)
+					if e := candidate.MemoryEnvelope; e.HostGB != 14 || e.Source != "submitter hint" || e.Basis != "hint" || e.Evidence != 0 {
+						t.Errorf("hinted candidate: %+v", e)
+					}
+
+					// A smaller hint cannot erase censored demand; a larger one cannot
+					// bypass permanent physical/allowance capacity.
+					low := *queued
+					low.Spec.SizeHint = SizeHint{HostMemoryGB: 8, MemoryGB: 30}
+					low.MemoryFallback = &low.Spec.SizeHint
+					if e := seedMemoryCandidate(t, q, &low, &target).MemoryEnvelope; e.HostGB < 9.1 {
+						t.Errorf("small hint erased measured floor: %+v", e)
+					}
+					high := low
+					high.Spec.SizeHint = SizeHint{HostMemoryGB: 40, MemoryGB: 30}
+					high.MemoryFallback = &high.Spec.SizeHint
+					tooLarge := seedMemoryCandidate(t, q, &high, &target)
+					capacity := q.qualificationCapacity(&target)
+					if tooLarge.MemoryEnvelope.HostGB != 40 || hostFits(&capacity, tooLarge.Spec.Needs.MemoryGB, tooLarge.Spec.Needs.HostMemoryGB) {
+						t.Errorf("large hint bypassed capacity: %+v", tooLarge.MemoryEnvelope)
+					}
+					if err := q.Cancel(queued.ID); err != nil {
+						t.Fatal(err)
+					}
+					eligible := 0
+					for _, target := range report.Targets {
+						if !target.Eligible {
+							continue
+						}
+						eligible++
+					}
+					if eligible != 2 {
+						t.Errorf("wanted two eligible single-card targets: %+v", report.Targets)
+					}
+				})
+			}
+		}
 	}
 }

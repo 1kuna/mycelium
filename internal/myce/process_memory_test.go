@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -289,23 +288,23 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")
 	constrained := complete("low 0\nhigh 0\nmax 6264\noom 0\noom_kill 0\noom_group_kill 0\n")
-	// #486: successful constrained samples are diagnostic only. Throughput can
-	// learn, but accepted memory and its event counts/timestamp must stay exact.
-	assertAccepted := func() {
+	// Native ceiling pressure invalidates memory even on success. Throughput
+	// and exact-attempt diagnostic facts remain independent.
+	assertInvalidated := func() {
 		t.Helper()
 		var learned WorkObservation
 		if err := json.Unmarshal([]byte(stored()), &learned); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(learned.MemoryPeak, point.MemoryPeak) || !learned.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || learned.Samples != point.Samples+1 {
-			t.Fatalf("constrained success changed accepted memory or lost throughput: %+v", learned)
+		if !learned.MemoryPeak.constrained() || !learned.MemoryRecordedAt.IsZero() || learned.MemoryRange != nil || learned.GPUHostRange != nil || learned.Samples != point.Samples+1 {
+			t.Fatalf("constrained success retained accepted memory or lost throughput: %+v", learned)
 		}
 	}
-	assertAccepted()
+	assertInvalidated()
 	// Both eligible zero counters and rejected nonzero counters persist as job
 	// facts after restart, independently of the reusable accepted observation.
 	q = memoryFactsRestart(t, q, clock)
-	assertAccepted()
+	assertInvalidated()
 	memoryFactsGET(t, q, accepted, acceptedPeak, false, "eligible")
 	memoryFactsGET(t, q, constrained, a.peak(), false)
 }

@@ -183,8 +183,12 @@ can use prior accepted estimates. An auto OOM or constrained attempt
 invalidates comparable learned memory points across machines and families,
 without recording a bound or setting the performance Forbidden flag. To measure
 the true need after a ceiling-bound run, submit the same comparable work with
-`memory: auto` and no submitter hint: a CPU run starts at its retained measured
-floor; GPU work keeps its device containment contract. When a constrained peak invalidated the measurement, its source reads
+`memory: auto` and an optional `advanced.size_hint.host_memory_gb` large enough
+for the measurement. With no unconstrained accepted estimate, a submitter host
+hint precedes an invalidated recovery prior, retaining measured lower bounds,
+member caps and OOM floors. Native ceiling pressure clears comparable learned
+memory even on a successful result. Without a hint, a CPU run starts at its
+retained measured floor; GPU work keeps its device containment contract. When a constrained peak invalidated the measurement, its source reads
 `exploratory (previous peak constrained)`. A successful unconstrained
 exploration re-teaches the peak. Ceiling pressure alone does not retry or
 change the job's outcome. After OOM, one retry keeps a job-local host floor

@@ -66,27 +66,15 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 				t.Fatalf("ceiling pressure changed the attempt outcome: %+v", got)
 			}
 			for _, point := range q.s.WorkObservations {
-				if tc.success && tc.mode == "auto" {
-					if point.MemoryRecordedAt.IsZero() || point.MemoryPeak == nil || *point.MemoryPeak.HostGB != 2 {
-						t.Errorf("successful constrained sample erased accepted peak: %+v", point)
-					}
-					continue
-				}
 				if point.MemoryPeak != nil && !point.MemoryPeak.Constrained || !point.MemoryRecordedAt.IsZero() || point.Forbidden {
 					t.Errorf("cap-bound result retained a learned peak or forbade work: %+v", point)
 				}
 			}
 			s.Needs.Memory = "auto"
 			next := startObservation(t, q, m, s)
-			wantSource := physicalMemoryProbe
+			wantSource := "exploratory (previous peak constrained)"
 			if tc.mode == "auto" {
 				wantSource = acceptedMemoryEscalation
-			}
-			if tc.success && tc.mode == "auto" {
-				if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.Spec.Needs.HostMemoryGB != 2+minimumHostMemoryGB {
-					t.Fatalf("rejected sample changed accepted envelope: %+v", next.MemoryEnvelope)
-				}
-				return
 			}
 			if next.MemoryEnvelope.Source != wantSource || next.Spec.Needs.HostMemoryGB <= bound.Spec.Needs.HostMemoryGB {
 				t.Fatalf("next auto run did not explore a larger envelope: bound=%+v next=%+v", bound.MemoryEnvelope, next.MemoryEnvelope)
@@ -1211,12 +1199,12 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Fatal("pressure changed successful outcome")
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "accepted peak + measured uncertainty" || next.MemoryEnvelope.HostGB != 12+minimumHostMemoryGB {
-		t.Errorf("successful constrained sample changed accepted envelope: %+v", next.MemoryEnvelope)
+	if next.MemoryEnvelope.Source != acceptedMemoryEscalation || next.MemoryEnvelope.HostGB <= bound.MemoryEnvelope.HostGB {
+		t.Errorf("successful constrained sample did not reopen measurement: %+v", next.MemoryEnvelope)
 	}
 	for _, point := range q.s.WorkObservations {
-		if point.MemoryRecordedAt.IsZero() || point.Forbidden || *point.MemoryPeak.CgroupGB != 12 {
-			t.Errorf("rejected sample must preserve accepted memory: %+v", point)
+		if !point.MemoryRecordedAt.IsZero() || point.Forbidden || !point.MemoryPeak.constrained() {
+			t.Errorf("constrained sample retained accepted memory: %+v", point)
 		}
 	}
 	clock.Advance(time.Second)

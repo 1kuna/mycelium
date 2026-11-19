@@ -903,9 +903,9 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 	}
 }
 
-// #486: a rejected successful neighbour must not replace any accepted memory,
-// even when throughput can still learn. True OOMs retain class invalidation.
-func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
+// Unknown pressure cannot replace accepted memory. Native ceiling pressure
+// disproves the old bound even on success; OOM retains class invalidation.
+func TestGPUHostMemoryConstrainedNeighbourInvalidatesAccepted(t *testing.T) {
 	for _, outcome := range []string{"constrained success", "pressure unavailable success", "OOM", "ceiling failure"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, clock, m, spec := gpuHostFixture(t)
@@ -977,7 +977,7 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 				if !ok {
 					t.Fatal("curve key removed", old.Key)
 				}
-				if success {
+				if outcome == "pressure unavailable success" {
 					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout {
 						t.Fatal("constrained neighbour changed accepted memory", old, point)
 					}

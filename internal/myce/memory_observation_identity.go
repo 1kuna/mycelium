@@ -130,7 +130,7 @@ func profileMemoryStaleReason(p WorkObservation, m *Machine) string {
 	return ""
 }
 
-// Explicit OOMs forbid their duration record; auto OOMs and failed constrained
+// Explicit OOMs forbid their duration record; auto OOMs and native constrained
 // attempts invalidate comparable memory so exploration can re-teach it.
 func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	if !oomFailure && !memoryConstraintResult(j.StartedAt != nil, r) {
@@ -167,7 +167,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 				point.MemoryRange, point.MemorySamples = nil, 0
 				point.GPUHostRange = nil
 				point.DeviceRange = nil
-				if !oomFailure && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
+				if !oomFailure && r.MemoryPeak.constrained() {
 					// Keep the existing diagnostic as invalidation provenance,
 					// never as a learned estimate or a new class-level bound.
 					point.MemoryPeak = r.MemoryPeak

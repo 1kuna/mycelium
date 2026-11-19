@@ -36,7 +36,6 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	acceptedAt := clock.Now()
 	if len(q.s.WorkObservations) != 1 {
 		t.Fatalf("clean serial child did not learn: %+v", q.s.WorkObservations)
 	}
@@ -60,15 +59,15 @@ func TestFanOutMemoryLearningAndPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range q.s.WorkObservations {
-		if !p.MemoryRecordedAt.Equal(acceptedAt) || p.MemoryPeak.constrained() || *p.MemoryPeak.CgroupGB != total {
-			t.Fatalf("successful constrained child changed accepted memory: %+v", p)
+		if !p.MemoryRecordedAt.IsZero() || !p.MemoryPeak.constrained() || p.MemoryRange != nil || p.Forbidden {
+			t.Fatalf("successful constrained child retained accepted memory: %+v", p)
 		}
 	}
 	if facts := job(t, q, next.ID).MemoryAttempts; len(facts) != 1 || !facts[0].MemoryPeak.constrained() {
 		t.Fatalf("lost attempt pressure facts: %+v", facts)
 	}
-	if got := start().MemoryEnvelope.Source; got != "accepted peak + measured uncertainty" {
-		t.Fatalf("rejected child erased earlier accepted memory: %s", got)
+	if got := start().MemoryEnvelope.Source; got != acceptedMemoryEscalation {
+		t.Fatalf("constrained child did not reopen measurement: %s", got)
 	}
 }
 
