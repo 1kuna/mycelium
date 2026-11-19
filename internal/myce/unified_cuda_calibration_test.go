@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -380,7 +381,13 @@ func TestUnifiedCUDACalibrationAdmission(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i, h := range unifiedNamingHistory(t) {
+	history := unifiedNamingHistory(t)
+	// Constrained success invalidates earlier accepted peaks. Replay all five
+	// clean samples after it, retaining their coverage gap followed by two
+	// complete physical samples, so the original calibrated charge is taught
+	// entirely by accepted evidence newer than the invalidation.
+	history = append(history[:3:3], history[0], history[1], history[3], history[4], history[5])
+	for i, h := range history {
 		queued := submit(t, q, spec)
 		run := assignedJob(machineCheck(t, q, m))
 		if run == nil || run.ID != queued.ID {
@@ -415,12 +422,31 @@ func TestUnifiedCUDACalibrationAdmission(t *testing.T) {
 		if len(facts) != 1 || facts[0].LearningReason != h.Reason {
 			t.Fatal("native eligibility changed", facts)
 		}
+		if h.Reason == "constrained" {
+			for _, p := range q.s.WorkObservations {
+				if p.MemorySamples != 0 || p.DeviceRange != nil || p.MemoryRange != nil || p.GPUHostRange != nil || !p.MemoryRecordedAt.IsZero() {
+					t.Fatalf("constrained completion retained accepted memory facts: %+v", p)
+				}
+			}
+		}
+	}
+	var before WorkObservation
+	for _, p := range q.s.WorkObservations {
+		if r := p.DeviceRange; r.valid() && r.Samples == 5 && r.MinGB == 22.318359375 && r.MaxGB == 22.318359375 {
+			before = p
+		}
+	}
+	if before.DeviceRange == nil {
+		t.Fatal("clean completions did not rebuild five accepted peaks")
 	}
 	q = memoryFactsRestart(t, q, clock)
 	machineCheck(t, q, m) // Re-establish current inventory before submitting work.
 	retainedRange := false
 	for _, p := range q.s.WorkObservations {
 		if r := p.DeviceRange; r.valid() && r.Samples == 5 && r.MinGB == 22.318359375 && r.MaxGB == 22.318359375 {
+			if !reflect.DeepEqual(p.MemoryPeak, before.MemoryPeak) || !reflect.DeepEqual(p.MemoryRange, before.MemoryRange) || !reflect.DeepEqual(p.GPUHostRange, before.GPUHostRange) || !reflect.DeepEqual(p.DeviceRange, before.DeviceRange) || p.MemorySamples != before.MemorySamples || !p.MemoryRecordedAt.Equal(before.MemoryRecordedAt) {
+				t.Fatalf("restart changed accepted memory facts: before=%+v after=%+v", before, p)
+			}
 			retainedRange = true
 		}
 	}
