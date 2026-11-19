@@ -370,12 +370,26 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 			state := filepath.Join(c.State, "custody")
 			os.WriteFile(state, []byte("preserve"), 0600)
 			os.WriteFile(executable, []byte("version 2"), 0700)
+			if role == "worker" {
+				// The adjacent predecessor used the default service slice.
+				old := strings.Replace(c.ServiceText(), "Slice=myce.slice\nMemoryAccounting=yes\nOOMPolicy=continue\n", "", 1)
+				if err := os.WriteFile(c.Service, []byte(old), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := Install(context.Background(), c, executable, "", runner); err != nil {
 				t.Fatal(err)
 			}
 			b, _ := os.ReadFile(c.Binary)
 			if string(b) != "version 2" {
 				t.Fatal("binary not upgraded")
+			}
+			unit, err := os.ReadFile(c.Service)
+			if err != nil || string(unit) != c.ServiceText() {
+				t.Fatal("upgrade differs from dry-run unit", err)
+			}
+			if role == "worker" && !strings.Contains(string(unit), "Slice=myce.slice\n") {
+				t.Fatal("upgrade did not establish joint parent")
 			}
 			b, _ = os.ReadFile(state)
 			if string(b) != "preserve" {

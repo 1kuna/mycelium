@@ -70,6 +70,7 @@ func NewModelEngine(m Model, dir string, clock Clock) Engine {
 }
 
 type LlamaEngine struct {
+	memoryOOMScore     atomic.Int32
 	readinessWorker    *Worker
 	memoryCeilings     *memoryCeilings
 	memoryAttempt      *memoryAttempt
@@ -218,6 +219,9 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	}
 	l.exited = make(chan struct{})
 	go func() { l.waitErr = l.cmd.Wait(); output.close(); close(l.exited) }()
+	if l.memoryAttempt != nil {
+		l.memoryAttempt.oomScore = int(l.memoryOOMScore.Load())
+	}
 	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
 		_ = l.Unload()
 		return fmt.Errorf("memory ceiling attach: %w", e)
@@ -706,6 +710,18 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 	for name, m := range rt.models {
 		s, ok := desired[name]
 		m.queueFlight = s.InFlight
+		if ok && s.Attempt == m.attempt && s.Session == rt.session {
+			if owned, yes := m.engine.(*LlamaEngine); yes {
+				score := modelOOMScore(s)
+				owned.memoryOOMScore.Store(int32(score))
+				if (m.state == "ready" || m.state == "draining") && owned.memoryAttempt != nil {
+					if err := owned.memoryAttempt.updateOOMScore(score); err != nil {
+						m.err, m.runtimeFailed = "model OOM priority update failed", true
+						rt.unload(m)
+					}
+				}
+			}
+		}
 		replaced := ok && s.Attempt != "" && m.attempt != "" && s.Attempt != m.attempt
 		if replaced {
 			m.queueFlight = 0 // B's assignments cannot keep A alive.
@@ -801,6 +817,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			if owned, ok := engine.(*LlamaEngine); ok {
 				owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes
 			}
+		}
+		if owned, ok := engine.(*LlamaEngine); ok {
+			owned.memoryOOMScore.Store(int32(modelOOMScore(s)))
 		}
 		parent := context.Background()
 		if rt.availability != nil {

@@ -195,6 +195,7 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	PriorityPolicy       *PriorityMatch      `json:"priority_policy,omitempty"`
 	Resident             *ResidentEngine     `json:"resident,omitempty"`
 	Interval             *ModelInterval      `json:"interval,omitempty"`
 	Device               string              `json:"device,omitempty"`
@@ -710,6 +711,11 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	for _, s := range q.s.ModelSlots {
 		if s.Machine == machine {
 			slot := *s
+			// Keep the adjacent predecessor's strict wire schema unchanged.
+			if contains(q.s.Machines[machine].Capabilities, jointMemoryCapability) {
+				match := q.priorityMatch(Spec{Project: s.Project, Class: s.Class, Priority: s.Priority})
+				slot.PriorityPolicy = &match
+			}
 			model, _ := q.model(s.Model)
 			if s.State == "loading" && !logPolicyFits(model.Logs, q.s.Machines[machine]) {
 				continue

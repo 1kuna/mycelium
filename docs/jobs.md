@@ -1028,6 +1028,26 @@ files. Job GET replies continue to omit extension payloads.
 
 ### Measured job envelopes
 
+Installed Linux workers put their service and detached attempts under one
+`myce.slice` memory ceiling. The worker applies the queue's existing host
+allowance, including measured updates, before consuming assignments; each
+attempt keeps its own inner ceiling. The common parent is not an OOM group,
+so exceeding it can kill a lower-tier attempt without killing every job.
+Launchers in the highest owner tier use `oom_score_adj=0`; lower tiers use
+`1000`, inherited by main and sidecars. Intermediate tiers share that score.
+This orders kernel victims without reserving idle memory or making production
+immune when it alone exhausts the allowance. Model plans carry the same owner
+tier on supporting workers. Upgrades retain the service identity and change
+its slice on restart; install dry runs show that unit placement. Foreground
+joins keep their existing admission-only behavior.
+
+After a CPU auto-memory stop, the durable retry floor retains the exact
+attempt's largest resident/cgroup/guard observation plus measured growth or
+guard overshoot. A smaller final sample cannot erase it. Recovery retains the
+same logical job across restart and target movement, and physical capacity
+bounds increasing retries. Transferred probes keep their no-retry contract.
+
+
 Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
 and main `run.memory_gb` are optional additional member caps; omit them to let
 members share the job envelope. Sample whole-group anon + kernel + shmem

@@ -176,7 +176,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 				t.Fatal(err)
 			}
 		} else {
-			command("systemd-run", "--user", "--collect", "--quiet", "--unit="+c.Service, "--property=Delegate=yes", "--property=KillMode=mixed", c.Binary, "service", "--config", c.Config)
+			command("systemd-run", "--user", "--collect", "--quiet", "--unit="+c.Service, "--property=Delegate=yes", "--slice=myce.slice", "--property=KillMode=mixed", c.Binary, "service", "--config", c.Config)
 		}
 	}
 	stop := func() {

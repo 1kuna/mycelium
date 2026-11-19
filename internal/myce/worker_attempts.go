@@ -1500,6 +1500,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
 				}
 				if reply.HostMemoryBudget != nil {
+					if err := w.syncJointMemoryCeiling(observeCtx, *reply.HostMemoryBudget); err != nil {
+						return fmt.Errorf("%w: joint host ceiling: %v", ErrMemoryCeilingsRequired, err)
+					}
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
 					w.Machine.HostMemoryBudgetMeasured = reply.HostMemoryBudget.Measured
 				}

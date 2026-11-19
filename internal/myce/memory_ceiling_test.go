@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -105,6 +106,90 @@ func TestMemoryCeilingDelegationAndOOM(t *testing.T) {
 	}
 	if err = a.failure(); err == nil || err.Error() != "exceeded its 5 GiB memory ceiling" {
 		t.Fatalf("OOM: %v", err)
+	}
+}
+
+func TestMemoryCeilingJointAllowance(t *testing.T) {
+	c := fakeCeilings(t)
+	c.pageSize = 4096
+	root := filepath.Join(t.TempDir(), "myce.slice")
+	if err := c.fs.Mkdir(root); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	command := func(_ context.Context, args ...string) error {
+		calls++
+		if strings.Join(args[:5], " ") != "--user set-property --runtime myce.slice MemoryMax=5368709120" && calls == 1 {
+			t.Fatal(args)
+		}
+		for _, arg := range args[4:] {
+			key, value, _ := strings.Cut(arg, "=")
+			name := map[string]string{"MemoryMax": "memory.max", "MemorySwapMax": "memory.swap.max"}[key]
+			if value == "infinity" {
+				value = "max"
+			}
+			if err := c.fs.WriteFile(filepath.Join(root, name), []byte(value)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, gb := range []float64{5, 5, 3, 0} {
+		if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{GiB: gb}, 0, command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 3 {
+		t.Fatal("unchanged allowance rewrote systemd", calls)
+	}
+	if _, err := jointMemoryRoot(filepath.Join(root, "myce-jobs.slice", "attempt.scope")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jointMemoryRoot("/user.slice/myce-worker.service"); err == nil {
+		t.Fatal("old service silently bypassed common ceiling")
+	}
+	if err := c.fs.WriteFile(filepath.Join(root, "memory.oom.group"), []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{}, 0, command); err == nil {
+		t.Fatal("whole-host group kill accepted")
+	}
+	if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{Measured: true}, 0, command); err == nil {
+		t.Fatal("zero measured allowance disabled cap")
+	}
+}
+
+func TestMemoryCeilingTierScores(t *testing.T) {
+	for _, tc := range []struct {
+		match PriorityMatch
+		want  int
+	}{
+		{PriorityMatch{Tier: "production", Index: 0}, 0},
+		{PriorityMatch{Tier: "deadline", Index: 1}, 1000},
+		{PriorityMatch{Tier: "experiment", Index: 2}, 1000},
+		{PriorityMatch{Tier: "owner-top", Index: 0}, 0},
+		{PriorityMatch{Tier: "owner-lower", Index: 12}, 1000},
+	} {
+		j := Job{Spec: Spec{Priority: "production"}, PriorityPolicy: tc.match}
+		if got := attemptOOMScore(j); got != tc.want {
+			t.Fatal(tc.match, got)
+		}
+		if got := modelOOMScore(ModelSlot{PriorityPolicy: &tc.match}); got != tc.want {
+			t.Fatal("model", tc.match, got)
+		}
+	}
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.s.ModelSlots["fixture"] = &ModelSlot{Machine: m.ID, Model: "fixture", Project: "example", Class: "production"}
+	if plan := q.modelPlan(m.ID); len(plan) != 1 || plan[0].PriorityPolicy != nil {
+		t.Fatal("predecessor received new wire field", plan)
+	}
+	q.s.Machines[m.ID].Capabilities = append(q.s.Machines[m.ID].Capabilities, jointMemoryCapability)
+	if plan := q.modelPlan(m.ID); len(plan) != 1 || plan[0].PriorityPolicy == nil || plan[0].PriorityPolicy.Index != 0 {
+		t.Fatal("model lost owner tier", plan)
 	}
 }
 func TestMemoryCeilingUnavailableIsExplicit(t *testing.T) {
@@ -230,7 +315,7 @@ func TestMemoryCeilingModelOOMAfterReady(t *testing.T) {
 
 func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
-	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") {
+	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") || !strings.Contains(c.ServiceText(), "Slice=myce.slice\nMemoryAccounting=yes\n") {
 		t.Fatal("worker has no delegated memory controller")
 	}
 	status := WorkerMemoryDelegationStatus(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return []byte("Delegate=no\n"), nil })
@@ -372,14 +457,103 @@ func TestMemoryCeilingLinuxIntegration(t *testing.T) {
 	if err = a.failure(); err == nil || err.Error() != "exceeded its 0.03125 GiB memory ceiling" {
 		t.Fatalf("real kernel OOM evidence: %v", err)
 	}
+	t.Run("joint victim order", func(t *testing.T) {
+		joint, err := c.create("joint-integration-"+ID(), 256<<20, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := joint.cleanup(RealClock{}); err != nil {
+				t.Error(err)
+			}
+		}()
+		children, err := joint.children()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		start := func(name string, score int) (*exec.Cmd, *os.File, *bufio.Reader, *memoryAttempt) {
+			t.Helper()
+			a, err := children.create(name, 224<<20, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.oomScore = score
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { r.Close(); w.Close() })
+			cmd := exec.CommandContext(ctx, "sh", "-c", `read gate || exit 125; exec "$@"`, "memory-test", os.Args[0], "-test.run=^TestMemoryCeilingAllocationHelper$")
+			cmd.Stdin = r
+			cmd.Env = append(withoutMyceToken(os.Environ()), "MYCE_TEST_ALLOCATE_MEMORY=1", "MYCE_TEST_MEMORY_HOLD=1")
+			out, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+			if err := a.attach(cmd.Process.Pid); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.WriteString("start\n"); err != nil {
+				t.Fatal(err)
+			}
+			return cmd, w, bufio.NewReader(out), a
+		}
+		production, gate, ready, protected := start("production", attemptOOMScore(Job{PriorityPolicy: PriorityMatch{Tier: "experiment", Index: 2}}))
+		if line, err := ready.ReadString('\n'); err != nil || line != "allocated\n" {
+			t.Fatalf("production allocation: %q %v", line, err)
+		}
+		// A loaded model can be promoted without being restarted. Verify that
+		// the unprivileged owner can lower its earlier score back to zero.
+		if err := protected.updateOOMScore(attemptOOMScore(Job{PriorityPolicy: PriorityMatch{Tier: "production", Index: 0}})); err != nil {
+			t.Fatal(err)
+		}
+		lower, _, _, victim := start("experiment", attemptOOMScore(Job{PriorityPolicy: PriorityMatch{Tier: "experiment", Index: 2}}))
+		if err := lower.Wait(); err == nil {
+			t.Fatal("joint overflow did not kill lower tier")
+		}
+		if err := victim.failure(); err == nil {
+			t.Fatal("lower tier has no kernel OOM victim evidence")
+		}
+		local, err := victim.fs.ReadFile(filepath.Join(victim.path, "memory.events.local"))
+		if err != nil || memoryCounters(local)["oom"] != 0 {
+			t.Fatalf("victim hit its own limit: %s %v", local, err)
+		}
+		events, err := joint.fs.ReadFile(filepath.Join(joint.path, "memory.events.local"))
+		if err != nil || memoryCounters(events)["oom"] == 0 {
+			t.Fatalf("joint limit did not trigger: %s %v", events, err)
+		}
+		if err := protected.failure(); err != nil {
+			t.Fatal("production killed", err)
+		}
+		if _, err := gate.WriteString("finish\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := production.Wait(); err != nil {
+			t.Fatal("production did not survive", err)
+		}
+	})
 }
 func TestMemoryCeilingAllocationHelper(t *testing.T) {
 	if os.Getenv("MYCE_TEST_ALLOCATE_MEMORY") != "1" {
 		return
 	}
-	b := make([]byte, 128<<20)
+	size := 128 << 20
+	if os.Getenv("MYCE_TEST_MEMORY_HOLD") == "1" {
+		size = 160 << 20
+	}
+	b := make([]byte, size)
 	for i := range b {
 		b[i] = 1
+	}
+	if os.Getenv("MYCE_TEST_MEMORY_HOLD") == "1" {
+		fmt.Println("allocated")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 	}
 	runtime.KeepAlive(b)
 	os.Exit(0)

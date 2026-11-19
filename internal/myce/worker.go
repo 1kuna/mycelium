@@ -782,6 +782,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	// Report the actual cgroup limit to the payload.
 	if memoryAttempt != nil {
 		ceilingBytes = memoryAttempt.bytes
+		memoryAttempt.oomScore = attemptOOMScore(j)
 	}
 	started := false
 	defer func() {
