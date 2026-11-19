@@ -638,9 +638,14 @@ incomplete host evidence; device completeness alone does not establish host
 coverage. A rejected CUDA proc pin read additionally records `failed_pid`,
 `failed_state`, `failed_counter` and `failed_counter_reason` (`missing` or
 `malformed`). Keep those failure-only fields with the exact attempt; missing
-fields on an older worker leave the cause unknown. An exiting PID is skipped
-only after a fresh subtree inventory confirms it left; a listed owner with
-unreadable counters still makes sampling incomplete.
+fields on an older worker leave the cause unknown. A leader that has dropped
+its memory map can remain listed while a sibling owns live pins. Supporting
+workers read that shared map's counters through a sibling and count them once;
+zero requires a complete thread-group proof that no map remains. A fresh
+subtree inventory can also confirm the whole PID left. Unreadable or partial
+counters and incomplete thread inventories still make sampling incomplete;
+absolute host/global pin bounds remain required. `failed_pid` may identify the
+thread whose counters failed.
 Repeated complete physical forecasts supersede legacy additive sizing
 only when they cover every retained total-cgroup floor and resident-plus-device
 forecast. Incomplete-only history and uncovered larger peaks keep conservative

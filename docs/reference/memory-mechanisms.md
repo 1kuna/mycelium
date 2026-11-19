@@ -242,12 +242,33 @@ failure from the status bytes already read; no raw status or command is retained
 CUDA proc status may vanish or lose memory fields between cgroup enumeration and
 reading. Linux drops the memory map before removing the exiting task from its
 cgroup, so the status can still be readable without `VmPin`/`VmLck`.
-Only a successful fresh exact-subtree inventory confirming that PID has left
-permits skipping it; absolute physical/global pin counters still cover residual
-allocations. A zombie leader can have live threads, so neither process state nor
-`Kthread` alone permits skipping a listed owner. Missing live-PID counters, failed
-inventory rechecks, permission errors, slow reads and real gaps continue to reject
-completeness.
+`cgroup.procs` lists thread-group leaders, and a dying leader can remain listed
+while siblings share its memory map. When a complete userspace leader status
+has no memory-map fields, read `/proc/PID/task/TID/status` for that shared map's
+`VmPin`/`VmLck`, counted once per group. Zero requires readable statuses proving
+every enumerated thread has no map, plus a second inventory with no unobserved
+threads. Neither state `R`/`Z` nor `Kthread` alone authorizes zero. Partial or
+malformed memory counters, truncated status, unreadable/empty inventories and
+unreadable threads still reject completeness. A fresh exact-subtree inventory
+proving the entire PID left also permits skipping it, as before. Absolute
+physical/global pin counters remain required to bound residual allocations.
+Slow reads and real gaps continue to reject completeness.
+
+The CPU-only [exit reproduction](../../scripts/repro-cuda-exiting-leader.py)
+registers a 64 KiB io_uring buffer and locks it with `mlock`, then exits only its
+leader. Run `python3 scripts/repro-cuda-exiting-leader.py` on Linux with `cc` and
+permitted io_uring. It checks live sibling counters and cgroup membership and
+also samples the last-task exit window. Linux source explains the observed
+`R` with no counters: [`proc_pid_status`](https://github.com/torvalds/linux/blob/v6.17/fs/proc/array.c#L439)
+emits [`task_mem`](https://github.com/torvalds/linux/blob/v6.17/fs/proc/task_mmu.c#L37)
+only when [`get_task_mm`](https://github.com/torvalds/linux/blob/v6.17/kernel/fork.c#L1320)
+succeeds. [`do_exit`](https://github.com/torvalds/linux/blob/v6.17/kernel/exit.c#L949)
+clears that task's mm before cgroup removal and zombie notification;
+[`cgroup_exit`](https://github.com/torvalds/linux/blob/v6.17/kernel/cgroup/cgroup.c#L6870)
+retains a dying leader while live siblings remain. The counters belong to the
+shared mm; [io_uring pin accounting](https://github.com/torvalds/linux/blob/v6.17/io_uring/rsrc.c#L58)
+can outlive a task's mm reference, and [GUP pin accounting](https://github.com/torvalds/linux/blob/v6.17/mm/gup.c#L175)
+also feeds the retained global pin bound.
 Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
 baseline the host and attempt-cgroup cumulative `some total` counters before
 payload/sidecar launch, while the attempt cgroup is empty. Reject learning if

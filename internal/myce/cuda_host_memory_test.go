@@ -2,6 +2,7 @@ package myce
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +12,52 @@ import (
 	"testing/synctest"
 	"time"
 )
+
+func cudaNoMMStatus(pid, tid int, state string) string {
+	return fmt.Sprintf("State:\t%s (exiting)\nTgid:\t%d\nPid:\t%d\nKthread:\t0\nvoluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n", state, pid, tid)
+}
+
+type cudaThreadRaceFS struct {
+	memoryFS
+	mode        string
+	inventories int
+}
+
+func (f *cudaThreadRaceFS) ReadFile(path string) ([]byte, error) {
+	if path == "/proc/8/task/9/status" {
+		switch f.mode {
+		case "thread status missing":
+			return nil, os.ErrNotExist
+		case "thread status unreadable":
+			return nil, os.ErrPermission
+		}
+	}
+	return f.memoryFS.ReadFile(path)
+}
+
+func (f *cudaThreadRaceFS) ReadDir(path string) ([]os.DirEntry, error) {
+	if path != "/proc/8/task" {
+		return f.memoryFS.ReadDir(path)
+	}
+	f.inventories++
+	if f.mode == "thread inventory unreadable" || f.mode == "healthy no task access" || (f.mode == "thread inventory lost" && f.inventories == 2) {
+		return nil, os.ErrPermission
+	}
+	if f.mode == "thread inventory empty" {
+		return nil, nil
+	}
+	entries, err := f.memoryFS.ReadDir(path)
+	if f.mode == "thread inventory grew" && f.inventories == 1 {
+		var initial []os.DirEntry
+		for _, entry := range entries {
+			if entry.Name() != "9" {
+				initial = append(initial, entry)
+			}
+		}
+		return initial, err
+	}
+	return entries, err
+}
 
 type cudaProcExitFS struct {
 	memoryFS
@@ -89,6 +136,28 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 		put(filepath.Join(c.root, "memory.stat"), strings.Replace(stat, "anon 2147483648", "anon 10737418240", 1))
 		put(filepath.Join(proc, "meminfo"), strings.Replace(meminfo, "MemAvailable: 50331648", "MemAvailable: 47185920", 1))
 		switch mode {
+		case "healthy no task access":
+			a.fs = &cudaThreadRaceFS{memoryFS: a.fs, mode: mode}
+		case "thread status missing", "thread status unreadable", "thread inventory unreadable", "thread inventory lost", "thread inventory grew", "thread inventory empty", "live sibling missing pin", "live sibling malformed lock", "truncated no mm", "no mm with VmRSS":
+			status := cudaNoMMStatus(8, 8, "R")
+			if mode == "truncated no mm" {
+				status = strings.Split(status, "voluntary_ctxt_switches:")[0]
+			} else if mode == "no mm with VmRSS" {
+				status += "VmRSS: 64 kB\n"
+			}
+			put(filepath.Join(proc, "8/status"), status)
+			put(filepath.Join(proc, "8/task/8/status"), status)
+			sibling := cudaNoMMStatus(8, 9, "R")
+			switch mode {
+			case "live sibling missing pin":
+				sibling = "State: S (sleeping)\nVmLck: 65536 kB\n"
+			case "live sibling malformed lock":
+				sibling = "State: S (sleeping)\nVmPin: 131072 kB\nVmLck: unknown kB\n"
+			case "thread inventory grew":
+				sibling = "VmPin: 131072 kB\nVmLck: 65536 kB\n"
+			}
+			put(filepath.Join(proc, "8/task/9/status"), sibling)
+			a.fs = &cudaThreadRaceFS{memoryFS: a.fs, mode: mode}
 		case "detached siblings", "missing detached root":
 			// Parent scope now contains only this attempt; detached siblings
 			// and worker engines live under separate accounting roots.
@@ -98,6 +167,23 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 			a.accountingRoots = []string{c.root, other}
 			if mode == "missing detached root" {
 				put(filepath.Join(other, "memory.stat"), "anon 8589934592\nkernel 1073741824\n")
+			}
+		case "exiting leader sibling", "zombie leader sibling", "exiting leader no mm", "exiting group no mm":
+			state := "R"
+			if mode == "zombie leader sibling" {
+				state = "Z"
+			}
+			status := cudaNoMMStatus(8, 8, state)
+			put(filepath.Join(proc, "8/status"), status)
+			put(filepath.Join(proc, "8/task/8/status"), status)
+			if strings.HasSuffix(mode, "sibling") {
+				// Both siblings share this mm. Count once, including nonzero
+				// pins and locks; the leader alone would incorrectly report zero.
+				for _, tid := range []string{"9", "10"} {
+					put(filepath.Join(proc, "8/task", tid, "status"), "VmPin: 131072 kB\nVmLck: 65536 kB\n")
+				}
+			} else if mode == "exiting group no mm" {
+				put(filepath.Join(proc, "8/task/9/status"), cudaNoMMStatus(8, 9, "R"))
 			}
 		case "missing cgroup":
 			put(filepath.Join(a.path, "memory.stat"), strings.ReplaceAll(stat, "file_writeback 16777216\n", ""))
@@ -147,10 +233,10 @@ func cudaHostFixture(t *testing.T, mode string) *AttemptMemoryPeak {
 }
 
 func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
-	for _, mode := range []string{"complete", "detached siblings", "missing detached root", "masked host drop", "exited proc", "exited proc status", "failed exit inventory", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing live lock", "malformed pin", "malformed lock", "zombie leader", "kernel thread", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
+	for _, mode := range []string{"complete", "detached siblings", "missing detached root", "masked host drop", "exited proc", "exited proc status", "exiting leader sibling", "zombie leader sibling", "exiting leader no mm", "exiting group no mm", "healthy no task access", "thread status missing", "thread status unreadable", "thread inventory unreadable", "thread inventory lost", "thread inventory grew", "thread inventory empty", "live sibling missing pin", "live sibling malformed lock", "truncated no mm", "no mm with VmRSS", "failed exit inventory", "missing live proc", "slow collector", "missing cgroup", "missing proc pin", "missing live lock", "malformed pin", "malformed lock", "zombie leader", "kernel thread", "missing physical", "missing global pins", "reset global pins", "host OOM"} {
 		t.Run(mode, func(t *testing.T) {
 			p := cudaHostFixture(t, mode)
-			complete := mode == "complete" || mode == "detached siblings" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status"
+			complete := mode == "complete" || mode == "detached siblings" || mode == "masked host drop" || mode == "exited proc" || mode == "exited proc status" || mode == "exiting leader sibling" || mode == "zombie leader sibling" || mode == "exiting leader no mm" || mode == "exiting group no mm" || mode == "healthy no task access"
 			if p == nil || (p.NonreclaimableGB != nil) != (complete || mode == "host OOM") {
 				t.Fatalf("wrong complete evidence: %+v", p)
 			}
@@ -161,7 +247,14 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 				t.Fatal("missing live process was silently ignored", p.HostSampling)
 			}
 			state, counter, reason := "", "", ""
+			failedPID := 8
 			switch mode {
+			case "thread status missing", "thread status unreadable", "thread inventory unreadable", "thread inventory lost", "thread inventory grew", "thread inventory empty", "truncated no mm", "no mm with VmRSS":
+				state, counter, reason = "R", "VmPin", "missing"
+			case "live sibling missing pin":
+				failedPID, state, counter, reason = 9, "S", "VmPin", "missing"
+			case "live sibling malformed lock":
+				failedPID, state, counter, reason = 9, "S", "VmLck", "malformed"
 			case "missing proc pin":
 				state, counter, reason = "unknown", "VmPin", "missing"
 			case "missing live lock":
@@ -179,7 +272,7 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 			}
 			sampling := p.HostSampling
 			if state != "" {
-				if sampling.Reason != "cuda_proc_pin_counters:read_failed" || sampling.FailedPID != 8 || sampling.FailedState != state || sampling.FailedCounter != counter || sampling.FailedCounterReason != reason {
+				if sampling.Reason != "cuda_proc_pin_counters:read_failed" || sampling.FailedPID != failedPID || sampling.FailedState != state || sampling.FailedCounter != counter || sampling.FailedCounterReason != reason {
 					t.Fatalf("lost proc rejection details: %+v", sampling)
 				}
 			} else if sampling.FailedPID != 0 || sampling.FailedState != "" || sampling.FailedCounter != "" || sampling.FailedCounterReason != "" {
@@ -189,8 +282,11 @@ func TestCUDAHostMemoryCompleteCalibration(t *testing.T) {
 				t.Fatal("slow collection lost predicate/timing", p.HostSampling)
 			}
 			const nr = 2 + .25 + .125 + .0625 + .03125 + .015625
-			const pins = .03125 + .0625 + .015625
-			const combined = nr + 1 + pins
+			pins := .03125 + .0625 + .015625
+			if mode == "exiting leader sibling" || mode == "zombie leader sibling" {
+				pins += .125 + .0625
+			}
+			combined := nr + 1 + pins
 			if complete {
 				got, ok := p.gpuHostPeakGB()
 				if !ok || got != combined || *p.NonreclaimableGB != nr || p.GPUHost.Source != cudaHostMemorySource || *p.GPUHost.PinnedGB != pins || *p.GPUHost.PhysicalGB != 11.125 {
