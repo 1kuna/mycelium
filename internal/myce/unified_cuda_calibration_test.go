@@ -382,12 +382,11 @@ func TestUnifiedCUDACalibrationAdmission(t *testing.T) {
 		}
 	}
 	history := unifiedNamingHistory(t)
-	// Constrained success invalidates earlier accepted peaks. Rebuild the
-	// five-sample range with clean completions after that invalidation and
-	// the subsequent corrected-attribution replacement.
-	// Finish with two complete physical samples after the coverage gap;
-	// incomplete coverage must not retain the reduced physical charge.
-	history = append(history, history[3], history[0], history[1])
+	// Constrained success invalidates earlier accepted peaks. Replay all five
+	// clean samples after it, retaining their coverage gap followed by two
+	// complete physical samples, so the original calibrated charge is taught
+	// entirely by accepted evidence newer than the invalidation.
+	history = append(history[:3:3], history[0], history[1], history[3], history[4], history[5])
 	for i, h := range history {
 		queued := submit(t, q, spec)
 		run := assignedJob(machineCheck(t, q, m))
