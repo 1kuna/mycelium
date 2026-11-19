@@ -428,7 +428,7 @@ func TestFleetUpgradeInitialRuntimeDefersAndReturns(t *testing.T) {
 					}
 					order = append(order, fleetActivate(t, q, c))
 				}
-				if q.s.FleetUpgrade.State != "complete" || q.s.FleetUpgrade.Operation != operation || !h.StartRevisited {
+				if q.s.FleetUpgrade.State != "complete" || q.s.FleetUpgrade.Operation != operation || !recovers && !h.StartRevisited {
 					t.Fatalf("initial deferral never returned/finished: %+v", q.fleetUpgradeStatus())
 				}
 				if recovers {

@@ -290,7 +290,7 @@ func (q *Queue) fleetCurrent(p *FleetRuntimeProof, goos, arch string) bool {
 }
 
 func (q *Queue) fleetWorkerFailure(m *Machine, release *EnrollmentRelease) string {
-	if m == nil || m.Fleet == nil || m.CapabilityProfile == nil {
+	if m == nil || m.Fleet == nil || m.Fleet.ObservedAt.IsZero() || m.CapabilityProfile == nil {
 		return "worker_unmanaged"
 	}
 	// A once-managed service can temporarily stop proving health. Missing or
@@ -733,6 +733,9 @@ func slicesContainsPhase(hosts []*fleetUpgradeHost, phase string) bool {
 // only an explicit critical request uses the existing tier-stop policy.
 func (q *Queue) fleetDrain(u *fleetUpgrade, h *fleetUpgradeHost) bool {
 	if h.StartIdentity != "" && !h.WorkerDone {
+		if h.StartProbe == "" {
+			h.StartRevisited = false
+		}
 		q.fleetSnapshotStarts(h)
 		h.Phase, h.StepAt = "worker_start", q.clock.Now()
 		return true
