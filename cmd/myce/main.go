@@ -545,6 +545,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		startupPhase := queueStartupTrace(myce.RealClock{}, log.Printf)
 		// Reject invalid admission limits before opening storage and starting
 		// background checkpoint preparation.
 		if *uploadSpoolBytes == 0 || *uploadSpoolBytes < -1 {
@@ -580,6 +581,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		startupPhase("load_state")
 		if err := q.ConfigureHealthNotifier(ctx, *healthNotify); err != nil {
 			return err
 		}
@@ -596,6 +598,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err = q.ConfigureFileRetention(*fileRetention); err != nil {
 			return err
 		}
+		startupPhase("service_and_retention")
 		if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" || *releaseCA != "" {
 			data, e := os.ReadFile(*releaseManifest)
 			if e != nil {
@@ -641,9 +644,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err = q.ConfigureEnvironments(ec); err != nil {
 			return err
 		}
+		startupPhase("storage_and_environments")
 		if err = q.ConfigureModels(mc); err != nil {
 			return err
 		}
+		startupPhase("models")
 		if *projectConfig != "" {
 			policies, e := myce.ReadProjectPolicies(*projectConfig)
 			if e != nil {
@@ -663,6 +668,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err = q.SetLossTimeouts(*productionLoss, *deadlineLoss, *experimentLoss); err != nil {
 			return err
 		}
+		startupPhase("policy")
 		listener, err := listenWithRetry(ctx, *address, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -675,6 +681,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			listener.Close()
 			return err
 		}
+		startupPhase("initial_maintenance")
 		defer listener.Close()
 		var queueServers []*http.Server
 		if *discovery {
@@ -721,6 +728,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		go func() { errs <- server.Serve(listener) }()
 		go func() { errs <- q.Run(ctx) }()
 		fmt.Printf("Mycelium queue: http://%s\n", listener.Addr())
+		startupPhase("listener_ready")
 		select {
 		case <-ctx.Done():
 		case err = <-errs:

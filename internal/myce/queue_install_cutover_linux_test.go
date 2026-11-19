@@ -110,7 +110,9 @@ func TestQueueInstalledCutover(t *testing.T) {
 	c.EnvironmentFile = filepath.Join(root, "synthetic.env")
 	c.RequireMountedNAS = false
 	c.ModelCatalog, c.EnvironmentCatalog = "", ""
-	// Keep shipped queue defaults for the baseline, including CPUQuota=25%.
+	// Bound the manager-launched process as well as the harness. Fresh queues
+	// have no CPU/memory limit; these explicit test limits fit the fleet job.
+	c.CPUQuota, c.MemoryMax = "200%", "1G"
 	if quota := os.Getenv("MYCE_TEST_QUEUE_CPU_QUOTA"); quota != "" {
 		c.CPUQuota = quota
 	}
@@ -135,6 +137,10 @@ func TestQueueInstalledCutover(t *testing.T) {
 	}
 	write(c.Config, data, 0600)
 	write(c.Service, []byte(c.ServiceText()), 0600)
+	// The service must not inherit the real manager account's agent homes.
+	// A private runtime drop-in affects only this test's uniquely named unit.
+	isolatedHome := filepath.Join(runtimeDir, "systemd/user", unit+".d/home.conf")
+	write(isolatedHome, []byte("[Service]\nEnvironment="+unitQuote("HOME="+home)+" "+unitQuote("CODEX_HOME="+filepath.Join(home, "codex"))+"\n"), 0600)
 	shim := filepath.Join(root, "bin/systemctl")
 	adapter, err := os.ReadFile("testdata/queue_install_systemctl.py")
 	if err != nil {
@@ -177,6 +183,12 @@ func TestQueueInstalledCutover(t *testing.T) {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				t.Error(err)
 			}
+		}
+		if err := os.Remove(isolatedHome); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
+		}
+		if err := os.Remove(filepath.Dir(isolatedHome)); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
 		}
 		if _, err := manager("daemon-reload"); err != nil {
 			t.Error(err)
@@ -416,7 +428,7 @@ print('finished',flush=True)
 			Message string `json:"MESSAGE"`
 			At      string `json:"__REALTIME_TIMESTAMP"`
 		}
-		if json.Unmarshal(line, &row) != nil || !strings.HasPrefix(row.Message, "Mycelium queue: http://") {
+		if json.Unmarshal(line, &row) != nil {
 			continue
 		}
 		at, err := strconv.ParseInt(row.At, 10, 64)
@@ -424,10 +436,14 @@ print('finished',flush=True)
 			t.Fatal(err)
 		}
 		mu.Lock()
-		if at*1000 > marks["stop_request"] {
+		if at*1000 > marks["stop_request"] && strings.HasPrefix(row.Message, "Mycelium queue: http://") {
 			marks["new_process_ready"] = at * 1000
 		}
+		cut := marks["stop_request"]
 		mu.Unlock()
+		if at*1000 > cut && (strings.Contains(row.Message, "event=queue_startup_phase") || strings.Contains(row.Message, "event=slow_queue_mutex_hold")) {
+			t.Logf("installed_queue_phase=%s", row.Message)
+		}
 	}
 	mu.Lock()
 	ready := marks["new_process_ready"]
