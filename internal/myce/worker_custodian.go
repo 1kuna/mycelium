@@ -330,6 +330,33 @@ func custodianInterval(interval time.Duration) time.Duration {
 	return interval
 }
 
+// Keep the independently owned preparation observable while its runner blocks
+// in staging/build I/O. Freeze the last committed snapshot instead of reading
+// workerStore concurrently with that writer. Join before the next publication,
+// so a preparation heartbeat can never overwrite Started or a final result.
+func (w Worker) keepCustodianPreparationLive(dir, id string) func() {
+	var v custodianSnapshot
+	if readCustodianJSON(dir, custodianName(id, "snapshot"), &v) != nil {
+		return func() {} // Failed observation expires normally; never invent proof.
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(custodianInterval(w.Interval))
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				v.At = w.Clock.Now()
+				_ = saveWorkerJSON(dir, custodianName(id, "snapshot"), v)
+			}
+		}
+	}()
+	return func() { close(stop); <-done }
+}
+
 func (g *attemptCustodian) snapshot() custodianSnapshot {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -594,7 +621,9 @@ func (w Worker) runCustodian(stop context.Context) error {
 	defer tick.Stop()
 	var p *process
 	for p == nil && s.state.Result == nil {
+		stopHeartbeat := w.keepCustodianPreparationLive(dir, id)
 		p, err = w.startAssignedAttempt(prepareCtx, s, *req.State.Job)
+		stopHeartbeat()
 		if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
 			r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: req.State.Session, Execution: Execution{ID: req.State.Job.ID, Attempt: req.State.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
 			if cause := safeRuntimeCause(r.ExecutionCause); cause != nil {

@@ -112,7 +112,13 @@ fi
 if [[ -f scripts/test-gate-reconcile.py ]]; then
   step gate-reconcile-regressions python3 scripts/test-gate-reconcile.py
 fi
-step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
+if [[ $mode == full ]]; then
+  # The real compiled-image boundary includes intentional races and a panic;
+  # quick retains the inexpensive selector, custody and watchdog regressions.
+  step gate-scheduler-regressions env GATE_TEST_BINARY_INTEGRATION=1 python3 scripts/test-gate-scheduler.py
+else
+  step gate-scheduler-regressions python3 scripts/test-gate-scheduler.py
+fi
 if [[ -f scripts/test-gate-shards.py ]]; then
   step gate-shards-regressions python3 scripts/test-gate-shards.py
 fi
@@ -124,12 +130,24 @@ if [[ -f scripts/test-gate-default-cache.py ]]; then
 fi
 step docs-links-regressions python3 scripts/test-check-doc-links.py
 step docs-links python3 scripts/check-doc-links.py
-step build go build -o "$scratch/bin/myce" ./cmd/myce
+# The CLI used to enumerate targets is also the native release image. Match
+# that target's CGO setting so the matrix can reuse its exact linked bytes.
+# The race-enabled CLI and package tests still build native CGO below.
+host_os=$(go env GOHOSTOS)
+host_arch=$(go env GOHOSTARCH)
+native_cgo=0
+if [[ $host_os == darwin ]]; then native_cgo=1; fi
+step build env CGO_ENABLED="$native_cgo" go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
 while read -r os arch cgo; do
-  if [[ $cgo == 1 && $os != $(go env GOHOSTOS) ]]; then
+  if [[ $cgo == 1 && $os != $host_os ]]; then
     echo "build-$os-$arch: skipped (native CGO toolchain required; verify on $os)"
+    continue
+  fi
+  if [[ $os == $host_os && $arch == $host_arch && $cgo == $native_cgo ]]; then
+    echo "build-$os-$arch: reusing native release image"
+    step "build-$os-$arch" cp "$scratch/bin/myce" "$scratch/bin/myce-$os-$arch"
     continue
   fi
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
@@ -139,6 +157,7 @@ done < <("$scratch/bin/myce" release build-targets)
 step build-test-cli go build -race -tags=myce_test -o "$scratch/bin/myce-test" ./cmd/myce
 export GATE_TEST_CLI_BINARY="$scratch/bin/myce-test"
 if [[ $mode == full ]]; then
+  export GATE_TEST_BINARY_DIR="$scratch/bin/packages"
   step upgrade-compat-supervisor python3 scripts/test-upgrade-compat.py
   # Real cross-release queue/worker and installer proof. Previous source must
   # already be local/cached; this gate remains offline.

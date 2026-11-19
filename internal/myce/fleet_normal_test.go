@@ -2,6 +2,7 @@ package myce
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -95,14 +96,23 @@ func TestFleetUpgradeNormalNaturalFallback(t *testing.T) {
 func runExecution(j *Job) Execution { return Execution{ID: j.ID, Attempt: j.Attempt} }
 
 func TestFleetUpgradeLiveTakeover(t *testing.T) {
-	for _, urgency := range []string{"normal", "critical"} {
-		t.Run(urgency, func(t *testing.T) {
+	for _, kind := range []string{"normal", "critical", "preparing"} {
+		t.Run(kind, func(t *testing.T) {
 			q, c, workers := fleetFixture(t, "q", "a")
 			m := workers[0]
 			s := spec("production")
 			s.Resumable = false
 			run := fleetRun(t, q, m, s)
-			q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+			urgency := kind
+			if kind == "preparing" {
+				urgency = "normal"
+				// The assignment exists but the payload has not started. The
+				// custodian owns staging and the final launch gate throughout.
+				q.s.Jobs[run.ID].StartedAt = nil
+			}
+			g := &attemptCustodian{observed: true, last: custodianSnapshot{At: c.Now(), Started: kind != "preparing"}}
+			a := &attemptSupervisor{job: *run, custodian: g}
+			q.s.Machines[m.ID].Fleet.Adoption = workerAdoptionProof(map[attemptKey]*attemptSupervisor{jobKey(*run): a}, c.Now(), time.Second)
 			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{Urgency: urgency}); err != nil {
 				t.Fatal(err)
 			}
@@ -136,7 +146,7 @@ func TestFleetUpgradeLiveTakeover(t *testing.T) {
 			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := q.Checkin(Checkin{Machine: updated, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: true}}}); err != nil {
+			if _, err := q.Checkin(Checkin{Machine: updated, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: runExecution(run), Session: run.Session, Started: kind != "preparing"}}}); err != nil {
 				t.Fatal(err)
 			}
 			fleetTick(t, q)
@@ -150,6 +160,130 @@ func TestFleetUpgradeLiveTakeover(t *testing.T) {
 			}
 			if !h.WorkerDone {
 				t.Fatalf("same-session replacement not verified: %+v", h)
+			}
+			if kind == "preparing" && got.StartedAt != nil {
+				t.Fatal("upgrade waited for preparation to start the payload")
+			}
+		})
+	}
+}
+
+// A stale readiness view is a wait-and-recheck condition, not a requirement to
+// finish the payload. Positive release is still required for pending cleanup.
+func TestFleetUpgradeReadinessRecheck(t *testing.T) {
+	for _, kind := range []string{"unobserved", "stale", "release-pending"} {
+		t.Run(kind, func(t *testing.T) {
+			q, c, workers := fleetFixture(t, "q", "a")
+			m := workers[0]
+			run := fleetRun(t, q, m, spec("experiment"))
+			g := &attemptCustodian{observed: kind != "unobserved", last: custodianSnapshot{At: c.Now()}}
+			if kind == "stale" {
+				g.last.At = c.Now().Add(-time.Hour)
+			}
+			if kind == "release-pending" {
+				g.last.State.Result = &Result{ReleasePending: true}
+			}
+			a := &attemptSupervisor{job: *run, custodian: g}
+			actors := map[attemptKey]*attemptSupervisor{jobKey(*run): a}
+			q.s.Machines[m.ID].Fleet.Adoption = workerAdoptionProof(actors, c.Now(), time.Second)
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			h := q.fleetActiveHost()
+			if h == nil || h.Takeover || h.Phase != "draining" || !strings.Contains(h.Wait, "readiness or release") {
+				t.Fatalf("unproved custody authorized swap: %+v", h)
+			}
+			c.Advance(time.Second)
+			if kind == "release-pending" {
+				// Cleanup must finish before release, rather than accepting a
+				// newer observation of the same pending helper.
+				g.last.At = c.Now()
+				q.s.Machines[m.ID].Fleet.Adoption = workerAdoptionProof(actors, c.Now(), time.Second)
+				fleetRefresh(t, q, c)
+				if h.Takeover || h.Phase != "draining" {
+					t.Fatal("fresh pending cleanup authorized swap", h)
+				}
+				finish(t, q, run, true)
+				a.released = true
+			} else {
+				g.observed, g.last.At = true, c.Now()
+			}
+			q.s.Machines[m.ID].Fleet.Adoption = workerAdoptionProof(actors, c.Now(), time.Second)
+			fleetRefresh(t, q, c)
+			// Positive release can advance the ordinary quiet-host update
+			// immediately, before another live-adoption proof is needed.
+			if h.Phase != "worker_update" || kind != "release-pending" && !h.Takeover || len(h.StopRequests) != 0 {
+				t.Fatalf("recheck failed to permit unmodified custody: %+v", h)
+			}
+			if kind != "release-pending" && job(t, q, run.ID).State != "running" {
+				t.Fatal("readiness required natural completion")
+			}
+		})
+	}
+}
+
+func TestFleetUpgradePreparationLaunchRace(t *testing.T) {
+	q, c, workers := fleetFixture(t, "q", "a")
+	m := workers[0]
+	run := fleetRun(t, q, m, spec("experiment"))
+	q.s.Machines[m.ID].Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol, Attempts: []Execution{runExecution(run)}}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	// A delayed preparation offer appears after the instruction was fetched.
+	// Neither its launch nor final update authorization may pass this fence.
+	launch := q.issuePreparation(q.s.Machines[m.ID], "environment", "late-build")
+	if err := q.AuthorizeLaunch(launch); !errors.Is(err, ErrStale) {
+		t.Fatalf("preparation raced cutover: %v", err)
+	}
+	if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session); err == nil {
+		t.Fatal("final authorization ignored new preparation custody")
+	}
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err == nil {
+		t.Fatal("restart acknowledgement ignored new preparation custody")
+	}
+	if q.s.PreparationPlans[launch.Attempt].Started || len(q.s.WorkerHandovers) != 0 {
+		t.Fatal("late preparation started or swap was committed")
+	}
+	c.Advance(time.Second)
+	fleetRefresh(t, q, c) // The unstarted offer is withdrawn, then takeover rechecks.
+	h := q.fleetActiveHost()
+	if h == nil || !h.Takeover || h.Phase != "worker_update" {
+		t.Fatalf("withdrawn preparation stranded takeover: %+v", h)
+	}
+}
+
+func TestFleetUpgradeStandalonePreparationFallback(t *testing.T) {
+	for _, kind := range []string{"environment", "copy", "untracked", "cleanup"} {
+		t.Run(kind, func(t *testing.T) {
+			q, c, workers := fleetFixture(t, "q", "a")
+			m := q.s.Machines[workers[0].ID]
+			m.Fleet.Adoption = &WorkerAdoptionProof{Protocol: custodianProtocol}
+			switch kind {
+			case "environment", "copy":
+				l := q.issuePreparation(m, kind, "background")
+				if err := q.AuthorizeLaunch(l); err != nil {
+					t.Fatal(err)
+				}
+			case "untracked":
+				m.EnvironmentReports = []EnvironmentReport{{Key: "legacy", State: "building"}}
+			case "cleanup":
+				r := HostRelease{Host: m.HostID, Machine: m.ID, Session: m.Session, Job: "preparation", Preparation: true}
+				q.s.HostReleases = map[string]HostRelease{releaseKey(r): r}
+				m.EnvironmentReports = []EnvironmentReport{{Key: "unconfirmed-cleanup", State: "building"}}
+			}
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			h := q.fleetActiveHost()
+			c.Advance(StopGrace)
+			fleetRefresh(t, q, c)
+			if h == nil || h.Takeover || h.Phase != "draining" || len(h.StopRequests) != 0 || !strings.Contains(h.Wait, "preparation has no detached custodian") {
+				t.Fatalf("unowned preparation lost drain/reason: %+v", h)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"mycelium/internal/probeguard"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -90,7 +92,7 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 			t.Fatalf("build replacement: %v\n%s", err, out)
 		}
 	}
-	for _, mode := range []string{"plain", "native", "cancel", "memory"} {
+	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation"} {
 		t.Run(mode, func(t *testing.T) { custodianNativeReplacement(t, next, mode) })
 	}
 }
@@ -101,8 +103,26 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(API{Queue: q, Token: "custodian-test"}.Handler())
+	entered, unblock := make(chan struct{}, 1), make(chan struct{})
+	var releaseOnce sync.Once
+	releasePreparation := func() { releaseOnce.Do(func() { close(unblock) }) }
+	handler := API{Queue: q, Token: "custodian-test"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode == "preparation" && r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			select {
+			case <-unblock:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	defer server.Close()
+	defer releasePreparation()
 	dir := t.TempDir()
 
 	c := ServiceConfig{State: filepath.Join(dir, "state"), Binary: filepath.Join(dir, "myce"), Config: filepath.Join(dir, "config.json"), Name: "custodian-test", HostID: "custodian-test-host", Queue: server.URL, Service: "myce-worker@custodian-test-" + ID() + ".service"}
@@ -227,6 +247,45 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 
 	j := submit(t, q, s)
 	var before custodianSnapshot
+	if mode == "preparation" {
+		await(t, func() bool {
+			select {
+			case <-entered:
+				return true
+			default:
+				return false
+			}
+		})
+		await(t, func() bool {
+			files, _ := filepath.Glob(filepath.Join(custodianDir(c.State), "*.snapshot.json"))
+			return len(files) == 1 && readCustodianJSON(custodianDir(c.State), filepath.Base(files[0]), &before) == nil
+		})
+		if before.Started || before.Finished || job(t, q, j.ID).StartedAt != nil {
+			t.Fatal("fixture did not hold input preparation")
+		}
+		stop()
+		// Only the parent proxy publishes the admission ledger. Requiring a
+		// new ledger after the old service exits proves the replacement has
+		// adopted this preparing custodian before its input is released.
+		ledger := filepath.Join(custodianDir(c.State), custodianName(before.ID, "ledger"))
+		if err := os.Remove(ledger); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		writeImage(next)
+		start()
+		await(t, func() bool {
+			image, _ := os.ReadFile(filepath.Join(c.State, "worker-image"))
+			b, e := readSingleAttemptState(filepath.Join(c.State, "state.json"))
+			_, ledgerErr := os.Stat(ledger)
+			var st workerState
+			return string(image) == "my55-next" && e == nil && json.Unmarshal(b, &st) == nil && st.Custodian == before.ID && ledgerErr == nil
+		})
+		var after custodianSnapshot
+		if err := readCustodianJSON(custodianDir(c.State), custodianName(before.ID, "snapshot"), &after); err != nil || after.PID != before.PID || after.Birth != before.Birth || after.Started || after.Finished {
+			t.Fatalf("preparation did not survive replacement: %+v %v", after, err)
+		}
+		releasePreparation()
+	}
 	await(t, func() bool {
 		files, _ := filepath.Glob(filepath.Join(custodianDir(c.State), "*.snapshot.json"))
 		if len(files) != 1 {
@@ -275,7 +334,9 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop()
+	if mode != "preparation" {
+		stop()
+	}
 	if mode == "memory" {
 		if err := os.WriteFile(filepath.Join(checkpoint, "finish"), nil, 0600); err != nil {
 			t.Fatal(err)
@@ -288,8 +349,10 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	if current, e := processBirth(payload); (e != nil || current != birth) && mode != "memory" {
 		t.Fatalf("service teardown interrupted payload: %v", e)
 	}
-	writeImage(next)
-	start()
+	if mode != "preparation" {
+		writeImage(next)
+		start()
+	}
 	await(t, func() bool {
 		b, _ := os.ReadFile(filepath.Join(c.State, "worker-image"))
 		return string(b) == "my55-next"
