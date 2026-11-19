@@ -42,6 +42,9 @@ you press Ctrl-C. No token setup or second terminal is needed. To try your own
 command, run `./myce dev -- ./myce run -- echo hello`. Plain `./myce dev` keeps
 running until Ctrl-C and keeps its state in the current folder.
 
+For a fresh project with an input file, its own command and an output folder,
+follow the [six-step project journey](../skills/mycelium/setup-project.md#try-a-fresh-project-on-a-laptop).
+
 ## 2. Run it on two machines
 
 You need two Linux or Apple Silicon Mac computers on the same local network, and
@@ -145,16 +148,20 @@ machine's installed tools; to send your own code, use an entry (next section).
 
 ## 4. Make work reusable
 
+If a non-interactive shell cannot find an installed `myce`, use the
+[installed-path setup step](../skills/mycelium/setup-project.md#find-the-installed-cli).
+
 For a project you'll run more than once, describe its work in one file,
 `.mycelium/adapter.yaml`. From the project's root (a Git repository):
 
 ```sh
-myce init -- python3 scripts/report.py
+myce init --output report.json -- python3 scripts/report.py
 ```
 
 This writes one entry named `test` that runs your command. If the project has a
-`pixi.lock` or `uv.lock`, the entry uses it as its environment. Add the files
-you want back under the entry:
+`pixi.lock` or `uv.lock`, the entry uses it as its environment. `--output`
+declares what comes back; repeat it for files, folders (`plots/`) or quoted
+globs (`"logs/*.txt"`). The generated entry is:
 
 ```yaml
 project: example
