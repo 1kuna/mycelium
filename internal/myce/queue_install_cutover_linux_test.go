@@ -58,25 +58,6 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if _, err := manager("show", "--property=Version"); err != nil {
 		t.Fatal("user manager unavailable")
 	}
-	// Register before any install, so even a failed activation removes this unit.
-	t.Cleanup(func() {
-		out, err := manager("disable", "--now", unit)
-		if err != nil {
-			t.Errorf("isolated unit cleanup: %v: %s", err, out)
-		}
-		if out, err := manager("show", unit, "--property=MainPID", "--value"); err != nil || strings.TrimSpace(string(out)) != "0" {
-			t.Errorf("isolated process cleanup unproved: %q %v", out, err)
-		}
-		for _, path := range []string{filepath.Join(runtimeDir, "systemd/user", unit), filepath.Join(runtimeDir, "systemd/user/default.target.wants", unit)} {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				t.Error(err)
-			}
-		}
-		if _, err := manager("daemon-reload"); err != nil {
-			t.Error(err)
-		}
-		t.Log("isolated unit disabled, process exited, runtime definition and enablement removed; temporary state removed by test cleanup")
-	})
 	q, workers := candidateCostFixture(t)
 	q.clock.(*fakeClock).Advance(time.Since(q.clock.Now()))
 	now := q.clock.Now()
@@ -162,6 +143,18 @@ func TestQueueInstalledCutover(t *testing.T) {
 	write(shim, adapter, 0700)
 	events := filepath.Join(root, "manager.jsonl")
 	env = append(env, "PATH="+filepath.Dir(shim)+":"+os.Getenv("PATH"), "MYCE_TEST_QUEUE_UNIT="+unit, "MYCE_TEST_QUEUE_DEFINITION="+c.Service, "MYCE_TEST_SYSTEMCTL="+systemctl, "MYCE_TEST_QUEUE_EVENTS="+events)
+	// Refuse foreign and wildcard units, including names passed through flags,
+	// before any manager operation. The event file proves no command escaped.
+	for _, args := range [][]string{{"--user", "restart", "foreign.service"}, {"--user", "stop", "myce-queue.service", "foreign.socket"}, {"--user", "show", "myce-queue.service", "--unit=foreign"}, {"--user", "restart", "myce-*.service"}} {
+		cmd := exec.Command(shim, args...)
+		cmd.Env = env
+		if err := cmd.Run(); err == nil {
+			t.Fatal("namespace adapter accepted a foreign unit")
+		}
+	}
+	if _, err := os.Stat(events); !os.IsNotExist(err) {
+		t.Fatal("refused namespace request reached manager")
+	}
 	install := func() error {
 		cmd := exec.Command(binary, "install", "queue", "--config", c.Config)
 		cmd.Env = env
@@ -171,6 +164,25 @@ func TestQueueInstalledCutover(t *testing.T) {
 		}
 		return nil
 	}
+	// Register before any install, so even a failed activation removes this unit.
+	t.Cleanup(func() {
+		out, err := manager("disable", "--now", unit)
+		if err != nil {
+			t.Errorf("isolated unit cleanup: %v: %s", err, out)
+		}
+		if out, err := manager("show", unit, "--property=MainPID", "--value"); err != nil || strings.TrimSpace(string(out)) != "0" {
+			t.Errorf("isolated process cleanup unproved: %q %v", out, err)
+		}
+		for _, path := range []string{filepath.Join(runtimeDir, "systemd/user", unit), filepath.Join(runtimeDir, "systemd/user/default.target.wants", unit)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Error(err)
+			}
+		}
+		if _, err := manager("daemon-reload"); err != nil {
+			t.Error(err)
+		}
+		t.Log("isolated unit disabled, process exited, runtime definition and enablement removed; temporary state removed by test cleanup")
+	})
 	if err := install(); err != nil {
 		t.Fatal(err)
 	} // Bootstrap is outside the measured trial.
@@ -391,6 +403,38 @@ print('finished',flush=True)
 		}
 	}
 	mark("all_reconnected")
+	// Read only this test unit's journal. Its existing listener-ready message
+	// identifies readiness independently of Type=simple manager activation.
+	journal := exec.CommandContext(ctx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager")
+	journal.Env = env
+	journalData, err := journal.Output()
+	if err != nil {
+		t.Fatal("cannot measure queue readiness from test unit journal")
+	}
+	for _, line := range bytes.Split(journalData, []byte("\n")) {
+		var row struct {
+			Message string `json:"MESSAGE"`
+			At      string `json:"__REALTIME_TIMESTAMP"`
+		}
+		if json.Unmarshal(line, &row) != nil || !strings.HasPrefix(row.Message, "Mycelium queue: http://") {
+			continue
+		}
+		at, err := strconv.ParseInt(row.At, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		if at*1000 > marks["stop_request"] {
+			marks["new_process_ready"] = at * 1000
+		}
+		mu.Unlock()
+	}
+	mu.Lock()
+	ready := marks["new_process_ready"]
+	mu.Unlock()
+	if ready == 0 {
+		t.Fatal("replacement readiness message absent")
+	}
 	stopWorkers()
 	wg.Wait()
 	if err := client.Call(ctx, "POST", "/api/workers/complete", Result{Execution: Execution{ID: "running-0", Attempt: 1}, Machine: workers[0].ID, Session: workers[0].Session, Success: true}, nil); err != nil {

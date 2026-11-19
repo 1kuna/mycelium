@@ -32,11 +32,14 @@ else:
         sys.exit("unexpected manager operation")
     if args.count("myce-queue.service") != 1:
         sys.exit("only myce-queue.service may be mapped")
-    for arg in args[2:]:
-        if arg != "myce-queue.service" and not arg.startswith("--"):
-            sys.exit("unexpected unit or positional argument")
-        if ".service" in arg and arg != "myce-queue.service":
-            sys.exit("another unit is forbidden")
+    flags = {
+        "show": {"--property=UnitFileState", "--property=DropInPaths",
+                 "--property=TimeoutStopUSec", "--property=TimeoutStartUSec", "--value"},
+        "is-active": {"--quiet"}, "enable": {"--now", "--runtime"},
+        "disable": {"--now"}, "start": set(), "stop": set(), "restart": set(),
+    }
+    if any(arg != "myce-queue.service" and arg not in flags[action] for arg in args[2:]):
+        sys.exit("unexpected unit or flag")
     args = [unit if arg == "myce-queue.service" else arg for arg in args]
     if action == "enable" and "--runtime" not in args:
         args.insert(2, "--runtime")
