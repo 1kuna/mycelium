@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -33,6 +34,11 @@ func (osMemoryFS) Mkdir(p string) error                    { return os.Mkdir(p, 
 func (osMemoryFS) Remove(p string) error                   { return os.Remove(p) }
 
 type memoryCeilings struct {
+	oomScore        int
+	jointMu         sync.Mutex
+	jointBytes      int64
+	jointSwap       int64
+	jointConfirmed  bool
 	accountingRoots []string // Aggregate worker + detached jobs for sibling attribution.
 	fs              memoryFS
 	root            string
@@ -40,6 +46,7 @@ type memoryCeilings struct {
 	clock           Clock
 }
 type memoryAttempt struct {
+	oomScore         int
 	accountingRoots  []string
 	currentMu        sync.Mutex
 	currentGrowth    memoryGrowth
@@ -57,6 +64,8 @@ type memoryAttempt struct {
 	// Latest per-process device sample, for live planning credit (#596).
 	device atomic.Pointer[hostMemorySample]
 }
+
+const jointMemoryCapability = "joint_memory_v1"
 
 var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")
 
@@ -123,6 +132,7 @@ func (w *Worker) initMemoryCeilings() {
 					w.memoryCeilings, err = delegateMemory(osMemoryFS{}, filepath.Join("/sys/fs/cgroup", p), os.Getpid())
 					if err == nil {
 						w.memoryCeilings.clock = w.Clock
+						w.Machine.Capabilities = append(w.Machine.Capabilities, jointMemoryCapability)
 						w.Machine.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 						return
 					}
@@ -200,7 +210,7 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 	if err != nil {
 		return nil, err
 	}
-	a := &memoryAttempt{accountingRoots: c.accountingRoots, fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
+	a := &memoryAttempt{oomScore: c.oomScore, accountingRoots: c.accountingRoots, fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err
 	}
@@ -238,6 +248,15 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 func (a *memoryAttempt) attach(pid int) error {
 	if a == nil {
 		return nil
+	}
+	// The launcher still holds the exec gate. Descendants inherit this score,
+	// including main and sidecars; no authored allocation can race the write.
+	if runtime.GOOS == "linux" {
+		if _, real := a.fs.(osMemoryFS); real {
+			if err := setAttemptOOMScore(a.fs, pid, a.oomScore); err != nil {
+				return err
+			}
+		}
 	}
 	if err := a.fs.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte(strconv.Itoa(pid))); err != nil {
 		return err
@@ -345,7 +364,168 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 			return nil, errors.New("child memory delegation not confirmed")
 		}
 	}
-	return &memoryCeilings{fs: a.fs, root: a.path, clock: a.clock}, nil
+	return &memoryCeilings{oomScore: a.oomScore, fs: a.fs, root: a.path, clock: a.clock}, nil
+}
+
+// Linux adds oom_score_adj / 1000 of the OOM domain's pages to badness.
+// Giving lower tiers the full domain, while the highest tier stays at zero,
+// makes even a small lower-tier borrower precede a large production process.
+// No process is immune: production can still be killed if it alone exhausts
+// the allowance. Intermediate tiers share the lower-tier score.
+func attemptOOMScore(j Job) int {
+	if j.PriorityPolicy.Tier != "" {
+		if j.PriorityPolicy.Index > 0 {
+			return 1000
+		}
+		return 0
+	}
+	if j.Spec.Class == "production" || j.Spec.Priority == "production" {
+		return 0
+	}
+	return 1000
+}
+
+func modelOOMScore(s ModelSlot) int {
+	j := Job{Spec: Spec{Class: s.Class, Priority: s.Priority}}
+	if s.PriorityPolicy != nil {
+		j.PriorityPolicy = *s.PriorityPolicy
+	}
+	return attemptOOMScore(j)
+}
+
+func (a *memoryAttempt) updateOOMScore(score int) error {
+	if a == nil || a.oomScore == score {
+		return nil
+	}
+	if runtime.GOOS != "linux" {
+		a.oomScore = score
+		return nil
+	}
+	if _, real := a.fs.(osMemoryFS); !real {
+		a.oomScore = score
+		return nil
+	}
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.procs"))
+	if err != nil {
+		return err
+	}
+	for _, text := range strings.Fields(string(b)) {
+		pid, err := strconv.Atoi(text)
+		if err != nil {
+			return err
+		}
+		if err := setAttemptOOMScore(a.fs, pid, score); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	entries, err := a.fs.ReadDir(a.path)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			child := &memoryAttempt{fs: a.fs, path: filepath.Join(a.path, entry.Name()), oomScore: a.oomScore}
+			if err := child.updateOOMScore(score); err != nil {
+				return err
+			}
+		}
+	}
+	a.oomScore = score
+	return nil
+}
+
+func setAttemptOOMScore(fs memoryFS, pid, score int) error {
+	path := filepath.Join("/proc", strconv.Itoa(pid), "oom_score_adj")
+	value := strconv.Itoa(score)
+	if err := fs.WriteFile(path, []byte(value)); err != nil {
+		return fmt.Errorf("set attempt OOM priority: %w", err)
+	}
+	b, err := fs.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(b)) != value {
+		return errors.New("attempt OOM priority not confirmed")
+	}
+	return nil
+}
+
+// The systemd slice contains both the worker (including model engines) and
+// myce-jobs.slice's detached custodians. A service-only cap misses the latter.
+// Apply the existing queue allowance before consuming assignments, including
+// changes returned during rolling upgrades. systemd owns the slice controls;
+// never try to delegate or relocate another owner's running processes.
+func (w Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBudget) error {
+	c := w.memoryCeilings
+	if runtime.GOOS != "linux" || c == nil || w.Custodian != "" || !ValidWorkerUnit(w.Unit) {
+		return nil
+	}
+	if _, real := c.fs.(osMemoryFS); !real {
+		return nil
+	}
+	root, err := jointMemoryRoot(c.root)
+	if err != nil {
+		return err
+	}
+	return c.setJointMemoryLimit(ctx, root, budget, w.MemorySwapMaxBytes, func(ctx context.Context, args ...string) error {
+		cmd := exec.CommandContext(ctx, "systemctl", args...)
+		cmd.Env = withoutMyceToken(os.Environ())
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("configure joint memory ceiling: %w", err)
+		}
+		return nil
+	})
+}
+
+func jointMemoryRoot(root string) (string, error) {
+	for p := filepath.Clean(root); p != "." && p != string(filepath.Separator); p = filepath.Dir(p) {
+		if filepath.Base(p) == "myce.slice" {
+			return p, nil
+		}
+	}
+	return "", errors.New("worker is outside myce.slice; upgrade its installed service unit")
+}
+
+func (c *memoryCeilings) setJointMemoryLimit(ctx context.Context, root string, budget HostMemoryBudget, swap int64, command func(context.Context, ...string) error) error {
+	bytes, err := memoryBytes(budget.GiB)
+	if err != nil || swap < 0 || budget.Measured && bytes == 0 {
+		return errors.New("invalid joint memory allowance")
+	}
+	if bytes > 0 {
+		page := c.pageSize
+		if page == 0 {
+			page = os.Getpagesize()
+		}
+		bytes, err = pageAlignedMemory(bytes, page)
+		if err != nil {
+			return err
+		}
+		swap, err = pageAlignedMemory(swap, page)
+		if err != nil {
+			return err
+		}
+	}
+	c.jointMu.Lock()
+	defer c.jointMu.Unlock()
+	if !c.jointConfirmed || c.jointBytes != bytes || c.jointSwap != swap {
+		limit, swapLimit := strconv.FormatInt(bytes, 10), strconv.FormatInt(swap, 10)
+		if bytes == 0 { // Existing uncapped installations remain uncapped.
+			limit, swapLimit = "infinity", "infinity"
+		}
+		if err := command(ctx, "--user", "set-property", "--runtime", "myce.slice", "MemoryMax="+limit, "MemorySwapMax="+swapLimit); err != nil {
+			c.jointConfirmed = false
+			return err
+		}
+	}
+	for name, want := range map[string]string{"memory.max": strconv.FormatInt(bytes, 10), "memory.swap.max": strconv.FormatInt(swap, 10), "memory.oom.group": "0"} {
+		if bytes == 0 && name != "memory.oom.group" {
+			want = "max"
+		}
+		b, err := c.fs.ReadFile(filepath.Join(root, name))
+		if err != nil || strings.TrimSpace(string(b)) != want {
+			c.jointConfirmed = false
+			return fmt.Errorf("joint memory %s not confirmed", name)
+		}
+	}
+	c.jointBytes, c.jointSwap, c.jointConfirmed = bytes, swap, true
+	return nil
 }
 
 // cgroup.kill empties descendants but leaves directories. Recovery uses the

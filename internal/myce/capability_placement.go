@@ -280,20 +280,7 @@ func (q *Queue) retryHostOOM(j *Job) {
 	if j != nil && q.s.Jobs[j.ID] == j {
 		q.touchJob(j.ID)
 	}
-	need := j.Spec.Needs.HostMemoryGB
-	if f := j.MemoryOOMFloor; f != nil {
-		need = max(need, f.HostMemoryGB)
-	}
-	for _, facts := range j.MemoryAttempts {
-		if facts.Attempt != j.Attempt || facts.Machine != j.Machine || facts.Session != j.Session {
-			continue
-		}
-		if p := facts.MemoryPeak; p != nil && p.HostGB != nil && validRate(*p.HostGB) {
-			peak := hostMemoryPeakGB(p)
-			need = max(need, peak)
-		}
-	}
-	j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: need + minimumHostMemoryGB}
+	j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: memoryStopFloor(j)}
 	j.OOMCapacity = nil
 	j.OOMRetries++
 	probe := cloneJob(j)
