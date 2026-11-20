@@ -105,7 +105,8 @@ func TestCheckpointCommand(t *testing.T) {
 func TestDevCheckpointEndToEnd(t *testing.T) {
 	dir := currentTestStateRoot(t)
 	binary := devTestBinary(t)
-	cmd := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "dev.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--memory-gb", "8")
+	// Keep real stop/save/resume transitions without waiting for the default heartbeat.
+	cmd := exec.Command(binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "dev.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--memory-gb", "8")
 	cmd.Env = append(os.Environ(), "MYCE_TOKEN=e2e-token")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -357,7 +358,8 @@ func readLogs(t *testing.T, ctx context.Context, c myce.Client, id string) strin
 func TestDevModelEndToEnd(t *testing.T) {
 	dir := currentTestStateRoot(t)
 	binary := devTestBinary(t)
-	cmd := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--model-idle", "1s")
+	// Model loading and idle release still run for real; only check-ins are faster.
+	cmd := exec.Command(binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--model-idle", "1s")
 	cmd.Env = append(os.Environ(), "MYCE_TOKEN=model-test-token")
 	stdout, e := cmd.StdoutPipe()
 	if e != nil {
