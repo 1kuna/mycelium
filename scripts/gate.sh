@@ -140,7 +140,9 @@ host_arch=$(go env GOHOSTARCH)
 native_cgo=0
 if [[ $host_os == darwin ]]; then native_cgo=1; fi
 step build env CGO_ENABLED="$native_cgo" go build -o "$scratch/bin/myce" ./cmd/myce
-step vet go vet ./...
+# Vet must retain checkout paths: cached cgo records with -trimpath can
+# refer to a removed prior checkout (the merge check uses the same boundary).
+step vet env GOFLAGS="-p=$cores" go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
 while read -r os arch cgo; do
   if [[ $cgo == 1 && $os != $host_os ]]; then
