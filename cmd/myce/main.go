@@ -936,8 +936,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 					if facts.Attempt != a.Attempt || facts.Machine != a.Machine || facts.Session != a.Session || !a.OutOfMemory && (a.ExecutionCause == nil || a.ExecutionCause.Class != "resource_limit") {
 						continue
 					}
-					if facts.MemoryEnvelope != nil {
-						fmt.Printf("; memory limit=%g GiB", facts.MemoryEnvelope.HostGB)
+					if facts.MemoryEnvelope != nil && (a.ExecutionCause == nil || a.ExecutionCause.RSSLimit == nil) {
+						label := "memory limit"
+						if facts.MemoryEnvelope.Enforcement == "adaptive native CPU memory guard" {
+							label = "memory envelope"
+						}
+						fmt.Printf("; %s=%g GiB", label, facts.MemoryEnvelope.HostGB)
 					}
 					if p := facts.MemoryPeak; p != nil {
 						if p.CgroupGB != nil {

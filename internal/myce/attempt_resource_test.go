@@ -33,3 +33,15 @@ func TestAttemptResourceFailureRequiresOwnCeilingEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestAttemptResourceFailurePreservesReportedBound(t *testing.T) {
+	now := (&fakeClock{}).Now()
+	j := &Job{StartedAt: &now, MemoryEnvelope: &JobMemoryEnvelope{HostGB: 2.125}}
+	for _, message := range []string{"device out of memory", "exceeded its 8 GiB memory ceiling"} {
+		r := Result{OutOfMemory: true, Error: message}
+		got := classifyAttemptResourceFailure(j, r)
+		if got.Error != message || !got.OutOfMemory {
+			t.Fatalf("rewrote measured bound: %+v", got)
+		}
+	}
+}

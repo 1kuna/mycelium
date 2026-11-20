@@ -249,7 +249,7 @@ func TestEntryCoverageResourceFailuresKeepTypeEligible(t *testing.T) {
 			if len(got.MemoryAttempts) != 1 || got.MemoryAttempts[0].MemoryEnvelope.HostGB != run.MemoryEnvelope.HostGB || got.MemoryAttempts[0].MemoryPeak.Events != nil && *got.MemoryAttempts[0].MemoryPeak.Events != *tc.events {
 				t.Fatal("lost bound/events", got.MemoryAttempts)
 			}
-			if tc.oom && !tc.auto && !strings.Contains(h.Reason, "2.125 GiB memory ceiling") {
+			if tc.oom && !tc.auto && tc.name != "RSS guard" && !strings.Contains(h.Reason, "2.125 GiB memory ceiling") {
 				t.Fatal("lost limit", h.Reason)
 			}
 			nextSpec := s

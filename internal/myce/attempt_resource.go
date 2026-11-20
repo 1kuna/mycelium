@@ -18,10 +18,11 @@ func classifyAttemptResourceFailure(j *Job, r Result) Result {
 		kernelOOM = e.OOM > 0 || e.OOMGroupKill > 0 || e.OOMKill > 0 && e.Max > 0
 	}
 	ceiling := strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
-	r.OutOfMemory = r.OutOfMemory || kernelOOM || ceiling || r.ExecutionCause != nil && r.ExecutionCause.Class == rssLimitExceeded
-	if !r.OutOfMemory {
+	rss := r.ExecutionCause != nil && r.ExecutionCause.Class == rssLimitExceeded && safeRSSLimit(r.ExecutionCause.RSSLimit) != nil
+	if !kernelOOM && !ceiling && !rss {
 		return r
 	}
+	r.OutOfMemory = true
 	// Positive OOM evidence wins a concurrent infrastructure/preemption stop.
 	r.Interrupted = false
 	if r.ExecutionCause == nil || r.ExecutionCause.Class == "command_exit" {
@@ -31,7 +32,7 @@ func classifyAttemptResourceFailure(j *Job, r Result) Result {
 		}
 		r.ExecutionCause = &cause
 	}
-	if j.MemoryEnvelope != nil && j.MemoryEnvelope.HostGB > 0 {
+	if kernelOOM && !ceiling && !rss && j.MemoryEnvelope != nil && j.MemoryEnvelope.HostGB > 0 && !floorCharged(j.MemoryEnvelope) && j.MemoryEnvelope.Enforcement != learnedMemoryGuardEnforcement {
 		r.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", j.MemoryEnvelope.HostGB)
 	}
 	return r
