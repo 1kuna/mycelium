@@ -3,6 +3,8 @@ package myce
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,13 +63,14 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	// A median of three independent fixtures suppresses a single scheduler or
 	// storage outlier without retrying failed assertions or dropping samples.
 	var waits, burstHolds, launchWaits, launchHolds []time.Duration
+	seed, clock, workers := queueHistorySeed(t, count)
 	for sample := range 3 {
 		var got queueHistoryBurstTiming
 		// Each sample owns tens of MB of real SQLite history. Finish its
 		// cleanup before the next sample instead of retaining all six queues
 		// (including the 1k baseline) until the entire root exits.
 		if !t.Run(fmt.Sprintf("history-%d-sample-%d", count, sample), func(t *testing.T) {
-			got = queueHistoryBurst(t, count)
+			got = queueHistoryBurst(t, count, seed, clock, workers)
 		}) {
 			t.FailNow()
 		}
@@ -83,7 +86,7 @@ func measureQueueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	return queueHistoryBurstTiming{waits[1], burstHolds[1], launchWaits[1], launchHolds[1]}
 }
 
-func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
+func queueHistorySeed(t *testing.T, count int) (string, *fakeClock, []Machine) {
 	t.Helper()
 	q, c := fixture(t)
 	// Enroll before loading retained history: enrollment is fixture setup, not
@@ -111,6 +114,34 @@ func queueHistoryBurst(t *testing.T, count int) queueHistoryBurstTiming {
 	if err := q.update(func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
+	// Consistent SQLite backup of immutable retained history. Each median sample
+	// still opens its own database and executes every real burst and commit.
+	path := filepath.Join(t.TempDir(), "history.db")
+	if _, err := q.db.Exec("VACUUM INTO ?", path); err != nil {
+		t.Fatal(err)
+	}
+	return path, c, workers
+}
+
+func queueHistoryBurst(t *testing.T, count int, seed string, clock *fakeClock, workers []Machine) queueHistoryBurstTiming {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "queue.db")
+	data, err := os.ReadFile(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &fakeClock{now: clock.Now()}
+	q, err := Open(path, t.TempDir(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	fakeCheckpointAvailability(t, q, true)
+	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
+	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
 	var waits, holds []time.Duration
 	q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }
 	for range 12 {
