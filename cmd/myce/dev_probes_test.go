@@ -40,7 +40,8 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	// Fresh services and integration clients need not have /usr/sbin in PATH.
 	env := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
 	t.Setenv("MYCE_TOKEN", token)
-	cmd := exec.CommandContext(ctx, binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", backend, "--memory-gb", "8")
+	// Exercise enrollment, command effects and release without waiting for the default heartbeat cadence.
+	cmd := exec.CommandContext(ctx, binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", backend, "--memory-gb", "8")
 	cmd.Dir, cmd.Env = root, env
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = time.Second
