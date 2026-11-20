@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 var coverageSource FileRef
@@ -64,7 +65,11 @@ func TestEntryCoverageFindingSkipsTypeUntilRecipeChanges(t *testing.T) {
 	if first == nil || first.ID != j.ID {
 		t.Fatal("unseen machine type not tried", first)
 	}
-	finish(t, q, first, false)
+	failure := result(first, false)
+	failure.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "not_found"}
+	if err := q.Complete(failure); err != nil {
+		t.Fatal(err)
+	}
 	got := job(t, q, j.ID)
 	if got.State != "queued" || !slices.ContainsFunc(got.AttemptHistory, func(h AttemptOutcome) bool { return strings.Contains(h.Reason, "coverage finding") }) || len(got.EntryCoverage.Findings) != 1 || got.EntryCoverage.Findings[0].Target != (ExecutionTarget{"darwin", "arm64", "cpu"}) || got.EntryCoverage.Findings[0].Action == "" {
 		t.Fatalf("failure on unseen type not a coverage finding: %s %+v", got.State, got.EntryCoverage)
@@ -161,5 +166,103 @@ func TestEntryCoverageProductionRequiresTargets(t *testing.T) {
 	s.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
 	if j := submit(t, q, s); j.EntryCoverage != nil {
 		t.Fatal("explicit targets got a coverage stamp")
+	}
+}
+
+// A ceiling is attempt-owned, including older workers that report exit 1 plus
+// kernel events without setting OutOfMemory. It must never poison coverage.
+func TestEntryCoverageResourceFailuresKeepTypeEligible(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		auto, production, oom bool
+		cause                 *RuntimeCause
+		events                *MemoryEventCounts
+	}{
+		{name: "resource limit", cause: &RuntimeCause{Operation: "command", Class: "resource_limit"}},
+		{name: "reported resource OOM", oom: true, cause: &RuntimeCause{Operation: "command", Class: "resource_limit"}, events: &MemoryEventCounts{OOM: 1, OOMKill: 3, OOMGroupKill: 1}},
+		{name: "RSS guard", oom: true, cause: &RuntimeCause{Operation: "command", Class: rssLimitExceeded, RSSLimit: &RSSLimitEvidence{ObservedBytes: 3 << 30, LimitBytes: 2 << 30, Quality: "owned_session_rss"}}},
+		{name: "kernel OOM", oom: true, events: &MemoryEventCounts{Max: 43719, OOM: 1, OOMKill: 3, OOMGroupKill: 1}},
+		{name: "kernel kill at ceiling", oom: true, events: &MemoryEventCounts{Max: 1, OOMKill: 1}},
+		{name: "auto recovery", auto: true, oom: true, cause: &RuntimeCause{Operation: "command", Class: "resource_limit"}, events: &MemoryEventCounts{OOM: 1, OOMKill: 3}},
+		{name: "production declared ceiling", production: true, oom: true, events: &MemoryEventCounts{OOM: 1, OOMGroupKill: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock := fixture(t)
+			coverageStore(t, q, t.TempDir())
+			preferred, other := coverageMachines()
+			preferred.MemoryCeilingSlackGB = .125
+			preferred.MemoryEnforcement = cgroupMemoryEnforcement
+			check(t, q, preferred, nil)
+			check(t, q, other, nil)
+			s := coverageEntrySpec("limited", "recipe", "first")
+			s.Needs.MemoryGB, s.Needs.HostMemoryGB = 0, 2
+			if tc.auto {
+				s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
+			}
+			if tc.production {
+				s.Priority, s.Class = "production", "production"
+				s.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
+			}
+			queued := submit(t, q, s)
+			run := check(t, q, preferred, nil).Job
+			if run == nil || run.ID != queued.ID {
+				t.Fatal("not assigned", run)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			r := result(run, false)
+			code := 1
+			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "command_exit", ExitCode: &code}
+			if tc.cause != nil {
+				r.ExecutionCause = tc.cause
+			}
+			peak, resident := 2.13, 2.08
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &resident, NonreclaimableGB: &resident, CgroupGB: &peak, Events: tc.events}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, queued.ID)
+			if got.EntryCoverage != nil && len(got.EntryCoverage.Findings) != 0 {
+				t.Fatal("resource failure learned coverage", got.EntryCoverage)
+			}
+			for _, rec := range q.s.EntryCoverage {
+				if len(rec.Skipped) != 0 {
+					t.Fatal("resource failure persisted skip", rec)
+				}
+			}
+			want := "failed"
+			if tc.auto {
+				want = "queued"
+			}
+			if got.State != want || got.Losses != 0 || got.InfrastructureRetries != 0 {
+				t.Fatalf("state=%s reason=%s losses=%d infra=%d", got.State, got.Reason, got.Losses, got.InfrastructureRetries)
+			}
+			if len(got.AttemptHistory) != 1 {
+				t.Fatal(got.AttemptHistory)
+			}
+			h := got.AttemptHistory[0]
+			if h.OutOfMemory != tc.oom || h.ExecutionCause == nil || (h.ExecutionCause.Class != "resource_limit" && h.ExecutionCause.Class != rssLimitExceeded) || strings.Contains(h.Reason, "coverage") {
+				t.Fatalf("lost cause: %+v", h)
+			}
+			if len(got.MemoryAttempts) != 1 || got.MemoryAttempts[0].MemoryEnvelope.HostGB != run.MemoryEnvelope.HostGB || got.MemoryAttempts[0].MemoryPeak.Events != nil && *got.MemoryAttempts[0].MemoryPeak.Events != *tc.events {
+				t.Fatal("lost bound/events", got.MemoryAttempts)
+			}
+			if tc.oom && !tc.auto && !strings.Contains(h.Reason, "2.125 GiB memory ceiling") {
+				t.Fatal("lost limit", h.Reason)
+			}
+			nextSpec := s
+			nextSpec.SubmissionKey = "next"
+			next := submit(t, q, nextSpec)
+			if tc.auto {
+				retry := check(t, q, preferred, nil).Job
+				if retry == nil || retry.ID != queued.ID || retry.MemoryEnvelope.HostGB <= run.MemoryEnvelope.HostGB {
+					t.Fatal("memory recovery did not retain type/grow bound", retry)
+				}
+			} else if retry := check(t, q, preferred, nil).Job; retry == nil || retry.ID != next.ID {
+				t.Fatal("type was skipped", retry)
+			}
+		})
 	}
 }

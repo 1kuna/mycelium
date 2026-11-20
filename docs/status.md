@@ -20,6 +20,14 @@ field is unknown. Per-attempt cgroup memory/swap limits and group OOM handling,
 RSS guards where applicable, and tier OOM scores retain their existing behavior.
 `myce status` includes the condition and next step in text as well as JSON.
 
+Attempt history distinguishes OOM/resource-limit stops from entry coverage
+findings. `myce status JOB_ID` prints each stopped attempt's retained memory
+bound in GiB, available cgroup/non-reclaimable peaks and kernel event counts.
+Attempt-owned limits never mark an unproven machine type incompatible; auto
+memory recovery and authored ceilings keep their existing policies.
+`myce logs JOB_ID` labels every chunk by attempt, including the appended
+`[attempt 0: environment failure]` block. Sequence cursors are unchanged.
+
 ## Generated field inventory
 
 <!-- BEGIN GENERATED STATUS FIELDS -->

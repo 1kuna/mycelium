@@ -9,7 +9,7 @@ import (
 // EntryCoverage is derived at submission for a non-production adapter or
 // profile entry that names no targets (#853, #1341). Such an entry runs on any
 // machine type its platform, Pixi lock and declared tools fit. A failure on a
-// type the recipe has never succeeded on is a coverage finding: the queue skips
+// type the recipe has never succeeded on can be a coverage finding: the queue skips
 // that type for the entry until its recipe changes, and requeues the job onto
 // another type. Production entries keep explicit targets (MY-19).
 type EntryCoverage struct {
@@ -133,7 +133,12 @@ func (q *Queue) recordEntryCoverageSuccess(j *Job, machine string) {
 // job. It returns false when the failure stays the job's own: production, a
 // type the recipe already succeeded on, or a failure on every type it could use
 // while it has never succeeded anywhere (not type-specific; skips are cleared).
-func (q *Queue) entryCoverageFailure(j *Job, machine string) bool {
+func (q *Queue) entryCoverageFailure(j *Job, r Result) bool {
+	// An attempt-owned bound says nothing about platform compatibility.
+	if r.OutOfMemory || r.ExecutionCause != nil && (r.ExecutionCause.Class == "resource_limit" || r.ExecutionCause.Class == rssLimitExceeded) {
+		return false
+	}
+	machine := r.Machine
 	c, m := j.EntryCoverage, q.s.Machines[machine]
 	if c == nil || m == nil || q.entryCoverageProduction(j) {
 		return false

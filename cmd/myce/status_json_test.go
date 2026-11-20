@@ -172,3 +172,17 @@ func TestStatusSectionsAndHistoryFlags(t *testing.T) {
 		t.Fatal("history/full-ID semantics", queries)
 	}
 }
+
+func TestStatusAttemptMemoryLimitAndKernelEvents(t *testing.T) {
+	peak, resident := 2.13, 2.08
+	j := myce.Job{ID: "job", State: "failed", AttemptHistory: []myce.AttemptOutcome{{Attempt: 2, Machine: "worker", Session: "session", State: "failed", OutOfMemory: true, ExecutionCause: &myce.RuntimeCause{Operation: "command", Class: "resource_limit"}}}, MemoryAttempts: []myce.AttemptMemoryFacts{{Attempt: 2, Machine: "worker", Session: "session", MemoryEnvelope: &myce.JobMemoryEnvelope{HostGB: 2.125}, MemoryPeak: &myce.AttemptMemoryPeak{CgroupGB: &peak, NonreclaimableGB: &resident, Events: &myce.MemoryEventCounts{Max: 43719, OOM: 1, OOMKill: 3, OOMGroupKill: 1}}}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(j) }))
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "fixture")
+	out := captureJoiningOutput(t, func() error { return run([]string{"status", "job", "--queue", server.URL}) })
+	for _, want := range []string{"attempt 2", "oom=true", "resource_limit", "memory limit=2.125 GiB", "cgroup peak=2.13 GiB", "non-reclaimable=2.08 GiB", "max=43719 oom=1 oom_kill=3 oom_group_kill=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q: %s", want, out)
+		}
+	}
+}

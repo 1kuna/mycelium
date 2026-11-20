@@ -932,6 +932,25 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				if a.ExecutionCause != nil {
 					fmt.Print("; ", a.ExecutionCause.String())
 				}
+				for _, facts := range j.MemoryAttempts {
+					if facts.Attempt != a.Attempt || facts.Machine != a.Machine || facts.Session != a.Session || !a.OutOfMemory && (a.ExecutionCause == nil || a.ExecutionCause.Class != "resource_limit") {
+						continue
+					}
+					if facts.MemoryEnvelope != nil {
+						fmt.Printf("; memory limit=%g GiB", facts.MemoryEnvelope.HostGB)
+					}
+					if p := facts.MemoryPeak; p != nil {
+						if p.CgroupGB != nil {
+							fmt.Printf("; cgroup peak=%g GiB", *p.CgroupGB)
+						}
+						if p.NonreclaimableGB != nil {
+							fmt.Printf("; non-reclaimable=%g GiB", *p.NonreclaimableGB)
+						}
+						if e := p.Events; e != nil {
+							fmt.Printf("; kernel events high=%d max=%d oom=%d oom_kill=%d oom_group_kill=%d", e.High, e.Max, e.OOM, e.OOMKill, e.OOMGroupKill)
+						}
+					}
+				}
 				if a.CleanupCause != nil {
 					fmt.Print("; cleanup: ", a.CleanupCause.String())
 				}
@@ -1358,7 +1377,7 @@ func logsAfter(ctx context.Context, c myce.Client, id string, follow bool, after
 		return nil
 	}
 	for {
-		if err := drainJobLogs(ctx, c, id, &after, out); err != nil {
+		if err := drainJobLogsOutput(ctx, c, id, &after, out, true); err != nil {
 			return err
 		}
 		if !follow {
@@ -1371,7 +1390,7 @@ func logsAfter(ctx context.Context, c myce.Client, id string, follow bool, after
 		if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
 			// Drain once more after observing completion, including the last
 			// worker log page published before its terminal result.
-			return drainJobLogs(ctx, c, id, &after, out)
+			return drainJobLogsOutput(ctx, c, id, &after, out, true)
 		}
 		select {
 		case <-ctx.Done():

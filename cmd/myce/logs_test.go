@@ -51,7 +51,7 @@ func TestLogsFollowUsesOnlyJobReadsAndDrainsFinalLogs(t *testing.T) {
 			out := captureJoiningOutput(t, func() error {
 				return logs(context.Background(), myce.Client{URL: server.URL, Token: "test"}, "12345678", true)
 			})
-			if reads != 2 || logsReads != 2 || !strings.Contains(out, "first\nfinal\n") {
+			if reads != 2 || logsReads != 2 || !strings.Contains(out, "[attempt 1]\nfirst\n[attempt 1]\nfinal\n") {
 				t.Fatalf("reads=%d logs=%d output=%q", reads, logsReads, out)
 			}
 		})
@@ -112,15 +112,36 @@ func TestLogsShedRetryAndResume(t *testing.T) {
 				// Run the supported command parser with the printed continuation.
 				t.Setenv("MYCE_TOKEN", "fixture")
 				resumed := captureJoiningOutput(t, func() error { return run([]string{"logs", "job", "--queue", server.URL, "--after", "256"}) })
-				if resumed != "tail\n" {
+				if resumed != "[attempt 0: environment failure]\ntail\n" {
 					t.Fatalf("replayed prefix: %q", resumed)
 				}
-			} else if err != nil || out.String() != strings.Repeat("prefix\n", 256)+"tail\n" {
+			} else if err != nil || out.String() != strings.Repeat("[attempt 0: environment failure]\nprefix\n", 256)+"[attempt 0: environment failure]\ntail\n" {
 				t.Fatalf("retry lost output: %v %q", err, out.String())
 			}
 			if pauses != 1 {
 				t.Fatalf("pauses=%d", pauses)
 			}
 		})
+	}
+}
+
+func TestLogsLabelsAttemptsAndEnvironmentFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/jobs/job" {
+			fmt.Fprint(w, `{"id":"job","state":"failed"}`)
+			return
+		}
+		if r.URL.Query().Get("after") != "7" {
+			t.Errorf("lost explicit cursor: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `[{"seq":8,"attempt":1,"text":"first"},{"seq":9,"attempt":2,"text":"second\n"},{"seq":10,"attempt":0,"text":"build failed\n"}]`)
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	if err := logsAfter(context.Background(), myce.Client{URL: server.URL, Token: "fixture"}, "job", false, 7, &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := "[attempt 1]\nfirst\n[attempt 2]\nsecond\n[attempt 0: environment failure]\nbuild failed\n"; out.String() != want {
+		t.Fatalf("output=%q want=%q", out.String(), want)
 	}
 }

@@ -372,13 +372,28 @@ func (authority *runAuthority) resolve(address, token string) (myce.Client, erro
 // Drain every available page, advancing only after a successful write. The same
 // cursor is retained across transient read errors and the final terminal drain.
 func drainJobLogs(ctx context.Context, c myce.Client, id string, after *int64, out io.Writer) error {
+	return drainJobLogsOutput(ctx, c, id, after, out, false)
+}
+
+func drainJobLogsOutput(ctx context.Context, c myce.Client, id string, after *int64, out io.Writer, labelAttempts bool) error {
 	for {
 		var chunks []myce.Log
 		if err := c.Call(ctx, "GET", fmt.Sprintf("/api/jobs/%s/logs?after=%d", id, *after), nil, &chunks); err != nil {
 			return err
 		}
 		for _, chunk := range chunks {
-			if _, err := io.WriteString(out, strings.ReplaceAll(chunk.Text, c.Token, "[redacted]")); err != nil {
+			text := strings.ReplaceAll(chunk.Text, c.Token, "[redacted]")
+			if labelAttempts {
+				label := fmt.Sprintf("attempt %d", chunk.Attempt)
+				if chunk.Attempt == 0 {
+					label = "attempt 0: environment failure"
+				}
+				text = "[" + label + "]\n" + text
+				if !strings.HasSuffix(text, "\n") {
+					text += "\n"
+				}
+			}
+			if _, err := io.WriteString(out, text); err != nil {
 				return err
 			}
 			*after = chunk.Seq
