@@ -133,7 +133,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	startupTrace            func(string)    // Startup only; controlled phase names, no state values.
+	startupTrace            func(string) // Startup only; controlled phase names, no state values.
+	startupReadWorkers      int
 	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
 	readDependenciesInvalid bool
 
