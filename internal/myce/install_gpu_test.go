@@ -104,6 +104,9 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			}
 			// A failed upgrade also refuses acceptance and retains its saved token.
 			err = Install(context.Background(), c, binary, "changed", func(_ context.Context, n string, args ...string) ([]byte, error) {
+				if n == "systemctl" && len(args) == 3 && args[1] == "show" {
+					return installUnitObservation(c), nil
+				}
 				if n == "cat" {
 					return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
 				}
