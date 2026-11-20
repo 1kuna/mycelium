@@ -539,6 +539,9 @@ separate operator task.
 > curves remain present. Existing complete `/api/inspection` collectors remain
 > supported. See [the upgrade requirement](#rolling-fleet-upgrades).
 
+After rollout, [verify the installed consumer skill](#verify-the-installed-consumer-skill)
+before claiming a skill update in the release notes.
+
 The queue administrator provisions a trusted publisher HTTPS directory and an
 Ed25519 public key independently of the release manifest. The signing key stays
 with the publisher in a mode-0600 PKCS8 PEM file. Never distribute it with a release.
@@ -986,6 +989,7 @@ every earlier job ID is present, running attempts kept their attempt number, and
 the priority policy is unchanged. Confirm `myce status` lists each worker's
 release and that the default onboarding approval is the new release
 ([advance the default](#advance-the-default-after-a-signed-update)).
+Then [verify the installed consumer skill](#verify-the-installed-consumer-skill).
 
 **First use.** Storage preflight runs in the installed helper before it downloads
 the candidate. Publishing a candidate with advisory NAS checks cannot change an
@@ -1022,6 +1026,56 @@ does not prove storage closure.
 
 How hosts are chosen, how services verify a release, and every failure code are
 in [fleet upgrade internals](reference/fleet-upgrades.md).
+
+### Verify the installed consumer skill
+
+After cutover, read the running queue's release from the same authenticated
+operator shell used for the rollout after-check. This command requires `jq`.
+
+```sh
+queue_status=$(myce status --json) &&
+  printf '%s\n' "$queue_status" | jq -er '.queue_release.version | strings | select(length > 0)'
+```
+
+On each machine and account that supplies the skill to agents, set
+`queue_release` to that exact version and `myce_bin` to the absolute path of the
+installed executable from the signed release for that machine. If the executable
+needs updating, use the published artifact for that version and verify its
+SHA-256 against the signed `release.json`. Run the check as the account whose
+agents load the skill. `skill status` reads the default agent homes and shows
+each copy's state, installed version and binary version. If agents load the
+skill from other directories, pass the complete list of skill directories after
+`--json`.
+
+```sh
+(
+  set -e
+  : "${queue_release:?Set this to the running queue release}"
+  skill_status=$("$myce_bin" skill status --json)
+  printf 'queue release: %s\n%s\n' "$queue_release" "$skill_status"
+  printf '%s\n' "$skill_status" | jq -e --arg release "$queue_release" '
+    length > 0 and all(.[]; .state == "current" and
+      .installed_version == $release and .binary_version == $release)
+  ' >/dev/null
+)
+```
+
+If the check fails, verify the binary version before installing the embedded skill.
+Use the same directory arguments, if any, for install and status.
+
+```sh
+: "${queue_release:?Set this to the running queue release}" &&
+  "$myce_bin" version --expect-version "$queue_release" &&
+  "$myce_bin" skill install
+```
+
+The ordinary install fills missing folders and refreshes stale managed copies.
+For a symlink, edited copy or unmanaged copy, inspect `skill install --replace
+--dry-run` with the same verified binary and directories. The account owner or
+operator can then run `skill install --replace` to replace those copies. Rerun
+the check after repair. Claim a skill update in the release notes only when the
+check passes for every account and directory agents use. Keep the output private
+because it includes local paths.
 
 ## Production leases
 
@@ -1331,6 +1385,9 @@ startup with `unsupported queue persistence format`; their converters, including
 the r6.9-to-r6.8 `myce queue downgrade`, live only in source history (r6.10,
 `302620cacaace8a16e7ed424e1183dbb10f46414`). Never restore only an old DB while
 leaving a mismatched generation of referenced files.
+
+After changing the running queue release in either direction,
+[verify the installed consumer skill](#verify-the-installed-consumer-skill).
 
 ### Preserve one complete generation
 
