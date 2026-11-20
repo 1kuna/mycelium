@@ -2,12 +2,221 @@ package myce
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Model the incident mix, then measure routine maintenance after the first
+// expiry decisions. The fake clock stays fixed: a fenced render's re-armed
+// budget must avoid repeating backlog planning on every worker check-in.
+// The old release fails the three renders during warmup; report that difference.
+func BenchmarkStartWindowDeadlineMaintenance(b *testing.B) {
+	q, clock := fixture(b)
+	m := cpuBackfillMachine("worker-0", 64)
+	check(b, q, m, nil)
+	holderSpec := cpuSpec(1, 32)
+	holderSpec.Priority = "production" // Same-tier work must finish, not be reclaimed.
+	holder := submit(b, q, holderSpec)
+	running := assignedJob(check(b, q, m, nil))
+	if running == nil || running.ID != holder.ID {
+		b.Fatal("missing holder")
+	}
+	if err := q.Started(result(running, false)); err != nil {
+		b.Fatal(err)
+	}
+	for i := 1; i < 5; i++ {
+		check(b, q, cpuBackfillMachine(fmt.Sprintf("worker-%d", i), 8), nil)
+	}
+	s := cpuSpec(1, 48)
+	s.Priority, s.StartWindow = "production", "600s"
+	s.AllowedMachines = []string{m.ID}
+	demand := submit(b, q, s)
+	clock.Advance(time.Second)
+	s.Needs.HostMemoryGB = 4
+	s.Needs.MemoryGB = 0
+	template := submit(b, q, s)
+	drainAdmissionWait(b, q)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	expiredAt := clock.Now().Add(-20 * time.Minute)
+	// Cold, structurally valid queue records isolate this pass from submission I/O.
+	for i := range 24 {
+		j := cloneJob(template)
+		j.ID = fmt.Sprintf("parent-%02d", i)
+		j.Spec.StartBy = &expiredAt
+		j.Spec.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "piece"}}}
+		j.FanOut = &FanOutProgress{}
+		q.s.Jobs[j.ID] = &j
+	}
+	for i := range 100 {
+		j := cloneJob(template)
+		j.ID = fmt.Sprintf("stage-%03d", i)
+		j.Spec.StartBy, j.StartWindow = nil, 0
+		j.Spec.After = &PieceDependency{Job: "parent-00", Outputs: map[string]string{"input": "output"}}
+		j.Dependency = &PieceBinding{Job: "parent-00", State: "waiting"}
+		q.s.Jobs[j.ID] = &j
+	}
+	renders := []*Job{q.s.Jobs[template.ID]}
+	for i := range 2 {
+		j := cloneJob(template)
+		j.ID = fmt.Sprintf("render-%d", i)
+		q.s.Jobs[j.ID] = &j
+		renders = append(renders, &j)
+	}
+	for _, j := range renders {
+		j.Spec.StartBy = &expiredAt
+	}
+	// Confirm the fixture really exercises host accumulation, not ordinary fit.
+	scan := q.placementScan()
+	for _, j := range renders {
+		waiting, ready := q.queuedCapacityStatus(j)
+		reason := q.hostBackfillWaitingReason(j, scan)
+		if waiting || !ready || reason == "" {
+			b.Fatalf("render is not ready but fenced: waiting=%t ready=%t reason=%q holder_stop=%v", waiting, ready, reason, q.s.Jobs[holder.ID].StopAt)
+		}
+	}
+	q.maintainStartDeadlines()
+	q.maintainStartDeadlines()
+	failed := 0
+	for _, j := range renders {
+		if j.State == "failed" {
+			failed++
+		}
+	}
+	b.Logf("warmup: %d/3 renders failed; 24 expired parents, 100 blocked stages, 5 machines; demand=%s", failed, demand.ID)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		q.maintainStartDeadlines()
+	}
+	b.StopTimer()
+	for i := range 24 {
+		j := q.s.Jobs[fmt.Sprintf("parent-%02d", i)]
+		if j.State != "queued" {
+			b.Fatal("logical parent expired")
+		}
+	}
+}
+
+func TestStartWindowHostBackfill(t *testing.T) {
+	for _, absolute := range []bool{false, true} {
+		name := "relative"
+		if absolute {
+			name = "absolute"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuBackfillMachine("worker", 64)
+			machineCheck(t, q, m)
+			holderSpec := cpuSpec(1, 32)
+			holderSpec.Priority = "production"
+			holder := submit(t, q, holderSpec)
+			running := assignedJob(machineCheck(t, q, m))
+			if running == nil || running.ID != holder.ID {
+				t.Fatal("missing running holder", running)
+			}
+			if err := q.Started(result(running, false)); err != nil {
+				t.Fatal(err)
+			}
+			large := cpuSpec(1, 48)
+			large.Priority = "production"
+			demand := submit(t, q, large)
+			clock.Advance(time.Second)
+			s := cpuSpec(1, 4)
+			s.Priority, s.StartWindow = "production", "60s"
+			cutoff := clock.Now().Add(time.Minute)
+			if absolute {
+				s.StartBy = &cutoff
+			}
+			j := submit(t, q, s)
+			recordedWait := false
+			var rearmed time.Time
+			for range 90 {
+				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
+					t.Fatal("fenced job dispatched", next)
+				}
+				q.mu.Lock()
+				stored := q.s.Jobs[j.ID]
+				if !absolute && stored.StartCapacityWaiting {
+					recordedWait = true
+					if !stored.Spec.StartBy.Equal(clock.Now().Add(time.Minute)) {
+						q.mu.Unlock()
+						t.Fatal("fenced expiry did not re-arm budget")
+					}
+					rearmed = *stored.Spec.StartBy
+				}
+				q.mu.Unlock()
+				clock.Advance(time.Second)
+			}
+			machineCheck(t, q, m, running)
+			waiting := job(t, q, j.ID)
+			if absolute {
+				if waiting.State != "failed" || !waiting.Spec.StartBy.Equal(cutoff) || !strings.Contains(waiting.Reason, "production start deadline exceeded") {
+					t.Fatal("absolute cutoff moved or was ignored", waiting.State, waiting.Reason)
+				}
+				return
+			}
+			if waiting.State != "queued" || !recordedWait || !strings.Contains(waiting.Reason, "host_capacity_accumulation") || !waiting.Spec.StartBy.After(clock.Now()) || waiting.Spec.StartBy.After(rearmed.Add(time.Second)) {
+				t.Fatal("fenced relative window expired or repeatedly re-armed", waiting.State, waiting.Reason)
+			}
+			// Clear the fence with only five seconds of the renewed queued
+			// window left. Preparation must still receive a full minute.
+			clock.Advance(waiting.Spec.StartBy.Sub(clock.Now()) - 5*time.Second)
+			machineCheck(t, q, m, running)
+			finish(t, q, running, true)
+			next := assignedJob(machineCheck(t, q, m))
+			if next == nil || next.ID != demand.ID {
+				t.Fatal("earlier demand did not dispatch", next)
+			}
+			offer := assignedJob(machineCheck(t, q, m, next))
+			if offer == nil || offer.ID != j.ID || offer.StartCapacityWaiting || offer.Spec.StartBy.Sub(clock.Now()) != time.Minute {
+				t.Fatal("fence recovery did not restore a full preparation budget", offer)
+			}
+			clock.Advance(6 * time.Second)
+			machineCheck(t, q, m, next, offer)
+			if err := q.Started(result(offer, false)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Logical parents do not consume physical launch budgets. A fenced ordinary
+// job re-arms at expiry, but must still fail if that renewed budget later
+// expires with an unavailable route and no host fence.
+func TestStartWindowFenceExpiryExemptions(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuBackfillMachine("worker", 64)
+	machineCheck(t, q, m)
+	s := cpuSpec(1, 4)
+	s.Priority, s.StartWindow = "production", "60s"
+	parent := submit(t, q, s)
+	j := submit(t, q, s)
+	drainAdmissionWait(t, q)
+	q.mu.Lock()
+	p := q.s.Jobs[parent.ID]
+	p.Spec.FanOut = &FanOut{Pieces: []FanOutPiece{{Key: "piece"}}}
+	p.FanOut = &FanOutProgress{}
+	cutoff := *p.Spec.StartBy
+	q.mu.Unlock()
+	clock.Advance(time.Minute)
+	q.mu.Lock()
+	// No check-in/assignment: expiry decisions alone must preserve the parent
+	// and fail the ordinary job, with no fence and no deadline extension.
+	q.maintainStartDeadlines()
+	p = q.s.Jobs[parent.ID]
+	got := q.s.Jobs[j.ID]
+	parentOK := p.State == "queued" && p.Spec.StartBy.Equal(cutoff)
+	jobOK := got.State == "failed" && got.Spec.StartBy.Equal(cutoff)
+	q.mu.Unlock()
+	if !parentOK || !jobOK {
+		t.Fatal("expiry exemptions or unfenced expiry changed", parentOK, jobOK)
+	}
+}
 
 // Reproduce a production recovery whose entire relative window was consumed
 // by an uncharged live-host-growth refusal, including retained helper custody.
