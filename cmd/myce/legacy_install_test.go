@@ -88,7 +88,16 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		call := strings.Join(args, " ")
 		calls = append(calls, n+" "+call)
 		if n == "systemctl" && len(args) == 3 && args[1] == "show" {
-			return []byte("FragmentPath=" + installing.Service + "\nDropInPaths=\nActiveState=inactive\nSlice=" + installing.Slice + "\nOOMScoreAdjust=0\nControlGroup=\n"), nil
+			slice := ""
+			for _, line := range strings.Split(installing.ServiceText(), "\n") {
+				if value, ok := strings.CutPrefix(line, "Slice="); ok {
+					slice = value
+				}
+			}
+			if slice == "" {
+				t.Fatal("generated worker definition has no Slice")
+			}
+			return []byte("FragmentPath=" + installing.Service + "\nDropInPaths=\nActiveState=inactive\nSlice=" + slice + "\nOOMScoreAdjust=0\nControlGroup=\n"), nil
 		}
 		if strings.Contains(call, "--property=UnitFileState") {
 			return []byte("disabled"), nil
