@@ -849,6 +849,7 @@ need; keep intentional situational pins. It also compares typed
 - [Results](references/results.md): output failures, diagnostics, large outputs,
   and startup publication progress. Released results replay without withholding
   the host's free compute; retain their original job and attempt identity.
+  Verified success clears its pending-finalization reason.
   Upload retries use the accepted offset, including a fully received upload
   whose publication must finish. A 500 needs the queue's `file_upload` event
   (operation/error class and offsets); retain the same receipt and bytes.
