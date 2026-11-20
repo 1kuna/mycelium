@@ -33,6 +33,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 	if err != nil {
 		return err
 	}
+	q.traceStartup("load_record_rows")
 	base := records["state"]
 	if len(base) == 0 || bytes.Equal(bytes.TrimSpace(base), []byte("null")) {
 		return fmt.Errorf("queue state fragment missing")
@@ -111,6 +112,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 		}
 	}
 	q.persisted = records
+	q.traceStartup("load_decode")
 	return nil
 }
 

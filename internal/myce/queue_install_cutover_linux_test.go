@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,12 +83,19 @@ func TestQueueInstalledCutover(t *testing.T) {
 		q.s.WorkObservations[k] = v
 	}
 	retainedShape := os.Getenv("MYCE_TEST_RETAINED_SHAPE") == "1"
+	databaseVolume := os.Getenv("MYCE_TEST_DATABASE_VOLUME") == "1"
 	paddingKiB, err := strconv.Atoi(envTestDefault("MYCE_TEST_RECORD_PADDING_KIB", "0"))
 	if err != nil || paddingKiB < 0 || paddingKiB > 8 {
 		t.Fatal("record padding must be between 0 and 8 KiB")
 	}
 	if retainedShape {
 		shapeRetainedInstallFixture(t, q, now, paddingKiB)
+	}
+	if databaseVolume {
+		if !retainedShape {
+			t.Fatal("database volume requires the retained shape")
+		}
+		shapeInstallDatabaseRecords(t, q, now)
 	}
 	for i := range workers {
 		workers[i].HostHealth = &HostHealth{DrainReason: "host_memory_pressure"}
@@ -102,15 +110,35 @@ func TestQueueInstalledCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs, history, submissions := len(q.s.Jobs), len(q.s.WorkObservations), len(q.s.Submissions)
+	retainedAnswers := map[string][]byte{}
+	for _, r := range q.s.Submissions {
+		if q.s.Jobs[r.JobID] == nil {
+			data, err := json.Marshal(r.Job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retainedAnswers[r.JobID] = data
+		}
+	}
 	var stateBytes int64
 	if err := q.db.QueryRow("SELECT COALESCE(SUM(length(data)),0) FROM queue_state").Scan(&stateBytes); err != nil {
 		t.Fatal(err)
 	}
-	if retainedShape {
+	if retainedShape && !databaseVolume {
 		seedRetainedInstallLogs(t, q)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if databaseVolume {
+		// This helper writes only newly generated synthetic state in the opted-in
+		// fleet test. Keep multi-GB SQLite work out of the workstation and q.mu.
+		seed := exec.Command(python, "testdata/queue_install_volume.py", db)
+		if out, err := seed.CombinedOutput(); err != nil {
+			t.Fatalf("synthetic database volume: %v %s", err, out)
+		} else {
+			t.Logf("installed_database_volume=%s", bytes.TrimSpace(out))
+		}
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -135,6 +163,12 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if paddingKiB > 0 {
 		c.MemoryMax = "4G"
 	} // Explicit footprint sweep; its fleet profile must allow this.
+	if databaseVolume {
+		// Production startup reached 3.67 GB RSS, and queue accounting later
+		// reported 21.11 GiB available. 8G is test containment, not a claim about
+		// the production unit's hard limit. The 1G stress case stays separate.
+		c.MemoryMax = "8G"
+	}
 	if quota := os.Getenv("MYCE_TEST_QUEUE_CPU_QUOTA"); quota != "" {
 		c.CPUQuota = quota
 	}
@@ -584,11 +618,17 @@ print('finished',flush=True)
 		t.Fatal("keyed answer loss or duplication")
 	}
 	for _, r := range restored.s.Submissions {
-		if r.Job != restored.s.Jobs[r.JobID] {
+		if live := restored.s.Jobs[r.JobID]; live != nil && r.Job != live {
 			t.Fatal("keyed answer identity changed")
 		}
+		if want, ok := retainedAnswers[r.JobID]; ok {
+			got, err := json.Marshal(r.Job)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatal("historical keyed answer changed")
+			}
+		}
 	}
-	if retainedShape {
+	if retainedShape && !databaseVolume {
 		var fresh, expired int
 		if err := restored.db.QueryRow("SELECT count(*) FROM logs WHERE text='synthetic-fresh-cutover'").Scan(&fresh); err != nil {
 			t.Fatal(err)
@@ -598,6 +638,21 @@ print('finished',flush=True)
 		}
 		if fresh != 6201 || expired != 0 {
 			t.Fatalf("log retention or preservation changed: fresh=%d expired=%d", fresh, expired)
+		}
+	}
+	if databaseVolume {
+		var rows, textBytes, offsets, usage int64
+		if err := restored.db.QueryRow("SELECT count(*), sum(length(text)) FROM logs").Scan(&rows, &textBytes); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.db.QueryRow("SELECT count(*) FROM log_offsets").Scan(&offsets); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.db.QueryRow("SELECT count(*) FROM usage_samples").Scan(&usage); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 655178 || textBytes != 3440339990 || offsets != 653585 || usage < 369176 {
+			t.Fatalf("database volume lost: logs=%d bytes=%d offsets=%d usage=%d", rows, textBytes, offsets, usage)
 		}
 	}
 	for i, m := range workers {
@@ -659,6 +714,112 @@ func shapeRetainedInstallFixture(t *testing.T, q *Queue, now time.Time, paddingK
 			t.Fatal(err)
 		}
 		q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: j.Spec.Project, Key: j.Spec.SubmissionKey, Fingerprint: fingerprint, JobID: j.ID, Job: j, Created: &now}
+	}
+}
+
+// The measured database-volume axis is separate from the earlier 1G stress
+// fixture. Only aggregate dimensions enter this generator, never real records.
+func shapeInstallDatabaseRecords(t *testing.T, q *Queue, now time.Time) {
+	t.Helper()
+	// Keep 12,192 total jobs, including the five unchanged running attempts.
+	for i := 12077; i < 12400; i++ {
+		id := fmt.Sprintf("retained-%05d", i)
+		j := q.s.Jobs[id]
+		delete(q.s.Submissions, submissionDigest(j.Spec.Project, j.Spec.SubmissionKey))
+		delete(q.s.Jobs, id)
+	}
+	for i := 4464; i < 4495; i++ {
+		v := q.s.WorkObservations[strconv.Itoa(i%1400)]
+		v.Key.Configuration = fmt.Sprintf("synthetic-volume-%d", i)
+		q.s.WorkObservations[strconv.Itoa(i)] = v
+	}
+	q.s.StorageObservations = map[string]StorageObservation{}
+	for i := range 9841 {
+		q.s.StorageObservations[strconv.Itoa(i)] = StorageObservation{Key: StorageKey{Program: "synthetic-volume", Configuration: fmt.Sprintf("configuration-%d", i), Shape: strings.Repeat("s", 850)}, RecordedAt: now, Family: "synthetic-volume", AllocationUnit: 4096}
+	}
+	ids := make([]string, 0, len(q.s.Jobs))
+	for id, j := range q.s.Jobs {
+		if terminal(j.State) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	// Representative reference topology, not a claim that production uses
+	// these particular fields/values. The aggregate byte distribution is the
+	// measured axis; logs/usage/freelist are generated independently below.
+	for i, id := range ids {
+		j := q.s.Jobs[id]
+		j.Spec.Args = append([]string(nil), j.Spec.Args...)
+		for k := range 27 {
+			value := fmt.Sprintf("synthetic-shared-value-%03d", k)
+			j.Spec.Args = append(j.Spec.Args, value, value)
+		}
+		if i < 895 {
+			count := 37
+			if i == 0 {
+				count = 679
+			}
+			for k := range count {
+				j.LedgerEntries = append(j.LedgerEntries, JobLedgerEntry{Sequence: k + 1, At: now, Attempt: 1, ExecutionID: id, Machine: j.Machine, Session: j.Session, Kind: "synthetic-retained", State: j.State, Reason: fmt.Sprintf("synthetic decision %d", k)})
+			}
+			j.Ledger = &JobLedgerInfo{Complete: true, HighWater: count}
+		}
+		if i < 4746 {
+			j.AttemptHistory = []AttemptOutcome{{Attempt: 1, Machine: j.Machine, Session: j.Session, EndedAt: now, State: j.State, Reason: "synthetic retained attempt"}}
+		}
+		// Fixed quantile bins approximate the measured 13.6/27.6 KB p50/p95
+		// and 779 KB tail, without inventing a production payload distribution.
+		target := 13629
+		switch {
+		case i < 2:
+			target = 779249
+		case i < 8:
+			target = 400000
+		case i < 44:
+			target = 180000
+		case i < 132:
+			target = 95000
+		case i < 392:
+			target = 45000
+		case i < 3508:
+			target = 27557
+		case i >= 9690:
+			target = 6500
+		}
+		data, err := json.Marshal(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if padding := target - len(slimJobRecord(data)); padding > 0 {
+			j.Reason = strings.Repeat("v", padding)
+		}
+		r := q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)]
+		r.Fingerprint, err = submissionFingerprint(j.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The measured submission mix includes 4,497 full answers whose jobs have
+	// already left the live map, not a second copy of every live job.
+	for _, id := range ids[:3251] {
+		j := q.s.Jobs[id]
+		delete(q.s.Submissions, submissionDigest(j.Spec.Project, j.Spec.SubmissionKey))
+	}
+	for i := range 4497 {
+		j := *q.s.Jobs[ids[len(ids)-1]]
+		j.ID = fmt.Sprintf("historical-%05d", i)
+		j.Spec.SubmissionKey = j.ID
+		j.Reason = strings.Repeat("h", 4000+i%3000)
+		fingerprint, err := submissionFingerprint(j.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: j.Spec.Project, Key: j.Spec.SubmissionKey, Fingerprint: fingerprint, JobID: j.ID, Job: &j, Created: &now, RemovedAt: &now}
+	}
+	q.s.FileInputClaims = map[string]FileInputClaim{}
+	for i := range 7000 {
+		id := fmt.Sprintf("synthetic-claim-%05d", i)
+		q.s.FileInputClaims[id] = FileInputClaim{ID: id, Project: "synthetic-volume", File: FileRef{SHA256: fmt.Sprintf("%064x", i), Size: 1}, At: now, SettledAt: &now}
 	}
 }
 
