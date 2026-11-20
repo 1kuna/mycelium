@@ -326,3 +326,59 @@ func TestFileCapacityDiagnosticsFolderFinalization(t *testing.T) {
 		})
 	}
 }
+
+func TestFileCapacityDiagnosticsReservationRetry(t *testing.T) {
+	q, _ := fixture(t)
+	c := deliveryClient(t, q)
+	q.deliveryRoot = q.root
+	s := asyncDeliverySpec()
+	s.Disk.OutputBytes = 2
+	m := machine("worker", "fake")
+	check(t, q, m, nil)
+	submitted := submit(t, q, s)
+	j := check(t, q, m, nil).Job
+	if j == nil || j.ID != submitted.ID {
+		t.Fatal("no assignment")
+	}
+	j.Spec.Run.Workdir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out.txt"), []byte("four"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	q.files.limit = 3
+	parent := t.TempDir()
+	w := Worker{Client: c}
+	pending, err := w.finishFileResult(*j, result(j, true), parent)
+	if err == nil || !pending.Success || pending.ExecutionCause == nil || pending.ExecutionCause.FileCapacity == nil || pending.ExecutionCause.Predicate != fileCapacityBacking || pending.ExecutionCause.Finalization.Step != "output_reservation" {
+		t.Fatalf("reservation cause: %+v %v", pending, err)
+	}
+	if e := pending.ExecutionCause.FileCapacity; e.NeedBytes != 4 || e.FreeBytes != 3 || e.JobID != j.ID || e.Attempt != j.Attempt || e.Identified == nil || !*e.Identified {
+		t.Fatalf("reservation operands: %+v", e)
+	}
+	release := pending
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.GetJob(context.Background(), j.ID)
+	if err != nil || got.ExecutionCause == nil || !reflect.DeepEqual(got.ExecutionCause.FileCapacity, pending.ExecutionCause.FileCapacity) {
+		t.Fatalf("pending status: %+v %v", got, err)
+	}
+	// Stale attempt diagnostics cannot replace the recorded refusal.
+	stale := release
+	stale.Attempt++
+	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+		t.Fatal("stale update accepted", err)
+	}
+	q.files.limit = 1000
+	accepted, err := w.finishFileResult(*j, pending, parent)
+	if err != nil || !accepted.Success || accepted.ExecutionCause != nil {
+		t.Fatalf("worker retry: %+v %v", accepted, err)
+	}
+	if err := q.Complete(accepted); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.GetJob(context.Background(), j.ID)
+	if err != nil || got.State != "succeeded" || got.ExecutionCause != nil || got.CleanupCause != nil || strings.HasPrefix(got.Reason, "finalization pending:") {
+		t.Fatalf("pending state survived retry: %+v %v", got, err)
+	}
+}
