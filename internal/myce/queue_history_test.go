@@ -126,6 +126,9 @@ func queueHistorySeed(t *testing.T, count int) (string, *fakeClock, []Machine) {
 func queueHistoryBurst(t *testing.T, count int, seed string, clock *fakeClock, workers []Machine) queueHistoryBurstTiming {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "queue.db")
+	if err := PrepareStateRoots(filepath.Dir(path), path+".uploads"); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(seed)
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +145,7 @@ func queueHistoryBurst(t *testing.T, count int, seed string, clock *fakeClock, w
 	fakeCheckpointAvailability(t, q, true)
 	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
 	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
+	q.s.PublicationHorizon = filePublicationGrace
 	var waits, holds []time.Duration
 	q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }
 	for range 12 {
