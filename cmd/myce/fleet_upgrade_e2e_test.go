@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,13 @@ import (
 
 	"mycelium/internal/myce"
 )
+
+const fleetStreamProbeEnv = "FLEET_UPGRADE_CANCEL_PROBE"
+
+type fleetStreamProbe struct {
+	FixturePID, HelperPID int
+	Address               string
+}
 
 // The ordinary generic-server adapter supervises this small loopback backend.
 // A file releases the stream naturally; no GPU/model or fake queue call exists.
@@ -35,12 +43,29 @@ func TestFleetUpgradeModelStreamCommand(t *testing.T) {
 		t.Fatal("model server inherited fleet authority")
 	}
 	port, dir := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
+	address := "127.0.0.1:" + port
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"status":"ok"}`) })
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"stream started\"}}]}\n\n")
 		w.(http.Flusher).Flush()
+		if path := os.Getenv(fleetStreamProbeEnv); path != "" {
+			pid, _ := strconv.Atoi(os.Getenv("FLEET_UPGRADE_FIXTURE_PID"))
+			data, err := json.Marshal(fleetStreamProbe{FixturePID: pid, HelperPID: os.Getpid(), Address: address})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.WriteFile(path+".tmp", data, 0600); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.Rename(path+".tmp", path); err != nil {
+				t.Error(err)
+				return
+			}
+		}
 		tick := time.NewTicker(20 * time.Millisecond)
 		defer tick.Stop()
 		for {
@@ -55,7 +80,7 @@ func TestFleetUpgradeModelStreamCommand(t *testing.T) {
 		}
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"stream finished naturally\"}}]}\n\ndata: [DONE]\n\n")
 	})
-	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
+	if err := http.ListenAndServe(address, mux); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +107,9 @@ func fleetE2EEnv(home string) []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
-		if key != "HOME" && key != "PATH" && !strings.HasPrefix(key, "MYCE_") {
+		// Keep nested engines in the host attempt's session across fake service
+		// starts. This marker carries process custody, while credentials stay filtered.
+		if key == "MYCE_PROCESS_SESSION" || (key != "HOME" && key != "PATH" && !strings.HasPrefix(key, "MYCE_")) {
 			env = append(env, entry)
 		}
 	}
@@ -251,6 +278,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		path := filepath.Join(dir, version, "myce")
 		// Keep distinct signed versions and Go symbols; skip unused Darwin DWARF.
 		cmd := exec.CommandContext(ctx, "go", "build", "-p", "1", "-tags=myce_test", "-ldflags", versionedFixtureLDFlags(version), "-o", path, ".")
+		cmd.Dir = os.Getenv("FLEET_UPGRADE_BUILD_DIR")
 		cmd.Env = append(os.Environ(), "GOMAXPROCS=2")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("build signed fixture: %v\n%s", err, out)
@@ -315,7 +343,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_ROOT="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_ROOT"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
+	// The helper has no natural listener exit. Bound its lifetime even if the
+	// fixture and its cleanup owner are both killed before it can be reaped.
+	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_ROOT="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -test.timeout=5m -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_ROOT"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
+	cancelProbe := os.Getenv(fleetStreamProbeEnv)
+	if cancelProbe != "" {
+		model.Env[fleetStreamProbeEnv] = cancelProbe
+		model.Env["FLEET_UPGRADE_FIXTURE_PID"] = strconv.Itoa(os.Getpid())
+	}
 	models, err := json.Marshal([]myce.Model{model})
 	if err != nil {
 		t.Fatal(err)
@@ -492,6 +527,10 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	first, err := stream.ReadString('\n')
 	if err != nil || response.StatusCode != http.StatusOK || !strings.Contains(first, "stream started") {
 		t.Fatalf("real model stream: HTTP %d first=%q err=%v", response.StatusCode, first, err)
+	}
+	if cancelProbe != "" {
+		<-ctx.Done()
+		t.Fatal("outer attempt did not cancel the active stream")
 	}
 	approve(target)
 	// The operator is an independent, short-lived CLI process. Its exit removes
