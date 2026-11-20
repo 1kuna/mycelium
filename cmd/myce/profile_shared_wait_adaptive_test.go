@@ -25,11 +25,14 @@ func adaptiveReceipt(t *testing.T, root, address, name string, expires time.Time
 		t.Fatal(err)
 	}
 	receipt := profileReceipt{JobID: name, Status: "running", Observation: "armed", ArmNonce: name}
-	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), receipt); err != nil {
+	// Seed files before the observer starts; there is no crash/recovery boundary
+	// in fixture construction. Observer receipt transitions still use the real
+	// durable writer, covered separately by the receipt persistence regressions.
+	if err := saveAtomicProfileJSON(filepath.Join(dir, "receipt.json"), receipt, false); err != nil {
 		t.Fatal(err)
 	}
 	reg := sharedProfileRegistration{Directory: dir, Observer: profileObserver{Queue: address}, Token: "fixture", Expires: expires}
-	if err := saveProfileJSON(filepath.Join(root, name+".json"), reg); err != nil {
+	if err := saveAtomicProfileJSON(filepath.Join(root, name+".json"), reg, false); err != nil {
 		t.Fatal(err)
 	}
 	return dir
