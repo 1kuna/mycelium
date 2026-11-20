@@ -114,6 +114,9 @@ func (q *Queue) nonProductionFileStoreFree(status FileStoreStatus, productionRes
 // remainder is withheld. Disk inventory always precedes this metadata check.
 func (q *Queue) fileStoreReserveRefusal(status FileStoreStatus, need, growth, productionReserved uint64, production bool) error {
 	if err := fileStoreRefusal(status, need); err != nil {
+		if h, ok := err.(*HTTPError); ok && h.Code == "file_store_capacity" {
+			h.Cause = q.capacityCause(status, fileCapacityBacking, need, growth, productionReserved, production)
+		}
 		return err
 	}
 	if growth == 0 || production {
@@ -121,7 +124,9 @@ func (q *Queue) fileStoreReserveRefusal(status FileStoreStatus, need, growth, pr
 	}
 	available := q.nonProductionFileStoreFree(status, productionReserved)
 	if need > available {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes free=%d bytes; production reserve=%d bytes (--file-store-production-reserve) withholds the rest; production and unidentified legacy writes may use the reserve%s", need, available, status.FreeBytes, q.fileStoreProductionReserve, status.capacityBound())}
+		cause := q.capacityCause(status, fileCapacityProduction, need, growth, productionReserved, production)
+		cause.FileCapacity.AvailableBytes = available
+		return &HTTPError{Cause: cause, Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes free=%d bytes; production reserve=%d bytes (--file-store-production-reserve) withholds the rest; production and unidentified legacy writes may use the reserve%s", need, available, status.FreeBytes, q.fileStoreProductionReserve, status.capacityBound())}
 	}
 	return nil
 }
@@ -197,6 +202,9 @@ func (q *Queue) fileUploadAdmission(ctx context.Context, status FileStoreStatus,
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
 	refusal := q.fileStoreAdmissionRefusal(ctx, status, projected, need, growth, reserved, production)
+	if h, ok := refusal.(*HTTPError); ok && h.Cause != nil {
+		h.Cause.FileCapacity.Identified = &identified
+	}
 	// Input uploads naming a project are checked against its file-store quota
 	// at preflight and tus creation; worker results and bundles never are.
 	// Use the class submit will see, unlike the reserve, so a production
@@ -246,10 +254,18 @@ func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapsho
 // The inventory is detached; caller holds q.mu only for metadata checks.
 func (q *Queue) fileStoreAdmissionRefusal(ctx context.Context, status FileStoreStatus, payloads map[string]storedPayload, need, growth, productionReserved uint64, production bool) error {
 	if err := q.fileStoreReserveRefusal(status, need, growth, productionReserved, production); err != nil {
-		return err
+		return bindCapacityContext(ctx, err)
 	}
+	original := status
 	if !production {
 		status.FreeBytes = q.nonProductionFileStoreFree(status, productionReserved)
 	}
-	return q.projectFileReservationRefusal(ctx, status, payloads, need, growth)
+	err := q.projectFileReservationRefusal(ctx, status, payloads, need, growth)
+	if h, ok := err.(*HTTPError); ok && h.Cause != nil {
+		e := h.Cause.FileCapacity
+		base := q.capacityCause(original, fileCapacityProject, need, growth, productionReserved, production).FileCapacity
+		base.ProjectWithheldBytes, base.AvailableBytes = e.ProjectWithheldBytes, e.AvailableBytes
+		h.Cause.FileCapacity = base
+	}
+	return bindCapacityContext(ctx, err)
 }

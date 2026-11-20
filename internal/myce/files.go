@@ -1583,12 +1583,13 @@ func fileTransferError(res *http.Response, message string, observed ...time.Time
 		}
 	}
 	var body struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
+		Cause *RuntimeCause `json:"cause"`
+		Code  string        `json:"code"`
+		Error string        `json:"error"`
 	}
 	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil {
 		if fileStoreRefusalCode(body.Code) {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay, Cause: safeRuntimeCause(body.Cause)}
 		}
 		if publicErrorCode(body.Code) || body.Code == "request_failed" {
 			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message, RetryAfter: delay}
