@@ -27,6 +27,9 @@ func init() {
 }
 
 func nativeBindingsCheck() error {
+	if err := os.WriteFile("bindings-started", nil, 0600); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(os.Getenv(inputBindingsVariable))
 	if err != nil {
 		return errors.New("binding manifest is not readable")
@@ -74,11 +77,53 @@ func TestNativeManagedInputBindings(t *testing.T) {
 				}
 				// 771 real cache acquisitions consume about 25s on a loaded
 				// laptop before launch; allow room for the grouped handshake too.
-				p := nativeCompatibilityRun(t, w, root, j, 60*time.Second)
+				p := nativeCompatibilityRun(t, w, root, j, 60*time.Second, func(v nativeCompatibilityTiming) {
+					logNativeBindingsTiming(t, v)
+				})
 				nativeCompatibilityRead(t, filepath.Join(p.job.Spec.Run.Workdir, "bindings-ok"), "771 inputs verified\n")
 			})
 		}
 	}
+}
+
+func logNativeBindingsTiming(t *testing.T, v nativeCompatibilityTiming) {
+	t.Helper()
+	sinceStart := func(at time.Time) string {
+		if at.IsZero() {
+			return "unobserved"
+		}
+		return at.Sub(v.started).Round(time.Millisecond).String()
+	}
+	fileTime := func(path string) time.Time {
+		if info, err := os.Stat(path); err == nil {
+			return info.ModTime()
+		}
+		return time.Time{}
+	}
+	var manifest, policy, entry, payloadDone time.Time
+	if v.work != "" {
+		files, _ := filepath.Glob(filepath.Join(v.work, ".myce-bindings-*.json"))
+		if len(files) == 1 {
+			manifest = fileTime(files[0])
+		}
+		files, _ = filepath.Glob(filepath.Join(nativeLaunchRoot(v.work), "launch-*"))
+		for _, path := range files {
+			if at := fileTime(path); at.After(policy) {
+				policy = at
+			}
+		}
+		entry = fileTime(filepath.Join(v.work, "bindings-started"))
+		payloadDone = fileTime(filepath.Join(v.work, "bindings-ok"))
+	}
+	if v.staging != nil {
+		p := v.staging.Phases[stageSharedInputs]
+		var filesStaged time.Time
+		if v.staging.CompletedAt != nil {
+			filesStaged = *v.staging.CompletedAt
+		}
+		t.Logf("binding staging: shared_inputs=%.3fs calls=%d failures=%d files_staged_at=%s", p.Seconds, p.Calls, p.Failures, sinceStart(filesStaged))
+	}
+	t.Logf("binding launch milestones after Worker.start call began: manifest_written=%s last_launch_file_written=%s worker_start_returned=%s payload_entered=%s payload_verified=%s completion_observed=%s", sinceStart(manifest), sinceStart(policy), sinceStart(v.workerReturned), sinceStart(entry), sinceStart(payloadDone), sinceStart(v.observed))
 }
 
 func TestNativeIsolationSharedInputs(t *testing.T) {

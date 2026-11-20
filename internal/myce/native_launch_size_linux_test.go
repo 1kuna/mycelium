@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestNativeLaunchBindingE2BIG(t *testing.T) {
@@ -95,6 +96,7 @@ func TestNativeNamespaceOptionsFile(t *testing.T) {
 		path := filepath.Join(cache, fmt.Sprintf("%064x/data", i))
 		policy.Read = append(policy.Read, path)
 	}
+	started := time.Now()
 	options := append(nativeBwrapPolicyArgs(policy), "--help")
 	if len(options) > 100 || len(policy.Read) != 10000 {
 		t.Fatal("binding mounts grew or exact Landlock grants changed")
@@ -106,11 +108,13 @@ func TestNativeNamespaceOptionsFile(t *testing.T) {
 	if len(argv) != 6 {
 		t.Fatal("namespace options still grow exec argv")
 	}
+	written := time.Now()
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "--ro-bind") {
 		t.Fatalf("file-backed bubblewrap option parsing: %v: %s", err, out)
 	}
+	t.Logf("10,000 bindings: option construction and file write=%s; bubblewrap launch and option parse=%s (no mounts performed)", written.Sub(started), time.Since(written))
 }
 
 // Fault injection runs in a disposable helper. It simulates unavailable or
@@ -160,18 +164,30 @@ func TestNativeInputMountLandlockBoundary(t *testing.T) {
 		}
 	}
 	policy := nativeLinuxPolicy{Namespace: true, InputMountRoots: []string{cache}, Read: []string{"/usr", "/bin", "/lib", "/lib64", own}}
+	// The end-to-end binding fixture uses aliases of one cache entry. Use
+	// distinct files here to measure realistic per-path Landlock work as well.
+	for i := range 770 {
+		path := filepath.Join(cache, fmt.Sprintf("input-%03d", i))
+		if err := os.WriteFile(path, []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		policy.Read = append(policy.Read, path)
+	}
 	// The whole cache is already visible to this helper, as under a root mount.
 	// No namespace capability skip may bypass proof of the Landlock boundary.
+	started := time.Now()
 	argv, err := nativePolicyFileArgs(policy, []string{"/bin/sh", "-ec", `test "$(cat "$1")" = synthetic; if cat "$2" 2>/dev/null; then exit 22; fi; printf boundary-ok`, "synthetic", own, sibling}, work)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	written := time.Now()
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "boundary-ok" {
 		t.Fatalf("exact grants with visible cache root: %v: %s", err, out)
 	}
+	t.Logf("771 distinct grants: policy construction and file write=%s; helper launch, Landlock, and payload=%s", written.Sub(started), time.Since(written))
 	for _, call := range []int{unix.SYS_LANDLOCK_CREATE_RULESET, unix.SYS_LANDLOCK_ADD_RULE, unix.SYS_LANDLOCK_RESTRICT_SELF} {
 		for _, code := range []syscall.Errno{syscall.ENOSYS, syscall.EINVAL, syscall.EOPNOTSUPP} {
 			t.Run(fmt.Sprintf("%d/%d", call, code), func(t *testing.T) {
