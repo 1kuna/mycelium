@@ -148,6 +148,23 @@ func TestWorkerUnitMigrationRefusalKeepsServing(t *testing.T) {
 }
 
 func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
+	t.Run("darwin-without-systemd-properties", func(t *testing.T) {
+		c := ServiceConfig{Role: "worker", Detection: Detection{OS: "darwin"}, Service: filepath.Join(t.TempDir(), "worker.plist")}
+		const plist = "synthetic existing launchd definition"
+		if err := os.WriteFile(c.Service, []byte(plist), 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := InstallUnitPlan(t.Context(), c, func(context.Context, string, ...string) ([]byte, error) {
+			t.Fatal("Darwin plan queried Linux service-manager properties")
+			return nil, nil
+		})
+		if err != nil || plan != "" {
+			t.Fatalf("Darwin plan required Linux properties: %q %v", plan, err)
+		}
+		if got, err := os.ReadFile(c.Service); err != nil || string(got) != plist {
+			t.Fatal("Darwin plan changed the launchd definition", err)
+		}
+	})
 	c, source := preserveWorkerFixture(t)
 	if err := Install(t.Context(), c, source, "synthetic", fakeInstallManager(c)); err != nil {
 		t.Fatal(err)

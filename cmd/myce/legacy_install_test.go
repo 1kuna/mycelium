@@ -83,9 +83,22 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		}
 	}
 	var calls []string
+	var installing myce.ServiceConfig
 	probe := myce.MachineProbe{OS: "linux", Arch: runtime.GOARCH, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		call := strings.Join(args, " ")
 		calls = append(calls, n+" "+call)
+		if n == "systemctl" && len(args) == 3 && args[1] == "show" {
+			slice := ""
+			for _, line := range strings.Split(installing.ServiceText(), "\n") {
+				if value, ok := strings.CutPrefix(line, "Slice="); ok {
+					slice = value
+				}
+			}
+			if slice == "" {
+				t.Fatal("generated worker definition has no Slice")
+			}
+			return []byte("FragmentPath=" + installing.Service + "\nDropInPaths=\nActiveState=inactive\nSlice=" + slice + "\nOOMScoreAdjust=0\nControlGroup=\n"), nil
+		}
 		if strings.Contains(call, "--property=UnitFileState") {
 			return []byte("disabled"), nil
 		}
@@ -96,6 +109,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	}}
 	// Even install refuses before consulting/changing the manager, or publishing.
 	for _, c := range configs {
+		installing = c
 		before, _ := os.ReadFile(c.Config)
 		calls = nil
 		err := setupCommandWithProbe([]string{"install", c.Role, "--config", c.Config}, probe, home)
@@ -148,6 +162,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	}
 	archived := archiveHashes()
 	for _, c := range configs {
+		installing = c
 		if e := setupCommandWithProbe([]string{"install", c.Role, "--config", c.Config}, probe, home); e != nil {
 			t.Fatal("fresh install", c.Role, e)
 		}
@@ -170,6 +185,7 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	}
 	// Once an explicit value is provisioned,
 	// the same overlay must retain it on the next omitted-flag invocation.
+	installing = configs[1]
 	args := []string{"install", "worker", "--config", configs[1].Config, "--log-retention", "48h"}
 	if e := setupCommandWithProbe(args, probe, home); e != nil {
 		t.Fatal(e)
