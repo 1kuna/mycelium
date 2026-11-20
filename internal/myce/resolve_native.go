@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"slices"
 	"strings"
 )
 
@@ -27,7 +28,7 @@ func (q *Queue) resolveNative(req ResolveRequest, ctx context.Context) (ResolveR
 	if err != nil {
 		return ResolveReport{}, err
 	}
-	r := ResolveReport{ObservedAt: p.ObservedAt, Resolved: []string{"native adapter: authored metadata; immutable registration and qualification remain unverified"}, Targets: []ResolveTarget{}, Findings: []ResolveFinding{}, Notes: []string{"Read-only: no registration, upload, build, qualification or payload execution. Register and qualify the adapter through myce run before expecting eligible frozen evidence."}, Portability: &p}
+	r := ResolveReport{ObservedAt: p.ObservedAt, Resolved: []string{"native adapter: authored metadata; immutable registration and qualification remain unverified"}, Targets: []ResolveTarget{}, Findings: []ResolveFinding{}, Notes: []string{"Read-only: no registration, upload, build, qualification or payload execution."}, Portability: &p}
 	for _, target := range p.Targets {
 		for _, env := range target.Environments {
 			if len(env.MissingInputs) > 0 {
@@ -39,6 +40,14 @@ func (q *Queue) resolveNative(req ResolveRequest, ctx context.Context) (ResolveR
 		}
 	}
 	r.Hold = ResolveFindingHold(r.Findings)
+	if r.Hold == nil && darwinDeveloperToolsRequired(&Job{Spec: req.Spec, Extensions: []Extension{*req.Recipe}}) {
+		hasDarwin := slices.ContainsFunc(r.Targets, func(t ResolveTarget) bool {
+			return t.Target.OS == "darwin" && t.Freshness == "fresh"
+		})
+		if !hasDarwin {
+			r.Hold = darwinDeveloperToolsHold()
+		}
+	}
 	if r.Hold == nil {
 		r.Hold = withAction(newHold("unprepared", "authored metadata is not qualified execution evidence"), ownerConsumer, "register and qualify the selected adapter through myce run; verify output parity before production use")
 	}

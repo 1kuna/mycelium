@@ -142,7 +142,7 @@ func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
 	// The reason depends on whether the queue's own native check is pending
 	// (#990, e74cbc53e); require the reason the queue currently reports.
 	q.mu.Lock()
-	hold := q.jobHold(q.s.Jobs[j.ID])
+	hold := q.jobHold(q.s.Jobs[j.ID], false)
 	q.mu.Unlock()
 	if hold == nil || hold.Reason == "" {
 		t.Fatal("queued job has no hold reason")

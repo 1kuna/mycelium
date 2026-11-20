@@ -63,6 +63,13 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 		for _, plan := range plans {
 			reconcileQualification(t, w, plan)
 			first := qualificationJob(t, q, plan.Report.CheckID)
+			if plan.Report.Work == demand.Spec.workType() {
+				got, err := q.jobSnapshot(demand.ID)
+				if err != nil || got.Hold == nil || !strings.Contains(got.Hold.Reason, "its native check "+ShortID(first.ID)) ||
+					!strings.Contains(got.Hold.Reason, "is queued") || !strings.Contains(got.Hold.Reason, "queued native check job") {
+					t.Fatalf("status missed the submitted check: %+v (%v)", got.Hold, err)
+				}
+			}
 			// Repeated demand and preparation retain the persisted invocation.
 			reconcileQualification(t, w, plan)
 			if err := w.prepareRegisteredExtension(context.Background(), prepare); err != nil {
@@ -174,6 +181,9 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			clock.Advance(time.Second)
 			switch outcome {
 			case "failed":
+				if err := q.Started(result(assigned, false)); err != nil {
+					t.Fatal(err)
+				}
 				finish(t, q, assigned, false)
 			case "prelaunch refusal", "unproven refusal", "stale refusal":
 				r := result(assigned, false)
@@ -243,14 +253,22 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					}
 				}
 				w.Machine.ExtensionReports = local
-				if outcome == "prelaunch refusal" {
-					// The supported receipt must retain the same accepted proof
-					// as dispatch, even though terminal history is projected out.
+				if outcome == "prelaunch refusal" || outcome == "failed" {
+					// Receipt, aggregate status and read-only resolve use the
+					// same identity-matched evidence as the real planner.
 					check(t, q, w.Machine, nil)
-					got, err := q.jobSnapshot(demand.ID)
-					if err != nil || got.Hold == nil || got.Hold.Kind != "native_qualification" || strings.Contains(got.Hold.Reason, "no automatic retry") {
-						t.Fatalf("receipt lost retryable infrastructure evidence: %v %+v", err, got.Hold)
+					report, err := q.Resolve(ResolveRequest{Spec: Spec{Name: demand.Spec.Name, Project: demand.Spec.Project, Extension: extensionKey(e)}})
+					if err != nil {
+						t.Fatal(err)
 					}
+					action, source := nativeFailureAction, nativeFailureSource
+					if outcome == "prelaunch refusal" {
+						action, source = "wait for the automatic retry", "accepted release and exact-attempt execution evidence"
+						if report.Hold == nil || report.Hold.Kind != "native_qualification" || !strings.Contains(report.Hold.Reason, "refused before launch") {
+							t.Fatalf("resolve lost the retryable infrastructure evidence: %+v", report.Hold)
+						}
+					}
+					assertCompatibilityAction(t, q, demand.ID, report, action, source)
 				}
 				var successor *ExtensionQualificationPlan
 				for _, offered := range check(t, q, w.Machine, nil).ExtensionQualificationPlan {
@@ -276,6 +294,10 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					for _, id := range []string{demand.ID, parent.ID} {
 						if got := job(t, q, id); got.State != "failed" || got.DiagnosticCode != deadEndWait || !strings.Contains(got.Reason, "native check") || !strings.Contains(got.Reason, "action: ") {
 							t.Fatal("failed check left its useful job waiting", got.Spec.Name, got.State, got.Reason)
+						}
+						got, err := q.jobSnapshot(id)
+						if err != nil || got.Finding == nil || got.Finding.Action != nativeFailureAction || !strings.Contains(got.Finding.What, nativeFailureSource) {
+							t.Fatalf("terminal status lost its qualification action: %+v (%v)", got.Finding, err)
 						}
 					}
 				} else {

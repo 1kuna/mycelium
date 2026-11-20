@@ -160,6 +160,8 @@ func deadEndFinding(raw string) *JobFinding {
 	raw = strings.ToLower(raw)
 	what, action := "No known host can run the job's required preparation.", "provide a compatible builder or change the environment recipe, then resubmit."
 	switch {
+	case strings.HasPrefix(raw, "dead end: "+strings.ToLower(darwinToolsReason)), strings.HasPrefix(raw, strings.ToLower(darwinToolsReason)):
+		what, action = darwinToolsReason+"; source: "+darwinToolsSource, darwinToolsAction
 	case strings.Contains(raw, "no registered implementation"):
 		what, action = "No registered implementation matches a known host.", "register a variant for a compatible target, then resubmit."
 	case strings.Contains(raw, "declares no native check"), strings.Contains(raw, "declares no native qualification check"):
@@ -168,8 +170,8 @@ func deadEndFinding(raw string) *JobFinding {
 		what, action = "The implementation declares no native qualification baseline.", "add the required baseline, register a new version, then resubmit."
 	case strings.Contains(raw, "no known host can fit the native check"):
 		what, action = "No known host can fit the native check's resource requirements.", "reduce its resource requirements or provide a capable host, then resubmit."
-	case strings.Contains(raw, "the native check"), strings.Contains(raw, "native qualification check failed"):
-		what, action = "The implementation's native qualification check failed.", "fix the implementation or its check, register a new version, then resubmit."
+	case strings.Contains(raw, "the native check"), strings.Contains(raw, "native qualification check failed"), strings.HasPrefix(raw, nativeFailureReason):
+		what, action = nativeFailureReason+"; source: "+nativeFailureSource, nativeFailureAction
 	case strings.Contains(raw, "environment preparation failed"):
 		what, action = "Environment preparation failed on every compatible builder.", "fix the environment recipe or repair a builder, then resubmit."
 	case strings.Contains(raw, "no host can size"), strings.Contains(raw, "out of memory"), strings.Contains(raw, "no known host can fit"):

@@ -1,7 +1,9 @@
 package myce
 
 import (
+	"context"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -112,7 +114,18 @@ func TestNativeQualificationHoldDispatchability(t *testing.T) {
 				other.ExtensionReports = []ExtensionReport{r}
 				check(t, q, other, nil)
 			}
-			j := submit(t, q, variantSpec(e, "ci"))
+			s := variantSpec(e, "ci")
+			if scenario == "ready" {
+				report, err := q.Resolve(ResolveRequest{Spec: s})
+				if err != nil || report.Hold == nil || report.Hold.Owner != ownerConsumer ||
+					report.Hold.Next != "submit the job without require_target to request native qualification" ||
+					!strings.Contains(report.Hold.Reason, "resolve creates no check") ||
+					strings.Contains(report.Hold.Reason, "next check-in") ||
+					len(q.extensionQualificationPlan(q.s.Machines[m.ID])) != 0 {
+					t.Fatalf("resolve promised work with no submitted demand: %+v (%v)", report.Hold, err)
+				}
+			}
+			j := submit(t, q, s)
 			clock.Advance(time.Second)
 			got, err := q.jobSnapshot(j.ID)
 			if err != nil || got.Hold == nil {
@@ -304,7 +317,7 @@ func TestActionableBlockerProducerPrecedesPreparation(t *testing.T) {
 	j := &Job{State: "queued", Spec: cpuSpec(1, 1)}
 	j.Spec.After = &PieceDependency{Piece: "part"}
 	j.Spec.Environment.Name = "cold"
-	b := q.jobHold(j)
+	b := q.jobHold(j, false)
 	if b == nil || b.Owner != "producer" || b.Kind != "upstream" {
 		t.Fatalf("%+v", b)
 	}
@@ -458,44 +471,114 @@ func TestCheckpointRootHold(t *testing.T) {
 	}
 }
 
-// A job authored for one platform waits on its busy host while a host of
-// another platform has room. The hold names that platform (never the host),
-// so the consumer widens targets instead of steering to a box. Platforms
-// without room now, and jobs without authored targets, get no advice.
-func TestHoldNamesPlatformWithRoomNow(t *testing.T) {
-	t.Parallel()
+// Exercise the resolve and public status projections against the same fake
+// inventory and frozen command environments. Capacity stays a capacity hold.
+func TestHoldNamesCPUCandidateFromEnvironmentEvidence(t *testing.T) {
+	for _, coverage := range []string{"declared", "unknown", "missing"} {
+		t.Run(coverage, func(t *testing.T) {
+			q, _ := fixture(t)
+			mac := cpuMachine("darwin-worker", "darwin-host", "cpu", 4, 16)
+			mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
+			linux := cpuMachine("linux-worker", "linux-host", "cpu", 4, 16)
+			linux.CapabilityProfile.Arch = "arm64"
+			s := cpuSpec(4, 2)
+			s.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
+			first := submit(t, q, s)
+			running := check(t, q, mac, nil).Job
+			if running == nil || running.ID != first.ID {
+				t.Fatal("Darwin capacity fixture did not start", running)
+			}
+			want, source := "verify target-native environment coverage for linux/arm64/cpu", "available member environment metadata"
+			if coverage != "unknown" {
+				r := breadthRecipe("osx-arm64")
+				want, source = "cover linux/arm64/cpu in the required member environments", "selected member recipes or locks"
+				if coverage == "declared" {
+					r = breadthRecipe("osx-arm64", "linux-aarch64")
+					want, source = "verify the complete workload on linux/arm64/cpu before widening targets", "selected immutable member locks"
+				}
+				q.environments = EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}
+				s.Environment = Environment{Name: "tools"}
+				mac.Environments, linux.Environments = []string{r.Key}, []string{r.Key}
+			}
+			check(t, q, mac, running)
+			check(t, q, linux, nil)
+			waiting := submit(t, q, s)
+			if coverage != "unknown" {
+				stored := storedTestJob(t, q, waiting.ID)
+				recipe := stored.EnvironmentRecipes["cpu"]
+				if recipe.FilesRef == nil || len(recipe.Files) != 0 {
+					t.Fatal("fixture must exercise status with lock bytes outside the job record")
+				}
+			}
+			report, err := q.Resolve(ResolveRequest{Spec: s})
+			if err != nil || report.Hold == nil || report.Hold.Kind != "capacity" {
+				t.Fatalf("wanted a capacity hold plus compatibility advice: %+v %v", report.Hold, err)
+			}
+			assertCompatibilityAction(t, q, waiting.ID, report, want, source)
+		})
+	}
+}
+
+func TestHoldPreservesDarwinDeveloperToolsRequirement(t *testing.T) {
 	q, _ := fixture(t)
-	mac := cpuMachine("m-1", "h-1", "cpu", 4, 16)
-	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
-	roomy := cpuMachine("m-2", "h-2", "cpu", 4, 16)
-	roomy.CapabilityProfile.Arch = "arm64"
-	tight := cpuMachine("m-3", "h-3", "cpu", 4, 1) // linux/amd64 without memory for the job
-	darwinOnly := cpuSpec(4, 2)
-	darwinOnly.Targets = []ExecutionTarget{{"darwin", "arm64", "cpu"}}
-	queued := submit(t, q, darwinOnly)
-	running := check(t, q, mac, nil).Job
-	if running == nil || running.ID != queued.ID {
-		t.Fatal("darwin job not placed on the darwin host", running)
+	e, _, linux := variantsFixture(t, true)
+	e.Variants = e.Variants[1:]
+	e.Variants[0].Target = ExecutionTarget{"darwin", "arm64", "cpu"}
+	e.Variants[0].Needs.Tools = []string{"xcodebuild", "xcrun"}
+	e.Variants[0].Check = []string{"xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
 	}
-	check(t, q, mac, running)
-	check(t, q, roomy, nil)
-	check(t, q, tight, nil)
-	waiting := submit(t, q, darwinOnly)
+	linux.ExtensionReports = nil
+	check(t, q, linux, nil)
+	s := variantSpec(e, "experiment")
+	waiting := submit(t, q, s)
+	report, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCompatibilityAction(t, q, waiting.ID, report, darwinToolsAction, darwinToolsSource)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	got, err := q.jobSnapshot(waiting.ID)
-	if err != nil || got.State != "queued" || got.Hold == nil {
-		t.Fatalf("darwin job should wait with a hold: %+v %v", got.Hold, err)
+	if err != nil || got.State != "failed" || got.Finding == nil || got.Finding.Action != darwinToolsAction || !strings.Contains(got.Finding.What, darwinToolsSource) {
+		t.Fatalf("terminal status lost the Darwin requirement: %+v, %v", got, err)
 	}
-	if got.Hold.RunsNowOn != "linux/arm64/cpu" {
-		t.Fatalf("hold should name only the platform with room now: %+v", got.Hold)
+}
+
+func assertCompatibilityAction(t *testing.T, q *Queue, id string, report ResolveReport, action, source string) {
+	t.Helper()
+	if h := report.Hold; h == nil || h.Next != action || !strings.Contains(h.Reason, "source: ") || !strings.Contains(h.Reason, source) || h.RunsNowOn != "" {
+		t.Fatalf("resolve hold: %+v", h)
 	}
-	// Default status prints reason and next only, so the advice rides in next.
-	if next := got.Hold.Next; !strings.Contains(next, "would run now on linux/arm64/cpu") || strings.Contains(next, "h-2") || strings.Contains(next, "m-2") {
-		t.Fatal("next must name the platform, not the host:", next)
+	var out strings.Builder
+	if err := WriteResolve(&out, report, false); err != nil || strings.Count(out.String(), "next: ") != 1 || !strings.Contains(out.String(), source) || !strings.Contains(out.String(), action) || strings.Contains(out.String(), "  - ") {
+		t.Fatalf("resolve text: %s (%v)", out.String(), err)
 	}
-	free := cpuSpec(1, 1)
-	free.Project = "other"
-	unrestricted, err := q.jobSnapshot(submit(t, q, free).ID)
-	if err != nil || unrestricted.Hold != nil && unrestricted.Hold.RunsNowOn != "" {
-		t.Fatalf("a job without authored targets needs no platform advice: %+v %v", unrestricted.Hold, err)
+	server := httptest.NewServer(API{Queue: q, Token: "compatibility-fixture"}.Handler())
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "compatibility-fixture"}
+	ctx := context.Background()
+	got, err := client.GetJob(ctx, id)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if got.Hold == nil || got.Hold.Next != action || !strings.Contains(JobReason(got), source) || strings.Count(JobReason(got), "next: ") != 1 {
+		t.Fatalf("job status: %+v", got.Hold)
+	}
+	var snapshot Snapshot
+	if err := client.Call(ctx, "GET", "/api/status?sections=jobs", nil, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range snapshot.Jobs {
+		if j.ID == id {
+			if j.Hold == nil || j.Hold.Next != action || !strings.Contains(j.Hold.Reason, source) {
+				t.Fatalf("detailed status: %+v", j.Hold)
+			}
+			return
+		}
+	}
+	t.Fatal("aggregate status omitted job", id)
 }
