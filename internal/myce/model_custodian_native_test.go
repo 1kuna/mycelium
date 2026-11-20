@@ -59,6 +59,37 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 	dir := custodianDir(c.State)
 	defer func() {
 		paths, _ := filepath.Glob(filepath.Join(dir, "*.model-request.json"))
+		if t.Failed() {
+			// Capture before Unload can replace the failed/loading observation.
+			q.mu.Lock()
+			var slots []ModelSlot
+			for _, slot := range q.s.ModelSlots {
+				if slot.Machine == c.Name {
+					slots = append(slots, *slot)
+				}
+			}
+			q.mu.Unlock()
+			t.Logf("native model queue observations: %+v", slots)
+			for _, path := range paths {
+				var request modelCustodianRequest
+				if err := readCustodianJSON(dir, filepath.Base(path), &request); err != nil {
+					t.Logf("native model request observation: %v", err)
+					continue
+				}
+				t.Logf("native model launch observation: execution=%+v oom_score=%d host_budget_gb=%g slice=%s", request.Execution, request.OOMScore, request.Machine.HostMemoryBudgetGB, c.workerSlice())
+				for _, kind := range []string{"snapshot", "gate", "gate-receipt", "model-policy"} {
+					b, err := os.ReadFile(filepath.Join(dir, custodianName(request.ID, kind)))
+					t.Logf("native model %s observation: %s (read=%v)", kind, b, err)
+				}
+				files, _ := filepath.Glob(filepath.Join(dir, "model-"+request.ID, "engine-*"))
+				for _, file := range files {
+					if strings.HasSuffix(file, ".json") || strings.HasSuffix(file, ".log") {
+						b, err := os.ReadFile(file)
+						t.Logf("native model engine observation %s: %s (read=%v)", filepath.Base(file), b, err)
+					}
+				}
+			}
+		}
 		for _, path := range paths {
 			var r modelCustodianRequest
 			if readCustodianJSON(dir, filepath.Base(path), &r) != nil {

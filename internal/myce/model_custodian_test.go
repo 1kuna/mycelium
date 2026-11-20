@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +31,29 @@ func TestDetachedModelCustodianHelper(t *testing.T) {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer cancel()
-	w := Worker{StateDir: spool, Custodian: id, Machine: r.Machine, Client: Client{Token: "test"}, Clock: RealClock{}, Interval: 10 * time.Millisecond, ServiceConfig: &ServiceConfig{State: spool}, custodianIsolation: func(string) (string, error) { return "test-independent", nil }}
+	c := ServiceConfig{State: spool, Slice: os.Getenv("MYCE_MODEL_HELPER_SLICE")}
+	if err := checkNativeFixtureSlice(c); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise actual engine launch/containment under a non-default slice. Only
+	// the kernel files and manager membership are synthetic; no native units run.
+	root := filepath.Join(spool, "kernel", c.workerSlice(), c.custodianSlice(), custodianUnit(id))
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"cgroup.controllers": "memory cpu", "cgroup.subtree_control": "", "cgroup.procs": "42\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ceilings, err := delegateMemory(fakeMemoryFS{}, root, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jointMemoryRoot(ceilings.root, c.workerSlice()); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{StateDir: spool, Custodian: id, Machine: r.Machine, Client: Client{Token: "test"}, Clock: RealClock{}, Interval: 10 * time.Millisecond, ServiceConfig: &c, memoryCeilings: ceilings, custodianIsolation: func(string) (string, error) { return root, nil }}
 	if err := w.runExecutionCustodian(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -44,21 +67,21 @@ func testModelCustodian(t *testing.T, execution ...HostEngineExecution) (*modelC
 	model.HostMemoryGB = 0.25
 	machine := machine("model-worker", "fake")
 	machine.HostMemoryBudgetGB = 32
-	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, OOMScore: 1000, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
+	g := &modelCustodian{dir: custodianDir(spool), clock: RealClock{}, interval: 10 * time.Millisecond, token: "test", service: nativeCustodianServiceConfig(spool, ""), request: modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Machine: machine, Original: model, Prepared: model, OOMScore: 1000, Execution: HostEngineExecution{Machine: machine.ID, Session: machine.Session, Model: model.Name, Attempt: ID()}}}
 	if len(execution) != 0 {
 		g.request.Execution = execution[0]
 		g.request.Machine.ID, g.request.Machine.Session = execution[0].Machine, execution[0].Session
 	}
 
 	g.verify = func(_ string, _ int, scope string) error {
-		if scope != "test-independent" {
+		if scope != filepath.Join(spool, "kernel", g.service.workerSlice(), g.service.custodianSlice(), custodianUnit(g.request.ID)) {
 			return errors.New("wrong test scope")
 		}
 		return nil
 	}
-	g.launch = func(ctx context.Context, _ ServiceConfig, dir, id string) error {
+	g.launch = func(ctx context.Context, c ServiceConfig, dir, id string) error {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestDetachedModelCustodianHelper$")
-		cmd.Env = append(withoutMyceToken(os.Environ()), "MYCE_MODEL_HELPER_SPOOL="+spool, "MYCE_MODEL_HELPER_ID="+id)
+		cmd.Env = append(withoutMyceToken(os.Environ()), "MYCE_MODEL_HELPER_SPOOL="+spool, "MYCE_MODEL_HELPER_ID="+id, "MYCE_MODEL_HELPER_SLICE="+c.workerSlice())
 		log, err := os.Create(filepath.Join(spool, "helper.log"))
 		if err != nil {
 			return err
@@ -123,6 +146,23 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	before := g.last
 	if before.OOMScore != 1000 {
 		t.Fatal("initial lower-tier OOM policy was lost", before.OOMScore)
+	}
+	paths, err := filepath.Glob(filepath.Join(g.dir, "model-"+before.ID, "engine-*.json"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("expected one contained engine launch: %v %v", paths, err)
+	}
+	var launched workerState
+	if err := readCustodianJSON(filepath.Dir(paths[0]), filepath.Base(paths[0]), &launched); err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(launched.Cgroup) != before.Cgroup || launched.PID == 0 {
+		t.Fatalf("engine escaped configured slice: %+v helper=%s", launched, before.Cgroup)
+	}
+	for name, want := range map[string]string{"cgroup.procs": fmt.Sprint(launched.PID), "memory.max": "268435456"} {
+		got, err := os.ReadFile(filepath.Join(launched.Cgroup, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("engine containment %s=%q want=%q: %v", name, got, want, err)
+		}
 	}
 	serviceStop, cancel := context.WithCancel(context.Background())
 	cancel()
