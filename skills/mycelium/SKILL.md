@@ -755,6 +755,18 @@ In an existing project, Mycelium now does these; delete your own:
 
 ## Check your project's efficiency
 
+When finished work fills the file store, use `myce file release plan --project
+NAME JOB_ID...`, inspect the plan, then `myce file release apply --accept-expiry
+PLAN_FILE`. Include every finished owner whose queue recovery you can give up.
+Code bundles held as inputs follow explicit release and the project's
+`file_retention`; they do not wait another queue-wide window from upload.
+`bundle_tracked` alone does not mean protected: `reclaimable_bytes` counts released
+bundles after publication grace when no keeping reference remains. Live, queued,
+unexpired or other projects' retained jobs still protect shared bytes, as do
+checkpoint, model, extension and environment custody. Apply schedules collection;
+it does not prove bytes were deleted. See the
+[file-store release contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/file-store.md#project-owner-early-file-release-465).
+
 After a batch, run `myce efficiency --project NAME` once. It shows named-host
 list usage (real pins), those jobs' plain queue wait and current stranded jobs
 that would fit with host lists removed while platform targets stay intact.
