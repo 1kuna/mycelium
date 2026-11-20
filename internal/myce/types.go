@@ -706,6 +706,7 @@ type Machine struct {
 	HostMemoryInUseGB           float64               `json:"host_memory_in_use_gb,omitempty"`           // Deprecated in status (host_memory.charged_gb).
 	modelReservationDebtGB      float64               // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
 	hostReservationDebtGB       float64               // Same deficit for the shared host allowance.
+	MemoryContainment           *MemoryContainment    `json:"memory_containment,omitempty"`
 	MemoryEnforcement           string                `json:"memory_enforcement,omitempty"`
 	HostMemoryBudgetGB          float64               `json:"host_memory_budget_gb,omitempty"`
 	MemoryCeilingSlackGB        float64               `json:"memory_ceiling_slack_gb,omitempty"`

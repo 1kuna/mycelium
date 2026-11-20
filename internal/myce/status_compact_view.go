@@ -33,14 +33,15 @@ type CompactStatus struct {
 	Freshness     *SnapshotFreshness   `json:"freshness,omitempty"`
 }
 type CompactHypha struct {
-	ID           string   `json:"id"`
-	GPU          string   `json:"gpu"`
-	FreeMemoryGB float64  `json:"free_memory_gb"`
-	Availability string   `json:"availability"`
-	HostRAMGB    *float64 `json:"host_ram_for_admission_gb,omitempty"`
-	FreeCPU      *int     `json:"free_cpu_cores,omitempty"`
-	CPU          *int     `json:"cpu_cores,omitempty"`
-	Running      int      `json:"running,omitempty"`
+	MemoryContainment *MemoryContainment `json:"memory_containment,omitempty"`
+	ID                string             `json:"id"`
+	GPU               string             `json:"gpu"`
+	FreeMemoryGB      float64            `json:"free_memory_gb"`
+	Availability      string             `json:"availability"`
+	HostRAMGB         *float64           `json:"host_ram_for_admission_gb,omitempty"`
+	FreeCPU           *int               `json:"free_cpu_cores,omitempty"`
+	CPU               *int               `json:"cpu_cores,omitempty"`
+	Running           int                `json:"running,omitempty"`
 	// Release is set only when it differs from the queue's, or is "unknown".
 	Release            string              `json:"release,omitempty"`
 	Preparing          []string            `json:"preparing,omitempty"`
@@ -123,6 +124,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 	}
 	for _, m := range s.Machines {
 		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID]}
+		h.MemoryContainment = m.MemoryContainment
 		h.ResultPublications = m.ResultPublications
 		if m.HostMemoryMeasured {
 			ram := m.FreeHostMemoryGB
@@ -290,6 +292,9 @@ func (c CompactStatus) Lines(full bool) []string {
 			line += "; release " + h.Release
 		}
 		out = append(out, line)
+		if h.MemoryContainment != nil {
+			out = append(out, "  "+h.MemoryContainment.String())
+		}
 		for _, p := range h.ResultPublications {
 			out = append(out, "  "+p.String())
 		}

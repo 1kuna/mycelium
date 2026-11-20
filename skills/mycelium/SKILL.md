@@ -526,6 +526,15 @@ are one trailing count. Use `myce status --sections alerts` for records or
 `myce efficiency` for sizing and placement findings. Host health openings and
 closings go to the installation owner's Mycelium inbox when its hook is configured.
 
+A worker's `memory_containment.state: unavailable` with reason `worker unit is
+outside the configured slice` means its older installed service has no joint
+slice ceiling. Batch and model jobs continue with existing per-attempt limits,
+applicable RSS guards and tier OOM scores. Keep the same job and key; the
+installation owner enables joint containment by migrating the worker unit into
+its configured slice (see [#1771](https://github.com/1kuna/mycelium/issues/1771)).
+Text status includes this reason and next step. `available` confirms the joint
+controls; an omitted field is unknown.
+
 For a host-memory wait, per-job JSON's `admission_wait.first.targets[]` retains
 `host_memory_ledger` on supporting queues. Compare physical room
 (`capacity_gb - growth_gb`) with allowance room (`allowance_gb - reserved_gb`)
