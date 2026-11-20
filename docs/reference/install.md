@@ -29,10 +29,27 @@ The transaction snapshots binary, config, credentials, GPU environment and
 service files/modes plus actual manager registration/activity. Failure restores
 that snapshot and verifies it independently. Incomplete rollback requests affected
 services stopped and reports remaining differences; preserve the snapshot for
-recovery. Effective drop-ins that override execution, credentials or containment block activation,
-except queue `ExecStart` overrides: these are preserved with a warning so their
-settings can be migrated before removal. Consumer files are preserved. Check
-health and exact cleanup before resuming.
+recovery. Effective drop-ins that override execution, credentials or containment block activation.
+A queue `ExecStart` override is permitted only when its arguments are semantically
+equivalent to the generated queue command. Otherwise installation exits nonzero
+with typed reason `queue_execstart_override`, listing every hidden or differing
+flag (names only). Duration spellings such as `60s` and `1m0s`, omitted runtime
+defaults such as `--file-retention 72h`, and the saved discovery bind supplied by
+`--service-config` compare by their effective values. Uninspectable execution
+syntax refuses conservatively; the override is never removed automatically.
+Consumer files are preserved. Check health and exact cleanup before resuming.
+
+To prepare retirement while a differing override remains in place, use
+`myce install queue --config QUEUE_CONFIG --save-settings-only` with all intended
+settings. This mode requires an existing Linux queue. It saves only the config
+and generated base unit, with transactional file restoration on failure. It does
+not replace the binary or credentials, reload systemd, enable, stop or restart
+the queue. Success means **settings saved, not activated**; the installer prints
+that distinction. The flag is invocation-only and is not saved. A dry run still
+writes nothing. Inspect every custom argument, retire the override, then reload,
+restart and verify before resuming admission, following the
+[file-store retirement procedure](file-store.md#production-file-store-reserve).
+Run a normal install afterward if the binary also needs upgrading.
 
 From the next release (#1081), Linux installer stop/start/restart waits read the
 unit's effective `TimeoutStopUSec` and `TimeoutStartUSec` from systemd, including

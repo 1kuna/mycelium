@@ -115,7 +115,8 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 }
 
 type ServiceConfig struct {
-	storageWarning *StoragePreflightFailure // Current invocation only; never configuration authority.
+	storageWarning   *StoragePreflightFailure // Current invocation only; never configuration authority.
+	SaveSettingsOnly bool                     `json:"-"` // Prepare queue override retirement without activation.
 
 	DailyUse       bool            `json:"daily_use"`
 	Laptop         bool            `json:"laptop"`
@@ -417,6 +418,19 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		installed = old
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if c.SaveSettingsOnly {
+		if !existing {
+			return errors.New("--save-settings-only requires an existing queue installation")
+		}
+		return saveQueueInstallSettings(ctx, c, files, command)
+	}
+	// Refuse known queue overrides before publication (and therefore without
+	// rollback restarting the old service). Recheck after daemon-reload too.
+	if existing && c.Detection.OS == "linux" && c.Role == "queue" {
+		if err := validateInstallDropIns(ctx, c, command); err != nil {
+			return err
+		}
 	}
 	if existing && c.Detection.OS == "darwin" {
 		if err := validateDarwinUpgradeIdentity(ctx, c.Binary, executable, command); err != nil {

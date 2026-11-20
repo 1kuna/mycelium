@@ -146,6 +146,12 @@ func InstallSettings() []InstallSetting {
 	return []InstallSetting{
 		// Invocation evidence only: no flag, persistence or configuration authority.
 		{Field: "storageWarning"},
+		installContext(installSetting("save-settings-only", "SaveSettingsOnly", "save existing Linux queue config and generated unit without reload or activation (override retirement)", func(c *ServiceConfig) *bool { return &c.SaveSettingsOnly }, installAny[bool]), func(c ServiceConfig) error {
+			if c.SaveSettingsOnly && (c.Role != "queue" || c.Detection.OS != "linux") {
+				return errors.New("--save-settings-only requires a Linux queue")
+			}
+			return nil
+		}),
 		installSetting("daily-use", "DailyUse", "wait for owner inactivity and safe power/heat", func(c *ServiceConfig) *bool { return &c.DailyUse }, installAny[bool]),
 		installContext(installSetting("laptop", "Laptop", "require external power", func(c *ServiceConfig) *bool { return &c.Laptop }, installAny[bool]), func(c ServiceConfig) error {
 			if c.Laptop && c.Desktop {
