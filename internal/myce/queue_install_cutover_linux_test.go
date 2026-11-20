@@ -698,7 +698,7 @@ func diagnoseStartupPhysical(t *testing.T, python, path string) {
 			t.Logf("physical_layout=%s", bytes.TrimSpace(out))
 		}
 		for _, cache := range []string{"cold", "warm"} {
-			for _, operation := range []string{"scan", "reassemble", "decode"} {
+			for _, operation := range []string{"scan", "reassemble", "reassemble_parallel", "decode", "decode_parallel"} {
 				if cache == "cold" {
 					cmd := exec.Command(python, "testdata/queue_install_physical.py", "evict", path)
 					if out, err := cmd.CombinedOutput(); err != nil {
@@ -725,7 +725,7 @@ func diagnoseStartupPhysical(t *testing.T, python, path string) {
 					before, _ := os.ReadFile("/proc/self/io")
 					started := time.Now()
 					rows, size := 0, 0
-					switch operation {
+					switch strings.TrimSuffix(operation, "_parallel") {
 					case "scan":
 						var result *sql.Rows
 						result, err = db.Query("SELECT key,data FROM queue_state")
@@ -746,13 +746,20 @@ func diagnoseStartupPhysical(t *testing.T, python, path string) {
 						}
 					case "reassemble":
 						var records map[string][]byte
-						records, err = readQueueRecords(db)
+						if strings.HasSuffix(operation, "_parallel") {
+							records, err = readStartupQueueRecords(db, nil, 4)
+						} else {
+							records, err = readQueueRecords(db)
+						}
 						rows = len(records)
 						for _, data := range records {
 							size += len(data)
 						}
 					case "decode":
 						q := &Queue{db: db, clock: RealClock{}}
+						if strings.HasSuffix(operation, "_parallel") {
+							q.startupReadWorkers = 4
+						}
 						previous := started
 						q.startupTrace = func(phase string) {
 							now := time.Now()
