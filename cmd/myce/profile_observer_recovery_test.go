@@ -31,7 +31,7 @@ func TestSharedObserverCLIAdoptsPreexistingArms(t *testing.T) {
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
 	events := filepath.Join(t.TempDir(), "events")
 	hook := filepath.Join(t.TempDir(), "notify")
-	if err = os.WriteFile(hook, []byte("#!/bin/sh\nif [ \"${1:-}\" = --check ]; then exit 0; fi\ncat >> \"$OBSERVER_ADOPTION_EVENTS\"\nprintf '\\n' >> \"$OBSERVER_ADOPTION_EVENTS\"\n"), 0700); err != nil {
+	if err = os.WriteFile(hook, []byte("#!/bin/sh\nif [ \"${1:-}\" = --check ]; then exit 0; fi\ncat >> "+shellArg(events)+"\nprintf '\\n' >> "+shellArg(events)+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	registry, err := sharedProfileRoot()
@@ -60,7 +60,7 @@ func TestSharedObserverCLIAdoptsPreexistingArms(t *testing.T) {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, binary, "run", "--profile", "adoption", "--queue", d.URL, "--key", key, "--notify", hook)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "MYCE_TOKEN=recovery-fixture", "OBSERVER_ADOPTION_EVENTS="+events)
+		cmd.Env = append(os.Environ(), "MYCE_TOKEN=recovery-fixture")
 		var diagnostic bytes.Buffer
 		cmd.Stderr = &diagnostic
 		out, err := cmd.Output()

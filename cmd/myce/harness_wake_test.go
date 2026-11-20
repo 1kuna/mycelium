@@ -64,14 +64,22 @@ func TestDevSubmitWakesSubmitterOnce(t *testing.T) {
 	// The harness's CLI stands in for `t3 thread send THREAD -`.
 	wakes := filepath.Join(project, "wakes")
 	cli := filepath.Join(project, "harness-cli")
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\nprintf 'argv:%s %s %s %s\\n' \"$1\" \"$2\" \"$3\" \"$4\" >> "+shellArg(wakes)+"\ncat >> "+shellArg(wakes)+"\n"), 0700); err != nil {
+	// The default CLI reads T3CODE_HOME to find its server, not just the
+	// thread/CLI binding used by Mycelium. No ambient secret may reach it.
+	home := filepath.Join(project, "harness-home")
+	script := "#!/bin/sh\n[ \"$T3CODE_HOME\" = " + shellArg(home) + " ] || exit 1\n[ -z \"${FIXTURE_TOKEN+x}${FIXTURE_KEY+x}${MYCE_TOKEN+x}${UNRELATED_SETTING+x}\" ] || exit 1\nprintf 'argv:%s %s %s %s\\n' \"$1\" \"$2\" \"$3\" \"$4\" >> " + shellArg(wakes) + "\ncat >> " + shellArg(wakes) + "\n"
+	if err := os.WriteFile(cli, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("T3CODE_HOME", home)
+	t.Setenv("FIXTURE_TOKEN", "fixture-secret")
+	t.Setenv("FIXTURE_KEY", "fixture-secret")
+	t.Setenv("UNRELATED_SETTING", "fixture")
 	t.Setenv("T3CODE_THREAD_ID", "thread-under-test")
 	t.Setenv("T3CODE_CLI_PATH", cli)
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
-	script := `set -eu
+	script = `set -eu
 cd "$1"
 profile=.mycelium/profiles/quickstart.yaml
 "$2" run --profile "$profile" --key wake-fixture > receipt.json

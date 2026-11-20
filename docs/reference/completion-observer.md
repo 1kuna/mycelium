@@ -9,9 +9,32 @@ the starter's PATH and locale, and explicit dev/managed-attempt custody markers.
 Runner tracking identities, job-scoped variables, inherited temporary directories,
 unrelated secrets and MYCE_TOKEN are excluded. An allowlist also excludes future
 CI providers' tracking variables without needing a provider-specific denylist.
-Notifier delivery retains its separately saved caller environment with MYCE_TOKEN
-removed; legacy registrations without that snapshot keep the owner's PATH/locale
-fallback. Dev sessions and managed attempts retain their existing cleanup custody.
+From the release containing #1830, notifier delivery saves only PATH, HOME,
+LANG/LANGUAGE and the standard LC_* locale categories, XDG_CONFIG_HOME,
+XDG_CACHE_HOME, SSL_CERT_FILE/SSL_CERT_DIR, and T3CODE_THREAD_ID,
+T3CODE_CLI_PATH and T3CODE_HOME. The last selects the default harness CLI's
+runtime state; the thread ID and executable alone are insufficient for a custom
+harness home. Secret-named variables (`*_TOKEN`, `*_KEY`, `*_SECRET`,
+`*_PASSWORD`, `*_CREDENTIAL`, `*_CREDENTIALS`, including MYCE_TOKEN) are always
+excluded, even if accidentally allowlisted later. Custom hooks load credentials
+from private configuration under HOME or XDG_CONFIG_HOME, rather than inherited
+environment secrets. Legacy registrations without a snapshot keep the owner's
+filtered PATH/locale fallback. Dev sessions and managed attempts retain their
+existing cleanup custody.
+
+**After deploying #1830, remove saved environment secrets from old registrations.**
+Have the installation owner upgrade the running observer through the cooperative
+handoff described below; verify the fixed image with `myce wait --observer-status`.
+The fixed owner filters and atomically rewrites each registration when adopting
+it, under its receipt lock, before any authority read or delivery. This purges
+disallowed environment entries while retaining the original job, arm, notifier,
+allowed wake environment and authority. Completed registrations retire normally.
+If the old image cannot hand off, use the exact-owner recovery steps below and
+replay the original keyed command with the fixed CLI. Installing the binary alone
+does not rewrite old files. Never dump, back up, copy or print registration
+contents; do not delete live registrations or receipts. This rewrite is logical
+removal from the current file, not secure erasure of old filesystem blocks or
+copies already made elsewhere.
 
 From the release containing #919's supervision fix, the detached starter owns a
 separate observer child and retains its process handle. Child exit or silence

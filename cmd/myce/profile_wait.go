@@ -51,13 +51,7 @@ func resolveProfileNotifier(path string) (string, error) {
 }
 
 func notifierEnvironment() []string {
-	var env []string
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") {
-			env = append(env, v)
-		}
-	}
-	return env
+	return filterNotifierEnvironment(os.Environ())
 }
 
 func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg profileObserver, token string, errOut io.Writer) error {
@@ -301,7 +295,7 @@ func finishProfileObservationUsing(ctx context.Context, c *myce.Client, dir stri
 		defer cancel()
 		env := notifierEnvironment()
 		if len(notifyEnv) > 0 && notifyEnv[0] != nil {
-			env = notifyEnv[0]
+			env = filterNotifierEnvironment(notifyEnv[0])
 		}
 		var deliveryErr error
 		if isHarnessWake(cfg.Notify) {
