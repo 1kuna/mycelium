@@ -480,12 +480,13 @@ silently cleared. See [fresh install](#archive-old-state-and-install-fresh).
    their hosts while they report the previous hash.
 4. On each worker, rerun the preview against the updated queue, then run
    `myce install worker --config WORKER_CONFIG --model-config NEW_CATALOG`.
-   The installer handles the service restart. Check `myce host status HOST
-   --json` for a fresh check-in with the new `machine.model_config_hash` and
-   confirm it matches across workers. `myce status --json` also shows the worker
-   hashes. Keep a worker that still reports the old hash drained and retry the
-   reinstall with the matching catalog. Resume only drains you took once the
-   workers on the host report the new hash.
+   The installer handles the service restart. `myce host status HOST` prints
+   JSON. Check for a fresh worker and a changed `machine.model_config_hash`.
+   Confirm that it matches across workers. `myce status --json` also shows the
+   worker hashes. Keep a worker that still reports the old hash or the
+   `model_catalog_stale` admission reason drained and retry the matching
+   reinstall. Resume only drains you took once the workers on the host report
+   the new hash.
 
 On earlier queue releases that reject old-catalog check-ins, an active stale
 worker can fail install with `fleet_existing_service_unavailable`. Drain and

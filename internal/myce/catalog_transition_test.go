@@ -21,23 +21,27 @@ func TestCatalogTransitionCheckin(t *testing.T) {
 	m := machine("worker", "fake")
 	m.ModelConfigHash = modelConfigHash(oldCatalog)
 	check(t, q, m, nil)
-	if err := q.ConfigureModels(nextCatalog); err != nil {
-		t.Fatal(err)
-	}
-	beat := Checkin{Machine: m, period: time.Second, Recovering: true}
-	if _, err := q.Checkin(beat); err == nil {
-		t.Fatal("enabled worker bypassed the catalog fence during recovery")
-	}
+	enabled := machine("enabled-worker", "fake")
+	enabled.ModelConfigHash = m.ModelConfigHash
+	check(t, q, enabled, nil)
 	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "drain"}); err != nil {
 		t.Fatal(err)
 	}
+	q = reopenQueue(t, q, clock)
+	if err := q.ConfigureModels(nextCatalog); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Checkin(Checkin{Machine: enabled, period: time.Second, Recovering: true}); err == nil {
+		t.Fatal("enabled worker bypassed the catalog fence during recovery")
+	}
+	beat := Checkin{Machine: m, period: time.Second, Recovering: true}
 	clock.Advance(LossAfter + time.Second)
 	j := submit(t, q, spec("experiment"))
 	unknown := beat
 	unknown.Machine.ID = "unknown"
 	unknown.Machine.HostID = hostID(&m)
 	busy := beat
-	busy.ModelReports = []ModelReport{{Name: "previous", State: "ready"}}
+	busy.ModelReports = []ModelReport{{Name: "previous", Attempt: "active-engine", State: "ready"}}
 	missingHash := beat
 	missingHash.Machine.ModelConfigHash = ""
 	for _, invalid := range []Checkin{unknown, busy, missingHash} {
@@ -121,7 +125,7 @@ func TestCatalogTransitionDev(t *testing.T) {
 		}
 		if m.ModelConfigHash == modelConfigHash(oldCatalog) {
 			// The runtime retains the terminal report after an engine unloads.
-			checkin.ModelReports = []ModelReport{{Name: "previous", State: "unloaded", CallsMeasured: true}}
+			checkin.ModelReports = []ModelReport{{Name: "previous", Attempt: "released-engine", State: "unloaded", CallsMeasured: true}}
 		}
 		err := client.Call(ctx, "POST", "/api/workers/checkin", checkin, &reply)
 		return reply, err
@@ -209,6 +213,13 @@ func TestCatalogTransitionDev(t *testing.T) {
 	if err := d.Queue.ConfigureModels(newCatalog); err != nil {
 		t.Fatal(err)
 	}
+	await(t, func() bool {
+		status, err := d.Queue.HostMaintenanceStatus("dev-host")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(status.Workers) == 1 && status.Workers[0].Fresh && status.Workers[0].Machine.AdmissionReason == "model_catalog_stale"
+	})
 	s := spec("experiment")
 	s.Resumable = false
 	j := submit(t, d.Queue, s)
