@@ -237,9 +237,11 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	j := waitSubmit(t, q)
 	// Successful long polls replace the client pause. Model that hold on the
 	// fake clock, bounded by the current deadline rather than rounded seconds.
-	transportDeadline := clock.Now().Add(5 * time.Second)
+	var transportDeadline atomic.Int64
+	transportDeadline.Store(clock.Now().Add(5 * time.Second).UnixNano())
 	server := httptest.NewServer(waitPollingHandler(t, q, func(d time.Duration) {
-		clock.advance(min(d, max(0, transportDeadline.Sub(clock.Now()))))
+		remaining := time.Unix(0, transportDeadline.Load()).Sub(clock.Now())
+		clock.advance(min(d, max(0, remaining)))
 	}))
 	defer server.Close()
 	var delays []time.Duration
@@ -261,7 +263,7 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 		s.Needs.MemoryGB = 1
 		s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
 		deadline := clock.Now().Add(3 * time.Second)
-		transportDeadline = deadline
+		transportDeadline.Store(deadline.UnixNano())
 		s.StartBy = &deadline
 		j, err := q.Submit(s)
 		if err != nil {
@@ -542,7 +544,7 @@ func waitPollingHandler(t *testing.T, q *myce.Queue, advanceHold func(time.Durat
 				return
 			}
 			// Return immediately; a supplied callback can model the transport hold
-			// on the guidance fixture clock. Timeout fixtures advance in their pause.
+			// on the fixture clock, including timeout fixtures with bounded holds.
 			// Real hold/wakeup coverage stays in TestWaitIndexCommitRollbackAndUnlockedReads.
 			if len(request.After) > 0 && advanceHold != nil {
 				advanceHold(time.Duration(request.Seconds) * time.Second)
