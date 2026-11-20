@@ -3,6 +3,7 @@ package myce
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -79,6 +80,10 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	var targets []observation
 	compatibleHosts := map[string]bool{}
 	freshTargets := false
+	var maintainedHosts map[string]bool
+	openRoute := false
+	explainMaintenance := !specificWaitKind(wait.Kind) || wait.Kind == "no_matching_device" ||
+		wait.Kind == "unprepared" || wait.Kind == "waiting_for_builder"
 	q.evaluateTargets(j, func(f targetFit, candidate *Job, m *Machine) bool {
 		if j.Spec.Needs.cpuOnly() && m.Device != "" {
 			return true
@@ -88,6 +93,24 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 		freshTargets = freshTargets || fresh
 		if fresh && f.failures == 0 {
 			compatibleHosts[hostID(m)] = true
+		}
+		if explainMaintenance && !f.excluded && f.failures == 0 && m.Replacement == nil {
+			host := hostID(m)
+			live := q.s.Machines[m.ID]
+			// A drained worker can leave or restart during maintenance. Keep its
+			// last known fit. An otherwise eligible undrained route, even a stale
+			// one, has its own diagnosis and prevents maintenance attribution.
+			if !q.maintenanceBlocked(host) {
+				openRoute = true
+			} else if live.Disabled != "" || live.LastSeen.IsZero() || live.HostMemoryError != "" ||
+				!candidate.Spec.Needs.cpuOnly() && (q.deviceAdmissionBlocked(m) || inventoryWaitingReason(live) != "" || live.MemoryError != "") {
+				openRoute = true
+			} else {
+				if maintainedHosts == nil {
+					maintainedHosts = map[string]bool{}
+				}
+				maintainedHosts[host] = true
+			}
 		}
 		return true
 	})
@@ -108,6 +131,21 @@ func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 			blocker.Detail += "; only one freshly observed physical host meets the declared software, resource, qualification and parity requirements; this is observed coverage, not a required host pin; keep the job unpinned unless an explicit restriction is intended"
 		}
 	}()
+	if !openRoute && len(maintainedHosts) != 0 {
+		var reasons, owners, actions []string
+		for _, host := range slices.Sorted(maps.Keys(maintainedHosts)) {
+			h := q.maintenanceHold(host)
+			reasons = append(reasons, h.Reason)
+			owners = append(owners, h.Owner)
+			actions = append(actions, h.Next)
+		}
+		slices.Sort(owners)
+		h := newHold(hostMaintenanceJobHold, "")
+		h.Reason = strings.Join(reasons, "; ")
+		h.Owner = strings.Join(slices.Compact(owners), " or ")
+		h.Next = strings.Join(actions, "; ")
+		return h
+	}
 	slices.SortFunc(targets, func(a, b observation) int {
 		if a.fit.better(b.fit) {
 			return -1

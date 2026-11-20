@@ -24,6 +24,22 @@ acknowledgement and exits 75 if release still needs confirmation. A deadline
 before acknowledgement leaves the outcome uncertain. Retry with the same job
 ID or project and key.
 
+### Maintenance holds
+
+When every eligible host for a queued job is in maintenance, `myce status JOB_ID`
+and full fleet status report a `host_maintenance` job hold. Its reason names
+the affected hosts and their operations. The hold's `owner` and `next` identify
+who can restore admission. The fleet overview also lists each host's maintenance
+hold. An eligible route with missing or stale observations outside maintenance
+keeps its own diagnosis.
+
+Operators can record context with `myce host drain HOST --reason TEXT
+--expected-return RFC3339`. Both flags are optional and also work with
+`myce host disable`. The host policy exposes them as `reason` and
+`expected_return`. Job and fleet holds show an expected return only for hosts
+with a recorded time. Admission resumes through the operation's normal resume
+action, even if the expected return time has already passed.
+
 The inventory below comes from the Go types. Behavior, freshness, redaction,
 units, compatibility and interpretation live in the [status behavior reference](reference/status-behavior.md).
 Declared fields are not a promise that every view exposes their values.

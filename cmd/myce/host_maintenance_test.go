@@ -89,12 +89,17 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	defer server.Close()
 	t.Setenv("MYCE_TOKEN", "test-only")
 	var out bytes.Buffer
-	if err = hostMaintenanceCommand(context.Background(), []string{"drain", "host", "--queue", server.URL}, &out); err != nil {
+	expected := clock.Now().Add(time.Hour).UTC()
+	if err = hostMaintenanceCommand(context.Background(), []string{"drain", "host", "--queue", server.URL,
+		"--reason", "scheduled service", "--expected-return", expected.Format(time.RFC3339Nano)}, &out); err != nil {
 		t.Fatal(err)
 	}
 	var status myce.HostMaintenanceStatus
 	if err = json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.Mode != "drained" || len(status.Attempts) != 1 {
 		t.Fatal(out.String(), err)
+	}
+	if status.Policy.Reason != "scheduled service" || !status.Policy.ExpectedReturn.Equal(expected) {
+		t.Fatal("missing maintenance metadata", status.Policy)
 	}
 	client := myce.Client{URL: server.URL, Token: "test-only"}
 	status, err = waitHostMaintenance(context.Background(), client, "host", 6*time.Second, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })

@@ -19,12 +19,14 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		return hostDeviceCommand(ctx, args[1:], out)
 	}
 	if len(args) == 0 {
-		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement|profile|role HOST [--config PATH] [--last-resort=true|false] [--role node|services|interactive] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement|profile|role HOST [--config PATH] [--last-resort=true|false] [--role node|services|interactive] [--stop] [--reason TEXT] [--expected-return RFC3339] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	stop := f.Bool("stop", false, "disable and stop exact current attempts")
+	reason := f.String("reason", "", "maintenance reason shown to affected jobs")
+	expectedReturn := f.String("expected-return", "", "recorded return time (RFC3339); does not resume admission")
 	wait := f.Bool("wait", false, "wait for fresh workers and zero known work/cleanup")
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
@@ -43,7 +45,11 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "interactive-reserve-gb" || key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores" || key == "role") && i+1 < len(args) {
+			switch key {
+			case "interactive-reserve-gb", "headroom-gb", "queue-overhead-gb", "config", "joining-file", "queue", "token", "timeout", "memory-budget-gb", "cpu-budget-cores", "role", "reason", "expected-return":
+				if i+1 >= len(args) {
+					break
+				}
 				i++
 				flags = append(flags, args[i])
 			}
@@ -69,9 +75,13 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if *wait && (action == "resume" || action == "budget" || action == "placement" || action == "profile" || action == "role") {
 		return errors.New("--wait requires drain, disable or status")
 	}
-	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop}
+	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop, Reason: *reason}
+	var maintenanceMetadata bool
 	sharedSet, reserveSet := false, false
 	f.Visit(func(v *flag.Flag) {
+		if v.Name == "reason" || v.Name == "expected-return" {
+			maintenanceMetadata = true
+		}
 		if v.Name == "shared" {
 			sharedSet = true
 		}
@@ -94,6 +104,16 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 			request.Role = role
 		}
 	})
+	if maintenanceMetadata && action != "drain" && action != "disable" {
+		return errors.New("--reason and --expected-return require drain or disable")
+	}
+	if *expectedReturn != "" {
+		expected, err := time.Parse(time.RFC3339, *expectedReturn)
+		if err != nil {
+			return errors.New("--expected-return requires an RFC3339 timestamp")
+		}
+		request.ExpectedReturn = &expected
+	}
 	if (action == "role") != (request.Role != nil) {
 		return errors.New("role requires --role node|services|interactive, and --role requires role")
 	}
