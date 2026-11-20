@@ -146,7 +146,7 @@ entries:
 		t.Fatal(err)
 	}
 	if j.StopAt == nil || !advanced.Now.Before(*j.StopAt) {
-		t.Fatal("save did not stay within the stop grace")
+		t.Fatalf("save did not stay within the stop grace: state=%s stop_at=%v advanced=%s release=%t reason=%q before_state=%s", j.State, j.StopAt, advanced.Now, j.ReleaseConfirmed, j.Reason, before.State)
 	}
 	if get().ReleaseConfirmed {
 		t.Fatal("released while the checkpoint save was held")
