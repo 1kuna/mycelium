@@ -85,7 +85,18 @@ case "$1" in
       *--property=DropInPaths*) :;;
       *--property=ActiveState*) test -f "$pidfile"; printf 'ActiveState=active\nSubState=running\nMainPID=%s\nNRestarts=0\nResult=success\n' "$(cat "$pidfile")";;
       *--property=ControlGroup*) echo /fake-admission-only;;
-      *) :;;
+      *)
+        # InstallUnitPlan observes the installed definition before an upgrade.
+        unit="$HOME/.config/systemd/user/$2"
+        slice=$(sed -n 's/^Slice=//p' "$unit")
+        score=$(sed -n 's/^OOMScoreAdjust=//p' "$unit")
+        state=inactive
+        group=
+        if test -f "$pidfile"; then
+          state=active
+          group="/user.slice/$slice/$2"
+        fi
+        printf 'FragmentPath=%s\nDropInPaths=\nActiveState=%s\nSlice=%s\nOOMScoreAdjust=%s\nControlGroup=%s\n' "$unit" "$state" "$slice" "$score" "$group";;
     esac;;
   is-active) test -f "$pidfile" || exit 3;;
   daemon-reload|disable) :;;
