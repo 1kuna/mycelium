@@ -52,6 +52,12 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 	if q.db.Stats().MaxOpenConnections != 1 {
 		t.Fatal("startup left concurrent connections enabled for ordinary writes")
 	}
+	for pragma, expected := range map[string]int{"busy_timeout": 5000, "synchronous": 2} {
+		var got int
+		if err := q.db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != expected {
+			t.Fatalf("startup changed writer %s: %d, %v", pragma, got, err)
+		}
+	}
 	for _, record := range q.s.Submissions {
 		if record.Job != q.s.Jobs[record.JobID] {
 			t.Fatal("keyed answer did not reuse committed job")

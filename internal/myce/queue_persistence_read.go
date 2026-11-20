@@ -12,6 +12,9 @@ import (
 // generation concurrently. No schema/format change or second persisted copy.
 // Ordinary readers and all writes retain the single-connection boundary.
 func readStartupQueueRecords(db *sql.DB, visit func(string, []byte), workers int) (map[string][]byte, error) {
+	if workers <= 1 {
+		return readQueueRecordsVisit(db, visit)
+	}
 	var first, last int64
 	err := db.QueryRow("SELECT rowid FROM queue_state ORDER BY rowid LIMIT 1").Scan(&first)
 	if err == sql.ErrNoRows {
@@ -48,7 +51,19 @@ func readStartupQueueRecords(db *sql.DB, visit func(string, []byte), workers int
 		group.Add(1)
 		go func(query string, args []any) {
 			defer group.Done()
-			result, err := db.QueryContext(ctx, query, args...)
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				rows.send(ctx, startupRecord{err: err})
+				return
+			}
+			defer conn.Close()
+			// These settings belong to a connection, not the database file. Any
+			// reader may become the one connection retained for ordinary writes.
+			if _, err := conn.ExecContext(ctx, "PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000"); err != nil {
+				rows.send(ctx, startupRecord{err: err})
+				return
+			}
+			result, err := conn.QueryContext(ctx, query, args...)
 			if err != nil {
 				rows.send(ctx, startupRecord{err: err})
 				return
