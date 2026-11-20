@@ -302,6 +302,13 @@ func TestWorkCurveHeartbeatLabelsDoNotRewriteMeasurements(t *testing.T) {
 			t.Fatal(err)
 		}
 		drainAdmissionWait(t, q)
+		// Read one durable snapshot per heartbeat. Repeating the logical-record
+		// query for every curve scans the same SQLite field rows 1,400 times.
+		// Every accepted measurement is still decoded and compared below.
+		records, err := readQueueRecords(q.db)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for id, p := range q.s.WorkObservations {
 			// The round-robin fixture deliberately ages other reporters past
 			// their advertised cadence. Availability can change; identity cannot.
@@ -313,7 +320,7 @@ func TestWorkCurveHeartbeatLabelsDoNotRewriteMeasurements(t *testing.T) {
 				t.Fatalf("heartbeat label %s: want %q, got %q", id, want, p.StaleReason)
 			}
 			var durable WorkObservation
-			if err := json.Unmarshal(durableQueueRecord(t, q.db, "work_observations/"+id), &durable); err != nil {
+			if err := json.Unmarshal(records["work_observations/"+id], &durable); err != nil {
 				t.Fatal(err)
 			}
 			if durable.StaleReason != "" || workMeasurementDigest(durable) != workMeasurementDigest(p) {
