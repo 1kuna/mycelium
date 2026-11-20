@@ -97,7 +97,7 @@ def load_history(path):
     return None
 
 
-def history_identity(label):
+def history_identity(label, command=()):
     # The cache belongs to this execution environment, alongside Go's cache.
     # No hostname, address, source path or credentials are persisted in telemetry.
     identity = [label, platform.system(), platform.machine(), cpu_count(),
@@ -106,11 +106,20 @@ def history_identity(label):
     # still learn separately; otherwise both appear to be the same CPU profile.
     if slots := os.environ.get('GATE_TEST_SLOTS'):
         identity.append(slots)
+    if command[:1] == ['--test-binary']:
+        # test2json emits package start before it launches this image. A newly
+        # linked Darwin image can initialize much more slowly than a warm one;
+        # a previous image's subsecond timing cannot qualify its first launch.
+        digest = hashlib.sha256()
+        with Path(command[2]).open('rb') as image:
+            for block in iter(lambda: image.read(1024 * 1024), b''):
+                digest.update(block)
+        identity.extend(['compiled-test', digest.hexdigest()])
     return identity
 
 
 def run(label, command, cache, report, clock=time.monotonic):
-    identity = history_identity(label)
+    identity = history_identity(label, command)
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / (hashlib.sha256(json.dumps(identity).encode()).hexdigest() + '.json')
     history = load_history(path)
@@ -244,7 +253,9 @@ def run(label, command, cache, report, clock=time.monotonic):
             output.write(json.dumps(record) + '\n')
         if status == 0 and elapsed > 0:
             learned = dict(count=(history['count'] if history else 0) + 1,
-                           expected_seconds=elapsed)
+                           # Keep the slow successful launch as evidence. Replacing it with
+                           # the latest warm run would forget measured startup cost.
+                           expected_seconds=max(elapsed, expected or 0))
             temporary = path.with_suffix('.' + uuid.uuid4().hex)
             temporary.write_text(json.dumps(learned) + '\n')
             os.replace(temporary, path)

@@ -155,7 +155,9 @@ temporary selection file, and prints each partition in the gate log. Run
 
 Quick and full have no overall wall deadline. Each Go package runs under its
 own test-progress watchdog, keyed by package, exact selected test expression,
-OS/architecture, Go version and available/assigned CPU count.
+OS/architecture, Go version and available/assigned CPU count. Compiled test
+images also key timing history by their executable SHA-256, so a rebuilt image
+learns its own first-launch cost before a warm deadline can apply.
 The full scheduler also keys those timings by shard concurrency, since each
 individual shard uses one Go CPU at every allocation size. Timings live beside
 Go's execution-host build cache (`mycelium-gate-timings`), shared across checkouts
@@ -165,8 +167,9 @@ A new selection/toolchain/CPU configuration learns independently; a small quick
 selection cannot shorten a full-package deadline.
 
 A learned package stalls after **three times its expected package duration with
-no test lifecycle progress**. Expected duration is the latest completed successful observation
-for that host/configuration/selection. Three intervals allow the normal expected
+no test lifecycle progress**. Expected duration is the largest completed successful observation
+for that host/configuration/selection/image. Keeping the slow successful launch
+prevents a later fast run from forgetting measured initialization cost. Three intervals allow the normal expected
 completion plus two missed completions for transient contention; the cost is up
 to three expected durations to detect a test that stops advancing. This is an operational
 tolerance, not a statistical confidence claim or a wall-time limit. Go JSON lifecycle events (`start`, `run`, `pause`, `cont`, `pass`, `fail`,
@@ -177,6 +180,11 @@ wall duration while progressing, and sibling output cannot hide its hang.
 The watchdog starts at Go's JSON package-start event, after compilation: a warm
 cache measurement must not kill cold compilation. Build/vet/compatibility steps
 record elapsed time but do not infer silent deadlines from cache-dependent work.
+For compiled images, package-start precedes executable initialization. Darwin
+evidence in #1817 measured a 1.158s first-launch silence gap versus 0.075–0.115s
+later gaps; the old 0.245s warm baseline would allow only 0.735s. Image-specific
+cold learning and retention of successful startup evidence prevent that false
+stall without increasing the three-interval tolerance or learning from failures.
 
 Cold packages retain `go test -timeout=1h` as the finite toolchain backstop.
 The prior ad-hoc 15-minute value would already truncate the measured 1,708s full

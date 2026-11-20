@@ -25,7 +25,7 @@ class ProgressTests(unittest.TestCase):
         child.stdout.fileno.return_value = 123
         if expected is not None:
             cache.mkdir(exist_ok=True)
-            identity = progress.history_identity('package:selection')
+            identity = progress.history_identity('package:selection', command or ['go', 'test', './pkg'])
             key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
             (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected)))
         selector = Mock()
@@ -162,6 +162,26 @@ class ProgressTests(unittest.TestCase):
             for flag in ('-test.timeout=0', '-test.v=test2json', '-test.paniconexit0',
                          '-test.count=1', '-test.parallel=1', '-test.run=^TestBlocked$'):
                 self.assertIn(flag, launched)
+
+    def test_new_image_cannot_inherit_warm_image_startup_deadline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / 'shared.test'
+            image.write_bytes(b'first compiled image')
+            command = ['--test-binary', 'fixture/pkg', str(image), str(root)]
+            code, first, _ = self.execute(root, [(2, b'')], command=command)
+            self.assertEqual(code, 0)
+            self.assertIn('-test.timeout=1h', first)
+            code, warm, _ = self.execute(root, [(0.2, b'')], command=command)
+            self.assertEqual(code, 0)
+            self.assertIn('-test.timeout=0', warm)
+            learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
+            self.assertEqual(learned['expected_seconds'], 2)
+            image.write_bytes(b'new compiled image')
+            code, rebuilt, _ = self.execute(root, [(2, b'')], command=command)
+            self.assertEqual(code, 0)
+            self.assertIn('-test.timeout=1h', rebuilt)
+            self.assertEqual(len(list((root / 'cache').glob('*.json'))), 2)
 
     def test_compile_only_is_not_learned_as_a_running_test_package(self):
         with tempfile.TemporaryDirectory() as folder:
