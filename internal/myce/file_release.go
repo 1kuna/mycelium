@@ -34,18 +34,19 @@ type FileReleaseFile struct {
 }
 
 type FileReleaseJob struct {
-	ID                 string            `json:"id"`
-	Project            string            `json:"project"`
-	State              string            `json:"state"`
-	Release            string            `json:"release"`
-	CustodySHA256      string            `json:"custody_sha256"`
-	FilesExpired       bool              `json:"files_expired"`
-	ExpiresAt          *time.Time        `json:"expires_at,omitempty"`
-	Files              []FileReleaseFile `json:"files"`
-	Blockers           []string          `json:"blockers"`
-	DeliveryState      string            `json:"delivery_state,omitempty"`
-	DeliveryManifest   string            `json:"delivery_manifest,omitempty"`
-	DeliveryVerifiedAt *time.Time        `json:"delivery_verified_at,omitempty"`
+	ID                 string                      `json:"id"`
+	Project            string                      `json:"project"`
+	State              string                      `json:"state"`
+	Release            string                      `json:"release"`
+	CustodySHA256      string                      `json:"custody_sha256"`
+	FilesExpired       bool                        `json:"files_expired"`
+	ExpiresAt          *time.Time                  `json:"expires_at,omitempty"`
+	Files              []FileReleaseFile           `json:"files"`
+	Blockers           []string                    `json:"blockers"`
+	CustodyBlockers    []FileReleaseCustodyBlocker `json:"custody_blockers,omitempty"`
+	DeliveryState      string                      `json:"delivery_state,omitempty"`
+	DeliveryManifest   string                      `json:"delivery_manifest,omitempty"`
+	DeliveryVerifiedAt *time.Time                  `json:"delivery_verified_at,omitempty"`
 }
 
 type FileReleaseBlob struct {
@@ -176,6 +177,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		}
 		if q.jobReleasePending(j) {
 			item.Blockers = append(item.Blockers, "physical_custody")
+			item.CustodyBlockers = q.fileReleaseCustodyBlockers(j, selection.Project)
 		}
 		if deliveryPending(j) || checkpointMirrorsPending(j) {
 			item.Blockers = append(item.Blockers, "pending_delivery")

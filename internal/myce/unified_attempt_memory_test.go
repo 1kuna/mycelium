@@ -276,11 +276,6 @@ func TestUnifiedAttemptMemoryStartupWaitsForFirstSample(t *testing.T) {
 }
 
 func TestUnifiedAttemptMemoryLearningSurvivesRestart(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte("#!/bin/sh\nprintf 'GPU-one, 42, N/A\\n'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
 	fs := &unifiedResidentFS{values: map[string]string{
 		"/synthetic/attempt/memory.stat": "anon 8589934592\nkernel 0\nshmem 0\n",
 		"/synthetic/memory.stat":         "anon 8589934592\nkernel 0\nshmem 0\n",
@@ -297,8 +292,15 @@ func TestUnifiedAttemptMemoryLearningSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &memoryAttempt{fs: fs, path: "/synthetic/attempt", pageSize: 4096, hostBaseline: &gpuHostState{available: 64}, rootBaseline: new(float64)}
-	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+	// This tick proves fallback learning and restart, not subprocess startup.
+	// A real query can miss its two-second deadline under load, consuming the
+	// only injected tick without publishing a sample for await below.
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true},
+		cudaMemoryQuery: func(context.Context) ([]byte, error) {
+			return []byte("GPU-one, 42, N/A\n"), nil
+		}}
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	ticks := make(chan time.Time, 1)
 	device := w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) { return map[int]bool{42: true}, nil, nil }, fs, time.Second, clock, a, ticks)
 	ticks <- clock.Now()

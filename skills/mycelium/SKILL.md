@@ -61,6 +61,15 @@ by rerunning the same command with the same `--key`; entries retain their genera
 key when intent is unchanged. Inline commands need an explicit `--key` to re-attach
 by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
 
+Supporting workers publish small directory outputs through the existing tus
+upload protocol with concurrency learned from measured transfer service. They
+retain the exact-attempt manifest and confirmed blobs across publication retries
+and worker restarts; a refusal resumes the missing work without rechecking every
+confirmed blob. Keep the same job and key. Changed local output files are refused
+rather than silently replacing the manifest; accepted names, sizes and hashes
+and result fetching are unchanged. Older queues use ordinary tus reconciliation
+when an upload-creation response has no accepted offset.
+
 
 ## Ground rules
 
@@ -86,6 +95,19 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+A `507 file_store_capacity` may include a typed `cause.predicate` and
+`cause.file_capacity` snapshot. Finalization retains them in the job's
+`execution_cause` or `cleanup_cause`, visible in status/JSON. Predicates distinguish
+`file_store_backing` (store allowance or physical volume),
+`file_store_production_reserve`, and `file_store_project_reservation`.
+Keep the original need/growth, available/free, commitments, withholding,
+observation time and request/job/attempt correlation when reporting a refusal.
+They describe that request, even after collection changes current headroom;
+missing evidence on older queues is unknown. A reserve cannot prevent a physical
+shortage. Wait for the binding shortage to clear before retrying; a new key does
+not relieve it. Successful finalization clears the pending diagnostic. See the
+[capacity status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#file-store-capacity-refusals).
+
 Temporary zero request-memory headroom returns `503 request_capacity_unavailable`;
 safe reads, waits and keyed submissions retry within the same caller budget.
 A positive fitting size exceeded by a request remains `413 request_too_large`.
@@ -841,6 +863,9 @@ In an existing project, Mycelium now does these; delete your own:
 When finished work fills the file store, use `myce file release plan --project
 NAME JOB_ID...`, inspect the plan, then `myce file release apply --accept-expiry
 PLAN_FILE`. Include every finished owner whose queue recovery you can give up.
+For `physical_custody`, inspect each job's `custody_blockers`: blocker job ID,
+state and relationship `path` (for example, `after` evaluation then `after`
+serving). `other_project: true` means another project's job, with details hidden.
 Code bundles held as inputs follow explicit release and the project's
 `file_retention`; they do not wait another queue-wide window from upload.
 `bundle_tracked` alone does not mean protected: `reclaimable_bytes` counts released

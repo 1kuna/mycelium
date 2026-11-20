@@ -215,10 +215,16 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	if err := next.restoreModelCustodiansWith(g.verify); err != nil {
 		t.Fatal(err)
 	}
-	reports, memory := next.report()
-	if len(reports) != 1 || reports[0].InFlight != 1 || reports[0].Attempt != e.Attempt || reports[0].URL != before.URL || reports[0].Custody == nil || memory != g.request.Original.MemoryGB {
-		t.Fatalf("replacement lost/duplicated engine accounting: %+v memory=%v", reports, memory)
-	}
+	// The last periodic snapshot can still include the completed legacy echo.
+	// Identity and the single reservation must survive immediately; call counts
+	// settle only after the helper publishes the echo handler's completion.
+	await(t, func() bool {
+		reports, memory := next.report()
+		if len(reports) != 1 || reports[0].Attempt != e.Attempt || reports[0].URL != before.URL || reports[0].Custody == nil || memory != g.request.Original.MemoryGB {
+			t.Fatalf("replacement lost/duplicated engine accounting: %+v memory=%v", reports, memory)
+		}
+		return reports[0].InFlight == 1
+	})
 	adopted := next.models[engineKey(e.Model, e.Device)].engine.(*modelCustodian)
 	if adopted.last.PID != before.PID || adopted.last.Birth != before.Birth {
 		t.Fatal("replacement restarted the model owner")
@@ -312,6 +318,96 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	if got := adopted.last.Report.Error; got != want {
 		t.Fatalf("detached policy refusal lost typed diagnostic: %q", got)
 	}
+}
+
+type heldModelAccountingEngine struct {
+	FakeEngine
+	entered, release chan struct{}
+}
+
+func (e *heldModelAccountingEngine) Call(ctx context.Context, path string, data []byte) (*http.Response, error) {
+	close(e.entered)
+	select {
+	case <-e.release:
+		return e.FakeEngine.Call(ctx, path, data)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestDetachedModelAdoptionRefreshesPublishedCallAccounting(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	spool := filepath.Join(t.TempDir(), "worker")
+	dir := custodianDir(spool)
+	if err := PrepareStateRoots(dir); err != nil {
+		t.Fatal(err)
+	}
+	engine := &heldModelAccountingEngine{FakeEngine: FakeEngine{Model: "test"}, entered: make(chan struct{}), release: make(chan struct{})}
+	// Represent the surviving stream, then admit a second real handler. Hold
+	// its engine call so publication of two in-flight calls is deterministic.
+	m := &workerModel{model: Model{Name: "test", MemoryGB: 1}, engine: engine, state: "ready", attempt: "attempt", inflight: 1}
+	live := &modelRuntime{models: map[string]*workerModel{"test": m}, session: "session", token: "test", clock: clock}
+	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
+	defer cancel()
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"test"}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer test")
+	req.Header.Set("X-Myce-Session", "session")
+	done := make(chan int, 1)
+	go func() { w := httptest.NewRecorder(); live.serve(w, req); done <- w.Code }()
+	select {
+	case <-engine.entered:
+	case <-ctx.Done():
+		t.Fatal("second call did not reach engine")
+	}
+	r := modelCustodianRequest{Protocol: custodianProtocol, ID: ID(), Original: m.model, Execution: HostEngineExecution{Machine: "worker", Session: "session", Model: "test", Attempt: m.attempt}}
+	birth, err := processBirth(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports, _ := live.report()
+	if reports[0].InFlight != 2 {
+		t.Fatal("second call not accounted", reports)
+	}
+	v := modelCustodianSnapshot{custodianSnapshot: custodianSnapshot{Protocol: custodianProtocol, ID: r.ID, PID: os.Getpid(), Birth: birth, At: clock.Now()}, Execution: r.Execution, URL: "http://127.0.0.1:1234", Report: reports[0]}
+	publish := func() {
+		t.Helper()
+		if err := saveWorkerJSON(dir, custodianName(r.ID, "snapshot"), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := saveWorkerJSON(dir, custodianName(r.ID, "model-request"), r); err != nil {
+		t.Fatal(err)
+	}
+	publish()
+	close(engine.release)
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatal("second call failed", code)
+		}
+	case <-ctx.Done():
+		t.Fatal("second handler did not finish")
+	}
+	settled, _ := live.report()
+	if settled[0].InFlight != 1 {
+		t.Fatal("completed handler leaked its call", settled)
+	}
+	next := &modelRuntime{models: map[string]*workerModel{}, dir: spool, clock: clock, machine: "worker", session: "session"}
+	if err := next.restoreModelCustodiansWith(func(string, int, string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want int) {
+		t.Helper()
+		reports, memory := next.report()
+		if len(reports) != 1 || reports[0].InFlight != want || reports[0].Attempt != r.Execution.Attempt || reports[0].URL != v.URL || reports[0].Custody == nil || reports[0].Custody.ID != r.ID || !reports[0].CallsMeasured || memory != 1 {
+			t.Fatalf("want published calls=%d, got %+v memory=%g", want, reports, memory)
+		}
+	}
+	check(2) // Completion alone cannot update the helper's published snapshot.
+	clock.Advance(time.Millisecond)
+	v.At, v.Report = clock.Now(), settled[0]
+	publish()
+	check(1) // The same adopted engine converges after the next publication.
 }
 
 func TestDetachedModelProofRefusesUnconfirmedIdentity(t *testing.T) {
