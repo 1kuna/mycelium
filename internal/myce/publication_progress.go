@@ -46,7 +46,7 @@ func safeResultPublications(reports []ResultPublication) []ResultPublication {
 		switch r.Blocking {
 		case "retry", "filesystem/checkpoint_publication", "filesystem/output_spool", "filesystem/output_path", "filesystem/output_validation",
 			"filesystem/storage_observation", "filesystem/failure_diagnostics",
-			"POST /api/workers/log", "POST /api/workers/complete", "GET /api/jobs/:id", "POST /api/files/result", "POST /api/files/preflight", "POST /api/files/checkpoint",
+			"POST /api/workers/log", "POST /api/workers/log-batch", "POST /api/workers/complete", "GET /api/jobs/:id", "POST /api/files/result", "POST /api/files/preflight", "POST /api/files/checkpoint",
 			"HEAD /api/files/blobs/:id", "POST /api/files/uploads/", "HEAD /api/files/uploads/:id", "PATCH /api/files/uploads/:id":
 		default:
 			r.Blocking = "publication"

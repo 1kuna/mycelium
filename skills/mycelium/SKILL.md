@@ -847,7 +847,9 @@ need; keep intentional situational pins. It also compares typed
   (host RAM is `host_memory`; older RAM fields are deprecated), stalled queues,
   observers, progress.
 - [Results](references/results.md): output failures, diagnostics, large outputs,
-  and startup publication progress. Released results replay without withholding
+  and startup publication progress. A publication's `last_error` clears after
+  a later acknowledged API request; on older workers it can remain historical.
+  Released results replay without withholding
   the host's free compute; retain their original job and attempt identity.
   Verified success clears its pending-finalization reason.
   Upload retries use the accepted offset, including a fully received upload

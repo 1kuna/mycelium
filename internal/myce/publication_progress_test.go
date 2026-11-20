@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,7 +250,7 @@ func TestRecoveryLogReplayRetryExcludesAcknowledgedChunks(t *testing.T) {
 	}
 	r := result(&j, true)
 	s.state.Result, s.state.Log = &r, "saved-replay.log"
-	if err := os.WriteFile(filepath.Join(s.dir, s.state.Log), []byte(strings.Repeat("x", 16384)+"last chunk"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.dir, s.state.Log), []byte(strings.Repeat("x", logReplayBatchSize)+"last chunk"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.save(); err != nil {
@@ -259,9 +260,15 @@ func TestRecoveryLogReplayRetryExcludesAcknowledgedChunks(t *testing.T) {
 	var failedChunk LogChunk
 	retried := make(chan struct{})
 	w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Path == "/api/workers/log" {
+		if req.URL.Path == "/api/workers/log" || req.URL.Path == "/api/workers/log-batch" {
 			var chunk LogChunk
-			if err := json.NewDecoder(req.Body).Decode(&chunk); err != nil {
+			if req.URL.Path == "/api/workers/log-batch" {
+				var batch logBatch
+				if err := json.NewDecoder(req.Body).Decode(&batch); err != nil {
+					t.Error(err)
+				}
+				chunk = batch.Chunks[0]
+			} else if err := json.NewDecoder(req.Body).Decode(&chunk); err != nil {
 				t.Error(err)
 			}
 			switch calls.Add(1) {
@@ -335,5 +342,22 @@ func TestRecoveryPublicationFieldsRetryPredecessorQueue(t *testing.T) {
 	}
 	if len(reports) != 3 || len(reports[0].Machine.ResultPublications) != 1 || len(reports[1].Machine.ResultPublications) != 0 || len(reports[2].Machine.ResultPublications) != 0 {
 		t.Fatal(reports)
+	}
+}
+
+func TestPublicationProgressAcknowledgementClearsError(t *testing.T) {
+	for _, status := range []int{200, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			p := &publicationProgress{}
+			p.failed(&QueueStalledError{})
+			c := Client{URL: "http://fixture.invalid", publication: p, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			})}}
+			_ = c.Call(context.Background(), "POST", "/api/workers/log", LogChunk{}, nil)
+			got := p.snapshot(Job{}, c.clock().Now()).LastError
+			if status == 200 && got != "" || status == 503 && got != "queue_stalled" {
+				t.Fatal("wrong retained error", got)
+			}
+		})
 	}
 }

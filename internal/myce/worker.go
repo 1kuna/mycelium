@@ -1289,6 +1289,17 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return w.replayWithProgress(ctx, s, nil)
 }
 
+// Keep the existing durable 16 KiB offset records; amortize their round trips
+// and SQLite commits over sixteen records. Worst-case JSON escaping is 6x the
+// 256 KiB text plus small record envelopes. Memory admission may split a batch.
+const logReplayRecordSize = 16 << 10
+const logReplayBatchRecords = 16
+const logReplayBatchSize = logReplayRecordSize * logReplayBatchRecords
+
+type logBatch struct {
+	Chunks []LogChunk `json:"chunks"`
+}
+
 func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowledged func()) error {
 	if s.state.Log == "" {
 		return nil
@@ -1305,7 +1316,8 @@ func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowle
 	// Persist each chunk boundary before upload, so lost acknowledgements
 	// replay identical bytes at the same offset even if the output grows.
 	limit := info.Size()
-	buf := make([]byte, 16384)
+	buf := make([]byte, logReplayBatchSize)
+	batchRecords, legacy := logReplayBatchRecords, false
 	for s.state.Offset < limit {
 		n := s.state.Pending
 		if n == 0 {
@@ -1315,16 +1327,39 @@ func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowle
 				return err
 			}
 		}
+		// A retained pending batch may already be committed. Split only at its
+		// original record boundaries, never coalesce with newly appended bytes.
+		n = min(n, batchRecords*logReplayRecordSize)
 		if _, err = f.ReadAt(buf[:n], s.state.Offset); err != nil {
 			return err
 		}
 		r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}
-		chunk := LogChunk{Result: r, Offset: s.state.Offset + 1, Text: string(buf[:n])}
-		if err = w.Client.Call(ctx, "POST", "/api/workers/log", chunk, nil); err != nil {
+		batch := logBatch{}
+		for at := 0; at < n; at += logReplayRecordSize {
+			end := min(n, at+logReplayRecordSize)
+			batch.Chunks = append(batch.Chunks, LogChunk{Result: r, Offset: s.state.Offset + int64(at) + 1, Text: string(buf[at:end])})
+		}
+		if legacy || n <= logReplayRecordSize {
+			err = w.Client.Call(ctx, "POST", "/api/workers/log", batch.Chunks[0], nil)
+		} else {
+			err = w.Client.Call(ctx, "POST", "/api/workers/log-batch", batch, nil)
+		}
+		var api *HTTPError
+		if errors.As(err, &api) {
+			if !legacy && api.Status == 404 {
+				legacy, batchRecords = true, 1 // Adjacent queue has no batch route.
+				continue
+			}
+			if api.Status == 413 && api.Code == "request_too_large" && len(batch.Chunks) > 1 {
+				batchRecords = max(1, len(batch.Chunks)/2)
+				continue // Same records/offsets, even after a previous lost ACK.
+			}
+		}
+		if err != nil {
 			return err
 		}
 		s.state.Offset += int64(n)
-		s.state.Pending = 0
+		s.state.Pending -= n
 		if err = s.save(); err != nil {
 			return err
 		}
