@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -64,15 +65,15 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 					section = line
 					continue
 				}
-				if section != "[Service]" {
-					continue
-				}
 				key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
 				if !ok {
 					continue
 				}
 				key = strings.TrimSpace(key)
 				if c.Role == "queue" && key == "ExecStart" {
+					if section != "[Service]" {
+						continue
+					}
 					overridden = true
 					value = strings.TrimSpace(value)
 					if value == "" {
@@ -141,19 +142,15 @@ func compareQueueExecStart(c ServiceConfig, start string) error {
 	}
 	args := words[1:]
 	if args[0] == "service" {
-		if len(args) < 3 || args[1] != "--config" || args[2] != c.Config {
+		wrapper := flag.NewFlagSet("service", flag.ContinueOnError)
+		wrapper.SetOutput(io.Discard)
+		path := wrapper.String("config", "", "")
+		if wrapper.Parse(args[1:]) != nil || *path != c.Config {
 			return refuse("--config")
 		}
-		if len(args) == 3 {
+		args = wrapper.Args()
+		if len(args) == 0 {
 			args = c.Args()
-		} else {
-			if args[3] != "--" {
-				return refuse("--config")
-			}
-			args = args[4:]
-			if len(args) == 0 {
-				args = c.Args()
-			}
 		}
 		// serviceCommand always appends this, even with an explicit runtime argv.
 		args = append(args, "--service-config", c.Config)
@@ -215,6 +212,7 @@ func compareQueueExecStart(c ServiceConfig, start string) error {
 		f := flag.NewFlagSet("queue-override", flag.ContinueOnError)
 		var config ServiceConfig
 		RegisterInstallFlags(f, &config)
+		f.Bool("discovery", true, "")
 		for name, value := range values {
 			if v := f.Lookup(name); v != nil {
 				if err := v.Value.Set(value); err != nil {

@@ -23,7 +23,7 @@ func queueOverrideCommand(c ServiceConfig, args []string) string {
 }
 
 func TestInstallQueueExecStartOverride(t *testing.T) {
-	for _, tc := range []string{"no override", "equivalent", "hidden catalog and timing", "direct discovery", "discovery mismatch", "defaults and durations", "wrapper saved arguments", "wrapper explicit arguments", "unreset command", "empty reset", "multiple commands", "malformed", "environment expansion", "specifier", "unknown flag", "different binary"} {
+	for _, tc := range []string{"no override", "equivalent", "hidden catalog and timing", "direct discovery", "discovery mismatch", "defaults and durations", "explicit default retention", "wrapper saved arguments", "wrapper explicit arguments", "unreset command", "empty reset", "multiple commands", "malformed", "environment expansion", "specifier", "unknown flag", "different binary"} {
 		t.Run(tc, func(t *testing.T) {
 			f := newInstallMatrixFixture(t, "linux", "queue", 3)
 			c := f.c
@@ -54,7 +54,7 @@ func TestInstallQueueExecStartOverride(t *testing.T) {
 					want = []string{"--discovery-listen"}
 				}
 				args = append(args, "--discovery-listen", bind)
-			case "defaults and durations":
+			case "defaults and durations", "explicit default retention":
 				var compact []string
 				for i := 0; i < len(args); i++ {
 					if args[i] == "--file-retention" || args[i] == "--file-store-production-reserve" {
@@ -64,6 +64,9 @@ func TestInstallQueueExecStartOverride(t *testing.T) {
 					compact = append(compact, args[i])
 				}
 				args = append(compact, "--experiment-loss-timeout=60s")
+				if tc == "explicit default retention" {
+					args = append(args, "--file-retention=72h")
+				}
 			case "wrapper saved arguments":
 				args = []string{"service", "--config", c.Config}
 			case "wrapper explicit arguments":
