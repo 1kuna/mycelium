@@ -366,8 +366,14 @@ func TestFileCapacityDiagnosticsReservationRetry(t *testing.T) {
 	// Stale attempt diagnostics cannot replace the recorded refusal.
 	stale := release
 	stale.Attempt++
-	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
-		t.Fatal("stale update accepted", err)
+	stale.ExecutionCause = safeRuntimeCause(release.ExecutionCause)
+	stale.ExecutionCause.FileCapacity.NeedBytes++
+	if err := q.Complete(stale); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.GetJob(context.Background(), j.ID)
+	if err != nil || got.ExecutionCause == nil || !reflect.DeepEqual(got.ExecutionCause.FileCapacity, pending.ExecutionCause.FileCapacity) {
+		t.Fatalf("stale update replaced refusal: %+v %v", got, err)
 	}
 	q.files.limit = 1000
 	accepted, err := w.finishFileResult(*j, pending, parent)
