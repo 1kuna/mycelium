@@ -61,6 +61,15 @@ by rerunning the same command with the same `--key`; entries retain their genera
 key when intent is unchanged. Inline commands need an explicit `--key` to re-attach
 by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
 
+Supporting workers publish small directory outputs through the existing tus
+upload protocol with concurrency learned from measured transfer service. They
+retain the exact-attempt manifest and confirmed blobs across publication retries
+and worker restarts; a refusal resumes the missing work without rechecking every
+confirmed blob. Keep the same job and key. Changed local output files are refused
+rather than silently replacing the manifest; accepted names, sizes and hashes
+and result fetching are unchanged. Older queues use ordinary tus reconciliation
+when an upload-creation response has no accepted offset.
+
 
 ## Ground rules
 
