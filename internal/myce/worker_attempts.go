@@ -514,7 +514,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			} else {
-				err = w.replay(ioCtx, s, func() {
+				err = w.replayWithProgress(ioCtx, s, func() {
 					// Successful chunks are progress, not the cost of a later
 					// failed request. Otherwise a long replay makes one lost
 					// acknowledgement impose another replay-length idle pause.
