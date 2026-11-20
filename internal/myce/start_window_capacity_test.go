@@ -9,6 +9,70 @@ import (
 	"time"
 )
 
+func TestStartWindowHostBackfill(t *testing.T) {
+	for _, absolute := range []bool{false, true} {
+		name := "relative"
+		if absolute {
+			name = "absolute"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := cpuBackfillMachine("worker", 64)
+			machineCheck(t, q, m)
+			holderSpec := cpuSpec(1, 32)
+			holderSpec.Priority = "production"
+			holder := submit(t, q, holderSpec)
+			running := assignedJob(machineCheck(t, q, m))
+			if running == nil || running.ID != holder.ID {
+				t.Fatal("missing running holder", running)
+			}
+			if err := q.Started(result(running, false)); err != nil {
+				t.Fatal(err)
+			}
+			large := cpuSpec(1, 48)
+			large.Priority = "production"
+			demand := submit(t, q, large)
+			clock.Advance(time.Second)
+			s := cpuSpec(1, 4)
+			s.Priority, s.StartWindow = "production", "60s"
+			cutoff := clock.Now().Add(time.Minute)
+			if absolute {
+				s.StartBy = &cutoff
+			}
+			j := submit(t, q, s)
+			for range 90 {
+				if next := assignedJob(machineCheck(t, q, m, running)); next != nil {
+					t.Fatal("fenced job dispatched", next)
+				}
+				clock.Advance(time.Second)
+			}
+			machineCheck(t, q, m, running)
+			waiting := job(t, q, j.ID)
+			if absolute {
+				if waiting.State != "failed" || !waiting.Spec.StartBy.Equal(cutoff) || !strings.Contains(waiting.Reason, "production start deadline exceeded") {
+					t.Fatal("absolute cutoff moved or was ignored", waiting.State, waiting.Reason)
+				}
+				return
+			}
+			if waiting.State != "queued" || !waiting.StartCapacityWaiting || !strings.Contains(waiting.Reason, "host_capacity_accumulation") || !strings.Contains(waiting.Reason, "paused for capacity") {
+				t.Fatal("fenced relative window expired or was not paused", waiting.State, waiting.Reason)
+			}
+			finish(t, q, running, true)
+			next := assignedJob(machineCheck(t, q, m))
+			if next == nil || next.ID != demand.ID {
+				t.Fatal("earlier demand did not dispatch", next)
+			}
+			offer := assignedJob(machineCheck(t, q, m, next))
+			if offer == nil || offer.ID != j.ID || offer.StartCapacityWaiting || offer.Spec.StartBy.Sub(clock.Now()) != time.Minute {
+				t.Fatal("fence recovery did not restore a fresh start budget", offer)
+			}
+			if err := q.Started(result(offer, false)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // Reproduce a production recovery whose entire relative window was consumed
 // by an uncharged live-host-growth refusal, including retained helper custody.
 func TestStartWindowCapacityRecovery(t *testing.T) {

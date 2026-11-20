@@ -149,10 +149,14 @@ func (q *Queue) maintainStartDeadlines() {
 		previous := q.memoryPlanning
 		q.memoryPlanning = newMemoryPlanningCache()
 		defer func() { q.memoryPlanning = previous }()
+		scan := q.placementScan()
 		status := map[*Job]capacityStatus{}
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
 				waiting, ready := q.queuedCapacityStatus(j)
+				if ready && q.hostBackfillWaitingReason(j, scan) != "" {
+					waiting, ready = true, false
+				}
 				status[j] = capacityStatus{waiting, ready}
 			}
 		}
