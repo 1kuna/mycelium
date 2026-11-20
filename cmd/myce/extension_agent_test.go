@@ -35,7 +35,8 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	const token = "agent-journey-test-token"
 	t.Setenv("MYCE_TOKEN", token)
 	extensionRoot := filepath.Join(root, "extensions")
-	cmd := exec.CommandContext(ctx, binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--extension-root", extensionRoot, "--host-id", "dev-host", "--workers", "1", "--memory-gb", "8")
+	// Keep real enrollment and retries; only shorten this fixture's check-in budget.
+	cmd := exec.CommandContext(ctx, binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--extension-root", extensionRoot, "--host-id", "dev-host", "--workers", "1", "--memory-gb", "8")
 	cmd.Env = os.Environ()
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = time.Second
