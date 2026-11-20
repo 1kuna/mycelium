@@ -146,6 +146,14 @@ func queueHistoryBurst(t *testing.T, count int, seed string, clock *fakeClock, w
 	q.fileRetention, q.logRetention = testFileRetention, testLogRetention
 	q.lossTimeouts = [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}
 	q.s.PublicationHorizon = filePublicationGrace
+	// Open restores durable state with workers unreported. Re-establish the
+	// original fixture's enrolled inventory before any measured burst.
+	for _, worker := range workers {
+		check(t, q, worker, nil)
+	}
+	if len(q.s.Jobs) != count || len(q.s.Submissions) != count {
+		t.Fatal("snapshot did not preserve the complete retained history")
+	}
 	var waits, holds []time.Duration
 	q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }
 	for range 12 {
