@@ -11,12 +11,59 @@ import os
 import random
 import re
 import sqlite3
+import struct
 import sys
 import time
 
 assert sys.platform == "linux" and os.environ.get("MYCE_JOB_ID")
 assert not os.environ.get("MYCE_TOKEN")
 action, path = sys.argv[1:]
+
+
+def scatter_free_pages(path):
+    """Permute only free-page references in this closed generated database.
+
+    SQLite's documented freelist trunk format is (next, count, leaf pages).
+    The set of free pages, trunk links and every allocated byte stay unchanged.
+    Shuffling within 1024-entry windows breaks adjacent overflow allocation
+    without changing the large-scale allocation trajectory across the file.
+    One window in ten stays ordered: a mix of old and contiguous allocations.
+    Never apply this fixture operation to a live or externally supplied DB.
+    """
+    with open(path, "r+b") as output:
+        header = output.read(100)
+        assert header[:16] == b"SQLite format 3\0"
+        page_size = struct.unpack_from(">H", header, 16)[0] or 65536
+        page, free_count = struct.unpack_from(">II", header, 32)
+        file_pages = os.fstat(output.fileno()).st_size // page_size
+        trunks, leaves, seen = [], [], set()
+        while page:
+            assert 0 < page <= file_pages and page not in seen
+            seen.add(page)
+            output.seek((page - 1) * page_size)
+            data = output.read(page_size)
+            following, count = struct.unpack_from(">II", data)
+            assert count <= (page_size - header[20]) // 4 - 2
+            trunks.append((page, count))
+            leaves.extend(struct.unpack_from(">" + "I" * count, data, 8))
+            page = following
+        assert len(seen) + len(leaves) == free_count
+        assert all(0 < p <= file_pages and p not in seen for p in leaves)
+        assert len(set(leaves)) == len(leaves)
+        rng = random.Random(1742)
+        for start in range(0, len(leaves), 1024):
+            if start // 1024 % 10:
+                part = leaves[start:start + 1024]
+                rng.shuffle(part)
+                leaves[start:start + 1024] = part
+        start = 0
+        for page, count in trunks:
+            output.seek((page - 1) * page_size + 8)
+            output.write(struct.pack(">" + "I" * count, *leaves[start:start + count]))
+            start += count
+        output.flush()
+        os.fdatasync(output.fileno())
+    return {"free_pages": free_count, "trunks": len(trunks), "shuffle_window": 1024}
 
 
 def resident(fd):
@@ -80,6 +127,11 @@ if action == "fragmented":
     db.execute("CREATE TABLE queue_state(key TEXT PRIMARY KEY,data BLOB NOT NULL)")
     db.execute(log_schema)
     db.execute("CREATE TABLE physical_spacing(data BLOB)")
+    db.commit()
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.close()
+    free_geometry = scatter_free_pages(path)
+    db = sqlite3.connect(path)
     db.execute("CREATE TEMP TABLE physical_jobs(rank INTEGER PRIMARY KEY,job TEXT)")
     db.executemany("INSERT INTO physical_jobs VALUES(?,?)", enumerate(jobs))
     rows.sort(key=lambda row: hashlib.sha256(row[0].encode()).digest())
@@ -110,13 +162,16 @@ if action == "fragmented":
     db.execute("CREATE INDEX logs_job ON logs(job,seq)")
     db.commit()
     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    assert db.execute("PRAGMA quick_check").fetchall() == [("ok",)]
 
 else:
     assert action == "compact"
+    free_geometry = None
 
 pages = list(db.execute("SELECT pageno,pagetype FROM dbstat WHERE name='queue_state' ORDER BY path"))
 jumps = [abs(a[0] - b[0]) for a, b in zip(pages, pages[1:])]
 print(json.dumps({"layout": action, "prepare_seconds": time.monotonic() - started,
+                  "freelist_shuffle": free_geometry,
                   "query_plan": list(db.execute("EXPLAIN QUERY PLAN SELECT key,data FROM queue_state")),
                   "page_count": db.execute("PRAGMA page_count").fetchone()[0],
                   "freelist_count": db.execute("PRAGMA freelist_count").fetchone()[0],
