@@ -65,6 +65,17 @@ func (q *Queue) noteEngineFailure(s *ModelSlot) {
 }
 
 func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
+	// Only exact-attempt reports reach here. A missing/failed proof withholds
+	// takeover, but never reroutes an already dispatched call through a worker.
+	s.Custody = nil
+	if validModelCustody(r.Custody) && validModelBridgeURL(r.URL) {
+		v := *r.Custody
+		v.WorkerPID = 0
+		if m := q.s.Machines[s.Machine]; m != nil && m.Fleet != nil {
+			v.WorkerPID = m.Fleet.PID
+		}
+		s.Custody, s.URL = &v, r.URL
+	}
 	q.expireEngineLoad(s)
 	if s.LoadTimedOut && r.State == "unloaded" {
 		r.State, r.RuntimeFailed = "failed", false
@@ -251,6 +262,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 }
 
 func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
+	s.Custody, s.URL = nil, ""
 	s.State = "loading"
 	s.RetryReserved = false
 	s.LoadTimedOut = false

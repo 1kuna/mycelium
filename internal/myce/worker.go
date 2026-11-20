@@ -1328,7 +1328,7 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 }
 func (w Worker) Run(stop context.Context) error {
 	if w.Custodian != "" {
-		return w.runCustodian(stop)
+		return w.runExecutionCustodian(stop)
 	}
 	w.Client.inventoryWire = &atomic.Bool{}
 	w.Client.inventoryWire.Store(true)
@@ -1408,7 +1408,14 @@ func (w Worker) Run(stop context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(stores) > 0 {
+	modelSession, err := retainedModelSession(s.dir, w.Machine.ID)
+	if err != nil {
+		return err
+	}
+	if modelSession != "" && modelSession != s.state.Session {
+		return errors.New("detached model session differs from retained worker session")
+	}
+	if len(stores) > 0 || modelSession != "" {
 		w.Machine.Session = s.state.Session
 	} else {
 		if !s.state.Fresh || s.state.Session == "" {

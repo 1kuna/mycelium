@@ -196,6 +196,8 @@ func validateModels(c ModelConfig) error {
 
 type ModelSlot struct {
 	PriorityPolicy       *PriorityMatch      `json:"priority_policy,omitempty"`
+	Custody              *ModelCustody       `json:"custody,omitempty"`
+	URL                  string              `json:"url,omitempty"`
 	Resident             *ResidentEngine     `json:"resident,omitempty"`
 	Interval             *ModelInterval      `json:"interval,omitempty"`
 	Device               string              `json:"device,omitempty"`
@@ -235,7 +237,9 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
-	memoryGB, hostMemoryGB float64 // Worker-local budgets, never accepted over the wire.
+	Custody                *ModelCustody `json:"custody,omitempty"`
+	URL                    string        `json:"url,omitempty"`
+	memoryGB, hostMemoryGB float64       // Worker-local budgets, never accepted over the wire.
 	resourcesMeasured      bool
 	Device                 string `json:"device,omitempty"`
 	Attempt                string `json:"attempt,omitempty"`
@@ -960,6 +964,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			engineLost = a.Queue.engineAttemptLost(&call)
 			if m := a.Queue.s.Machines[call.Machine]; m != nil && !m.Gone && m.Session == call.Session && a.Queue.callAttemptLive(&call) {
 				target = m.ModelURL
+				if s := a.Queue.s.ModelSlots[slotKey(call.Machine, call.Model, call.Device)]; s.URL != "" {
+					target = s.URL
+				}
 			}
 			return nil
 		}, nil)

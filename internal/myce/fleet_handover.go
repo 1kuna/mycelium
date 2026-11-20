@@ -4,9 +4,10 @@ package myce
 // ownership survives an unhealthy update and operation rerun; a timeout is not
 // permission to duplicate still-running non-resumable work on another host.
 type workerHandover struct {
-	Session  string      `json:"session"`
-	PID      int         `json:"pid"`
-	Attempts []Execution `json:"attempts"`
+	Session  string                `json:"session"`
+	PID      int                   `json:"pid"`
+	Attempts []Execution           `json:"attempts"`
+	Models   []HostEngineExecution `json:"models,omitempty"`
 }
 
 func (q *Queue) beginWorkerHandover(h *fleetUpgradeHost) {
@@ -16,9 +17,16 @@ func (q *Queue) beginWorkerHandover(h *fleetUpgradeHost) {
 	}
 	v := workerHandover{Session: m.Session, PID: m.Fleet.PID}
 	for _, o := range q.hostObligations(h.Host) {
+		if o.Engine != nil {
+			v.Models = append(v.Models, *o.Engine)
+			continue
+		}
+		if o.Call != nil {
+			continue // Calls share the exact detached engine/bridge owner.
+		}
 		v.Attempts = append(v.Attempts, Execution{ID: o.Result.ID, Attempt: o.Result.Attempt})
 	}
-	if len(v.Attempts) == 0 {
+	if len(v.Attempts) == 0 && len(v.Models) == 0 {
 		return
 	}
 	if q.s.WorkerHandovers == nil {
@@ -54,6 +62,16 @@ func (q *Queue) retainWorkerHandover(m *Machine) bool {
 					if o.Result.Machine == m.ID && o.Result.Session == v.Session && o.Result.ID == e.ID && o.Result.Attempt == e.Attempt {
 						adopted = false
 					}
+				}
+			}
+		}
+	}
+	for _, e := range v.Models {
+		for _, o := range q.hostObligations(hostID(m)) {
+			if o.Engine != nil && *o.Engine == e {
+				pending = true
+				if q.modelAdoptionReason(m, o) != "" {
+					adopted = false
 				}
 			}
 		}

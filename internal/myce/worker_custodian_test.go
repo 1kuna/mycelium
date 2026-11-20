@@ -58,6 +58,9 @@ func TestCustodianServiceHelper(t *testing.T) {
 	m.HostMemoryBudgetGB, m.HostMemoryMeasured = 8, true
 	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
 	w := Worker{EnvironmentLimit: 1 << 28, Clock: RealClock{}, StateDir: c.State, ServiceConfig: &c, Custodian: id, Unit: unit, Client: Client{URL: c.Queue, Token: "custodian-test"}, Machine: m, Interval: 25 * time.Millisecond, CPUIsolationProbe: func(context.Context) error { return nil }}
+	if w.ModelConfig, err = ReadModels(c.ModelCatalog); err != nil {
+		t.Fatal(err)
+	}
 	if runtime.GOOS == "darwin" {
 		probeguard.Before = nil // Explicit native RSS sensor tier; inventory stays synthetic.
 		w.processMemory = localProcessMemory()
@@ -130,7 +133,7 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 			t.Fatalf("build replacement: %v\n%s", err, out)
 		}
 	}
-	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation"} {
+	for _, mode := range []string{"plain", "native", "cancel", "memory", "preparation", "model"} {
 		t.Run(mode, func(t *testing.T) { custodianNativeReplacement(t, next, mode) })
 	}
 }
@@ -195,6 +198,9 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			}
 		})
 	}
+	if mode == "model" {
+		configureNativeModel(t, q, &c)
+	}
 	if err := os.MkdirAll(c.State, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +251,11 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 				t.Fatal(err)
 			}
 		} else {
-			command(append(nativeCustodianStartArgs(c), c.Binary, "service", "--config", c.Config)...)
+			args := nativeCustodianStartArgs(c)
+			if mode == "model" {
+				args = append(args, "--property=StandardOutput=append:"+filepath.Join(dir, "worker.log"), "--property=StandardError=inherit")
+			}
+			command(append(args, c.Binary, "service", "--config", c.Config)...)
 		}
 	}
 	stop := func() {
@@ -298,6 +308,10 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	}()
 	start()
 	defer stop()
+	if mode == "model" {
+		custodianNativeModelReplacement(t, q, c, server.URL, next, start, stop, writeImage)
+		return
+	}
 	s := cpuSpec(1, 1)
 	s.Resumable = false
 	_, input := retentionUpload(t, Client{URL: server.URL, Token: "custodian-test"}, "fixture input")
