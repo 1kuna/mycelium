@@ -225,6 +225,10 @@ func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
 	if r.ExecutionCause == nil || r.ExecutionCause.RSSLimit.MemoryRoom == nil {
 		t.Fatal("decision lost at result boundary")
 	}
+	finding := resourceStopFinding(&j, r.ExecutionCause)
+	if finding.Code != "memory_capacity" || finding.Owner != findingOwnerMycelium || strings.Contains(finding.What, "declaration") {
+		t.Fatalf("measured contention mislabelled as an authored limit: %+v", finding)
+	}
 }
 
 // Shared/protected and previous-release workers reserve measured shell startup
