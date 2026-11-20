@@ -25,9 +25,8 @@ func TestObserverNewerCLIHandoff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(next), 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Preserve both versioned race images and Go symbols for crash diagnostics;
-	// observer handoff does not need DWARF generation or compression.
-	build := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", "-w -X mycelium/internal/myce.BuildVersion=v3.1.0", "-o", next, ".")
+	// Preserve versioned race images and Go symbols; skip unused Darwin DWARF.
+	build := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", versionedFixtureLDFlags("v3.1.0"), "-o", next, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build upgrade image: %v %s", err, out)
 	}
@@ -91,7 +90,7 @@ func TestObserverNewerCLIHandoff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(old), 0700); err != nil {
 		t.Fatal(err)
 	}
-	buildOld := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", "-w -X mycelium/internal/myce.BuildVersion=v3.0.0", "-o", old, ".")
+	buildOld := exec.Command("go", "build", "-p", "1", "-tags=myce_test", "-race", "-ldflags", versionedFixtureLDFlags("v3.0.0"), "-o", old, ".")
 	if out, err := buildOld.CombinedOutput(); err != nil {
 		t.Fatalf("build previous image: %v %s", err, out)
 	}

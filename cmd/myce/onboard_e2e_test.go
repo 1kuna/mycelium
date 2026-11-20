@@ -194,9 +194,8 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	makeCommand := func(version string) string {
 		t.Helper()
 		binary := filepath.Join(dir, "artifact-"+version)
-		// Retain versioned executable bytes and Go symbols; this journey does
-		// not consume DWARF, so avoid generating and compressing debug sections.
-		build := exec.CommandContext(ctx, "go", "build", "-tags=myce_test", "-ldflags", "-w -X mycelium/internal/myce.BuildVersion="+version, "-o", binary, ".")
+		// Keep versioned executable bytes and Go symbols; skip unused Darwin DWARF.
+		build := exec.CommandContext(ctx, "go", "build", "-tags=myce_test", "-ldflags", versionedFixtureLDFlags(version), "-o", binary, ".")
 		if output, e := build.CombinedOutput(); e != nil {
 			t.Fatalf("build: %v %s", e, output)
 		}

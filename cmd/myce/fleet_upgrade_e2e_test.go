@@ -249,9 +249,8 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	buildRelease := func(version string) release {
 		t.Helper()
 		path := filepath.Join(dir, version, "myce")
-		// These signed fixtures need distinct versions and executable code, but
-		// no DWARF. Keep Go symbols for runtime diagnostics and skip debug linking.
-		cmd := exec.CommandContext(ctx, "go", "build", "-p", "1", "-tags=myce_test", "-ldflags", "-w -X mycelium/internal/myce.BuildVersion="+version, "-o", path, ".")
+		// Keep distinct signed versions and Go symbols; skip unused Darwin DWARF.
+		cmd := exec.CommandContext(ctx, "go", "build", "-p", "1", "-tags=myce_test", "-ldflags", versionedFixtureLDFlags(version), "-o", path, ".")
 		cmd.Env = append(os.Environ(), "GOMAXPROCS=2")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("build signed fixture: %v\n%s", err, out)
