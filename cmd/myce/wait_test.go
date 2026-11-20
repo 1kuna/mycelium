@@ -235,9 +235,12 @@ func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	// The injected client pause owns this deadline. Avoid a second, rounded
-	// transport-clock advance, which could exceed the remaining owner budget.
-	server := httptest.NewServer(waitPollingHandler(t, q, nil))
+	// Successful long polls replace the client pause. Model that hold on the
+	// fake clock, bounded by the current deadline rather than rounded seconds.
+	transportDeadline := clock.Now().Add(5 * time.Second)
+	server := httptest.NewServer(waitPollingHandler(t, q, func(d time.Duration) {
+		clock.advance(min(d, max(0, transportDeadline.Sub(clock.Now()))))
+	}))
 	defer server.Close()
 	var delays []time.Duration
 	err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 5*time.Second, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
@@ -258,6 +261,7 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 		s.Needs.MemoryGB = 1
 		s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
 		deadline := clock.Now().Add(3 * time.Second)
+		transportDeadline = deadline
 		s.StartBy = &deadline
 		j, err := q.Submit(s)
 		if err != nil {
