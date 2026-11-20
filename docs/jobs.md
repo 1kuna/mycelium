@@ -81,6 +81,24 @@ optional `pause.until`, and `pause_revision`. To resume, post
 Stale revisions return 409 `job_pause_revision_conflict`. The CLI reads that
 revision before resuming. Both commands accept the installed-client flags above.
 
+For a running resumable job, use `myce pause JOB --yield --project NAME --reason
+TEXT`. This uses the existing planned maintenance TERM/stop grace and requeue
+semantics. Saved generations and the job ID stay intact; no infrastructure loss
+is charged and no host policy changes. The job remains `stopping`, with
+`yield_pause` recording the pending hold, until its exact attempt confirms
+release. Missing heartbeats and elapsed grace never mark it paused early.
+Then `myce resume JOB` restores normal placement. Non-resumable work requires
+`--confirm-restart`, acknowledging that progress is lost.
+
+The HTTP pause form adds `"yield":true`, `"project":"example"`, and
+`"if_attempt":N` from the current job; non-resumable work also needs
+`"confirm_restart":true`. Missing project/attempt returns `job_pause_invalid`,
+a different project returns `job_project_mismatch`, and an obsolete attempt is
+stale. Project attribution is checked against the job; shared credentials remain
+the authentication boundary, as for other owner operations. Python provides
+`client.pause(job_id, project="example", reason="capacity", yield_=True)` and
+`client.resume(job_id)`. Optional `until` remains an absolute auto-resume time.
+
 Pausing a fan-out parent pauses its queued children, including later retries;
 assigned children finish. Parent-owned children resume with their parent, while
 independently paused children retain their own pause. A parent can settle if all
@@ -1657,21 +1675,3 @@ compatible known target remains. `myce spec check --resolve` reports excluded
 targets with `excluded_machines` reasons; queued reasons retain the exclusion
 list. Use this optional constraint for a real requirement, not queue safety or
 priority; Mycelium owns ordinary placement.
-For a running resumable job, use `myce pause JOB --yield --project NAME --reason
-TEXT`. This uses the existing planned maintenance TERM/stop grace and requeue
-semantics. Saved generations and the job ID stay intact; no infrastructure loss
-is charged and no host policy changes. The job remains `stopping`, with
-`yield_pause` recording the pending hold, until its exact attempt confirms
-release. Missing heartbeats and elapsed grace never mark it paused early.
-Then `myce resume JOB` restores normal placement. Non-resumable work requires
-`--confirm-restart`, acknowledging that progress is lost.
-
-The HTTP pause form adds `"yield":true`, `"project":"example"`, and
-`"if_attempt":N` from the current job; non-resumable work also needs
-`"confirm_restart":true`. Missing project/attempt returns `job_pause_invalid`,
-a different project returns `job_project_mismatch`, and an obsolete attempt is
-stale. Project attribution is checked against the job; shared credentials remain
-the authentication boundary, as for other owner operations. Python provides
-`client.pause(job_id, project="example", reason="capacity", yield_=True)` and
-`client.resume(job_id)`. Optional `until` remains an absolute auto-resume time.
-
