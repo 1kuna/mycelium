@@ -129,10 +129,13 @@ def run(label, command, cache, report, clock=time.monotonic):
     startup_samples = [x for x in startup_samples if isinstance(x, (int, float))
                        and math.isfinite(x) and x >= 0][-STALL_INTERVALS:]
     startup_expected = max(startup_samples, default=0)
-    # Legacy caches have no startup observations. Bootstrap this phase once,
-    # using the existing one-hour cold backstop, then keep the measured bound
-    # across rebuilt images. Warm in-test detection remains enabled meanwhile.
-    startup_limit = (STALL_INTERVALS * startup_expected if startup_expected > 0 else 3600)
+    # Only compiled images identify first launches. Ordinary go test emits start
+    # before launching its binary, and warm runs can erase its cold-start cost.
+    # Keep the existing one-hour cold backstop for that unidentified startup;
+    # the first named test still switches to the learned in-test silence bound.
+    # Legacy compiled histories bootstrap once with that same backstop.
+    startup_limit = (STALL_INTERVALS * startup_expected
+                     if compiled and startup_expected > 0 else 3600)
     first_launch = image_sha is None or image_sha != (history or {}).get('image_sha256')
     is_test = compiled or command[:2] == ['go', 'test'] and '-c' not in command[2:]
     directory = None

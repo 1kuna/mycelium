@@ -92,7 +92,8 @@ class ProgressTests(unittest.TestCase):
             code, command, _ = self.execute(root, [(20, b'')])
             self.assertEqual(code, 0)
             self.assertIn('-timeout=1h', command)
-            code, command, _ = self.execute(root, [(60, None)])
+            code, command, _ = self.execute(root, [
+                (0, b'{"Action":"run","Test":"TestBlocked"}\n'), (60, None)])
             self.assertEqual(code, 124)
             self.assertIn('-timeout=0', command)
             learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
@@ -180,6 +181,29 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(record['stopped_phase'], 'test')
             code, _, record = self.execute(root, [(3.6, None)],
                 expected=.25, startup=1.2, command=command)
+            self.assertEqual(code, 124)
+            self.assertEqual(record['stopped_phase'], 'startup')
+
+    def test_go_test_startup_does_not_reuse_warm_launch_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            code, _, record = self.execute(root, [
+                (2, b'{"Action":"run","Test":"TestA"}\n'),
+                (2.1, b'{"Action":"pass","Test":"TestA"}\n'), (2.2, b'')],
+                expected=.49, startup=.49)
+            self.assertEqual(code, 0)
+            self.assertEqual(record['startup_limit_seconds'], 3600)
+            self.assertEqual(record['startup_gap_seconds'], 2)
+            # Startup tolerance must not relax silence once a test has begun.
+            code, _, record = self.execute(root, [
+                (2, b'{"Action":"run","Test":"TestBlocked"}\n'), (3.5, None)],
+                expected=.49, startup=.49)
+            self.assertEqual(code, 124)
+            self.assertEqual(record['stopped_phase'], 'test')
+            self.assertEqual(record['active_tests'], ['TestBlocked'])
+            # A missing first test remains bounded by the cold backstop.
+            code, _, record = self.execute(root, [(3600, None)],
+                expected=.49, startup=.49)
             self.assertEqual(code, 124)
             self.assertEqual(record['stopped_phase'], 'startup')
 
