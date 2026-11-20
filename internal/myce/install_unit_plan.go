@@ -107,7 +107,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 				if slices.Equal(got, want) {
 					delete(changes, "[Service] ExecStart")
 				} else {
-					changes["[Service] ExecStart"] = fmt.Sprintf("[Service] ExecStart argv: %q -> %q", got, want)
+					changes["[Service] ExecStart"] = "[Service] ExecStart: changed (argument values redacted)"
 				}
 			} else {
 				changes["[Service] ExecStart"] = "[Service] ExecStart: effective argv comparison unavailable; inspect the generated definition"
@@ -188,7 +188,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 }
 
 func unitDefinitionChange(key, before, after string) string {
-	if key == "[Service] Environment" {
+	if key == "[Service] Environment" || strings.HasPrefix(key, "[Service] Exec") {
 		return key + ": changed (values redacted)"
 	}
 	return fmt.Sprintf("%s: %q -> %q", key, before, after)
