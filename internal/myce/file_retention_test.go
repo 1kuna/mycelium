@@ -123,7 +123,7 @@ func TestFileRetentionBundleProjectWindowAndReferenceFence(t *testing.T) {
 			if err := q.ConfigureFileRetention(DefaultFileRetention); err != nil {
 				t.Fatal(err)
 			}
-			j, _, ref := releaseTerminal(t, q, c, "project bundle")
+			j, _, ref := releaseTerminal(t, q, c, "project-bundle")
 			if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
 				t.Fatal(err)
 			}

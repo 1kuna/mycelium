@@ -191,7 +191,7 @@ func TestFileReleaseBundleWithoutAutomaticRetention(t *testing.T) {
 	if err := q.ConfigureFileRetention(0); err != nil {
 		t.Fatal(err)
 	}
-	j, _, ref := releaseTerminal(t, q, c, "explicit bundle release")
+	j, _, ref := releaseTerminal(t, q, c, "explicit-bundle-release")
 	if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,14 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			clock.Advance(filePublicationGrace + time.Second)
+			bundle := kind == "recent_bundle" || kind == "refreshed_bundle"
+			if bundle {
+				// #1767 removes the second upload-age window after owner release;
+				// a bundle's publication grace still protects in-flight reuse.
+				clock.Advance(filePublicationGrace - time.Nanosecond)
+			} else {
+				clock.Advance(filePublicationGrace + time.Second)
+			}
 			p := releasePlan(t, q, releaseSelection(selected))
 			if p.ReclaimableBytes != 0 {
 				t.Fatal("protected class counted as reclaimable", p)
@@ -545,6 +552,19 @@ func TestFileReleaseProtectsExpiredCustodyAndRecoveredResults(t *testing.T) {
 			}
 			if _, err := os.Stat(q.files.blob(ref)); err != nil {
 				t.Fatal("protected class removed", err)
+			}
+			if bundle {
+				clock.Advance(time.Nanosecond)
+				p = releasePlan(t, q, releaseSelection(selected))
+				if p.ReclaimableBytes != ref.SizeBytes || p.Blobs[0].BundleProtected {
+					t.Fatal("released bundle retained past publication grace", p)
+				}
+				if err := q.reclaimPublishedFiles(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+					t.Fatal("released bundle not reclaimed after grace", err)
+				}
 			}
 		})
 	}
