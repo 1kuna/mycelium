@@ -1692,3 +1692,36 @@ behavior explanations in [the reference](reference/status-behavior.md).
 Quick and full also run `python3 scripts/check-doc-links.py` to check local
 Markdown paths and heading anchors in root documents, `docs/` and `skills/`.
 Mechanism chapters linked from the approved design remain part of that design.
+
+### Durable worker log batches
+
+Workers replay up to sixteen existing 16 KiB offset records per
+`POST /api/workers/log-batch`, with one SQLite transaction. The 256 KiB source
+batch reduces a 5,670,640-byte replay to 22 requests/commits while bounding each
+writer turn to sixteen log inserts. JSON escaping can expand text sixfold
+(about 1.5 MiB plus record envelopes); the request memory budget still accounts
+for wire buffers and decoded allocations before the queue lock. Record
+construction, validation, JSON encoding/decoding and log-file reads run outside
+that lock. The queue's SQLite transaction remains inside it.
+
+A 404 on the new route falls back to the unchanged single-record endpoint.
+A typed 413 splits a batch at its original record boundaries. The worker saves
+its pending span before sending and advances only the acknowledged prefix;
+a lost acknowledgement, growing log, restart or later smaller memory allowance
+therefore replays the same bytes at each original offset. Old workers keep
+using the unchanged endpoint with new queues. No database format changes.
+
+`event=queue_stalled` records one typed JSON evidence object at the watchdog
+return, with its branch, window, last progress and a bounded tail of eight
+probe start/end times, RTTs, typed errors, p99, release counts and waiters.
+`dropped_probes` counts older observations omitted from long calls. Unobserved
+progress is marked `seen=false`; last-progress time then means request start.
+This observes the existing watchdog; it does not change its liveness decisions.
+`request_id` matches the `X-Myce-Request-ID` header and the queue's sampled
+`event=slow_request` for both log routes, which includes job/attempt,
+offset/length, status, request duration and mutex wait/hold. IDs must be opaque
+32-character lowercase hex strings; arbitrary headers, URLs, credentials,
+payloads and raw transport errors never enter these records. A probe can
+report a stall as the main response arrives; a fully received success or
+refusal still wins that race. Such an evidence record describes the watchdog's
+observation, not proof that the log was uncommitted.

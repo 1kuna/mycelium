@@ -493,7 +493,16 @@ func (a API) handler(joiningPin string, observationClocks ...Clock) http.Handler
 		if !decode(w, r, &c) {
 			return
 		}
+		setLogRequestEvidence(r, []LogChunk{c})
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c, r.Context()), "worker_log_invalid")
+	})
+	mux.HandleFunc("POST /api/workers/log-batch", func(w http.ResponseWriter, r *http.Request) {
+		var batch logBatch
+		if !decode(w, r, &batch) {
+			return
+		}
+		setLogRequestEvidence(r, batch.Chunks)
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.appendLogBatch(batch, r.Context()), "worker_log_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
@@ -752,6 +761,9 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			legacy, _ = stagingWireInput(legacy, false)
 			err = c.callWatched(ctx, method, path, legacy, out)
 		}
+		if err == nil {
+			c.publication.failed(nil) // A complete, acknowledged request clears history.
+		}
 		var api *HTTPError
 		safe := method == "GET" || method == "HEAD" || method == "POST" && replaySafePost[path]
 		var transport *url.Error
@@ -790,6 +802,9 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
 	if err != nil {
 		return err
+	}
+	if evidence, ok := ctx.Value(stalledRequestKey{}).(stalledRequest); ok {
+		req.Header.Set(logRequestIDHeader, evidence.RequestID)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	fileStoreSubmissionHeaders(ctx, req)

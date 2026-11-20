@@ -2922,8 +2922,27 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 }
 
 func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error {
-	requestCtx := requestContext(requestContexts)
+	return q.appendLogs([]LogChunk{l}, requestContext(requestContexts))
+}
 
+// Decode, validate and construct bounded batches before taking the global lock.
+// The transaction is the only payload I/O under it, as on the single-log path.
+func (q *Queue) appendLogBatch(batch logBatch, ctx context.Context) error {
+	if len(batch.Chunks) == 0 || len(batch.Chunks) > logReplayBatchRecords {
+		return errors.New("invalid log batch size")
+	}
+	first := batch.Chunks[0]
+	for i, c := range batch.Chunks {
+		// JSON replaces invalid UTF-8 with up to three bytes per source byte.
+		if c.ID != first.ID || c.Attempt != first.Attempt || c.Machine != first.Machine || c.Session != first.Session || c.Offset <= 0 || len(c.Text) > 3*logReplayRecordSize || (i > 0 && c.Offset <= batch.Chunks[i-1].Offset) {
+			return errors.New("invalid log batch record")
+		}
+	}
+	return q.appendLogs(batch.Chunks, ctx)
+}
+
+func (q *Queue) appendLogs(chunks []LogChunk, requestCtx context.Context) error {
+	l := chunks[0]
 	requestUnlock1 := requestLock(requestCtx, &q.mu)
 	defer requestUnlock1()
 	j, err := q.current(l.Result)
@@ -2949,21 +2968,23 @@ func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error 
 		return err
 	}
 	defer tx.Rollback()
-	if l.Offset > 0 {
-		res, err := tx.Exec("INSERT OR IGNORE INTO log_offsets(job,attempt,offset) VALUES(?,?,?)", l.ID, l.Attempt, l.Offset)
-		if err != nil {
+	for _, l := range chunks {
+		if l.Offset > 0 {
+			res, err := tx.Exec("INSERT OR IGNORE INTO log_offsets(job,attempt,offset) VALUES(?,?,?)", l.ID, l.Attempt, l.Offset)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				continue
+			}
+		}
+		if _, err = tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text); err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return tx.Commit()
-		}
-	}
-	if _, err = tx.Exec("INSERT INTO logs(job,attempt,text) VALUES(?,?,?)", l.ID, l.Attempt, l.Text); err != nil {
-		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err

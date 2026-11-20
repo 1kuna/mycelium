@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -417,5 +418,69 @@ func TestClientAdaptiveTransientTypedPreparationRefusal(t *testing.T) {
 	err := c.RetryTransient(context.Background(), func(context.Context, Client) error { calls++; return failure }, func(error, time.Duration) { t.Fatal("permanent refusal retried") })
 	if err != failure || calls != 1 {
 		t.Fatal("permanent storage refusal did not stop", err, calls)
+	}
+}
+
+func TestClientAdaptiveStallTypedEvidence(t *testing.T) {
+	for _, branch := range []string{"lock_no_progress", "probe_failed"} {
+		t.Run(branch, func(t *testing.T) {
+			var logs testLogBuffer
+			old := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(old)
+			clock := &fakeClock{now: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}
+			start := clock.Now()
+			evidence := stalledRequest{RequestID: ID(), Job: ID(), Attempt: 2, Offset: 16385, Length: 262144}
+			c := Client{URL: "http://private-endpoint.invalid", Token: "private-credential", Clock: clock, Pause: func(_ context.Context, d time.Duration) error { clock.Advance(d); return nil }, HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				clock.Advance(20 * time.Millisecond)
+				if branch == "probe_failed" {
+					return nil, &net.OpError{Op: "private-operation", Err: errors.New("private-transport-payload")}
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"queue_progress":{"releases":7,"waiting":2,"p99_ms":20}}`))}, nil
+			})}}
+			ctx := context.WithValue(context.Background(), stalledRequestKey{}, evidence)
+			err := c.watchProgress(ctx, "POST", "/api/workers/log-batch")
+			var stall *QueueStalledError
+			if !errors.As(err, &stall) {
+				t.Fatal(err)
+			}
+			output := logs.String()
+			if strings.Count(output, "event=queue_stalled") != 1 {
+				t.Fatal(output)
+			}
+			var record queueStallEvidence
+			at := strings.Index(output, "evidence=")
+			if at < 0 {
+				t.Fatal(output)
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(output[at+len("evidence="):])), &record); err != nil {
+				t.Fatal(err, output)
+			}
+			if record.Branch != branch || record.stalledRequest != evidence || record.Waited != stall.Waited || record.Window != stall.Window || record.Started != start || record.LastProgress.IsZero() || record.Ended.Sub(start) != stall.Waited || record.Route != "POST /api/workers/log-batch" {
+				t.Fatalf("wrong evidence: %+v", record)
+			}
+			if len(record.Probes) < 4 {
+				t.Fatal("missing probe history", record)
+			}
+			for _, p := range record.Probes {
+				if p.RTT != 20*time.Millisecond || p.Ended.Sub(p.Started) != p.RTT {
+					t.Fatal(p)
+				}
+				if branch == "lock_no_progress" && (p.Releases != 7 || p.Waiters != 2 || p.P99MS != 20 || p.Error != "none" || !p.Seen) {
+					t.Fatal(p)
+				}
+				if branch == "probe_failed" && (p.Error != "network" || p.Seen) {
+					t.Fatal(p)
+				}
+			}
+			for _, private := range []string{"private-endpoint", "private-credential", "private-operation", "private-transport-payload"} {
+				if strings.Contains(output+err.Error(), private) {
+					t.Fatal("unsafe diagnostic", output)
+				}
+			}
+			if got := stalledRoute("GET", "/api/jobs/private-payload?token=private"); got != "other" {
+				t.Fatal(got)
+			}
+		})
 	}
 }

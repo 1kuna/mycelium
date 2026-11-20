@@ -258,3 +258,54 @@ func TestRequestTimingConnectRedirectPrivacy(t *testing.T) {
 		t.Fatal("legitimate route blocked by CONNECT traffic", summary)
 	}
 }
+
+// A real log POST's request ID reaches the slow-request line. Caller supplied
+// header/body strings cannot turn that line into a payload/credential channel.
+func TestRequestTimingLogCorrelation(t *testing.T) {
+	for _, unsafe := range []bool{false, true} {
+		t.Run(fmt.Sprint(unsafe), func(t *testing.T) {
+			q, _ := fixture(t)
+			submit(t, q, spec("experiment"))
+			j := check(t, q, machine("a", "fake"), nil).Job
+			api := API{Queue: q, Token: "test"}.Handler()
+			var logs testLogBuffer
+			old := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(old)
+			route := "POST /api/workers/log"
+			q.requestLatencies.record(route, 0)
+			chunk := LogChunk{Result: result(j, true), Offset: 1, Text: "private-payload"}
+			requestID := ID()
+			if unsafe {
+				chunk.ID = "private-job"
+				requestID = "private-header"
+			}
+			c := Client{URL: "http://fixture.invalid", Token: "test", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				if !unsafe {
+					requestID = r.Header.Get(logRequestIDHeader)
+					if safeLogID(requestID) == "" {
+						t.Error("missing request ID")
+					}
+				} else {
+					r.Header.Set(logRequestIDHeader, requestID)
+				}
+				rw := httptest.NewRecorder()
+				api.ServeHTTP(rw, r)
+				return rw.Result(), nil
+			})}}
+			_ = c.Call(context.Background(), "POST", "/api/workers/log", chunk, nil)
+			output := testLogEvent(t, logs.String(), "slow_request")
+			if !strings.Contains(output, `offset=1 length=15`) || !strings.Contains(output, `attempt=1`) {
+				t.Fatal(output)
+			}
+			if !unsafe && (!strings.Contains(output, `request_id="`+requestID+`"`) || !strings.Contains(output, `job="`+j.ID+`"`)) {
+				t.Fatal(output)
+			}
+			for _, private := range []string{"private-payload", "private-header", "private-job"} {
+				if strings.Contains(output, private) {
+					t.Fatal("unsafe metadata", output)
+				}
+			}
+		})
+	}
+}

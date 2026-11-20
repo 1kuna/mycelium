@@ -25,11 +25,22 @@ type requestSpan struct {
 	writerWait time.Duration
 	lastUnlock time.Time
 	measured   bool
+	logRequest stalledRequest
 }
 
 func spanFrom(ctx context.Context) *requestSpan {
 	s, _ := ctx.Value(requestSpanKey{}).(*requestSpan)
 	return s
+}
+
+// Handler supplies decoded identity outside q.mu; invalid IDs are suppressed.
+func setLogRequestEvidence(r *http.Request, chunks []LogChunk) {
+	if s := spanFrom(r.Context()); s != nil {
+		s.mu.Lock()
+		s.logRequest = logRequestEvidence(chunks)
+		s.logRequest.RequestID = safeLogID(r.Header.Get(logRequestIDHeader))
+		s.mu.Unlock()
+	}
 }
 
 func requestLock(ctx context.Context, mu sync.Locker) func() {
@@ -205,6 +216,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			s.finished = true
 			wait, hold, lastUnlock, measured := s.wait, s.hold, s.lastUnlock, s.measured
 			writerWait := s.writerWait
+			logRequest := s.logRequest
 			s.mu.Unlock()
 			duration := ended.Sub(s.started)
 			route := "unmatched"
@@ -243,6 +255,9 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 				// Role only: hosts stay out of slow lines (#474); the idle-request
 				// event names host and machine.
 				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f caller=%s", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond), fleetInstructionCaller(r.URL.Query()))
+			}
+			if route == "POST /api/workers/log" || route == "POST /api/workers/log-batch" {
+				phases = fmt.Sprintf(" request_id=%q job=%q attempt=%d offset=%d length=%d", logRequest.RequestID, logRequest.Job, logRequest.Attempt, logRequest.Offset, logRequest.Length)
 			}
 			logStarted := time.Now()
 			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)

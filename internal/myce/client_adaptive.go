@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"math/rand/v2"
 	"net"
@@ -177,6 +178,115 @@ func (c Client) apiContext(ctx context.Context) (context.Context, context.Cancel
 // owner's deadline. Opt-in: workers pace their own check-ins.
 func (c Client) WithProgressWatch() Client { c.watch = true; return c }
 
+const logRequestIDHeader = "X-Myce-Request-ID"
+
+type stalledRequestKey struct{}
+type stalledRequest struct {
+	RequestID string `json:"request_id"`
+	Job       string `json:"job"`
+	Attempt   int    `json:"attempt"`
+	Offset    int64  `json:"offset"`
+	Length    int    `json:"length"`
+}
+
+// IDs are opaque 128-bit queue identities. Never echo arbitrary header/body text.
+func safeLogID(id string) string {
+	if len(id) != 32 {
+		return ""
+	}
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return ""
+		}
+	}
+	return id
+}
+
+func logRequestEvidence(chunks []LogChunk) stalledRequest {
+	var r stalledRequest
+	if len(chunks) > 0 {
+		r.Job, r.Attempt, r.Offset = safeLogID(chunks[0].ID), chunks[0].Attempt, chunks[0].Offset
+		for _, c := range chunks {
+			r.Length += len(c.Text)
+		}
+	}
+	return r
+}
+
+// A bounded tail preserves per-probe timing and typed outcomes without retaining
+// transport strings or growing with a long-running healthy request. At the usual
+// four probes/window, eight entries include the preceding window as well.
+type stalledProbe struct {
+	Started          time.Time     `json:"started"`
+	Ended            time.Time     `json:"ended"`
+	RTT              time.Duration `json:"rtt_ns"`
+	Error            string        `json:"error_class"`
+	HTTPStatus       int           `json:"http_status,omitempty"`
+	Seen             bool          `json:"seen"`
+	PreviousReleases uint64        `json:"previous_releases"`
+	Releases         uint64        `json:"releases"`
+	Waiters          int64         `json:"waiters"`
+	P99MS            float64       `json:"p99_ms"`
+}
+
+type queueStallEvidence struct {
+	stalledRequest
+	Branch        string         `json:"branch"`
+	Route         string         `json:"route"`
+	Started       time.Time      `json:"started"`
+	Ended         time.Time      `json:"ended"`
+	Waited        time.Duration  `json:"waited_ns"`
+	Window        time.Duration  `json:"window_ns"`
+	LastProgress  time.Time      `json:"last_progress"`
+	Probes        []stalledProbe `json:"probes"`
+	DroppedProbes int            `json:"dropped_probes"`
+}
+
+func typedProbeError(err error) (string, int) {
+	var api *HTTPError
+	var dns *net.DNSError
+	var network net.Error
+	switch {
+	case err == nil:
+		return "none", 0
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded", 0
+	case errors.Is(err, context.Canceled):
+		return "cancelled", 0
+	case IsTLSIdentityError(err):
+		return "tls_identity", 0
+	case errors.As(err, &api):
+		return "http", api.Status
+	case errors.As(err, &dns):
+		return "dns", 0
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection_reset", 0
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection_refused", 0
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof", 0
+	case errors.Is(err, io.EOF):
+		return "eof", 0
+	case errors.As(err, &network):
+		if network.Timeout() {
+			return "timeout", 0
+		}
+		return "network", 0
+	default:
+		return "other", 0
+	}
+}
+
+// Literal routes only. No endpoints, dynamic IDs, query strings or caller text.
+func stalledRoute(method, path string) string {
+	switch method + " " + path {
+	case "POST /api/workers/log", "POST /api/workers/log-batch", "POST /api/workers/checkin", "POST /api/workers/complete", "POST /api/resolve", "GET /api/status":
+		return method + " " + path
+	default:
+		return "other"
+	}
+}
+
 // QueueStalledError reports a queue that stopped making progress while this
 // call waited. The request may still complete on the queue.
 type QueueStalledError struct {
@@ -189,13 +299,23 @@ type QueueStalledError struct {
 func (e *QueueStalledError) Error() string {
 	cause := "the queue held its lock with callers waiting"
 	if e.Cause != nil {
-		cause = fmt.Sprintf("the queue did not answer progress checks (%v)", e.Cause)
+		class, status := typedProbeError(e.Cause)
+		cause = fmt.Sprintf("the queue did not answer progress checks (class=%s status=%d)", class, status)
 	}
 	return fmt.Sprintf("queue_stalled: %s %s waited %s; %s for %s (four measured request periods); the request may still complete. Check the queue with `myce status` or its service log; read-only calls and keyed submissions are safe to repeat", e.Method, e.Path, e.Waited.Round(time.Millisecond), cause, e.Window.Round(time.Millisecond))
 }
 func (e *QueueStalledError) Unwrap() error { return e.Cause }
 
 func (c Client) callWatched(ctx context.Context, method, path string, in, out any) error {
+	var evidence stalledRequest
+	switch v := in.(type) {
+	case LogChunk:
+		evidence = logRequestEvidence([]LogChunk{v})
+	case logBatch:
+		evidence = logRequestEvidence(v.Chunks)
+	}
+	evidence.RequestID = ID()
+	ctx = context.WithValue(ctx, stalledRequestKey{}, evidence)
 	// A batch wait is held on purpose and reads the wait index, never the lock.
 	if !c.watch || path == "/api/ping" || path == "/api/wait" {
 		return c.callOnce(ctx, method, path, in, out)
@@ -237,6 +357,9 @@ func (c Client) watchProgress(ctx context.Context, method, path string) error {
 	var releases uint64
 	seen := false
 	var cause error
+	evidence, _ := ctx.Value(stalledRequestKey{}).(stalledRequest)
+	record := queueStallEvidence{stalledRequest: evidence, Route: stalledRoute(method, path), Started: started}
+	var last QueueProgress
 	for {
 		if c.pause(ctx, wait) != nil {
 			return nil
@@ -252,6 +375,8 @@ func (c Client) watchProgress(ctx context.Context, method, path string) error {
 			return nil
 		}
 		now := clock.Now()
+		probe := stalledProbe{Started: probeStarted, Ended: now, RTT: now.Sub(probeStarted), Seen: seen, PreviousReleases: releases, Releases: releases, Waiters: last.Waiting, P99MS: last.P99MS}
+		probe.Error, probe.HTTPStatus = typedProbeError(err)
 		var api *HTTPError
 		var syntax *json.SyntaxError
 		var shape *json.UnmarshalTypeError
@@ -269,9 +394,24 @@ func (c Client) watchProgress(ctx context.Context, method, path string) error {
 				progressAt = now
 			}
 			seen, releases = true, p.Releases
+			last = *p
+			probe.Seen, probe.Releases, probe.Waiters, probe.P99MS = true, p.Releases, p.Waiting, p.P99MS
 		}
+		if len(record.Probes) == 8 {
+			copy(record.Probes, record.Probes[1:])
+			record.Probes = record.Probes[:7]
+			record.DroppedProbes++
+		}
+		record.Probes = append(record.Probes, probe)
 		quiet := now.Sub(progressAt)
 		if quiet >= window {
+			record.Branch = "lock_no_progress"
+			if cause != nil {
+				record.Branch = "probe_failed"
+			}
+			record.Ended, record.Waited, record.Window, record.LastProgress = now, now.Sub(started), window, progressAt
+			data, _ := json.Marshal(record) // Only typed fields and allowlisted identities.
+			log.Printf("event=queue_stalled evidence=%s", data)
 			return &QueueStalledError{Method: method, Path: path, Waited: now.Sub(started), Window: window, Cause: cause}
 		}
 		// Probe about four times per window, and again just as it would close.
