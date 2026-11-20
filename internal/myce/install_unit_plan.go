@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -45,6 +46,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 	after := map[string]string{}
 	apply := func(values map[string]string, text string) {
 		section := ""
+		text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\\\n", " ")
 		for _, line := range strings.Split(text, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "[") {
@@ -55,6 +57,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 			if !ok || strings.HasPrefix(k, "#") || strings.HasPrefix(k, ";") {
 				continue
 			}
+			k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 			key := section + " " + k
 			if k == "EnvironmentFile" || k == "Environment" {
 				if v != "" && values[key] != "" {
@@ -91,6 +94,26 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 	for k, v := range after {
 		if _, ok := before[k]; !ok {
 			changes[k] = unitDefinitionChange(k, "", v)
+		}
+	}
+	// ExecStart's manager representation also contains timestamps and exit status.
+	// Compare only its argv; those runtime fields are not generated unit changes.
+	if current, ok := active["ExecStart"]; ok {
+		if _, argv, found := strings.Cut(current, "argv[]="); found {
+			argv, _, found = strings.Cut(argv, " ;")
+			want, ew := installEnvironmentWords(strings.ReplaceAll(strings.TrimPrefix(after["[Service] ExecStart"], ":"), "%%", "%"))
+			got, eg := installEnvironmentWords(argv)
+			if found && ew == nil && eg == nil {
+				if slices.Equal(got, want) {
+					delete(changes, "[Service] ExecStart")
+				} else {
+					changes["[Service] ExecStart"] = fmt.Sprintf("[Service] ExecStart argv: %q -> %q", got, want)
+				}
+			} else {
+				changes["[Service] ExecStart"] = "[Service] ExecStart: effective argv comparison unavailable; inspect the generated definition"
+			}
+		} else {
+			changes["[Service] ExecStart"] = "[Service] ExecStart: effective argv comparison unavailable; inspect the generated definition"
 		}
 	}
 	// Prefer effective manager values for scalar properties. This also catches
@@ -154,7 +177,7 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 	if group != "" {
 		_, placementErr = jointMemoryRoot(group, c.workerSlice())
 	}
-	if slice != c.workerSlice() || score != "0" || placementErr != nil {
+	if slice != c.workerSlice() || score != "0" || placementErr != nil || after["[Service] Slice"] != c.workerSlice() || after["[Service] OOMScoreAdjust"] != "0" {
 		lines = append(lines, fmt.Sprintf("Active ControlGroup: %q; generated Slice=%s OOMScoreAdjust=0", group, c.workerSlice()))
 		refusal = fmt.Errorf("%w: stage with myce migrate worker-unit --config INSTALLED_WORKER_CONFIG; activate through the next normal myce fleet upgrade to a newer approved release (MY-55)", ErrWorkerUnitMigrationRequired)
 	}

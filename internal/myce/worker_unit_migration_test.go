@@ -14,6 +14,7 @@ type migrationManager struct {
 	slice, score, group, dropins string
 	reloads                      int
 	refuse                       bool
+	properties                   string
 }
 
 func migrationFixture(t *testing.T) *migrationManager {
@@ -32,7 +33,7 @@ func (m *migrationManager) command(ctx context.Context, name string, args ...str
 	}
 	switch args[1] {
 	case "show":
-		return []byte("FragmentPath=" + m.c.Service + "\nDropInPaths=" + m.dropins + "\nSlice=" + m.slice + "\nOOMScoreAdjust=" + m.score + "\nActiveState=active\nControlGroup=" + m.group + "\n"), nil
+		return []byte("FragmentPath=" + m.c.Service + "\nDropInPaths=" + m.dropins + "\nSlice=" + m.slice + "\nOOMScoreAdjust=" + m.score + "\nActiveState=active\nControlGroup=" + m.group + "\n" + m.properties), nil
 	case "daemon-reload":
 		m.reloads++
 		if m.refuse {
@@ -153,6 +154,7 @@ func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
 	}
 	m := migrationFixture(t)
 	m.c = c
+	m.properties = "KillMode=process\nDelegateControllers=cpu memory\nRestartUSec=3000000us\n"
 	legacy := strings.ReplaceAll(strings.ReplaceAll(c.ServiceText(), "Slice="+c.workerSlice(), "Slice=app.slice"), "OOMScoreAdjust=0", "OOMScoreAdjust=200")
 	legacy = strings.ReplaceAll(legacy, "KillMode=mixed", "KillMode=control-group")
 	if err := os.WriteFile(c.Service, []byte(legacy), 0600); err != nil {
@@ -173,8 +175,11 @@ func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
 		if !staged && (!strings.Contains(plan, `Slice: "app.slice" -> "myce.slice"`) || !strings.Contains(plan, `OOMScoreAdjust: "200" -> "0"`)) {
 			t.Fatal(plan)
 		}
-		if !strings.Contains(plan, `KillMode: "control-group" -> "mixed"`) || !strings.Contains(plan, "Active ControlGroup") {
+		if !strings.Contains(plan, `KillMode: "process" -> "mixed"`) || !strings.Contains(plan, "Active ControlGroup") {
 			t.Fatal(plan)
+		}
+		if strings.Contains(plan, "[Service] Delegate:") || strings.Contains(plan, "[Service] RestartSec:") {
+			t.Fatal("equivalent effective settings reported as changes", plan)
 		}
 		if err := Install(t.Context(), c, source, "", m.command); !errors.Is(err, ErrWorkerUnitMigrationRequired) {
 			t.Fatal(err)
