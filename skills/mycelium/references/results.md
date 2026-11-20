@@ -54,7 +54,10 @@ report the job/attempt, `published_bytes`, `blocking` operation/request,
 blobs confirmed by the queue since this worker process started, including
 already-present blobs; they are not socket-write counters or accepted job
 success. Queue API stalls use the queue's progress evidence and request p99;
-failures retry with measured service cost or Retry-After. Filesystem publication
+failures retry with measured service cost or Retry-After. Acknowledged log chunks
+reset retry pacing; a later failure does not charge the preceding successful
+replay time as a new idle pause. `last_error` retains the last failure during
+subsequent requests and does not count new failures. Filesystem publication
 retains one outstanding operation, so a stalled share cannot create duplicate
 writers; local admission and root-health checks still apply. Predecessor queues
 can omit the new status field; the worker log still reports it.

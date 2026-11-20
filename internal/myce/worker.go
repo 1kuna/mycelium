@@ -1286,6 +1286,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 }
 
 func (w Worker) replay(ctx context.Context, s *workerStore) error {
+	return w.replayWithProgress(ctx, s, nil)
+}
+
+func (w Worker) replayWithProgress(ctx context.Context, s *workerStore, acknowledged func()) error {
 	if s.state.Log == "" {
 		return nil
 	}
@@ -1323,6 +1327,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 		s.state.Pending = 0
 		if err = s.save(); err != nil {
 			return err
+		}
+		if acknowledged != nil {
+			acknowledged()
 		}
 	}
 	return nil

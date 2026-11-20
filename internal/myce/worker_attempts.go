@@ -514,7 +514,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 			} else {
-				err = w.replay(ioCtx, s)
+				err = w.replayWithProgress(ioCtx, s, func() {
+					// Successful chunks are progress, not the cost of a later
+					// failed request. Otherwise a long replay makes one lost
+					// acknowledgement impose another replay-length idle pause.
+					publicationStarted = w.Clock.Now()
+					publicationPace = ClientPace{}
+				})
 			}
 			if err == nil && (a.job.storedFileResults() || s.state.Result != nil && scarceYieldStop(s.state.Result.PriorityStop)) {
 				w.storageObserver = s.storageObserver

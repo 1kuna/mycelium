@@ -227,6 +227,87 @@ func TestRecoveryPublicationRequestUsesQueueProgress(t *testing.T) {
 	}
 }
 
+// #1792: one lost acknowledgement after minutes of successful replay used to
+// schedule minutes of idle retry time. Exercise the actor's actual retry gate,
+// retaining the failed chunk boundary and the original successful result.
+func TestRecoveryLogReplayRetryExcludesAcknowledgedChunks(t *testing.T) {
+	w := recoveryWorker(t)
+	clock := &fakeClock{now: time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)}
+	w.Clock, w.control = clock, &processControl{}
+	w.Client.Jitter = func() float64 { return 0 }
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	j := recoveryJob(t, []string{"true"})
+	j.Machine, j.Session = w.Machine.ID, "saved-session"
+	root.state.Session = j.Session
+	s, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result(&j, true)
+	s.state.Result, s.state.Log = &r, "saved-replay.log"
+	if err := os.WriteFile(filepath.Join(s.dir, s.state.Log), []byte(strings.Repeat("x", 16384)+"last chunk"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	var failedChunk LogChunk
+	retried := make(chan struct{})
+	w.Client.HTTP = &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/api/workers/log" {
+			var chunk LogChunk
+			if err := json.NewDecoder(req.Body).Decode(&chunk); err != nil {
+				t.Error(err)
+			}
+			switch calls.Add(1) {
+			case 1:
+				clock.Advance(5 * time.Minute)
+			case 2:
+				failedChunk = chunk
+				clock.Advance(2 * time.Second)
+				return nil, &QueueStalledError{Method: req.Method, Path: req.URL.Path, Waited: 2 * time.Second}
+			case 3:
+				if chunk.Offset != failedChunk.Offset || chunk.Text != failedChunk.Text || chunk.Session != j.Session || chunk.Attempt != j.Attempt {
+					t.Error("retry changed the durable chunk identity")
+				}
+				close(retried)
+			}
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	a := &attemptSupervisor{store: s, job: j, worker: w, connected: true, publication: &publicationProgress{}, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	go a.run(ctx)
+	defer func() { cancel(); <-a.done }()
+	await(t, func() bool {
+		p := a.publication.snapshot(j, clock.Now())
+		return p != nil && p.Blocking == "retry" && p.LastError == "queue_stalled"
+	})
+	failedAt := clock.Now()
+	await(t, func() bool {
+		clock.Advance(10 * time.Millisecond)
+		select {
+		case <-retried:
+			return true
+		default:
+			if clock.Now().Sub(failedAt) > 10*time.Second {
+				t.Fatal("successful replay time inflated the retry pause")
+			}
+			return false
+		}
+	})
+	cancel()
+	<-a.done
+	if s.state.Result != nil && !s.state.Result.Success {
+		t.Fatal("retry lost the saved successful outcome")
+	}
+}
+
 func TestRecoveryPublicationFieldsRetryPredecessorQueue(t *testing.T) {
 	var mu sync.Mutex
 	var reports []Checkin
