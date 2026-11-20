@@ -105,8 +105,7 @@ func TestCheckpointCommand(t *testing.T) {
 func TestDevCheckpointEndToEnd(t *testing.T) {
 	dir := currentTestStateRoot(t)
 	binary := devTestBinary(t)
-	// Keep real stop/save/resume transitions without waiting for the default heartbeat.
-	cmd := exec.Command(binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "dev.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--memory-gb", "8")
+	cmd := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "dev.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--memory-gb", "8")
 	cmd.Env = append(os.Environ(), "MYCE_TOKEN=e2e-token")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
