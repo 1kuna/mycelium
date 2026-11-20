@@ -99,6 +99,11 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+During queue restart recovery, an exact attempt proven to have started no main,
+sidecars or environment preparation can retry a control-unreachable start gate
+without spending a loss or infrastructure retry. Keep its job and key. The
+queue's existing restart grace bounds this exemption; persistent failures after
+that window and unknown execution still use normal loss accounting.
 A `507 file_store_capacity` may include a typed `cause.predicate` and
 `cause.file_capacity` snapshot. Finalization retains them in the job's
 `execution_cause` or `cleanup_cause`, visible in status/JSON. Predicates distinguish

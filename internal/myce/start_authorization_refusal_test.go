@@ -3,11 +3,13 @@ package myce
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -225,5 +227,148 @@ func TestStartAuthorizationRefusalRestoresRelativeWindow(t *testing.T) {
 	got := job(t, q, a.ID)
 	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || got.Spec.StartBy.Sub(clock.Now()) != 600*time.Second {
 		t.Fatalf("relative recovery budget lost: state=%s losses=%d retries=%d cutoff=%v", got.State, got.Losses, got.InfrastructureRetries, got.Spec.StartBy)
+	}
+}
+
+// #1842: a dial refusal during a 17s queue restart never authorized execution.
+// Exact no-execution evidence permits retry without spending a loss budget;
+// uncertainty or any work that may have run must keep normal accounting.
+func TestStartControlUnreachableAccounting(t *testing.T) {
+	for _, name := range []string{"prelaunch", "started-reply", "main", "sidecars", "environment", "unknown", "missing", "wrong-attempt", "timeout", "other-operation", "absolute-expired", "outside-grace"} {
+		t.Run(name, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("worker", "fake")
+			s := spec("production")
+			s.Resumable = false
+			s.StartWindow = "10m"
+			cutoff := clock.Now().Add(10 * time.Second)
+			if name == "absolute-expired" {
+				s.StartBy = &cutoff
+			}
+			submit(t, q, s)
+			a := check(t, q, m, nil).Job
+			if name == "started-reply" {
+				if err := q.Started(result(a, false)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			w := Worker{Clock: clock, Machine: m, Client: Client{URL: "http://queue.invalid", Token: "test", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+			})}}}
+			err := w.authorizeLaunch(HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)})
+			if name == "started-reply" {
+				err = w.authorizeStart(*a, a.Session)
+			}
+			if err == nil || !errors.Is(err, errWorkerControlUnreachable) {
+				t.Fatal("outage authorized launch", err)
+			}
+			wantCalls := 1
+			if name == "started-reply" {
+				wantCalls = 2
+			}
+			if calls != wantCalls {
+				t.Fatal("unexpected authorization retries", calls)
+			}
+			r := result(a, false)
+			r.Interrupted, r.ExecutionEvidence = true, unstartedExecution(a.Attempt)
+			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", err))
+			wantLoss := 1
+			switch name {
+			case "prelaunch", "started-reply", "absolute-expired":
+				wantLoss = 0
+			case "main":
+				r.ExecutionEvidence.Main = executionMayHaveRun
+			case "sidecars":
+				r.ExecutionEvidence.Sidecars = executionMayHaveRun
+			case "environment":
+				r.ExecutionEvidence.EnvironmentPreparation = executionMayHaveRun
+			case "unknown":
+				r.ExecutionEvidence.Main = executionUnknown
+			case "missing":
+				r.ExecutionEvidence = nil
+			case "wrong-attempt":
+				r.ExecutionEvidence.Attempt++
+			case "timeout":
+				r.ExecutionCause.Class = "timeout"
+			case "other-operation":
+				r.ExecutionCause.Operation = "launch"
+			}
+			clock.Advance(17 * time.Second)
+			q = reopenQueue(t, q, clock)
+			if recordedStartRefusal(q.s.Jobs[a.ID]) != "" {
+				t.Fatal("outage invented an admission refusal")
+			}
+			if name == "outside-grace" {
+				clock.Advance(RestartGrace)
+			}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, a.ID)
+			if got.Losses != wantLoss || got.InfrastructureRetries != wantLoss || got.Copies[0].LossCharged != (wantLoss != 0) || !got.Copies[0].ReleaseConfirmed {
+				t.Fatalf("wrong outage accounting: state=%s losses=%d retries=%d copy=%+v", got.State, got.Losses, got.InfrastructureRetries, got.Copies[0])
+			}
+			if name == "absolute-expired" {
+				if got.State != "failed" || !got.Spec.StartBy.Equal(cutoff) {
+					t.Fatalf("absolute cutoff changed: %+v", got)
+				}
+				return
+			}
+			if got.State != "queued" {
+				t.Fatal("outage did not requeue", got.State)
+			}
+			next := check(t, q, m, nil).Job
+			if next == nil || next.ID != a.ID || next.Attempt != a.Attempt+1 {
+				t.Fatal("same logical job not reassigned", next)
+			}
+			if err := q.Complete(r); !errors.Is(err, ErrStale) {
+				t.Fatal("old attempt accepted", err)
+			}
+		})
+	}
+}
+
+// The same flaky host may retry during restart recovery, but the existing
+// restart window ends that exemption; ordinary infrastructure limits then bind.
+func TestStartControlUnreachableRecoveryIsBounded(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("worker", "fake")
+	s := spec("production")
+	s.Resumable = false
+	s.StartWindow = "10m"
+	submit(t, q, s)
+	a := check(t, q, m, nil).Job
+	clock.Advance(17 * time.Second)
+	q = reopenQueue(t, q, clock)
+	recovered := clock.Now()
+	for i := 0; i < 6; i++ {
+		r := result(a, false)
+		r.Interrupted = true
+		r.ExecutionCause = &RuntimeCause{Operation: "start_authorization", Class: "control_unreachable", Predicate: "launch_authorization"}
+		r.ExecutionEvidence = unstartedExecution(a.Attempt)
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		got := job(t, q, a.ID)
+		if i < 3 {
+			if got.Losses != 0 || got.InfrastructureRetries != 0 || got.State != "queued" {
+				t.Fatalf("restart gap charged: %+v", got)
+			}
+		} else if got.Losses != i-2 {
+			t.Fatalf("persistent outage forgiven: losses=%d iteration=%d", got.Losses, i)
+		}
+		if i == 5 {
+			if got.State != "failed" || got.InfrastructureRetries != q.productionInfrastructureRetries {
+				t.Fatalf("flaky host loop did not terminate: %+v", got)
+			}
+			return
+		}
+		clock.Advance(RestartGrace / 3)
+		a = check(t, q, m, nil).Job
+		if a == nil {
+			t.Fatal("missing reassignment", i, clock.Now().Sub(recovered))
+		}
 	}
 }

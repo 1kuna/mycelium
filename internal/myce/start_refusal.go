@@ -32,6 +32,19 @@ func startRefusalBeforeMain(j *Job, r Result) bool {
 		e != nil && e.Main == executionNotStarted
 }
 
+// A queue restart can refuse a dial before any execution was possible. Exact
+// no-execution proof avoids charging that recovery as lost work. Only the
+// existing restart window forgives it: persistent connectivity failures still
+// spend normal loss/retry budgets after recovery grace ends.
+func (q *Queue) restartControlBeforeExecution(r Result) bool {
+	c := r.ExecutionCause
+	e := safeExecutionEvidence(r.ExecutionEvidence, r.Attempt)
+	return r.Interrupted && c != nil && (c.Operation == "start_authorization" || c.Operation == "start_handoff") &&
+		c.Class == "control_unreachable" && e != nil && e.Main == executionNotStarted &&
+		e.Sidecars == executionNotStarted && e.EnvironmentPreparation == executionNotStarted &&
+		q.inRestartGrace(q.clock.Now())
+}
+
 // #1299: the queue's own admission withdrew this attempt before main ran, so
 // it is an admission requeue, not an execution start or an interrupted attempt.
 // The attempt number stays spent (AdmissionRequeues keeps the high-water mark),
