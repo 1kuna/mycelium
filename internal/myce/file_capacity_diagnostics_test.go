@@ -226,7 +226,7 @@ func TestFileCapacityDiagnosticsUnknownAndPrivacy(t *testing.T) {
 		t.Fatalf("unsafe/unknown snapshot: %+v", got)
 	}
 	cause.Predicate = "arbitrary transport text"
-	if safeRuntimeCause(cause).FileCapacity != nil {
+	if got := safeRuntimeCause(cause); got != nil && got.FileCapacity != nil {
 		t.Fatal("untyped evidence accepted")
 	}
 	// Previous clients decode the unchanged code/error envelope, ignoring additions.
