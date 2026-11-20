@@ -2638,9 +2638,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			out.Holds = append(out.Holds, h)
 		}
 		if q.maintenanceBlocked(host) {
-			h := scopedHold("host_disabled", host, "host "+host+" disabled by operator", true)
-			h.Next = strings.ReplaceAll(h.Next, "HOST", host)
-			out.Holds = append(out.Holds, h)
+			out.Holds = append(out.Holds, *q.maintenanceHold(host))
 		}
 	}
 	slices.SortFunc(out.DeviceMaintenance, func(a, b DeviceMaintenance) int {

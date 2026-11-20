@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
@@ -68,4 +69,81 @@ func hostHoldTexts(holds []Hold) []string {
 		}
 	}
 	return out
+}
+
+func TestJobHostMaintenanceHold(t *testing.T) {
+	q, clock := fixture(t)
+	first := machine("worker-a", "fake", "host-a")
+	second := machine("worker-b", "fake", "host-b")
+	check(t, q, first, nil)
+	check(t, q, second, nil)
+	expected := clock.Now().Add(30 * time.Minute)
+	const reason = "replace a fan"
+	if _, err := q.ChangeHostMaintenance(first.HostID, HostMaintenanceRequest{
+		Action: "drain", Reason: reason, ExpectedReturn: &expected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	j := submit(t, q, spec("experiment"))
+	read := func() *Job {
+		t.Helper()
+		got, err := q.jobSnapshot(j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	// Losing observations on an undrained compatible host is an independent
+	// route failure. A drain on another host must not claim it.
+	clock.Advance(LossAfter + time.Minute)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got.Hold == nil || got.Hold.Kind != "unknown_observation" {
+		t.Fatalf("stale route lost its own diagnosis: %+v", got.Hold)
+	}
+	if err := setMaintenance(t, q, second.HostID, "drain"); err != nil {
+		t.Fatal(err)
+	}
+	got := read()
+	h := got.Hold
+	if got.State != "queued" || h == nil || h.Kind != hostMaintenanceJobHold ||
+		h.Owner != ownerOperator || !strings.Contains(h.Next, "myce host resume host-a") ||
+		!strings.Contains(h.Reason, first.HostID) || !strings.Contains(h.Reason, second.HostID) ||
+		!strings.Contains(h.Reason, reason) || strings.Count(h.Reason, "expected return") != 1 ||
+		!strings.Contains(h.Reason, expected.Format(time.RFC3339)) || h.Expires != nil {
+		t.Fatalf("job maintenance hold: %+v", h)
+	}
+	fleet, err := q.publicSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fleet.Holds) != 2 || fleet.Holds[0].Scope != first.HostID ||
+		fleet.Holds[0].Owner != ownerOperator || !strings.Contains(fleet.Holds[0].Line(), expected.Format(time.RFC3339)) ||
+		strings.Contains(fleet.Holds[1].Line(), "expected return") {
+		t.Fatalf("fleet maintenance holds: %+v", fleet.Holds)
+	}
+
+	// A recorded forecast never resumes admission, even after it passes.
+	clock.Advance(time.Hour)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got.Hold == nil || got.Hold.Kind != hostMaintenanceJobHold {
+		t.Fatalf("forecast cleared the drain: %+v", got.Hold)
+	}
+	resumed, err := q.ChangeHostMaintenance(first.HostID, HostMaintenanceRequest{Action: "resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Policy.Reason != "" || !resumed.Policy.ExpectedReturn.IsZero() {
+		t.Fatalf("resume retained old maintenance metadata: %+v", resumed.Policy)
+	}
+	if got := read(); got.Hold != nil && got.Hold.Kind == hostMaintenanceJobHold {
+		t.Fatalf("resume left the maintenance hold: %+v", got.Hold)
+	}
+	if offered := check(t, q, first, nil).Job; offered == nil || offered.ID != j.ID {
+		t.Fatalf("resumed worker did not take the same job: %+v", offered)
+	}
 }
