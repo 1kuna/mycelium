@@ -174,11 +174,11 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		if runtime.GOOS != "linux" {
 			t.Skip("systemd migration native tier")
 		}
-		home, err := os.UserHomeDir()
-		if err != nil {
-			t.Fatal(err)
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if !filepath.IsAbs(runtimeDir) {
+			t.Fatal("native fixture requires user manager runtime directory")
 		}
-		c.Service = filepath.Join(home, ".config", "systemd", "user", c.Service)
+		c.Service = filepath.Join(runtimeDir, "systemd", "user", c.Service)
 		c.Role, c.Detection = "worker", Detection{OS: "linux"}
 	}
 	if err := checkNativeFixtureSlice(c); err != nil {
