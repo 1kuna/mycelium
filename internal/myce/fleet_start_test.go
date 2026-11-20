@@ -144,12 +144,28 @@ func TestFleetUpgradeStartProofPersistsAcrossQueueRestart(t *testing.T) {
 func TestFleetUpgradeHealthyWorkerNeverStartsStops(t *testing.T) {
 	q, c, h := fleetAtStartProbe(t)
 	probe := h.StartProbe
-	// #1709: service health and check-ins continue, but every assignment
-	// remains before Started. Queue time, not a sleep, exhausts the bound.
-	for q.s.FleetUpgrade.State == "running" {
-		c.Advance(fleetRuntimeFreshFor / 2)
-		fleetRefreshWithoutStart(t, q, c)
+	// #1709: the upgraded service reports healthy, but its assignment never
+	// reaches Started. Exercise the actual check-in/maintenance path just
+	// before and at the deadline instead of committing hundreds of identical
+	// healthy reports. Each sampled report still carries the exact attempt.
+	deadline := h.StepAt.Add(fleetStepTimeout)
+	reportAt := func(at time.Time) {
+		t.Helper()
+		drainAdmissionWait(t, q)
+		c.Advance(at.Sub(c.Now()))
+		m := cloneMachine(q.s.Machines[h.Machine])
+		m.Fleet.ObservedAt = c.Now()
+		j := q.s.Jobs[probe]
+		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol,
+			Attempts: []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: m.Session}}}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	reportAt(deadline.Add(-time.Nanosecond))
+	if q.s.FleetUpgrade.State != "running" || h.Failure != "" || h.WorkerDone || job(t, q, probe).StartedAt != nil {
+		t.Fatalf("healthy never-started worker stopped before its deadline: %+v", q.fleetUpgradeStatus())
+	}
+	reportAt(deadline)
 	if h.Failure != "worker_start_not_verified" || h.WorkerDone || job(t, q, probe).StartedAt != nil || q.s.FleetUpgrade.Hosts[1].Phase != "pending" {
 		t.Fatalf("healthy never-started worker accepted: %+v", q.fleetUpgradeStatus())
 	}
@@ -159,6 +175,8 @@ func TestFleetUpgradeHealthyWorkerNeverStartsStops(t *testing.T) {
 	if !cancelled(job(t, q, probe)) {
 		t.Fatal("failed operation left its probe runnable")
 	}
+	// Refresh the other fixture services before requesting another operation.
+	fleetRefreshWithoutStart(t, q, c)
 	// A same-release rerun retains the debt rather than skipping current bytes.
 	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 		t.Fatal(err)
