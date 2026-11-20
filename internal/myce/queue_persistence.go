@@ -58,17 +58,11 @@ func (q *Queue) readStartupState(marker []byte) error {
 		}
 		done <- result
 	}()
-	read := readQueueRecordsVisit
-	if q.startupReadWorkers > 1 {
-		read = func(_ queueRecordReader, visit func(string, []byte), _ ...string) (map[string][]byte, error) {
-			return readStartupQueueRecords(q.db, visit, q.startupReadWorkers)
-		}
-	}
-	records, err := read(q.db, func(key string, data []byte) {
+	records, err := readStartupQueueRecords(q.db, func(key string, data []byte) {
 		if id, ok := strings.CutPrefix(key, "jobs/"); ok {
 			jobs <- jobRecord{id, data}
 		}
-	})
+	}, q.startupReadWorkers)
 	q.traceStartup("load_record_rows")
 	close(jobs)
 	decoded := <-done
