@@ -235,7 +235,9 @@ func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	server := httptest.NewServer(waitClockHandler(t, q, clock))
+	// The injected client pause owns this deadline. Avoid a second, rounded
+	// transport-clock advance, which could exceed the remaining owner budget.
+	server := httptest.NewServer(waitPollingHandler(t, q, nil))
 	defer server.Close()
 	var delays []time.Duration
 	err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 5*time.Second, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
@@ -524,7 +526,7 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	}
 }
 
-func waitClockHandler(t *testing.T, q *myce.Queue, clock *waitClock) http.Handler {
+func waitPollingHandler(t *testing.T, q *myce.Queue, advanceHold func(time.Duration)) http.Handler {
 	t.Helper()
 	api := myce.API{Queue: q, Token: "test-only"}.Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -535,10 +537,11 @@ func waitClockHandler(t *testing.T, q *myce.Queue, clock *waitClock) http.Handle
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			// Model the steady-state transport hold on the injected clock;
-			// real hold/wakeup coverage lives in TestWaitIndexCommitRollbackAndUnlockedReads.
-			if len(request.After) > 0 {
-				clock.advance(time.Duration(request.Seconds) * time.Second)
+			// Return immediately; a supplied callback can model the transport hold
+			// on the guidance fixture clock. Timeout fixtures advance in their pause.
+			// Real hold/wakeup coverage stays in TestWaitIndexCommitRollbackAndUnlockedReads.
+			if len(request.After) > 0 && advanceHold != nil {
+				advanceHold(time.Duration(request.Seconds) * time.Second)
 			}
 			request.Seconds = 0
 			body, err := json.Marshal(request)
@@ -556,7 +559,7 @@ func waitClockHandler(t *testing.T, q *myce.Queue, clock *waitClock) http.Handle
 
 func TestWaitDeadlineGuidance(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
-	server := httptest.NewServer(waitClockHandler(t, q, clock))
+	server := httptest.NewServer(waitPollingHandler(t, q, clock.advance))
 	defer server.Close()
 	client := myce.Client{URL: server.URL, Token: "test-only"}
 	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}
