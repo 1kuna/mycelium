@@ -54,8 +54,9 @@ func TestFleetUpgradeAttemptCancellation(t *testing.T) {
 	spec.Run.Command = []string{binary, "-test.run=^TestFleetUpgradeDevSignedReleasesEndToEnd$", "-test.timeout=5m"}
 	spec.Run.Env = map[string]string{fleetStreamProbeEnv: probePath, "FLEET_UPGRADE_BUILD_DIR": buildDir}
 	// The re-executed test uses the existing private TestMain roots and the
-	// same offline Go setup for building its two signed images.
-	for _, key := range []string{"MYCE_TEST_ROOT", "MYCE_TEST_ISOLATED_HOME", "GOFLAGS", "GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GOSUMDB", "GOTOOLCHAIN", "GOTELEMETRY", "GOENV", "GOWORK", "GORACE"} {
+	// same offline Go setup for building its two signed images. The Darwin
+	// gate overrides the packaged Go toolchain's default C compiler.
+	for _, key := range []string{"MYCE_TEST_ROOT", "MYCE_TEST_ISOLATED_HOME", "GOFLAGS", "GOCACHE", "GOMODCACHE", "GOPATH", "GOPROXY", "GOSUMDB", "GOTOOLCHAIN", "GOTELEMETRY", "GOENV", "GOWORK", "GORACE", "CC", "CGO_ENABLED"} {
 		if value, ok := os.LookupEnv(key); ok {
 			spec.Run.Env[key] = value
 		}
