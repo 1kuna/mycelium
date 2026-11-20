@@ -303,11 +303,11 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-workerdataremoval"></a>**WorkerDataRemoval** | `path`: string; `bytes`: number; `removed`: boolean; `error?`: string |
 | <a id="fields-workerhygienecollection"></a>**WorkerHygieneCollection** | `disk_budget?`: array of [DiskBudgetVolume](#fields-diskbudgetvolume); `scratch?`: [AttemptFilesCollection](#fields-attemptfilescollection); `compiler_warning?`: string; `unmanaged_compiler_bytes?`: number; `at`: timestamp; `next_at`: timestamp; `file_cache`: [CacheCollection](#fields-cachecollection); `environments`: [CacheCollection](#fields-cachecollection); `staging_error?`: string |
 | <a id="fields-workload"></a>**Workload** | `input_shape`: string; `units`: number |
+| <a id="fields-yieldpause"></a>**YieldPause** | `progress?`: number; `id`: string; `attempt`: number; `pause`: [JobPause](#fields-jobpause) |
 | <a id="fields-efficiencyrate"></a>**efficiencyRate** | `release?`: string; `reserved_device_gb`: number; `measured_device_gb`: number; `device_valid_until`: timestamp; `host?`: string; `basis?`: string; `reserved_memory_gb`: number; `reserved_cpu_cores`: number; `measured_memory_gb`: number; `valid_until`: timestamp |
 | <a id="fields-probeestimate"></a>**probeEstimate** | `mean`: number; `deviation`: number |
 | <a id="fields-retiredfield"></a>**retiredField** |  |
 | <a id="fields-sharedpressurelearning"></a>**sharedPressureLearning** | `cpu_known?`: boolean; `cpu`: [probeEstimate](#fields-probeestimate); `wake`: [probeEstimate](#fields-probeestimate); `psi`: [probeEstimate](#fields-probeestimate); `at`: timestamp |
-| <a id="fields-yieldpause"></a>**YieldPause** | `id`: string; `attempt`: number; `pause`: [JobPause](#fields-jobpause) |
 
 <!-- END GENERATED STATUS FIELDS -->
 

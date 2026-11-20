@@ -7317,6 +7317,9 @@
         },
         "pause": {
           "$ref": "#/$defs/JobPause"
+        },
+        "progress": {
+          "type": "integer"
         }
       },
       "required": [
