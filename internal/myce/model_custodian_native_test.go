@@ -3,6 +3,7 @@ package myce
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,11 @@ import (
 
 func configureNativeModel(t *testing.T, q *Queue, c *ServiceConfig) {
 	t.Helper()
+	identity, err := json.Marshal(map[string]string{"service": c.Service, "slice": c.workerSlice(), "jobs": c.custodianSlice()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("native fixture cleanup identity: %s", identity)
 	m := serverTestModel(t, "ready")
 	m.Name, m.Device, m.DeviceEnv, m.HostMemoryGB = "test", "", nil, 0.25
 	m.Path = filepath.Join(filepath.Dir(c.Config), "weights")
@@ -26,7 +32,6 @@ func configureNativeModel(t *testing.T, q *Queue, c *ServiceConfig) {
 		t.Fatal(err)
 	}
 	m.SizeBytes, m.DirectNAS = 1, true
-	var err error
 	m.SHA256, err = FileSHA256(m.Path)
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +110,11 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity, err := json.Marshal(map[string]any{"scope": custodianUnit(before.ID), "cgroup": before.Cgroup, "helper_pid": before.PID, "helper_birth": before.Birth, "engine_pid": engine.PID, "engine_birth": birth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("native model cleanup identity: %s", identity)
 	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
 	defer cancel()
 	request := func(target, session, attempt, endpoint string) *http.Response {
