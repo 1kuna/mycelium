@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -215,6 +216,31 @@ func TestRequestTimingControlTransactions(t *testing.T) {
 			}
 		})
 	}
+	t.Run("submit phases", func(t *testing.T) {
+		var measured []submitRequestTiming
+		q.observeSubmit = func(p submitRequestTiming) { measured = append(measured, p) }
+		spec := cpuSpec(1, 1)
+		spec.Name = "phase-probe"
+		data, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(string(data)))
+		r.Header.Set("Authorization", "Bearer fixture")
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "fixture"}.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK || len(measured) != 1 {
+			t.Fatalf("status=%d observations=%+v body=%s", w.Code, measured, w.Body.String())
+		}
+		p := measured[0]
+		if p.Name != spec.Name || p.Admission <= 0 || p.Decode <= 0 || p.Hold <= 0 || p.SQLiteCommit <= 0 || p.Response <= 0 {
+			t.Fatalf("submit phases missing: %+v", p)
+		}
+		// Hold contains SQLite commit; it is diagnostic, not an extra phase.
+		if p.Admission+p.Decode+p.Wait+p.SQLiteCommit+p.Response+p.EvidenceWait > p.Finished.Sub(p.Started) || p.SQLiteCommit > p.Hold {
+			t.Fatalf("submit phases overlap: %+v", p)
+		}
+	})
 }
 
 type delayedRequestResponse struct{ *httptest.ResponseRecorder }

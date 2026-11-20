@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,7 +85,17 @@ func devFanOutBurst62(t testing.TB, window bool) devFanOutBurstResult {
 	if err := InstallExtension(c.ExtensionRoot, e); err != nil {
 		t.Fatal(err)
 	}
+	phases := make(chan submitRequestTiming, 62)
 	d, err := startTestDev(t, c, func(q *Queue) {
+		// The package default is synchronous for fixtures that inspect mutable
+		// evidence immediately. A real dev queue publishes it asynchronously;
+		// waiting for every concurrent capture here manufactures a burst barrier.
+		asynchronousAdmissionWait(t, q)
+		q.observeSubmit = func(p submitRequestTiming) {
+			if strings.HasPrefix(p.Name, "burst-") {
+				phases <- p
+			}
+		}
 		// Match incident retained-history cardinality. These are cold fixture records;
 		// new parents and all running executions below use the ordinary API.
 		now := q.clock.Now()
@@ -218,6 +229,17 @@ func devFanOutBurst62(t testing.TB, window bool) devFanOutBurstResult {
 	// benchmark's bound, with no retries, staggering or prewarmed connections.
 	p99 := durations[(99*len(durations)+99)/100-1]
 	t.Logf("62 concurrent fan-out submits: p50=%s p99=max=%s", durations[len(durations)/2], p99)
+	for range 62 {
+		var p submitRequestTiming
+		select {
+		case p = <-phases:
+		case <-ctx.Done():
+			t.Fatal("missing submit phase observation:", ctx.Err())
+		}
+		total := p.Finished.Sub(p.Started)
+		work := total - p.Admission - p.Decode - p.Wait - p.SQLiteCommit - p.Response - p.EvidenceWait
+		t.Logf("submit_phase name=%s start_ms=%.3f end_ms=%.3f total_ms=%.3f admission_ms=%.3f decode_ms=%.3f lock_wait_ms=%.3f sqlite_commit_ms=%.3f response_ms=%.3f evidence_wait_ms=%.3f work_ms=%.3f lock_hold_ms=%.3f", p.Name, holdMS(p.Started.Sub(began)), holdMS(p.Finished.Sub(began)), holdMS(total), holdMS(p.Admission), holdMS(p.Decode), holdMS(p.Wait), holdMS(p.SQLiteCommit), holdMS(p.Response), holdMS(p.EvidenceWait), holdMS(work), holdMS(p.Hold))
+	}
 	if window {
 		until := time.Now().Add(6 * time.Second)
 		for time.Now().Before(until) {

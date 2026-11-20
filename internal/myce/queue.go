@@ -254,6 +254,7 @@ type Queue struct {
 	jobSnapshots    map[string]*jobSnapshotCache
 	observeRead     func(string, time.Duration, time.Duration)
 	observeRequest  func(string, time.Duration, time.Duration, time.Duration, time.Duration)
+	observeSubmit   func(submitRequestTiming) // Optional disjoint HTTP submit phase attribution.
 	usageReader     *sql.DB
 	db              *sql.DB
 	persisted       map[string][]byte
@@ -688,7 +689,9 @@ func (q *Queue) updateTransactionMode(ctx context.Context, fn func() error, timi
 		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn, &hold)
 		if waitCapture != nil {
+			finishEvidence := submitPhase(ctx, "evidence")
 			q.enqueueAdmissionWait(waitCapture)
+			finishEvidence()
 		}
 	}()
 	if q.stopping.Load() {
