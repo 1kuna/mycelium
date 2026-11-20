@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,6 +18,76 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestNotifierEnvironmentAllowlist(t *testing.T) {
+	source := []string{"UNRELATED_SETTING=fixture", "MALFORMED"}
+	var want []string
+	for key := range notifierEnvironmentVariables {
+		entry := key + "=fixture=value"
+		source = append(source, entry)
+		want = append(want, entry)
+	}
+	// Simulate an accidental future allowlist addition, independently of the
+	// current allowlist. The deny rule must still win, including mixed case.
+	for _, key := range []string{"FIXTURE_TOKEN", "FIXTURE_KEY", "FIXTURE_SECRET", "FIXTURE_PASSWORD", "FIXTURE_CREDENTIAL", "FIXTURE_CREDENTIALS", "fixture_token", "MYCE_TOKEN"} {
+		notifierEnvironmentVariables[key] = "Test an accidental allowlist entry."
+		t.Cleanup(func() { delete(notifierEnvironmentVariables, key) })
+		source = append(source, key+"=fixture-secret")
+	}
+	got := filterNotifierEnvironment(source)
+	if !slices.Equal(got, want) {
+		t.Fatal("notifier environment did not preserve exactly the allowlisted nonsecret entries")
+	}
+	path := filepath.Join(t.TempDir(), "registration.json")
+	if err := saveProfileJSON(path, sharedProfileRegistration{NotifyEnv: got}); err != nil {
+		t.Fatal(err)
+	}
+	var saved sharedProfileRegistration
+	if err := readProfileJSON(path, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(saved.NotifyEnv, want) {
+		t.Fatal("registration persisted an unexpected environment")
+	}
+}
+
+func TestObserverAdoptionFiltersSavedEnvironment(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Discovery and its rewrite precede the first authority read. Stop with
+		// the arm still live, so the durable registration can be checked.
+		cancel()
+		fmt.Fprint(w, `{"jobs":[{"id":"job","state":"running","revision":1}]}`)
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	clock := &waitClock{now: time.Now()}
+	dir, entry, lock := sharedWatchFixture(t, root, server.URL, clock)
+	var reg sharedProfileRegistration
+	if err := readProfileJSON(entry, &reg); err != nil {
+		t.Fatal(err)
+	}
+	reg.Observer.Notify = "myce:wake/t3/fixture-thread"
+	want := []string{"PATH=/usr/bin:/bin", "HOME=/fixture", "T3CODE_THREAD_ID=fixture-thread", "T3CODE_CLI_PATH=/fixture/t3", "T3CODE_HOME=/fixture/runtime"}
+	reg.NotifyEnv = append(slices.Clone(want), "FIXTURE_TOKEN=fixture-secret", "FIXTURE_KEY=fixture-secret", "MYCE_TOKEN=fixture-secret", "UNRELATED_SETTING=fixture")
+	if err := saveProfileJSON(entry, reg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSharedProfileLoop(ctx, root, lock, clock, waitPause); err != context.Canceled {
+		t.Fatalf("adoption returned %v", err)
+	}
+	var saved sharedProfileRegistration
+	if err := readProfileJSON(entry, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(saved.NotifyEnv, want) {
+		t.Fatal("adoption did not durably filter the saved environment")
+	}
+	if saved.Directory != dir || saved.Observer != reg.Observer || saved.Token != reg.Token || !saved.Expires.Equal(reg.Expires) {
+		t.Fatal("adoption changed the saved binding or authority")
+	}
+}
 
 func TestObserverStarterCleanup(t *testing.T) {
 	if root := os.Getenv("MYCE_OBSERVER_STARTER_FIXTURE"); root != "" {

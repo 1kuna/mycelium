@@ -680,6 +680,12 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   means the queue stopped making progress: read status once, then repeat the
   same command ([wait and status](references/wait-and-status.md)).
 - Foreground wait/result collection and owner cancellation suppress later wakes; `myce run --supersedes JOB` explicitly replaces a same-project job’s wake without cancelling its execution.
+- Custom notifier hooks receive only PATH, HOME, locale, XDG config/cache paths,
+  TLS certificate paths and the built-in harness wake binding. Load receiver
+  credentials from private configuration under HOME or XDG_CONFIG_HOME; secret
+  environment variables are never saved or passed to hooks. Existing saved
+  environments are filtered when the upgraded observer adopts their registrations
+  ([operator recovery](https://github.com/1kuna/mycelium/blob/main/docs/reference/completion-observer.md)).
 - **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
   its resources are released (75 while release is pending); `command_started:
   false` means no command began. `myce pause JOB_ID --reason TEXT` holds your

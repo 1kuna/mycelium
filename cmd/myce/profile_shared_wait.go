@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -502,6 +503,16 @@ func runSharedProfileLoopStarted(ctx context.Context, root string, lock *os.File
 				_ = os.Remove(entry)
 				receiptLock.Close()
 				continue
+			}
+			// Own the receipt before rewriting a legacy snapshot: a caller may
+			// otherwise replace this registration while adoption is in flight.
+			filtered := filterNotifierEnvironment(reg.NotifyEnv)
+			if !slices.Equal(filtered, reg.NotifyEnv) {
+				reg.NotifyEnv = filtered
+				if e = saveProfileJSON(entry, reg); e != nil {
+					receiptLock.Close()
+					return e
+				}
 			}
 			if receipt.Spec.Deadline != nil && (reg.Expires.IsZero() || receipt.Spec.Deadline.Before(reg.Expires)) {
 				reg.Expires = *receipt.Spec.Deadline
