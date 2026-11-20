@@ -101,7 +101,13 @@ func TestWorkerEventReconnectUsesClock(t *testing.T) {
 	clock.now = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	requests := make(chan struct{}, 4)
 	transport := clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		requests <- struct{}{}
+		// A retry regression must fail its assertion and still let cleanup join
+		// watchStops, even if no test reader drains this bounded observation.
+		select {
+		case requests <- struct{}{}:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
 		return nil, errors.New("event stream unavailable")
 	})
 	w := Worker{Clock: clock, Machine: machine("event-worker", "fake"), Client: Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: transport}}}

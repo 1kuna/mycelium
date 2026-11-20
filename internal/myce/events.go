@@ -106,6 +106,9 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 	if w.Clock == nil {
 		w.Clock = RealClock{}
 	}
+	// This loop owns reconnect pacing with the worker's injected Clock. A
+	// nested client retry would conceal failures and add a second backoff.
+	client := w.Client.WithoutRetries()
 	after := ""
 	var retry workerRetry
 	wake := time.NewTicker(10 * time.Millisecond)
@@ -120,7 +123,7 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 			continue
 		}
 		var event WorkerEvent
-		e := w.Client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
+		e := client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
 		if e != nil {
 			retry.succeeded(w.Clock.Now(), time.Second)
 			continue
