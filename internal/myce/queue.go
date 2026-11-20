@@ -1732,7 +1732,7 @@ func (q *Queue) processCheckinContext(ctx context.Context, c Checkin, healthRepo
 		}
 		catalogStale := q.catalogStale(&m)
 		if catalogStale && (old == nil || hostID(old) != hostID(&m) || !q.maintenanceBlocked(hostID(&m)) ||
-			len(reports) != 0 || len(c.ModelReports) != 0 || hostPreparing(&m) || len(q.hostObligations(hostID(&m))) != 0) {
+			len(reports) != 0 || !modelReportsQuiescent(c.ModelReports) || hostPreparing(&m) || len(q.hostObligations(hostID(&m))) != 0) {
 			return errors.New("worker model config does not match queue")
 		}
 		if old != nil && old.Session != m.Session && q.retainWorkerHandover(old) {

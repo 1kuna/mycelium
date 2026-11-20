@@ -116,9 +116,14 @@ func TestCatalogTransitionDev(t *testing.T) {
 	drain("dev-host")
 	heartbeat := func(m Machine, previous string) (Reply, error) {
 		var reply Reply
-		err := client.Call(ctx, "POST", "/api/workers/checkin", Checkin{
+		checkin := Checkin{
 			Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol, Fresh: previous != "", PreviousSession: previous,
-		}, &reply)
+		}
+		if m.ModelConfigHash == modelConfigHash(oldCatalog) {
+			// The runtime retains the terminal report after an engine unloads.
+			checkin.ModelReports = []ModelReport{{Name: "previous", State: "unloaded", CallsMeasured: true}}
+		}
+		err := client.Call(ctx, "POST", "/api/workers/checkin", checkin, &reply)
 		return reply, err
 	}
 	type worker struct {
