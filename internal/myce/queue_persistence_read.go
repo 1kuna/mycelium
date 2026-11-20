@@ -7,6 +7,12 @@ import (
 	"sync"
 )
 
+// Eight readers overlap cold scattered-page latency. Three alternating trials
+// on the production-volume synthetic improved on four readers without a
+// material compact-state penalty. Each buffers at most one physical record;
+// ordinary operation returns to one connection after every success/error.
+const startupQueueReadWorkers = 8
+
 // Startup holds the queue's exclusive file lock and has not started API or
 // maintenance writers. Disjoint rowid ranges can therefore read the same durable
 // generation concurrently. No schema/format change or second persisted copy.

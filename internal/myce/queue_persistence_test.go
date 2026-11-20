@@ -41,7 +41,6 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 	if _, err := q.db.Exec("UPDATE queue_state SET rowid=rowid*1000000"); err != nil {
 		t.Fatal(err)
 	}
-	q.startupReadWorkers = 4
 	q.s = state{}
 	if err := q.readStartupState(normalizedQueueMarker); err != nil {
 		t.Fatal(err)

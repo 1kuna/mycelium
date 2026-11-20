@@ -25,15 +25,17 @@ def scatter_free_pages(path):
 
     SQLite's documented freelist trunk format is (next, count, leaf pages).
     The set of free pages, trunk links and every allocated byte stay unchanged.
-    Shuffling within 1024-entry windows breaks adjacent overflow allocation
-    without changing the large-scale allocation trajectory across the file.
-    One window in ten stays ordered: a mix of old and contiguous allocations.
+    Shuffle across trunks, not within a trunk: SQLite searches the current
+    trunk's leaves for a page near the allocating B-tree/overflow page. Local
+    permutations therefore leave many overflow chains contiguous.
     Never apply this fixture operation to a live or externally supplied DB.
     """
     with open(path, "r+b") as output:
         header = output.read(100)
         assert header[:16] == b"SQLite format 3\0"
-        page_size = struct.unpack_from(">H", header, 16)[0] or 65536
+        page_size = struct.unpack_from(">H", header, 16)[0]
+        if page_size == 1:
+            page_size = 65536
         page, free_count = struct.unpack_from(">II", header, 32)
         file_pages = os.fstat(output.fileno()).st_size // page_size
         trunks, leaves, seen = [], [], set()
@@ -51,11 +53,7 @@ def scatter_free_pages(path):
         assert all(0 < p <= file_pages and p not in seen for p in leaves)
         assert len(set(leaves)) == len(leaves)
         rng = random.Random(1742)
-        for start in range(0, len(leaves), 1024):
-            if start // 1024 % 10:
-                part = leaves[start:start + 1024]
-                rng.shuffle(part)
-                leaves[start:start + 1024] = part
+        rng.shuffle(leaves)
         start = 0
         for page, count in trunks:
             output.seek((page - 1) * page_size + 8)
@@ -63,7 +61,7 @@ def scatter_free_pages(path):
             start += count
         output.flush()
         os.fdatasync(output.fileno())
-    return {"free_pages": free_count, "trunks": len(trunks), "shuffle_window": 1024}
+    return {"free_pages": free_count, "trunks": len(trunks), "shuffle": "across_trunks"}
 
 
 def resident(fd):
