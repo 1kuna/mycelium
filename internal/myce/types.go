@@ -495,6 +495,7 @@ type Job struct {
 
 	SharedHostBackoff      map[string]SharedHostBackoff `json:"shared_host_backoff,omitempty"`
 	Pause                  *JobPause                    `json:"pause,omitempty"`
+	YieldPause             *YieldPause                  `json:"yield_pause,omitempty"`
 	PauseRevision          uint64                       `json:"pause_revision,omitempty"`
 	LocalOutputs           *TaskOutputCustody           `json:"local_outputs,omitempty"`
 	StorageAllocation      *StorageAllocation           `json:"storage_allocation,omitempty"`

@@ -295,6 +295,25 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/cancel", {}))
         self.assertEqual(APIError(404, '{"code":"job_unknown","will_not_run":null}').code, "job_unknown")
 
+    def test_pause_yield_and_resume(self):
+        client = Client(token="test-only")
+        with patch.object(client, "get", return_value={"attempt": 3, "pause_revision": 4}), patch.object(client, "_call", return_value={"state": "stopping"}) as call:
+            self.assertEqual(client.pause("job/one", project="test", reason="capacity", yield_=True), {"state": "stopping"})
+            self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/pause", {
+                "project": "test", "reason": "capacity", "yield": True,
+                "confirm_restart": False, "if_attempt": 3,
+            }))
+            client.pause("job/one", project="test", reason="capacity", yield_=True,
+                         confirm_restart=True, until="2027-01-01T00:00:00Z")
+            self.assertTrue(call.call_args.args[2]["confirm_restart"])
+            self.assertEqual(call.call_args.args[2]["until"], "2027-01-01T00:00:00Z")
+            client.resume("job/one")
+            self.assertEqual(call.call_args.args, ("POST", "/api/jobs/job%2Fone/resume", {"if_revision": 4}))
+        with self.assertRaisesRegex(ValueError, "project"):
+            client.pause("job", reason="capacity", yield_=True)
+        with self.assertRaisesRegex(ValueError, "requires yield_"):
+            client.pause("job", reason="capacity", confirm_restart=True)
+
     def test_production_lease_requests(self):
         client = Client(token="test-only")
         stage = {"needs": {"memory_gb": 8, "platform": {"required": ["cuda"]}}}

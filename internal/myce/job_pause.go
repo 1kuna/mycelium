@@ -14,8 +14,19 @@ type JobPause struct {
 	Parent string     `json:"parent,omitempty"`
 }
 type PauseJobRequest struct {
-	Reason string     `json:"reason"`
-	Until  *time.Time `json:"until,omitempty"`
+	Reason         string     `json:"reason"`
+	Until          *time.Time `json:"until,omitempty"`
+	Project        string     `json:"project,omitempty"`
+	Yield          bool       `json:"yield,omitempty"`
+	ConfirmRestart bool       `json:"confirm_restart,omitempty"`
+	IfAttempt      *int       `json:"if_attempt,omitempty"`
+}
+
+// YieldPause retains owner intent without claiming execution has been released.
+// The ordinary maintenance stop and release protocol owns the attempt throughout.
+type YieldPause struct {
+	Execution
+	Pause JobPause `json:"pause"`
 }
 type ResumeJobRequest struct {
 	IfRevision uint64 `json:"if_revision"`
@@ -42,13 +53,37 @@ func (q *Queue) changeJobPause(id string, request *PauseJobRequest, revision uin
 			return &HTTPError{Status: 409, Code: "job_pause_conflict", Message: "only queued batch jobs can pause"}
 		}
 		if request != nil {
-			if j.State != "queued" {
+			if request.Project != "" && request.Project != j.Spec.Project {
+				return &HTTPError{Status: 403, Code: "job_project_mismatch", Message: "job belongs to another project"}
+			}
+			if request.Yield && (request.Project == "" || request.IfAttempt == nil) {
+				return &HTTPError{Status: 400, Code: "job_pause_invalid", Message: "yield requires project and if_attempt"}
+			}
+			if request.IfAttempt != nil && *request.IfAttempt != j.Attempt {
+				return ErrStale
+			}
+			if j.State != "queued" && !(request.Yield && (j.State == "running" || j.State == "stopping" && j.YieldPause != nil)) {
 				return &HTTPError{Status: 409, Code: "job_pause_conflict", Message: "only queued jobs can pause; assigned or running attempts cannot be paused"}
 			}
 			if request.Until != nil && !request.Until.After(q.clock.Now()) {
 				return &HTTPError{Status: 400, Code: "job_pause_invalid", Message: "until must be a future absolute time"}
 			}
-			q.pauseJob(j, JobPause{Reason: request.Reason, Until: request.Until})
+			pause := JobPause{Reason: request.Reason, Until: request.Until}
+			if j.State == "queued" {
+				q.pauseJob(j, pause)
+			} else {
+				if !j.Spec.Resumable && !request.ConfirmRestart {
+					return &HTTPError{Status: 409, Code: "job_yield_confirmation_required", Message: "non-resumable work loses progress; confirm_restart is required"}
+				}
+				q.touchJob(j.ID)
+				if pause.Until != nil {
+					until := *pause.Until
+					pause.Until = &until
+				}
+				j.YieldPause = &YieldPause{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Pause: pause}
+				deadline := q.clock.Now().Add(StopGrace)
+				q.maintainHostObligation(HostObligation{Result: resultIdentity(j)}, &deadline)
+			}
 		} else {
 			if j.State != "paused" || j.Pause == nil || j.Pause.Parent != "" || j.PauseRevision != revision {
 				return &HTTPError{Status: 409, Code: "job_pause_revision_conflict", Message: "resume requires the current pause revision; parent-owned children resume with their parent"}
@@ -86,6 +121,10 @@ func (q *Queue) resumeJob(j *Job) {
 	j.PauseRevision++
 }
 func (q *Queue) maintainJobPause(parent *Job) {
+	if terminal(parent.State) && parent.YieldPause != nil {
+		q.touchJob(parent.ID)
+		parent.YieldPause = nil
+	}
 	if parent.State == "paused" && parent.Pause != nil && parent.Pause.Parent == "" && expired(parent.Pause.Until, q.clock.Now()) {
 		q.resumeJob(parent)
 	}

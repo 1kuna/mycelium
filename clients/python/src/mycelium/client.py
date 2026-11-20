@@ -1023,6 +1023,36 @@ class Client:
             query += f"&high_water={high_water}"
         return self._call("GET", f"/api/jobs/{quote(job_id, safe='')}/ledger?{query}")
 
+    def pause(self, job_id: str, *, reason: str, project: str | None = None,
+              yield_: bool = False, confirm_restart: bool = False,
+              until: str | None = None) -> dict[str, Any]:
+        """Hold queued work, or checkpoint-stop an owned attempt before holding it.
+
+        A yield reply in ``stopping`` is accepted intent; only ``paused`` proves
+        release. Project attribution is checked against the job, not a separate
+        authentication boundary. Non-resumable work requires confirm_restart.
+        """
+        if yield_ and not project:
+            raise ValueError("yield requires project")
+        if confirm_restart and not yield_:
+            raise ValueError("confirm_restart requires yield_")
+        body: dict[str, Any] = {"reason": reason, "yield": yield_,
+                                "confirm_restart": confirm_restart}
+        if project is not None:
+            body["project"] = project
+        if until is not None:
+            body["until"] = until
+        if yield_:
+            body["if_attempt"] = self.get(job_id)["attempt"]
+        return self._call("POST", f"/api/jobs/{quote(job_id, safe='')}/pause", body)
+
+    def resume(self, job_id: str) -> dict[str, Any]:
+        """Resume the current pause revision; a concurrent newer pause wins."""
+        current = self.get(job_id)
+        return self._call("POST", f"/api/jobs/{quote(job_id, safe='')}/resume", {
+            "if_revision": current.get("pause_revision", 0),
+        })
+
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""
         return self._call("POST", f"/api/jobs/{quote(job_id, safe='')}/cancel", {})

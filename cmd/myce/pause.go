@@ -20,10 +20,14 @@ func pauseCommand(ctx context.Context, action string, args []string, out io.Writ
 	queue := f.String("queue", os.Getenv("MYCE_QUEUE"), "queue address")
 	token := f.String("token", "", "queue token (prefer MYCE_TOKEN)")
 	joining := f.String("joining-file", os.Getenv("MYCE_JOINING_FILE"), "joining file")
+	project := f.String("project", "", "owning project (required for --yield)")
 	var reason, until string
+	var yield, confirmRestart bool
 	if action == "pause" {
 		f.StringVar(&reason, "reason", "", "required pause reason")
 		f.StringVar(&until, "until", "", "optional absolute RFC3339 resume time")
+		f.BoolVar(&yield, "yield", false, "checkpoint-stop this project's running attempt, then pause after release")
+		f.BoolVar(&confirmRestart, "confirm-restart", false, "allow --yield to discard non-resumable progress")
 	}
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		args = append(append([]string{}, args[1:]...), args[0])
@@ -34,8 +38,14 @@ func pauseCommand(ctx context.Context, action string, args []string, out io.Writ
 	if f.NArg() != 1 {
 		return fmt.Errorf("usage: myce %s JOB [flags]", action)
 	}
-	request := myce.PauseJobRequest{Reason: reason}
+	request := myce.PauseJobRequest{Reason: reason, Project: *project, Yield: yield, ConfirmRestart: confirmRestart}
 	if action == "pause" {
+		if yield && strings.TrimSpace(*project) == "" {
+			return errors.New("pause --yield requires --project NAME")
+		}
+		if confirmRestart && !yield {
+			return errors.New("--confirm-restart requires --yield")
+		}
 		if strings.TrimSpace(reason) == "" {
 			return errors.New("pause requires --reason TEXT")
 		}
@@ -59,6 +69,11 @@ func pauseCommand(ctx context.Context, action string, args []string, out io.Writ
 		return err
 	}
 	var body any = request
+	if yield {
+		attempt := j.Attempt
+		request.IfAttempt = &attempt
+		body = request
+	}
 	if action == "resume" {
 		body = myce.ResumeJobRequest{IfRevision: j.PauseRevision}
 	}
