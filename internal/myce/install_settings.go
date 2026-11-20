@@ -305,6 +305,7 @@ func InstallSettings() []InstallSetting {
 		installPath("model-config", "ModelCatalog", "NAS model catalog", func(c *ServiceConfig) *string { return &c.ModelCatalog }, false),
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
+		{Field: "Slice", validate: ServiceConfig.validateWorkerSlice},
 		{Field: "FileCacheBytesExplicit"},
 		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }},
 		{Field: "Version", validate: func(c ServiceConfig) error {

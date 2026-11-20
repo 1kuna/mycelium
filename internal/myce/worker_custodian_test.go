@@ -76,6 +76,44 @@ func TestCustodianServiceHelper(t *testing.T) {
 	}
 }
 
+// Every native mode shares this configuration and its isolated slice.
+func nativeCustodianServiceConfig(dir, queue string) ServiceConfig {
+	return ServiceConfig{State: filepath.Join(dir, "state"), Binary: filepath.Join(dir, "myce"), Config: filepath.Join(dir, "config.json"), Name: "custodian-test", HostID: "custodian-test-host", Queue: queue, Service: "myce-worker@custodian-test-" + ID() + ".service", Slice: "mycetest" + ID() + ".slice"}
+}
+
+func checkNativeFixtureSlice(c ServiceConfig) error {
+	id := strings.TrimSuffix(strings.TrimPrefix(c.Slice, "mycetest"), ".slice")
+	if c.Slice != "mycetest"+id+".slice" || !validCustodianID(id) {
+		return fmt.Errorf("native fixture requires its own unique slice, got %q", c.workerSlice())
+	}
+	return c.validateWorkerSlice()
+}
+
+func nativeCustodianStartArgs(c ServiceConfig) []string {
+	return []string{"systemd-run", "--user", "--collect", "--quiet", "--unit=" + c.Service, "--property=Delegate=yes", "--slice=" + c.workerSlice(), "--property=KillMode=mixed"}
+}
+
+func TestCustodianNativeSliceIsolation(t *testing.T) {
+	seen := map[string]bool{}
+	for range 3 {
+		c := nativeCustodianServiceConfig(t.TempDir(), "http://queue")
+		if err := checkNativeFixtureSlice(c); err != nil || seen[c.Slice] {
+			t.Fatalf("fixture slice is not unique: %q %v", c.Slice, err)
+		}
+		seen[c.Slice] = true
+		args := strings.Join(nativeCustodianStartArgs(c), "\n")
+		if !strings.Contains(args, "--slice="+c.Slice+"\n") || strings.Contains(args, "--slice=myce.slice") {
+			t.Fatal("native fixture command targets the live slice", args)
+		}
+		for _, slice := range []string{"", "myce.slice", "myce-jobs.slice", "myce-test.slice"} {
+			c.Slice = slice
+			if checkNativeFixtureSlice(c) == nil {
+				t.Fatalf("native fixture could alter the live slice: %q", slice)
+			}
+		}
+	}
+}
+
 // Opt-in test tier: invokes only uniquely named, test-owned native manager jobs.
 // Unlike fake managers this proves service teardown cannot reach running work.
 func TestCustodianNativeWorkerReplacement(t *testing.T) {
@@ -125,7 +163,38 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	defer releasePreparation()
 	dir := t.TempDir()
 
-	c := ServiceConfig{State: filepath.Join(dir, "state"), Binary: filepath.Join(dir, "myce"), Config: filepath.Join(dir, "config.json"), Name: "custodian-test", HostID: "custodian-test-host", Queue: server.URL, Service: "myce-worker@custodian-test-" + ID() + ".service"}
+	c := nativeCustodianServiceConfig(dir, server.URL)
+	if err := checkNativeFixtureSlice(c); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		// Only reads target the installed slice. Fixture workers and detached
+		// scopes share a separate per-run slice, including during cleanup.
+		liveProperties := func() string {
+			t.Helper()
+			out, err := exec.Command("systemctl", "--user", "show", "myce.slice", "--property=MemoryMax", "--property=MemorySwapMax").CombinedOutput()
+			if err != nil {
+				t.Fatalf("read live slice memory properties: %v: %s", err, out)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		before := liveProperties()
+		t.Logf("live myce.slice before fixture: %s", before)
+		t.Cleanup(func() {
+			after := liveProperties()
+			t.Logf("live myce.slice after fixture: %s", after)
+			if after != before {
+				t.Error("native fixture changed live slice memory properties")
+			}
+		})
+		t.Cleanup(func() {
+			for _, args := range [][]string{{"stop", c.custodianSlice(), c.workerSlice()}, {"revert", c.workerSlice()}} {
+				if out, err := exec.Command("systemctl", append([]string{"--user"}, args...)...).CombinedOutput(); err != nil {
+					t.Errorf("remove fixture slice: %v: %s", err, out)
+				}
+			}
+		})
+	}
 	if err := os.MkdirAll(c.State, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +245,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 				t.Fatal(err)
 			}
 		} else {
-			command("systemd-run", "--user", "--collect", "--quiet", "--unit="+c.Service, "--property=Delegate=yes", "--slice=myce.slice", "--property=KillMode=mixed", c.Binary, "service", "--config", c.Config)
+			command(append(nativeCustodianStartArgs(c), c.Binary, "service", "--config", c.Config)...)
 		}
 	}
 	stop := func() {

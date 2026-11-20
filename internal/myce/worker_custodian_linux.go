@@ -11,6 +11,9 @@ import (
 )
 
 func launchCustodian(ctx context.Context, c ServiceConfig, dir, id string) error {
+	if err := c.validateWorkerSlice(); err != nil {
+		return err
+	}
 	log, err := os.OpenFile(filepath.Join(dir, "custodian-"+id+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -18,7 +21,7 @@ func launchCustodian(ctx context.Context, c ServiceConfig, dir, id string) error
 	defer log.Close()
 	// Scope placement happens before exec. The scope is a sibling of the worker
 	// service, so KillMode=mixed and its final cgroup KILL cannot reach it.
-	cmd := exec.Command("systemd-run", "--user", "--scope", "--collect", "--quiet", "--unit="+custodianUnit(id), "--slice=myce-jobs.slice", "--property=Delegate=yes", c.Binary, "service", "--config", c.Config, "--attempt-custodian", id)
+	cmd := exec.Command("systemd-run", "--user", "--scope", "--collect", "--quiet", "--unit="+custodianUnit(id), "--slice="+c.custodianSlice(), "--property=Delegate=yes", c.Binary, "service", "--config", c.Config, "--attempt-custodian", id)
 	cmd.Env = withoutMyceToken(os.Environ())
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {

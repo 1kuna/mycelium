@@ -3,6 +3,7 @@ package myce
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -110,52 +111,61 @@ func TestMemoryCeilingDelegationAndOOM(t *testing.T) {
 }
 
 func TestMemoryCeilingJointAllowance(t *testing.T) {
-	c := fakeCeilings(t)
-	c.pageSize = 4096
-	root := filepath.Join(t.TempDir(), "myce.slice")
-	if err := c.fs.Mkdir(root); err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	command := func(_ context.Context, args ...string) error {
-		calls++
-		if strings.Join(args[:5], " ") != "--user set-property --runtime myce.slice MemoryMax=5368709120" && calls == 1 {
-			t.Fatal(args)
-		}
-		for _, arg := range args[4:] {
-			key, value, _ := strings.Cut(arg, "=")
-			name := map[string]string{"MemoryMax": "memory.max", "MemorySwapMax": "memory.swap.max"}[key]
-			if value == "infinity" {
-				value = "max"
+	for _, slice := range []string{"myce.slice", "mycetest0123456789abcdef0123456789abcdef.slice"} {
+		t.Run(slice, func(t *testing.T) {
+			c := fakeCeilings(t)
+			c.pageSize = 4096
+			root := filepath.Join(t.TempDir(), slice)
+			if err := c.fs.Mkdir(root); err != nil {
+				t.Fatal(err)
 			}
-			if err := c.fs.WriteFile(filepath.Join(root, name), []byte(value)); err != nil {
-				return err
+			calls := 0
+			command := func(_ context.Context, args ...string) error {
+				calls++
+				if len(args) != 6 || args[3] != slice || calls == 1 && args[4] != "MemoryMax=5368709120" {
+					t.Fatal(args)
+				}
+				for _, arg := range args[4:] {
+					key, value, _ := strings.Cut(arg, "=")
+					name := map[string]string{"MemoryMax": "memory.max", "MemorySwapMax": "memory.swap.max"}[key]
+					if value == "infinity" {
+						value = "max"
+					}
+					if err := c.fs.WriteFile(filepath.Join(root, name), []byte(value)); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
-		}
-		return nil
-	}
-	for _, gb := range []float64{5, 5, 3, 0} {
-		if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{GiB: gb}, 0, command); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if calls != 3 {
-		t.Fatal("unchanged allowance rewrote systemd", calls)
-	}
-	if _, err := jointMemoryRoot(filepath.Join(root, "myce-jobs.slice", "attempt.scope")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jointMemoryRoot("/user.slice/myce-worker.service"); err == nil {
-		t.Fatal("old service silently bypassed common ceiling")
-	}
-	if err := c.fs.WriteFile(filepath.Join(root, "memory.oom.group"), []byte("1")); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{}, 0, command); err == nil {
-		t.Fatal("whole-host group kill accepted")
-	}
-	if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{Measured: true}, 0, command); err == nil {
-		t.Fatal("zero measured allowance disabled cap")
+			for _, gb := range []float64{5, 5, 3, 0} {
+				if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{GiB: gb}, 0, command); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if calls != 3 {
+				t.Fatal("unchanged allowance rewrote systemd", calls)
+			}
+			if _, err := jointMemoryRoot(filepath.Join(root, "jobs.slice", "attempt.scope"), slice); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := jointMemoryRoot("/user.slice/myce-worker.service", slice); err == nil {
+				t.Fatal("old service silently bypassed common ceiling")
+			}
+			if err := c.fs.WriteFile(filepath.Join(root, "memory.oom.group"), []byte("1")); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{}, 0, command); err == nil {
+				t.Fatal("whole-host group kill accepted")
+			}
+			if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{Measured: true}, 0, command); err == nil {
+				t.Fatal("zero measured allowance disabled cap")
+			}
+			if slice != "myce.slice" {
+				if _, err := jointMemoryRoot(filepath.Join(root, "worker.service"), "myce.slice"); err == nil {
+					t.Fatal("fixture membership accepted as the live worker's slice")
+				}
+			}
+		})
 	}
 }
 
@@ -315,12 +325,38 @@ func TestMemoryCeilingModelOOMAfterReady(t *testing.T) {
 
 func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
+	if c.workerSlice() != "myce.slice" || c.custodianSlice() != "myce-jobs.slice" {
+		t.Fatal("production slice defaults changed")
+	}
 	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") || !strings.Contains(c.ServiceText(), "Slice=myce.slice\nMemoryAccounting=yes\n") {
 		t.Fatal("worker has no delegated memory controller")
 	}
 	status := WorkerMemoryDelegationStatus(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return []byte("Delegate=no\n"), nil })
 	if !strings.Contains(status, "memory ceiling not enforced on this host (") {
 		t.Fatal(status)
+	}
+	c.Slice = "mycetest0123456789abcdef0123456789abcdef.slice"
+	if !strings.Contains(c.ServiceText(), "Slice="+c.Slice+"\n") || strings.Contains(c.ServiceText(), "Slice=myce.slice\n") {
+		t.Fatal("custom worker slice was not rendered")
+	}
+	if c.custodianSlice() != "mycetest0123456789abcdef0123456789abcdef-jobs.slice" {
+		t.Fatal("detached scopes would escape the fixture slice")
+	}
+	config := filepath.Join(t.TempDir(), "config.json")
+	for _, slice := range []string{c.Slice, "", "../myce.slice", "myce.slice\nMemoryMax=infinity", "-.slice", "myce--test.slice", "myce.service"} {
+		c.Slice = slice
+		data, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		restored, err := ReadServiceConfig(config)
+		valid := slice == "" || strings.HasPrefix(slice, "mycetest")
+		if valid && (err != nil || restored.workerSlice() != c.workerSlice()) || !valid && err == nil {
+			t.Fatalf("slice config round trip: %q %+v %v", slice, restored, err)
+		}
 	}
 }
 func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
