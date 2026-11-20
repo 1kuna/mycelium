@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"log"
 	"maps"
 	"os"
 	"path"
@@ -249,7 +248,7 @@ func fileStoreLimitRefusal(err error) bool {
 // the store admits); other errors keep the local files for a retry. Pattern
 // manifests are preflighted whole, so an oversized folder or glob is refused
 // once before any upload instead of failing part-way.
-func (w Worker) publishOutputFiles(ctx context.Context, j Job, step, outputName *string) (FileManifest, bool, error) {
+func (w Worker) identifyOutputFiles(ctx context.Context, j Job, step, outputName *string) (FileManifest, bool, error) {
 	done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_path")
 	*step, *outputName = "output_path", ""
 	sources, err := collectOutputFiles(j.Spec.Run.Workdir, j.Spec.Outputs, jobInputFiles(&j))
@@ -269,23 +268,6 @@ func (w Worker) publishOutputFiles(ctx context.Context, j Job, step, outputName 
 			return nil, true, err
 		}
 		refs[name] = ref
-	}
-	if outputPatterns(j.Spec.Outputs) {
-		*step, *outputName = "output_preflight", ""
-		if err := w.Client.PreflightFileStore(ctx, refs); err != nil {
-			if fileStoreLimitRefusal(err) {
-				log.Printf("job %s outputs refused by the file store (%d files): %v", ShortID(j.ID), len(refs), err)
-				return nil, true, outputLimitError{err}
-			}
-			return nil, false, err
-		}
-	}
-	for _, name := range names {
-		decl, _ := outputDeclarationFor(j.Spec.Outputs, name)
-		*step, *outputName = "output_upload", decl
-		if err := w.Client.UploadFile(ctx, sources[name], refs[name]); err != nil {
-			return nil, false, err
-		}
 	}
 	return refs, false, nil
 }

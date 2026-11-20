@@ -437,7 +437,7 @@ func (w Worker) finishFileResultContext(ctx context.Context, j Job, result Resul
 	// the attempt owner's cancellation; the transfer client detects stalled
 	// sockets and reconciles accepted offsets without restarting finalization.
 	ctx = withFileStoreAttempt(ctx, j)
-	output, terminal, err := w.publishOutputFiles(ctx, j, &step, &outputName)
+	output, terminal, err := w.publishOutputFiles(ctx, j, parent, &step, &outputName)
 	if terminal {
 		return finalizationResult(result, step, outputName, err, true), nil
 	}
