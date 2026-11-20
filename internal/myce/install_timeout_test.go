@@ -106,7 +106,7 @@ func TestInstallSystemdSlowStopAndRollback(t *testing.T) {
 			for _, fail := range []bool{false, true} {
 				t.Run(map[bool]string{false: "upgrade", true: "expired-install-rollback"}[fail], func(t *testing.T) {
 					c, executable := preserveWorkerFixture(t)
-					if err := Install(context.Background(), c, executable, "test", fakeInstallManager); err != nil {
+					if err := Install(context.Background(), c, executable, "test", fakeInstallManager(c)); err != nil {
 						t.Fatal(err)
 					}
 					old, _ := os.ReadFile(c.Binary)
@@ -118,6 +118,9 @@ func TestInstallSystemdSlowStopAndRollback(t *testing.T) {
 						ctx, cancel := context.WithCancel(context.Background())
 						defer cancel()
 						raw := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+							if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+								return installUnitObservation(c), nil
+							}
 							if err := ctx.Err(); err != nil {
 								t.Fatalf("manager received an expired context: %v", err)
 							}

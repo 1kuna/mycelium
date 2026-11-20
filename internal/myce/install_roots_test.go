@@ -103,7 +103,7 @@ func TestInstallFileCachePreflight(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			c, source := preserveWorkerFixture(t)
 			if mode == "existing-host" {
-				if err := Install(context.Background(), c, source, "synthetic", fakeInstallManager); err != nil {
+				if err := Install(context.Background(), c, source, "synthetic", fakeInstallManager(c)); err != nil {
 					t.Fatal(err)
 				}
 			} else if err := PrepareStateRoots(c.State); err != nil {

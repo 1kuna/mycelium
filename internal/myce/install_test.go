@@ -104,6 +104,9 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	os.WriteFile(executable, []byte("test binary"), 0700)
 	commands := []string{}
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+			return installUnitObservation(c), nil
+		}
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		if name == "cat" {
 			return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
@@ -335,6 +338,9 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 			os.WriteFile(executable, []byte("version 1"), 0700)
 			mounted := false
 			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+					return installUnitObservation(c), nil
+				}
 				if name == "cat" {
 					if !mounted {
 						return []byte("root / ext4 rw 0 0\n"), nil

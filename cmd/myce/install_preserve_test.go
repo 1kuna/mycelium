@@ -195,7 +195,12 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	os.WriteFile(c.Binary, []byte("old binary"), 0700)
 	os.MkdirAll(filepath.Dir(c.Service), 0700)
 	os.WriteFile(c.Service, []byte(c.ServiceText()), 0600)
-	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: fakeSetupManager}
+	return c, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+			return []byte("FragmentPath=" + c.Service + "\nDropInPaths=\nActiveState=active\nSlice=" + c.Slice + "\nOOMScoreAdjust=0\nControlGroup=/user.slice/" + c.Slice + "/" + filepath.Base(c.Service) + "\n"), nil
+		}
+		return fakeSetupManager(ctx, name, args...)
+	}}
 }
 
 func TestInstallPreservesEveryConfigField(t *testing.T) {
@@ -541,5 +546,50 @@ func TestInstallWorkerFileCacheCapacity(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "file-cache-bytes") {
 			t.Fatal("nonpositive file cache capacity accepted", err)
 		}
+	}
+}
+
+func TestInstallWorkerLegacyCatalogPlanRefusesActivation(t *testing.T) {
+	c, p := savedInstallFixture(t, "worker")
+	c.AllowDeviceless, c.Enrollment = true, false
+	c.ModelCatalog = ""
+	data, _ := json.Marshal(c)
+	if err := os.WriteFile(c.Config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.ReplaceAll(strings.ReplaceAll(c.ServiceText(), "Slice="+c.Slice, "Slice=app.slice"), "OOMScoreAdjust=0", "OOMScoreAdjust=200")
+	if err := os.WriteFile(c.Service, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := filepath.Join(c.NAS, "catalog.yaml")
+	if err := os.WriteFile(catalog, []byte("models: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := p.Command
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+			return []byte("FragmentPath=" + c.Service + "\nDropInPaths=\nActiveState=active\nSlice=app.slice\nOOMScoreAdjust=200\nControlGroup=/user.slice/app.slice/myce-worker.service\n"), nil
+		}
+		return original(ctx, name, args...)
+	}
+	args := []string{"install", "worker", "--config", c.Config, "--model-config", catalog}
+	output := captureJoiningOutput(t, func() error { return setupCommandWithProbe(append(args, "--dry-run"), p, c.NAS) })
+	for _, want := range []string{"model_catalog: changed", `Slice: "app.slice" -> "` + c.Slice + `"`, `OOMScoreAdjust: "200" -> "0"`, "worker_unit_migration_required", "myce migrate worker-unit", "normal myce fleet upgrade"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q in plan:\n%s", want, output)
+		}
+	}
+	output = captureJoiningOutput(t, func() error {
+		err := setupCommandWithProbe(args, p, c.NAS)
+		if !errors.Is(err, myce.ErrWorkerUnitMigrationRequired) {
+			t.Fatal(err)
+		}
+		return nil
+	})
+	if got, _ := os.ReadFile(c.Config); string(got) != string(data) {
+		t.Fatal("refusal changed config")
+	}
+	if got, _ := os.ReadFile(c.Service); string(got) != legacy {
+		t.Fatal("refusal changed unit")
 	}
 }

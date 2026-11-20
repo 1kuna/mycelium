@@ -399,6 +399,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
 		return err
 	}
+	if _, err := InstallUnitPlan(ctx, c, command); err != nil {
+		return err
+	}
 	c.Version = 1
 	existing := false
 	var installed ServiceConfig

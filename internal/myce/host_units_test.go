@@ -49,6 +49,9 @@ func TestInstallMachineTargetsItsOwnUnit(t *testing.T) {
 	os.WriteFile(executable, []byte("fixture"), 0700)
 	var calls []string
 	command := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) == 3 && args[1] == "show" {
+			return installUnitObservation(c), nil
+		}
 		calls = append(calls, strings.Join(args, " "))
 		return nil, nil
 	}
