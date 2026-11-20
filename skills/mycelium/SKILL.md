@@ -206,6 +206,13 @@ unsupported with entries. Only production entries need a target list; every fiel
   is read from the project root and uploaded with its companion file; workers
   install from the lock, never solve, and reuse it
   ([environments](references/submit.md#environments)).
+- **Portable CPU entries** can set `portable: true` and omit `targets` when the
+  whole payload is portable and each member's selected Pixi lock declares
+  compatible platforms. The main command can use a named recipe or a project
+  `pixi.lock` with its companion `pixi.toml`. Run
+  `myce spec check --resolve --entry NAME .mycelium/adapter.yaml` to check
+  the resulting targets. Use explicit verified targets for unknown lock
+  coverage and for production plain commands under MY-19.
 - **Threads and scratch** are set for you: `MYCE_CPUS` is the job's CPU share,
   common thread pools (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `GOMAXPROCS` and
   others) default to it, and `TMPDIR` and `MYCE_SCRATCH_DIR` point at the

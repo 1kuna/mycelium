@@ -315,12 +315,159 @@ func TestCommandDiscoveryPreparesEveryMemberAndIsolatesSidecarFailure(t *testing
 	}
 }
 
+func projectDiscoveryEnvironment(platforms ...string) Environment {
+	files := breadthRecipe(platforms...).Files
+	files["pixi.lock"] = []byte(strings.Replace(string(files["pixi.lock"]), "  selected:", "  default:", 1))
+	return Environment{Backend: "pixi", LockFile: "env/pixi.lock", Platforms: []string{"cpu"}, Files: files}
+}
+
+func TestCommandDiscoveryProjectPixiTargets(t *testing.T) {
+	fakeWorkerPixi(t, workerPixiVersion())
+	q, clock := fixture(t)
+	want := []ExecutionTarget{{"darwin", "arm64", "cpu"}, {"linux", "amd64", "cpu"}, {"linux", "arm64", "cpu"}}
+	outside := ExecutionTarget{"darwin", "amd64", "cpu"}
+	machines := map[ExecutionTarget]Machine{}
+	for _, target := range append(slices.Clone(want), outside) {
+		m := cpuMachine(target.OS+"-"+target.Arch, target.OS+"-"+target.Arch, "cpu", 8, 32)
+		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = target.OS, target.Arch
+		m.EnvironmentBuilder = true
+		check(t, q, m, nil)
+		machines[target] = m
+	}
+	platforms := []string{"linux-64", "linux-aarch64", "osx-arm64"}
+	discoveryCatalog(t, q, breadthRecipe(platforms...))
+	projectEnv := projectDiscoveryEnvironment(platforms...)
+	report := func(s Spec, expected []ExecutionTarget) ResolveReport {
+		t.Helper()
+		r, err := q.Resolve(ResolveRequest{Spec: s})
+		if err != nil || len(r.Targets) != 4 || len(r.Findings) != 0 {
+			t.Fatalf("resolve targets: %+v, findings: %+v, err: %v", r.Targets, r.Findings, err)
+		}
+		for _, row := range r.Targets {
+			if row.Eligible != slices.Contains(expected, row.Target) {
+				t.Fatalf("want eligible %v, got %+v", expected, row)
+			}
+		}
+		return r
+	}
+
+	s := discoverySpec()
+	// The same named-recipe command before and after dropping its target rows.
+	s.Targets = slices.Clone(want)
+	report(s, want)
+	s.Targets = nil
+	report(s, want)
+
+	// A project carries one lock and its companion manifest with no catalog
+	// name. The authored target rows are gone, but the eligible set is the same.
+	s.Environment = projectEnv
+	r := report(s, want)
+	for _, row := range r.Targets {
+		if row.Target == outside && !strings.Contains(row.Reason, "selected immutable lock") {
+			t.Fatalf("uncovered target lacked lock explanation: %+v", row)
+		}
+	}
+	j := submit(t, q, s)
+	if j.CommandDiscovery == nil || !slices.Equal(j.CommandDiscovery.Targets, want) || len(j.Spec.Targets) != 0 || j.EnvironmentLock == nil || len(j.EnvironmentLock.SHA256["pixi.lock"]) != 64 {
+		t.Fatalf("bad frozen discovery or lock: %+v, %+v", j.CommandDiscovery, j.EnvironmentLock)
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.Targets = []ExecutionTarget{want[1]}
+	report(s, s.Targets)
+	s.Targets = nil
+
+	// A separately managed sidecar narrows the project's main lock.
+	s.Run.MemoryGB = 0.25
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Environment: "tools", Command: []string{"helper"}, MemoryGB: 0.25}}
+	discoveryCatalog(t, q, breadthRecipe("linux-64", "linux-aarch64"))
+	report(s, want[1:])
+
+	// Another lock environment cannot stand in for the missing default one.
+	unknown := s
+	unknown.Environment.Files = breadthRecipe(platforms...).Files
+	r, err := q.Resolve(ResolveRequest{Spec: unknown})
+	if err != nil || len(r.Findings) != 1 || r.Findings[0].Field != "portable" || !strings.Contains(r.Findings[0].Problem, "unknown member lock coverage") {
+		t.Fatalf("unknown coverage: %+v, %v", r.Findings, err)
+	}
+	if _, err := q.Submit(unknown); err == nil || !strings.Contains(err.Error(), "declare explicit targets") {
+		t.Fatalf("unknown coverage did not require explicit targets: %v", err)
+	}
+
+	s.Class, s.Priority = "production", ""
+	r = report(s, nil)
+	if !slices.ContainsFunc(r.Targets, func(row ResolveTarget) bool {
+		return row.Target == want[1] && strings.Contains(row.Reason, "MY-19")
+	}) {
+		t.Fatalf("production resolve lost parity reason: %+v", r.Targets)
+	}
+	if _, err := q.Submit(s); err == nil || !strings.Contains(err.Error(), "MY-19") {
+		t.Fatalf("production crossed the discovery parity boundary: %v", err)
+	}
+
+	s.Class = "experiment"
+	s.Run.MemoryGB, s.Run.Sidecars = 0, nil
+	amd64, arm64 := machines[want[1]], machines[want[2]]
+	// Keep only the first builder available, then introduce the fallback.
+	for _, target := range []ExecutionTarget{want[0], want[2]} {
+		m := machines[target]
+		m.EnvironmentBuilder = false
+		check(t, q, m, nil)
+	}
+	j = submit(t, q, s)
+	first := check(t, q, amd64, nil).EnvironmentPlan
+	if len(first) != 1 || first[0].Target == nil || *first[0].Target != want[1] {
+		t.Fatalf("expected amd64 preparation: %+v", first)
+	}
+	if err := q.AuthorizeLaunch(*first[0].Launch); err != nil {
+		t.Fatal(err)
+	}
+	amd64.EnvironmentReports = []EnvironmentReport{{Key: first[0].Key, Attempt: first[0].Launch.Attempt, State: "failed", FailureKind: "deterministic", Error: "No solution found"}}
+	if reply := check(t, q, amd64, nil); reply.Job != nil || len(reply.EnvironmentPlan) != 0 {
+		t.Fatal("failed preparation retried", reply)
+	}
+	clock.Advance(time.Second)
+	second := check(t, q, arm64, nil).EnvironmentPlan
+	if len(second) != 1 || second[0].Target == nil || *second[0].Target != want[2] || second[0].Key == first[0].Key {
+		t.Fatalf("expected independent arm64 preparation: %+v", second)
+	}
+	if err := q.AuthorizeLaunch(*second[0].Launch); err != nil {
+		t.Fatal(err)
+	}
+	arm64.Environments = []string{second[0].Key}
+	arm64.EnvironmentReports = []EnvironmentReport{{Key: second[0].Key, Attempt: second[0].Launch.Attempt, State: "ready"}}
+	if assigned := check(t, q, arm64, nil).Job; assigned == nil || assigned.ID != j.ID {
+		t.Fatal("viable target failed to execute", assigned)
+	} else {
+		finish(t, q, assigned, true)
+	}
+}
+
 // Cached native preparation is a fixture, not proof that Pixi installs on every
 // OS. The command, API, transport, keyed replay and exact release are real.
 func TestCommandDiscoveryRealCPUResult(t *testing.T) {
+	t.Run("named", func(t *testing.T) { testCommandDiscoveryRealCPUResult(t, false) })
+	t.Run("project_pixi", func(t *testing.T) { testCommandDiscoveryRealCPUResult(t, true) })
+}
+
+func testCommandDiscoveryRealCPUResult(t *testing.T, inline bool) {
+	t.Helper()
 	root := t.TempDir()
-	r := breadthRecipe("linux-64", "linux-aarch64", "osx-64", "osx-arm64")
+	platforms := []string{"linux-64", "linux-aarch64", "osx-64", "osx-arm64"}
+	r := breadthRecipe(platforms...)
 	s := discoverySpec()
+	catalog := EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}
+	if inline {
+		fakeWorkerPixi(t, workerPixiVersion())
+		s.Environment = projectDiscoveryEnvironment(platforms...)
+		catalog = EnvironmentCatalog{}
+		recipes, err := catalog.resolveEnvironment(s.Environment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = recipes["cpu"]
+	}
 	s.SubmissionKey = "discovered-result"
 	s.Run.Command = []string{"sh", "-c", "printf 'discovered-cpu-ok\\n' > result.txt"}
 	s.Outputs = map[string]string{"result.txt": "results"}
@@ -332,7 +479,7 @@ func TestCommandDiscoveryRealCPUResult(t *testing.T) {
 	m := &Machine{GPU: "cpu", CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	recipe, _ := commandEnvironmentRecipe(&Job{CommandDiscovery: d}, map[string]EnvironmentRecipe{"cpu": r}, m)
 	cache := filepath.Join(root, "workers", "fake-1", "environment-cache", recipe.Key)
-	dev, err := startTestDev(t, DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}, Interval: 10 * time.Millisecond}, func(*Queue) {
+	dev, err := startTestDev(t, DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), FileStore: filepath.Join(root, "store"), Token: "discovery-fixture", EnvironmentConfig: catalog, Interval: 10 * time.Millisecond}, func(*Queue) {
 		// Seed fixture readiness after the ordinary state-root safety gate,
 		// before the dev workers start; never disguise existing state as fresh.
 		if err := os.MkdirAll(cache, 0700); err != nil {

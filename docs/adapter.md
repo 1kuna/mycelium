@@ -29,7 +29,9 @@ explicit targets (MY-19).
 
 A flat non-production native CPU entry or compatibility
 profile may instead set `portable: true` and omit targets when all member environments
-have selected immutable managed Pixi lock coverage. Mycelium derives candidates
+have selected immutable Pixi lock coverage. The main environment may use a
+named recipe or a project-carried `environment: {backend: pixi, lock_file: pixi.lock}`
+with `pixi.toml` alongside it. Mycelium derives candidates
 from those locks, supported runtimes and fresh inventory; see
 [managed CPU discovery](environments.md#cpu-tools-with-pixi). `portable: true`
 asserts the entire payload. Unknown coverage requires explicit verified targets.
