@@ -100,7 +100,7 @@ func (q *Queue) maintenanceHold(host string) *Hold {
 	policy := q.s.HostMaintenance[host]
 	h := newHold("host_disabled", "")
 	h.Scope = host
-	h.Reason = "host " + host + " is disabled for maintenance"
+	h.Reason = "host " + host + " is disabled for planned host maintenance"
 	if policy.Mode == "drained" {
 		h.Reason = "waiting for drained host " + host + " to return from maintenance"
 	}
