@@ -86,6 +86,8 @@ if action == "evict":
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         after = resident(fd)
         print("physical_cache=" + json.dumps({"resident_before": before, "resident_after": after,
+                                               "at_ns": time.time_ns(),
+                                               "wal_bytes": os.path.getsize(path + "-wal") if os.path.exists(path + "-wal") else 0,
                                                "seconds": time.monotonic() - started}), flush=True)
         assert after[0] < after[1] // 100, "owned file cache did not become cold"
     finally:
