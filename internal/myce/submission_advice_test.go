@@ -255,6 +255,13 @@ func TestSubmissionAdvicePreservesFields(t *testing.T) {
 	// curves for each hypothetical backfill candidate. Keep the reference's
 	// planning decisions independent of the submission view and its caches.
 	q.memoryObservationIndex = q.memoryObservationCatalog()
+	// One reference pass owns its own planning cache and scan, just as the
+	// detached status projection does. Neither is shared with snapshot's view.
+	// The fixture, clock, observations and occupancy stay fixed for all cases.
+	q.memoryPlanning = newMemoryPlanningCache()
+	q.observationScan = q.placementScan()
+	q.observationScan.observationOwner = q
+	q.observationScan.memory = q.memoryPlanning
 	for _, id := range []string{"queued-000", "queued-081", "running-0", "retained-000"} {
 		before := storedTestJob(t, q, id)
 		want := cloneJob(&before)
