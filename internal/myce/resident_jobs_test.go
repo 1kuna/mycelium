@@ -145,6 +145,7 @@ func TestResidentJobsPiecesReuseFrozenEngineAndAcceptIndependently(t *testing.T)
 			binding := parent.Spec.Resident
 			// A later catalog edit must not change an unmaterialized child's engine.
 			q.models.Models[0].StartCommand[0] = "changed-runtime"
+			m.ModelConfigHash = modelConfigHash(q.models)
 			var slot *ModelSlot
 			var loadAttempt string
 			accepted := map[string]PieceResult{}
@@ -259,6 +260,8 @@ func TestResidentJobsUnsupportedSpecs(t *testing.T) {
 				if mode == "registered-extension" && shape == "cpu-fallback" {
 					// Authoring rejects this before extension binding is resolved.
 					want = "extension work runs on CPU through a declared cpu variant"
+				} else if mode == "registered-extension" && shape == "multi-device" {
+					want = "gpu_count_unsupported"
 				}
 				if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "use pieces") {
 					t.Fatalf("unsupported resident shape has wrong refusal: %v", err)
