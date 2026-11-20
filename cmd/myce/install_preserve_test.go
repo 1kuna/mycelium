@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -120,13 +119,14 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Set every field, including fields without a CLI option, away from its default.
+	// Set every persistent field, including fields without a CLI option, away
+	// from its default. SaveSettingsOnly is invocation-only (json:"-").
 	v := reflect.ValueOf(&c).Elem()
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		name := v.Type().Field(i).Name
 		switch name {
-		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
+		case "Version", "Force", "SaveSettingsOnly", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
 			continue
 		}
 		switch f.Kind() {
@@ -289,64 +289,34 @@ func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := map[string][]byte{}
-	for _, path := range []string{c.Config, c.Service} {
+	for _, path := range []string{c.Config, c.Service, c.Binary, c.Credentials, path} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		before[path] = data
 	}
-	var warnings enrollmentLogBuffer
-	writer := log.Writer()
-	log.SetOutput(&warnings)
-	defer log.SetOutput(writer)
-	injected := errors.New("injected reload failure before cutover")
-	fail := true
+	original := p.Command
 	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		switch strings.Join(args, " ") {
-		case "--user show myce-queue.service --property=DropInPaths --value":
-			return []byte(path), nil
-		case "--user daemon-reload":
-			if fail {
-				fail = false
-				return nil, injected
+		if name == "systemctl" {
+			switch strings.Join(args, " ") {
+			case "--user show myce-queue.service --property=DropInPaths --value":
+				return []byte(path), nil
+			}
+			if len(args) > 1 && args[1] != "show" && args[1] != "is-active" {
+				t.Fatalf("refused override reached manager mutation: %v", args)
 			}
 		}
-		return fakeSetupManager(ctx, name, args...)
+		return original(ctx, name, args...)
 	}
 	args := []string{"install", "queue", "--config", c.Config, "--file-store-bytes=12", "--file-store-production-reserve=6"}
-	if err := setupCommandWithProbe(args, p, c.NAS); !errors.Is(err, injected) {
-		t.Fatalf("did not reach install with override present: %v", err)
+	if err := setupCommandWithProbe(args, p, c.NAS); !errors.Is(err, myce.ErrQueueExecStartOverride) {
+		t.Fatalf("conflicting override was not refused: %v", err)
 	}
 	for path, want := range before {
 		if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
-			t.Fatal("failed install did not restore previous config/unit", err)
+			t.Fatal("refused override changed installed files", err)
 		}
-	}
-	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, override) {
-		t.Fatal("failed install changed the effective override", err)
-	}
-	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
-		t.Fatal(err)
-	}
-	got, err := myce.ReadServiceConfig(c.Config)
-	if err != nil || got.FileStoreBytes != 12 || got.FileStoreProductionReserve != 6 {
-		t.Fatal("override prevented saving replacement settings", err)
-	}
-	unit, err := os.ReadFile(c.Service)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, pair := range []string{`"--file-store-bytes" "12"`, `"--file-store-production-reserve" "6"`} {
-		if strings.Count(string(unit), pair) != 1 {
-			t.Errorf("generated base unit must carry %s exactly once", pair)
-		}
-	}
-	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, override) {
-		t.Fatal("installer changed the effective override", err)
-	}
-	if !strings.Contains(warnings.String(), "ExecStart drop-in still takes precedence") {
-		t.Fatal("installer did not warn that the override remains authoritative")
 	}
 }
 
