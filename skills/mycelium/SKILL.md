@@ -148,6 +148,17 @@ unsupported with entries. Only production entries need a target list; every fiel
   sidecars ([migration](references/submit.md#environments)).
 - **Installed tools** are the default. List what the command calls in
   `needs: {tools: [git, node]}` so placement skips machines without them.
+  Supporting workers also require `xcodebuild -version` and `xcrun --version`
+  to succeed in the worker-owned environment before advertising those tools.
+  Older workers only check executable presence. Launch still checks presence;
+  job-specific environment selection and SDK health use qualification below.
+  For **full Xcode plus the iOS Simulator SDK**, use the existing native
+  `checks.qualification` with an exact success-marker baseline: run
+  `xcodebuild -version`, then `xcrun --sdk iphonesimulator --show-sdk-path`,
+  verify that directory exists, and only then write `$MYCE_CHECK_OUTPUT`.
+  Declare exact Darwin targets and `needs: {tools: [xcodebuild, xcrun]}`;
+  avoid a fixed Xcode application path. Tool names alone do not establish SDK
+  availability. See the [complete Xcode qualification example](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#require-full-xcode-and-the-ios-simulator-sdk).
 - **Probed software capabilities** use native `checks.qualification` and a
   bundled `baselines: {extension:ENTRY_NAME: ...}` comparison, with exact
   targets and the same environment as the payload. For software EGL, run the
