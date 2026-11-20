@@ -78,8 +78,10 @@ by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
   extension checks, CPU maintenance resumes, and waits for a finite GPU execution
   to finish. Freed capacity accumulates toward that demand; portable queued CPU
   work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
-  Production's relative start window pauses behind `host_capacity_accumulation`
-  fences; an explicit `start_by` still binds.
+  Production's relative start budget renews when it expires behind a
+  `host_capacity_accumulation` fence; status may show a countdown that re-arms.
+  First assignment grants a full relative budget for preparation. An explicit
+  `start_by` still binds.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.

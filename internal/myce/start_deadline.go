@@ -144,7 +144,7 @@ func (q *Queue) maintainStartDeadlines() {
 	}
 	// Resolve the backlog in one immutable planning pass. Deadline transitions
 	// below can change jobs, so discard this evidence cache before applying them.
-	type capacityStatus struct{ waiting, ready bool }
+	type capacityStatus struct{ waiting, ready, rearm bool }
 	capacity := func() map[*Job]capacityStatus {
 		previous := q.memoryPlanning
 		q.memoryPlanning = newMemoryPlanningCache()
@@ -156,15 +156,17 @@ func (q *Queue) maintainStartDeadlines() {
 				waiting, ready := q.queuedCapacityStatus(j)
 				// Fence planning sizes the backlog. Keep it off ordinary check-ins;
 				// only an expired production budget needs this final expiry guard.
-				if ready && j.Spec.Priority == "production" && expired(j.Spec.StartBy, now) {
+				rearm := false
+				if ready && j.Spec.Priority == "production" && j.Spec.FanOut == nil && expired(j.Spec.StartBy, now) {
 					if scan == nil {
 						scan = q.placementScan()
 					}
 					if q.hostBackfillWaitingReason(j, scan) != "" {
 						waiting, ready = true, false
+						rearm = true
 					}
 				}
-				status[j] = capacityStatus{waiting, ready}
+				status[j] = capacityStatus{waiting, ready, rearm}
 			}
 		}
 		return status
@@ -172,12 +174,13 @@ func (q *Queue) maintainStartDeadlines() {
 	for _, j := range q.liveJobs() {
 		faultWaiting := q.maintainDeviceFaultStartWait(j)
 		if status, ok := capacity[j]; ok && !faultWaiting {
-			if j.StartCapacityWaiting != status.waiting || j.StartCapacityWaiting && status.ready {
+			if j.StartCapacityWaiting != status.waiting || j.StartCapacityWaiting && status.ready || status.rearm {
 				q.touchJob(j.ID)
 			}
-			if j.StartCapacityWaiting && status.ready && j.Spec.StartBy != nil {
+			if (j.StartCapacityWaiting && status.ready || status.rearm) && j.Spec.StartBy != nil {
 				// Capacity recovered before dispatch. Restore startup time without
-				// hiding a later unavailable/disabled-route diagnosis.
+				// hiding a later unavailable/disabled-route diagnosis. Re-arm a
+				// fenced expiry too, bounding fence checks to once per budget.
 				deadline := now.Add(startCapacityBudget(j))
 				j.Spec.StartBy = &deadline
 			}
