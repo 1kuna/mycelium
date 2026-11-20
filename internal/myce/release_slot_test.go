@@ -79,6 +79,9 @@ func TestReleaseSlotInstallerReconciliation(t *testing.T) {
 				if name != "systemctl" {
 					t.Fatalf("unexpected command: %s", name)
 				}
+				if len(args) == 3 && args[1] == "show" {
+					return installUnitObservation(f.c), nil
+				}
 				text := strings.Join(args, " ")
 				if strings.Contains(text, "MainPID") {
 					return []byte(fmt.Sprintf("ActiveState=active\nSubState=running\nMainPID=%d\nNRestarts=0\nResult=success\n", f.managerPID)), nil
@@ -216,6 +219,9 @@ func TestReleaseSlotRepairVerifiedAddress(t *testing.T) {
 		if name != "systemctl" {
 			t.Fatalf("unexpected manager: %s", name)
 		}
+		if len(args) == 3 && args[1] == "show" {
+			return installUnitObservation(f.c), nil
+		}
 		text := strings.Join(args, " ")
 		if strings.Contains(text, "MainPID") {
 			return []byte(fmt.Sprintf("ActiveState=active\nSubState=running\nMainPID=%d\nNRestarts=0\nResult=success\n", f.managerPID)), nil
@@ -243,6 +249,9 @@ func TestReleaseSlotMatchThenChangesBeforeSnapshot(t *testing.T) {
 	command := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name != "systemctl" {
 			t.Fatalf("unexpected command %s", name)
+		}
+		if len(args) == 3 && args[1] == "show" {
+			return installUnitObservation(f.c), nil
 		}
 		text := strings.Join(args, " ")
 		if strings.Contains(text, "MainPID") {
