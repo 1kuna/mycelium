@@ -210,6 +210,9 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 					if !job(t, q, a.ID).Copies[0].ReleaseConfirmed {
 						t.Fatal("outage did not release exact custody")
 					}
+					if got := job(t, q, a.ID); got.Losses != 1 || got.InfrastructureRetries != 1 {
+						t.Fatal("outage outside queue restart grace bypassed accounting", got)
+					}
 				}
 			case <-time.After(testWaitTimeout):
 				p.stop(clock.Now(), 0, true)
