@@ -133,9 +133,11 @@ recipe. Status describes missing platform/environment capacity.
 
 ## CPU tools with pixi
 
-From the next release, non-production native CPU commands can use `portable: true`
-with omitted targets and a named managed recipe. Candidate coverage comes from
-that recipe's selected immutable Pixi lock environment, intersected with every
+Non-production native CPU commands can use `portable: true` with omitted targets
+and a named managed recipe or a project-carried Pixi lock. For a project lock,
+use `environment: {backend: pixi, lock_file: pixi.lock}` and keep `pixi.toml`
+alongside the lock. Coverage comes from the `default` environment in the project
+lock or the selected environment in a named recipe, intersected with every
 member environment, supported runtime and fresh worker inventory. `portable`
 asserts the entire payload, including native binaries, downloads and shell code;
 lock coverage alone proves dependencies only. Unknown uv/binary/installed-tool

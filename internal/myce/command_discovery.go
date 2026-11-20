@@ -29,8 +29,9 @@ func validateCommandDiscovery(s Spec) error {
 	if err := lowerExecution(&s); err != nil {
 		return err
 	}
-	if !s.Needs.cpuOnly() || s.Environment.Name == "" {
-		return errors.New("omitted-target portable discovery requires native CPU commands and a named managed environment with selected immutable lock coverage; otherwise declare explicit targets")
+	e := s.Environment
+	if !s.Needs.cpuOnly() || (e.Name == "" && (e.Backend != "pixi" || e.LockFile == "")) {
+		return errors.New("omitted-target portable discovery requires native CPU commands with a named managed environment or a Pixi lock_file, and known selected immutable lock coverage; otherwise declare explicit targets")
 	}
 	return nil
 }
@@ -53,7 +54,7 @@ func deriveCommandDiscovery(s Spec, main map[string]EnvironmentRecipe, sidecars 
 		r, ok := recipes["cpu"]
 		coverage := environmentLockCoverage(r, nil, "cpu")
 		if !ok || r.Key == "" || !strings.HasPrefix(coverage.State, "declared:") {
-			return nil, errors.New("portable discovery has unknown member lock coverage; select a managed CPU recipe with machine-readable selected-lock targets, or declare explicit targets")
+			return nil, errors.New("portable discovery has unknown member lock coverage; use CPU member locks that declare their selected environment's targets, or declare explicit targets")
 		}
 		covered := func(t ExecutionTarget) bool {
 			return portabilityRuntime(t) == "supported" && slices.Contains(coverage.Targets, t) && (r.Target == nil || *r.Target == t)
