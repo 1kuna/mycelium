@@ -155,7 +155,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 		}
 	})
 
-	for _, outcome := range []string{"failed", "cancelled", "stale", "maintenance", "demand cancelled", "identity changed"} {
+	for _, outcome := range []string{"failed", "prelaunch refusal", "unproven refusal", "stale refusal", "cancelled", "stale", "maintenance", "demand cancelled", "identity changed"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, w, e, demand, _, plans := qualificationFixture(t)
 			plan := plans[0]
@@ -175,6 +175,18 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			switch outcome {
 			case "failed":
 				finish(t, q, assigned, false)
+			case "prelaunch refusal", "unproven refusal", "stale refusal":
+				r := result(assigned, false)
+				r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: launchRefused, Predicate: "launch_authorization", PrelaunchRefused: true}
+				if outcome != "unproven refusal" {
+					r.ExecutionEvidence = unstartedExecution(assigned.Attempt)
+					if outcome == "stale refusal" {
+						r.ExecutionEvidence.Attempt++
+					}
+				}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
 			case "cancelled":
 				if err := q.Cancel(assigned.ID); err != nil {
 					t.Fatal(err)
@@ -217,7 +229,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 			if qualifiedExtension(demand, q.s.Machines[incoming.ID]) != nil {
 				t.Fatal("unsuccessful or obsolete check granted qualification")
 			}
-			if outcome == "failed" || outcome == "cancelled" {
+			if outcome == "failed" || outcome == "cancelled" || outcome == "prelaunch refusal" || outcome == "unproven refusal" || outcome == "stale refusal" {
 				reconcileQualification(t, w, plan)
 				before := qualificationJob(t, q, plan.Report.CheckID)
 				reconcileQualification(t, w, plan)
@@ -231,6 +243,15 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 					}
 				}
 				w.Machine.ExtensionReports = local
+				if outcome == "prelaunch refusal" {
+					// The supported receipt must retain the same accepted proof
+					// as dispatch, even though terminal history is projected out.
+					check(t, q, w.Machine, nil)
+					got, err := q.jobSnapshot(demand.ID)
+					if err != nil || got.Hold == nil || got.Hold.Kind != "native_qualification" || strings.Contains(got.Hold.Reason, "no automatic retry") {
+						t.Fatalf("receipt lost retryable infrastructure evidence: %v %+v", err, got.Hold)
+					}
+				}
 				var successor *ExtensionQualificationPlan
 				for _, offered := range check(t, q, w.Machine, nil).ExtensionQualificationPlan {
 					if offered.Report.CheckID == plan.Report.CheckID {
@@ -240,7 +261,7 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 						successor = &offered
 					}
 				}
-				if outcome == "failed" {
+				if outcome == "failed" || outcome == "unproven refusal" || outcome == "stale refusal" {
 					// A failed verdict is the consumer's to fix: the useful job
 					// fails at the next tick with that one action, not a wait.
 					if successor != nil {
@@ -258,20 +279,21 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 						}
 					}
 				} else {
-					// A cancelled check has no verdict. The queue reruns it under
+					// Cancellation or proven prelaunch refusal has no verdict.
+					// The queue reruns it under
 					// a successor key instead of waiting for an explicit retry.
 					if successor == nil || successor.Report.CheckID != automaticExtensionRetryCheckID(w.Machine.ID, successor.Report, plan.Report.CheckID) {
-						t.Fatal("cancelled check was not rerun", successor)
+						t.Fatal("check without a native verdict was not rerun", successor)
 					}
 					reconcileQualification(t, w, *successor)
 					rerun := qualificationJob(t, q, successor.Report.CheckID)
 					if rerun.ID == before.ID || terminal(rerun.State) {
-						t.Fatal("successor reused the cancelled invocation", rerun.State)
+						t.Fatal("successor reused the previous invocation", rerun.State)
 					}
 					forged := successor.Report
 					forged.CheckID = automaticExtensionRetryCheckID(w.Machine.ID, forged, "never-issued")
 					if q.automaticCheckKeyValid(w.Machine.ID, forged) {
-						t.Fatal("successor key accepted without a cancelled predecessor")
+						t.Fatal("successor key accepted without an accepted predecessor")
 					}
 					if err := q.Tick(); err != nil {
 						t.Fatal(err)

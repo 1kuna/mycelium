@@ -459,6 +459,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 					s.Submissions[key] = r
 				}
 			}
+			for key, r := range q.qualificationRetryInputs() {
+				s.Submissions[key] = r
+			}
 		}
 		if id == "" {
 			files = q.captureFileStoreStatus()
