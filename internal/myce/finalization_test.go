@@ -242,7 +242,7 @@ func TestFinalizationUploadRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = c.GetJob(context.Background(), j.ID)
-	if err != nil || got.State != "succeeded" || got.ExecutionCause != nil {
+	if err != nil || got.State != "succeeded" || got.ExecutionCause != nil || strings.HasPrefix(got.Reason, "finalization pending:") {
 		t.Fatalf("pending failure survived success: %+v %v", got, err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "retained output" {
