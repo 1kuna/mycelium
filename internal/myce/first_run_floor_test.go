@@ -163,7 +163,7 @@ func TestFirstRunFloorCompilerRoom(t *testing.T) {
 			if run == nil || run.ID != queued.ID || run.Spec.Needs.HostMemoryGB != minimumHostMemoryGB {
 				t.Fatal("compiler was not charged only its floor")
 			}
-			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 15, nil }, hostRawMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 			d, err := w.firstRunMemoryAdmission(context.Background(), *run)
 			if err != nil || d.RoomGB != 15 {
 				t.Fatalf("compiler launch: %+v %v", d, err)
