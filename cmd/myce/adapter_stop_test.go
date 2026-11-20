@@ -16,16 +16,31 @@ import (
 
 // Exercise the actual adapter lowering, API and worker command runner. A FIFO
 // holds the TERM handler mid-save so wrapper exit cannot race a tiny write.
-func TestAdapterGracefulStopCheckpoint(t *testing.T) {
-	for _, runner := range []string{"plain", "native"} {
-		for _, platform := range []string{"cpu", "fake"} {
-			for _, stop := range []string{"leave", "deadline", "cancel"} {
-				for _, checks := range []bool{false, true} {
-					t.Run(fmt.Sprintf("%s/%s/%s/checks=%t", runner, platform, stop, checks), func(t *testing.T) {
-						testAdapterGracefulStopCheckpoint(t, runner, platform, stop, checks)
-					})
-				}
-			}
+func TestAdapterGracefulStopCheckpointPlainCPU(t *testing.T) {
+	testAdapterGracefulStopCheckpointMatrix(t, "plain", "cpu")
+}
+
+func TestAdapterGracefulStopCheckpointPlainGPU(t *testing.T) {
+	testAdapterGracefulStopCheckpointMatrix(t, "plain", "fake")
+}
+
+func TestAdapterGracefulStopCheckpointNativeCPU(t *testing.T) {
+	testAdapterGracefulStopCheckpointMatrix(t, "native", "cpu")
+}
+
+func TestAdapterGracefulStopCheckpointNativeGPU(t *testing.T) {
+	testAdapterGracefulStopCheckpointMatrix(t, "native", "fake")
+}
+
+// Separate roots let the full gate refill its existing process slots between
+// runner/platform groups. Each case still owns its real queue, worker and FIFO.
+func testAdapterGracefulStopCheckpointMatrix(t *testing.T, runner, platform string) {
+	t.Helper()
+	for _, stop := range []string{"leave", "deadline", "cancel"} {
+		for _, checks := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/checks=%t", stop, checks), func(t *testing.T) {
+				testAdapterGracefulStopCheckpoint(t, runner, platform, stop, checks)
+			})
 		}
 	}
 }
