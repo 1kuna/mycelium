@@ -361,8 +361,18 @@ func (q *Queue) contactTime(m *Machine, now time.Time, includePending bool) time
 	opportunity := q.controlNow()
 	contact := q.checkinContact(m, now, includePending, allowance, opportunity)
 	p := q.workerPolls[m.ID][m.Session]
-	if !includePending || p == nil {
+	if p == nil {
 		return contact
+	}
+	if !includePending {
+		c := q.contacts[m.ID]
+		// A poll already open at the last accepted check-in identifies a
+		// surviving session, rather than a reconnect that could hide an outage.
+		// Discarding that continuity repeatedly resets delivered cadence when
+		// local reconciliation takes longer than the advertised send interval.
+		if p.open == 0 || c == nil || c.session != m.Session || p.last > c.processedOpportunity {
+			return contact
+		}
 	}
 	polled := now
 	if p.open == 0 {

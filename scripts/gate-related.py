@@ -67,6 +67,9 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
     'device_detection_test.go', 'device_inventory_family_test.go',
     'probe_consolidation_test.go', 'accelerator_backend_test.go')
 
+# Contact/loss and outage decisions have fake-clock coverage in the clock tests.
+SUPPLEMENTAL_CONSUMERS['internal/myce/queue_contact.go'] = ('control_clock_test.go',)
+
 # Actual check-in admission decisions are exercised by the admission wait tests.
 SUPPLEMENTAL_CONSUMERS['internal/myce/admission_decision.go'] = ('admission_wait_test.go',)
 # The Linux owner probe and its constructor are exercised by the owner-signal tests.
