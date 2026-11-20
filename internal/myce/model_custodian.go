@@ -540,7 +540,7 @@ func (w Worker) runModelCustodian(stop context.Context, spool string) error {
 		if !stopping && readCustodianJSON(dir, custodianName(id, "model-policy"), &policy) == nil && policy.ID == id && policy.Execution == r.Execution && (policy.OOMScore == 0 || policy.OOMScore == 1000) {
 			rt.mu.Lock()
 			if err := updateModelOOMScore(m, policy.OOMScore); err != nil {
-				m.err, m.runtimeFailed = "model OOM priority update failed", true
+				m.err, m.runtimeFailed = err.Error(), true
 				rt.unload(m)
 			} else {
 				oomScore = policy.OOMScore
