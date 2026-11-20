@@ -128,6 +128,7 @@ type Worker struct {
 	batchAdmission    func(context.Context, HostLaunch) error
 	// The worker ledger without one attempt: others' charges and pending growth.
 	hostChargesExcept     func(attemptKey) (charge, pending float64)
+	firstRunAdmission     *MemoryRoomDecision
 	stopAdmission         func()
 	DeviceBinding         string
 	EnvironmentSourceRoot string
@@ -507,6 +508,23 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, chargedHostGB(&j)); err != nil {
 		return nil, err
+	}
+	if floorCharged(j.MemoryEnvelope) {
+		decision, err := w.firstRunMemoryAdmission(ctx, j)
+		if err != nil {
+			return nil, s.startFailure(j, launchRefused, err)
+		}
+		w.firstRunAdmission = decision
+		admit := w.batchAdmission
+		w.batchAdmission = func(ctx context.Context, launch HostLaunch) error {
+			if admit != nil {
+				if err := admit(ctx, launch); err != nil {
+					return err
+				}
+			}
+			_, err := w.firstRunMemoryAdmission(ctx, j)
+			return err
+		}
 	}
 	phaseDone(nil)
 	phaseDone = stagingMeasure(ctx, stageRoots)

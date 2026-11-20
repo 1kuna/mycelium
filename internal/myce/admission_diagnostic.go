@@ -20,6 +20,7 @@ type AdmissionDetail struct {
 	EnvelopeHostGB   float64                 `json:"envelope_host_gb"`
 	EnvelopeDeviceGB float64                 `json:"envelope_device_gb"`
 	Contributors     []HostGrowthContributor `json:"contributors,omitempty"`
+	MemoryRoom       *MemoryRoomDecision     `json:"memory_room,omitempty"`
 }
 
 // These are the terms of the failed physical-growth sum, not memory attributed
@@ -85,12 +86,15 @@ func safeAdmissionDetail(d *AdmissionDetail) *AdmissionDetail {
 		"device_budget": "GiB", "aggregate_cpu_allowance": "cores",
 		"aggregate_host_allowance": "GiB", "configured_host_allowance": "GiB",
 		"live_host_ram": "GiB", "live_host_growth": "GiB", "live_gpu_memory": "GiB",
-		"shared_cpu_controller": "controllers",
+		"shared_cpu_controller":            "controllers",
+		"exploratory_capacity_unavailable": "GiB", "custodian_ledger_read_failed": "GiB",
+		"exploratory_host_memory_unavailable": "GiB", "exploratory_memory_room": "GiB",
 	}
 	if units[d.Subcheck] == "" || units[d.Subcheck] != d.Unit || !validMemoryValue(d.Required) || !validMemoryValue(d.EnvelopeHostGB) || !validMemoryValue(d.EnvelopeDeviceGB) {
 		return nil
 	}
 	out := *d
+	out.MemoryRoom = safeMemoryRoom(d.MemoryRoom)
 	out.Contributors = nil
 	if d.Subcheck == "live_host_growth" {
 		for _, c := range d.Contributors {

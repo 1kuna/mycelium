@@ -19,20 +19,25 @@ const rssLimitExceeded = "rss_limit_exceeded"
 const darwinRSSGuardStatus = "sampled RSS guard (native CPU); no kernel memory ceiling"
 
 type RSSLimitEvidence struct {
-	ObservedBytes uint64 `json:"observed_bytes"`
-	LimitBytes    int64  `json:"limit_bytes"`
-	Quality       string `json:"quality"`
+	ObservedBytes uint64              `json:"observed_bytes"`
+	LimitBytes    int64               `json:"limit_bytes"`
+	Quality       string              `json:"quality"`
+	MemoryRoom    *MemoryRoomDecision `json:"memory_room,omitempty"`
 }
 
 func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
-	if e == nil || e.LimitBytes <= 0 || e.ObservedBytes <= uint64(e.LimitBytes) || e.Quality != "owned_session_rss" && e.Quality != "cgroup_current" && e.Quality != footprintGuardQuality {
+	if e == nil || e.LimitBytes < 0 || e.LimitBytes == 0 && (safeMemoryRoom(e.MemoryRoom) == nil || e.MemoryRoom.RoomGB > 0) || e.ObservedBytes <= uint64(e.LimitBytes) || e.Quality != "owned_session_rss" && e.Quality != "cgroup_current" && e.Quality != footprintGuardQuality {
 		return nil
 	}
 	copy := *e
+	copy.MemoryRoom = safeMemoryRoom(e.MemoryRoom)
 	return &copy
 }
 
 func (e *RSSLimitEvidence) String() string {
+	if d := e.MemoryRoom; d != nil {
+		return fmt.Sprintf("sampled memory %d bytes exceeded measured room %g GiB (capacity %g GiB from %s; charges %g GiB; pending %g GiB)", e.ObservedBytes, d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB)
+	}
 	if e.Quality == "cgroup_current" {
 		return fmt.Sprintf("sampled cgroup memory %d bytes exceeded resolved limit %d bytes (%s)", e.ObservedBytes, e.LimitBytes, e.Quality)
 	}

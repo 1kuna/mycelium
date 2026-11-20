@@ -1,6 +1,9 @@
 package myce
 
 import (
+	"context"
+	"errors"
+	"math"
 	"strings"
 	"time"
 )
@@ -71,6 +74,113 @@ type firstRunFloorRoom struct {
 	others          func() (charge, pending float64)
 	at              time.Time
 	used, available float64
+	charge, pending float64
+	ledgerKnown     bool
+	decision        *MemoryRoomDecision
+}
+
+// MemoryRoomDecision preserves the actual bound, independently of the launch
+// accounting floor. Only numeric inputs and fixed source labels cross the wire.
+type MemoryRoomDecision struct {
+	RoomGB           float64  `json:"room_gb"`
+	FloorGB          float64  `json:"floor_gb"`
+	AllowanceGB      float64  `json:"allowance_gb"`
+	CapacityGB       float64  `json:"capacity_gb"`
+	CapacitySource   string   `json:"capacity_source"`
+	ChargeGB         float64  `json:"charges_gb"`
+	PendingGB        float64  `json:"pending_gb"`
+	AvailableGB      *float64 `json:"available_gb,omitempty"`
+	ReserveGB        float64  `json:"reserve_gb"`
+	OwnGrowthGB      float64  `json:"own_growth_gb"`
+	HostLossGB       float64  `json:"host_loss_gb"`
+	LedgerReadFailed bool     `json:"ledger_read_failed,omitempty"`
+}
+
+func memoryCapacitySource(m *Machine) string {
+	if p := m.CapabilityProfile; p != nil && p.SystemMemoryBytes > 0 && (m.HostMemoryBudgetGB <= 0 || float64(p.SystemMemoryBytes)/(1<<30) < m.HostMemoryBudgetGB) {
+		return "physical RAM"
+	}
+	if m.HostMemoryBudgetGB > 0 {
+		return "host allowance"
+	}
+	return "unavailable"
+}
+
+func safeMemoryRoom(d *MemoryRoomDecision) *MemoryRoomDecision {
+	if d == nil || math.IsNaN(d.RoomGB) || math.IsInf(d.RoomGB, 0) {
+		return nil
+	}
+	for _, v := range []float64{d.FloorGB, d.AllowanceGB, d.CapacityGB, d.ChargeGB, d.PendingGB, d.ReserveGB, d.OwnGrowthGB, d.HostLossGB} {
+		if !validMemoryValue(v) {
+			return nil
+		}
+	}
+	if d.CapacitySource != "physical RAM" && d.CapacitySource != "host allowance" && d.CapacitySource != "unavailable" {
+		return nil
+	}
+	out := *d
+	if d.AvailableGB != nil {
+		if !validMemoryValue(*d.AvailableGB) {
+			return nil
+		}
+		v := *d.AvailableGB
+		out.AvailableGB = &v
+	}
+	return &out
+}
+
+func custodianHostCharges(dir, id string) func(attemptKey) (float64, float64) {
+	return func(attemptKey) (float64, float64) {
+		var ledger struct {
+			Charge  *float64 `json:"charge"`
+			Pending *float64 `json:"pending"`
+		}
+		if readCustodianJSON(dir, custodianName(id, "ledger"), &ledger) != nil || ledger.Charge == nil || ledger.Pending == nil || !validMemoryValue(*ledger.Charge) || !validMemoryValue(*ledger.Pending) {
+			return math.NaN(), math.NaN() // Unknown, never fabricated full-allowance charges.
+		}
+		return *ledger.Charge, *ledger.Pending
+	}
+}
+
+// The existing final launch gates call this again after preparation. An offer
+// of the accounting floor is never permission to start a floor-only guard.
+func (w Worker) firstRunMemoryAdmission(ctx context.Context, j Job) (*MemoryRoomDecision, error) {
+	if !floorCharged(j.MemoryEnvelope) {
+		return nil, nil
+	}
+	floor := hostNeed(&w.Machine, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	capacity := adaptiveMemoryCeilingGB(&j, &w.Machine)
+	d := &MemoryRoomDecision{FloorGB: floor, CapacityGB: capacity, AllowanceGB: w.Machine.HostMemoryBudgetGB, CapacitySource: memoryCapacitySource(&w.Machine), ReserveGB: w.HostMemoryReserveGB}
+	refuse := func(check string, unavailable bool) (*MemoryRoomDecision, error) {
+		err := refuseAdmission(check, "GiB", floor, max(0, d.RoomGB), unavailable).(*admissionError)
+		err.detail.MemoryRoom = d
+		return d, err
+	}
+	if capacity <= floor {
+		return refuse("exploratory_capacity_unavailable", true)
+	}
+	if w.hostChargesExcept != nil {
+		d.ChargeGB, d.PendingGB = w.hostChargesExcept(jobKey(j))
+	}
+	if !validMemoryValue(d.ChargeGB) || !validMemoryValue(d.PendingGB) {
+		d.ChargeGB, d.PendingGB, d.LedgerReadFailed = 0, 0, true
+		d, err := refuse("custodian_ledger_read_failed", true)
+		return d, errors.Join(errWorkerCheckpoint, err)
+	}
+	if w.HostMemorySource == nil {
+		return refuse("exploratory_host_memory_unavailable", true)
+	}
+	_, raw, err := w.sampleHostMemory(ctx)
+	if err != nil || !validMemoryValue(raw) {
+		return refuse("exploratory_host_memory_unavailable", true)
+	}
+	d.AvailableGB = &raw
+	d.RoomGB = min(capacity-d.ChargeGB, raw-d.ReserveGB-d.PendingGB)
+	if d.RoomGB <= floor {
+		d, err := refuse("exploratory_memory_room", false)
+		return d, errors.Join(errWorkerCheckpoint, err)
+	}
+	return d, nil
 }
 
 func (r *firstRunFloorRoom) limitBytes(now time.Time, bytes uint64, host *gpuHostState, reserve, capacityGB float64) int64 {
@@ -89,18 +199,30 @@ func (r *firstRunFloorRoom) limitBytes(now time.Time, bytes uint64, host *gpuHos
 	}
 	r.at, r.used, r.available = now, used, available
 	charge, pending := r.others()
+	failed := !validMemoryValue(charge) || !validMemoryValue(pending)
+	if !failed {
+		r.charge, r.pending, r.ledgerKnown = charge, pending, true
+	}
+	// A failed read is not a full-allowance charge. Retain the admitted ledger
+	// while the physical-room and hard guards keep running during replacement.
+	charge, pending = r.charge, r.pending
 	room := capacityGB - charge - own
 	if available >= 0 {
 		room = min(room, used+available-reserve-pending-lost)
 	}
-	if !validRate(room) {
-		return 0
+	d := MemoryRoomDecision{RoomGB: room, CapacityGB: capacityGB, ChargeGB: charge, PendingGB: pending, ReserveGB: reserve, OwnGrowthGB: own, HostLossGB: lost, LedgerReadFailed: failed}
+	if previous := r.decision; previous != nil {
+		d.FloorGB, d.AllowanceGB, d.CapacitySource = previous.FloorGB, previous.AllowanceGB, previous.CapacitySource
 	}
-	return int64(room * (1 << 30))
+	if available >= 0 {
+		d.AvailableGB = &available
+	}
+	r.decision = &d
+	return int64(max(0, room) * (1 << 30))
 }
 
 func (r *firstRunFloorRoom) reset() {
 	if r != nil {
-		*r = firstRunFloorRoom{others: r.others}
+		*r = firstRunFloorRoom{others: r.others, charge: r.charge, pending: r.pending, ledgerKnown: r.ledgerKnown, decision: r.decision}
 	}
 }

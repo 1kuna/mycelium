@@ -605,6 +605,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				// measures, and the ledger charges what it uses (lendProbe).
 				// A refusal of the whole-room offer does not apply to it.
 				n.HostMemoryGB, source = probeFloor, source+"; "+firstRunFloorSource
+				if room := q.hostRoomAfter(m, nil, nil); room <= hostNeed(m, 0, probeFloor) {
+					refusal = fmt.Sprintf("exploratory first run needs room above its accounting floor; measured room %g GiB, floor %g GiB", room, hostNeed(m, 0, probeFloor))
+				}
 			}
 		}
 		if floor := j.MemoryOOMFloor; floor != nil {
@@ -642,6 +645,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		envelope.Enforcement = learnedMemoryGuardEnforcement
 		if adaptiveMemoryCeilingGB(j, m) <= 0 {
 			envelope.Enforcement = enforcement
+			if floorCharged(envelope) {
+				envelope.Refusal = "exploratory adaptive capacity unavailable; accounting floor cannot be enforced as a ceiling"
+			}
 		}
 	}
 	q.observeMemoryAdmission(j, m)

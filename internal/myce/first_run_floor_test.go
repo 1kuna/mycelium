@@ -119,7 +119,7 @@ func TestFirstRunFloorLaunchRefusals(t *testing.T) {
 			w.hostChargesExcept = func(attemptKey) (float64, float64) { return 0, 0 }
 			switch mode {
 			case "ledger read failed":
-				w.hostChargesExcept = func(attemptKey) (float64, float64) { return math.NaN(), math.NaN() }
+				w.hostChargesExcept = custodianHostCharges(t.TempDir(), ID())
 			case "floor-only room":
 				w.hostChargesExcept = func(attemptKey) (float64, float64) { return 28 - minimumHostMemoryGB, 0 }
 			case "missing adaptive capacity":
@@ -142,7 +142,88 @@ func TestFirstRunFloorLaunchRefusals(t *testing.T) {
 			if p != nil || !errors.Is(err, errWorkerMemory) || admissionDetail(err, j) == nil {
 				t.Fatalf("%s launched or lost its typed admission refusal: process=%v error=%v", mode, p != nil, err)
 			}
+			detail := admissionDetail(err, j)
+			if detail.MemoryRoom == nil || mode == "ledger read failed" && (!detail.Unavailable || !detail.MemoryRoom.LedgerReadFailed || detail.Subcheck != "custodian_ledger_read_failed") || mode == "floor-only room" && detail.MemoryRoom.RoomGB != minimumHostMemoryGB || mode == "missing adaptive capacity" && detail.Subcheck != "exploratory_capacity_unavailable" {
+				t.Fatalf("lost boundary decision: %+v", detail)
+			}
 		})
+	}
+}
+
+// The compiler-sized RSS reading from #1761 is injected, not allocated. Replay
+// it through ordinary admission and both sampled guards without a memory hint.
+func TestFirstRunFloorCompilerRoom(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			q, clock, m := floorFixture(t, platform)
+			m.MemoryCeilingSlackGB = 0
+			check(t, q, m, nil)
+			queued := submit(t, q, autoSpec("compiler", "go", "test", "-c", "./..."))
+			run := check(t, q, m, nil).Job
+			if run == nil || run.ID != queued.ID || run.Spec.Needs.HostMemoryGB != minimumHostMemoryGB {
+				t.Fatal("compiler was not charged only its floor")
+			}
+			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+			d, err := w.firstRunMemoryAdmission(context.Background(), *run)
+			if err != nil || d.RoomGB != 16 {
+				t.Fatalf("compiler launch: %+v %v", d, err)
+			}
+			w.firstRunAdmission = d
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			g := w.learnedGuard(*run)
+			members := 1 // The cgroup observer always supplies one membership.
+			if platform == "darwin" {
+				members = 8
+			}
+			for range 20 {
+				if stop := g.observeMemory(clock.Now(), map[int]string{7: "birth"}, 2314674176, members, nil, &gpuHostState{available: 16}); stop != nil {
+					t.Fatalf("compiler stopped at accounting floor: %+v", stop)
+				}
+				clock.Advance(processMemorySamplePeriod)
+			}
+			peak := float64(2314674176) / (1 << 30)
+			r := result(run, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if done := job(t, q, run.ID); done.State != "succeeded" || done.Attempt != 1 || done.OOMRetries != 0 {
+				t.Fatalf("first-run compiler result: state=%s attempt=%d retries=%d", done.State, done.Attempt, done.OOMRetries)
+			}
+		})
+	}
+}
+
+func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
+	_, clock, m := floorFixture(t)
+	m.MemoryCeilingSlackGB = 0
+	j := Job{Spec: autoSpec("compiler", "go", "test"), MemoryEnvelope: &JobMemoryEnvelope{Source: firstRunFloorSource, Basis: "exploratory", Enforcement: learnedMemoryGuardEnforcement}}
+	j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
+	charge := 2.0
+	w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, hostChargesExcept: func(attemptKey) (float64, float64) { return charge, 1 }}
+	d, err := w.firstRunMemoryAdmission(context.Background(), j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.firstRunAdmission = d
+	g := w.learnedGuard(j)
+	charge = math.NaN() // A later read failure retains the admitted ledger.
+	for range 4 {
+		if stop := g.observeMemory(clock.Now(), map[int]string{7: "birth"}, 2314674176, 1, nil, &gpuHostState{available: 16}); stop != nil {
+			t.Fatalf("failed ledger read fabricated a floor stop: %+v", stop)
+		}
+		clock.Advance(processMemorySamplePeriod)
+	}
+	charge = 28 // Real contention now exhausts the allowance.
+	stop := g.observeMemory(clock.Now(), map[int]string{7: "birth"}, 2314674176, 1, nil, &gpuHostState{available: 16})
+	if safeRSSLimit(stop) == nil || stop.LimitBytes != 0 || stop.MemoryRoom == nil || stop.MemoryRoom.ChargeGB != 28 || stop.MemoryRoom.CapacitySource != "host allowance" {
+		t.Fatalf("lost real room-exhaustion bound: %+v", stop)
+	}
+	r := classifyAttemptOutcome(result(&j, false), attemptCause{memberOutcome: memberOutcome{RSSLimit: stop}})
+	if r.ExecutionCause == nil || r.ExecutionCause.RSSLimit.MemoryRoom == nil {
+		t.Fatal("decision lost at result boundary")
 	}
 }
 
