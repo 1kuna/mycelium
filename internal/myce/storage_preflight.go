@@ -117,7 +117,7 @@ func preflightFleetStorageResult(ctx context.Context, c ServiceConfig, command f
 			return nil, storageCheckError(name, "format", time.Since(started), err)
 		}
 	}
-	return prepareInstallStorage(ctx, c, command, true, fs)
+	return prepareInstallStorage(ctx, c, command, installStorageProbe, fs)
 }
 
 func fleetStorageFailure(code string, detail *StoragePreflightFailure) *StoragePreflightFailure {
@@ -172,14 +172,15 @@ type installStorageReceipt struct {
 	Warning *StoragePreflightFailure `json:"storage_warning,omitempty"`
 }
 
-func prepareInstallStorage(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool, fs *onboardingStorageFS) (*StoragePreflightFailure, error) {
+func prepareInstallStorage(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), mode installStorageMode, fs *onboardingStorageFS) (*StoragePreflightFailure, error) {
 	var err error
 	if fs != nil {
 		copy := *fs
-		copy.removeCreated = preflight
+		copy.removeCreated = mode == installStorageProbe
+		copy.readOnly = mode == installStoragePreview
 		_, err = prepareOnboardingStorageFS(ctx, c, false, command, copy)
 	} else {
-		err = prepareInstallNASMode(ctx, c, command, preflight)
+		err = prepareInstallNASMode(ctx, c, command, mode)
 	}
 	warning, err := installStorageOutcome(ctx, err)
 	var typed *PreflightError

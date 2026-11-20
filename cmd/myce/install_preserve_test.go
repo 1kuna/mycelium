@@ -3,16 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -543,7 +546,12 @@ func TestInstallWorkerLegacyCatalogPlanRefusesActivation(t *testing.T) {
 		return original(ctx, name, args...)
 	}
 	args := []string{"install", "worker", "--config", c.Config, "--model-config", catalog}
-	output := captureJoiningOutput(t, func() error { return setupCommandWithProbe(append(args, "--dry-run"), p, c.NAS) })
+	output := captureJoiningOutput(t, func() error {
+		if err := setupCommandWithProbe(append(args, "--dry-run"), p, c.NAS); !errors.Is(err, myce.ErrWorkerUnitMigrationRequired) {
+			t.Fatalf("preview should refuse activation: %v", err)
+		}
+		return nil
+	})
 	for _, want := range []string{"model_catalog: changed", `Slice: "app.slice" -> "` + c.Slice + `"`, `OOMScoreAdjust: "200" -> "0"`, "worker_unit_migration_required", "myce migrate worker-unit", "normal myce fleet upgrade"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("missing %q in plan:\n%s", want, output)
@@ -561,5 +569,59 @@ func TestInstallWorkerLegacyCatalogPlanRefusesActivation(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(c.Service); string(got) != legacy {
 		t.Fatal("refusal changed unit")
+	}
+}
+
+func TestInstallPreviewRefusesUnavailableFleetService(t *testing.T) {
+	c, p := savedInstallFixture(t, "worker")
+	c.Enrollment = false
+	c.AllowDeviceless = true
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/api/hosts/"+c.HostID+"/maintenance" {
+			t.Errorf("unexpected queue request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(myce.HostMaintenanceStatus{
+			Workers: []myce.MaintenanceWorker{{Machine: myce.Machine{ID: c.Name}, Fresh: false}},
+		})
+	}))
+	defer server.Close()
+	c.Queue = server.URL
+	config, _ := json.Marshal(c)
+	if err := os.WriteFile(c.Config, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := myce.PrepareStateRoots(c.State); err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.State, "fleet-publisher.pub"), public, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := p.Command
+	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != "systemctl" || len(args) < 2 || args[1] != "show" && args[1] != "is-active" {
+			t.Fatalf("refusal changed manager state: %s %v", name, args)
+		}
+		return original(ctx, name, args...)
+	}
+	args := []string{"install", "worker", "--config", c.Config}
+	for _, invocation := range [][]string{append(append([]string{}, args...), "--dry-run"), args} {
+		err := setupCommandWithProbe(invocation, p, c.NAS)
+		if err == nil || err.Error() != "fleet_existing_service_unavailable" {
+			t.Fatalf("expected the active service custody refusal: %v", err)
+		}
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected one custody check per invocation, got %d", got)
+	}
+	if got, err := os.ReadFile(c.Config); err != nil || !bytes.Equal(got, config) {
+		t.Fatal("refusal changed the saved configuration", err)
 	}
 }

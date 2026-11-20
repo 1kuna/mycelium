@@ -78,24 +78,32 @@ func ReadFleetEnvironment(path string) (token, queue string, err error) {
 }
 
 func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	return prepareInstallNASMode(ctx, c, command, false)
+	return prepareInstallNASMode(ctx, c, command, installStorageWrite)
 }
 
-func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool) (result error) {
+type installStorageMode int
+
+const (
+	installStorageWrite installStorageMode = iota
+	installStorageProbe
+	installStoragePreview
+)
+
+func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), mode installStorageMode) (result error) {
 	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
-		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: preflight})
+		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: mode == installStorageProbe, readOnly: mode == installStoragePreview})
 		return err
 	}
 	started := time.Now()
 	ioCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	_, err := onboardingNASIO.runContext(ioCtx, c.NAS, func() (bool, error) {
-		return false, prepareInstallLocalNAS(ioCtx, abort, c, preflight)
+		return false, prepareInstallLocalNAS(ioCtx, abort, c, mode)
 	})
 	return storageCheckError("nas", "filesystem", time.Since(started), err)
 }
 
-func prepareInstallLocalNAS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, preflight bool) (result error) {
+func prepareInstallLocalNAS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, mode installStorageMode) (result error) {
 	root, operation := "", "filesystem"
 	started := time.Now()
 	defer func() { result = storageCheckError(root, operation, time.Since(started), result) }()
@@ -106,9 +114,12 @@ func prepareInstallLocalNAS(ctx context.Context, abort context.CancelCauseFunc, 
 		ctx := storageRootContext(ctx, root)
 		st, err := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return os.Lstat(dir) }, "lstat")
 		if errors.Is(err, os.ErrNotExist) {
+			if mode == installStoragePreview {
+				continue
+			}
 			operation = "mkdir"
 			created := false
-			if preflight {
+			if mode == installStorageProbe {
 				defer func(path, root string) {
 					if !created {
 						return
@@ -132,6 +143,9 @@ func prepareInstallLocalNAS(ctx context.Context, abort context.CancelCauseFunc, 
 		} else if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 			return preflightError("nas_root_invalid", "storage", "NAS namespace must contain real directories, not symlinks")
 		}
+	}
+	if mode == installStoragePreview {
+		return nil
 	}
 	for _, name := range []string{"checkpoints", "models", "environments"} {
 		dir := filepath.Join(c.NAS, "mycelium", name)

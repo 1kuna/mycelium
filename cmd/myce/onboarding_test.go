@@ -43,7 +43,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 		return []byte("GPU, 24576"), nil
 	}}
 	text := captureJoiningOutput(t, func() error {
-		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, p, home)
+		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--nas", home, "--dry-run", "--environment-cache-bytes", "1048576"}, dryInstallProbe(t, home, p), home)
 	})
 	for _, want := range []string{"--device", `1,0`, "--device-settings", "GPU-a", "GPU-b"} {
 		if !strings.Contains(text, want) {
@@ -72,14 +72,24 @@ func TestOnboardingInstallRedetectionFromSavedCPU(t *testing.T) {
 	b, _ := json.Marshal(c)
 	os.WriteFile(c.Config, b, 0600)
 	failed := false
-	p := myce.MachineProbe{OS: "darwin", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) {
+	p := myce.MachineProbe{OS: "darwin", Arch: "arm64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "codesign" {
+			switch args[0] {
+			case "-dv":
+				return []byte("Identifier=io.github.1kuna.mycelium\nAuthority=Developer ID Application: Fixture\n(runtime)"), nil
+			case "-dr":
+				return []byte(`designated => identifier "io.github.1kuna.mycelium" and anchor apple generic`), nil
+			default:
+				return nil, nil
+			}
+		}
 		if failed {
 			return nil, errors.New("driver failed")
 		}
 		return []byte("Metal Support: Metal 3"), nil
 	}}
 	text := captureJoiningOutput(t, func() error {
-		return setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--redetect", "--dry-run"}, p, home)
+		return setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--redetect", "--dry-run"}, dryInstallProbe(t, home, p), home)
 	})
 	for _, want := range []string{"platform=metal", "unified", "--daily-use=true", "--laptop=true", "saved-host"} {
 		if !strings.Contains(text, want) {
@@ -87,7 +97,7 @@ func TestOnboardingInstallRedetectionFromSavedCPU(t *testing.T) {
 		}
 	}
 	failed = true
-	if err := setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--redetect", "--dry-run"}, p, home); err == nil {
+	if err := setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--redetect", "--dry-run"}, dryInstallProbe(t, home, p), home); err == nil {
 		t.Fatal("broken driver accepted")
 	}
 	after, _ := os.ReadFile(c.Config)

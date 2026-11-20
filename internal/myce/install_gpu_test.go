@@ -91,10 +91,13 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			// A denied permission migration must not activate the service or
 			// publish replacement credentials.
 			err := Install(context.Background(), c, binary, "changed", func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name != "sudo" {
-					t.Fatalf("command ran after denied health access: %s", name)
+				if name == "sudo" {
+					return nil, errors.New("denied")
 				}
-				return nil, errors.New("denied")
+				if name != "systemctl" || len(args) < 2 || args[1] != "show" && args[1] != "is-active" {
+					t.Fatalf("activation command ran without GPU health access: %s", name)
+				}
+				return fakeInstallManager(c)(context.Background(), name, args...)
 			})
 			if err == nil || !strings.Contains(err.Error(), "xpu_health_access_unavailable") {
 				t.Fatal(err)

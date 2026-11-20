@@ -275,20 +275,16 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			if err != nil {
 				return err
 			}
-			if !*dry {
-				address := ""
-				if explicit["queue"] {
-					address = values.Queue
-				}
-				client, err := myce.ResolveJoining(ctx, i, address, myce.MDNSDiscovery{})
-				if err != nil {
-					return err
-				}
-				i.Address = client.URL
+			address := ""
+			if explicit["queue"] {
+				address = values.Queue
 			}
-			if i.Address != "" {
-				c.Queue = i.Address
+			client, err := myce.ResolveJoining(ctx, i, address, myce.MDNSDiscovery{})
+			if err != nil {
+				return err
 			}
+			client.HTTP.CloseIdleConnections()
+			c.Queue = client.URL
 			c.EnvironmentFile = ""
 		}
 	}
@@ -310,7 +306,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		c = myce.ApplyHardwarePreflight(c, found)
 	}
-	if role == "worker" && !*dry && (installed == nil || c.Enrollment) && hardware == nil && c.Detection.Platform != "fake" {
+	if role == "worker" && (installed == nil || c.Enrollment) && hardware == nil && c.Detection.Platform != "fake" {
 		found, err := myce.PreflightHardware(ctx, c, probe)
 		if err != nil {
 			return err
@@ -349,6 +345,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		if e != nil {
 			return e
 		}
+		c.RequireMountedNAS = true
 	}
 	d := c.Detection
 	if role == "worker" {
@@ -371,9 +368,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	}
 	if unitErr != nil {
 		fmt.Println("Install refusal:", unitErr)
-		if !*dry || !errors.Is(unitErr, myce.ErrWorkerUnitMigrationRequired) {
-			return unitErr
-		}
+		return unitErr
 	}
 	fileCacheDescription := "automatic from disk headroom at worker startup"
 	if c.FileCacheBytes > 0 {
@@ -406,11 +401,6 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
-	if *dry {
-		fmt.Println("Dry run: no files written, packages installed, or services changed.")
-		fmt.Print(c.ServiceText())
-		return nil
-	}
 	executable, e := os.Executable()
 	if e != nil {
 		return e
@@ -421,21 +411,23 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			return e
 		}
 	}
+	if *dry {
+		if e = myce.PreflightInstall(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
+			return e
+		}
+		fmt.Println("Dry run: read-only checks passed. Deferred to install: directory creation and storage write/sync/rename probes, service-session changes, GPU access provisioning, transient service hardware checks, publication and activation.")
+		fmt.Print(c.ServiceText())
+		return nil
+	}
 	if c.Enrollment {
 		if e = myce.PreflightEnrollmentInstall(ctx, c, executable, probe.Command); e != nil {
 			return e
 		}
 	}
-	if role == "worker" && c.Detection.Platform != "fake" {
-		if c.Enrollment {
-			// Preflight already proved NAS I/O. The installer creates its roots
-			// after drain succeeds, alongside the other persistent changes.
-			c.RequireMountedNAS = true
-		} else {
-			c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
-			if e != nil {
-				return e
-			}
+	if role == "worker" && c.Detection.Platform != "fake" && !c.Enrollment {
+		c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+		if e != nil {
+			return e
 		}
 	}
 	if e = install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {

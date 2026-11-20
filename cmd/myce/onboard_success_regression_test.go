@@ -12,11 +12,13 @@ import (
 )
 
 func TestInstallSuccessOutputRequiresSuccessfulInstall(t *testing.T) {
-	for _, mode := range []string{"dry-run", "storage-refusal", "install-failure", "success"} {
+	for _, mode := range []string{"dry-run", "dry-storage-refusal", "storage-refusal", "install-failure", "success"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			args := []string{"install", "worker", "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "2", "--allow-deviceless", "--nas", home}
-			if mode == "storage-refusal" {
+			storageRefusal := mode == "storage-refusal" || mode == "dry-storage-refusal"
+			dry := mode == "dry-run" || mode == "dry-storage-refusal"
+			if storageRefusal {
 				args = []string{"install", "worker", "--gpu", "cpu", "--allow-deviceless", "--nas", home}
 				if err := os.Mkdir(filepath.Join(home, "mycelium"), 0700); err != nil {
 					t.Fatal(err)
@@ -26,14 +28,17 @@ func TestInstallSuccessOutputRequiresSuccessfulInstall(t *testing.T) {
 				}
 			}
 			args = append(args, "--environment-cache-bytes", "1048576")
-			if mode == "dry-run" {
+			if dry {
 				args = append(args, "--dry-run")
 			}
 			called := false
 			var installErr error
 			output := captureJoiningOutput(t, func() error {
-				installErr = setupCommandWithInstaller(args, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {
-					return []byte("fixture " + home + " nfs rw 0 0\n"), nil
+				installErr = setupCommandWithInstaller(args, myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+					if name == "cat" {
+						return []byte("fixture " + home + " nfs rw 0 0\n"), nil
+					}
+					return nil, nil
 				}}, home, func(string) (myce.WorkerAccount, error) { return myce.WorkerAccount{}, myce.ErrHostIdentity },
 					func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error {
 						called = true
@@ -46,13 +51,13 @@ func TestInstallSuccessOutputRequiresSuccessfulInstall(t *testing.T) {
 					})
 				return nil // Capture a deliberate failure too.
 			})
-			if (installErr != nil) != (mode == "install-failure" || mode == "storage-refusal") {
+			if (installErr != nil) != (mode == "install-failure" || storageRefusal) {
 				t.Fatalf("unexpected result: %v", installErr)
 			}
-			if mode == "storage-refusal" && (installErr == nil || !strings.Contains(installErr.Error(), "nas_root_invalid")) {
+			if storageRefusal && (installErr == nil || !strings.Contains(installErr.Error(), "nas_root_invalid")) {
 				t.Fatalf("did not reach storage refusal: %v", installErr)
 			}
-			if called != (mode != "dry-run" && mode != "storage-refusal") {
+			if called != (!dry && !storageRefusal) {
 				t.Fatalf("installer invoked=%v", called)
 			}
 			success := strings.Index(output, "Worker installed;")

@@ -407,6 +407,11 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	case "disable":
 		policy.Mode = "disabled"
 	case "resume":
+		for _, m := range q.s.Machines {
+			if hostID(m) == host && !m.Gone && m.Replacement == nil && q.catalogStale(m) {
+				return errors.New("worker model config does not match queue; install the active catalog before resuming this host")
+			}
+		}
 		policy.Mode = "enabled"
 	case "budget":
 	case "profile":

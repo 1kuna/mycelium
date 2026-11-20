@@ -144,6 +144,7 @@ func ResolveOnboardingStorage(ctx context.Context, c ServiceConfig, discover boo
 
 type onboardingStorageFS struct {
 	removeCreated bool // Preflight removes only directories it created, inside the owned I/O sequence.
+	readOnly      bool // Preview checks existing metadata without creating or probing files.
 	lstat         func(string) (os.FileInfo, error)
 	mkdir         func(string, os.FileMode) error
 	probe         func(string) error
@@ -295,6 +296,9 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 			}
 			st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(at) }, "ancestor-metadata")
 			if errors.Is(e, os.ErrNotExist) {
+				if fs.readOnly {
+					break // The rest of this root depends on directory creation.
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -311,6 +315,9 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 				return storageRootRefusal(ctx, "ancestor-metadata", preflightError("nas_root_invalid", "storage", "NAS roots require accessible real directories, without symlinks"), e)
 			}
 		}
+	}
+	if fs.readOnly {
+		return ctx.Err()
 	}
 	for i, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
 		ctx := storageRootContext(ctx, []string{"checkpoint", "model", "environment"}[i])

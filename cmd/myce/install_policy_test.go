@@ -35,9 +35,6 @@ func TestInstallCLIPolicyDryRun(t *testing.T) {
 					}
 					return []byte("Fixture GPU, 24576"), nil
 				}
-				if name == "systemctl" || name == "launchctl" {
-					t.Fatal("dry run touched service manager")
-				}
 				return nil, nil
 			}}
 			probe = cudaPCIFixture(probe, false)
@@ -45,7 +42,7 @@ func TestInstallCLIPolicyDryRun(t *testing.T) {
 			if tc.role == "worker" {
 				args = append(args, "--environment-cache-bytes", "1048576")
 			}
-			err := setupCommandWithProbe(args, probe, home)
+			err := setupCommandWithProbe(args, dryInstallProbe(t, home, probe), home)
 			if tc.reason == "" {
 				if err != nil {
 					t.Fatal(err)
