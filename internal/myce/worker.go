@@ -890,6 +890,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (starte
 		return nil, err
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
+	if err := bindManagedInputs(executionWork, j, sharedEnv, env); err != nil {
+		return nil, s.startFailure(j, launchFailed, err)
+	}
 	if nativeCIRequired(&j) {
 		// The worker user's home is hidden from ci jobs; tools that write
 		// config and caches under HOME (git, Go, npm, pip) use attempt scratch.

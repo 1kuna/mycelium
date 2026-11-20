@@ -7,11 +7,124 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func init() {
+	if len(os.Args) > 1 && os.Args[1] == "_native-bindings-test" {
+		if err := nativeBindingsCheck(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
+
+func nativeBindingsCheck() error {
+	if err := os.WriteFile("bindings-started", nil, 0600); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(os.Getenv(inputBindingsVariable))
+	if err != nil {
+		return errors.New("binding manifest is not readable")
+	}
+	var bindings inputBindings
+	if err := json.Unmarshal(data, &bindings); err != nil {
+		return err
+	}
+	if len(bindings.Inputs) != 771 {
+		return errors.New("binding manifest is incomplete")
+	}
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "MYCE_INPUT_") || strings.HasPrefix(entry, "MYCE_TOKEN=") {
+			return errors.New("large legacy binding environment or token inherited")
+		}
+	}
+	for _, path := range bindings.Inputs {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "synthetic binding data" {
+			return errors.New("verified input is not readable through the binding manifest")
+		}
+	}
+	return os.WriteFile("bindings-ok", []byte("771 inputs verified\n"), 0600)
+}
+
+func TestNativeManagedInputBindings(t *testing.T) {
+	for _, isolation := range []string{"unsandboxed", "sandboxed"} {
+		for _, group := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/group=%t", isolation, group), func(t *testing.T) {
+				w, root, j := nativeCompatibilityFixture(t, "")
+				if err := w.initFileTransfers(context.Background(), root); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = removeSharedEntry(w.sharedInputs.cache.Root) })
+				ref := sharedFixtureFile(t, w.CheckpointRoot, "binding.dat", "synthetic binding data")
+				bindings, _ := syntheticInputBindings(771)
+				j.Spec.SharedInputs = bindings.Spec.SharedInputs
+				for name := range j.Spec.SharedInputs {
+					j.Spec.SharedInputs[name] = SharedInput{NAS: "binding.dat", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+				}
+				j.Spec.Run.Command = []string{j.Spec.Run.Command[0], "_native-bindings-test"}
+				j.Spec.Isolation, j.Spec.Reason = isolation, "synthetic launch regression"
+				if group {
+					j.Spec.Run.MemoryGB = .0625
+				}
+				// 771 real cache acquisitions consume about 25s on a loaded
+				// laptop before launch; allow room for the grouped handshake too.
+				p := nativeCompatibilityRun(t, w, root, j, 60*time.Second, func(v nativeCompatibilityTiming) {
+					logNativeBindingsTiming(t, v)
+				})
+				nativeCompatibilityRead(t, filepath.Join(p.job.Spec.Run.Workdir, "bindings-ok"), "771 inputs verified\n")
+			})
+		}
+	}
+}
+
+func logNativeBindingsTiming(t *testing.T, v nativeCompatibilityTiming) {
+	t.Helper()
+	sinceStart := func(at time.Time) string {
+		if at.IsZero() {
+			return "unobserved"
+		}
+		return at.Sub(v.started).Round(time.Millisecond).String()
+	}
+	fileTime := func(path string) time.Time {
+		if info, err := os.Stat(path); err == nil {
+			return info.ModTime()
+		}
+		return time.Time{}
+	}
+	var manifest, policy, entry, payloadDone time.Time
+	if v.work != "" {
+		files, _ := filepath.Glob(filepath.Join(v.work, ".myce-bindings-*.json"))
+		if len(files) == 1 {
+			manifest = fileTime(files[0])
+		}
+		files, _ = filepath.Glob(filepath.Join(nativeLaunchRoot(v.work), "launch-*"))
+		for _, path := range files {
+			if at := fileTime(path); at.After(policy) {
+				policy = at
+			}
+		}
+		entry = fileTime(filepath.Join(v.work, "bindings-started"))
+		payloadDone = fileTime(filepath.Join(v.work, "bindings-ok"))
+	}
+	if v.staging != nil {
+		p := v.staging.Phases[stageSharedInputs]
+		var filesStaged time.Time
+		if v.staging.CompletedAt != nil {
+			filesStaged = *v.staging.CompletedAt
+		}
+		t.Logf("binding staging: shared_inputs=%.3fs calls=%d failures=%d files_staged_at=%s", p.Seconds, p.Calls, p.Failures, sinceStart(filesStaged))
+	}
+	t.Logf("binding launch milestones after Worker.start call began: manifest_written=%s last_launch_file_written=%s worker_start_returned=%s payload_entered=%s payload_verified=%s completion_observed=%s", sinceStart(manifest), sinceStart(policy), sinceStart(v.workerReturned), sinceStart(entry), sinceStart(payloadDone), sinceStart(v.observed))
+}
 
 func TestNativeIsolationSharedInputs(t *testing.T) {
 	for _, group := range []bool{false, true} {

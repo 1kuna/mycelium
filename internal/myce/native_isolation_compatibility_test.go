@@ -488,7 +488,13 @@ func nativeCompatibilityMetricDenials(t *testing.T, j *Job) {
 	j.Spec.Run.Env["NATIVE_COMPATIBILITY_CGROUP_DENIED"] = string(data)
 }
 
-func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, budget time.Duration) *process {
+type nativeCompatibilityTiming struct {
+	started, workerReturned, observed time.Time
+	staging                           *StagingTimings
+	work                              string
+}
+
+func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, budget time.Duration, timing ...func(nativeCompatibilityTiming)) *process {
 	t.Helper()
 	store, err := newAttemptStore(root, j)
 	if err != nil {
@@ -499,9 +505,28 @@ func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, bu
 	// as confinement failure or copied twice.
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	started := time.Now()
+	var p *process
+	var workerReturned time.Time
+	report := func() {}
+	if len(timing) > 0 {
+		// Capture the timeout before failure cleanup can remove files or delay
+		// observation. The staging recorder also covers failed start calls.
+		report = func() {
+			v := nativeCompatibilityTiming{started: started, workerReturned: workerReturned, observed: time.Now(), staging: store.staging.snapshot()}
+			if p != nil {
+				v.work = p.job.Spec.Run.Workdir
+			}
+			timing[0](v)
+		}
+		defer func() {
+			if p == nil {
+				report()
+			}
+		}()
+	}
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
-	var p *process
 	for {
 		p, err = w.start(store, j)
 		if err == nil || !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending") {
@@ -513,6 +538,7 @@ func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, bu
 		case <-tick.C:
 		}
 	}
+	workerReturned = time.Now()
 	if err != nil {
 		t.Fatalf("real Worker.start: %v", err)
 	}
@@ -538,11 +564,13 @@ func nativeCompatibilityRun(t *testing.T, w Worker, root *workerStore, j Job, bu
 	}()
 	select {
 	case f := <-p.done:
+		report()
 		finished = true
 		if f.err != nil || !f.result.Success || f.result.ReleasePending {
 			t.Errorf("confined execution/publication/cleanup: %+v", f)
 		}
 	case <-ctx.Done():
+		report()
 		t.Fatal("tiny confined compatibility probe timed out")
 	}
 	t.Run("process-cleanup", func(t *testing.T) {

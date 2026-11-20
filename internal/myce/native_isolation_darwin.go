@@ -232,7 +232,11 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		fmt.Fprintf(&profile, "(deny network-outbound (remote tcp %s))\n", strconv.Quote("*:"+port))
 	}
 	// Apply authored loader/shell variables only after Seatbelt is active.
-	args := append([]string{"/usr/bin/sandbox-exec", "-p", profile.String(), "/usr/bin/env", "-i"}, environmentList(env)...)
+	profilePath, _, err := writeNativeLaunchFile(work, []byte(profile.String()))
+	if err != nil {
+		return err
+	}
+	args := append([]string{"/usr/bin/sandbox-exec", "-f", profilePath, "/usr/bin/env", "-i"}, environmentList(env)...)
 	cmd.Args = append(args, cmd.Args...)
 	cmd.Path = "/usr/bin/sandbox-exec"
 	cmd.Env = environmentList(jobBaseEnvironment())

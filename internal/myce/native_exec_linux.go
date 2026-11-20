@@ -24,16 +24,29 @@ func NativeExec(args []string) error {
 	if len(args) > 0 && args[0] == "namespace-monitor" {
 		return nativeNamespaceMonitor(args[1:])
 	}
+	if len(args) > 0 && args[0] == "namespace-monitor-file" {
+		return nativeNamespaceMonitorFile(args[1:])
+	}
 	if len(args) > 0 && args[0] == "namespace-anchor" {
 		return nativeNamespaceExec(args[1:], os.Environ())
 	}
 	if len(args) > 0 && (args[0] == "probe" || args[0] == "listener") {
 		return nativeNamespaceProbe(args)
 	}
-	if len(args) < 3 || args[0] != "run" {
+	if len(args) < 3 || args[0] != "run" && args[0] != "run-file" {
 		return errors.New("native exec requires a policy and executable")
 	}
-	data, err := base64.RawStdEncoding.DecodeString(args[1])
+	var data []byte
+	var err error
+	if args[0] == "run-file" {
+		if len(args) < 4 {
+			return errors.New("native exec requires a policy file and executable")
+		}
+		data, err = readNativeLaunchFile(args[1], args[2])
+		args = args[1:] // Both formats leave the executable at index 2.
+	} else {
+		data, err = base64.RawStdEncoding.DecodeString(args[1])
+	}
 	if err != nil {
 		return errors.New("invalid native isolation policy")
 	}
@@ -94,6 +107,16 @@ func NativeExec(args []string) error {
 }
 
 func nativeApplyLandlock(p nativeLinuxPolicy) error {
+	// Recheck in the actual exec helper, even after worker capability probing.
+	// Cache-root mounts supply visibility only; no payload may execute with
+	// weaker content, network or cross-process confinement on another ABI.
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 {
+		return errno
+	}
+	if abi < 6 {
+		return errors.New("Landlock ABI 6 required")
+	}
 	const read = unix.LANDLOCK_ACCESS_FS_EXECUTE | unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_READ_DIR
 	const all = uint64(1<<16 - 1)
 	const write = all &^ (unix.LANDLOCK_ACCESS_FS_MAKE_CHAR | unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK | unix.LANDLOCK_ACCESS_FS_IOCTL_DEV)

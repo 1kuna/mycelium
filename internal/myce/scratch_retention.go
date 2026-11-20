@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -254,8 +255,12 @@ func (c *attemptFilesCollector) disposition(job, name string) (AttemptFilesDispo
 	return c.resolve(job, attempt)
 }
 
-// attemptFolderNumber parses an exact attempt folder name.
+// Launch metadata lives beside the writable workdir, under the same exact
+// attempt's custody and collection authority.
 func attemptFolderNumber(name string) (int, bool) {
+	if strings.HasPrefix(name, ".") && strings.HasSuffix(name, "-launch") {
+		name = strings.TrimSuffix(strings.TrimPrefix(name, "."), "-launch")
+	}
 	attempt, err := strconv.Atoi(name)
 	return attempt, err == nil && attempt >= 1 && strconv.Itoa(attempt) == name
 }

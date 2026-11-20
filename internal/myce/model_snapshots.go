@@ -450,6 +450,8 @@ func (w *Worker) nativeInputPaths(j Job, paths map[string]string) {
 	}
 	slices.Sort(w.nativeSharedInputs)
 	slices.Sort(w.nativeModelInputs)
+	w.nativeSharedInputs = slices.Compact(w.nativeSharedInputs)
+	w.nativeModelInputs = slices.Compact(w.nativeModelInputs)
 }
 
 func init() {

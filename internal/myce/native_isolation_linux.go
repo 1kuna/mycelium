@@ -26,6 +26,8 @@ type nativeLinuxPolicy struct {
 	Env                            []string
 	Ports                          []uint16
 	Namespace                      bool
+	// Mount visibility only. Landlock still grants exact acquired paths above.
+	InputMountRoots []string
 	// Plain withholds only Deny from an unsandboxed job; Read lists the
 	// allowed paths inside it (#1309).
 	Plain bool
@@ -200,6 +202,13 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	p.Read = append(p.Read, declaredExecute...)
 	// Acquired archive members may execute, but receive no content-write grant.
 	p.Read = append(p.Read, w.nativeSharedInputs...)
+	for _, cache := range []*SharedInputCache{w.sharedInputs, w.modelSnapshots} {
+		if cache != nil && cache.cache.Root != "" {
+			if root, err := nativeCanonical(cache.cache.Root); err == nil {
+				p.InputMountRoots = append(p.InputMountRoots, root)
+			}
+		}
+	}
 	if w.environmentCache != nil {
 		p.Read = append(p.Read, w.environmentCache.Root)
 	}
@@ -351,6 +360,24 @@ func nativePolicyArgs(p nativeLinuxPolicy, payload []string) ([]string, error) {
 	return append([]string{executable, "_native-exec", "run", base64.RawStdEncoding.EncodeToString(data)}, payload...), nil
 }
 
+// The environment and exact read grants grow with managed inputs. A single
+// base64 argv string hits Linux MAX_ARG_STRLEN well before aggregate ARG_MAX.
+func nativePolicyFileArgs(p nativeLinuxPolicy, payload []string, work string) ([]string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	path, digest, err := writeNativeLaunchFile(work, data)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{executable, "_native-exec", "run-file", path, digest}, payload...), nil
+}
+
 func nativeWrapPayload(cmd *exec.Cmd, wrapper []string) error {
 	if err := nativeWrapPayloadCheck(cmd); err != nil {
 		return err
@@ -368,10 +395,24 @@ func nativeWrapPayloadCheck(cmd *exec.Cmd) error {
 
 func nativeBwrapPolicyArgs(p nativeLinuxPolicy) []string {
 	args := nativeBwrapBase()
+	// Restoring cache roots once bounds mount options independently of binding
+	// count (bubblewrap also caps --args expansion at 9000 arguments). These
+	// read-only mounts supply visibility, never Landlock authority: sibling data
+	// and cache bookkeeping remain outside the exact Read/ReadOnly grants.
+	for _, root := range p.InputMountRoots {
+		if strings.HasPrefix(root, "/tmp/") {
+			args = append(args, "--ro-bind", root, root)
+		}
+	}
 	// The private /tmp must not hide an exact helper binary or a configured
 	// prepared environment beneath /tmp (including go test's build directory).
 	// Restore only trusted read grants, then put private write overlays on top.
 	for _, path := range append(slices.Clone(p.Read), p.ReadOnly...) {
+		if slices.ContainsFunc(append(slices.Clone(p.InputMountRoots), p.Write...), func(root string) bool {
+			return nativePathContains(root, path)
+		}) {
+			continue
+		}
 		canonical, err := nativeCanonical(path)
 		if err == nil && strings.HasPrefix(canonical, "/tmp/") {
 			args = append(args, "--ro-bind", canonical, canonical)
@@ -379,6 +420,12 @@ func nativeBwrapPolicyArgs(p nativeLinuxPolicy) []string {
 	}
 	for _, path := range p.Write {
 		args = append(args, "--bind", path, path)
+		// /tmp is private in the namespace; expose only this attempt's trusted
+		// launch metadata beside its workdir, including later sidecar policies.
+		root := nativeLaunchRoot(path)
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			args = append(args, "--ro-bind", root, root)
+		}
 	}
 	args = append(args, "--dir", "/dev/dri", "--tmpfs", "/dev/shm")
 	for _, path := range p.Devices {
@@ -408,7 +455,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if !p.Namespace && len(p.Ports) > 0 {
 		log.Printf("native isolation: mode=landlock network=partial reserved_tcp_ports=%d", len(p.Ports))
 	}
-	args, err := nativePolicyArgs(p, cmd.Args[4:])
+	args, err := nativePolicyFileArgs(p, cmd.Args[4:], work)
 	if err != nil {
 		return err
 	}
@@ -416,7 +463,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		bwrap := nativeBwrapPolicyArgs(p)
 		// bwrap 0.9 passes inherited descriptors to its executable by default;
 		// --preserve-fds belongs to other launchers and is not a bwrap option.
-		args, err = nativeNamespaceMonitorArgs(s.bwrap, append(append(bwrap, "--"), args...))
+		args, err = nativeNamespaceMonitorFileArgs(s.bwrap, append(append(bwrap, "--"), args...), work)
 		if err != nil {
 			return err
 		}

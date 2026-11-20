@@ -15,7 +15,11 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	for _, name := range []string{"published", "failed", "live", "pending"} {
-		if err := os.MkdirAll(filepath.Join(dir, "job-files", name, "1", ".venv"), 0700); err != nil {
+		work := filepath.Join(dir, "job-files", name, "1")
+		if err := os.MkdirAll(filepath.Join(work, ".venv"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := writeNativeLaunchFile(work, []byte("synthetic launch policy")); err != nil {
 			t.Fatal(err)
 		}
 		st := workerState{PublishedAttempt: &Execution{ID: name, Attempt: 1}}
@@ -47,9 +51,11 @@ func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range []string{"failed", "live", "pending"} {
-			_, err := os.Stat(filepath.Join(dir, "job-files", name, "1", ".venv"))
-			if err != nil {
-				t.Fatalf("%s removed before eligible: %v", name, err)
+			work := filepath.Join(dir, "job-files", name, "1")
+			for _, path := range []string{filepath.Join(work, ".venv"), nativeLaunchRoot(work)} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("%s payload or launch metadata removed before eligible: %v", name, err)
+				}
 			}
 		}
 	}
