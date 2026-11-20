@@ -716,7 +716,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 				owned.memoryOOMScore.Store(int32(score))
 				if (m.state == "ready" || m.state == "draining") && owned.memoryAttempt != nil {
 					if err := owned.memoryAttempt.updateOOMScore(score); err != nil {
-						m.err, m.runtimeFailed = "model OOM priority update failed", true
+						m.err, m.runtimeFailed = err.Error(), true
 						rt.unload(m)
 					}
 				}
