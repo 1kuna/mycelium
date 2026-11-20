@@ -63,6 +63,8 @@ func TestQueueInstalledCutover(t *testing.T) {
 	q, workers := candidateCostFixture(t)
 	q.clock.(*fakeClock).Advance(time.Since(q.clock.Now()))
 	now := q.clock.Now()
+	// Moving fixture timestamps is not observed fleet usage across that gap.
+	q.s.UsageAt = now
 	for i := 160; i < 12400; i++ {
 		j := *q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
 		j.ID = fmt.Sprintf("retained-%05d", i)

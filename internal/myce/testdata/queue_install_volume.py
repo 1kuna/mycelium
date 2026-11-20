@@ -71,6 +71,8 @@ chunks(log_rows, "INSERT INTO logs(job,attempt,text) "
 chunks(653585, "INSERT INTO log_offsets(job,attempt,offset) "
        "SELECT logs.job,logs.attempt,logs.seq FROM n JOIN logs ON logs.seq=n.i+1")
 minute = int(time.time()) // 60 * 60
+# Replace only this newly generated fixture's usage with the aggregate target.
+db.execute("DELETE FROM usage_samples")
 # Historical rows need not refer to still-retained jobs. Seven distinct machine
 # keys avoid primary-key collisions per minute; keep the real usage schema.
 chunks(369176, "INSERT INTO usage_samples "
@@ -101,6 +103,7 @@ counts = {table: db.execute("SELECT count(*) FROM " + table).fetchone()[0]
           for table in ("queue_state", "logs", "log_offsets", "usage_samples", "job_summaries", "environment_build_logs")}
 actual_logs = db.execute("SELECT count(*),sum(length(text)),count(distinct job) FROM logs").fetchone()
 assert actual_logs == (log_rows, log_bytes, 4103), actual_logs
+assert counts["usage_samples"] == 369176, counts
 print(json.dumps({"tables": counts, "log_bytes": actual_logs[1], "log_jobs": actual_logs[2],
                   "page_size": db.execute("PRAGMA page_size").fetchone()[0],
                   "page_count": db.execute("PRAGMA page_count").fetchone()[0],

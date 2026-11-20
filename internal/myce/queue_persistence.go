@@ -29,11 +29,50 @@ func (q *Queue) readStartupState(marker []byte) error {
 	if !bytes.Equal(marker, normalizedQueueMarker) {
 		return fmt.Errorf("unsupported queue persistence format; current and previous releases require normalized-state-v3")
 	}
-	records, err := readQueueRecords(q.db)
+	// One decoder overlaps the SQLite reader and split-record reconstruction.
+	// A single queued record bounds extra retained bytes; only the decoder owns
+	// this map, and startup joins it on every success/error path before returning.
+	type jobRecord struct {
+		id   string
+		data []byte
+	}
+	type jobResult struct {
+		jobs map[string]*Job
+		err  error
+	}
+	jobs := make(chan jobRecord, 1)
+	done := make(chan jobResult, 1)
+	go func() {
+		result := jobResult{jobs: map[string]*Job{}}
+		for record := range jobs {
+			if result.err != nil {
+				continue // Drain the reader even after a malformed record.
+			}
+			data, err := expandJobRecord(record.data)
+			if err == nil {
+				err = decodeQueueRecord(result.jobs, record.id, data)
+			}
+			if err != nil {
+				result.err = fmt.Errorf("decode queue fragment jobs: %w", err)
+			}
+		}
+		done <- result
+	}()
+	records, err := readQueueRecordsVisit(q.db, func(key string, data []byte) {
+		if id, ok := strings.CutPrefix(key, "jobs/"); ok {
+			jobs <- jobRecord{id, data}
+		}
+	})
+	q.traceStartup("load_record_rows")
+	close(jobs)
+	decoded := <-done
 	if err != nil {
 		return err
 	}
-	q.traceStartup("load_record_rows")
+	if decoded.err != nil {
+		return decoded.err
+	}
+	q.traceStartup("load_job_decode")
 	base := records["state"]
 	if len(base) == 0 || bytes.Equal(bytes.TrimSpace(base), []byte("null")) {
 		return fmt.Errorf("queue state fragment missing")
@@ -41,7 +80,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 	if err := json.Unmarshal(base, &q.s); err != nil {
 		return err
 	}
-	q.s.Jobs, q.s.Machines = map[string]*Job{}, map[string]*Machine{}
+	q.s.Jobs, q.s.Machines = decoded.jobs, map[string]*Machine{}
 	events := map[int]HealthAlert{}
 	for key, data := range records {
 		if key == "state" {
@@ -53,10 +92,7 @@ func (q *Queue) readStartupState(marker []byte) error {
 		}
 		switch group {
 		case "jobs":
-			data, err = expandJobRecord(data)
-			if err == nil {
-				err = decodeQueueRecord(q.s.Jobs, id, data)
-			}
+			continue // Already decoded while reading/reassembling records.
 		case "machines":
 			err = decodeQueueRecord(q.s.Machines, id, data)
 		case "submissions":
@@ -624,6 +660,12 @@ func (q *Queue) writeFields(key string, old, data []byte, measured *queuePersist
 
 // Reassemble logical records for startup/recovery, outside ordinary writes.
 func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, error) {
+	return readQueueRecordsVisit(db, nil, only...)
+}
+
+// visit receives each immutable, complete logical record exactly once. It may
+// hand bytes to a decoder, but must not query this single-connection database.
+func readQueueRecordsVisit(db queueRecordReader, visit func(string, []byte), only ...string) (map[string][]byte, error) {
 	query := "SELECT key,data FROM queue_state"
 	var args []any
 	if len(only) > 0 {
@@ -647,6 +689,9 @@ func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, 
 		encoded, ok := strings.CutPrefix(key, "fields/")
 		if !ok {
 			records[key] = data
+			if visit != nil {
+				visit(key, data)
+			}
 			continue
 		}
 		record, field, ok := strings.Cut(encoded, "/")
@@ -694,6 +739,9 @@ func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, 
 				return nil, fmt.Errorf("null queue record has fields")
 			}
 			records[key] = root
+			if visit != nil {
+				visit(key, root)
+			}
 			continue
 		}
 		for field, value := range members {
@@ -707,6 +755,9 @@ func readQueueRecords(db queueRecordReader, only ...string) (map[string][]byte, 
 			return nil, err
 		}
 		records[key] = data
+		if visit != nil {
+			visit(key, data)
+		}
 	}
 	return records, nil
 }
