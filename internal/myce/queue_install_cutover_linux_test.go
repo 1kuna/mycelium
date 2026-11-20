@@ -151,6 +151,18 @@ func TestQueueInstalledCutover(t *testing.T) {
 		diagnoseStartupPhysical(t, python, db)
 		return // Diagnostic mode never publishes a service unit.
 	}
+	physicalCutover := os.Getenv("MYCE_TEST_PHYSICAL_CUTOVER") == "1"
+	if physicalCutover {
+		if !databaseVolume {
+			t.Fatal("physical cutover requires generated volume")
+		}
+		cmd := exec.Command(python, "testdata/queue_install_physical.py", "fragmented", db)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("physical cutover layout: %v %s", err, out)
+		} else {
+			t.Logf("physical_layout=%s", bytes.TrimSpace(out))
+		}
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +224,23 @@ func TestQueueInstalledCutover(t *testing.T) {
 	// The service must not inherit the real manager account's agent homes.
 	// A private runtime drop-in affects only this test's uniquely named unit.
 	isolatedHome := filepath.Join(runtimeDir, "systemd/user", unit+".d/home.conf")
-	write(isolatedHome, []byte("[Service]\nEnvironment="+unitQuote("HOME="+home)+" "+unitQuote("CODEX_HOME="+filepath.Join(home, "codex"))+"\n"), 0600)
+	dropIn := "[Service]\nEnvironment=" + unitQuote("HOME="+home) + " " + unitQuote("CODEX_HOME="+filepath.Join(home, "codex")) + "\n"
+	if physicalCutover {
+		// Test-only conditioning, before each start (including replacement),
+		// after systemd has stopped the old process. Evict only this generated
+		// DB. The added pre-start duration is included in the API gap, and its
+		// own journal marks distinguish it from the binary's startup spans.
+		helper, err := filepath.Abs("testdata/queue_install_physical.py")
+		if err != nil {
+			t.Fatal(err)
+		}
+		envTool, err := exec.LookPath("env")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dropIn += "ExecStartPre=" + unitQuote(envTool) + " -u MYCE_TOKEN " + unitQuote("MYCE_JOB_ID="+os.Getenv("MYCE_JOB_ID")) + " " + unitQuote(python) + " " + unitQuote(helper) + " evict " + unitQuote(db) + "\n"
+	}
+	write(isolatedHome, []byte(dropIn), 0600)
 	shim := filepath.Join(root, "bin/systemctl")
 	adapter, err := os.ReadFile("testdata/queue_install_systemctl.py")
 	if err != nil {
@@ -282,7 +310,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 		// Diagnostics must survive expiry of the trial's cancellation budget.
 		journalCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
-		journal := exec.CommandContext(journalCtx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager", "--grep=event=queue_startup_phase|Mycelium queue: http://")
+		journal := exec.CommandContext(journalCtx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager", "--grep=event=queue_startup_phase|Mycelium queue: http://|physical_cache=")
 		journal.Env = env
 		journalData, err := journal.Output()
 		if err != nil {
@@ -307,7 +335,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 			}
 			mu.Unlock()
 			key := row.At + row.Message
-			if !journalSeen[key] && strings.Contains(row.Message, "event=queue_startup_phase") {
+			if !journalSeen[key] && (strings.Contains(row.Message, "event=queue_startup_phase") || strings.HasPrefix(row.Message, "physical_cache=")) {
 				journalSeen[key] = true
 				t.Logf("installed_queue_phase=%s", row.Message)
 			}

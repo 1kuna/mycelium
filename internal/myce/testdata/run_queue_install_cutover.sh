@@ -14,7 +14,7 @@ go build -o "$scratch/myce" ./cmd/myce
 export MYCE_NATIVE_QUEUE_INSTALL_TEST=1 MYCE_TEST_BINARY="$scratch/myce"
 count=3
 timeout=8m
-if [ "${MYCE_TEST_PHYSICAL_DIAG:-}" = 1 ]; then
+if [ "${MYCE_TEST_PHYSICAL_DIAG:-}" = 1 ] || [ "${MYCE_TEST_PHYSICAL_CUTOVER:-}" = 1 ]; then
   # One matrix already contains independent scan/reassembly/decode probes for
   # two physical layouts and two cache conditions, plus multi-GB preparation.
   count=1

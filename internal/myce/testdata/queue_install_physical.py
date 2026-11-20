@@ -33,13 +33,15 @@ def resident(fd):
 
 
 if action == "evict":
+    started = time.monotonic()
     fd = os.open(path, os.O_RDWR)
     try:
         os.fdatasync(fd)
         before = resident(fd)
         os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
         after = resident(fd)
-        print(json.dumps({"resident_before": before, "resident_after": after}))
+        print("physical_cache=" + json.dumps({"resident_before": before, "resident_after": after,
+                                               "seconds": time.monotonic() - started}), flush=True)
         assert after[0] < after[1] // 100, "owned file cache did not become cold"
     finally:
         os.close(fd)
