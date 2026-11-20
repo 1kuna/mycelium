@@ -107,6 +107,16 @@ func NativeExec(args []string) error {
 }
 
 func nativeApplyLandlock(p nativeLinuxPolicy) error {
+	// Recheck in the actual exec helper, even after worker capability probing.
+	// Cache-root mounts supply visibility only; no payload may execute with
+	// weaker content, network or cross-process confinement on another ABI.
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
+	if errno != 0 {
+		return errno
+	}
+	if abi < 6 {
+		return errors.New("Landlock ABI 6 required")
+	}
 	const read = unix.LANDLOCK_ACCESS_FS_EXECUTE | unix.LANDLOCK_ACCESS_FS_READ_FILE | unix.LANDLOCK_ACCESS_FS_READ_DIR
 	const all = uint64(1<<16 - 1)
 	const write = all &^ (unix.LANDLOCK_ACCESS_FS_MAKE_CHAR | unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK | unix.LANDLOCK_ACCESS_FS_IOCTL_DEV)
