@@ -165,7 +165,7 @@ func TestFirstRunFloorCompilerRoom(t *testing.T) {
 			}
 			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 			d, err := w.firstRunMemoryAdmission(context.Background(), *run)
-			if err != nil || d.RoomGB != 16 {
+			if err != nil || d.RoomGB != 15 {
 				t.Fatalf("compiler launch: %+v %v", d, err)
 			}
 			w.firstRunAdmission = d
