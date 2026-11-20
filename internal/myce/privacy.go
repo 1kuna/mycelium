@@ -15,6 +15,18 @@ func diagnostic(value, message string) string {
 	return message
 }
 
+// Release diagnostics disclose only identity/lifecycle within the selection's
+// project. Foreign members remain anonymous, including intermediate path steps.
+func publicFileReleaseCustodyBlocker(j *Job, project string, path []FileReleaseCustodyStep) FileReleaseCustodyBlocker {
+	b := FileReleaseCustodyBlocker{Path: path}
+	if j.Spec.Project != project {
+		b.OtherProject = true
+	} else {
+		b.JobID, b.State = j.ID, j.State
+	}
+	return b
+}
+
 func deviceReasonDiagnostic(reason string) string {
 	if deviceFaultReason(reason) {
 		return reason

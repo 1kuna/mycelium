@@ -484,7 +484,7 @@ func (q *Queue) cancellationObservation() *Queue {
 	return view
 }
 
-func (q *Queue) jobReleasePending(j *Job) bool {
+func (q *Queue) jobOwnReleasePending(j *Job) bool {
 	if j.Attempt > 0 && len(j.Copies) == 0 && !j.ReleaseConfirmed {
 		return true
 	}
@@ -497,6 +497,13 @@ func (q *Queue) jobReleasePending(j *Job) bool {
 		if r.Job == j.ID {
 			return true
 		}
+	}
+	return false
+}
+
+func (q *Queue) jobReleasePending(j *Job) bool {
+	if q.jobOwnReleasePending(j) {
+		return true
 	}
 	for _, child := range q.cancellationMembers(j) {
 		if q.jobReleasePending(child) {
