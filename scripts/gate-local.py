@@ -106,6 +106,7 @@ def execute(path):
         raise
     started_receipts = []
     children = []
+    waiters = []
     completed = queue.Queue()
     interrupted = []
 
@@ -132,7 +133,9 @@ def execute(path):
             child.send_signal(interrupted[-1])
         def wait():
             completed.put((child, child.wait(), receipt, nonce))
-        threading.Thread(target=wait, daemon=True).start()
+        waiter = threading.Thread(target=wait, daemon=True)
+        waiter.start()
+        waiters.append(waiter)
         return child
 
     handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -202,7 +205,10 @@ def execute(path):
         for child in children:
             if child.poll() is None:
                 child.terminate()
-        for child in children:
+        for waiter in waiters:
+            waiter.join()
+        # A child still needs reaping if its wait thread failed to start.
+        for child in children[len(waiters):]:
             child.wait()
         complete = (bool(started_receipts) and
                     all(receipts.confirmed(p, key) for p, key in started_receipts) and

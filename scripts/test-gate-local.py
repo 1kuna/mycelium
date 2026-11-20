@@ -1503,6 +1503,8 @@ sys.exit(m.main())
                       patch.object(local.subprocess, 'Popen', side_effect=launch)):
                     self.assertEqual(local.execute(path), 125)
                 self.assertEqual(len(calls), 1 if timing == 'between' else 2)
+                for child in children:
+                    child.wait.assert_called_once_with()
                 if timing in ('handoff', 'both-running'):
                     children[-1].send_signal.assert_called_once_with(signal.SIGTERM)
                 if timing == 'both-running':
