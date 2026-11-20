@@ -235,7 +235,7 @@ func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+	server := httptest.NewServer(waitClockHandler(t, q, clock))
 	defer server.Close()
 	var delays []time.Duration
 	err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 5*time.Second, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
@@ -524,10 +524,10 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestWaitDeadlineGuidance(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
+func waitClockHandler(t *testing.T, q *myce.Queue, clock *waitClock) http.Handler {
+	t.Helper()
 	api := myce.API{Queue: q, Token: "test-only"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
 			var request myce.WaitRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -551,7 +551,12 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 			r.ContentLength = int64(len(body))
 		}
 		api.ServeHTTP(w, r)
-	}))
+	})
+}
+
+func TestWaitDeadlineGuidance(t *testing.T) {
+	q, clock, _, _ := waitQueue(t)
+	server := httptest.NewServer(waitClockHandler(t, q, clock))
 	defer server.Close()
 	client := myce.Client{URL: server.URL, Token: "test-only"}
 	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}
