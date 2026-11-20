@@ -24,6 +24,7 @@ type memoryFS interface {
 	WriteFile(string, []byte) error
 	Mkdir(string) error
 	Remove(string) error
+	setOOMScore(int, int) error
 }
 type osMemoryFS struct{}
 
@@ -32,6 +33,12 @@ func (osMemoryFS) ReadFile(p string) ([]byte, error)       { return os.ReadFile(
 func (osMemoryFS) WriteFile(p string, b []byte) error      { return os.WriteFile(p, b, 0600) }
 func (osMemoryFS) Mkdir(p string) error                    { return os.Mkdir(p, 0700) }
 func (osMemoryFS) Remove(p string) error                   { return os.Remove(p) }
+func (fs osMemoryFS) setOOMScore(pid, score int) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	return setAttemptOOMScore(fs, pid, score)
+}
 
 type memoryCeilings struct {
 	oomScore        int
@@ -251,12 +258,8 @@ func (a *memoryAttempt) attach(pid int) error {
 	}
 	// The launcher still holds the exec gate. Descendants inherit this score,
 	// including main and sidecars; no authored allocation can race the write.
-	if runtime.GOOS == "linux" {
-		if _, real := a.fs.(osMemoryFS); real {
-			if err := setAttemptOOMScore(a.fs, pid, a.oomScore); err != nil {
-				return err
-			}
-		}
+	if err := a.fs.setOOMScore(pid, a.oomScore); err != nil {
+		return err
 	}
 	if err := a.fs.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte(strconv.Itoa(pid))); err != nil {
 		return err
@@ -397,14 +400,6 @@ func (a *memoryAttempt) updateOOMScore(score int) error {
 	if a == nil || a.oomScore == score {
 		return nil
 	}
-	if runtime.GOOS != "linux" {
-		a.oomScore = score
-		return nil
-	}
-	if _, real := a.fs.(osMemoryFS); !real {
-		a.oomScore = score
-		return nil
-	}
 	b, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.procs"))
 	if err != nil {
 		return err
@@ -414,7 +409,7 @@ func (a *memoryAttempt) updateOOMScore(score int) error {
 		if err != nil {
 			return err
 		}
-		if err := setAttemptOOMScore(a.fs, pid, score); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := a.fs.setOOMScore(pid, score); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}

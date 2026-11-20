@@ -12,12 +12,67 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // Fake kernel files make delegation and launch ordering laptop-testable.
 type fakeMemoryFS struct{ osMemoryFS }
+
+func (fakeMemoryFS) setOOMScore(int, int) error { return nil }
+
+// A user service may inherit a privileged minimum above zero. Model Linux's
+// refusal without writing the laptop's real /proc, including on Darwin.
+type inheritedOOMMemoryFS struct {
+	fakeMemoryFS
+	mu          sync.Mutex
+	minimum     int
+	refuseRaise bool
+	scores      map[string]int
+	refused     int
+}
+
+func (f *inheritedOOMMemoryFS) ReadFile(path string) ([]byte, error) {
+	if strings.HasPrefix(path, "/proc/") && filepath.Base(path) == "oom_score_adj" {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		pid := filepath.Base(filepath.Dir(path))
+		score, ok := f.scores[pid]
+		if !ok {
+			score = f.minimum
+		}
+		return []byte(strconv.Itoa(score)), nil
+	}
+	return f.fakeMemoryFS.ReadFile(path)
+}
+
+func (f *inheritedOOMMemoryFS) WriteFile(path string, b []byte) error {
+	if strings.HasPrefix(path, "/proc/") && filepath.Base(path) == "oom_score_adj" {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		pid := filepath.Base(filepath.Dir(path))
+		score, err := strconv.Atoi(string(b))
+		if err != nil {
+			return err
+		}
+		current, ok := f.scores[pid]
+		if !ok {
+			current = f.minimum
+		}
+		if score < f.minimum || score == current || f.refuseRaise && score > current {
+			f.refused++
+			return os.ErrPermission
+		}
+		f.scores[pid] = score
+		return nil
+	}
+	return f.fakeMemoryFS.WriteFile(path, b)
+}
+
+func (f *inheritedOOMMemoryFS) setOOMScore(pid, score int) error {
+	return setAttemptOOMScore(f, pid, score)
+}
 
 func (f fakeMemoryFS) ReadFile(p string) ([]byte, error) {
 	// Worker memory sensors stay synthetic on every laptop platform.
@@ -186,6 +241,83 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 		}
 		if got := modelOOMScore(ModelSlot{PriorityPolicy: &tc.match}); got != tc.want {
 			t.Fatal("model", tc.match, got)
+		}
+	}
+	for _, kind := range []string{"batch", "model"} {
+		for _, tier := range []string{"highest", "lower", "refused raise"} {
+			t.Run("inherited200/"+kind+"/"+tier, func(t *testing.T) {
+				fs := &inheritedOOMMemoryFS{minimum: 200, refuseRaise: tier == "refused raise", scores: map[string]int{}}
+				c := fakeCeilings(t)
+				c.fs = fs
+				class, want := "test", "1000"
+				if tier == "highest" {
+					class, want = "production", "200"
+				}
+				var pid int
+				var err error
+				if kind == "batch" {
+					w := recoveryWorker(t)
+					w.memoryCeilings = c
+					w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
+					store, e := w.openStore()
+					if e != nil {
+						t.Fatal(e)
+					}
+					defer store.close()
+					j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
+					j.Spec.Class, j.Spec.Priority, j.Spec.Needs.HostMemoryGB = class, "", 1
+					w = workerWithPreparedCheckpoint(t, w, store, j)
+					var p *process
+					p, err = startAfterFixtureInputs(t, w, store, j)
+					if err == nil {
+						pid = p.cmd.Process.Pid
+						select {
+						case f := <-p.done:
+							if f.err != nil || !f.result.Success {
+								t.Fatalf("inherited-score batch failed: %+v", f)
+							}
+						case <-time.After(testWaitTimeout):
+							t.Fatal("inherited-score batch did not complete")
+						}
+					}
+				} else {
+					m := serverTestModel(t, "ready")
+					m.HostMemoryGB = 1
+					e := &LlamaEngine{Dir: t.TempDir(), Clock: RealClock{}, memoryCeilings: c}
+					e.memoryOOMScore.Store(int32(modelOOMScore(ModelSlot{Class: class})))
+					t.Cleanup(func() {
+						if err := e.Unload(); err != nil {
+							t.Error(err)
+						}
+					})
+					err = e.Load(t.Context(), m)
+					if err == nil {
+						pid = e.cmd.Process.Pid
+					}
+					if err == nil && tier == "highest" {
+						owned := &workerModel{engine: e, state: "ready"}
+						for _, score := range []int{1000, 0} {
+							if err := updateModelOOMScore(owned, score); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				if tier == "refused raise" {
+					cause := runtimeDiagnostic(runtimeErrorFor("launch", err))
+					if err == nil || cause == nil || cause.Class != "oom_priority_unavailable" || !errors.Is(err, os.ErrPermission) {
+						t.Fatalf("needed raise refusal lost typed diagnostic: %v %+v", err, cause)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal("unprivileged inherited-score launch failed:", err)
+				}
+				got, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "oom_score_adj"))
+				if err != nil || string(got) != want || fs.refused != 0 {
+					t.Fatalf("score=%s want=%s refused=%d err=%v", got, want, fs.refused, err)
+				}
+			})
 		}
 	}
 	q, _ := fixture(t)
