@@ -285,7 +285,9 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 		defer adopted.mu.Unlock()
 		return adopted.read() == nil && adopted.last.Finished
 	})
-	if got := adopted.last.Report.Error; !strings.Contains(got, "launch:"+oomPriorityUnavailable) || !strings.Contains(got, os.ErrPermission.Error()) {
+	// Runtime diagnostics publish the safe class; raw process causes stay local.
+	want := (RuntimeCause{Operation: "launch", Class: oomPriorityUnavailable}).String()
+	if got := adopted.last.Report.Error; got != want {
 		t.Fatalf("detached policy refusal lost typed diagnostic: %q", got)
 	}
 }
