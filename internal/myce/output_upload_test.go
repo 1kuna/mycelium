@@ -12,6 +12,23 @@ import (
 	"testing"
 )
 
+// ResponseRecorder treats the first 1xx as final; a real HTTP transport consumes
+// informational responses and returns the later final response to its caller.
+type outputUploadRecorder struct {
+	*httptest.ResponseRecorder
+	progress int
+}
+
+func (w *outputUploadRecorder) WriteHeader(status int) {
+	if status >= 100 && status < 200 {
+		if status == http.StatusProcessing {
+			w.progress++
+		}
+		return
+	}
+	w.ResponseRecorder.WriteHeader(status)
+}
+
 // Exercise the actual queue/tus finish callback, including its durability
 // barrier and old wrapper responses, without sockets or wall-clock sleeps.
 func TestOutputUploadCreationAndReconciliation(t *testing.T) {
@@ -59,14 +76,13 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			requests := 0
+			requests, progress := 0, 0
 			c := Client{URL: "http://queue.invalid", Clock: q.clock, singleAttempt: true, HTTP: &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 				requests++
-				w := httptest.NewRecorder()
+				w := &outputUploadRecorder{ResponseRecorder: httptest.NewRecorder()}
 				if strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
 					// serveUpload handles only tus routes. Match the queue's blob
 					// identity contract for the legacy reconciliation probe.
-					w = httptest.NewRecorder()
 					if store.verify(r.Context(), ref) != nil {
 						w.WriteHeader(404)
 					} else {
@@ -77,6 +93,7 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 				} else {
 					store.serveUpload(w, r)
 				}
+				progress += w.progress
 				return w.Result(), nil
 			})}}
 			err := c.uploadOutputFile(context.Background(), path, ref)
@@ -91,6 +108,9 @@ func TestOutputUploadCreationAndReconciliation(t *testing.T) {
 			}
 			if (mode == "new" || mode == "empty") && requests != 1 {
 				t.Fatal("fresh file request count", requests)
+			}
+			if mode == "new" && progress == 0 {
+				t.Fatal("creation-with-upload did not report verification progress")
 			}
 		})
 	}
