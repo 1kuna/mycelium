@@ -271,6 +271,13 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 		}
 		t.Cleanup(func() {
 			// Exact unique fixture files only; no installed unit or shared slice.
+			// Also cover a failure during initial startup or migration staging,
+			// before the ordinary stop defer can complete.
+			cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if out, err := manager.command(cleanup, "systemctl", "--user", "stop", filepath.Base(c.Service)); err != nil {
+				t.Errorf("stop owned migration fixture: %v: %s", err, out)
+			}
 			for _, path := range []string{filepath.Join(c.Service+".d", workerUnitMigrationDropIn), c.Service + ".d", c.Service} {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 					t.Error(err)
@@ -302,6 +309,14 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 					t.Fatalf("joint limit missing: %q %v", out, err)
 				}
 				t.Logf("migrated fixture reports available; slice MemoryMax=%s", strings.TrimSpace(string(out)))
+				pid, err := os.ReadFile(filepath.Join(c.State, "worker-pid"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				score, err := os.ReadFile("/proc/" + strings.TrimSpace(string(pid)) + "/oom_score_adj")
+				if err != nil || strings.TrimSpace(string(score)) != "0" {
+					t.Fatalf("replacement inherited OOM score: %q %v", score, err)
+				}
 			}
 			starts++
 		} else if runtime.GOOS == "darwin" {
@@ -322,11 +337,23 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	stop := func() {
 		t.Helper()
 		if migration && !staged {
+			pid, err := os.ReadFile(filepath.Join(c.State, "worker-pid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			membership := "/proc/" + strings.TrimSpace(string(pid)) + "/cgroup"
+			before, err := os.ReadFile(membership)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for range 2 {
 				status, err := StageWorkerUnitMigration(t.Context(), c, manager.command)
 				if err != nil || status.Reason != "worker_unit_migration_staged" {
 					t.Fatalf("stage fixture migration: %+v %v", status, err)
 				}
+			}
+			if after, err := os.ReadFile(membership); err != nil || string(after) != string(before) {
+				t.Fatalf("staging moved live worker: %q %v", after, err)
 			}
 			staged = true
 			t.Log("staged migration twice while running; no service stop or scope move")
