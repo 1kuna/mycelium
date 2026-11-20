@@ -527,6 +527,20 @@ can't submit ahead.
 
 ## When a job fails or waits
 
+Use `myce status JOB_ID` for attempt history. An OOM or resource-limit stop
+belongs to the attempt, so it does not skip the machine type as a coverage
+finding. Status shows its memory limit in GiB and available cgroup peak,
+non-reclaimable peak and kernel events (`oom`, `oom_kill`, `oom_group_kill`).
+Auto-memory work keeps its existing recovery; an authored ceiling remains a
+limit. For a terminal declared-limit failure, reduce memory use or raise the
+limit and submit the changed work. Missing tools or exec failures can still
+produce coverage findings on an unproven type.
+
+`myce logs JOB_ID` labels each chunk `[attempt N]`. The appended preparation
+failure is `[attempt 0: environment failure]`, separate from command attempts.
+`--after SEQ` and `--follow` keep the same API sequence cursors; labels are
+presentation only. `myce run` continues streaming command output directly.
+
 Default `myce status` puts unhealthy hosts, holds and waiting work first; alerts
 are one trailing count. Use `myce status --sections alerts` for records or
 `myce efficiency` for sizing and placement findings. Host health openings and

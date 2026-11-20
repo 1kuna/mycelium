@@ -2329,6 +2329,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if err != nil {
 		return err
 	}
+	r = classifyAttemptResourceFailure(j, r)
 	wallFailure := r.ExecutionCause != nil && r.ExecutionCause.Class == wallTimeLimit
 	wallFailure = (wallFailure || wallTimeStopped(j) && (r.Success || r.Interrupted)) && !r.OutOfMemory && !attemptDiskLimitFailure(r)
 	if wallFailure {
@@ -2495,7 +2496,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		q.recordModelUse(j.Spec.Needs.Model)
 		q.recordEntryCoverageSuccess(j, r.Machine)
 		j.State = "succeeded"
-	} else if q.entryCoverageFailure(j, r.Machine) {
+	} else if q.entryCoverageFailure(j, r) {
 		// A coverage finding requeued the job onto another machine type, or
 		// failed it with the finding when no proven type remains.
 	} else {

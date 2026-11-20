@@ -41,7 +41,18 @@ the last 14 days or still holding something (files, logs, custody, a checkpoint
 folder, a dependent `after:` job, an extension check). Older records expire
 and leave a one-line summary: `myce status JOB_ID` and `GET /api/jobs/ID`
 then answer `410 job_expired` with it (see [retention](../retention.md#job-records)). `--full` means full job IDs. For one job, `myce wait JOB_ID` prints each state change
-and `myce logs JOB_ID` prints its output.
+and `myce logs JOB_ID` prints its output, labelling each chunk `[attempt N]`.
+The queue's appended environment-preparation failure is labelled
+`[attempt 0: environment failure]`. Labels do not change `--after`/`--follow`
+sequence cursors or the API's `attempt` field.
+
+Attempt history reports memory-limit stops with their retained bound in GiB,
+measured cgroup/non-reclaimable peaks and kernel event counts. A failed attempt
+with `execution_cause.class: resource_limit`, an RSS guard stop, or kernel OOM
+evidence at its enforced ceiling is not a coverage finding. Auto-memory work
+uses ordinary OOM recovery; a declared ceiling is still the author's limit.
+A missing tool or exec failure on an unproven machine type can still record a
+coverage finding. Pressure (`high`/`max`) alone does not prove an OOM stop.
 
 - **Machines:** each worker has a `hypha NAME:` line (a hypha is one machine)
   with its hardware and free memory. It says `available for work` when it can
