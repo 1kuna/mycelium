@@ -169,6 +169,19 @@ func TestMemoryCeilingDelegationAndOOM(t *testing.T) {
 }
 
 func TestMemoryCeilingJointAllowance(t *testing.T) {
+	t.Run("unmigrated worker", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("production Linux membership regression")
+		}
+		c := fakeCeilings(t)
+		// Use real local files, but never a real cgroup or service manager.
+		// A legacy app.slice unit has no configured slice in its ancestry.
+		c.fs = osMemoryFS{}
+		w := Worker{Unit: "myce-worker.service", memoryCeilings: c}
+		if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 5}); err != nil {
+			t.Fatalf("unmigrated worker refused assignments: %v", err)
+		}
+	})
 	for _, slice := range []string{"myce.slice", "mycetest0123456789abcdef0123456789abcdef.slice"} {
 		t.Run(slice, func(t *testing.T) {
 			c := fakeCeilings(t)
