@@ -58,6 +58,10 @@ SUPPLEMENTAL_CONSUMERS['cmd/myce/queue_startup.go'] = ('install_test.go',)
 # `result recover` is dispatched through resultCommand; its dev regressions live there.
 SUPPLEMENTAL_CONSUMERS['cmd/myce/result_recover.go'] = ('result_test.go',)
 
+# Bundle publication and custody regressions predate the retention/release split.
+for source in ('file_retention', 'file_release', 'file_capacity'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('blob_gc_test.go',)
+
 # PCI facts feed onboarding, worker inventory and backend descriptor dispatch.
 SUPPLEMENTAL_CONSUMERS['internal/myce/pci_inventory.go'] = (
     'device_detection_test.go', 'device_inventory_family_test.go',
