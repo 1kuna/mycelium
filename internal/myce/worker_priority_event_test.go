@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,52 +87,88 @@ func TestWorkerEventCarriesPriorityStop(t *testing.T) {
 
 type observedEventClock struct {
 	manualWorkerClock
-	reads chan struct{}
+	reads chan time.Time
 }
 
 func (c *observedEventClock) Now() time.Time {
 	now := c.manualWorkerClock.Now()
 	select {
-	case c.reads <- struct{}{}:
+	case c.reads <- now:
 	default:
 	}
 	return now
 }
 func TestWorkerEventReconnectUsesClock(t *testing.T) {
-	clock := &observedEventClock{reads: make(chan struct{}, 16)}
-	clock.now = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	requests := make(chan struct{}, 4)
-	transport := clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		requests <- struct{}{}
-		return nil, errors.New("event stream unavailable")
-	})
-	w := Worker{Clock: clock, Machine: machine("event-worker", "fake"), Client: Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: transport}}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); w.watchStops(ctx, make(chan WorkerEvent)) }()
-	defer func() { cancel(); <-done }()
-	// Observe the initial readiness check, failure timestamp, and backoff check.
-	for i := 0; i < 3; i++ {
-		select {
-		case <-clock.reads:
-		case <-time.After(testWaitTimeout):
-			t.Fatal("retry did not consult Clock")
-		}
-	}
-	select {
-	case <-requests:
-	default:
-		t.Fatal("initial request missing")
-	}
-	select {
-	case <-requests:
-		t.Fatal("retried before fake-clock deadline")
-	default:
-	}
-	clock.Advance(time.Second)
-	select {
-	case <-requests:
-	case <-time.After(testWaitTimeout):
-		t.Fatal("fake-clock advance did not release reconnect")
+	for _, overload := range []bool{false, true} {
+		t.Run(map[bool]string{false: "transport", true: "retry_after"}[overload], func(t *testing.T) {
+			clock := &observedEventClock{reads: make(chan time.Time, 16)}
+			clock.now = time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+			requests := make(chan struct{}, 4)
+			transport := clientTestTransport(func(r *http.Request) (*http.Response, error) {
+				// A regression must fail its assertion and still let cleanup join
+				// watchStops when nobody drains this bounded observation.
+				select {
+				case requests <- struct{}{}:
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+				if overload {
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Retry-After": {"2"}}, Body: io.NopCloser(strings.NewReader(`{"code":"request_capacity_unavailable","error":"retry later"}`)), Request: r}, nil
+				}
+				return nil, errors.New("event stream unavailable")
+			})
+			w := Worker{Clock: clock, Machine: machine("event-worker", "fake"), Client: Client{URL: "http://fixture.invalid", HTTP: &http.Client{Transport: transport}}}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { defer close(done); w.watchStops(ctx, make(chan WorkerEvent)) }()
+			defer func() { cancel(); <-done }()
+			// Observe readiness, the failure timestamp, and the backoff check.
+			for i := 0; i < 3; i++ {
+				select {
+				case <-clock.reads:
+				case <-time.After(testWaitTimeout):
+					t.Fatal("retry did not consult Clock")
+				}
+			}
+			select {
+			case <-requests:
+			default:
+				t.Fatal("initial request missing")
+			}
+			select {
+			case <-requests:
+				t.Fatal("retried before fake-clock deadline")
+			default:
+			}
+			if overload {
+				clock.Advance(time.Second)
+				target := clock.manualWorkerClock.Now()
+				// Two reads prove the intervening iteration finished. An early
+				// request would be buffered before its failure timestamp (read 2).
+				timer := time.NewTimer(testWaitTimeout)
+				defer timer.Stop()
+				for observed := 0; observed < 2; {
+					select {
+					case at := <-clock.reads:
+						if !at.Before(target) {
+							observed++
+						}
+					case <-timer.C:
+						t.Fatal("backoff did not consult advanced Clock")
+					}
+				}
+				select {
+				case <-requests:
+					t.Fatal("retried before Retry-After deadline")
+				default:
+				}
+			}
+			clock.Advance(time.Second)
+			select {
+			case <-requests:
+			case <-time.After(testWaitTimeout):
+				t.Fatal("fake-clock advance did not release reconnect")
+			}
+		})
 	}
 }

@@ -321,6 +321,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true}
 	operations["execution"], classes[wallTimeLimit] = true, true
 	classes["tools_missing"] = true
+	classes[oomPriorityUnavailable] = true
 	if c.Operation == "outputs" && safeFinalization(c.Finalization) != nil {
 		classes[c.Finalization.Error] = true
 	}
