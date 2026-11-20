@@ -48,6 +48,32 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 			t.Fatal("keyed answer did not reuse committed job")
 		}
 	}
+	// Both reader and decoder failures must join the bounded startup pipeline.
+	// A following load must still return the complete, unchanged state.
+	for _, tc := range []struct{ name, key, data string }{
+		{"invalid_json", "jobs/corrupt", `{"id":`},
+		{"invalid_reference", "jobs/corrupt", `{"$refs":[],"id":{"$ref":0}}`},
+		{"missing_field_root", fieldPrefix("jobs/corrupt") + "cmVhc29u", `"orphan"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := q.db.Exec("INSERT INTO queue_state(key,data) VALUES(?,?)", tc.key, []byte(tc.data)); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.readStartupState(normalizedQueueMarker); err == nil {
+				t.Fatal("corrupt startup record accepted")
+			}
+			if _, err := q.db.Exec("DELETE FROM queue_state WHERE key=?", tc.key); err != nil {
+				t.Fatal(err)
+			}
+			q.s = state{}
+			if err := q.readStartupState(normalizedQueueMarker); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(expected, q.s) {
+				t.Fatal("failed startup changed the following load")
+			}
+		})
+	}
 }
 
 func TestQueuePersistenceRetiredDockerJob(t *testing.T) {

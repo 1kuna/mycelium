@@ -133,6 +133,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	startupTrace            func(string)    // Startup only; controlled phase names, no state values.
 	readInvalidations       map[string]bool // q.mu; applied atomically with capture publication.
 	readDependenciesInvalid bool
 
@@ -305,6 +306,18 @@ func ID() string {
 // QueueOption configures a queue before its startup transactions run.
 type QueueOption func(*Queue)
 
+// WithStartupTrace observes startup boundaries using the caller's injected clock.
+// The observer runs before serving requests, outside queue transactions.
+func WithStartupTrace(trace func(string)) QueueOption {
+	return func(q *Queue) { q.startupTrace = trace }
+}
+
+func (q *Queue) traceStartup(phase string) {
+	if q.startupTrace != nil {
+		q.startupTrace(phase)
+	}
+}
+
 // WithFileStore selects storage before startup verifies frozen bundle references.
 // An empty root uses the queue database's .files directory.
 func WithFileStore(root string, limit int64, checkpoints bool) QueueOption {
@@ -375,6 +388,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_schema")
 	var data []byte
 	err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
 	if err == nil {
@@ -404,6 +418,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_indexes")
 	q.retireWholeMachineHolds()
 	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
 	if q.startupFiles != nil {
@@ -419,6 +434,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_frozen_bundles")
 	q.unreported = map[string]bool{}
 	q.contacts = map[string]*workerContact{}
 	for id, m := range q.s.Machines {
@@ -443,6 +459,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_initial_commit")
 	if err = q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: 5 * time.Minute}); err != nil {
 		db.Close()
 		return nil, err
@@ -451,11 +468,13 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_defaults")
 	q.usageReader, err = openUsageReader(path)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
+	q.traceStartup("load_usage_reader")
 	success = true
 	if q.checkpointExpiryStatus == nil {
 		q.checkpointExpiryStatus = &atomic.Pointer[CheckpointExpiryStatus]{}

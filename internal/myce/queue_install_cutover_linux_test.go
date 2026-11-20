@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +63,8 @@ func TestQueueInstalledCutover(t *testing.T) {
 	q, workers := candidateCostFixture(t)
 	q.clock.(*fakeClock).Advance(time.Since(q.clock.Now()))
 	now := q.clock.Now()
+	// Moving fixture timestamps is not observed fleet usage across that gap.
+	q.s.UsageAt = now
 	for i := 160; i < 12400; i++ {
 		j := *q.s.Jobs[fmt.Sprintf("retained-%03d", i%160)]
 		j.ID = fmt.Sprintf("retained-%05d", i)
@@ -81,12 +85,19 @@ func TestQueueInstalledCutover(t *testing.T) {
 		q.s.WorkObservations[k] = v
 	}
 	retainedShape := os.Getenv("MYCE_TEST_RETAINED_SHAPE") == "1"
+	databaseVolume := os.Getenv("MYCE_TEST_DATABASE_VOLUME") == "1"
 	paddingKiB, err := strconv.Atoi(envTestDefault("MYCE_TEST_RECORD_PADDING_KIB", "0"))
 	if err != nil || paddingKiB < 0 || paddingKiB > 8 {
 		t.Fatal("record padding must be between 0 and 8 KiB")
 	}
 	if retainedShape {
 		shapeRetainedInstallFixture(t, q, now, paddingKiB)
+	}
+	if databaseVolume {
+		if !retainedShape {
+			t.Fatal("database volume requires the retained shape")
+		}
+		shapeInstallDatabaseRecords(t, q, now)
 	}
 	for i := range workers {
 		workers[i].HostHealth = &HostHealth{DrainReason: "host_memory_pressure"}
@@ -101,15 +112,35 @@ func TestQueueInstalledCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs, history, submissions := len(q.s.Jobs), len(q.s.WorkObservations), len(q.s.Submissions)
+	retainedAnswers := map[string][]byte{}
+	for _, r := range q.s.Submissions {
+		if q.s.Jobs[r.JobID] == nil {
+			data, err := json.Marshal(r.Job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retainedAnswers[r.JobID] = data
+		}
+	}
 	var stateBytes int64
 	if err := q.db.QueryRow("SELECT COALESCE(SUM(length(data)),0) FROM queue_state").Scan(&stateBytes); err != nil {
 		t.Fatal(err)
 	}
-	if retainedShape {
+	if retainedShape && !databaseVolume {
 		seedRetainedInstallLogs(t, q)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if databaseVolume {
+		// This helper writes only newly generated synthetic state in the opted-in
+		// fleet test. Keep multi-GB SQLite work out of the workstation and q.mu.
+		seed := exec.Command(python, "testdata/queue_install_volume.py", db)
+		if out, err := seed.CombinedOutput(); err != nil {
+			t.Fatalf("synthetic database volume: %v %s", err, out)
+		} else {
+			t.Logf("installed_database_volume=%s", bytes.TrimSpace(out))
+		}
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -134,9 +165,20 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if paddingKiB > 0 {
 		c.MemoryMax = "4G"
 	} // Explicit footprint sweep; its fleet profile must allow this.
+	if databaseVolume {
+		// Production startup reached 3.67 GB RSS, and queue accounting later
+		// reported 21.11 GiB available. 8G is test containment, not a claim about
+		// the production unit's hard limit. The 1G stress case stays separate.
+		c.MemoryMax = "8G"
+	}
 	if quota := os.Getenv("MYCE_TEST_QUEUE_CPU_QUOTA"); quota != "" {
 		c.CPUQuota = quota
 	}
+	fixture, err := json.Marshal(map[string]any{"jobs": jobs, "history": history, "submissions": submissions, "state_bytes": stateBytes, "retained_shape": retainedShape, "padding_kib": paddingKiB, "log_retention_hours": c.LogRetention.Hours(), "workers": len(workers), "cpu_quota": c.CPUQuota, "memory_max": c.MemoryMax})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("installed_fixture=%s", fixture)
 	write := func(path string, data []byte, mode os.FileMode) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -216,9 +258,89 @@ func TestQueueInstalledCutover(t *testing.T) {
 		}
 		t.Log("isolated unit disabled, process exited, runtime definition and enablement removed; temporary state removed by test cleanup")
 	})
+	var mu sync.Mutex
+	marks := map[string]int64{}
+	workerErrors := map[int]string{}
+	mark := func(name string) {
+		mu.Lock()
+		if marks[name] == 0 {
+			marks[name] = time.Now().UnixNano()
+		}
+		mu.Unlock()
+	}
+	journalSeen := map[string]bool{}
+	readJournal := func() error {
+		// Diagnostics must survive expiry of the trial's cancellation budget.
+		journalCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		journal := exec.CommandContext(journalCtx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager", "--grep=event=queue_startup_phase|Mycelium queue: http://")
+		journal.Env = env
+		journalData, err := journal.Output()
+		if err != nil {
+			return fmt.Errorf("cannot read isolated startup journal: %w", err)
+		}
+		for _, line := range bytes.Split(journalData, []byte("\n")) {
+			var row struct {
+				Message string `json:"MESSAGE"`
+				At      string `json:"__REALTIME_TIMESTAMP"`
+			}
+			if json.Unmarshal(line, &row) != nil {
+				continue
+			}
+			at, err := strconv.ParseInt(row.At, 10, 64)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			cut := marks["stop_request"]
+			if cut > 0 && at*1000 > cut && strings.HasPrefix(row.Message, "Mycelium queue: http://") {
+				marks["new_process_ready"] = at * 1000
+			}
+			mu.Unlock()
+			key := row.At + row.Message
+			if !journalSeen[key] && strings.Contains(row.Message, "event=queue_startup_phase") {
+				journalSeen[key] = true
+				t.Logf("installed_queue_phase=%s", row.Message)
+			}
+		}
+		return nil
+	}
+	// LIFO cleanup preserves partial evidence before removing the test unit.
+	// These observations never substitute for the reconnect/preservation checks.
+	t.Cleanup(func() {
+		if err := readJournal(); err != nil {
+			t.Errorf("startup diagnostics: %v", err)
+		}
+		mu.Lock()
+		missing := []string{}
+		if marks["client_reconnected"] == 0 {
+			missing = append(missing, "client")
+		}
+		for i := range workers {
+			if marks[fmt.Sprintf("worker_%d", i)] == 0 {
+				missing = append(missing, fmt.Sprintf("worker_%d", i))
+			}
+		}
+		partial, err := json.Marshal(map[string]any{"marks_ns": marks, "worker_last_errors": workerErrors, "missing_reconnections": missing, "failed": t.Failed()})
+		mu.Unlock()
+		if err != nil {
+			t.Error(err)
+		} else {
+			t.Logf("installed_observation=%s", partial)
+		}
+		if data, err := os.ReadFile(events); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line != "" {
+					t.Logf("installed_manager=%s", line)
+				}
+			}
+		}
+	})
+	mark("bootstrap_start")
 	if err := install(); err != nil {
 		t.Fatal(err)
 	} // Bootstrap is outside the measured trial.
+	mark("bootstrap_install_return")
 	client := Client{URL: c.Queue, Token: "synthetic", HTTP: &http.Client{Timeout: time.Second}, singleAttempt: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -238,15 +360,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if err != nil || oldPID <= 0 {
 		t.Fatal("no initial queue PID")
 	}
-	var mu sync.Mutex
-	marks := map[string]int64{}
-	mark := func(name string) {
-		mu.Lock()
-		if marks[name] == 0 {
-			marks[name] = time.Now().UnixNano()
-		}
-		mu.Unlock()
-	}
+	mark("bootstrap_ready")
 	var wg sync.WaitGroup
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	defer func() { stopWorkers(); wg.Wait() }()
@@ -261,6 +375,14 @@ func TestQueueInstalledCutover(t *testing.T) {
 				if retry.ready(now) {
 					_, err := w.checkin(workerCtx, Checkin{Machine: m, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: m.Session, Started: true}}})
 					if err != nil {
+						code := fmt.Sprintf("%T", err)
+						var api *HTTPError
+						if errors.As(err, &api) {
+							code = fmt.Sprintf("http_%d:%s", api.Status, api.Code)
+						}
+						mu.Lock()
+						workerErrors[i] = code
+						mu.Unlock()
 						retry.failed(time.Now(), time.Second)
 					} else {
 						retry.succeeded(time.Now(), time.Second)
@@ -325,10 +447,14 @@ print('finished',flush=True)
 	if err := py.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pyDone := make(chan struct{})
+	var pyResult error
 	defer func() {
-		if py.ProcessState == nil {
-			py.Process.Kill()
-			py.Wait()
+		select {
+		case <-pyDone:
+		default:
+			_ = py.Process.Kill()
+			<-pyDone
 		}
 	}()
 	sent := make(chan struct{}, 1)
@@ -355,10 +481,19 @@ print('finished',flush=True)
 			}
 		}
 	}()
+	// One waiter owns Wait and stderr. Drain stdout before Wait closes its pipe;
+	// closing pyDone publishes the result without racing ProcessState/buffers.
+	go func() {
+		<-scanDone
+		pyResult = py.Wait()
+		close(pyDone)
+	}()
 	select {
 	case <-sent:
+	case <-pyDone:
+		t.Fatalf("client exited before wait was in flight: %v %s", pyResult, pyErr.String())
 	case <-ctx.Done():
-		t.Fatalf("client wait not in flight: %s", pyErr.String())
+		t.Fatal("client wait not in flight before deadline")
 	}
 	if err := os.WriteFile(events, nil, 0600); err != nil {
 		t.Fatal(err)
@@ -428,6 +563,10 @@ print('finished',flush=True)
 	case <-ctx.Done():
 		t.Fatal("installer did not return")
 	}
+	// Capture readiness and startup spans before reconnect success is known.
+	if err := readJournal(); err != nil {
+		t.Fatal(err)
+	}
 	for {
 		mu.Lock()
 		all := marks["client_reconnected"] > 0
@@ -439,42 +578,14 @@ print('finished',flush=True)
 			break
 		}
 		select {
+		case <-pyDone:
+			t.Fatalf("client exited before reconnection: %v %s", pyResult, pyErr.String())
 		case <-ctx.Done():
 			t.Fatal("reconnections incomplete")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	mark("all_reconnected")
-	// Read only this test unit's journal. Its existing listener-ready message
-	// identifies readiness independently of Type=simple manager activation.
-	journal := exec.CommandContext(ctx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager")
-	journal.Env = env
-	journalData, err := journal.Output()
-	if err != nil {
-		t.Fatal("cannot measure queue readiness from test unit journal")
-	}
-	for _, line := range bytes.Split(journalData, []byte("\n")) {
-		var row struct {
-			Message string `json:"MESSAGE"`
-			At      string `json:"__REALTIME_TIMESTAMP"`
-		}
-		if json.Unmarshal(line, &row) != nil {
-			continue
-		}
-		at, err := strconv.ParseInt(row.At, 10, 64)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mu.Lock()
-		if at*1000 > marks["stop_request"] && strings.HasPrefix(row.Message, "Mycelium queue: http://") {
-			marks["new_process_ready"] = at * 1000
-		}
-		cut := marks["stop_request"]
-		mu.Unlock()
-		if at*1000 > cut && (strings.Contains(row.Message, "event=queue_startup_phase") || strings.Contains(row.Message, "event=slow_queue_mutex_hold")) {
-			t.Logf("installed_queue_phase=%s", row.Message)
-		}
-	}
 	mu.Lock()
 	ready := marks["new_process_ready"]
 	mu.Unlock()
@@ -486,10 +597,14 @@ print('finished',flush=True)
 	if err := client.Call(ctx, "POST", "/api/workers/complete", Result{Execution: Execution{ID: "running-0", Attempt: 1}, Machine: workers[0].ID, Session: workers[0].Session, Success: true}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := py.Wait(); err != nil {
-		t.Fatalf("client failed: %v %s", err, pyErr.String())
+	select {
+	case <-pyDone:
+		if pyResult != nil {
+			t.Fatalf("client failed: %v %s", pyResult, pyErr.String())
+		}
+	case <-ctx.Done():
+		t.Fatal("client did not finish before deadline")
 	}
-	<-scanDone
 	if _, err := manager("stop", unit); err != nil {
 		t.Fatal(err)
 	}
@@ -505,11 +620,17 @@ print('finished',flush=True)
 		t.Fatal("keyed answer loss or duplication")
 	}
 	for _, r := range restored.s.Submissions {
-		if r.Job != restored.s.Jobs[r.JobID] {
+		if live := restored.s.Jobs[r.JobID]; live != nil && r.Job != live {
 			t.Fatal("keyed answer identity changed")
 		}
+		if want, ok := retainedAnswers[r.JobID]; ok {
+			got, err := json.Marshal(r.Job)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatal("historical keyed answer changed")
+			}
+		}
 	}
-	if retainedShape {
+	if retainedShape && !databaseVolume {
 		var fresh, expired int
 		if err := restored.db.QueryRow("SELECT count(*) FROM logs WHERE text='synthetic-fresh-cutover'").Scan(&fresh); err != nil {
 			t.Fatal(err)
@@ -519,6 +640,21 @@ print('finished',flush=True)
 		}
 		if fresh != 6201 || expired != 0 {
 			t.Fatalf("log retention or preservation changed: fresh=%d expired=%d", fresh, expired)
+		}
+	}
+	if databaseVolume {
+		var rows, textBytes, offsets, usage int64
+		if err := restored.db.QueryRow("SELECT count(*), sum(length(text)) FROM logs").Scan(&rows, &textBytes); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.db.QueryRow("SELECT count(*) FROM log_offsets").Scan(&offsets); err != nil {
+			t.Fatal(err)
+		}
+		if err := restored.db.QueryRow("SELECT count(*) FROM usage_samples").Scan(&usage); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 655178 || textBytes != 3440339990 || offsets != 653585 || usage < 369176 {
+			t.Fatalf("database volume lost: logs=%d bytes=%d offsets=%d usage=%d", rows, textBytes, offsets, usage)
 		}
 	}
 	for i, m := range workers {
@@ -531,10 +667,6 @@ print('finished',flush=True)
 			t.Fatalf("attempt changed: %+v", j)
 		}
 	}
-	managerEvents, err := os.ReadFile(events)
-	if err != nil {
-		t.Fatal(err)
-	}
 	mu.Lock()
 	result := map[string]any{"marks_ns": marks, "jobs": jobs, "history": history, "submissions": submissions, "state_bytes": stateBytes, "retained_shape": retainedShape, "padding_kib": paddingKiB, "log_retention_hours": c.LogRetention.Hours(), "workers": len(workers), "cpu_quota": c.CPUQuota, "preserved": true}
 	data, err = json.Marshal(result)
@@ -543,9 +675,6 @@ print('finished',flush=True)
 		t.Fatal(err)
 	}
 	t.Logf("installed_cutover=%s", data)
-	for _, line := range strings.Split(strings.TrimSpace(string(managerEvents)), "\n") {
-		t.Logf("installed_manager=%s", line)
-	}
 }
 
 func envTestDefault(name, fallback string) string {
@@ -587,6 +716,112 @@ func shapeRetainedInstallFixture(t *testing.T, q *Queue, now time.Time, paddingK
 			t.Fatal(err)
 		}
 		q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: j.Spec.Project, Key: j.Spec.SubmissionKey, Fingerprint: fingerprint, JobID: j.ID, Job: j, Created: &now}
+	}
+}
+
+// The measured database-volume axis is separate from the earlier 1G stress
+// fixture. Only aggregate dimensions enter this generator, never real records.
+func shapeInstallDatabaseRecords(t *testing.T, q *Queue, now time.Time) {
+	t.Helper()
+	// Keep 12,192 total jobs, including the five unchanged running attempts.
+	for i := 12077; i < 12400; i++ {
+		id := fmt.Sprintf("retained-%05d", i)
+		j := q.s.Jobs[id]
+		delete(q.s.Submissions, submissionDigest(j.Spec.Project, j.Spec.SubmissionKey))
+		delete(q.s.Jobs, id)
+	}
+	for i := 4464; i < 4495; i++ {
+		v := q.s.WorkObservations[strconv.Itoa(i%1400)]
+		v.Key.Configuration = fmt.Sprintf("synthetic-volume-%d", i)
+		q.s.WorkObservations[strconv.Itoa(i)] = v
+	}
+	q.s.StorageObservations = map[string]StorageObservation{}
+	for i := range 9841 {
+		q.s.StorageObservations[strconv.Itoa(i)] = StorageObservation{Key: StorageKey{Program: "synthetic-volume", Configuration: fmt.Sprintf("configuration-%d", i), Shape: strings.Repeat("s", 850)}, RecordedAt: now, Family: "synthetic-volume", AllocationUnit: 4096}
+	}
+	ids := make([]string, 0, len(q.s.Jobs))
+	for id, j := range q.s.Jobs {
+		if terminal(j.State) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	// Representative reference topology, not a claim that production uses
+	// these particular fields/values. The aggregate byte distribution is the
+	// measured axis; logs/usage/freelist are generated independently below.
+	for i, id := range ids {
+		j := q.s.Jobs[id]
+		j.Spec.Args = append([]string(nil), j.Spec.Args...)
+		for k := range 27 {
+			value := fmt.Sprintf("synthetic-shared-value-%03d", k)
+			j.Spec.Args = append(j.Spec.Args, value, value)
+		}
+		if i < 895 {
+			count := 37
+			if i == 0 {
+				count = 679
+			}
+			for k := range count {
+				j.LedgerEntries = append(j.LedgerEntries, JobLedgerEntry{Sequence: k + 1, At: now, Attempt: 1, ExecutionID: id, Machine: j.Machine, Session: j.Session, Kind: "synthetic-retained", State: j.State, Reason: fmt.Sprintf("synthetic decision %d", k)})
+			}
+			j.Ledger = &JobLedgerInfo{Complete: true, HighWater: count}
+		}
+		if i < 4746 {
+			j.AttemptHistory = []AttemptOutcome{{Attempt: 1, Machine: j.Machine, Session: j.Session, EndedAt: now, State: j.State, Reason: "synthetic retained attempt"}}
+		}
+		// Fixed quantile bins approximate the measured 13.6/27.6 KB p50/p95
+		// and 779 KB tail, without inventing a production payload distribution.
+		target := 13629
+		switch {
+		case i < 2:
+			target = 779249
+		case i < 8:
+			target = 400000
+		case i < 44:
+			target = 180000
+		case i < 132:
+			target = 95000
+		case i < 392:
+			target = 45000
+		case i < 3508:
+			target = 27557
+		case i >= 9690:
+			target = 6500
+		}
+		data, err := json.Marshal(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if padding := target - len(slimJobRecord(data)); padding > 0 {
+			j.Reason = strings.Repeat("v", padding)
+		}
+		r := q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)]
+		r.Fingerprint, err = submissionFingerprint(j.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The measured submission mix includes 4,497 full answers whose jobs have
+	// already left the live map, not a second copy of every live job.
+	for _, id := range ids[:3251] {
+		j := q.s.Jobs[id]
+		delete(q.s.Submissions, submissionDigest(j.Spec.Project, j.Spec.SubmissionKey))
+	}
+	for i := range 4497 {
+		j := *q.s.Jobs[ids[len(ids)-1]]
+		j.ID = fmt.Sprintf("historical-%05d", i)
+		j.Spec.SubmissionKey = j.ID
+		j.Reason = strings.Repeat("h", 4000+i%3000)
+		fingerprint, err := submissionFingerprint(j.Spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.s.Submissions[submissionDigest(j.Spec.Project, j.Spec.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: j.Spec.Project, Key: j.Spec.SubmissionKey, Fingerprint: fingerprint, JobID: j.ID, Job: &j, Created: &now, RemovedAt: &now}
+	}
+	q.s.FileInputClaims = map[string]FileInputClaim{}
+	for i := range 7000 {
+		id := fmt.Sprintf("synthetic-claim-%05d", i)
+		q.s.FileInputClaims[id] = FileInputClaim{ID: id, Project: "synthetic-volume", File: FileRef{SHA256: fmt.Sprintf("%064x", i), SizeBytes: 1}, At: now, SettledAt: now}
 	}
 }
 

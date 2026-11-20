@@ -576,7 +576,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *checkpointExpiryGrace <= 0 {
 			return errors.New("checkpoint-expiry-grace must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithStartupTrace(queueStartupTrace(myce.RealClock{}, log.Printf)), myce.WithCheckpointShards(), myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay), myce.WithCheckpointExpiryGrace(*checkpointExpiryGrace))
 		if err != nil {
 			return err
 		}
