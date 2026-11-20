@@ -18,7 +18,9 @@ func BenchmarkStartWindowDeadlineMaintenance(b *testing.B) {
 	q, clock := fixture(b)
 	m := cpuBackfillMachine("worker-0", 64)
 	check(b, q, m, nil)
-	holder := submit(b, q, cpuSpec(1, 32))
+	holderSpec := cpuSpec(1, 32)
+	holderSpec.Priority = "production" // Same-tier work must finish, not be reclaimed.
+	holder := submit(b, q, holderSpec)
 	running := assignedJob(check(b, q, m, nil))
 	if running == nil || running.ID != holder.ID {
 		b.Fatal("missing holder")
@@ -71,8 +73,10 @@ func BenchmarkStartWindowDeadlineMaintenance(b *testing.B) {
 	// Confirm the fixture really exercises host accumulation, not ordinary fit.
 	scan := q.placementScan()
 	for _, j := range renders {
-		if waiting, ready := q.queuedCapacityStatus(j); waiting || !ready || q.hostBackfillWaitingReason(j, scan) == "" {
-			b.Fatal("render is not ready but fenced")
+		waiting, ready := q.queuedCapacityStatus(j)
+		reason := q.hostBackfillWaitingReason(j, scan)
+		if waiting || !ready || reason == "" {
+			b.Fatalf("render is not ready but fenced: waiting=%t ready=%t reason=%q holder_stop=%v", waiting, ready, reason, q.s.Jobs[holder.ID].StopAt)
 		}
 	}
 	q.maintainStartDeadlines()
