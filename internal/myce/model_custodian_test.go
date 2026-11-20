@@ -18,6 +18,24 @@ import (
 	"time"
 )
 
+type modelPolicyMemoryFS struct {
+	*inheritedOOMMemoryFS
+	refuse string
+}
+
+func (f modelPolicyMemoryFS) setOOMScore(pid, score int) error {
+	return setAttemptOOMScore(f, pid, score)
+}
+
+func (f modelPolicyMemoryFS) WriteFile(path string, value []byte) error {
+	if strings.HasPrefix(path, "/proc/") && filepath.Base(path) == "oom_score_adj" {
+		if _, err := os.Stat(f.refuse); err == nil {
+			return os.ErrPermission
+		}
+	}
+	return f.inheritedOOMMemoryFS.WriteFile(path, value)
+}
+
 // Only native service membership is synthetic. This subprocess owns the real
 // generic engine, its health/Wait loop, and the bridge's live response socket.
 func TestDetachedModelCustodianHelper(t *testing.T) {
@@ -46,7 +64,8 @@ func TestDetachedModelCustodianHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ceilings, err := delegateMemory(fakeMemoryFS{}, root, 42)
+	fs := modelPolicyMemoryFS{inheritedOOMMemoryFS: &inheritedOOMMemoryFS{minimum: 200, scores: map[string]int{}}, refuse: filepath.Join(spool, "refuse-oom-policy")}
+	ceilings, err := delegateMemory(fs, root, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +266,28 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 		t.Fatalf("worker replacement interrupted/duplicated response: %q %v", last, err)
 	}
 	await(t, func() bool { r, _ := next.report(); return r[0].InFlight == 0 })
+	// A later required raise can fail even after successful live adoption.
+	// Preserve its typed permission diagnostic across the helper snapshot.
+	policy.Class = "production"
+	next.sync([]ModelSlot{policy})
+	await(t, func() bool {
+		adopted.mu.Lock()
+		defer adopted.mu.Unlock()
+		return adopted.read() == nil && adopted.last.OOMScore == 0
+	})
+	if err := os.WriteFile(filepath.Join(spool, "refuse-oom-policy"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy.Class = "test"
+	next.sync([]ModelSlot{policy})
+	await(t, func() bool {
+		adopted.mu.Lock()
+		defer adopted.mu.Unlock()
+		return adopted.read() == nil && adopted.last.Finished
+	})
+	if got := adopted.last.Report.Error; !strings.Contains(got, "launch:"+oomPriorityUnavailable) || !strings.Contains(got, os.ErrPermission.Error()) {
+		t.Fatalf("detached policy refusal lost typed diagnostic: %q", got)
+	}
 }
 
 func TestDetachedModelProofRefusesUnconfirmedIdentity(t *testing.T) {
