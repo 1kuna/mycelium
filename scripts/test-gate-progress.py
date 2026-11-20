@@ -17,7 +17,7 @@ spec.loader.exec_module(progress)
 
 
 class ProgressTests(unittest.TestCase):
-    def execute(self, root, times, expected=None, command=None, status=0, start=True):
+    def execute(self, root, times, expected=None, command=None, status=0, start=True, startup=None):
         cache, report = root / 'cache', root / 'report'
         now = [0.0]
         child = Mock()
@@ -27,7 +27,8 @@ class ProgressTests(unittest.TestCase):
             cache.mkdir(exist_ok=True)
             identity = progress.history_identity('package:selection', command or ['go', 'test', './pkg'])
             key = progress.hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-            (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected)))
+            (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=expected,
+                startup_samples=[expected if startup is None else startup])))
         selector = Mock()
         selector.__enter__ = Mock(return_value=selector)
         selector.__exit__ = Mock(return_value=False)
@@ -163,25 +164,58 @@ class ProgressTests(unittest.TestCase):
                          '-test.count=1', '-test.parallel=1', '-test.run=^TestBlocked$'):
                 self.assertIn(flag, launched)
 
-    def test_new_image_cannot_inherit_warm_image_startup_deadline(self):
+    def test_fresh_image_keeps_startup_and_in_test_bounds_from_warm_history(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             image = root / 'shared.test'
-            image.write_bytes(b'first compiled image')
-            command = ['--test-binary', 'fixture/pkg', str(image), str(root)]
-            code, first, _ = self.execute(root, [(2, b'')], command=command)
-            self.assertEqual(code, 0)
-            self.assertIn('-test.timeout=1h', first)
-            code, warm, _ = self.execute(root, [(0.2, b'')], command=command)
-            self.assertEqual(code, 0)
-            self.assertIn('-test.timeout=0', warm)
-            learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
-            self.assertEqual(learned['expected_seconds'], 2)
             image.write_bytes(b'new compiled image')
-            code, rebuilt, _ = self.execute(root, [(2, b'')], command=command)
+            command = ['--test-binary', 'fixture/pkg', str(image), str(root)]
+            code, launched, record = self.execute(root, [
+                (1, b'{"Action":"run","Test":"TestBlocked"}\n'),
+                (1.75, None)], expected=.25, startup=1.2, command=command)
+            self.assertEqual(code, 124)
+            self.assertIn('-test.timeout=0', launched)
+            self.assertAlmostEqual(record['startup_limit_seconds'], 3.6)
+            self.assertEqual(record['startup_gap_seconds'], 1)
+            self.assertEqual(record['stopped_phase'], 'test')
+            code, _, record = self.execute(root, [(3.6, None)],
+                expected=.25, startup=1.2, command=command)
+            self.assertEqual(code, 124)
+            self.assertEqual(record['stopped_phase'], 'startup')
+
+    def test_legacy_history_bootstraps_only_startup_and_keeps_warm_test_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache = root / 'cache'
+            cache.mkdir()
+            key = progress.hashlib.sha256(json.dumps(progress.history_identity('package:selection')).encode()).hexdigest()
+            (cache / (key + '.json')).write_text(json.dumps(dict(count=1, expected_seconds=.25)))
+            code, _, record = self.execute(root, [
+                (1, b'{"Action":"run","Test":"TestBlocked"}\n'), (1.75, None)])
+            self.assertEqual(code, 124)
+            self.assertEqual(record['startup_limit_seconds'], 3600)
+            self.assertEqual(record['stopped_phase'], 'test')
+
+    def test_startup_window_forgets_old_launches_without_warm_repeats_eviction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / 'shared.test'
+            command = ['--test-binary', 'fixture/pkg', str(image), str(root)]
+            for n, gap in enumerate([2, 1, 1, 1]):
+                image.write_bytes(str(n).encode())
+                code, _, _ = self.execute(root, [
+                    (gap, b'{"Action":"run","Test":"TestA"}\n'),
+                    (gap + .1, b'')], command=command)
+                self.assertEqual(code, 0)
+            learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
+            self.assertEqual(learned['startup_samples'], [1, 1, 1])
+            code, _, _ = self.execute(root, [
+                (.1, b'{"Action":"run","Test":"TestA"}\n'), (.2, b'')], command=command)
             self.assertEqual(code, 0)
-            self.assertIn('-test.timeout=1h', rebuilt)
-            self.assertEqual(len(list((root / 'cache').glob('*.json'))), 2)
+            learned = json.loads(next((root / 'cache').glob('*.json')).read_text())
+            self.assertEqual(learned['startup_samples'], [1, 1, 1])
+            self.assertEqual(learned['expected_seconds'], .2)
+            self.assertEqual(len(list((root / 'cache').glob('*.json'))), 1)
 
     def test_compile_only_is_not_learned_as_a_running_test_package(self):
         with tempfile.TemporaryDirectory() as folder:

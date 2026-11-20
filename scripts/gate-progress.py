@@ -106,25 +106,34 @@ def history_identity(label, command=()):
     # still learn separately; otherwise both appear to be the same CPU profile.
     if slots := os.environ.get('GATE_TEST_SLOTS'):
         identity.append(slots)
-    if command[:1] == ['--test-binary']:
-        # test2json emits package start before it launches this image. A newly
-        # linked Darwin image can initialize much more slowly than a warm one;
-        # a previous image's subsecond timing cannot qualify its first launch.
-        digest = hashlib.sha256()
-        with Path(command[2]).open('rb') as image:
-            for block in iter(lambda: image.read(1024 * 1024), b''):
-                digest.update(block)
-        identity.extend(['compiled-test', digest.hexdigest()])
     return identity
 
 
 def run(label, command, cache, report, clock=time.monotonic):
-    identity = history_identity(label, command)
+    identity = history_identity(label)
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / (hashlib.sha256(json.dumps(identity).encode()).hexdigest() + '.json')
     history = load_history(path)
     expected = history['expected_seconds'] if history else None
     compiled = command[:1] == ['--test-binary']
+    image_sha = None
+    if compiled:
+        digest = hashlib.sha256()
+        with Path(command[2]).open('rb') as image:
+            for block in iter(lambda: image.read(1024 * 1024), b''):
+                digest.update(block)
+        image_sha = digest.hexdigest()
+    # Three recent first-launch successes match the existing three-interval
+    # contention tolerance. Warm repeats do not evict cold-start evidence.
+    startup_samples = (history or {}).get('startup_samples', [])
+    startup_samples = [x for x in startup_samples if isinstance(x, (int, float))
+                       and math.isfinite(x) and x >= 0][-STALL_INTERVALS:]
+    startup_expected = max(startup_samples, default=0)
+    # Legacy caches have no startup observations. Bootstrap this phase once,
+    # using the existing one-hour cold backstop, then keep the measured bound
+    # across rebuilt images. Warm in-test detection remains enabled meanwhile.
+    startup_limit = (STALL_INTERVALS * startup_expected if startup_expected > 0 else 3600)
+    first_launch = image_sha is None or image_sha != (history or {}).get('image_sha256')
     is_test = compiled or command[:2] == ['go', 'test'] and '-c' not in command[2:]
     directory = None
     if compiled:
@@ -137,12 +146,17 @@ def run(label, command, cache, report, clock=time.monotonic):
         # arbitrarily long provided they keep making progress.
         command = [*command[:2], '-timeout=0' if history else '-timeout=1h', *command[2:]]
     basis = f'{expected:.3f}s × {STALL_INTERVALS} silence' if history else 'cold learning (Go tests: 1h backstop)'
+    if is_test:
+        basis += f'; startup {startup_limit:.3f}s'
     print(f'gate progress {label}: cpu={cpu_count()} {basis}', flush=True)
     # Compilation/cache misses precede Go's package-start event. A warm test
     # measurement must not become a deadline for a cold compiler/linker.
     progress = Progress(None, clock())
     pending = b''
     active_tests = set()
+    package_started = None
+    startup_gap = None
+    phase = 'compile'
     package_scratch = None
     child_env = None
     if is_test:
@@ -179,7 +193,7 @@ def run(label, command, cache, report, clock=time.monotonic):
                 if remaining == 0:
                     status = 124
                     kind = 'test progress' if is_test else 'output'
-                    print(f'gate stall {label}: no {kind} for {STALL_INTERVALS * expected:.3f}s',
+                    print(f'gate stall {label}: no {kind} for {STALL_INTERVALS * progress.expected:.3f}s ({phase})',
                           file=sys.stderr, flush=True)
                     for name in sorted(active_tests):
                         print(f'gate stalled test: {name}', file=sys.stderr, flush=True)
@@ -212,15 +226,25 @@ def run(label, command, cache, report, clock=time.monotonic):
                         # lifecycle transitions renew the learned watchdog.
                         if action not in ('start', 'run', 'pause', 'cont', 'pass', 'fail', 'skip'):
                             continue
+                        now = clock()
                         if action == 'start':
-                            progress.expected = expected
+                            if package_started is not None:
+                                continue
+                            package_started = now
+                            phase = 'startup'
+                            progress.expected = startup_limit / STALL_INTERVALS
                         name = event.get('Test')
+                        if phase == 'startup' and (isinstance(name, str)
+                                                  or action in ('pass', 'fail', 'skip')):
+                            startup_gap = now - package_started
+                            phase = 'test'
+                            progress.expected = expected
                         if isinstance(name, str):
                             if action == 'run':
                                 active_tests.add(name)
                             elif action in ('pass', 'fail', 'skip'):
                                 active_tests.discard(name)
-                        progress.output(clock())
+                        progress.output(now)
                 else:
                     progress.output(clock())
                 sys.stdout.buffer.write(data)
@@ -240,11 +264,18 @@ def run(label, command, cache, report, clock=time.monotonic):
             else:
                 print('gate: package custody unconfirmed; scratch retained', file=sys.stderr, flush=True)
                 status = 125
+        # A successful no-test package can exit without a named lifecycle.
+        if status == 0 and is_test and startup_gap is None and package_started is not None:
+            startup_gap = clock() - package_started
         elapsed = clock() - progress.started
         record = dict(label=label, cpu=cpu_count(), elapsed_seconds=elapsed,
                       shard_slots=os.environ.get('GATE_TEST_SLOTS'),
                       longest_gap_seconds=max(progress.longest_gap, clock() - progress.last),
                       expected_seconds=expected, exit=status,
+                      startup_gap_seconds=startup_gap,
+                      startup_limit_seconds=startup_limit if is_test else None,
+                      first_launch=first_launch if compiled else None,
+                      stopped_phase=phase if status == 124 else None,
                       progress_kind='test lifecycle' if is_test else 'output',
                       active_tests=sorted(active_tests))
         # Every run is evidence, including failures, but censored/failed runs
@@ -252,10 +283,11 @@ def run(label, command, cache, report, clock=time.monotonic):
         with report.open('a') as output:
             output.write(json.dumps(record) + '\n')
         if status == 0 and elapsed > 0:
+            if first_launch and startup_gap is not None:
+                startup_samples = [*startup_samples, startup_gap][-STALL_INTERVALS:]
             learned = dict(count=(history['count'] if history else 0) + 1,
-                           # Keep the slow successful launch as evidence. Replacing it with
-                           # the latest warm run would forget measured startup cost.
-                           expected_seconds=max(elapsed, expected or 0))
+                           expected_seconds=elapsed, startup_samples=startup_samples,
+                           image_sha256=image_sha)
             temporary = path.with_suffix('.' + uuid.uuid4().hex)
             temporary.write_text(json.dumps(learned) + '\n')
             os.replace(temporary, path)
