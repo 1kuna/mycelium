@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -99,6 +101,48 @@ func TestFirstRunFloorEchoChargedSmall(t *testing.T) {
 	}
 	if done := job(t, q, run.ID); done.State != "succeeded" || done.Attempt != 1 || done.OOMRetries != 0 {
 		t.Fatalf("echo did not succeed first time: state=%s attempt=%d", done.State, done.Attempt)
+	}
+}
+
+// #1761: exercise the ordinary worker entry before any command can execute.
+// These are alternative fault injections, not a reconstruction of the missing
+// incident ledger. Unknown evidence and floor-only room must refuse launch.
+func TestFirstRunFloorLaunchRefusals(t *testing.T) {
+	for _, mode := range []string{"ledger read failed", "floor-only room", "missing adaptive capacity"} {
+		t.Run(mode, func(t *testing.T) {
+			_, clock, m := floorFixture(t)
+			m.MemoryCeilingSlackGB = 0
+			w := recoveryWorker(t)
+			w.Machine, w.Clock = m, clock
+			w.CPUIsolationProbe = func(context.Context) error { return nil }
+			w.HostMemorySource = func(context.Context) (float64, error) { return 17, nil }
+			w.hostChargesExcept = func(attemptKey) (float64, float64) { return 0, 0 }
+			switch mode {
+			case "ledger read failed":
+				w.hostChargesExcept = func(attemptKey) (float64, float64) { return math.NaN(), math.NaN() }
+			case "floor-only room":
+				w.hostChargesExcept = func(attemptKey) (float64, float64) { return 28 - minimumHostMemoryGB, 0 }
+			case "missing adaptive capacity":
+				w.Machine.HostMemoryBudgetGB, w.Machine.CapabilityProfile = 0, nil
+			}
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
+			j.Spec = autoSpec("compiler", "sh", "-c", "exit 0")
+			j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
+			j.MemoryEnvelope = &JobMemoryEnvelope{HostGB: minimumHostMemoryGB, ProbeFloorGB: minimumHostMemoryGB, Basis: "exploratory", Source: "exploratory first run; " + firstRunFloorSource, Enforcement: learnedMemoryGuardEnforcement}
+			p, err := startAfterFixtureInputs(t, w, store, j)
+			if p != nil {
+				p.stopDirective(clock.Now(), 0, true, true)
+				_ = d5Finish(t, p)
+			}
+			if p != nil || !errors.Is(err, errWorkerMemory) || admissionDetail(err, j) == nil {
+				t.Fatalf("%s launched or lost its typed admission refusal: process=%v error=%v", mode, p != nil, err)
+			}
+		})
 	}
 }
 
@@ -209,6 +253,17 @@ func firstRunFloorGrowsThenRelearns(t *testing.T, platform string) {
 	}
 	if stop == nil {
 		t.Fatal("run grew through the host's room without a stop")
+	}
+	data, err := json.Marshal(stop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decision map[string]any
+	if err := json.Unmarshal(data, &decision); err != nil {
+		t.Fatal(err)
+	}
+	if decision["memory_room"] == nil {
+		t.Fatalf("stop lost the computed room and its inputs: %s", data)
 	}
 	// Room ran out: available had reached the reserve plus the growth the
 	// guard's reaction allows, and the stop landed before the reserve went.
