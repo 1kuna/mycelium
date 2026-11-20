@@ -702,14 +702,17 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
-  A native-qualification wait names the automatic check and its current hold.
-  A next-check-in promise requires a dispatchable native check offer. Preparation
-  waits do not promise a submitted check. A real failed qualification is not
-  retried automatically; a released launch-authorization refusal with exact
-  proof that no payload ran leaves qualification retryable. When all compatible
-  hosts are refused or have failed qualification, status says no eligible host and names retained check
-  verdicts. Keep the useful job queued; the installation owner investigates
-  failed check logs and restores a usable host before retrying qualification.
+  Resolve (`myce spec check --resolve FILE`) and status give a compatibility
+  action under `hold.next` with its evidence source in `hold.reason`. A terminal
+  compatibility finding has its action and source under `finding`. For a newly
+  registered variant that still needs qualification, resolve tells you when to
+  submit without `require_target` to create demand. Resolve itself is read-only.
+  A native-qualification wait names the automatic check when it exists.
+  A next-check-in promise requires a dispatchable check offer. A released
+  launch-authorization refusal with exact proof that neither main nor sidecars
+  started is infrastructure evidence. Wait for the queue's automatic retry
+  under the same useful job and key. A retained failed check has no automatic
+  retry. Inspect the recorded failure before changing the implementation.
   On older releases, an installation owner can run `myce extension check --gpu cpu
   NAME@VERSION` locally on an enrolled dedicated worker to refresh its native
   evidence. This does not pin the useful job. Consumers cannot remotely clear
@@ -725,8 +728,11 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   Qualified GPU work also probes one card when only a transferred qualification
   estimate exceeds native capacity. Cold probes fit observed idle headroom and
   retain exact-session prelaunch deficits; keep the same queued job and key.
-  A hold with `runs_now_on` names platforms that would run the job now: add
-  them to its targets and environment rather than naming a host.
+  A CPU candidate backed by selected member locks still needs a workload
+  check before widening `targets`. Unknown coverage needs target-native
+  environment verification. Keep a hard platform requirement such as the
+  Darwin SDK check binding. `myce portability` shows the full per-target
+  evidence and actions.
 - **Environment builds (r6.16+):** one worker's package failure excludes only
   that worker/target/hash; keep the same queued job for another compatible worker.
   If no known host can build it, or every compatible builder has deterministically

@@ -22,9 +22,8 @@ type Hold struct {
 	Expires *time.Time `json:"expires,omitempty"`
 	Next    string     `json:"next"`
 	Detail  string     `json:"detail,omitempty"`
-	// Platforms (os/arch/accelerator, never hosts) whose fresh hosts have room
-	// for this waiting job now and are refused only by its authored targets,
-	// comma-separated. A string keeps Hold comparable.
+	// Legacy wire field. Candidate platforms are described in Reason and Next
+	// because permanent resource fit alone cannot prove launch eligibility.
 	RunsNowOn string `json:"runs_now_on,omitempty"`
 }
 

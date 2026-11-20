@@ -42,13 +42,14 @@ single freshly observed compatible host and the project's approved kinds. These
 are coverage limits, not instructions to add a pin. Stale or missing inventory
 is unknown, not proof that hardware is unique.
 
-When your job's `targets` keep it waiting while another platform has room, its
-hold carries `runs_now_on` (for example `linux/arm64/cuda`) and `next` says the
-job would run now there. That is a portability gap: run `myce portability` (with
-`--adapter` for your entry), add that platform to the targets and give the
-environment a recipe or lock for it, then submit the widened work. Keep a
-target only for a genuine requirement, and record its reason. Never answer the
-advice by naming a host; the platform is the unit you change.
+When authored `targets` exclude an observed CPU alternative, the hold can name
+one candidate and the evidence behind its next action. Selected immutable
+member locks establish dependency coverage. Verify the complete workload before
+widening targets, and obtain accepted output parity before production use.
+Unknown coverage calls for target-native environment verification. A missing
+member lock target requires authoring that coverage. Use `myce portability`
+for the full per-target report. Hard requirements such as Darwin developer
+tools stay binding.
 
 ## Admission evidence
 

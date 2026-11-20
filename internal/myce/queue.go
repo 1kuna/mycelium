@@ -925,6 +925,8 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 	var recipeErr error
 	var discovery *CommandDiscovery
 	var entryCoverage *EntryCoverage
+	var lockTargets []ExecutionTarget
+	var lockTargetsKnown bool
 	if !replay {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		// Digest before freezeRecipes moves the bytes to the file store.
@@ -940,6 +942,7 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		if recipeErr == nil {
 			entryCoverage = deriveEntryCoverage(prepared, recipes, discovery)
+			lockTargets, lockTargetsKnown = frozenCommandLockCoverage(prepared, recipes, sidecarRecipes)
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -1117,6 +1120,10 @@ func (q *Queue) submitContext(ctx context.Context, s Spec, committed func()) (_ 
 		}
 		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
+		if lockTargetsKnown {
+			j.PlacementIntent.Environment.State = commandLockTargets
+			j.PlacementIntent.Environment.Targets = lockTargets
+		}
 		explicitStartBy := s.StartBy != nil
 		j.StartByExplicit = &explicitStartBy
 		if s.Priority == "production" {
@@ -2677,7 +2684,7 @@ func (q *Queue) projectSnapshot(forStatus bool, budgets ...*requestBudgets) Snap
 			copy.Spec.Class = jobClass(copy.Spec)
 			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
 			if copy.State == "queued" && copy.Reason == "" {
-				copy.Reason = "waiting for capacity; inspect this job for placement diagnostics"
+				copy.Reason = "waiting; use myce status JOB_ID for placement diagnostics"
 			}
 			q.projectRuntime(&copy)
 			copy = statusJobValue(&copy)

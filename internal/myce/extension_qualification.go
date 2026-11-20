@@ -554,6 +554,9 @@ func (q *Queue) extensionDeadEnd(j *Job) string {
 		known = append(known, label)
 	}
 	slices.Sort(known)
+	if darwinDeveloperToolsRequired(j) {
+		return "dead end: " + darwinToolsReason + "; action: " + darwinToolsAction
+	}
 	return fmt.Sprintf("dead end: no registered implementation matches a known host (declared %s; hosts offer %s); action: register a variant for one of the offered targets and resubmit", strings.Join(placementStrings(declared), ", "), strings.Join(known, ", "))
 }
 

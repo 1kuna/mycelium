@@ -48,7 +48,7 @@ func (q *Queue) inventoryFresh(m *Machine) bool {
 
 // Called only on detached observation copies. Sort by the shared closest-fit
 // ordering so targeted GET, aggregate status and resolve choose the same cause.
-func (q *Queue) jobHold(j *Job) (blocker *Hold) {
+func (q *Queue) jobHold(j *Job, resolving bool) (blocker *Hold) {
 	if j.State != "queued" {
 		return nil
 	}
@@ -104,15 +104,6 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 				blocker.Detail += fmt.Sprintf("; the project approves these machine kinds for this work's production: %s; Mycelium places it on any host of those kinds without a job host pin; the project approves another kind with myce parity add after a passing output comparison", cmp.Or(strings.Join(labels, ", "), "none"))
 			}
 		}
-		blocker.RunsNowOn = q.portableRoomNow(j, compatibleHosts, func(visit func(targetFit, *Job, *Machine)) {
-			for _, t := range targets {
-				visit(t.fit, t.job, t.m)
-			}
-		})
-		if blocker.RunsNowOn != "" {
-			// Part of the one action: default status prints only reason and next.
-			blocker.Next += "; this job would run now on " + blocker.RunsNowOn + " if its targets and environment allowed it: add that platform (myce portability), never name a host"
-		}
 		if len(compatibleHosts) == 1 && len(j.Spec.AllowedMachines) == 0 && len(j.Spec.ExcludedMachines) == 0 && len(q.s.Policies[j.Spec.Project].AllowedMachines) == 0 {
 			blocker.Detail += "; only one freshly observed physical host meets the declared software, resource, qualification and parity requirements; this is observed coverage, not a required host pin; keep the job unpinned unless an explicit restriction is intended"
 		}
@@ -127,7 +118,8 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 		return 0
 	})
 	if wait.Kind == "no_buildable_worker" {
-		return wait
+		hold := *wait
+		return holdSource(&hold, "matching environment preparation reports")
 	}
 	var environment *Hold
 	for _, t := range targets {
@@ -172,14 +164,20 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 	b := newHold(wait.Kind, reason)
 	if specificWaitKind(wait.Kind) {
 		return b
-	} else if j.Spec.extensionJob() && len(j.Extensions) == 0 {
-		b.retag("missing_extension", "consumer", "register an implementation for this work with its supported targets, environment and native check; keep the queued job identity")
+	}
+	if wait.Kind == "waiting_for_worker" && len(compatibleHosts) != 0 {
+		return b
+	}
+	if j.Spec.extensionJob() && len(j.Extensions) == 0 {
+		b.retag("missing_extension", ownerConsumer, "register an implementation for this work with its targets, environment and native check")
+		holdSource(b, "extension registry")
 	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "extension" {
 		if !freshTargets {
 			b.retag("unknown_observation", "queue owner", "restore fresh worker observations before deciding implementation coverage or qualification")
-			return b
+			return holdSource(b, "worker inventory")
 		}
-		b.retag("execution_coverage", "consumer", "run myce portability for the registered extension; add an implementation for a supported target with its own environment and native check, or retain a genuine backend requirement; naming a host cannot create a missing variant")
+		b.retag("execution_coverage", ownerConsumer, "specify a candidate variant for an observed target in the adapter")
+		holdSource(b, "registered variant targets and fresh worker inventory")
 		var declared []string
 		for _, e := range j.Extensions {
 			for _, v := range e.Variants {
@@ -187,11 +185,15 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 			}
 		}
 		if len(declared) > 0 {
-			b.Detail += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
+			defer func() {
+				if blocker != nil {
+					blocker.Detail = strings.TrimPrefix(blocker.Detail+"; declared implementation targets: "+strings.Join(placementStrings(declared), ", "), "; ")
+				}
+			}()
 		}
 		staleCompatible := false
 		compatible := false
-		var verdicts []string
+		var pending, verdict *Hold
 		for _, t := range targets {
 			if t.fit.excluded || t.m.Replacement != nil {
 				continue
@@ -208,121 +210,147 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 					staleCompatible = true
 					continue
 				}
-				progress, failed := q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
-				if failed {
-					verdicts = append(verdicts, progress)
-					continue
+				progress, terminal, active := q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m, resolving)
+				switch {
+				case active:
+					return progress
+				case terminal && verdict == nil:
+					verdict = progress
+				case !terminal && pending == nil:
+					pending = progress
 				}
-				b.retag("native_qualification", "queue", "wait; nothing to do")
-				b.Reason = progress
-				b.Detail = b.Reason
-				if len(declared) > 0 {
-					b.Detail += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
-				}
-				return b
 			}
 		}
-		if staleCompatible {
-			b.retag("unknown_observation", "queue owner", "restore fresh observations from compatible hardware before deciding native qualification")
-		} else if compatible {
-			b.retag("no_eligible_host", "consumer and queue owner", "inspect native check verdicts and placement requirements; provide an eligible host or correct the failed qualification before retrying the check; keep this job and key")
+		switch {
+		case pending != nil:
+			return pending
+		case staleCompatible:
+			b.retag("unknown_observation", ownerPolicy, "restore fresh observations from compatible hardware before deciding native qualification")
+			holdSource(b, "worker inventory")
+		case verdict != nil:
+			return verdict
+		case compatible:
+			b.retag("no_eligible_host", ownerPolicy, "restore eligible native check admission")
 			b.Reason = "no eligible host can currently receive a native check for this work"
-			if len(verdicts) > 0 {
-				b.Reason += "; " + strings.Join(placementStrings(verdicts), "; ")
-			}
-			b.Detail = b.Reason
+			holdSource(b, "native check admission policy and worker inventory")
+		case darwinDeveloperToolsRequired(j):
+			return darwinDeveloperToolsHold()
 		}
 	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "production parity" {
 		b.retag("production_parity", "consumer and queue owner", variantParityAction)
-	} else if len(targets) > 0 && !targets[0].fit.excluded && (targets[0].fit.first == "target" || targets[0].fit.first == "platform") {
-		b.retag("execution_coverage", "consumer and queue owner", "declare supported targets and environment coverage; if the backend is a genuine requirement, keep this job queued for compatible hardware or add and verify another implementation; a host pin cannot supply a missing backend")
-		if !freshTargets {
-			b.retag("unknown_observation", "queue owner", "restore fresh worker observations before deciding target coverage")
-		}
 	} else if len(targets) == 0 {
 		b.retag("unknown_observation", ownerPolicy, "restore the missing observation named in the detail")
+		holdSource(b, "worker inventory")
+	} else if !j.Spec.extensionJob() && len(j.Spec.Targets) != 0 {
+		var alternatives []ExecutionTarget
+		for _, t := range targets {
+			if t.fit.excluded || !q.inventoryFresh(q.s.Machines[t.m.ID]) || t.m.Replacement != nil {
+				continue
+			}
+			target := portabilityTarget(machineTarget(t.m))
+			if target.OS == "" || target.Arch == "" || portabilityRuntime(target) != "supported" {
+				continue
+			}
+			if slices.Contains(t.fit.failed, "target") {
+				if darwinDeveloperToolsRequired(j) && len(compatibleHosts) == 0 {
+					return darwinDeveloperToolsHold()
+				}
+				if target.Platform == "cpu" && j.Spec.Needs.cpuOnly() &&
+					(len(t.fit.failed) == 1 || len(t.fit.failed) == 2 && slices.Contains(t.fit.failed, "environment")) {
+					alternatives = append(alternatives, target)
+				}
+			}
+		}
+		if len(alternatives) > 0 {
+			return commandCompatibilityHold(j, b, alternatives, len(compatibleHosts) != 0)
+		}
+		if !targets[0].fit.excluded && (targets[0].fit.first == "target" || targets[0].fit.first == "platform") {
+			if !freshTargets {
+				b.retag("unknown_observation", ownerPolicy, "restore fresh worker observations before deciding target coverage")
+				holdSource(b, "worker inventory")
+			} else {
+				b.retag("execution_coverage", ownerConsumer, "verify a target-native implementation for the workload")
+				holdSource(b, "authored targets and fresh worker inventory")
+			}
+		}
 	}
 	return b
 }
 
-// Platforms with room now for a waiting job that only its authored targets
-// refuse. Uses the targets jobHold already evaluated against permanent
-// capacity; only those failing solely on "target" are re-checked against the
-// live target's current free memory, cores and host memory. A platform where
-// the job can already be placed is not advice. Names platforms, never hosts.
-func (q *Queue) portableRoomNow(j *Job, compatibleHosts map[string]bool, targets func(func(targetFit, *Job, *Machine))) string {
-	if len(j.Spec.Targets) == 0 {
-		return ""
-	}
-	covered := map[string]bool{}
-	room := map[string]bool{}
-	targets(func(fit targetFit, candidate *Job, m *Machine) {
-		label := targetLabel(portabilityTarget(machineTarget(m)))
-		if compatibleHosts[hostID(m)] {
-			covered[label] = true
-		}
-		if fit.excluded || m.Replacement != nil || len(fit.failed) != 1 || fit.failed[0] != "target" || room[label] {
-			return
-		}
-		live := q.s.Machines[m.ID]
-		if live == nil || !q.inventoryFresh(live) {
-			return
-		}
-		for _, view := range q.placementTargets(live) {
-			if !sameTarget(view, m) {
-				continue
-			}
-			now := targetFit{}
-			fitsResourcesChecked(candidate, view, view.FreeMemoryGB, &now)
-			if len(now.failed) == 1 && now.failed[0] == "target" && hostFits(view, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
-				room[label] = true
-			}
-		}
-	})
-	var out []string
-	for label := range room {
-		if !covered[label] {
-			out = append(out, label)
-		}
-	}
-	slices.Sort(out)
-	return strings.Join(out, ", ")
-}
-
-// What the queue's own native check is doing now, in one clause. The hold once
-// promised the queue ran the check while no check existed for days (gap 3).
-func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) (string, bool) {
+// Classify the check on this exact native target. Active work and dispatchable
+// offers outrank pending work and retained terminal reports on other targets.
+func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine, resolving bool) (hold *Hold, terminalReport, active bool) {
 	host := hostID(m)
+	view, _ := e.forMachine(m)
+	_, baseline := view.baseline(work, m.GPU)
+	if len(view.Check) == 0 || !baseline {
+		h := withAction(newHold("execution_coverage", ""), ownerConsumer, "complete the adapter's native qualification command and baseline")
+		h.Reason = "the registered variant has incomplete native qualification metadata"
+		return holdSource(h, "registered variant check and baseline"), true, false
+	}
+	progress := func(reason, source, next string) *Hold {
+		h := withAction(newHold("native_qualification", ""), ownerQueue, next)
+		h.Reason = reason
+		return holdSource(h, source)
+	}
 	for _, j := range q.liveJobs() {
 		r := automaticExtensionCheck(j)
-		if r == nil || r.Digest != e.Digest || r.Work != work || terminal(j.State) || len(j.Spec.AllowedMachines) != 1 || j.Spec.AllowedMachines[0] != m.ID {
+		if r == nil || r.Digest != e.Digest || r.Work != work || !matchingExtensionReport(e, m, *r) || terminal(j.State) || len(j.Spec.AllowedMachines) != 1 || j.Spec.AllowedMachines[0] != m.ID {
 			continue
 		}
-		switch {
-		case j.State == "running" || j.State == "stopping" || j.State == "assigned":
-			return "its native check " + ShortID(j.ID) + " is running on " + host, false
+		var reason string
+		switch j.State {
+		case "running", "stopping", "assigned":
+			reason = "its native check " + ShortID(j.ID) + " is running on " + host
 		default:
-			// Stored live jobs need not carry the diagnostic projection's
-			// reason. Recompute the check's scheduler hold without recursing
-			// through another jobHold/nativeCheckProgress projection.
+			reason = "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State
 			copy := *j
 			if h := q.waitHold(&copy); h != nil {
-				return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(h.Detail), false
+				reason += ": " + compactLine(h.Detail)
 			}
-			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State, false
 		}
+		return progress(reason, "queued native check job", "wait; nothing to do"), false, true
 	}
+
+	releasedRefusal := false
 	for _, r := range m.ExtensionReports {
-		if r.Work == work && matchingExtensionReport(e, m, r) && !r.Qualified && r.CheckID != "" && terminal(r.CheckState) && !q.automaticCheckRetryable(m.ID, r) {
-			return "native check " + r.CheckID + " on " + host + " is " + r.CheckState + "; no automatic retry follows a terminal verdict", true
+		if r.Work != work || !matchingExtensionReport(e, m, r) || r.Qualified || r.CheckID == "" || !terminal(r.CheckState) {
+			continue
 		}
+		if q.automaticCheckRetryable(m.ID, r) {
+			releasedRefusal = releasedRefusal || r.CheckState == "failed"
+			continue
+		}
+		h := withAction(newHold("no_eligible_host", ""), ownerConsumer, nativeFailureAction)
+		h.Reason = "no eligible host can currently receive a native check; " + nativeFailureReason
+		return holdSource(h, nativeFailureSource), true, false
+	}
+	reason, source := "native qualification on "+host+" is waiting for preparation or dispatch eligibility; no check has been submitted", "worker preparation and check admission"
+	if releasedRefusal {
+		reason, source = "the native check was refused before launch and released; qualification remains pending", "accepted release and exact-attempt execution evidence"
 	}
 	for _, plan := range q.extensionQualificationPlan(m) {
 		if plan.Report.Digest == e.Digest && plan.Report.Work == work {
-			return "the queue submits its native check on " + host + " at that host's next check-in", false
+			offer := "the queue submits its native check on " + host + " at that host's next check-in"
+			if releasedRefusal {
+				return progress(reason+"; "+offer, source, "wait for the automatic retry"), false, true
+			}
+			return progress(offer, "dispatchable native check offer", "wait; nothing to do"), false, true
 		}
 	}
-	return "native qualification on " + host + " is waiting for preparation or dispatch eligibility; no check has been submitted", false
+	if resolving && !q.extensionQualificationDemand(e, m) {
+		if !releasedRefusal {
+			reason, source = "automatic native qualification requires submitted demand; resolve creates no check", "registered variant and queue qualification demand"
+		}
+		h := progress(reason, source, "submit the job without require_target to request native qualification")
+		h.Owner = ownerConsumer
+		return h, false, false
+	}
+	next := "wait; nothing to do"
+	if releasedRefusal {
+		next = "wait for the automatic retry"
+	}
+	return progress(reason, source, next), false, false
 }
 
 // Kinds whose mechanism already says exactly why and who acts. Generic
@@ -407,11 +435,12 @@ func (q *Queue) environmentHold(j *Job, m *Machine) *Hold {
 			b.retag("building", "builder", "wait for preparation to finish; inspect environment logs if progress stalls")
 			b.Detail = "builder reports " + r.State
 		case "failed", "uploading":
-			b.retag("deterministically_failed", "consumer", "repair this worker and retry its build, or submit changed immutable inputs")
+			b.retag("deterministically_failed", ownerConsumer, "inspect the recorded failure for the frozen environment build")
 			b.Detail = environmentFailureReason(r, j.Spec.Logs != "none")
 			if environmentFailureKind(r) == "transient" {
-				b.retag("waiting_for_builder", "queue", "wait for the recorded retry; ask the queue owner if infrastructure remains unavailable")
+				b.retag("waiting_for_builder", ownerQueue, "wait for the recorded retry")
 			}
+			holdSource(b, "matching environment preparation report")
 		}
 	}
 	return b

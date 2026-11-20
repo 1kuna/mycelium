@@ -171,6 +171,9 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		return j
 	}
 	j := job(s)
+	if targets, known := frozenCommandLockCoverage(j.Spec, recipes, sidecars); known {
+		j.PlacementIntent = &PlacementIntent{Environment: PlacementCoverage{State: commandLockTargets, Targets: targets}}
+	}
 	if err := view.sharedInputCapacityRefusal(j); err != nil {
 		return ResolveReport{}, err
 	}
@@ -189,7 +192,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		p := view.portabilityWithRecipes(PortabilityRequest{Spec: &s, RequirementReasons: req.RequirementReasons}, sets)
 		r.Portability = &p
 	}
-	r.Hold = view.jobHold(j)
+	r.Hold = view.jobHold(j, true)
 	if r.Hold != nil && r.Hold.Kind == "waiting_for_worker" {
 		r.Hold = nil
 	}
@@ -214,7 +217,7 @@ func (q *Queue) ResolveContext(ctx context.Context, req ResolveRequest) (Resolve
 		}
 	}
 	if eligible == 0 && len(r.Targets) > 0 {
-		r.Notes = append(r.Notes, "No eligible target: fix the first blocker on the closest target; submission with require_target would refuse.")
+		r.Notes = append(r.Notes, "No eligible target as authored; submission with require_target would refuse.")
 	}
 	if finding := ResolveFindingHold(r.Findings); finding != nil {
 		r.Hold = finding
@@ -401,6 +404,16 @@ func resolvePathFindings(s Spec) []ResolveFinding {
 }
 
 func WriteResolve(dest io.Writer, r ResolveReport, asJSON bool) error {
+	if r.Portability != nil && r.Hold != nil && strings.HasPrefix(r.Hold.Reason, "source: ") {
+		// Resolve prints the job's one action. The portability evidence stays
+		// visible, and myce portability retains its per-target advice.
+		evidence := *r.Portability
+		evidence.Targets = slices.Clone(evidence.Targets)
+		for i := range evidence.Targets {
+			evidence.Targets[i].Actions = []string{}
+		}
+		r.Portability = &evidence
+	}
 	if asJSON {
 		e := json.NewEncoder(dest)
 		e.SetIndent("", "  ")

@@ -2149,10 +2149,11 @@ before recipe defaults or scheduler assignment change the executable spec:
   and recipe targets with authored device selectors. These finite platform
   fields omit commands, local paths, environment contents and arbitrary reasons.
 - `environment` records coverage and its catalog, inline submission, or extension snapshot origin.
-  `targets` means exact target coverage; `platforms_only` means backend coverage
-  with OS/architecture unknown; `unknown` and `not_required` are explicit.
-  Main/sidecar catalog coverage is their intersection. Extension coverage is its
-  frozen variant target list, not proof that a worker is ready now.
+  `targets` means exact target coverage. `platforms_only` means backend coverage
+  with OS/architecture unknown. `unknown` and `not_required` are explicit.
+  `selected_member_lock_targets` records the frozen intersection of the CPU job's
+  selected locks for main and sidecars. It describes dependencies only.
+  Extension coverage records its frozen variant target list.
 - `qualification` records whether qualified execution is required. Owner output
   `parity` stays `unknown` (always present, required by the previous release's
   v1 reply): neither a pin nor registration proves MY-19 parity. Only command discovery records
@@ -2749,15 +2750,21 @@ the next owner/action rather than presenting the missing software or approval as
 ordinary capacity pressure. Extension coverage advice includes declared targets,
 without recipes or private paths. Stale compatible inventory remains unknown.
 
-A queued job with authored `targets` that waits while a freshly observed host of
-another platform has room for it now gets `runs_now_on` on its hold: the
-platforms (`os/arch/accelerator`, never hosts) whose hosts pass every current
-check except the job's targets, and the same platforms in `next`. The check
-reuses the targets the hold already evaluated and re-reads only those hosts'
-current free memory, cores and host memory; a platform the job can already
-use is omitted. The consumer acts by adding that platform to the job's targets
-and environment (`myce portability` shows what each platform still needs), not
-by naming a host. The advice is a snapshot, not a reservation.
+Resolve and status put the next compatibility action and its source in the
+job hold. A terminal compatibility finding carries the action and source in
+`finding.action` and `finding.what`. A CPU job with explicit targets can name
+one observed alternative. Known lock coverage makes it a dependency candidate
+whose complete workload still needs verification. Missing or unknown lock
+coverage produces an environment action. The scheduler's capacity reason
+remains visible when an authored target fits and is busy. `myce portability`
+retains its detailed per-target advice.
+
+Read-only resolve cannot create native check demand. When there is no demand
+or terminal verdict, resolve can direct the author to submit without
+`require_target`. A next-check-in promise requires a current offer. An accepted
+release and exact-attempt proof that neither main nor sidecars started support
+automatic retry after a launch-authorization refusal. A recorded failed check
+without that retry proof directs the author to inspect its failure.
 
 Detailed queued observations also explain when only one freshly observed
 physical host passes permanent requirements, deduplicating devices on a host.

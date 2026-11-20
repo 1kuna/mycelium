@@ -293,7 +293,7 @@ func JobWork(j *Job) string {
 // Called under the queue lock on a detached status copy. The scheduler's reason
 // is authoritative; status only words it for readers.
 func (q *Queue) statusWaitingReason(j *Job) string {
-	j.Hold = q.jobHold(j)
+	j.Hold = q.jobHold(j, false)
 	if j.Hold != nil && j.Hold.Kind == "native_qualification" {
 		return j.Hold.Reason
 	}
