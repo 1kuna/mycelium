@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -271,74 +272,122 @@ func TestControlClockHTTPAdvertisedCadence(t *testing.T) {
 // opportunity-clock allowance to wall age can otherwise withhold every offer
 // when queue processing is slower than the sender's interval.
 func TestControlClockSlowControlPathDoesNotStarveAdmission(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.SetLossTimeouts(0, 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	m := machine("worker", "fake")
-	j := submit(t, q, spec("production"))
-	period, service := 5*time.Millisecond, 31*time.Millisecond
-	var reply Reply
-	for range 2 {
-		contact, settle := q.trackWorkerCheckin(m.ID, m.Session, period, true)
-		q.mu.Lock()
-		clock.Advance(service)
-		q.mu.Unlock()
-		var err error
-		c := keyedFixtureCheckin(Checkin{Machine: m, period: period, contact: contact})
-		reply, err = q.checkinContext(context.Background(), c)
-		reply = fixtureReply(c, reply)
-		settle(err == nil)
-		if err != nil {
+	t.Run("slow response", func(t *testing.T) {
+		q, clock := fixture(t)
+		if err := q.SetLossTimeouts(0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
-		// Response decoding/local reconciliation also precedes the next send.
-		// A second interval outside q.mu exercises cold recovery inference.
-		clock.Advance(2 * period)
-	}
-	q.mu.Lock()
-	fresh := q.workerFresh(q.s.Machines[m.ID], clock.Now())
-	launchAllowed := q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session)
-	lossTimeout := q.machineLossTimeout(m.ID)
-	q.contactMu.Lock()
-	cadence := q.contacts[m.ID].cadence.Mean
-	q.contactMu.Unlock()
-	q.mu.Unlock()
-	if reply.Job == nil || reply.Job.ID != j.ID || !fresh {
-		t.Fatal("measured slow control path withheld a live worker")
-	}
-	if !launchAllowed || cadence == 0 {
-		t.Fatal("cold control cost repeatedly discarded healthy arrival cadence")
-	}
-	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(reply.Job.Attempt)}); err != nil {
-		t.Fatal("accepted slow contact could not authorize its offer", err)
-	}
-	if got := lossTimeout; got >= service {
-		t.Fatalf("wall service cost inflated confirmed-loss opportunities: %s", got)
-	}
-	// Opportunities alone cannot confirm loss before the actual delivered
-	// cadence is missed. This is ordinary available service after a slow reply.
-	clock.Advance(lossTimeout)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	q.mu.Lock()
-	prematureLoss := q.s.Machines[m.ID].Gone || q.s.Jobs[j.ID].Losses != 0 || !q.workerFresh(q.s.Machines[m.ID], clock.Now())
-	q.mu.Unlock()
-	if prematureLoss {
-		t.Fatal("available service charged a worker before its expected arrival")
-	}
-	// Learning this completed path must still leave a finite wall-silence
-	// bound for a sender that then dies during continuous queue saturation.
-	q.mu.Lock()
-	clock.Advance(4 * (service + period))
-	q.maintain()
-	suspect := q.workerSuspect(q.s.Machines[m.ID], clock.Now())
-	q.mu.Unlock()
-	got := job(t, q, j.ID)
-	if !suspect || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 {
-		t.Fatal("dead sender did not become suspect without a false charge", got)
-	}
+		m := machine("worker", "fake")
+		j := submit(t, q, spec("production"))
+		period, service := 5*time.Millisecond, 31*time.Millisecond
+		var reply Reply
+		for range 2 {
+			contact, settle := q.trackWorkerCheckin(m.ID, m.Session, period, true)
+			q.mu.Lock()
+			clock.Advance(service)
+			q.mu.Unlock()
+			var err error
+			c := keyedFixtureCheckin(Checkin{Machine: m, period: period, contact: contact})
+			reply, err = q.checkinContext(context.Background(), c)
+			reply = fixtureReply(c, reply)
+			settle(err == nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Response decoding/local reconciliation also precedes the next send.
+			// A second interval outside q.mu exercises cold recovery inference.
+			clock.Advance(2 * period)
+		}
+		q.mu.Lock()
+		fresh := q.workerFresh(q.s.Machines[m.ID], clock.Now())
+		launchAllowed := q.hostLaunchAllowed(q.s.Machines[m.ID], m.Session)
+		lossTimeout := q.machineLossTimeout(m.ID)
+		q.contactMu.Lock()
+		cadence := q.contacts[m.ID].cadence.Mean
+		q.contactMu.Unlock()
+		q.mu.Unlock()
+		if reply.Job == nil || reply.Job.ID != j.ID || !fresh {
+			t.Fatal("measured slow control path withheld a live worker")
+		}
+		if !launchAllowed || cadence == 0 {
+			t.Fatal("cold control cost repeatedly discarded healthy arrival cadence")
+		}
+		if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(reply.Job.Attempt)}); err != nil {
+			t.Fatal("accepted slow contact could not authorize its offer", err)
+		}
+		if got := lossTimeout; got >= service {
+			t.Fatalf("wall service cost inflated confirmed-loss opportunities: %s", got)
+		}
+		// Opportunities alone cannot confirm loss before the actual delivered
+		// cadence is missed. This is ordinary available service after a slow reply.
+		clock.Advance(lossTimeout)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		q.mu.Lock()
+		prematureLoss := q.s.Machines[m.ID].Gone || q.s.Jobs[j.ID].Losses != 0 || !q.workerFresh(q.s.Machines[m.ID], clock.Now())
+		q.mu.Unlock()
+		if prematureLoss {
+			t.Fatal("available service charged a worker before its expected arrival")
+		}
+		// Learning this completed path must still leave a finite wall-silence
+		// bound for a sender that then dies during continuous queue saturation.
+		q.mu.Lock()
+		clock.Advance(4 * (service + period))
+		q.maintain()
+		suspect := q.workerSuspect(q.s.Machines[m.ID], clock.Now())
+		q.mu.Unlock()
+		got := job(t, q, j.ID)
+		if !suspect || got.State != "running" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+			t.Fatal("dead sender did not become suspect without a false charge", got)
+		}
+	})
+	t.Run("local reconciliation with continuous event poll", func(t *testing.T) {
+		q, clock := fixture(t)
+		if err := q.SetLossTimeouts(0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		m := machine("worker", "fake")
+		j := submit(t, q, spec("production"))
+		period := 5 * time.Millisecond
+		if _, err := q.Checkin(Checkin{Machine: m, period: period}); err != nil {
+			t.Fatal(err)
+		}
+		// The same stop poll spans successive check-ins. Unlike a new
+		// reconnect, this is evidence the session survived the whole gap.
+		pollCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		endPoll := q.trackWorkerPoll(pollCtx, m.ID, m.Session)
+		defer func() { endPoll() }()
+		for range 4 {
+			clock.Advance(80 * time.Millisecond)
+			contact, settle := q.trackWorkerCheckin(m.ID, m.Session, period, true)
+			_, err := q.checkinContext(context.Background(), keyedFixtureCheckin(Checkin{Machine: m, period: period, contact: contact}))
+			settle(err == nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := q.Started(result(q.s.Jobs[j.ID], true)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Leave(m.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		// Normal event delivery closes this poll before the worker re-polls.
+		// Reproduce the captured 64 ms handoff with neither a check-in nor a
+		// result, preserving the original leave grace and exact custody.
+		endPoll()
+		endPoll = func() {}
+		clock.Advance(64 * time.Millisecond)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		got := q.s.Jobs[j.ID]
+		if q.s.Machines[m.ID].Gone || got.State != "stopping" || got.StopAt == nil || got.ReleaseConfirmed || got.Attempt != 1 {
+			t.Fatalf("continuous poll discarded delivered cadence before leave: gone=%v state=%s stop_at=%v release=%v reason=%q allowance=%s", q.s.Machines[m.ID].Gone, got.State, got.StopAt, got.ReleaseConfirmed, got.Reason, q.machineLossTimeout(m.ID))
+		}
+	})
 }
 
 func TestControlClockSuspectPreparationRetainsStartedCustody(t *testing.T) {
@@ -756,44 +805,57 @@ func TestControlClockFailedSessionReplacementRestoresLossDetection(t *testing.T)
 }
 
 func TestControlClockConcurrentReconnectsDoNotLearnOutage(t *testing.T) {
-	q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
-	allowance := q.machineLossTimeout(worker.ID)
-	clock.Advance(time.Hour)
-	ctx := context.Background()
-	a, settleA := q.trackWorkerCheckin(worker.ID, worker.Session, time.Second, true, ctx)
-	b, settleB := q.trackWorkerCheckin(peer.ID, peer.Session, time.Second, true, ctx)
-	defer settleA(false)
-	defer settleB(false)
-	// Both arrivals exist before either serialized transaction publishes. A late
-	// pending reconnect must not masquerade as a survivor from before the outage.
-	c := keyedFixtureCheckin(Checkin{Machine: worker, Running: &Execution{ID: job.ID, Attempt: job.Attempt}, period: time.Second, contact: a})
-	r, err := q.checkinContext(ctx, c)
-	r = fixtureReply(c, r)
-	if err != nil || r.Stop {
-		t.Fatal("first returning attempt lost custody", err)
-	}
-	settleA(true)
-	if _, err := q.checkinContext(ctx, keyedFixtureCheckin(Checkin{Machine: peer, period: time.Second, contact: b})); err != nil {
-		t.Fatal(err)
-	}
-	settleB(true)
-	if q.machineLossTimeout(worker.ID) > allowance || q.machineLossTimeout(peer.ID) > allowance {
-		t.Fatal("concurrent reconnects trained outage as cadence")
-	}
-	clock.Advance(allowance - time.Nanosecond)
-	if q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
-		t.Fatal("worker became suspect before its measured allowance")
-	}
-	// The survivor keeps reporting while the other worker genuinely stops.
-	check(t, q, peer, nil)
-	clock.Advance(time.Nanosecond)
-	if !q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
-		t.Fatal("outage hid bounded suspicion of a new genuine failure")
-	}
-	check(t, q, peer, nil)
-	got := q.s.Jobs[job.ID]
-	if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
-		t.Fatal("outage hid prompt confirmation of a new genuine failure")
+	for _, reconnectPoll := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reconnect_poll=%t", reconnectPoll), func(t *testing.T) {
+			q, clock, worker, peer, job := adaptiveLossFixture(t, "production")
+			allowance := q.machineLossTimeout(worker.ID)
+			clock.Advance(time.Hour)
+			ctx := context.Background()
+			endPolls := func() {}
+			if reconnectPoll {
+				endWorkerPoll := q.trackWorkerPoll(ctx, worker.ID, worker.Session)
+				endPeerPoll := q.trackWorkerPoll(ctx, peer.ID, peer.Session)
+				endPolls = func() { endWorkerPoll(); endPeerPoll() }
+			}
+			defer func() { endPolls() }()
+			a, settleA := q.trackWorkerCheckin(worker.ID, worker.Session, time.Second, true, ctx)
+			b, settleB := q.trackWorkerCheckin(peer.ID, peer.Session, time.Second, true, ctx)
+			defer settleA(false)
+			defer settleB(false)
+			// Both arrivals exist before either serialized transaction publishes. A late
+			// pending reconnect must not masquerade as a survivor from before the outage.
+			c := keyedFixtureCheckin(Checkin{Machine: worker, Running: &Execution{ID: job.ID, Attempt: job.Attempt}, period: time.Second, contact: a})
+			r, err := q.checkinContext(ctx, c)
+			r = fixtureReply(c, r)
+			if err != nil || r.Stop {
+				t.Fatal("first returning attempt lost custody", err)
+			}
+			settleA(true)
+			if _, err := q.checkinContext(ctx, keyedFixtureCheckin(Checkin{Machine: peer, period: time.Second, contact: b})); err != nil {
+				t.Fatal(err)
+			}
+			settleB(true)
+			if q.machineLossTimeout(worker.ID) > allowance || q.machineLossTimeout(peer.ID) > allowance {
+				t.Fatal("concurrent reconnects trained outage as cadence")
+			}
+			endPolls()
+			endPolls = func() {}
+			clock.Advance(allowance - time.Nanosecond)
+			if q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
+				t.Fatal("worker became suspect before its measured allowance")
+			}
+			// The survivor keeps reporting while the other worker genuinely stops.
+			check(t, q, peer, nil)
+			clock.Advance(time.Nanosecond)
+			if !q.workerSuspect(q.s.Machines[worker.ID], clock.Now()) {
+				t.Fatal("outage hid bounded suspicion of a new genuine failure")
+			}
+			check(t, q, peer, nil)
+			got := q.s.Jobs[job.ID]
+			if !q.s.Machines[worker.ID].Gone || got.Losses != 1 || got.InfrastructureRetries != 1 {
+				t.Fatal("outage hid prompt confirmation of a new genuine failure")
+			}
+		})
 	}
 }
 
