@@ -93,8 +93,17 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 				t.Fatal(err)
 			}
 			next := check(t, q, m, nil).Job
-			if next == nil || next.ID != original.ID || next.Attempt <= run.Attempt || next.Progress != 7 {
+			if next == nil || next.ID != original.ID || next.Attempt <= run.Attempt {
 				t.Fatal("resume did not restore placement", next)
+			}
+			// A new attempt resets live progress until the worker reports it.
+			// Prove the worker's actual restore path still receives generation 7.
+			restored, err := prepareCheckpoint(*next)
+			if err != nil {
+				t.Fatal("restore saved checkpoint", err)
+			}
+			if generation, err := checkpointProgress(restored); err != nil || generation != 7 {
+				t.Fatal("resume lost saved generation", generation, err)
 			}
 			if _, err := q.PauseJob(run.ID, yieldRequest(run)); !errors.Is(err, ErrStale) {
 				t.Fatal("stale yield stopped replacement", err)
