@@ -83,12 +83,16 @@ func (w Worker) outputPublication(ctx context.Context, j Job, root string, step,
 	if !os.IsNotExist(err) {
 		return p, false, err
 	}
-	files, terminal, err := w.identifyOutputFiles(ctx, j, step, outputName)
+	directories := map[string]bool{}
+	files, terminal, err := w.identifyOutputFiles(ctx, j, step, outputName, directories)
 	if err != nil {
 		return p, terminal, err
 	}
 	p.Files, p.Metadata = files, map[string]string{}
 	for name := range files {
+		directories[name] = true
+	}
+	for name := range directories {
 		for {
 			if _, ok := p.Metadata[name]; ok {
 				break

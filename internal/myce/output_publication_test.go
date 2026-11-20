@@ -349,3 +349,45 @@ func TestSmallOutputPublicationChangedSourceAndFence(t *testing.T) {
 		}
 	})
 }
+
+func TestSmallOutputPublicationDirectorySnapshot(t *testing.T) {
+	for _, glob := range []bool{false, true} {
+		t.Run(fmt.Sprint(glob), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				j, _ := outputFixture(t, 1, 4096)
+				if err := os.Mkdir(filepath.Join(j.Spec.Run.Workdir, "out/empty"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if glob {
+					j.Spec.Outputs = map[string]string{"out/*/*.bin": "results", "out/*.bin": "results"}
+				}
+				// Give each declaration an initial match while leaving another
+				// candidate directory empty; creation there must invalidate reuse.
+				if glob {
+					if err := os.Mkdir(filepath.Join(j.Spec.Run.Workdir, "out/used"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out/used/match.bin"), []byte("matched"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s := newOutputTestTransport()
+				w, parent := outputWorker(s), t.TempDir()
+				step, name := "", ""
+				if _, _, err := w.publishOutputFiles(context.Background(), j, parent, &step, &name); err != nil {
+					t.Fatal(err)
+				}
+				requests := requestTotal(s)
+				if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out/empty/new.bin"), []byte("new output"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, terminal, err := w.publishOutputFiles(context.Background(), j, parent, &step, &name); err == nil || !terminal {
+					t.Fatal("new output silently omitted", terminal, err)
+				}
+				if requestTotal(s) != requests {
+					t.Fatal("changed tree reached remote publication")
+				}
+			})
+		})
+	}
+}

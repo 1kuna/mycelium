@@ -157,8 +157,13 @@ func workerOwnedOutput(name string) bool {
 // file inside one is refused rather than silently skipped. Patterns skip
 // declared input files and worker-owned entries. The error names the
 // declaration and finalization step.
-func collectOutputFiles(workdir string, outputs map[string]string, inputs FileManifest) (map[string]string, error) {
+func collectOutputFiles(workdir string, outputs map[string]string, inputs FileManifest, directories ...map[string]bool) (map[string]string, error) {
 	files := map[string]string{}
+	noteDirectory := func(name string) {
+		for _, dirs := range directories {
+			dirs[name] = true
+		}
+	}
 	var root *os.Root
 	defer func() {
 		if root != nil {
@@ -187,6 +192,24 @@ func collectOutputFiles(workdir string, outputs map[string]string, inputs FileMa
 			if matches, err = fs.Glob(root.FS(), base); err != nil {
 				return nil, finalizationErrorFor("output_path", decl, err)
 			}
+			if len(directories) > 0 {
+				// Watch even empty glob parents: a later match must invalidate the
+				// frozen manifest without rewalking it on every publication retry.
+				for pattern := path.Dir(base); ; pattern = path.Dir(pattern) {
+					parents, err := fs.Glob(root.FS(), pattern)
+					if err != nil {
+						return nil, finalizationErrorFor("output_path", decl, err)
+					}
+					for _, parent := range parents {
+						if info, err := root.Lstat(parent); err == nil && info.IsDir() {
+							noteDirectory(parent)
+						}
+					}
+					if pattern == "." {
+						break
+					}
+				}
+			}
 		}
 		found := 0
 		for _, match := range matches {
@@ -208,6 +231,7 @@ func collectOutputFiles(workdir string, outputs map[string]string, inputs FileMa
 					return err
 				}
 				if d.IsDir() {
+					noteDirectory(name)
 					return nil
 				}
 				if !d.Type().IsRegular() {
@@ -243,15 +267,12 @@ func fileStoreLimitRefusal(err error) bool {
 	return fileStoreSpaceRefusal(err) || errors.As(err, &he) && he.Code == "request_too_large"
 }
 
-// publishOutputFiles identifies and uploads a stored-file job's outputs.
-// terminal marks a contract failure (missing, unsafe, unmatched, or more than
-// the store admits); other errors keep the local files for a retry. Pattern
-// manifests are preflighted whole, so an oversized folder or glob is refused
-// once before any upload instead of failing part-way.
-func (w Worker) identifyOutputFiles(ctx context.Context, j Job, step, outputName *string) (FileManifest, bool, error) {
+// Identify once; publication persists the manifest before attempting preflight
+// or uploads. Retry metadata includes empty output folders and glob parents.
+func (w Worker) identifyOutputFiles(ctx context.Context, j Job, step, outputName *string, directories map[string]bool) (FileManifest, bool, error) {
 	done := w.Client.publication.begin(w.Client.clock(), "filesystem/output_path")
 	*step, *outputName = "output_path", ""
-	sources, err := collectOutputFiles(j.Spec.Run.Workdir, j.Spec.Outputs, jobInputFiles(&j))
+	sources, err := collectOutputFiles(j.Spec.Run.Workdir, j.Spec.Outputs, jobInputFiles(&j), directories)
 	done()
 	if err != nil {
 		return nil, true, err
