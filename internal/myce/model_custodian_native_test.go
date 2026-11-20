@@ -148,7 +148,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		t.Fatal(err)
 	}
 	t.Logf("native model cleanup identity: %s", identity)
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" && !filepath.IsAbs(c.Service) {
 		verifyNativeInheritedOOM(t, q, c, before, engine.PID)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)

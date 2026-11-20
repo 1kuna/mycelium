@@ -546,6 +546,12 @@ func TestCustodianUnadoptedCancellationPersistsControl(t *testing.T) {
 }
 
 func TestCustodianWorkerReplacementDoesNotStopUnadoptedAttempt(t *testing.T) {
+	migration := migrationFixture(t)
+	for range 2 {
+		if _, err := StageWorkerUnitMigration(t.Context(), migration.c, migration.command); err != nil {
+			t.Fatal(err)
+		}
+	}
 	dir, id := t.TempDir(), ID()
 	if err := os.Mkdir(custodianDir(dir), 0700); err != nil {
 		t.Fatal(err)

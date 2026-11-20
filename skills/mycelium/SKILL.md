@@ -531,7 +531,12 @@ outside the configured slice` means its older installed service has no joint
 slice ceiling. Batch and model jobs continue with existing per-attempt limits,
 applicable RSS guards and tier OOM scores. Keep the same job and key; the
 installation owner enables joint containment by migrating the worker unit into
-its configured slice (see [#1771](https://github.com/1kuna/mycelium/issues/1771)).
+its configured slice: run `myce migrate worker-unit --config INSTALLED_WORKER_CONFIG`
+on the worker host to stage the drop-in, then activate through the next normal
+fleet upgrade using MY-55 takeover. Staging never restarts work. A
+`worker_unit_migration_*` reason means staging is pending or refused; retain its
+next step for the installation owner. Operator overrides and environment remain
+intact. See the [migration steps](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#stage-linux-worker-containment-migration).
 Text status includes this reason and next step. `available` confirms the joint
 controls; an omitted field is unknown.
 

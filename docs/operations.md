@@ -747,6 +747,49 @@ To upgrade one machine with a printed invitation line, or to replace a
 
 ## Rolling fleet upgrades
 
+### Stage Linux worker containment migration
+
+For a worker reporting `memory_containment.state: unavailable` because its
+service is outside the configured slice, use the CLI from a release supporting
+this command, on that worker's host as its service account:
+
+```sh
+myce migrate worker-unit --config INSTALLED_WORKER_CONFIG
+```
+
+This stages `50-myce-memory-containment.conf` beside the existing unit and
+reloads the user manager. It does not restart the worker, move processes, read
+fleet credentials, or rewrite the unit, config, environment files or operator
+drop-ins. The settings match fresh installs: the configured `Slice` (default
+`myce.slice`) and `OOMScoreAdjust=0`. The predecessor's base `app.slice` and
+score `200` can be migrated; conflicting operator placement/score overrides or
+an unrecognized file at the reserved drop-in name refuse with a typed reason.
+Other overrides and all environment settings remain intact. Rerunning is safe,
+including after interrupted publication or a failed daemon reload.
+
+Staging returns and reports `unavailable`, reason
+`worker_unit_migration_staged`. Activate the staged unit through the **next
+normal `myce fleet upgrade` to a newer approved release**, below. Use its existing
+MY-55 takeover proof and custody fences; do not use an install rerun or manual
+service restart to activate it. A service's slice cannot be changed in place;
+the replacement invocation joins the configured slice. Detached attempts and
+resident models already live in independent scopes under the configured
+`-jobs.slice`, outside the worker's stop/kill tree. They retain their exact
+process birth, session, attempt, open streams and release custody through the
+existing takeover machinery. Unproved takeover waits for natural completion.
+
+The replacement worker applies and reads back runtime slice `MemoryMax` and
+`MemorySwapMax` before reporting `memory_containment.state: available`.
+Placement alone does not claim enforcement. Refused or unconfirmed staging
+persists an `unavailable` reason and next step while the old worker keeps
+serving with its existing per-attempt controls. An unconfirmed reload may
+leave the owned drop-in staged: resolve its typed reason and rerun before
+authorizing any upgrade. Ordinary fleet upgrades never stage this migration
+implicitly. Rollout of an explicitly staged migration can use a normal upgrade;
+no critical interruption authority is needed.
+
+### Upgrade the approved release
+
 `myce fleet upgrade` is the one way a release reaches the fleet (MY-21, MY-35,
 MY-49, MY-55). Host by host it proves live takeover, swaps in the verified
 binary, restarts the worker and checks health. Running attempts keep their

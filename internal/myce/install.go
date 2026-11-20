@@ -313,7 +313,7 @@ func (c ServiceConfig) ServiceText() string {
 			// TERM must go through the worker's recorded stop path. Direct TERM
 			// to payloads races their exit observation and looks like command failure.
 			// mixed retains the bounded final KILL of every delegated descendant.
-			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nSlice=" + c.workerSlice() + "\nMemoryAccounting=yes\nOOMPolicy=continue\nDelegate=memory cpu\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
+			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\n" + c.workerContainmentSettings() + "MemoryAccounting=yes\nOOMPolicy=continue\nDelegate=memory cpu\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
 		}
 		settings := ""
 		if c.IOWeight != 0 {
