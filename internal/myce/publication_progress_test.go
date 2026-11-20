@@ -114,6 +114,12 @@ func testReleasedRecoveryAdmitsNewWork(t *testing.T, mode string) {
 	}))
 	defer server.Close()
 	w.Client.URL = server.URL
+	if mode == "output" {
+		// This fixture controls when the upload request completes. Keep loopback
+		// HTTP and owner cancellation without the socket stall detector racing
+		// the replacement's startup on a loaded test host.
+		w.Client.HTTP = &http.Client{Transport: fetchTransport(server.Client().Transport.RoundTrip)}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
