@@ -234,24 +234,38 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	}
 	policy.Class = "production"
 	next.sync([]ModelSlot{policy})
+	// A previous production snapshot can still be visible while the helper
+	// applies the intervening test policy. Wait for a fresh production snapshot
+	// before replacing the policy file with a stale-session request.
+	written := adopted.clock.Now()
 	await(t, func() bool {
 		adopted.mu.Lock()
 		defer adopted.mu.Unlock()
-		return adopted.read() == nil && adopted.last.OOMScore == 0
+		return adopted.read() == nil && adopted.last.At.After(written) && adopted.last.OOMScore == 0
 	})
 	stale := modelCustodianPolicy{ID: adopted.request.ID, Execution: e, OOMScore: 1000}
 	stale.Execution.Session = "stale-session"
 	if err := saveWorkerJSON(adopted.dir, custodianName(adopted.request.ID, "model-policy"), stale); err != nil {
 		t.Fatal(err)
 	}
-	written := adopted.clock.Now()
-	await(t, func() bool {
-		adopted.mu.Lock()
-		defer adopted.mu.Unlock()
-		return adopted.read() == nil && adopted.last.At.After(written)
-	})
-	if adopted.last.OOMScore != 0 {
-		t.Fatal("stale-session policy reached the resident engine")
+	written = adopted.clock.Now()
+	// The first publication may already be in progress when the stale file is
+	// written. The next publication must follow a policy read of that file.
+	for range 2 {
+		var observed modelCustodianSnapshot
+		await(t, func() bool {
+			adopted.mu.Lock()
+			defer adopted.mu.Unlock()
+			if adopted.read() != nil || !adopted.last.At.After(written) {
+				return false
+			}
+			observed = adopted.last
+			return true
+		})
+		if observed.OOMScore != 0 {
+			t.Fatalf("stale-session policy reached the resident engine: OOM score %d", observed.OOMScore)
+		}
+		written = observed.At
 	}
 	policy.Class = "test"
 	next.sync([]ModelSlot{policy})
