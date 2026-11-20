@@ -761,7 +761,10 @@ This stages `50-myce-memory-containment.conf` beside the existing unit and
 reloads the user manager. It does not restart the worker, move processes, read
 fleet credentials, or rewrite the unit, config, environment files or operator
 drop-ins. The settings match fresh installs: the configured `Slice` (default
-`myce.slice`) and `OOMScoreAdjust=0`. The predecessor's base `app.slice` and
+`myce.slice`) and requested `OOMScoreAdjust=0`. A privileged inherited minimum
+from the user manager may still bound actual process scores; existing tier-score
+handling respects that floor, and retained scopes keep their existing policy.
+The predecessor's base `app.slice` and
 score `200` can be migrated; conflicting operator placement/score overrides or
 an unrecognized file at the reserved drop-in name refuse with a typed reason.
 Other overrides and all environment settings remain intact. Rerunning is safe,
