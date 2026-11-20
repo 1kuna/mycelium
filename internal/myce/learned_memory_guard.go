@@ -117,6 +117,9 @@ func (w Worker) jobCeilingBytes(j Job) (int64, error) {
 		}
 		return memoryBytes(cap)
 	}
+	if floorCharged(j.MemoryEnvelope) {
+		return 0, refuseAdmission("exploratory_capacity_unavailable", "GiB", j.MemoryEnvelope.HostGB, 0, true)
+	}
 	return bytes, nil
 }
 
@@ -147,6 +150,15 @@ func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
 			}
 			return others(key)
 		}}
+		d := &MemoryRoomDecision{FloorGB: float64(limit) / (1 << 30), CapacityGB: float64(cap) / (1 << 30), AllowanceGB: w.Machine.HostMemoryBudgetGB, CapacitySource: memoryCapacitySource(&w.Machine)}
+		if w.firstRunAdmission != nil {
+			copy := *w.firstRunAdmission
+			d = &copy
+		}
+		g.room.decision = d
+		g.room.charge, g.room.pending = d.ChargeGB, d.PendingGB
+	} else if floorCharged(j.MemoryEnvelope) {
+		g.limit = 0 // A missed launch refusal must never become a strict floor guard.
 	}
 	return g
 }
@@ -194,7 +206,7 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	// allowance bypasses the adaptive pressure branch. A missing read must
 	// clear the baseline rather than bridge an unobserved interval.
 	defer func() { g.previous = host }()
-	if urgent && !g.exceeded && g.limit > 0 && bytes > uint64(g.limit) {
+	if urgent && g.room == nil && !g.exceeded && g.limit > 0 && bytes > uint64(g.limit) {
 		g.exceeded = true
 		return &RSSLimitEvidence{ObservedBytes: bytes, LimitBytes: g.limit, Quality: "owned_session_rss"}
 	}
@@ -203,11 +215,21 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 	}
 	limit := g.limit
 	defer func() { g.limit = limit }()
+	var room *MemoryRoomDecision
+	if g.room != nil {
+		g.limit = g.room.limitBytes(now, bytes, host, g.reserve, float64(g.ceiling)/(1<<30))
+		room = g.room.decision
+		// A collapsed room is a measured capacity stop, not the accounting
+		// floor. Zero is meaningful here and is retained with the signed room.
+		if !g.exceeded && (g.limit == 0 || urgent) && bytes > uint64(g.limit) {
+			g.exceeded = true
+			return &RSSLimitEvidence{ObservedBytes: bytes, LimitBytes: g.limit, Quality: "owned_session_rss", MemoryRoom: safeMemoryRoom(room)}
+		}
+	}
 	if g.hard > 0 && bytes > uint64(g.hard) {
 		g.limit = g.hard
 	} else if g.room != nil {
-		// The floor is charged and never a stop; the room is the limit.
-		g.limit = max(limit, g.room.limitBytes(now, bytes, host, g.reserve, float64(g.ceiling)/(1<<30)))
+		// The limit already contains measured room, never the charged floor.
 	} else {
 		pressure := false
 		if host != nil && validMemoryValue(host.available) {
@@ -227,7 +249,11 @@ func (g *learnedMemoryGuard) observeMemory(now time.Time, roots map[int]string, 
 			return g.observe(now, roots, 0, members, err)
 		}
 	}
-	return g.observe(now, roots, bytes, members, err)
+	evidence := g.observe(now, roots, bytes, members, err)
+	if evidence != nil {
+		evidence.MemoryRoom = safeMemoryRoom(room)
+	}
+	return evidence
 }
 
 type processResidentSample struct {

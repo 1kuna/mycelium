@@ -76,6 +76,9 @@
         "envelope_source": {
           "type": "string"
         },
+        "memory_room": {
+          "$ref": "#/$defs/MemoryRoomDecision"
+        },
         "required": {
           "type": "number"
         },
@@ -4638,6 +4641,59 @@
       ],
       "type": "object"
     },
+    "MemoryRoomDecision": {
+      "properties": {
+        "allowance_gb": {
+          "type": "number"
+        },
+        "available_gb": {
+          "type": "number"
+        },
+        "capacity_gb": {
+          "type": "number"
+        },
+        "capacity_source": {
+          "type": "string"
+        },
+        "charges_gb": {
+          "type": "number"
+        },
+        "floor_gb": {
+          "type": "number"
+        },
+        "host_loss_gb": {
+          "type": "number"
+        },
+        "ledger_read_failed": {
+          "type": "boolean"
+        },
+        "own_growth_gb": {
+          "type": "number"
+        },
+        "pending_gb": {
+          "type": "number"
+        },
+        "reserve_gb": {
+          "type": "number"
+        },
+        "room_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "room_gb",
+        "floor_gb",
+        "allowance_gb",
+        "capacity_gb",
+        "capacity_source",
+        "charges_gb",
+        "pending_gb",
+        "reserve_gb",
+        "own_growth_gb",
+        "host_loss_gb"
+      ],
+      "type": "object"
+    },
     "Model": {
       "properties": {
         "allowed_machines": {
@@ -5587,6 +5643,9 @@
       "properties": {
         "limit_bytes": {
           "type": "integer"
+        },
+        "memory_room": {
+          "$ref": "#/$defs/MemoryRoomDecision"
         },
         "observed_bytes": {
           "type": "integer"

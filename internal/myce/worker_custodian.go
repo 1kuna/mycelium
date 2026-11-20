@@ -515,13 +515,7 @@ func (w Worker) runCustodian(stop context.Context) error {
 	}
 	w.launchCtx = stop
 	w.batchAdmission = func(ctx context.Context, launch HostLaunch) error { return custodianLaunchGate(ctx, dir, id, launch) }
-	w.hostChargesExcept = func(attemptKey) (float64, float64) {
-		var ledger custodianLedger
-		if readCustodianJSON(dir, custodianName(id, "ledger"), &ledger) != nil {
-			return w.Machine.HostMemoryBudgetGB, w.Machine.HostMemoryBudgetGB
-		}
-		return ledger.Charge, ledger.Pending
-	}
+	w.hostChargesExcept = custodianHostCharges(dir, id)
 	if err := w.initAttemptRuntime(stop, s); err != nil {
 		return err
 	}

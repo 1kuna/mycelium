@@ -60,8 +60,12 @@ func TestMemoryStopFloorIncidentRecovery(t *testing.T) {
 				}
 				stopped := job(t, q, run.ID)
 				want := measurement.peak + max(measurement.growth, measurement.peak-run.MemoryEnvelope.HostGB)
-				if stopped.State != "queued" || stopped.MemoryOOMFloor == nil || stopped.MemoryOOMFloor.HostMemoryGB < want || stopped.OOMRetries != i+1 {
-					t.Fatalf("measured retry lost: state=%s floor=%+v want=%g retries=%d", stopped.State, stopped.MemoryOOMFloor, want, stopped.OOMRetries)
+				// The durable floor retains observed demand and ceiling overshoot.
+				// Sampling growth stays in the forecast checked on dispatch below;
+				// a delayed sampling horizon is not a measured lower bound (#884).
+				floor := max(run.MemoryEnvelope.HostGB+minimumHostMemoryGB, measurement.peak+max(minimumHostMemoryGB, measurement.peak-run.MemoryEnvelope.HostGB))
+				if stopped.State != "queued" || stopped.MemoryOOMFloor == nil || math.Abs(stopped.MemoryOOMFloor.HostMemoryGB-floor) > 1e-9 || stopped.OOMRetries != i+1 {
+					t.Fatalf("measured retry lost: state=%s floor=%+v want=%g retries=%d", stopped.State, stopped.MemoryOOMFloor, floor, stopped.OOMRetries)
 				}
 				q = memoryFactsRestart(t, q, clock)
 				m.HostAvailableMemoryGB = 32

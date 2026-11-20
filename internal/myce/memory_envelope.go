@@ -155,9 +155,11 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 // Exact-attempt OOM telemetry is durable job-local evidence, independent of
 // successful learning and target comparability. With no peak, advance past the
 // failed host vector by one supported kernel page: it cannot authorize another
-// identical ceiling. Sampling growth and observed guard overshoot replace the
-// old fixed 1.25/2 multipliers. An RSS stop may retain a larger observation than
-// the final sample, so consume its fenced cause as well.
+// identical ceiling. Observed guard overshoot replaces the old fixed 1.25/2
+// multipliers. Sampling growth is forecast uncertainty, retained separately in
+// measuredOOMRecovery so permanent target capacity can bound it. An RSS stop
+// may retain a larger observation than the final sample, so consume its fenced
+// cause as well.
 func memoryStopFloor(j *Job) float64 {
 	lower := j.Spec.Needs.HostMemoryGB
 	if f := j.MemoryOOMFloor; f != nil {
@@ -170,7 +172,6 @@ func memoryStopFloor(j *Job) float64 {
 		}
 		p := facts.MemoryPeak
 		if p != nil {
-			margin = max(margin, memoryGrowthGB(p))
 			for _, value := range []*float64{p.HostGB, p.CgroupGB, p.NonreclaimableGB} {
 				if value != nil && validMemoryValue(*value) {
 					peak = max(peak, *value)
@@ -187,6 +188,12 @@ func memoryStopFloor(j *Job) float64 {
 	if e := j.MemoryEnvelope; e != nil {
 		if j.Spec.Needs.cpuOnly() {
 			lower = max(lower, e.HostGB)
+		}
+		if floorCharged(e) {
+			// A floor-charged run exceeded an accounting charge, not a
+			// ceiling. Its durable requirement is the observed demand;
+			// measuredOOMRecovery retains growth in the retry forecast.
+			return max(lower, peak) + minimumHostMemoryGB
 		}
 		margin = max(margin, peak-e.HostGB)
 	}
@@ -605,6 +612,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 				// measures, and the ledger charges what it uses (lendProbe).
 				// A refusal of the whole-room offer does not apply to it.
 				n.HostMemoryGB, source = probeFloor, source+"; "+firstRunFloorSource
+				if room := q.hostRoomAfter(m, nil, nil); room <= hostNeed(m, 0, probeFloor) {
+					refusal = fmt.Sprintf("exploratory first run needs room above its accounting floor; measured room %g GiB, floor %g GiB", room, hostNeed(m, 0, probeFloor))
+				}
 			}
 		}
 		if floor := j.MemoryOOMFloor; floor != nil {
@@ -642,6 +652,9 @@ func (q *Queue) memoryCandidateOwned(j *Job, m *Machine) *Job {
 		envelope.Enforcement = learnedMemoryGuardEnforcement
 		if adaptiveMemoryCeilingGB(j, m) <= 0 {
 			envelope.Enforcement = enforcement
+			if floorCharged(envelope) {
+				envelope.Refusal = "exploratory adaptive capacity unavailable; accounting floor cannot be enforced as a ceiling"
+			}
 		}
 	}
 	q.observeMemoryAdmission(j, m)

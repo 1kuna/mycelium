@@ -31,6 +31,15 @@ An unknown CPU command starts with a small physical accounting floor. Its
 charge follows measured use on supporting workers; protected/shared or older
 workers keep strict containment with a measured shell startup minimum. A memory
 stop reruns the same job at its measured peak without an infrastructure loss; keep its job and key.
+Supporting workers refuse an exploratory launch with `custodian_ledger_read_failed`,
+`exploratory_capacity_unavailable`, `exploratory_host_memory_unavailable` or
+`exploratory_memory_room` when they cannot establish room above its accounting
+floor. Keep the same job and key; the installation owner resolves missing
+observations, while capacity waits resume normally. A later memory stop retains
+`rss_limit.memory_room`: its signed room, allowance, capacity source, other
+charges, pending growth, live availability, reserve and growth forecasts. A zero
+`limit_bytes` with nonpositive measured room means that capacity was exhausted;
+the accounting floor is not the stop bound.
 
 ## 2. Files back
 
