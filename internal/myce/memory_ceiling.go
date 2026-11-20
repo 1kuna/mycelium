@@ -371,7 +371,8 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 }
 
 // Linux adds oom_score_adj / 1000 of the OOM domain's pages to badness.
-// Giving lower tiers the full domain, while the highest tier stays at zero,
+// Giving lower tiers the full domain, while the highest tier keeps the worker's
+// inherited score (policy zero means inherit, not an absolute kernel value),
 // makes even a small lower-tier borrower precede a large production process.
 // No process is immune: production can still be killed if it alone exhausts
 // the allowance. Intermediate tiers share the lower-tier score.
@@ -430,17 +431,45 @@ func (a *memoryAttempt) updateOOMScore(score int) error {
 }
 
 func setAttemptOOMScore(fs memoryFS, pid, score int) error {
+	failure := func(err error) error {
+		return &runtimeError{diagnostic: RuntimeCause{Operation: "launch", Class: oomPriorityUnavailable}, cause: err}
+	}
+	// Read our own process, never a previously demoted payload: its privileged
+	// inherited minimum can exceed zero. Promotion may return to that value,
+	// but an unprivileged launcher cannot lower a child below it.
+	if score == 0 {
+		b, err := fs.ReadFile("/proc/self/oom_score_adj")
+		if err != nil {
+			return failure(err)
+		}
+		score, err = strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil || score < -1000 || score > 1000 {
+			return failure(errors.New("inherited OOM priority unavailable"))
+		}
+	}
 	path := filepath.Join("/proc", strconv.Itoa(pid), "oom_score_adj")
 	value := strconv.Itoa(score)
-	if err := fs.WriteFile(path, []byte(value)); err != nil {
-		return fmt.Errorf("set attempt OOM priority: %w", err)
-	}
 	b, err := fs.ReadFile(path)
+	if err != nil {
+		return failure(err)
+	}
+	if strings.TrimSpace(string(b)) == value {
+		return nil // No write or permission is needed for an unchanged score.
+	}
+	if err := fs.WriteFile(path, []byte(value)); err != nil {
+		return failure(err)
+	}
+	b, err = fs.ReadFile(path)
 	if err != nil || strings.TrimSpace(string(b)) != value {
-		return errors.New("attempt OOM priority not confirmed")
+		if err == nil {
+			err = errors.New("attempt OOM priority not confirmed")
+		}
+		return failure(err)
 	}
 	return nil
 }
+
+const oomPriorityUnavailable = "oom_priority_unavailable"
 
 // The systemd slice contains both the worker (including model engines) and
 // detached custodians in its jobs sub-slice. A service-only cap misses the latter.
@@ -672,6 +701,9 @@ func ceilingDiagnostic(value, fallback string) string {
 	const prefix = "exceeded its "
 	const suffix = " GiB memory ceiling"
 	text := strings.TrimPrefix(value, "command failed: ")
+	if strings.TrimPrefix(text, "memory ceiling attach: ") == "launch: "+oomPriorityUnavailable {
+		return "launch: " + oomPriorityUnavailable
+	}
 	if strings.HasPrefix(text, prefix) && strings.HasSuffix(text, suffix) {
 		n, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(text, prefix), suffix), 64)
 		if err == nil && n > 0 && validMemoryValue(n) && text == fmt.Sprintf("exceeded its %g GiB memory ceiling", n) {

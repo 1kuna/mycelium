@@ -1033,8 +1033,12 @@ Installed Linux workers put their service and detached attempts under one
 allowance, including measured updates, before consuming assignments; each
 attempt keeps its own inner ceiling. The common parent is not an OOM group,
 so exceeding it can kill a lower-tier attempt without killing every job.
-Launchers in the highest owner tier use `oom_score_adj=0`; lower tiers use
-`1000`, inherited by main and sidecars. Intermediate tiers share that score.
+Launchers in the highest owner tier keep the worker's inherited
+`oom_score_adj`; lower tiers use `1000`, inherited by main and sidecars.
+Promotion returns a model to that inherited score, never below the kernel's
+inherited minimum. Unchanged scores require no write. A required write that
+cannot be confirmed reports `oom_priority_unavailable`. Intermediate tiers share
+the lower-tier score.
 This orders kernel victims without reserving idle memory or making production
 immune when it alone exhausts the allowance. Model plans carry the same owner
 tier on supporting workers. Upgrades retain the service identity and change
