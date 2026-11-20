@@ -81,12 +81,19 @@ func TestNativeNamespaceOptionsFile(t *testing.T) {
 	// Parse a large mount list without creating namespaces or changing the
 	// filesystem. --help exits after option expansion, even on a host that
 	// refuses unprivileged namespaces. Paths contain spaces to guard NUL framing.
-	var options []string
-	for i := range 10000 {
-		path := fmt.Sprintf("/synthetic input/%064x/data", i)
-		options = append(options, "--ro-bind", path, path)
+	cache := filepath.Join(t.TempDir(), "synthetic input cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
 	}
-	options = append(options, "--help")
+	policy := nativeLinuxPolicy{InputMountRoots: []string{cache}}
+	for i := range 10000 {
+		path := filepath.Join(cache, fmt.Sprintf("%064x/data", i))
+		policy.Read = append(policy.Read, path)
+	}
+	options := append(nativeBwrapPolicyArgs(policy), "--help")
+	if len(options) > 100 || len(policy.Read) != 10000 {
+		t.Fatal("binding mounts grew or exact Landlock grants changed")
+	}
 	argv, err := nativeNamespaceMonitorFileArgs(bwrap, options, work)
 	if err != nil {
 		t.Fatal(err)

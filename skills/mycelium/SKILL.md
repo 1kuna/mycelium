@@ -291,14 +291,9 @@ for large binding sets. When the combined legacy `MYCE_INPUT_*` and `MYCE_MODEL_
 environment entries exceed 32 KiB (including exec pointers and terminators),
 the worker omits all those variables and supplies the complete map through the
 file. Small sets keep both interfaces. The file lives for the attempt and is
-available to main and sidecars; it is not a portable checkpoint. For Python:
-
-```python
-import json, os
-from pathlib import Path
-bindings = json.loads(Path(os.environ["MYCE_BINDINGS_FILE"]).read_text())
-footage = Path(bindings["inputs"]["footage"])
-```
+available to main and sidecars; it is not a portable checkpoint. In Python,
+load it with `json.loads(Path(os.environ["MYCE_BINDINGS_FILE"]).read_text())`
+(using `json`, `os` and `pathlib.Path`), then read `bindings["inputs"]["footage"]`.
 
 A kernel exec-size refusal is terminal with predicate `exec_argument_limit`;
 it does not spend infrastructure retries. Move large authored arguments or

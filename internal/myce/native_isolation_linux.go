@@ -26,6 +26,8 @@ type nativeLinuxPolicy struct {
 	Env                            []string
 	Ports                          []uint16
 	Namespace                      bool
+	// Mount visibility only. Landlock still grants exact acquired paths above.
+	InputMountRoots []string
 	// Plain withholds only Deny from an unsandboxed job; Read lists the
 	// allowed paths inside it (#1309).
 	Plain bool
@@ -200,6 +202,13 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	p.Read = append(p.Read, declaredExecute...)
 	// Acquired archive members may execute, but receive no content-write grant.
 	p.Read = append(p.Read, w.nativeSharedInputs...)
+	for _, cache := range []*SharedInputCache{w.sharedInputs, w.modelSnapshots} {
+		if cache != nil && cache.cache.Root != "" {
+			if root, err := nativeCanonical(cache.cache.Root); err == nil {
+				p.InputMountRoots = append(p.InputMountRoots, root)
+			}
+		}
+	}
 	if w.environmentCache != nil {
 		p.Read = append(p.Read, w.environmentCache.Root)
 	}
@@ -386,10 +395,24 @@ func nativeWrapPayloadCheck(cmd *exec.Cmd) error {
 
 func nativeBwrapPolicyArgs(p nativeLinuxPolicy) []string {
 	args := nativeBwrapBase()
+	// Restoring cache roots once bounds mount options independently of binding
+	// count (bubblewrap also caps --args expansion at 9000 arguments). These
+	// read-only mounts supply visibility, never Landlock authority: sibling data
+	// and cache bookkeeping remain outside the exact Read/ReadOnly grants.
+	for _, root := range p.InputMountRoots {
+		if strings.HasPrefix(root, "/tmp/") {
+			args = append(args, "--ro-bind", root, root)
+		}
+	}
 	// The private /tmp must not hide an exact helper binary or a configured
 	// prepared environment beneath /tmp (including go test's build directory).
 	// Restore only trusted read grants, then put private write overlays on top.
 	for _, path := range append(slices.Clone(p.Read), p.ReadOnly...) {
+		if slices.ContainsFunc(append(slices.Clone(p.InputMountRoots), p.Write...), func(root string) bool {
+			return nativePathContains(root, path)
+		}) {
+			continue
+		}
 		canonical, err := nativeCanonical(path)
 		if err == nil && strings.HasPrefix(canonical, "/tmp/") {
 			args = append(args, "--ro-bind", canonical, canonical)
