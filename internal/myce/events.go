@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -125,7 +126,12 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 		var event WorkerEvent
 		e := client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
 		if e != nil {
-			retry.succeeded(w.Clock.Now(), time.Second)
+			delay := time.Second
+			var response *HTTPError
+			if errors.As(e, &response) && response.RetryAfter > 0 {
+				delay = response.RetryAfter
+			}
+			retry.succeeded(w.Clock.Now(), delay)
 			continue
 		}
 		if event.Cursor != after {
