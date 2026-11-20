@@ -132,6 +132,7 @@ func TestFirstRunFloorLaunchRefusals(t *testing.T) {
 			defer store.close()
 			j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 			j.Spec = autoSpec("compiler", "sh", "-c", "exit 0")
+			j.Spec.Needs.Memory = "auto" // Worker input has already passed queue defaulting.
 			j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
 			j.MemoryEnvelope = &JobMemoryEnvelope{HostGB: minimumHostMemoryGB, ProbeFloorGB: minimumHostMemoryGB, Basis: "exploratory", Source: "exploratory first run; " + firstRunFloorSource, Enforcement: learnedMemoryGuardEnforcement}
 			p, err := startAfterFixtureInputs(t, w, store, j)
@@ -200,6 +201,7 @@ func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
 	_, clock, m := floorFixture(t)
 	m.MemoryCeilingSlackGB = 0
 	j := Job{Spec: autoSpec("compiler", "go", "test"), MemoryEnvelope: &JobMemoryEnvelope{Source: firstRunFloorSource, Basis: "exploratory", Enforcement: learnedMemoryGuardEnforcement}}
+	j.Spec.Needs.Memory = "auto"
 	j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
 	charge := 2.0
 	w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, hostChargesExcept: func(attemptKey) (float64, float64) { return charge, 1 }}
@@ -362,7 +364,7 @@ func firstRunFloorGrowsThenRelearns(t *testing.T, platform string) {
 		t.Fatal(err)
 	}
 	requeued := job(t, q, run.ID)
-	if requeued.State != "queued" || requeued.Losses != 0 || requeued.InfrastructureRetries != 0 || requeued.MemoryOOMFloor == nil || math.Abs(requeued.MemoryOOMFloor.HostMemoryGB-(at+minimumHostMemoryGB)) > 1e-9 {
+	if requeued.State != "queued" || requeued.Losses != 0 || requeued.InfrastructureRetries != 0 || requeued.MemoryOOMFloor == nil || math.Abs(requeued.MemoryOOMFloor.HostMemoryGB-(at+max(growth, minimumHostMemoryGB))) > 1e-9 {
 		t.Fatalf("not requeued at its measured peak: state=%s floor=%+v", requeued.State, requeued.MemoryOOMFloor)
 	}
 	next := check(t, q, m, nil).Job

@@ -188,7 +188,12 @@ func memoryStopFloor(j *Job) float64 {
 		if j.Spec.Needs.cpuOnly() {
 			lower = max(lower, e.HostGB)
 		}
-		margin = max(margin, peak-e.HostGB)
+		// The exploratory floor was an accounting charge, not a failed
+		// ceiling. Preserve measured growth without counting peak minus floor
+		// as another workload-sized overshoot (as measuredOOMRecovery does).
+		if !floorCharged(e) {
+			margin = max(margin, peak-e.HostGB)
+		}
 	}
 	return max(lower+minimumHostMemoryGB, peak+margin)
 }
