@@ -155,9 +155,11 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 // Exact-attempt OOM telemetry is durable job-local evidence, independent of
 // successful learning and target comparability. With no peak, advance past the
 // failed host vector by one supported kernel page: it cannot authorize another
-// identical ceiling. Sampling growth and observed guard overshoot replace the
-// old fixed 1.25/2 multipliers. An RSS stop may retain a larger observation than
-// the final sample, so consume its fenced cause as well.
+// identical ceiling. Observed guard overshoot replaces the old fixed 1.25/2
+// multipliers. Sampling growth is forecast uncertainty, retained separately in
+// measuredOOMRecovery so permanent target capacity can bound it. An RSS stop
+// may retain a larger observation than the final sample, so consume its fenced
+// cause as well.
 func memoryStopFloor(j *Job) float64 {
 	lower := j.Spec.Needs.HostMemoryGB
 	if f := j.MemoryOOMFloor; f != nil {
@@ -170,7 +172,6 @@ func memoryStopFloor(j *Job) float64 {
 		}
 		p := facts.MemoryPeak
 		if p != nil {
-			margin = max(margin, memoryGrowthGB(p))
 			for _, value := range []*float64{p.HostGB, p.CgroupGB, p.NonreclaimableGB} {
 				if value != nil && validMemoryValue(*value) {
 					peak = max(peak, *value)
