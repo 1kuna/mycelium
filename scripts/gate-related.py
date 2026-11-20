@@ -126,6 +126,10 @@ SUPPLEMENTAL_CONSUMERS['internal/myce/diagnostic_budget.go'] = (
 # The non-race diagnostic benchmark has its correctness regressions here.
 SUPPLEMENTAL_CONSUMERS['internal/myce/checkin_persistence_benchmark_test.go'] = (
     'queue_persistence_test.go',)
+# Startup's private parallel reader shares the durable-state equivalence,
+# corruption, rollback and adjacent-release regressions with the writer.
+SUPPLEMENTAL_CONSUMERS['internal/myce/queue_persistence_read.go'] = (
+    'queue_persistence_test.go',)
 # The host-load benchmark expands the shared candidate-cost planner fixture.
 SUPPLEMENTAL_CONSUMERS['internal/myce/host_backfill_cost_test.go'] = (
     'checkin_candidate_cost_test.go',)

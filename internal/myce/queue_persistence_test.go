@@ -36,12 +36,26 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 	if err := json.Unmarshal(data, &expected); err != nil {
 		t.Fatal(err)
 	}
+	// Keep the document reader as the independent sequential reference. Sparse
+	// rowids exercise the concurrent ranges without assuming dense inserts.
+	if _, err := q.db.Exec("UPDATE queue_state SET rowid=rowid*1000000"); err != nil {
+		t.Fatal(err)
+	}
 	q.s = state{}
 	if err := q.readStartupState(normalizedQueueMarker); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(expected, q.s) {
 		t.Fatal("record decoding changed the durable state")
+	}
+	if q.db.Stats().MaxOpenConnections != 1 {
+		t.Fatal("startup left concurrent connections enabled for ordinary writes")
+	}
+	for pragma, expected := range map[string]int{"busy_timeout": 5000, "synchronous": 2} {
+		var got int
+		if err := q.db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil || got != expected {
+			t.Fatalf("startup changed writer %s: %d, %v", pragma, got, err)
+		}
 	}
 	for _, record := range q.s.Submissions {
 		if record.Job != q.s.Jobs[record.JobID] {
@@ -51,6 +65,7 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 	// Both reader and decoder failures must join the bounded startup pipeline.
 	// A following load must still return the complete, unchanged state.
 	for _, tc := range []struct{ name, key, data string }{
+		{"invalid_field_key", "fields/invalid", `{}`},
 		{"invalid_json", "jobs/corrupt", `{"id":`},
 		{"invalid_reference", "jobs/corrupt", `{"$refs":[],"id":{"$ref":0}}`},
 		{"missing_field_root", fieldPrefix("jobs/corrupt") + "cmVhc29u", `"orphan"`},

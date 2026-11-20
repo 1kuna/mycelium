@@ -58,11 +58,11 @@ func (q *Queue) readStartupState(marker []byte) error {
 		}
 		done <- result
 	}()
-	records, err := readQueueRecordsVisit(q.db, func(key string, data []byte) {
+	records, err := readStartupQueueRecords(q.db, func(key string, data []byte) {
 		if id, ok := strings.CutPrefix(key, "jobs/"); ok {
 			jobs <- jobRecord{id, data}
 		}
-	})
+	}, q.startupReadWorkers)
 	q.traceStartup("load_record_rows")
 	close(jobs)
 	decoded := <-done
@@ -676,6 +676,17 @@ func readQueueRecordsVisit(db queueRecordReader, visit func(string, []byte), onl
 	if err != nil {
 		return nil, err
 	}
+	return readQueueRecordRows(rows, visit)
+}
+
+type queueRecordRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close() error
+}
+
+func readQueueRecordRows(rows queueRecordRows, visit func(string, []byte)) (map[string][]byte, error) {
 	defer rows.Close()
 	records := map[string][]byte{}
 	fields := map[string]map[string]json.RawMessage{}

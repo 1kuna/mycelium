@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -142,6 +144,25 @@ func TestQueueInstalledCutover(t *testing.T) {
 			t.Logf("installed_database_volume=%s", bytes.TrimSpace(out))
 		}
 	}
+	if os.Getenv("MYCE_TEST_PHYSICAL_DIAG") == "1" {
+		if !databaseVolume {
+			t.Fatal("physical diagnostics require generated volume")
+		}
+		diagnoseStartupPhysical(t, python, db)
+		return // Diagnostic mode never publishes a service unit.
+	}
+	physicalCutover := os.Getenv("MYCE_TEST_PHYSICAL_CUTOVER") == "1"
+	if physicalCutover {
+		if !databaseVolume {
+			t.Fatal("physical cutover requires generated volume")
+		}
+		cmd := exec.Command(python, "testdata/queue_install_physical.py", "fragmented", db)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("physical cutover layout: %v %s", err, out)
+		} else {
+			t.Logf("physical_layout=%s", bytes.TrimSpace(out))
+		}
+	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +253,21 @@ func TestQueueInstalledCutover(t *testing.T) {
 			return fmt.Errorf("install: %w: %s", err, out)
 		}
 		return nil
+	}
+	condition := func() {
+		t.Helper()
+		if !physicalCutover {
+			return
+		}
+		// Caller-only conditioning before invoking the unchanged installer.
+		// The running old queue may warm some pages during staging/check-ins;
+		// residency here is not a claim of zero residency at replacement start.
+		cmd := exec.Command(python, "testdata/queue_install_physical.py", "evict", db)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("caller cache conditioning: %v %s", err, out)
+		} else {
+			t.Logf("installed_cache_conditioning=%s", bytes.TrimSpace(out))
+		}
 	}
 	// Register before any install, so even a failed activation removes this unit.
 	t.Cleanup(func() {
@@ -336,6 +372,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 			}
 		}
 	})
+	condition()
 	mark("bootstrap_start")
 	if err := install(); err != nil {
 		t.Fatal(err)
@@ -498,6 +535,7 @@ print('finished',flush=True)
 	if err := os.WriteFile(events, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	condition()
 	mark("install_start")
 	installDone := make(chan error, 1)
 	go func() {
@@ -675,6 +713,136 @@ print('finished',flush=True)
 		t.Fatal(err)
 	}
 	t.Logf("installed_cutover=%s", data)
+}
+
+// Reuse the real installed fixture, reader and decoder. All cache operations
+// affect only this closed, generated file; never a host cache or fleet state.
+func diagnoseStartupPhysical(t *testing.T, python, path string) {
+	t.Helper()
+	trials, err := strconv.Atoi(envTestDefault("MYCE_TEST_PHYSICAL_TRIALS", "1"))
+	if err != nil || trials < 1 || trials > 3 {
+		t.Fatal("physical trials must be between one and three")
+	}
+	for _, layout := range []string{"compact", "fragmented"} {
+		cmd := exec.Command(python, "testdata/queue_install_physical.py", layout, path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("layout: %v %s", err, out)
+		} else {
+			t.Logf("physical_layout=%s", bytes.TrimSpace(out))
+		}
+		for trial := 0; trial < trials; trial++ {
+			caches := []string{"cold", "warm"}
+			operations := []string{"scan", "reassemble", "reassemble_parallel", "decode", "decode_parallel"}
+			if os.Getenv("MYCE_TEST_PHYSICAL_PAIR_ONLY") == "1" {
+				caches = []string{"cold"}
+				operations = []string{"decode", "decode_parallel", "decode_parallel8"}
+				if trial%2 == 1 {
+					for i, j := 0, len(operations)-1; i < j; i, j = i+1, j-1 {
+						operations[i], operations[j] = operations[j], operations[i]
+					}
+				}
+			}
+			t.Logf("physical_trial layout=%s trial=%d", layout, trial)
+			for _, cache := range caches {
+				for _, operation := range operations {
+					if cache == "cold" {
+						cmd := exec.Command(python, "testdata/queue_install_physical.py", "evict", path)
+						if out, err := cmd.CombinedOutput(); err != nil {
+							t.Fatalf("owned-file cache eviction: %v %s", err, out)
+						} else {
+							t.Logf("physical_cache=%s", bytes.TrimSpace(out))
+						}
+					}
+					func() {
+						db, err := sql.Open("sqlite", path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer db.Close()
+						db.SetMaxOpenConns(1)
+						profile, err := os.CreateTemp("", "startup-cpu-*.pprof")
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer os.Remove(profile.Name())
+						if err := pprof.StartCPUProfile(profile); err != nil {
+							t.Fatal(err)
+						}
+						before, _ := os.ReadFile("/proc/self/io")
+						started := time.Now()
+						rows, size := 0, 0
+						base, count, parallel := strings.Cut(operation, "_parallel")
+						workers := 4
+						if count != "" {
+							workers, err = strconv.Atoi(count)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+						switch base {
+						case "scan":
+							var result *sql.Rows
+							result, err = db.Query("SELECT key,data FROM queue_state")
+							if err == nil {
+								for result.Next() {
+									var key string
+									var data []byte
+									if err = result.Scan(&key, &data); err != nil {
+										break
+									}
+									rows++
+									size += len(data)
+								}
+								if err == nil {
+									err = result.Err()
+								}
+								result.Close()
+							}
+						case "reassemble":
+							var records map[string][]byte
+							if parallel {
+								records, err = readStartupQueueRecords(db, nil, workers)
+							} else {
+								records, err = readQueueRecords(db)
+							}
+							rows = len(records)
+							for _, data := range records {
+								size += len(data)
+							}
+						case "decode":
+							q := &Queue{db: db, clock: RealClock{}}
+							if parallel {
+								q.startupReadWorkers = workers
+							}
+							previous := started
+							q.startupTrace = func(phase string) {
+								now := time.Now()
+								t.Logf("physical_phase layout=%s cache=%s phase=%s seconds=%.6f", layout, cache, phase, now.Sub(previous).Seconds())
+								previous = now
+							}
+							err = q.readStartupState(normalizedQueueMarker)
+							rows = len(q.s.Jobs)
+						}
+						elapsed := time.Since(started)
+						after, _ := os.ReadFile("/proc/self/io")
+						pprof.StopCPUProfile()
+						profile.Close()
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Logf("physical_read layout=%s cache=%s operation=%s seconds=%.6f records=%d bytes=%d io_before=%q io_after=%q", layout, cache, operation, elapsed.Seconds(), rows, size, before, after)
+						cmd := exec.Command("go", "tool", "pprof", "-top", "-nodecount=12", profile.Name())
+						if out, err := cmd.CombinedOutput(); err != nil {
+							t.Fatalf("profile: %v %s", err, out)
+						} else {
+							t.Logf("physical_cpu=%s", out)
+						}
+					}()
+					runtime.GC()
+				}
+			}
+		}
+	}
 }
 
 func envTestDefault(name, fallback string) string {
