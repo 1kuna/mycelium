@@ -370,12 +370,15 @@ func firstRunFloorGrowsThenRelearns(t *testing.T, platform string) {
 		t.Fatal(err)
 	}
 	requeued := job(t, q, run.ID)
-	if requeued.State != "queued" || requeued.Losses != 0 || requeued.InfrastructureRetries != 0 || requeued.MemoryOOMFloor == nil || math.Abs(requeued.MemoryOOMFloor.HostMemoryGB-(at+max(growth, minimumHostMemoryGB))) > 1e-9 {
+	if requeued.State != "queued" || requeued.Losses != 0 || requeued.InfrastructureRetries != 0 || requeued.MemoryOOMFloor == nil || math.Abs(requeued.MemoryOOMFloor.HostMemoryGB-(at+minimumHostMemoryGB)) > 1e-9 {
 		t.Fatalf("not requeued at its measured peak: state=%s floor=%+v", requeued.State, requeued.MemoryOOMFloor)
 	}
 	next := check(t, q, m, nil).Job
 	if next == nil || next.ID != run.ID || next.Spec.Needs.HostMemoryGB < at || strings.Contains(next.MemoryEnvelope.Source, firstRunFloorSource) {
 		t.Fatalf("relearning run not charged its measured peak: %+v", next)
+	}
+	if next.Spec.Needs.HostMemoryGB < at+growth {
+		t.Fatal("retry forecast lost measured growth", next.MemoryEnvelope)
 	}
 	if err := q.Started(result(next, false)); err != nil {
 		t.Fatal(err)
