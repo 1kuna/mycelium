@@ -192,6 +192,10 @@ func (v *fileCapacitySnapshot) current() (FileStoreStatus, map[string]storedPayl
 		remaining = addDiskBytes(remaining, p.length-p.size)
 	}
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
-	status.FreeBytes = min(status.LimitBytes-min(status.LimitBytes, allocated), status.DiskFreeBytes-min(status.DiskFreeBytes, unavailable))
+	// Preserve the exact in-memory commitment overlay in diagnostic operands.
+	status.allowanceFree = status.LimitBytes - min(status.LimitBytes, allocated)
+	status.volumeFree = status.DiskFreeBytes - min(status.DiskFreeBytes, unavailable)
+	status.uploadRemaining = remaining
+	status.FreeBytes = min(status.allowanceFree, status.volumeFree)
 	return status, payloads
 }

@@ -449,3 +449,52 @@ for its explanation; add field names to the types, rather than this index.
 
 <a id="shared-owner-yield-and-measured-cpu-389"></a>
 - [Shared owner yield and measured CPU (#389)](reference/status-behavior.md#shared-owner-yield-and-measured-cpu-389)
+
+## File-store capacity refusals
+
+HTTP 507 keeps the public `code: file_store_capacity`. Supporting queues add
+`cause`, an ordinary `RuntimeCause` with `operation: outputs`, `class: http_error`,
+a stable `predicate`, and `file_capacity` evidence. The same cause is journalled
+as `event=file_store_capacity cause=...` and retained by worker finalization in
+`execution_cause` (or `cleanup_cause` when execution already failed). Job JSON,
+attempt diagnostics and `myce status` preserve it. Older queues/clients may omit
+it; absence is unknown. A 507 alone does not establish whether production fits.
+
+| Predicate | Refusal-time comparison |
+| --- | --- |
+| `file_store_backing` | `need_bytes > free_bytes`; `bound` is `store_allowance` or `physical_volume` when measured. |
+| `file_store_production_reserve` | `need_bytes > available_bytes`, after subtracting the uncommitted production reserve from `free_bytes`. |
+| `file_store_project_reservation` | `need_bytes > available_bytes`, after any non-production withholding and then aggregate unused project input reservations. Exact worker outputs remain exempt. |
+
+Every byte value is an unsigned count. `growth_bytes` is the new requested
+allocation after identity deduplication; `need_bytes` also includes
+`output_commitment_bytes` for other missing outputs, deduplicated against the
+request, existing uploads and each other. `free_bytes` is the effective backing
+headroom before reserve withholding. `store_free_bytes` is the store allowance
+minus allocated declared lengths; `volume_free_bytes` is `disk_free_bytes`
+minus `disk_floor_bytes` and the outstanding unwritten
+`upload_commitment_bytes`, saturating at zero. Backing headroom is the minimum
+of those two bounds. `store_limit_bytes` and `stored_bytes` retain the allowance
+and physically stored payload bytes. Optional measurements remain omitted when
+unknown; measured zero is explicit.
+
+`production_reserve_bytes` and `production_committed_bytes` explain the
+uncommitted reserve. For non-production, `production_withheld_bytes` is their
+saturating difference; for production it is zero. Reserve withholding is applied
+only after the backing check passes. `project_withheld_bytes` is the aggregate
+unused entitlement applied by the project arm. Each subtraction saturates at
+zero, producing `available_bytes`. No per-project identities, limits or usage
+breakdown enter this evidence or its public status projection.
+
+`production` records the effective classification, including the legacy
+unidentified-write exception; `identified` distinguishes that exception when
+known. `observed_at` uses the queue's injected clock at refusal; `job_id` and
+`attempt` identify an exact worker request when available. `request_id` correlates
+the response and journal event (a sanitized supplied request ID or a generated
+one). Input requests without an attempt omit `job_id`.
+
+These are immutable historical operands, not a fresh capacity reading. Later
+collection or free-space changes do not update them. A successful finalization
+retry clears its pending cause through ordinary completion. Retry only when the
+binding shortage has been relieved; changing the submission key does not free
+storage or bypass protected reservations.

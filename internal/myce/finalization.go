@@ -140,6 +140,11 @@ func finalizationErrorFor(step, output string, err error) error {
 	var response *HTTPError
 	if errors.As(err, &response) {
 		d.Error, d.HTTPStatus = "http_error", response.Status
+		if response.Code == "file_store_capacity" {
+			if e := safeFileCapacity(response.Cause); e != nil {
+				c.FileCapacity, c.Predicate = e, response.Cause.Predicate
+			}
+		}
 	}
 	c.Operation, c.Class, c.Finalization = "outputs", d.Error, safeFinalization(d)
 	return &runtimeError{diagnostic: *c, cause: err}

@@ -86,6 +86,19 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+A `507 file_store_capacity` may include a typed `cause.predicate` and
+`cause.file_capacity` snapshot. Finalization retains them in the job's
+`execution_cause` or `cleanup_cause`, visible in status/JSON. Predicates distinguish
+`file_store_backing` (store allowance or physical volume),
+`file_store_production_reserve`, and `file_store_project_reservation`.
+Keep the original need/growth, available/free, commitments, withholding,
+observation time and request/job/attempt correlation when reporting a refusal.
+They describe that request, even after collection changes current headroom;
+missing evidence on older queues is unknown. A reserve cannot prevent a physical
+shortage. Wait for the binding shortage to clear before retrying; a new key does
+not relieve it. Successful finalization clears the pending diagnostic. See the
+[capacity status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#file-store-capacity-refusals).
+
 Temporary zero request-memory headroom returns `503 request_capacity_unavailable`;
 safe reads, waits and keyed submissions retry within the same caller budget.
 A positive fitting size exceeded by a request remains `413 request_too_large`.
