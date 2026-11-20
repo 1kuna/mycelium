@@ -677,6 +677,17 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A native-qualification wait names the automatic check and its current hold.
+  A next-check-in promise requires a dispatchable native check offer. Preparation
+  waits do not promise a submitted check. A real failed qualification is not
+  retried automatically; a released launch-authorization refusal with exact
+  proof that no payload ran leaves qualification retryable. When all compatible
+  hosts are refused or have failed qualification, status says no eligible host and names retained check
+  verdicts. Keep the useful job queued; the installation owner investigates
+  failed check logs and restores a usable host before retrying qualification.
+  On older releases, an installation owner can run `myce extension check --gpu cpu
+  NAME@VERSION` locally on an enrolled dedicated worker to refresh its native
+  evidence. This does not pin the useful job. Consumers cannot remotely clear
+  another host's qualification cache; keep the useful job and key.
   When an unrun check's transferred estimate exceeds physical RAM, it uses the
   ordinary guarded first-run envelope to obtain a native measurement; status
   says `transferred estimate exceeds physical capacity`. Local measurements,

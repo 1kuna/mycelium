@@ -716,7 +716,67 @@ func (g *readGeneration) liveInputs(ctx context.Context) (state, error) {
 	if g.liveErr != nil {
 		return state{}, g.liveErr
 	}
-	return g.liveState, ctx.Err()
+	return g.nativeCheckInputs(ctx, g.liveState)
+}
+
+// Failed checks referenced by current inventory may carry no-execution proof.
+// Fetch only those immutable answers, outside q.mu, rather than decoding the
+// retained history for every queued receipt. The maps in liveState stay shared.
+func (g *readGeneration) nativeCheckInputs(ctx context.Context, s state) (state, error) {
+	var extra map[string]*submissionRecord
+	visit := func(reports []ExtensionReport) error {
+		for _, r := range reports {
+			if r.CheckState != "failed" || !strings.HasPrefix(r.CheckID, "auto-") {
+				continue
+			}
+			key := submissionDigest("extension-check", r.CheckID)
+			if s.Submissions[key] != nil || extra[key] != nil {
+				continue
+			}
+			record := readGet(g.root, "submissions/"+key)
+			if record == nil {
+				continue
+			}
+			if allocation := projectionAllocation(ctx); allocation != nil && !record.decoded.Load() {
+				if err := chargeReadRecord(allocation, "submissions", record); err != nil {
+					return err
+				}
+			}
+			value, err := record.decode("submissions/" + key)
+			if err != nil {
+				return err
+			}
+			answer := *value.(*submissionRecord)
+			if answer.Job == nil {
+				answer.Job, err = g.job(ctx, answer.JobID)
+				if err != nil {
+					return err
+				}
+			}
+			if automaticCheckNoVerdict(answer.Job) {
+				if extra == nil {
+					extra = map[string]*submissionRecord{}
+				}
+				extra[key] = &answer
+			}
+		}
+		return nil
+	}
+	for _, m := range s.Machines {
+		if err := visit(m.ExtensionReports); err != nil {
+			return state{}, err
+		}
+		for _, d := range m.Devices {
+			if err := visit(d.ExtensionReports); err != nil {
+				return state{}, err
+			}
+		}
+	}
+	if extra != nil {
+		s.Submissions = maps.Clone(s.Submissions)
+		maps.Copy(s.Submissions, extra)
+	}
+	return s, ctx.Err()
 }
 
 // The compact status view: live inputs plus per-host external memory rings,
