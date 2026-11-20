@@ -131,17 +131,21 @@ check: [test, -s, result]
 			}
 		}
 	}()
+	notificationFile := filepath.Join(root, "notifications")
 	notifier := filepath.Join(root, "notify")
-	if err := os.WriteFile(notifier, []byte(`#!/bin/sh
-if [ "${1:-}" = --check ]; then test -n "${NOTIFICATION_FILE:-}"; exit $?; fi
+	if err := os.WriteFile(notifier, []byte(fmt.Sprintf(`#!/bin/sh
+notification=%s
+pid_file=%s
+fifo=%s
+if [ "${1:-}" = --check ]; then test -p "$fifo"; exit $?; fi
 test -z "${MYCE_TOKEN:-}" || exit 99
-if [ ! -f "$NOTIFIER_PID" ]; then
- sh -c 'read value < "$NOTIFIER_FIFO"' &
- echo "$!" > "$NOTIFIER_PID"
+if [ ! -f "$pid_file" ]; then
+ sh -c 'read value < "$1"' sh "$fifo" &
+ echo "$!" > "$pid_file"
 fi
-cat >> "$NOTIFICATION_FILE"
-printf '\n' >> "$NOTIFICATION_FILE"
-`), 0700); err != nil {
+cat >> "$notification"
+printf '\n' >> "$notification"
+`, shellArg(notificationFile), shellArg(notifierPID), shellArg(notifierFIFO))), 0700); err != nil {
 		t.Fatal(err)
 	}
 	binary := devTestBinary(t)
@@ -155,11 +159,10 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
-	notificationFile := filepath.Join(root, "notifications")
 	invoke := func(extra ...string) (profileReceipt, error) {
 		cmd := exec.CommandContext(ctx, binary, append([]string{"run", "--queue", d.URL, "--profile", path}, extra...)...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token, "NOTIFICATION_FILE="+notificationFile, "NOTIFIER_FIFO="+notifierFIFO, "NOTIFIER_PID="+notifierPID)
+		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, e := cmd.Output()

@@ -261,7 +261,8 @@ func TestExtensionCheckHoldInDependentSummary(t *testing.T) {
 	if got.Hold == nil || got.Hold.Kind != "native_qualification" || !strings.Contains(got.Reason, ShortID(pending.ID)) || !strings.Contains(got.Reason, memoryEvidenceRecovering) || strings.Contains(got.Reason, other.ID+" needs") {
 		t.Fatalf("dependent summary lost real hold: reason=%s hold=%+v", got.Reason, got.Hold)
 	}
-	if !strings.Contains(got.Hold.Detail, memoryEvidenceRecovering) {
-		t.Fatal("hold detail retained unrelated variant", got.Hold)
+	if !strings.Contains(got.Hold.Reason, memoryEvidenceRecovering) || strings.Contains(got.Hold.Reason, other.ID+" needs") ||
+		!strings.Contains(got.Hold.Detail, "declared implementation targets:") || strings.Contains(got.Hold.Detail, other.ID+" needs") {
+		t.Fatalf("hold lost exact-check evidence or retained unrelated host capacity: %+v", got.Hold)
 	}
 }
