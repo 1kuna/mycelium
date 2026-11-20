@@ -819,7 +819,7 @@ func shapeInstallDatabaseRecords(t *testing.T, q *Queue, now time.Time) {
 	q.s.FileInputClaims = map[string]FileInputClaim{}
 	for i := range 7000 {
 		id := fmt.Sprintf("synthetic-claim-%05d", i)
-		q.s.FileInputClaims[id] = FileInputClaim{ID: id, Project: "synthetic-volume", File: FileRef{SHA256: fmt.Sprintf("%064x", i), Size: 1}, At: now, SettledAt: &now}
+		q.s.FileInputClaims[id] = FileInputClaim{ID: id, Project: "synthetic-volume", File: FileRef{SHA256: fmt.Sprintf("%064x", i), Size: 1}, At: now, SettledAt: now}
 	}
 }
 
