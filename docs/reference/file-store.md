@@ -348,14 +348,15 @@ plan stays valid; a new publication or HEAD refresh of selected content does not
 
 The plan lists each job's state, release/retention state, original expiry deadline,
 input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
-evidence where applicable. `physical_custody` includes `custody_blockers` naming each blocking job's
+evidence where applicable. `physical_custody` includes `custody_blockers` naming
+each blocking job's
 `job_id`, `state`, and one stable relationship `path` from the selected job.
 Each path step has a `relationship` (`after` or `fan_out`) and `job_id`; an
 empty path means the selected job itself. For example, a released recovery job
 can be blocked by `after` evaluation followed by `after` serving, even when
 its own copies have `release_confirmed`; aggregate `release` remains `pending`.
-Other projects' blockers and intermediate
-steps have `other_project: true` with job identity and state omitted.
+Other projects' blockers and intermediate steps have `other_project: true`
+with job identity and state omitted.
 Each content identity appears once in the byte total,
 using its current stored size. `reclaimable_bytes` counts only bytes removable
 now after selection: retained job references, checkpoints/resume generations,

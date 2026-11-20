@@ -2,6 +2,7 @@ package myce
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -42,7 +43,7 @@ func TestFileReleaseCustodyDependencyChain(t *testing.T) {
 	}
 	_, err := releaseApply(q, p)
 	releaseCode(t, err, "file_release_protected")
-	if err := c.HasFile(t.Context(), ref); err != nil || job(t, q, recovery.ID).FilesExpired {
+	if _, err := os.Stat(q.files.blob(ref)); err != nil || job(t, q, recovery.ID).FilesExpired {
 		t.Fatal("diagnostics changed custody", err)
 	}
 	if err := q.update(func() error { q.touchJob(serving.ID).ReleaseConfirmed = true; return nil }); err != nil {
