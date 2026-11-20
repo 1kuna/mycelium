@@ -51,7 +51,7 @@ while :; do sleep 0.02; done`, "sh", ready, effect}
 		if current.State == "failed" {
 			t.Fatalf("yield command failed: %+v", current)
 		}
-		return current
+		return *current
 	}
 	wait(func() bool { _, err := os.Stat(ready); return err == nil && read().StartedAt != nil })
 	cli := func(action string, args ...string) myce.Job {
