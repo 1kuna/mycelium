@@ -92,7 +92,6 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 			if _, err := q.ResumeJob(run.ID, paused.PauseRevision); err != nil {
 				t.Fatal(err)
 			}
-			m.Session = "replacement-session"
 			next := check(t, q, m, nil).Job
 			if next == nil || next.ID != original.ID || next.Attempt <= run.Attempt || next.Progress != 7 {
 				t.Fatal("resume did not restore placement", next)

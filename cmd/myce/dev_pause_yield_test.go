@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ func proveDevPauseYield(t *testing.T, ctx context.Context, binary string, client
 	t.Helper()
 	ready, effect := filepath.Join(root, "yield-ready"), filepath.Join(root, "yield-effect")
 	spec := myce.Spec{Name: "checkpoint-yield", Project: "probe", Priority: "experiment", Resumable: true, Portable: true}
+	spec.RequireTarget = true
+	spec.Targets = []myce.ExecutionTarget{{OS: runtime.GOOS}}
 	spec.Needs.CPUCores, spec.Needs.MemoryGB = 1, 1
 	spec.Run.Command = []string{"sh", "-ec", `test -z "$MYCE_TOKEN"
 save="$MYCE_CHECKPOINT_DIR/state.json"

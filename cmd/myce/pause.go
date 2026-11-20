@@ -70,7 +70,8 @@ func pauseCommand(ctx context.Context, action string, args []string, out io.Writ
 	}
 	var body any = request
 	if yield {
-		request.IfAttempt = &j.Attempt
+		attempt := j.Attempt
+		request.IfAttempt = &attempt
 		body = request
 	}
 	if action == "resume" {
