@@ -133,6 +133,9 @@ func TestFirstRunFloorLaunchRefusals(t *testing.T) {
 			j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 			j.Spec = autoSpec("compiler", "sh", "-c", "exit 0")
 			j.Spec.Needs.Memory = "auto" // Worker input has already passed queue defaulting.
+			if err := normalizeResources(&j.Spec); err != nil {
+				t.Fatal(err)
+			}
 			j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
 			j.MemoryEnvelope = &JobMemoryEnvelope{HostGB: minimumHostMemoryGB, ProbeFloorGB: minimumHostMemoryGB, Basis: "exploratory", Source: "exploratory first run; " + firstRunFloorSource, Enforcement: learnedMemoryGuardEnforcement}
 			p, err := startAfterFixtureInputs(t, w, store, j)
@@ -202,6 +205,9 @@ func TestFirstRunFloorRoomLossKeepsCapacityEvidence(t *testing.T) {
 	m.MemoryCeilingSlackGB = 0
 	j := Job{Spec: autoSpec("compiler", "go", "test"), MemoryEnvelope: &JobMemoryEnvelope{Source: firstRunFloorSource, Basis: "exploratory", Enforcement: learnedMemoryGuardEnforcement}}
 	j.Spec.Needs.Memory = "auto"
+	if err := normalizeResources(&j.Spec); err != nil {
+		t.Fatal(err)
+	}
 	j.Spec.Needs.HostMemoryGB = minimumHostMemoryGB
 	charge := 2.0
 	w := Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, hostChargesExcept: func(attemptKey) (float64, float64) { return charge, 1 }}
