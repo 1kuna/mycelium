@@ -68,3 +68,35 @@ func TestNativeLaunchBindingE2BIG(t *testing.T) {
 		t.Fatalf("file-backed native launch: %v: %s", err, out)
 	}
 }
+
+func TestNativeNamespaceOptionsFile(t *testing.T) {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bubblewrap is not installed; namespace option transport unverified")
+	}
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Parse a large mount list without creating namespaces or changing the
+	// filesystem. --help exits after option expansion, even on a host that
+	// refuses unprivileged namespaces. Paths contain spaces to guard NUL framing.
+	var options []string
+	for i := range 10000 {
+		path := fmt.Sprintf("/synthetic input/%064x/data", i)
+		options = append(options, "--ro-bind", path, path)
+	}
+	options = append(options, "--help")
+	argv, err := nativeNamespaceMonitorFileArgs(bwrap, options, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) != 6 {
+		t.Fatal("namespace options still grow exec argv")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "--ro-bind") {
+		t.Fatalf("file-backed bubblewrap option parsing: %v: %s", err, out)
+	}
+}

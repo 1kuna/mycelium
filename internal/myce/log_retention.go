@@ -299,10 +299,14 @@ func pruneAttemptFilesAt(dir, folder string, now time.Time, collectors ...*attem
 	local := func(job, name string) bool {
 		return custody[job][name] || custody[job] != nil && strings.HasPrefix(name, ".")
 	}
+	accepted := func(job, name string) bool {
+		attempt, ok := attemptFolderNumber(name)
+		return ok && published[job][strconv.Itoa(attempt)]
+	}
 	var queries []Execution
 	for _, job := range jobs {
 		for _, name := range listed[job.Name()] {
-			if attempt, ok := attemptFolderNumber(name); ok && !local(job.Name(), name) && !published[job.Name()][name] {
+			if attempt, ok := attemptFolderNumber(name); ok && !local(job.Name(), name) && !accepted(job.Name(), name) {
 				queries = append(queries, Execution{ID: job.Name(), Attempt: attempt})
 			}
 		}
@@ -320,7 +324,7 @@ func pruneAttemptFilesAt(dir, folder string, now time.Time, collectors ...*attem
 				result = errors.Join(result, err)
 				continue
 			}
-			d := AttemptFilesDisposition{Reclaim: published[job.Name()][name], Reason: "accepted_result"}
+			d := AttemptFilesDisposition{Reclaim: accepted(job.Name(), name), Reason: "accepted_result"}
 			if !d.Reclaim {
 				var err error
 				d, err = collector.disposition(job.Name(), name)
