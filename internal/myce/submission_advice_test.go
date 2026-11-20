@@ -250,6 +250,11 @@ func TestSubmissionAdvicePreservesFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This reference fixture never changes below. Prepare its immutable curve
+	// index once, as a status projection does, instead of rebuilding all 1,400
+	// curves for each hypothetical backfill candidate. Keep the reference's
+	// planning decisions independent of the submission view and its caches.
+	q.memoryObservationIndex = q.memoryObservationCatalog()
 	for _, id := range []string{"queued-000", "queued-081", "running-0", "retained-000"} {
 		before := storedTestJob(t, q, id)
 		want := cloneJob(&before)
