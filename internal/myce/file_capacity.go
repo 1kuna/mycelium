@@ -331,7 +331,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		if keep[hash] || p.modified.After(now.Add(-grace)) {
 			continue
 		}
-		if at, tracked := v.bundles[hash]; tracked && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
+		if at, tracked := v.bundles[hash]; tracked && !expired[hash] && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
 			continue
 		}
 		reclaimable := !p.upload && expired[hash]

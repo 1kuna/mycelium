@@ -240,7 +240,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		slices.SortFunc(r, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
 		r = slices.Compact(r) // Job and keyed answer may alias the same reference.
 		at, marked := q.s.BundleUploads[hash]
-		plan.Blobs = append(plan.Blobs, FileReleaseBlob{SHA256: hash, CollectionEligible: pending[hash] && !keep[hash], References: r, BundleTracked: marked, BundleProtected: marked && at.After(q.clock.Now().Add(-q.fileRetention))})
+		plan.Blobs = append(plan.Blobs, FileReleaseBlob{SHA256: hash, CollectionEligible: pending[hash] && !keep[hash], References: r, BundleTracked: marked, BundleProtected: marked && !pending[hash] && at.After(q.clock.Now().Add(-q.fileRetention))})
 	}
 	slices.SortFunc(plan.Blobs, func(a, b FileReleaseBlob) int { return compareReleaseJSON(a.SHA256, b.SHA256) })
 	return plan, nil
@@ -298,8 +298,8 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		if !b.BundleTracked {
 			b.PublicationProtected = st.ModTime().After(expiredCutoff)
 		}
-		b.BundleProtected = b.BundleProtected || b.BundleTracked && st.ModTime().After(orphanCutoff)
-		if b.CollectionEligible && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, expiredCutoff, orphanCutoff, b.BundleTracked) {
+		b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && st.ModTime().After(orphanCutoff)
+		if b.CollectionEligible && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, expiredCutoff, orphanCutoff, b.BundleTracked, b.CollectionEligible) {
 			b.ReclaimableBytes = b.SizeBytes
 			plan.ReclaimableBytes += b.SizeBytes
 		}

@@ -590,8 +590,8 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		}
 	}
 	for hash, published := range q.s.BundleUploads {
+		bundles[hash] = published
 		if q.fileRetention > 0 && !published.After(orphanCutoff) && !referenced[hash] {
-			bundles[hash] = published
 			items = append(items, candidate{hash: hash, bundle: true})
 		}
 	}
@@ -613,7 +613,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 		}
 		defer q.fileLifecycle.Unlock()
 		type decision struct {
-			remove, marked bool
+			remove, marked, expired bool
 		}
 		decisions := make([]decision, len(batch))
 		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
@@ -634,10 +634,11 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 				remove = q.files == store && marked && published.Equal(bundles[c.hash]) && !referenced[c.hash]
 			}
 			bundleTime, trackedBundle := q.s.BundleUploads[c.hash]
-			// An expired input can share bytes with a newly created, rejected
-			// recipe. Its older job window cannot shorten the recipe's retention.
-			remove = remove && (!trackedBundle || !bundleTime.After(orphanCutoff))
-			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle}
+			// An expired/released job owns reclamation of its bundle bytes.
+			// Other custody still wins above; refreshed publication keeps its
+			// ordinary grace below. Only unclaimed bundles need the orphan window.
+			remove = remove && (!trackedBundle || expired[c.hash] || !bundleTime.After(orphanCutoff))
+			decisions[i] = decision{remove: remove, marked: c.orphan || trackedBundle, expired: expired[c.hash]}
 		}
 		requestUnlock2()
 		// The fence stays held from the recheck through every unlink below, so
@@ -653,7 +654,7 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 			st, err := os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && filePayloadAgeEligible(st, cutoff, expiredCutoff, orphanCutoff, decisions[i].marked) {
+			if err == nil && filePayloadAgeEligible(st, cutoff, expiredCutoff, orphanCutoff, decisions[i].marked, decisions[i].expired) {
 				err = os.Remove(path)
 				if err == nil {
 					gone[c.hash] = true
@@ -755,13 +756,14 @@ func (q *Queue) reclaimPublishedFilesUntil(requestCtx context.Context, need uint
 }
 
 // The planner and collector must agree on both publication grace and the
-// longer blob-age rule for positively marked orphan/bundle uploads. An expired
-// job's files use expiredCutoff, the grace capped at the file retention.
-func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, expiredCutoff, orphanCutoff time.Time, marked bool) bool {
+// longer blob-age rule for positively marked orphan uploads. Expired/released
+// bundles keep publication grace but no second retention window from upload.
+// Other expired job files use the grace capped at the queue's file retention.
+func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, expiredCutoff, orphanCutoff time.Time, marked, expired bool) bool {
 	if !marked {
 		return !st.ModTime().After(expiredCutoff)
 	}
-	return !st.ModTime().After(publicationCutoff) && st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff)
+	return !st.ModTime().After(publicationCutoff) && st.Mode().IsRegular() && (expired || !st.ModTime().After(orphanCutoff))
 }
 
 func hasJobFiles(j *Job) bool {

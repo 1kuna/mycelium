@@ -29,6 +29,14 @@ and preserve the setting across upgrades; an installation keeps its saved window
 including a saved `0`, until its owner changes it. This is separate from log
 retention, and applies in NAS and file-store checkpoint modes.
 
+Code bundles held as job inputs follow the same release and project-retention
+rules. Once only released or expired jobs reference them, collection keeps the
+ordinary publication grace, without another queue-wide window from upload.
+Live, queued and unexpired jobs, including another project's retained jobs,
+still protect shared bytes. Frozen extension/environment references, catalog
+assets, models and checkpoints retain their independent protection. Unclaimed
+bundle uploads keep the queue-wide orphan window and publication grace.
+
 ### Per-project file retention (#1214)
 
 A project policy can set its own window with `file_retention` (a Go duration,
@@ -336,6 +344,11 @@ now after selection: retained job references, checkpoints/resume generations,
 model/catalog assets, extension/environment assets and bundles, pending output
 and unresolved custody remain protected. The plan lists the references that
 block each identity and flags publication grace or bundle retention separately.
+`bundle_tracked` records upload tracking; it does not by itself pin bytes.
+Expired or selected releasable job files do not keep a separate bundle-retention
+floor, and count in `reclaimable_bytes` once publication grace and all keeping
+references have cleared. `bundle_protected` describes that separate floor;
+retained owners remain listed under `references`.
 Absent blobs contribute zero. Recently published/HEAD-refreshed blobs retain the
 ordinary six-hour publication grace. An eligible plan can reclaim zero bytes
 while still expiring the selected identities.

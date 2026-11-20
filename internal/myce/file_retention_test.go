@@ -115,6 +115,94 @@ func TestFileRetentionRollbackTimestampFences(t *testing.T) {
 	}
 }
 
+func TestFileRetentionBundleProjectWindowAndReferenceFence(t *testing.T) {
+	for _, reuse := range []string{"none", "queued", "running", "retained_project", "publication"} {
+		t.Run(reuse, func(t *testing.T) {
+			q, clock := fixture(t)
+			c := retentionClient(t, q)
+			if err := q.ConfigureFileRetention(DefaultFileRetention); err != nil {
+				t.Fatal(err)
+			}
+			j, _, ref := releaseTerminal(t, q, c, "project-bundle")
+			if err := q.update(func() error { q.markBundleUpload(ref.SHA256); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			setQuotaPolicy(t, q, "owner", ProjectPolicy{FileRetention: "8h"})
+			clock.Advance(8*time.Hour - time.Nanosecond)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if job(t, q, j.ID).FilesExpired {
+				t.Fatal("project bundle expired early")
+			}
+			if _, err := os.Stat(q.files.blob(ref)); err != nil {
+				t.Fatal("bundle lost before project deadline", err)
+			}
+			clock.Advance(time.Nanosecond)
+			if err := q.update(func() error { q.maintainFileExpiry(); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if !job(t, q, j.ID).FilesExpired {
+				t.Fatal("project deadline did not expire bundle")
+			}
+			p := releasePlan(t, q, releaseSelection(j))
+			if p.ReclaimableBytes != ref.SizeBytes || p.Blobs[0].BundleProtected {
+				t.Fatal("project expiry kept queue-wide bundle window", p)
+			}
+			if status := q.fileStoreStatus(context.Background()); status.Error != "" || status.ReclaimableBytes != uint64(ref.SizeBytes) {
+				t.Fatal("status disagrees with expired bundle plan", status)
+			}
+			// Interleave after the collector's snapshot, before its revision-fenced
+			// recheck. A newly committed owner or HEAD must still prevent unlink.
+			ctx := &retentionInterleaveContext{Context: context.Background(), once: func() {
+				if reuse == "publication" {
+					if err := c.HasFile(context.Background(), ref); err != nil {
+						t.Fatal(err)
+					}
+				} else if reuse != "none" {
+					s := spec("experiment")
+					s.Project = "other"
+					s.Files = FileManifest{"source": ref}
+					other := submit(t, q, s)
+					if err := q.update(func() error {
+						other := q.touchJob(other.ID)
+						if reuse == "running" {
+							other.State = "running"
+						} else if reuse == "retained_project" {
+							other.State = "succeeded"
+							now := clock.Now()
+							other.FinishedAt = &now
+						}
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}
+			if err := q.reclaimPublishedFilesContext(ctx); err != nil {
+				t.Fatal(err)
+			}
+			_, err := os.Stat(q.files.blob(ref))
+			if reuse == "none" {
+				if !os.IsNotExist(err) {
+					t.Fatal("expired project bundle not reclaimed", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal("fresh custody/publication lost", err)
+				}
+				p = releasePlan(t, q, releaseSelection(j))
+				if p.ReclaimableBytes != 0 {
+					t.Fatal("plan ignored fresh custody/publication", p)
+				}
+				if status := q.fileStoreStatus(context.Background()); status.Error != "" || status.ReclaimableBytes != 0 {
+					t.Fatal("status ignored fresh custody/publication", status)
+				}
+			}
+		})
+	}
+}
+
 func TestFileRetention(t *testing.T) {
 	q, clock := fixture(t)
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
@@ -337,6 +425,10 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	_, orphan := retentionJobInput(t, c, "uploaded but never submitted")
+	_, bundle := retentionUpload(t, c, "unclaimed bundle")
+	if err := q.update(func() error { q.markBundleUpload(bundle.SHA256); return nil }); err != nil {
+		t.Fatal(err)
+	}
 	_, referenced := retentionJobInput(t, c, "submitted input")
 	s := spec("experiment")
 	s.Files = FileManifest{"input": referenced}
@@ -351,6 +443,9 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	if _, err := os.Stat(q.files.blob(orphan)); err != nil {
 		t.Fatal("orphan lost before retention elapsed", err)
 	}
+	if _, err := os.Stat(q.files.blob(bundle)); err != nil {
+		t.Fatal("unclaimed bundle lost before queue retention elapsed", err)
+	}
 	_, recent := retentionJobInput(t, c, "recent pre-submit upload")
 	clock.Advance(2 * time.Nanosecond)
 	if err := q.Tick(); err != nil {
@@ -363,6 +458,9 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	}
 	if _, err := os.Stat(q.files.blob(orphan)); !os.IsNotExist(err) {
 		t.Errorf("old orphan upload retained: %v", err)
+	}
+	if _, err := os.Stat(q.files.blob(bundle)); !os.IsNotExist(err) {
+		t.Errorf("old unclaimed bundle retained: %v", err)
 	}
 }
 
