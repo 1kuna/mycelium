@@ -179,7 +179,7 @@ func TestStatusAttemptMemoryLimitAndKernelEvents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(j) }))
 	defer server.Close()
 	t.Setenv("MYCE_TOKEN", "fixture")
-	out := captureJoiningOutput(t, func() error { return run([]string{"status", "job", "--queue", server.URL}) })
+	out := captureJoiningOutput(t, func() error { return run([]string{"status", "--queue", server.URL, "job"}) })
 	for _, want := range []string{"attempt 2", "oom=true", "resource_limit", "memory limit=2.125 GiB", "cgroup peak=2.13 GiB", "non-reclaimable=2.08 GiB", "max=43719 oom=1 oom_kill=3 oom_group_kill=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q: %s", want, out)
