@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +91,180 @@ func TestResidentJobsReuseChargeAndMeasuredIdle(t *testing.T) {
 	residentReport(t, q, m, second, "unloaded")
 	if q.modelMemory(m.ID) != 0 {
 		t.Fatal("acknowledged unload retained memory")
+	}
+}
+
+func residentPiecesFixture(t *testing.T, mode string) (*Queue, *fakeClock, Machine, Spec) {
+	t.Helper()
+	q, clock, m, s := residentFixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Outputs = map[string]string{"out": "results"}
+	s.FanOut = &FanOut{Pieces: []FanOutPiece{
+		{Key: "a", Args: []string{"--input", "a"}},
+		{Key: "b", Args: []string{"--input", "b"}},
+		{Key: "c", Args: []string{"--input", "c"}},
+	}}
+	if mode == "plain-entry" {
+		s.Files = FileManifest{}
+		for _, p := range s.FanOut.Pieces {
+			s.Files[PlainPiecePrefix+p.Key+"/input"] = putPieceTestFile(t, q, "input "+p.Key)
+		}
+		return q, clock, m, s
+	}
+	e := fakeExtension(t)
+	e.Resumable = false
+	if mode == "registered-extension" {
+		e.Resident, s.Resident = s.Resident, nil
+	}
+	e.Files["extension.yaml"], _ = yaml.Marshal(e)
+	e, err := extensionFromFiles(e.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	s.Run, s.Needs = RunSpec{}, ResourceNeeds{}
+	s.Kind = "sample"
+	s.Workload = &Workload{InputShape: "fixture", Units: 1}
+	s.FanOut.MaxConcurrency = 1
+	r := newExtensionReport(e, &m, s.workType())
+	r.Setup, r.Qualified, r.CheckID = true, true, "resident-check"
+	m.ExtensionReports = []ExtensionReport{r}
+	check(t, q, m, nil)
+	return q, clock, m, s
+}
+
+func TestResidentJobsPiecesReuseFrozenEngineAndAcceptIndependently(t *testing.T) {
+	for _, mode := range []string{"plain-entry", "extension-entry", "registered-extension"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock, m, s := residentPiecesFixture(t, mode)
+			parent := submit(t, q, s)
+			binding := parent.Spec.Resident
+			// A later catalog edit must not change an unmaterialized child's engine.
+			q.models.Models[0].StartCommand[0] = "changed-runtime"
+			var slot *ModelSlot
+			var loadAttempt string
+			accepted := map[string]PieceResult{}
+			for range 3 {
+				run := check(t, q, m, nil).Job
+				if run == nil || run.Batch == nil || run.Batch.Parent != parent.ID || run.Spec.FanOut != nil || run.Spec.Resumable || run.Batch.Concurrency != 1 || len(run.Batch.Pieces) != 1 {
+					t.Fatalf("piece is not an independent non-resumable job: %+v", run)
+				}
+				piece := run.Batch.Pieces[0]
+				if !reflect.DeepEqual(run.Spec.Resident, binding) {
+					t.Fatalf("piece %s changed frozen resident binding: %+v", piece.Key, run.Spec.Resident)
+				}
+				if mode == "plain-entry" {
+					if !slices.Equal(run.Spec.Run.Command, append(slices.Clone(s.Run.Command), piece.Args...)) || run.Spec.Files["input"] != s.Files[PlainPiecePrefix+piece.Key+"/input"] || len(run.Spec.Files) != 1 {
+						t.Fatal("piece arguments or private input lost")
+					}
+				} else if !slices.Equal(run.Spec.Args, piece.Args) {
+					t.Fatalf("piece arguments lost: %v", run.Spec.Args)
+				}
+				if err := q.Started(result(run, true)); err != nil {
+					t.Fatal(err)
+				}
+				if slot == nil {
+					clock.Advance(4 * time.Second)
+					slot = residentReport(t, q, m, run, "ready")
+					loadAttempt = slot.Attempt
+				}
+				current := q.s.ModelSlots[targetSlotKey(&m, binding.Engine.Model.Name)]
+				if current == nil || current.State != "ready" || current.Attempt != loadAttempt || len(q.s.ModelSlots) != 1 || q.modelMemory(m.ID) != 8 {
+					t.Fatalf("engine reloaded or charged more than once: %+v", q.s.ModelSlots)
+				}
+				// Test the parent's concurrency cap on another eligible worker too.
+				if mode != "plain-entry" {
+					other := cloneMachine(&m)
+					other.ID, other.Session = "other", "other-session"
+					if candidate := q.fanOutCandidate(q.s.Jobs[parent.ID], &other); candidate != nil {
+						t.Fatal("max_concurrency 1 admitted a sibling before completion")
+					}
+				}
+				clock.Advance(time.Second)
+				ref := completeWithOutput(t, q, run, "result "+piece.Key)
+				accepted[piece.Key] = PieceResult{Execution: Execution{ID: run.ID, Attempt: run.Attempt}, OutputRefs: FileManifest{"out": ref}, OutputFiles: map[string]string{}}
+				got := job(t, q, parent.ID)
+				if !reflect.DeepEqual(got.FanOut.Results, accepted) || job(t, q, run.ID).State != "succeeded" {
+					t.Fatalf("piece result not independently accepted: %+v", got.FanOut.Results)
+				}
+				if len(accepted) < 3 && (got.State != "queued" || q.modelIdleExpired(slot)) {
+					t.Fatal("remaining pieces did not retain the warm engine")
+				}
+			}
+			got := job(t, q, parent.ID)
+			if got.State != "succeeded" || len(got.OutputRefs) != 3 {
+				t.Fatalf("incomplete gather: state=%s outputs=%v", got.State, got.OutputRefs)
+			}
+		})
+	}
+}
+
+func TestResidentJobsFailedPiecePreservesAcceptedSiblings(t *testing.T) {
+	for _, mode := range []string{"plain-entry", "registered-extension"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock, m, s := residentPiecesFixture(t, mode)
+			parent := submit(t, q, s)
+			first := check(t, q, m, nil).Job
+			if first == nil {
+				t.Fatal("no first piece")
+			}
+			clock.Advance(time.Second)
+			residentReport(t, q, m, first, "ready")
+			ref := completeWithOutput(t, q, first, "accepted sibling")
+			key := first.Batch.Pieces[0].Key
+			accepted := job(t, q, parent.ID).FanOut.Results[key]
+			failed := check(t, q, m, nil).Job
+			if failed == nil {
+				t.Fatal("no second piece")
+			}
+			clock.Advance(time.Second)
+			finish(t, q, failed, false)
+			// Plain pieces let all siblings settle; extension fan-out keeps its
+			// existing fail-fast contract for work not yet accepted.
+			if mode == "plain-entry" {
+				last := check(t, q, m, nil).Job
+				if last == nil {
+					t.Fatal("failure cancelled the remaining plain piece")
+				}
+				completeWithOutput(t, q, last, "last sibling")
+			}
+			got := job(t, q, parent.ID)
+			if got.State != "failed" || job(t, q, failed.ID).State != "failed" || job(t, q, first.ID).State != "succeeded" || job(t, q, first.ID).OutputRefs["out"] != ref || !reflect.DeepEqual(got.FanOut.Results[key], accepted) {
+				t.Fatalf("failure invalidated an accepted sibling: state=%s results=%+v", got.State, got.FanOut.Results)
+			}
+		})
+	}
+}
+
+func TestResidentJobsUnsupportedSpecs(t *testing.T) {
+	for _, mode := range []string{"plain-entry", "registered-extension"} {
+		for _, shape := range []string{"resumable", "multi-device", "cpu-fallback"} {
+			t.Run(mode+"/"+shape, func(t *testing.T) {
+				q, _, _, s := residentPiecesFixture(t, mode)
+				switch shape {
+				case "resumable":
+					s.Resumable = true
+				case "multi-device":
+					count := 2
+					s.Needs.GPU = &GPUSelection{Count: &count}
+				case "cpu-fallback":
+					s.AllowCPUFallback = true
+				}
+				_, err := q.Submit(s)
+				want := "resident requires a catalog model and non-resumable single-device jobs without CPU fallback"
+				if mode == "registered-extension" && shape == "cpu-fallback" {
+					// Authoring rejects this before extension binding is resolved.
+					want = "extension work runs on CPU through a declared cpu variant"
+				}
+				if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "use pieces") {
+					t.Fatalf("unsupported resident shape has wrong refusal: %v", err)
+				}
+			})
+		}
 	}
 }
 

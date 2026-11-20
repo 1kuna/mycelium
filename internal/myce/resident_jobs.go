@@ -46,8 +46,11 @@ func validateResident(s Spec) error {
 	if s.Resident == nil {
 		return nil
 	}
-	if strings.TrimSpace(s.Resident.Model) == "" || s.Resumable || s.FanOut != nil || s.AllowCPUFallback || s.Needs.GPU != nil && s.Needs.GPU.Count != nil && *s.Needs.GPU.Count != 1 {
-		return errors.New("resident requires a catalog model and independent, non-resumable single-device stage jobs; use pieces for independent inputs")
+	// A fan-out parent describes independent attempts with these same limits.
+	// Freeze its binding before materialization; children inherit that identity
+	// rather than freezing again with their piece-specific arguments and inputs.
+	if strings.TrimSpace(s.Resident.Model) == "" || s.Resumable || s.AllowCPUFallback || s.Needs.GPU != nil && s.Needs.GPU.Count != nil && *s.Needs.GPU.Count != 1 {
+		return errors.New("resident requires a catalog model and non-resumable single-device jobs without CPU fallback")
 	}
 	return nil
 }
