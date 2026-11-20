@@ -149,13 +149,20 @@ func (q *Queue) maintainStartDeadlines() {
 		previous := q.memoryPlanning
 		q.memoryPlanning = newMemoryPlanningCache()
 		defer func() { q.memoryPlanning = previous }()
-		scan := q.placementScan()
+		var scan *placementScan
 		status := map[*Job]capacityStatus{}
 		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.StartBy != nil && !absoluteStartBy(j) {
 				waiting, ready := q.queuedCapacityStatus(j)
-				if ready && q.hostBackfillWaitingReason(j, scan) != "" {
-					waiting, ready = true, false
+				// Fence planning sizes the backlog. Keep it off ordinary check-ins;
+				// only an expired production budget needs this final expiry guard.
+				if ready && j.Spec.Priority == "production" && expired(j.Spec.StartBy, now) {
+					if scan == nil {
+						scan = q.placementScan()
+					}
+					if q.hostBackfillWaitingReason(j, scan) != "" {
+						waiting, ready = true, false
+					}
 				}
 				status[j] = capacityStatus{waiting, ready}
 			}

@@ -2,12 +2,44 @@ package myce
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Keep the routine deadline-maintenance path cheap with a production backlog.
+// The fake clock leaves all relative windows unexpired throughout the sample.
+// Run the identical fixture against release sources for performance comparisons.
+func BenchmarkStartWindowDeadlineMaintenance(b *testing.B) {
+	q, clock := fixture(b)
+	for i := range 5 {
+		m := cpuBackfillMachine(fmt.Sprintf("worker-%d", i), 64)
+		if _, err := q.Checkin(Checkin{Machine: m, period: time.Second, AttemptProtocol: keyedAttemptProtocol}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for range 100 {
+		s := cpuSpec(1, 4)
+		s.Priority, s.StartWindow = "production", "600s"
+		submit(b, q, s)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		q.maintainStartDeadlines()
+	}
+	b.StopTimer()
+	for _, j := range q.liveJobs() {
+		if j.State != "queued" || j.StartCapacityWaiting || expired(j.Spec.StartBy, clock.Now()) {
+			b.Fatal("routine maintenance changed a fresh relative window", j.ID)
+		}
+	}
+}
 
 func TestStartWindowHostBackfill(t *testing.T) {
 	for _, absolute := range []bool{false, true} {
