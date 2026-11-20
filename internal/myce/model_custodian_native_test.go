@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,7 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 				t.Error("cannot read owned model cleanup identity")
 				continue
 			}
+			t.Logf("native owned model scope: %s", custodianUnit(r.ID))
 			g := &modelCustodian{dir: dir, request: r, clock: RealClock{}, interval: time.Second, verify: modelCustodianMembership}
 			if err := g.Unload(); err != nil {
 				t.Error(err)
@@ -146,6 +148,9 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		t.Fatal(err)
 	}
 	t.Logf("native model cleanup identity: %s", identity)
+	if runtime.GOOS == "linux" {
+		verifyNativeInheritedOOM(t, q, c, before, engine.PID)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
 	defer cancel()
 	request := func(target, session, attempt, endpoint string) *http.Response {
@@ -221,4 +226,102 @@ func custodianNativeModelReplacement(t *testing.T, q *Queue, c ServiceConfig, qu
 		t.Fatal("replacement loaded another engine", paths)
 	}
 	t.Log("native manager replacement retained model PID/birth, engine attempt/session, one load and pin; admitted stream completed exactly once")
+}
+
+// The same isolated native run also proves the inherited minimum on an actual
+// highest-tier batch launch. No installed service or OOM policy is changed.
+func verifyNativeInheritedOOM(t *testing.T, q *Queue, c ServiceConfig, model modelCustodianSnapshot, enginePID int) {
+	t.Helper()
+	score := func(pid int) int {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "oom_score_adj"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	b, err := os.ReadFile(filepath.Join(c.State, "worker-pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerPID, err := strconv.Atoi(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inherited := score(workerPID)
+	modelScore, helperScore := score(enginePID), score(model.PID)
+	if modelScore != inherited || helperScore != inherited {
+		t.Fatalf("model inherited score: worker=%d helper=%d engine=%d", inherited, helperScore, modelScore)
+	}
+	release := ""
+	defer func() {
+		if release != "" {
+			if err := os.WriteFile(release, nil, 0600); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	s := cpuSpec(1, 0.125)
+	s.Priority, s.Resumable = "production", false
+	s.Targets = []ExecutionTarget{{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}}
+	s.Run.Command = []string{"/bin/sh", "-c", `echo $$ > "$MYCE_CHECKPOINT_DIR/native-batch-pid"; while [ ! -f "$MYCE_CHECKPOINT_DIR/native-batch-finish" ]; do sleep 0.01; done`}
+	j := submit(t, q, s)
+	dir := custodianDir(c.State)
+	var batch custodianSnapshot
+	await(t, func() bool {
+		paths, _ := filepath.Glob(filepath.Join(dir, "*.request.json"))
+		for _, path := range paths {
+			var r custodianRequest
+			if readCustodianJSON(dir, filepath.Base(path), &r) == nil && r.State.Job != nil && r.State.Job.ID == j.ID {
+				return readCustodianJSON(dir, custodianName(r.ID, "snapshot"), &batch) == nil && batch.Started
+			}
+		}
+		return false
+	})
+	if err := verifyCustodianIsolation(batch.ID, batch.PID, batch.Cgroup); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := filepath.Join(c.State, "checkpoints", j.ID, fmt.Sprintf("attempt-%d", batch.State.Job.Attempt))
+	release = filepath.Join(checkpoint, "native-batch-finish")
+	var payload int
+	await(t, func() bool {
+		b, err := os.ReadFile(filepath.Join(checkpoint, "native-batch-pid"))
+		if err != nil {
+			return false
+		}
+		_, err = fmt.Sscan(string(b), &payload)
+		return err == nil
+	})
+	birth, err := processBirth(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := json.Marshal(map[string]any{"scope": custodianUnit(batch.ID), "cgroup": batch.Cgroup, "helper_pid": batch.PID, "helper_birth": batch.Birth, "payload_pid": payload, "payload_birth": birth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("native batch cleanup identity: %s", identity)
+	var gate custodianGate
+	var receipt custodianGateReceipt
+	for kind, value := range map[string]any{"gate": &gate, "gate-receipt": &receipt} {
+		if err := readCustodianJSON(dir, custodianName(batch.ID, kind), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gate.Nonce == "" || receipt.Nonce != gate.Nonce || receipt.Error != "" {
+		t.Fatalf("batch launch gate: %+v %+v", gate, receipt)
+	}
+	actual := score(payload)
+	t.Logf("native inherited OOM evidence: worker_pid=%d inherited=%d model_helper=%d engine=%d batch_pid=%d actual=%d; exact batch gate receipt confirmed", workerPID, inherited, helperScore, modelScore, payload, actual)
+	if actual != inherited {
+		t.Fatalf("highest-tier batch score=%d inherited=%d", actual, inherited)
+	}
+	if err := os.WriteFile(release, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { v := job(t, q, j.ID); return v.State == "succeeded" && v.ReleaseConfirmed })
 }
