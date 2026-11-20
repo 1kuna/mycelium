@@ -36,6 +36,9 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 			if stopping.State != "stopping" || stopping.Pause != nil || stopping.YieldPause == nil || stopping.Losses != 0 || !plannedMaintenanceStop(stopping) {
 				t.Fatalf("premature pause or wrong stop: %+v", stopping)
 			}
+			if _, err := q.ResumeJob(run.ID, stopping.PauseRevision); err == nil {
+				t.Fatal("resume released a still-running attempt")
+			}
 			directive := check(t, q, m, run)
 			if !directive.Stop || directive.Kill || directive.GraceSeconds <= 0 || stopping.StopAt.Sub(clock.Now()) != q.gpuStopGrace() {
 				t.Fatalf("missing planned stop/grace: %+v", directive)
@@ -101,6 +104,38 @@ func TestJobPauseYieldReleaseAndResume(t *testing.T) {
 				t.Fatal("stale request changed attempt", got)
 			}
 		})
+	}
+}
+
+func TestJobPauseYieldLeavesOtherWorkUntouched(t *testing.T) {
+	q, _ := fixture(t)
+	a, b := machine("first-worker", "fake", "shared-host"), machine("second-worker", "fake", "shared-host")
+	submit(t, q, spec("experiment"))
+	own := check(t, q, a, nil).Job
+	s := spec("experiment")
+	s.Project = "different-project"
+	submit(t, q, s)
+	other := check(t, q, b, nil).Job
+	if own == nil || other == nil {
+		t.Fatal("missing concurrent assignments")
+	}
+	for _, run := range []*Job{own, other} {
+		if err := q.Started(result(run, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := q.PauseJob(own.ID, yieldRequest(own)); err != nil {
+		t.Fatal(err)
+	}
+	if got := check(t, q, b, other); got.Stop {
+		t.Fatal("yield stopped another project's work")
+	}
+	status, err := q.HostMaintenanceStatus("shared-host")
+	if err != nil || status.Policy.Mode != "enabled" || status.Policy.StopAt != nil {
+		t.Fatal("yield edited host policy", status.Policy, err)
+	}
+	if got := job(t, q, other.ID); got.State != "running" || plannedMaintenanceStop(got) {
+		t.Fatal("yield changed another job", got)
 	}
 }
 
