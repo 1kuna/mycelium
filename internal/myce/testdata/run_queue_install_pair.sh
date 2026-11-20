@@ -9,6 +9,8 @@ test -n "${MYCE_JOB_ID:-}"
 output=$PWD
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
+mkdir "$scratch/tmp"
+export TMPDIR="$scratch/tmp"
 export GOMAXPROCS=2 GOFLAGS=-p=2
 mkdir "$scratch/before"
 tar -xf installed-baseline.tar -C "$scratch/before"

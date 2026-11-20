@@ -66,6 +66,7 @@ func TestQueuePersistenceStartupMatchesDocument(t *testing.T) {
 	// Both reader and decoder failures must join the bounded startup pipeline.
 	// A following load must still return the complete, unchanged state.
 	for _, tc := range []struct{ name, key, data string }{
+		{"invalid_field_key", "fields/invalid", `{}`},
 		{"invalid_json", "jobs/corrupt", `{"id":`},
 		{"invalid_reference", "jobs/corrupt", `{"$refs":[],"id":{"$ref":0}}`},
 		{"missing_field_root", fieldPrefix("jobs/corrupt") + "cmVhc29u", `"orphan"`},
