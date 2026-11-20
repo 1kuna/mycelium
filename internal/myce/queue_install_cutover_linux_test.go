@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,6 +143,13 @@ func TestQueueInstalledCutover(t *testing.T) {
 		} else {
 			t.Logf("installed_database_volume=%s", bytes.TrimSpace(out))
 		}
+	}
+	if os.Getenv("MYCE_TEST_PHYSICAL_DIAG") == "1" {
+		if !databaseVolume {
+			t.Fatal("physical diagnostics require generated volume")
+		}
+		diagnoseStartupPhysical(t, python, db)
+		return // Diagnostic mode never publishes a service unit.
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -675,6 +684,103 @@ print('finished',flush=True)
 		t.Fatal(err)
 	}
 	t.Logf("installed_cutover=%s", data)
+}
+
+// Reuse the real installed fixture, reader and decoder. All cache operations
+// affect only this closed, generated file; never a host cache or fleet state.
+func diagnoseStartupPhysical(t *testing.T, python, path string) {
+	t.Helper()
+	for _, layout := range []string{"compact", "fragmented"} {
+		cmd := exec.Command(python, "testdata/queue_install_physical.py", layout, path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("layout: %v %s", err, out)
+		} else {
+			t.Logf("physical_layout=%s", bytes.TrimSpace(out))
+		}
+		for _, cache := range []string{"cold", "warm"} {
+			for _, operation := range []string{"scan", "reassemble", "decode"} {
+				if cache == "cold" {
+					cmd := exec.Command(python, "testdata/queue_install_physical.py", "evict", path)
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("owned-file cache eviction: %v %s", err, out)
+					} else {
+						t.Logf("physical_cache=%s", bytes.TrimSpace(out))
+					}
+				}
+				func() {
+					db, err := sql.Open("sqlite", path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
+					db.SetMaxOpenConns(1)
+					profile, err := os.CreateTemp("", "startup-cpu-*.pprof")
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer os.Remove(profile.Name())
+					if err := pprof.StartCPUProfile(profile); err != nil {
+						t.Fatal(err)
+					}
+					before, _ := os.ReadFile("/proc/self/io")
+					started := time.Now()
+					rows, size := 0, 0
+					switch operation {
+					case "scan":
+						var result *sql.Rows
+						result, err = db.Query("SELECT key,data FROM queue_state")
+						if err == nil {
+							for result.Next() {
+								var key string
+								var data []byte
+								if err = result.Scan(&key, &data); err != nil {
+									break
+								}
+								rows++
+								size += len(data)
+							}
+							if err == nil {
+								err = result.Err()
+							}
+							result.Close()
+						}
+					case "reassemble":
+						var records map[string][]byte
+						records, err = readQueueRecords(db)
+						rows = len(records)
+						for _, data := range records {
+							size += len(data)
+						}
+					case "decode":
+						q := &Queue{db: db, clock: RealClock{}}
+						previous := started
+						q.startupTrace = func(phase string) {
+							now := time.Now()
+							t.Logf("physical_phase layout=%s cache=%s phase=%s seconds=%.6f", layout, cache, phase, now.Sub(previous).Seconds())
+							previous = now
+						}
+						err = q.readStartupState(normalizedQueueMarker)
+						rows = len(q.s.Jobs)
+					}
+					elapsed := time.Since(started)
+					after, _ := os.ReadFile("/proc/self/io")
+					pprof.StopCPUProfile()
+					profile.Close()
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("physical_read layout=%s cache=%s operation=%s seconds=%.6f records=%d bytes=%d io_before=%q io_after=%q", layout, cache, operation, elapsed.Seconds(), rows, size, before, after)
+					cmd := exec.Command("go", "tool", "pprof", "-top", "-nodecount=12", profile.Name())
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("profile: %v %s", err, out)
+					} else {
+						t.Logf("physical_cpu=%s", out)
+					}
+				}()
+				runtime.GC()
+			}
+		}
+	}
 }
 
 func envTestDefault(name, fallback string) string {
