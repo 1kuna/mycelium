@@ -164,13 +164,17 @@ To retire an existing systemd `ExecStart` drop-in during an authorized upgrade:
 2. Preview the install with those flags and the exact saved config. Drain/disable
    admission using the normal upgrade procedure. Preserve a private copy of
    the drop-in outside the unit's `.d` directory. **Keep the override in place**
-   and run the install with those flags to save both replacement settings. The
-   installer warns that the override still takes precedence; any restart during
-   installation continues to use that override.
+   and run the install with those flags plus `--save-settings-only` to save the
+   replacement settings and generated base unit. For example:
+   `myce install queue --config QUEUE_CONFIG --file-store-bytes CAPACITY_BYTES --file-store-production-reserve RESERVE_BYTES --save-settings-only`.
+   Include every other custom setting you intend to keep, including loss timeouts
+   and the discovery bind. This mode does not upgrade the binary, reload systemd
+   or restart the queue. Exit zero means settings saved, **not activated**.
 3. Check the saved config's `file_store_bytes` and
    `file_store_production_reserve`, and inspect the generated base unit at the
    saved `service` path. Verify that its `ExecStart` includes both flags with the
-   intended values. If installation or verification fails, leave the override
+   intended values, and compare all other custom arguments too. The discovery bind
+   is read from the saved config through `--service-config`. If installation or verification fails, leave the override
    in place and fix the problem before proceeding.
 4. Remove only the overriding `ExecStart` directives (including the empty reset),
    or the whole file if it contains nothing else. Preserve unrelated settings;
@@ -185,8 +189,14 @@ To retire an existing systemd `ExecStart` drop-in during an authorized upgrade:
    path, run `systemctl --user daemon-reload`, restart the queue, and verify the
    restored values before resuming admission.
 
-A full `ExecStart` override hides new arguments in the generated base unit;
-future capacity/reserve changes should use install flags instead.
+A normal install refuses before activation with `queue_execstart_override` when
+an effective full `ExecStart` override hides or differs from the generated
+arguments. The error names each differing flag without exposing values. Equivalent
+arguments (including `60s`/`1m0s`, explicit default `--file-retention 72h`, and the
+saved discovery bind) remain accepted. Use `--save-settings-only` only to prepare
+retirement; it does not claim the running queue uses the saved settings. After
+retirement, run a normal install if the binary also needs upgrading. Future
+capacity/reserve changes should use install flags instead.
 
 New identified non-production allocations that would consume the reserve receive
 HTTP 507 `file_store_capacity`, naming the reserve, total free space and the bound

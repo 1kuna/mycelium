@@ -2,12 +2,15 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +33,8 @@ func ValidateInstallIdentity(old, next ServiceConfig) error {
 }
 
 func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	warned := false
+	starts := []string{""} // The base unit's command remains until an empty reset.
+	overridden := false
 	for _, unit := range []string{filepath.Base(c.Service)} {
 		b, err := command(ctx, "systemctl", "--user", "show", unit, "--property=DropInPaths", "--value")
 		if err != nil {
@@ -51,16 +55,31 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 			// Unit-file continuations are part of the same assignment.
 			text := strings.ReplaceAll(string(data), "\r\n", "\n")
 			text = strings.ReplaceAll(text, "\\\n", " ")
+			section := ""
 			for _, line := range strings.Split(text, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+					continue
+				}
+				if strings.HasPrefix(line, "[") {
+					section = line
+					continue
+				}
 				key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
 				if !ok {
 					continue
 				}
 				key = strings.TrimSpace(key)
 				if c.Role == "queue" && key == "ExecStart" {
-					if !warned {
-						log.Print("warning: queue ExecStart drop-in still takes precedence over saved settings and the generated unit; verify the generated arguments before retiring the override")
-						warned = true
+					if section != "[Service]" {
+						continue
+					}
+					overridden = true
+					value = strings.TrimSpace(value)
+					if value == "" {
+						starts = nil
+					} else {
+						starts = append(starts, value)
 					}
 					continue
 				}
@@ -76,6 +95,186 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 			}
 		}
 	}
+	if overridden {
+		if len(starts) != 1 {
+			return &InstallExecStartOverrideError{Flags: []string{"ExecStart"}}
+		}
+		return compareQueueExecStart(c, starts[0])
+	}
+	return nil
+}
+
+var ErrQueueExecStartOverride = errors.New("queue_execstart_override")
+
+// InstallExecStartOverrideError deliberately reports names, never values: an
+// operator's command may contain credentials or private paths.
+type InstallExecStartOverrideError struct {
+	Flags []string
+}
+
+func (e *InstallExecStartOverrideError) Error() string {
+	return "queue_execstart_override: effective ExecStart hides or differs from generated settings: " + strings.Join(e.Flags, ", ") + "; preserve the override and resolve before activation, or use --save-settings-only to prepare retirement without activation"
+}
+func (e *InstallExecStartOverrideError) Unwrap() error { return ErrQueueExecStartOverride }
+
+func compareQueueExecStart(c ServiceConfig, start string) error {
+	refuse := func(flags ...string) error { return &InstallExecStartOverrideError{Flags: flags} }
+	// Only ':' has the generated unit's ordinary execution semantics. Other
+	// executable prefixes change identity, argv or error handling.
+	literal := strings.HasPrefix(start, ":")
+	start = strings.TrimPrefix(start, ":")
+	words, err := installEnvironmentWords(start)
+	if err != nil || len(words) < 2 {
+		return refuse("ExecStart")
+	}
+	for i, word := range words {
+		if !literal && strings.Contains(word, "$") {
+			return refuse("ExecStart") // Environment expansion cannot prove equivalence.
+		}
+		withoutEscapes := strings.ReplaceAll(word, "%%", "")
+		if strings.Contains(withoutEscapes, "%") {
+			return refuse("ExecStart") // Unknown systemd specifier.
+		}
+		words[i] = strings.ReplaceAll(word, "%%", "%")
+	}
+	if words[0] != c.Binary {
+		return refuse("executable")
+	}
+	args := words[1:]
+	if args[0] == "service" {
+		wrapper := flag.NewFlagSet("service", flag.ContinueOnError)
+		wrapper.SetOutput(io.Discard)
+		path := wrapper.String("config", "", "")
+		if wrapper.Parse(args[1:]) != nil || *path != c.Config {
+			return refuse("--config")
+		}
+		args = wrapper.Args()
+		if len(args) == 0 {
+			args = c.Args()
+		}
+		// serviceCommand always appends this, even with an explicit runtime argv.
+		args = append(args, "--service-config", c.Config)
+	}
+	if len(args) == 0 || args[0] != "queue" {
+		return refuse("ExecStart")
+	}
+	// Defaults of queue's runtime flags, not installer defaults. Unknown flags
+	// are retained and compared conservatively, rather than silently discarded.
+	defaults := map[string]string{
+		"listen": "127.0.0.1:7331", "db": "myce-state/myce.db", "checkpoints": "./checkpoints",
+		"file-retention": DefaultFileRetention.String(), "log-retention": DefaultLogRetention.String(),
+		"file-store-bytes": strconv.FormatInt(100<<30, 10), "file-store-production-reserve": "0",
+		"upload-spool-bytes": strconv.FormatInt(DefaultUploadSpoolBytes, 10), "upload-spool-dir": "",
+		"restart-grace": RestartGrace.String(), "production-infrastructure-retries": strconv.Itoa(DefaultProductionInfrastructureRetries),
+		"production-loss-timeout": "0s", "deadline-loss-timeout": "0s", "experiment-loss-timeout": "0s",
+		"model-config": "", "environment-config": "", "project-config": "", "host-config": "",
+		"discovery-listen": "", "discovery": "true",
+	}
+	parse := func(argv []string) (map[string]string, error) {
+		values := make(map[string]string, len(defaults))
+		for name, value := range defaults {
+			values[name] = value
+		}
+		for len(argv) > 0 {
+			word := argv[0]
+			argv = argv[1:]
+			if !strings.HasPrefix(word, "-") {
+				return nil, refuse("ExecStart")
+			}
+			name, value, equal := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(word, "-"), "-"), "=")
+			if name == "" {
+				return nil, refuse("ExecStart")
+			}
+			if !equal {
+				if name == "discovery" {
+					value = "true"
+				} else {
+					if len(argv) == 0 {
+						return nil, refuse("--" + name)
+					}
+					value, argv = argv[0], argv[1:]
+				}
+			}
+			values[name] = value
+		}
+		if path, ok := values["service-config"]; ok {
+			if path != c.Config {
+				return nil, refuse("--service-config")
+			}
+			// ListenJoining uses saved DiscoveryListen only without an explicit bind.
+			if values["discovery-listen"] == "" {
+				values["discovery-listen"] = c.DiscoveryListen
+			}
+			delete(values, "service-config")
+		}
+		// The install table supplies the same duration/integer/boolean types as
+		// the runtime flags; Set canonicalizes 60s/1m0s and numeric spellings.
+		f := flag.NewFlagSet("queue-override", flag.ContinueOnError)
+		var config ServiceConfig
+		RegisterInstallFlags(f, &config)
+		f.Bool("discovery", true, "")
+		for name, value := range values {
+			if v := f.Lookup(name); v != nil {
+				if err := v.Value.Set(value); err != nil {
+					return nil, refuse("--" + name)
+				}
+				values[name] = v.Value.String()
+			}
+		}
+		return values, nil
+	}
+	actual, err := parse(args[1:])
+	if err != nil {
+		return err
+	}
+	want, err := parse(c.Args()[1:])
+	if err != nil {
+		return err
+	}
+	var differing []string
+	for name, value := range want {
+		if other, ok := actual[name]; !ok || other != value {
+			differing = append(differing, "--"+name)
+		}
+	}
+	for name := range actual {
+		if _, ok := want[name]; !ok {
+			differing = append(differing, "--"+name)
+		}
+	}
+	if len(differing) > 0 {
+		sort.Strings(differing)
+		return refuse(differing...)
+	}
+	return nil
+}
+
+// Preparation publishes only settings and the base unit. It never changes the
+// binary, credentials or manager state, including on failure.
+func saveQueueInstallSettings(ctx context.Context, c ServiceConfig, files installFiles, command func(context.Context, string, ...string) ([]byte, error)) (result error) {
+	tx, err := snapshotInstall(ctx, c, files, command)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if result != nil {
+			result = errors.Join(result, tx.restoreFiles())
+		}
+	}()
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = tx.put(c.Config, data, 0600); err != nil {
+		return err
+	}
+	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
+		return err
+	}
+	if err := tx.pruneBackups(); err != nil {
+		log.Printf("install backup retention: %v", err)
+	}
+	log.Print("queue settings and generated unit saved only; service NOT reloaded or activated; the existing ExecStart override remains effective until retired")
 	return nil
 }
 
