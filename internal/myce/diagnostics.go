@@ -327,7 +327,9 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	if c.Operation == "outputs" && safeFinalization(c.Finalization) != nil {
 		classes[c.Finalization.Error] = true
 	}
-	classes["http_error"] = c.Operation == "outputs" && (safeFinalization(c.Finalization) != nil || safeFileCapacity(c) != nil)
+	if c.Operation == "outputs" && safeFileCapacity(c) != nil {
+		classes["http_error"] = true
+	}
 	classes["host_unavailable"] = c.Operation == "launch"
 	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
