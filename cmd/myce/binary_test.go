@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -37,4 +38,14 @@ func devTestBinary(t *testing.T) string {
 		t.Fatalf("prepare dev CLI: %v\n%s", devBinary.err, devBinary.out)
 	}
 	return devBinary.path
+}
+
+// Darwin linking spends time compressing DWARF that versioned CLI fixtures do
+// not read. Keep Linux's measured build path and Go runtime symbols unchanged.
+func versionedFixtureLDFlags(version string) string {
+	flags := "-X mycelium/internal/myce.BuildVersion=" + version
+	if runtime.GOOS == "darwin" {
+		flags = "-w " + flags
+	}
+	return flags
 }

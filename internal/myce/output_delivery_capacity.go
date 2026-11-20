@@ -135,7 +135,7 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 		growth := need
 		need = addDiskBytes(need, q.outputReservations(projected, j.ID))
 		if err := q.fileStoreReserveRefusal(status, need, growth, q.outputReservationsFor(projected, j.ID, true), q.priorityMatch(j.Spec).Tier == "production"); err != nil {
-			return err
+			return bindCapacityContext(withFileStoreAttempt(ctx, *j), err)
 		}
 		j = q.touchJob(j.ID)
 		for _, ref := range r.OutputRefs {

@@ -1017,7 +1017,8 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	if method == "PATCH" && c.uploadTiming != nil {
+	uploading := method == "PATCH" || method == "POST" && req.Header.Get("Content-Type") == "application/offset+octet-stream"
+	if uploading && c.uploadTiming != nil {
 		// Four actual-read reports fit inside the learned idle window. This
 		// keeps full-blob verification distinct from a stalled network peer.
 		req.Header.Set("X-Myce-Upload-Progress", (max(c.transferIdle, c.uploadTiming.window()) / 4).String())
@@ -1059,7 +1060,7 @@ func (c Client) fileRequestOnce(ctx context.Context, method, path string, body i
 				return nil, fileTransferTimeout(err, idle)
 			}
 			var timing *uploadTiming
-			if method == "PATCH" {
+			if uploading {
 				timing = c.uploadTiming
 			}
 			// Socket deadlines use the real socket's clock, independently of an
@@ -1172,6 +1173,9 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) (headE
 	c.publication.confirm(ref)
 	return nil
 }
+
+const fileUploadChunkSize = 4 << 20 // Existing tus transfer chunk, also the creation-with-upload unit.
+
 func (c Client) UploadFile(ctx context.Context, path string, ref FileRef) error {
 	return c.uploadFile(ctx, path, ref, "")
 }
@@ -1306,7 +1310,7 @@ func (c Client) uploadFileAttempt(ctx context.Context, f io.ReadSeeker, ref File
 		if err := c.ownerError(ctx); err != nil {
 			return err
 		}
-		n := min(int64(4<<20), ref.SizeBytes-offset)
+		n := min(int64(fileUploadChunkSize), ref.SizeBytes-offset)
 		// Close synchronizes with any late net/http body reader before a retry
 		// seeks the caller's handle. A failed response may race the writer goroutine.
 		body := &uploadBody{reader: io.LimitReader(source, n)}
@@ -1579,12 +1583,13 @@ func fileTransferError(res *http.Response, message string, observed ...time.Time
 		}
 	}
 	var body struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
+		Cause *RuntimeCause `json:"cause"`
+		Code  string        `json:"code"`
+		Error string        `json:"error"`
 	}
 	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil {
 		if fileStoreRefusalCode(body.Code) {
-			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay}
+			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error, RetryAfter: delay, Cause: safeRuntimeCause(body.Cause)}
 		}
 		if publicErrorCode(body.Code) || body.Code == "request_failed" {
 			return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: message, RetryAfter: delay}

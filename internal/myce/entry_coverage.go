@@ -31,8 +31,8 @@ type CoverageFinding struct {
 	Action  string          `json:"action"`
 }
 
-// Persisted per project entry, so a changed recipe replaces the record and
-// clears its skips. Bounded by the number of entries, not submissions.
+// Persisted per project entry and immutable recipe, so concurrent recipes
+// cannot replace each other's learning. Submissions of one recipe share it.
 type entryCoverageRecord struct {
 	Recipe    string            `json:"recipe"`
 	Succeeded []ExecutionTarget `json:"succeeded,omitempty"`
@@ -98,23 +98,35 @@ func (q *Queue) entryCoverageAllows(j *Job, machine string) bool {
 	if len(c.LockTargets) > 0 && !slices.Contains(c.LockTargets, ExecutionTarget{OS: t.OS, Arch: t.Arch}) {
 		return false
 	}
-	rec, ok := q.s.EntryCoverage[c.Key]
-	return !ok || rec.Recipe != c.Recipe || !slices.ContainsFunc(rec.Skipped, func(f CoverageFinding) bool { return f.Target == t })
+	rec := q.entryCoverageRecord(c)
+	return !slices.ContainsFunc(rec.Skipped, func(f CoverageFinding) bool { return f.Target == t })
+}
+
+func entryCoverageKey(c *EntryCoverage) string {
+	return c.Key + "\x00" + c.Recipe
 }
 
 func (q *Queue) entryCoverageRecord(c *EntryCoverage) entryCoverageRecord {
-	rec, ok := q.s.EntryCoverage[c.Key]
+	rec, ok := q.s.EntryCoverage[entryCoverageKey(c)]
+	if !ok {
+		// Older queues stored one recipe at the entry key. Keep that evidence
+		// readable until this recipe's next write moves it to its own key.
+		rec, ok = q.s.EntryCoverage[c.Key]
+	}
 	if !ok || rec.Recipe != c.Recipe {
-		return entryCoverageRecord{Recipe: c.Recipe} // A changed recipe clears old skips.
+		return entryCoverageRecord{Recipe: c.Recipe}
 	}
 	return rec
 }
 
-func (q *Queue) putEntryCoverage(key string, rec entryCoverageRecord) {
+func (q *Queue) putEntryCoverage(c *EntryCoverage, rec entryCoverageRecord) {
 	if q.s.EntryCoverage == nil {
 		q.s.EntryCoverage = map[string]entryCoverageRecord{}
 	}
-	q.s.EntryCoverage[key] = rec
+	q.s.EntryCoverage[entryCoverageKey(c)] = rec
+	if legacy, ok := q.s.EntryCoverage[c.Key]; ok && legacy.Recipe == c.Recipe {
+		delete(q.s.EntryCoverage, c.Key)
+	}
 }
 
 func (q *Queue) recordEntryCoverageSuccess(j *Job, machine string) {
@@ -126,7 +138,7 @@ func (q *Queue) recordEntryCoverageSuccess(j *Job, machine string) {
 	if !slices.Contains(rec.Succeeded, t) {
 		rec.Succeeded = append(rec.Succeeded, t)
 	}
-	q.putEntryCoverage(c.Key, rec)
+	q.putEntryCoverage(c, rec)
 }
 
 // entryCoverageFailure decides a failed attempt that would otherwise end the
@@ -153,7 +165,7 @@ func (q *Queue) entryCoverageFailure(j *Job, r Result) bool {
 	if !slices.ContainsFunc(rec.Skipped, func(f CoverageFinding) bool { return f.Target == t }) {
 		rec.Skipped = append(rec.Skipped, finding)
 	}
-	q.putEntryCoverage(c.Key, rec)
+	q.putEntryCoverage(c, rec)
 	q.touchJob(j.ID)
 	updated := *c
 	updated.Findings = append(slices.Clone(c.Findings), finding)
@@ -164,7 +176,7 @@ func (q *Queue) entryCoverageFailure(j *Job, r Result) bool {
 		return true
 	}
 	if len(rec.Succeeded) == 0 {
-		delete(q.s.EntryCoverage, c.Key)
+		delete(q.s.EntryCoverage, entryCoverageKey(c))
 		return false
 	}
 	now := q.clock.Now()

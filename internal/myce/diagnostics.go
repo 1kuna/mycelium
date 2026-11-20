@@ -145,6 +145,7 @@ func specRejection(err error) error {
 // command arguments, environment values, endpoint URLs, or worker filesystem paths.
 // Linkage explicitly retains install names from payload load commands.
 type RuntimeCause struct {
+	FileCapacity      *FileCapacityEvidence      `json:"file_capacity,omitempty"`
 	CheckpointStorage *CheckpointStorageEvidence `json:"checkpoint_storage,omitempty"`
 	Finalization      *FinalizationDetail        `json:"finalization,omitempty"`
 	Linkage           *MachOLinkage              `json:"linkage,omitempty"`
@@ -164,6 +165,7 @@ type RuntimeCause struct {
 
 func (c RuntimeCause) String() string {
 	text := c.Operation + ": " + c.Class
+	text += capacityText(&c)
 	if e := safeCheckpointStorage(c.CheckpointStorage); c.Operation == "checkpoint" && e != nil {
 		text += "; " + e.String()
 	}
@@ -325,6 +327,9 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	if c.Operation == "outputs" && safeFinalization(c.Finalization) != nil {
 		classes[c.Finalization.Error] = true
 	}
+	if c.Operation == "outputs" && safeFileCapacity(c) != nil {
+		classes["http_error"] = true
+	}
 	classes["host_unavailable"] = c.Operation == "launch"
 	classes[machoLibraryMissing] = true
 	classes[diskLimitExceeded] = true
@@ -380,7 +385,11 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	if c.Operation == "launch" && c.Predicate == "memory_capacity" {
 		out.Admission = safeAdmissionDetail(c.Admission)
 	}
+	out.FileCapacity = nil
 	out.Predicate, out.Reason = "", ""
+	if e := safeFileCapacity(c); e != nil && c.Operation == "outputs" && (c.Class == "http_error" || c.Class == "limit_exceeded") {
+		out.FileCapacity, out.Predicate = e, c.Predicate
+	}
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		out.Predicate, out.Reason = c.Predicate, reason
 	}

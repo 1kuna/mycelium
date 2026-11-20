@@ -208,6 +208,11 @@ func (w *requestResponse) Flush() {
 func (q *Queue) measureRequests(next http.Handler, registered ...map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := &requestSpan{started: time.Now()}
+		requestID := safeLogID(r.Header.Get(logRequestIDHeader))
+		if requestID == "" {
+			requestID = ID()
+		}
+		r = r.WithContext(context.WithValue(r.Context(), fileCapacityRequestKey{}, requestID))
 		r = r.WithContext(context.WithValue(r.Context(), requestSpanKey{}, s))
 		response := &requestResponse{ResponseWriter: w}
 		defer func() {

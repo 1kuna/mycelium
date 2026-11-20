@@ -31,7 +31,7 @@ func uploadRequestDiagnostic(r *http.Request) (*http.Request, *uploadDiagnostic)
 // remains bounded. Opt-in preserves clients that cannot consume HTTP 102.
 func (s *FileStore) uploadVerificationProgress(w http.ResponseWriter, r *http.Request) *http.Request {
 	period, err := time.ParseDuration(r.Header.Get("X-Myce-Upload-Progress"))
-	if err != nil || period <= 0 || r.Method != "PATCH" {
+	if err != nil || period <= 0 || r.Method != "PATCH" && r.Method != "POST" {
 		return r
 	}
 	// The client window has the RFC 6298 recovery floor. At most four reports

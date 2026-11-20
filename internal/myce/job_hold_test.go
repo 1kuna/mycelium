@@ -79,6 +79,70 @@ func TestActionableBlockerImplementationCoverage(t *testing.T) {
 	}
 }
 
+func TestNativeQualificationHoldDispatchability(t *testing.T) {
+	for _, scenario := range []string{"shared", "failed", "alternative", "ready", "unprepared"} {
+		t.Run(scenario, func(t *testing.T) {
+			q, clock := fixture(t)
+			e, _, m := variantsFixture(t, true)
+			e.Variants = e.Variants[1:]
+			e = freezeComposition(t, e)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			r := newExtensionReport(e, &m, "extension:"+e.Name)
+			r.Setup = scenario != "unprepared"
+			if scenario == "failed" || scenario == "alternative" {
+				r.CheckID, r.CheckState = automaticExtensionCheckID(m.ID, r), "failed"
+			}
+			m.ExtensionReports = []ExtensionReport{r}
+			check(t, q, m, nil)
+			if scenario == "shared" {
+				if err := q.update(func() error {
+					q.s.Machines[m.ID].SharedHost = &SharedHostProfile{InteractiveReserveGB: 1}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "alternative" {
+				other := m
+				other.ID, other.HostID, other.Session = "eligible", "eligible", "eligible-session"
+				r = newExtensionReport(e, &other, "extension:"+e.Name)
+				r.Setup = true
+				other.ExtensionReports = []ExtensionReport{r}
+				check(t, q, other, nil)
+			}
+			j := submit(t, q, variantSpec(e, "ci"))
+			clock.Advance(time.Second)
+			got, err := q.jobSnapshot(j.ID)
+			if err != nil || got.Hold == nil {
+				t.Fatal(got, err)
+			}
+			switch scenario {
+			case "shared", "failed":
+				if got.Hold.Kind != "no_eligible_host" || !strings.Contains(got.Hold.Reason, "no eligible host") || strings.Contains(got.Hold.Reason, "next check-in") || got.Hold.Next == "wait; nothing to do" {
+					t.Fatal(got.Hold)
+				}
+				if plans := q.extensionQualificationPlan(q.s.Machines[m.ID]); len(plans) != 0 {
+					t.Fatal("offered an ineligible check", plans)
+				}
+			case "alternative":
+				if !strings.Contains(got.Hold.Reason, "on eligible at that host's next check-in") {
+					t.Fatal(got.Hold)
+				}
+			case "ready":
+				if !strings.Contains(got.Hold.Reason, "next check-in") {
+					t.Fatal(got.Hold)
+				}
+			case "unprepared":
+				if strings.Contains(got.Hold.Reason, "next check-in") || !strings.Contains(got.Hold.Reason, "preparation") {
+					t.Fatal(got.Hold)
+				}
+			}
+		})
+	}
+}
+
 func TestActionableBlockerSingleHostCoverage(t *testing.T) {
 	for _, restriction := range []string{"hardware", "authored", "parity"} {
 		t.Run(restriction, func(t *testing.T) {

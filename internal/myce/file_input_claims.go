@@ -245,7 +245,9 @@ func (q *Queue) projectFileReservationRefusal(ctx context.Context, status FileSt
 	}
 	available := status.FreeBytes - min(status.FreeBytes, withheld)
 	if need > available {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes available=%d bytes; other projects' reserved_file_bytes=%d protect capacity; release collected results or reduce new input bytes", need, available, withheld)}
+		cause := q.capacityCause(status, fileCapacityProject, need, growth, 0, false)
+		cause.FileCapacity.AvailableBytes, cause.FileCapacity.ProjectWithheldBytes = available, withheld
+		return &HTTPError{Cause: cause, Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes available=%d bytes; other projects' reserved_file_bytes=%d protect capacity; release collected results or reduce new input bytes", need, available, withheld)}
 	}
 	return nil
 }

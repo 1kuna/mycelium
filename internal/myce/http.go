@@ -667,6 +667,13 @@ func respond(w http.ResponseWriter, v any, err error) {
 				message = rejectionMessages[apiError.Code]
 			}
 			body = map[string]any{"error": message, "code": apiError.Code}
+			if apiError.Code == "file_store_capacity" {
+				if cause := safeRuntimeCause(apiError.Cause); cause != nil && cause.FileCapacity != nil {
+					body["cause"] = cause
+					snapshot, _ := json.Marshal(cause)
+					log.Printf("event=file_store_capacity cause=%s", snapshot)
+				}
+			}
 			if apiError.Code == "client_rate_limited" {
 				body["code_alias"] = "observation_shed_control_pressure"
 			}
@@ -837,6 +844,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, RetryAfter: retryAfter(res.Header.Get("Retry-After"), c.clock().Now()), Message: "request failed"}
 		var body struct {
+			Cause           *RuntimeCause   `json:"cause"`
 			PathDiagnostic  *PathDiagnostic `json:"path_diagnostic"`
 			Code            string          `json:"code"`
 			Error           string          `json:"error"`
@@ -844,6 +852,7 @@ func (c Client) callOnce(ctx context.Context, method, path string, in, out any) 
 		}
 		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (publicErrorCode(body.Code) || body.Code == "request_failed") {
 			e.Code, e.Message = body.Code, body.Error
+			e.Cause = safeRuntimeCause(body.Cause)
 			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision
 			// The queue returns specific, safe submission validation reasons.
@@ -917,6 +926,7 @@ func copyJSONDocument(dst io.Writer, src io.Reader) error {
 }
 
 type HTTPError struct {
+	Cause           *RuntimeCause
 	RetryAfter      time.Duration // Server not-before delay, including HTTP-date form.
 	PathDiagnostic  *PathDiagnostic
 	CurrentRevision *uint64

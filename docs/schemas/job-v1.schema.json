@@ -2866,6 +2866,96 @@
       ],
       "type": "object"
     },
+    "FileCapacityEvidence": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "available_bytes": {
+          "type": "integer"
+        },
+        "bound": {
+          "type": "string"
+        },
+        "disk_floor_bytes": {
+          "type": "integer"
+        },
+        "disk_free_bytes": {
+          "type": "integer"
+        },
+        "free_bytes": {
+          "type": "integer"
+        },
+        "growth_bytes": {
+          "type": "integer"
+        },
+        "identified": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "need_bytes": {
+          "type": "integer"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "output_commitment_bytes": {
+          "type": "integer"
+        },
+        "production": {
+          "type": "boolean"
+        },
+        "production_committed_bytes": {
+          "type": "integer"
+        },
+        "production_reserve_bytes": {
+          "type": "integer"
+        },
+        "production_withheld_bytes": {
+          "type": "integer"
+        },
+        "project_withheld_bytes": {
+          "type": "integer"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "store_free_bytes": {
+          "type": "integer"
+        },
+        "store_limit_bytes": {
+          "type": "integer"
+        },
+        "stored_bytes": {
+          "type": "integer"
+        },
+        "upload_commitment_bytes": {
+          "type": "integer"
+        },
+        "volume_free_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "observed_at",
+        "attempt",
+        "request_id",
+        "production",
+        "need_bytes",
+        "growth_bytes",
+        "available_bytes",
+        "free_bytes",
+        "output_commitment_bytes",
+        "production_reserve_bytes",
+        "production_committed_bytes",
+        "production_withheld_bytes",
+        "project_withheld_bytes"
+      ],
+      "type": "object"
+    },
     "FileCheckpoint": {
       "properties": {
         "files": {
@@ -6023,6 +6113,9 @@
         },
         "exit_code": {
           "type": "integer"
+        },
+        "file_capacity": {
+          "$ref": "#/$defs/FileCapacityEvidence"
         },
         "finalization": {
           "$ref": "#/$defs/FinalizationDetail"

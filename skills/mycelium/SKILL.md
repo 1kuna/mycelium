@@ -61,6 +61,15 @@ by rerunning the same command with the same `--key`; entries retain their genera
 key when intent is unchanged. Inline commands need an explicit `--key` to re-attach
 by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
 
+Supporting workers publish small directory outputs through the existing tus
+upload protocol with concurrency learned from measured transfer service. They
+retain the exact-attempt manifest and confirmed blobs across publication retries
+and worker restarts; a refusal resumes the missing work without rechecking every
+confirmed blob. Keep the same job and key. Changed local output files are refused
+rather than silently replacing the manifest; accepted names, sizes and hashes
+and result fetching are unchanged. Older queues use ordinary tus reconciliation
+when an upload-creation response has no accepted offset.
+
 
 ## Ground rules
 
@@ -78,6 +87,10 @@ by rerunning. Cancel only explicitly: `myce cancel --wait JOB_ID`.
   extension checks, CPU maintenance resumes, and waits for a finite GPU execution
   to finish. Freed capacity accumulates toward that demand; portable queued CPU
   work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
+  Production's relative start budget renews when it expires behind a
+  `host_capacity_accumulation` fence; status may show a countdown that re-arms.
+  First assignment grants a full relative budget for preparation. An explicit
+  `start_by` still binds.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
@@ -86,6 +99,19 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+A `507 file_store_capacity` may include a typed `cause.predicate` and
+`cause.file_capacity` snapshot. Finalization retains them in the job's
+`execution_cause` or `cleanup_cause`, visible in status/JSON. Predicates distinguish
+`file_store_backing` (store allowance or physical volume),
+`file_store_production_reserve`, and `file_store_project_reservation`.
+Keep the original need/growth, available/free, commitments, withholding,
+observation time and request/job/attempt correlation when reporting a refusal.
+They describe that request, even after collection changes current headroom;
+missing evidence on older queues is unknown. A reserve cannot prevent a physical
+shortage. Wait for the binding shortage to clear before retrying; a new key does
+not relieve it. Successful finalization clears the pending diagnostic. See the
+[capacity status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#file-store-capacity-refusals).
+
 Temporary zero request-memory headroom returns `503 request_capacity_unavailable`;
 safe reads, waits and keyed submissions retry within the same caller budget.
 A positive fitting size exceeded by a request remains `413 request_too_large`.
@@ -148,6 +174,17 @@ unsupported with entries. Only production entries need a target list; every fiel
   sidecars ([migration](references/submit.md#environments)).
 - **Installed tools** are the default. List what the command calls in
   `needs: {tools: [git, node]}` so placement skips machines without them.
+  Supporting workers also require `xcodebuild -version` and `xcrun --version`
+  to succeed in the worker-owned environment before advertising those tools.
+  Older workers only check executable presence. Launch still checks presence;
+  job-specific environment selection and SDK health use qualification below.
+  For **full Xcode plus the iOS Simulator SDK**, use the existing native
+  `checks.qualification` with an exact success-marker baseline: run
+  `xcodebuild -version`, then `xcrun --sdk iphonesimulator --show-sdk-path`,
+  verify that directory exists, and only then write `$MYCE_CHECK_OUTPUT`.
+  Declare exact Darwin targets and `needs: {tools: [xcodebuild, xcrun]}`;
+  avoid a fixed Xcode application path. Tool names alone do not establish SDK
+  availability. See the [complete Xcode qualification example](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#require-full-xcode-and-the-ios-simulator-sdk).
 - **Probed software capabilities** use native `checks.qualification` and a
   bundled `baselines: {extension:ENTRY_NAME: ...}` comparison, with exact
   targets and the same environment as the payload. For software EGL, run the
@@ -644,6 +681,17 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A native-qualification wait names the automatic check and its current hold.
+  A next-check-in promise requires a dispatchable native check offer. Preparation
+  waits do not promise a submitted check. A real failed qualification is not
+  retried automatically; a released launch-authorization refusal with exact
+  proof that no payload ran leaves qualification retryable. When all compatible
+  hosts are refused or have failed qualification, status says no eligible host and names retained check
+  verdicts. Keep the useful job queued; the installation owner investigates
+  failed check logs and restores a usable host before retrying qualification.
+  On older releases, an installation owner can run `myce extension check --gpu cpu
+  NAME@VERSION` locally on an enrolled dedicated worker to refresh its native
+  evidence. This does not pin the useful job. Consumers cannot remotely clear
+  another host's qualification cache; keep the useful job and key.
   When an unrun check's transferred estimate exceeds physical RAM, it uses the
   ordinary guarded first-run envelope to obtain a native measurement; status
   says `transferred estimate exceeds physical capacity`. Local measurements,
@@ -825,6 +873,9 @@ In an existing project, Mycelium now does these; delete your own:
 When finished work fills the file store, use `myce file release plan --project
 NAME JOB_ID...`, inspect the plan, then `myce file release apply --accept-expiry
 PLAN_FILE`. Include every finished owner whose queue recovery you can give up.
+For `physical_custody`, inspect each job's `custody_blockers`: blocker job ID,
+state and relationship `path` (for example, `after` evaluation then `after`
+serving). `other_project: true` means another project's job, with details hidden.
 Code bundles held as inputs follow explicit release and the project's
 `file_retention`; they do not wait another queue-wide window from upload.
 `bundle_tracked` alone does not mean protected: `reclaimable_bytes` counts released
