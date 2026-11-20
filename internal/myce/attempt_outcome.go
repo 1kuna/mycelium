@@ -68,6 +68,7 @@ const (
 	launchFailed       = "launch_failed"
 	environmentFailed  = "environment_failed"
 	foreignPort        = "foreign_port"
+	execArgumentLimit  = "exec_argument_limit"
 )
 
 type memberOutcome struct {
@@ -289,6 +290,18 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 		}
 		result.Error += "SIGKILL; interruption cause unconfirmed; treated as stage failure"
 	}
+	// A kernel exec-size refusal is deterministic. Retain the predicate in the
+	// saved facts so grouped launches and recovery make the same terminal choice.
+	if !result.Success && !result.OutOfMemory && !diskFailure && !facts.deliveredBeforeExit() {
+		for _, fact := range facts.Infrastructure {
+			if !fact.At.IsZero() && fact.Kind == launchFailed && fact.Predicate == execArgumentLimit {
+				result.Interrupted, result.Forced = false, false
+				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: launchFailed, Predicate: execArgumentLimit})
+				result.Error = launchPredicateMessages[execArgumentLimit]
+				break
+			}
+		}
+	}
 	return withStopProvenance(result, facts.PriorityStop)
 }
 
@@ -352,12 +365,16 @@ var launchPredicateMessages = map[string]string{
 	"memory_capacity":                       "free memory unavailable or insufficient for declared needs",
 	"environment_prepare":                   "execution environment preparation failed; check environment qualification",
 	"command_start":                         "command could not start; check executable and managed environment",
+	execArgumentLimit:                       "exec argument/environment size limit exceeded; read managed inputs from MYCE_BINDINGS_FILE and move large command arguments or authored environment values into files before submitting with a new key",
 	"launch_authorization":                  "queue launch authorization or assignment was refused; refresh job and host status",
 }
 
 func launchFailurePredicate(kind string, cause error) string {
 	if kind != launchRefused && kind != launchFailed && kind != environmentFailed {
 		return ""
+	}
+	if kind == launchFailed && errors.Is(cause, syscall.E2BIG) {
+		return execArgumentLimit
 	}
 	var rejection *rejectionError
 	if errors.As(cause, &rejection) && launchPredicateMessages[rejection.code] != "" {

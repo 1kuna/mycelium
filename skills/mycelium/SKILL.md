@@ -262,6 +262,28 @@ processing never runs at network speed (MY-36):
 The command reads the local copy at `$MYCE_INPUT_FOOTAGE`. NAS paths are
 relative to the NAS root ([inputs](references/submit.md#inputs-checkpoints-and-pieces)).
 
+Supporting workers also set `MYCE_BINDINGS_FILE` to an attempt-local JSON file:
+`{"inputs":{"footage":"/local/staged/path"},"models":{}}`. Keys preserve the
+declared input/model names; values are the verified local paths. Read this file
+for large binding sets. When the combined legacy `MYCE_INPUT_*` and `MYCE_MODEL_*`
+environment entries exceed 32 KiB (including exec pointers and terminators),
+the worker omits all those variables and supplies the complete map through the
+file. Small sets keep both interfaces. The file lives for the attempt and is
+available to main and sidecars; it is not a portable checkpoint. For Python:
+
+```python
+import json, os
+from pathlib import Path
+bindings = json.loads(Path(os.environ["MYCE_BINDINGS_FILE"]).read_text())
+footage = Path(bindings["inputs"]["footage"])
+```
+
+A kernel exec-size refusal is terminal with predicate `exec_argument_limit`;
+it does not spend infrastructure retries. Move large authored arguments or
+environment values into files before submitting with a new key. Older workers
+may have only the per-binding variables; an installation upgrade is required
+for the manifest interface.
+
 For data that must leave the execution worker, set
 `advanced: {worker_data: ephemeral}` on an offline, non-resumable command or
 extension with managed inputs and declared outputs. Environments, sidecars,

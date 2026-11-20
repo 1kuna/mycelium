@@ -40,12 +40,47 @@ func nativeNamespaceExec(args, env []string) error {
 	return unix.Exec(args[0], args, env)
 }
 
-func nativeNamespaceMonitorArgs(bwrap string, args []string) ([]string, error) {
+func nativeNamespaceMonitorFileArgs(bwrap string, args []string, work string) ([]string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	return append([]string{executable, "_native-exec", "namespace-monitor", bwrap}, args...), nil
+	path, digest, err := writeNativeLaunchFile(work, []byte(strings.Join(args, "\x00")+"\x00"))
+	if err != nil {
+		return nil, err
+	}
+	return []string{executable, "_native-exec", "namespace-monitor-file", bwrap, path, digest}, nil
+}
+
+// Bubblewrap accepts NUL-separated options from an FD. Do not turn the mount
+// grants back into exec arguments: /tmp-backed binding sets can grow those too.
+func nativeNamespaceMonitorFile(args []string) error {
+	if len(args) != 3 {
+		return errors.New("native namespace monitor requires argument metadata")
+	}
+	data, err := readNativeLaunchFile(args[1], args[2])
+	if err != nil {
+		return err
+	}
+	fd, err := unix.MemfdCreate("myce-bwrap-args", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(fd), "myce-bwrap-args")
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := unix.FcntlInt(f.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+		return err
+	}
+	if _, err := unix.FcntlInt(f.Fd(), unix.F_SETFD, 0); err != nil {
+		return err
+	}
+	return nativeNamespaceMonitor([]string{args[0], "--args", strconv.Itoa(fd)})
 }
 
 // The namespace init is a descendant of the existing PGID anchor. Custody,
@@ -72,6 +107,9 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(nativeLaunchRoot(work), 0700); err != nil {
+		return nil, err
+	}
 	n.infoReader, n.infoWriter, err = os.Pipe()
 	if err != nil {
 		return nil, err
@@ -89,7 +127,7 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 	args := append(nativeBwrapPolicyArgs(p), "--info-fd", "3", "--")
 	args = append(args, executable, "_native-exec", "namespace-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready")
 	args = append(args, cmd.Args...)
-	args, err = nativeNamespaceMonitorArgs(s.bwrap, args)
+	args, err = nativeNamespaceMonitorFileArgs(s.bwrap, args, work)
 	if err != nil {
 		n.close()
 		return nil, err
@@ -192,7 +230,7 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 		return err
 	}
 	p.Namespace = true
-	args, err := nativePolicyArgs(p, cmd.Args[4:])
+	args, err := nativePolicyFileArgs(p, cmd.Args[4:], work)
 	if err != nil {
 		return err
 	}

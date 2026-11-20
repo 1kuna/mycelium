@@ -351,6 +351,24 @@ func nativePolicyArgs(p nativeLinuxPolicy, payload []string) ([]string, error) {
 	return append([]string{executable, "_native-exec", "run", base64.RawStdEncoding.EncodeToString(data)}, payload...), nil
 }
 
+// The environment and exact read grants grow with managed inputs. A single
+// base64 argv string hits Linux MAX_ARG_STRLEN well before aggregate ARG_MAX.
+func nativePolicyFileArgs(p nativeLinuxPolicy, payload []string, work string) ([]string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	path, digest, err := writeNativeLaunchFile(work, data)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{executable, "_native-exec", "run-file", path, digest}, payload...), nil
+}
+
 func nativeWrapPayload(cmd *exec.Cmd, wrapper []string) error {
 	if err := nativeWrapPayloadCheck(cmd); err != nil {
 		return err
@@ -379,6 +397,12 @@ func nativeBwrapPolicyArgs(p nativeLinuxPolicy) []string {
 	}
 	for _, path := range p.Write {
 		args = append(args, "--bind", path, path)
+		// /tmp is private in the namespace; expose only this attempt's trusted
+		// launch metadata beside its workdir, including later sidecar policies.
+		root := nativeLaunchRoot(path)
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			args = append(args, "--ro-bind", root, root)
+		}
 	}
 	args = append(args, "--dir", "/dev/dri", "--tmpfs", "/dev/shm")
 	for _, path := range p.Devices {
@@ -408,7 +432,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if !p.Namespace && len(p.Ports) > 0 {
 		log.Printf("native isolation: mode=landlock network=partial reserved_tcp_ports=%d", len(p.Ports))
 	}
-	args, err := nativePolicyArgs(p, cmd.Args[4:])
+	args, err := nativePolicyFileArgs(p, cmd.Args[4:], work)
 	if err != nil {
 		return err
 	}
@@ -416,7 +440,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		bwrap := nativeBwrapPolicyArgs(p)
 		// bwrap 0.9 passes inherited descriptors to its executable by default;
 		// --preserve-fds belongs to other launchers and is not a bwrap option.
-		args, err = nativeNamespaceMonitorArgs(s.bwrap, append(append(bwrap, "--"), args...))
+		args, err = nativeNamespaceMonitorFileArgs(s.bwrap, append(append(bwrap, "--"), args...), work)
 		if err != nil {
 			return err
 		}

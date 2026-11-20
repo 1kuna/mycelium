@@ -45,7 +45,7 @@ func (w Worker) withholdNativeCredentials(cmd *exec.Cmd, spool, work string, env
 	if payloadEnv == nil {
 		payloadEnv = os.Environ()
 	}
-	args, err := nativePolicyArgs(nativeLinuxPolicy{Plain: true, Deny: deny, Read: allow, Env: payloadEnv}, cmd.Args[4:])
+	args, err := nativePolicyFileArgs(nativeLinuxPolicy{Plain: true, Deny: deny, Read: allow, Env: payloadEnv}, cmd.Args[4:], work)
 	if err != nil {
 		return err
 	}

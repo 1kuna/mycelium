@@ -24,16 +24,29 @@ func NativeExec(args []string) error {
 	if len(args) > 0 && args[0] == "namespace-monitor" {
 		return nativeNamespaceMonitor(args[1:])
 	}
+	if len(args) > 0 && args[0] == "namespace-monitor-file" {
+		return nativeNamespaceMonitorFile(args[1:])
+	}
 	if len(args) > 0 && args[0] == "namespace-anchor" {
 		return nativeNamespaceExec(args[1:], os.Environ())
 	}
 	if len(args) > 0 && (args[0] == "probe" || args[0] == "listener") {
 		return nativeNamespaceProbe(args)
 	}
-	if len(args) < 3 || args[0] != "run" {
+	if len(args) < 3 || args[0] != "run" && args[0] != "run-file" {
 		return errors.New("native exec requires a policy and executable")
 	}
-	data, err := base64.RawStdEncoding.DecodeString(args[1])
+	var data []byte
+	var err error
+	if args[0] == "run-file" {
+		if len(args) < 4 {
+			return errors.New("native exec requires a policy file and executable")
+		}
+		data, err = readNativeLaunchFile(args[1], args[2])
+		args = args[1:] // Both formats leave the executable at index 2.
+	} else {
+		data, err = base64.RawStdEncoding.DecodeString(args[1])
+	}
 	if err != nil {
 		return errors.New("invalid native isolation policy")
 	}
