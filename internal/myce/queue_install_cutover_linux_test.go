@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -137,6 +138,11 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if quota := os.Getenv("MYCE_TEST_QUEUE_CPU_QUOTA"); quota != "" {
 		c.CPUQuota = quota
 	}
+	fixture, err := json.Marshal(map[string]any{"jobs": jobs, "history": history, "submissions": submissions, "state_bytes": stateBytes, "retained_shape": retainedShape, "padding_kib": paddingKiB, "log_retention_hours": c.LogRetention.Hours(), "workers": len(workers), "cpu_quota": c.CPUQuota, "memory_max": c.MemoryMax})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("installed_fixture=%s", fixture)
 	write := func(path string, data []byte, mode os.FileMode) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -216,9 +222,89 @@ func TestQueueInstalledCutover(t *testing.T) {
 		}
 		t.Log("isolated unit disabled, process exited, runtime definition and enablement removed; temporary state removed by test cleanup")
 	})
+	var mu sync.Mutex
+	marks := map[string]int64{}
+	workerErrors := map[int]string{}
+	mark := func(name string) {
+		mu.Lock()
+		if marks[name] == 0 {
+			marks[name] = time.Now().UnixNano()
+		}
+		mu.Unlock()
+	}
+	journalSeen := map[string]bool{}
+	readJournal := func() error {
+		// Diagnostics must survive expiry of the trial's cancellation budget.
+		journalCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		journal := exec.CommandContext(journalCtx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager", "--grep=event=queue_startup_phase|Mycelium queue: http://")
+		journal.Env = env
+		journalData, err := journal.Output()
+		if err != nil {
+			return fmt.Errorf("cannot read isolated startup journal: %w", err)
+		}
+		for _, line := range bytes.Split(journalData, []byte("\n")) {
+			var row struct {
+				Message string `json:"MESSAGE"`
+				At      string `json:"__REALTIME_TIMESTAMP"`
+			}
+			if json.Unmarshal(line, &row) != nil {
+				continue
+			}
+			at, err := strconv.ParseInt(row.At, 10, 64)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			cut := marks["stop_request"]
+			if cut > 0 && at*1000 > cut && strings.HasPrefix(row.Message, "Mycelium queue: http://") {
+				marks["new_process_ready"] = at * 1000
+			}
+			mu.Unlock()
+			key := row.At + row.Message
+			if !journalSeen[key] && strings.Contains(row.Message, "event=queue_startup_phase") {
+				journalSeen[key] = true
+				t.Logf("installed_queue_phase=%s", row.Message)
+			}
+		}
+		return nil
+	}
+	// LIFO cleanup preserves partial evidence before removing the test unit.
+	// These observations never substitute for the reconnect/preservation checks.
+	t.Cleanup(func() {
+		if err := readJournal(); err != nil {
+			t.Errorf("startup diagnostics: %v", err)
+		}
+		mu.Lock()
+		missing := []string{}
+		if marks["client_reconnected"] == 0 {
+			missing = append(missing, "client")
+		}
+		for i := range workers {
+			if marks[fmt.Sprintf("worker_%d", i)] == 0 {
+				missing = append(missing, fmt.Sprintf("worker_%d", i))
+			}
+		}
+		partial, err := json.Marshal(map[string]any{"marks_ns": marks, "worker_last_errors": workerErrors, "missing_reconnections": missing, "failed": t.Failed()})
+		mu.Unlock()
+		if err != nil {
+			t.Error(err)
+		} else {
+			t.Logf("installed_observation=%s", partial)
+		}
+		if data, err := os.ReadFile(events); err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if line != "" {
+					t.Logf("installed_manager=%s", line)
+				}
+			}
+		}
+	})
+	mark("bootstrap_start")
 	if err := install(); err != nil {
 		t.Fatal(err)
 	} // Bootstrap is outside the measured trial.
+	mark("bootstrap_install_return")
 	client := Client{URL: c.Queue, Token: "synthetic", HTTP: &http.Client{Timeout: time.Second}, singleAttempt: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -238,15 +324,7 @@ func TestQueueInstalledCutover(t *testing.T) {
 	if err != nil || oldPID <= 0 {
 		t.Fatal("no initial queue PID")
 	}
-	var mu sync.Mutex
-	marks := map[string]int64{}
-	mark := func(name string) {
-		mu.Lock()
-		if marks[name] == 0 {
-			marks[name] = time.Now().UnixNano()
-		}
-		mu.Unlock()
-	}
+	mark("bootstrap_ready")
 	var wg sync.WaitGroup
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	defer func() { stopWorkers(); wg.Wait() }()
@@ -261,6 +339,14 @@ func TestQueueInstalledCutover(t *testing.T) {
 				if retry.ready(now) {
 					_, err := w.checkin(workerCtx, Checkin{Machine: m, Attempts: []AttemptReport{{Execution: Execution{ID: fmt.Sprintf("running-%d", i), Attempt: 1}, Session: m.Session, Started: true}}})
 					if err != nil {
+						code := fmt.Sprintf("%T", err)
+						var api *HTTPError
+						if errors.As(err, &api) {
+							code = fmt.Sprintf("http_%d:%s", api.Status, api.Code)
+						}
+						mu.Lock()
+						workerErrors[i] = code
+						mu.Unlock()
 						retry.failed(time.Now(), time.Second)
 					} else {
 						retry.succeeded(time.Now(), time.Second)
@@ -325,10 +411,14 @@ print('finished',flush=True)
 	if err := py.Start(); err != nil {
 		t.Fatal(err)
 	}
+	pyDone := make(chan struct{})
+	var pyResult error
 	defer func() {
-		if py.ProcessState == nil {
-			py.Process.Kill()
-			py.Wait()
+		select {
+		case <-pyDone:
+		default:
+			_ = py.Process.Kill()
+			<-pyDone
 		}
 	}()
 	sent := make(chan struct{}, 1)
@@ -355,10 +445,19 @@ print('finished',flush=True)
 			}
 		}
 	}()
+	// One waiter owns Wait and stderr. Drain stdout before Wait closes its pipe;
+	// closing pyDone publishes the result without racing ProcessState/buffers.
+	go func() {
+		<-scanDone
+		pyResult = py.Wait()
+		close(pyDone)
+	}()
 	select {
 	case <-sent:
+	case <-pyDone:
+		t.Fatalf("client exited before wait was in flight: %v %s", pyResult, pyErr.String())
 	case <-ctx.Done():
-		t.Fatalf("client wait not in flight: %s", pyErr.String())
+		t.Fatal("client wait not in flight before deadline")
 	}
 	if err := os.WriteFile(events, nil, 0600); err != nil {
 		t.Fatal(err)
@@ -428,6 +527,10 @@ print('finished',flush=True)
 	case <-ctx.Done():
 		t.Fatal("installer did not return")
 	}
+	// Capture readiness and startup spans before reconnect success is known.
+	if err := readJournal(); err != nil {
+		t.Fatal(err)
+	}
 	for {
 		mu.Lock()
 		all := marks["client_reconnected"] > 0
@@ -439,42 +542,14 @@ print('finished',flush=True)
 			break
 		}
 		select {
+		case <-pyDone:
+			t.Fatalf("client exited before reconnection: %v %s", pyResult, pyErr.String())
 		case <-ctx.Done():
 			t.Fatal("reconnections incomplete")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	mark("all_reconnected")
-	// Read only this test unit's journal. Its existing listener-ready message
-	// identifies readiness independently of Type=simple manager activation.
-	journal := exec.CommandContext(ctx, "journalctl", "--user", "-u", unit, "--output=json", "--no-pager")
-	journal.Env = env
-	journalData, err := journal.Output()
-	if err != nil {
-		t.Fatal("cannot measure queue readiness from test unit journal")
-	}
-	for _, line := range bytes.Split(journalData, []byte("\n")) {
-		var row struct {
-			Message string `json:"MESSAGE"`
-			At      string `json:"__REALTIME_TIMESTAMP"`
-		}
-		if json.Unmarshal(line, &row) != nil {
-			continue
-		}
-		at, err := strconv.ParseInt(row.At, 10, 64)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mu.Lock()
-		if at*1000 > marks["stop_request"] && strings.HasPrefix(row.Message, "Mycelium queue: http://") {
-			marks["new_process_ready"] = at * 1000
-		}
-		cut := marks["stop_request"]
-		mu.Unlock()
-		if at*1000 > cut && (strings.Contains(row.Message, "event=queue_startup_phase") || strings.Contains(row.Message, "event=slow_queue_mutex_hold")) {
-			t.Logf("installed_queue_phase=%s", row.Message)
-		}
-	}
 	mu.Lock()
 	ready := marks["new_process_ready"]
 	mu.Unlock()
@@ -486,10 +561,14 @@ print('finished',flush=True)
 	if err := client.Call(ctx, "POST", "/api/workers/complete", Result{Execution: Execution{ID: "running-0", Attempt: 1}, Machine: workers[0].ID, Session: workers[0].Session, Success: true}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := py.Wait(); err != nil {
-		t.Fatalf("client failed: %v %s", err, pyErr.String())
+	select {
+	case <-pyDone:
+		if pyResult != nil {
+			t.Fatalf("client failed: %v %s", pyResult, pyErr.String())
+		}
+	case <-ctx.Done():
+		t.Fatal("client did not finish before deadline")
 	}
-	<-scanDone
 	if _, err := manager("stop", unit); err != nil {
 		t.Fatal(err)
 	}
@@ -531,10 +610,6 @@ print('finished',flush=True)
 			t.Fatalf("attempt changed: %+v", j)
 		}
 	}
-	managerEvents, err := os.ReadFile(events)
-	if err != nil {
-		t.Fatal(err)
-	}
 	mu.Lock()
 	result := map[string]any{"marks_ns": marks, "jobs": jobs, "history": history, "submissions": submissions, "state_bytes": stateBytes, "retained_shape": retainedShape, "padding_kib": paddingKiB, "log_retention_hours": c.LogRetention.Hours(), "workers": len(workers), "cpu_quota": c.CPUQuota, "preserved": true}
 	data, err = json.Marshal(result)
@@ -543,9 +618,6 @@ print('finished',flush=True)
 		t.Fatal(err)
 	}
 	t.Logf("installed_cutover=%s", data)
-	for _, line := range strings.Split(strings.TrimSpace(string(managerEvents)), "\n") {
-		t.Logf("installed_manager=%s", line)
-	}
 }
 
 func envTestDefault(name, fallback string) string {
