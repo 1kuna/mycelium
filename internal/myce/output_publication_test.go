@@ -41,6 +41,8 @@ type outputTestTransport struct {
 	lostReply          bool
 	legacy             bool
 	newFileRequests    int
+	cancelAt           int
+	cancel             context.CancelFunc
 }
 
 func newOutputTestTransport() *outputTestTransport {
@@ -71,6 +73,10 @@ func (s *outputTestTransport) RoundTrip(r *http.Request) (*http.Response, error)
 	}
 	s.mu.Lock()
 	s.requests[r.Method+" "+r.URL.Path]++
+	if r.Method == "POST" && r.URL.Path == "/api/files/uploads/" && s.cancelAt > 0 && s.requests[r.Method+" "+r.URL.Path] == s.cancelAt {
+		s.cancel()
+		s.cancelAt = 0
+	}
 	s.active++
 	s.peak = max(s.peak, s.active)
 	end := maxTime(time.Now(), s.linkFree).Add(time.Duration(int64(len(body)) * int64(time.Second) / s.linkBytesPerSecond))
@@ -390,4 +396,26 @@ func TestSmallOutputPublicationDirectorySnapshot(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestSmallOutputPublicationCancellationDrains(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		j, want := outputFixture(t, 100, 100*4096)
+		s := newOutputTestTransport()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		s.cancel, s.cancelAt = cancel, 20
+		parent, w := t.TempDir(), outputWorker(s)
+		step, name := "", ""
+		if _, terminal, err := w.publishOutputFiles(ctx, j, parent, &step, &name); terminal || !errors.Is(err, context.Canceled) {
+			t.Fatal("cancellation lost", terminal, err)
+		}
+		if s.active != 0 || s.requests["POST /api/files/uploads/"] > 20 {
+			t.Fatal("publication dispatched or leaked work after cancellation", s.active, s.requests)
+		}
+		got, terminal, err := outputWorker(s).publishOutputFiles(context.Background(), j, parent, &step, &name)
+		if err != nil || terminal || !maps.Equal(got, want) {
+			t.Fatal("cancelled publication could not resume", terminal, err)
+		}
+	})
 }
