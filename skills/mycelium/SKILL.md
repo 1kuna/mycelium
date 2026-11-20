@@ -669,7 +669,25 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
 - **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
   its resources are released (75 while release is pending); `command_started:
   false` means no command began. `myce pause JOB_ID --reason TEXT` holds your
-  own queued job, and `myce resume JOB_ID` keeps its place.
+  own queued job, and `myce resume JOB_ID` keeps its place. To return your
+  running resumable job to the queue and hold it, use
+  `myce pause JOB_ID --yield --project NAME --reason TEXT`. It sends TERM
+  through the planned maintenance stop, allows its checkpoint grace, retains
+  saved generations and the same job ID, and spends no infrastructure loss.
+  The reply may still say `stopping`: the durable pause takes effect only after
+  the attempt confirms release. Silence or elapsed grace cannot prove release.
+  Check `myce status JOB_ID`; once `paused`, `myce resume JOB_ID` restores normal
+  placement with saved progress. No operator or host disable is needed.
+  Non-resumable work requires `--confirm-restart` because its progress is lost.
+  `--until RFC3339` retains the existing absolute auto-resume deadline.
+  Project attribution must match the job; shared fleet credentials remain the
+  authentication boundary. Python: `client.pause(job_id, project="example",
+  reason="free capacity", yield_=True)` and `client.resume(job_id)`.
+  HTTP: `POST /api/jobs/ID/pause` with `{"project":"example","reason":"free
+  capacity","yield":true,"if_attempt":N}` using the current job's attempt;
+  add `"confirm_restart":true` only when discarding non-resumable progress is
+  intended. A stale attempt is refused. Resume uses the existing
+  `POST /api/jobs/ID/resume` with `{"if_revision":N}` from the paused reply.
   A `custodian_startup_failed` finding means the detached command owner exited
   before staging or payload launch; supporting workers release that exact
   assignment through normal completion. Missing custodian observations alone

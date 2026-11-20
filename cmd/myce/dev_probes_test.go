@@ -194,6 +194,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		t.Fatal("short command effect missing", err)
 	}
 	if backend == "cpu" {
+		proveDevPauseYield(t, ctx, binary, client, root, env)
 		spec.Name = "smoke-progress"
 		spec.Outputs = map[string]string{"effect": "results"}
 		input := filepath.Join(root, "progress-input")

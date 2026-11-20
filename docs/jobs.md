@@ -69,7 +69,7 @@ myce resume JOB
 Pause moves a queued job to `paused`, outside scheduling, preparation demand,
 qualification demand and fairness. Its ID, submission key, frozen inputs,
 submission time and fairness age/position remain intact. Assigned/running
-attempts return HTTP 409 `job_pause_conflict`; this does not suspend execution.
+attempts return HTTP 409 `job_pause_conflict` unless explicitly yielded below.
 Cancellation also works while paused. Production `start_by` and `give_up_at`
 continue to advance and may fail a paused job. Clock maintenance resumes at
 `until` (RFC3339 absolute time); omission requires an explicit resume.
@@ -1657,3 +1657,21 @@ compatible known target remains. `myce spec check --resolve` reports excluded
 targets with `excluded_machines` reasons; queued reasons retain the exclusion
 list. Use this optional constraint for a real requirement, not queue safety or
 priority; Mycelium owns ordinary placement.
+For a running resumable job, use `myce pause JOB --yield --project NAME --reason
+TEXT`. This uses the existing planned maintenance TERM/stop grace and requeue
+semantics. Saved generations and the job ID stay intact; no infrastructure loss
+is charged and no host policy changes. The job remains `stopping`, with
+`yield_pause` recording the pending hold, until its exact attempt confirms
+release. Missing heartbeats and elapsed grace never mark it paused early.
+Then `myce resume JOB` restores normal placement. Non-resumable work requires
+`--confirm-restart`, acknowledging that progress is lost.
+
+The HTTP pause form adds `"yield":true`, `"project":"example"`, and
+`"if_attempt":N` from the current job; non-resumable work also needs
+`"confirm_restart":true`. Missing project/attempt returns `job_pause_invalid`,
+a different project returns `job_project_mismatch`, and an obsolete attempt is
+stale. Project attribution is checked against the job; shared credentials remain
+the authentication boundary, as for other owner operations. Python provides
+`client.pause(job_id, project="example", reason="capacity", yield_=True)` and
+`client.resume(job_id)`. Optional `until` remains an absolute auto-resume time.
+

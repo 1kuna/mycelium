@@ -4028,6 +4028,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "yield_pause": {
+          "$ref": "#/$defs/YieldPause",
+          "x-contract": "diagnostic"
+        },
         "yield_plan": {
           "$ref": "#/$defs/ScarceYieldProjection",
           "x-contract": "diagnostic"
@@ -7300,6 +7304,25 @@
       "required": [
         "input_shape",
         "units"
+      ],
+      "type": "object"
+    },
+    "YieldPause": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pause": {
+          "$ref": "#/$defs/JobPause"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "pause"
       ],
       "type": "object"
     },

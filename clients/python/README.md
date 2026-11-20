@@ -31,6 +31,17 @@ print(client.get(job["id"]))
 client.cancel(job["id"])
 ```
 
+Hold queued work with `client.pause(job_id, reason="review inputs")`.
+To checkpoint-stop your own running job and then hold it, call
+`client.pause(job_id, project="example", reason="free capacity", yield_=True)`.
+It checks the current attempt, uses planned-stop grace, and keeps the job ID and
+saved generations without an infrastructure loss. A `stopping` reply records
+intent; `client.get(job_id)["state"] == "paused"` proves release and the hold.
+Then `client.resume(job_id)` restores placement with the current pause revision.
+Non-resumable work additionally requires `confirm_restart=True`, acknowledging
+lost progress. `until="2027-01-01T00:00:00Z"` sets an absolute auto-resume time.
+Project attribution must match; shared fleet credentials authenticate requests.
+
 `Client.get(id)` includes optional `memory_attempts`: each recorded ended
 attempt's `attempt`/`machine`/`session`, `memory_envelope`, and observed
 `memory_peak`. Peaks include measured `host_gb`, `cgroup_gb`, `device_gb`,

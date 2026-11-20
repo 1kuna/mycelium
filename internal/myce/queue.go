@@ -1226,6 +1226,11 @@ func (q *Queue) retry(j *Job, why string) {
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	q.touchJob(j.ID)
+	if j.YieldPause != nil && !j.ReleaseConfirmed && !cancelled(j) {
+		// Planned stop expiry and missing heartbeats cannot surrender custody.
+		// The existing exact release path calls retry again after confirmation.
+		return
+	}
 	// With no local publication, an interrupted NAS writer may have saved
 	// unreported bytes. Preserve its target until resume inspects those bytes;
 	// absence of a live progress report is not proof of an empty checkpoint.
@@ -1303,6 +1308,10 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if maintenance {
 		now := q.clock.Now()
 		j.MaintenanceResume = &now
+	}
+	if pending := j.YieldPause; pending != nil {
+		j.YieldPause = nil
+		q.pauseJob(j, pending.Pause)
 	}
 }
 func (q *Queue) stop(j *Job, why string) {
