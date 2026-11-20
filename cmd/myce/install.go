@@ -365,6 +365,16 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			fmt.Println("Joining authority: preserve saved EnvironmentFile credential reference (no authority migration).")
 		}
 	}
+	unitPlan, unitErr := myce.InstallUnitPlan(ctx, c, probe.Command)
+	if unitPlan != "" {
+		fmt.Println("Intended generated-unit changes (effective manager properties and unit definitions):\n" + unitPlan)
+	}
+	if unitErr != nil {
+		fmt.Println("Install refusal:", unitErr)
+		if !*dry || !errors.Is(unitErr, myce.ErrWorkerUnitMigrationRequired) {
+			return unitErr
+		}
+	}
 	fileCacheDescription := "automatic from disk headroom at worker startup"
 	if c.FileCacheBytes > 0 {
 		fileCacheDescription = fmt.Sprintf("%d bytes each", c.FileCacheBytes)

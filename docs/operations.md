@@ -770,6 +770,17 @@ an unrecognized file at the reserved drop-in name refuse with a typed reason.
 Other overrides and all environment settings remain intact. Rerunning is safe,
 including after interrupted publication or a failed daemon reload.
 
+`myce install worker` and its `--dry-run` plan report generated-unit changes
+beside the saved-config diff, including effective systemd properties and unit
+and drop-in definition changes. A catalog/config-only change can therefore also
+show a slice or OOM-score change. An existing active worker outside the generated
+slice, or with a different OOM score, refuses installation with
+`worker_unit_migration_required` before publishing files or restarting services.
+The dry run prints the same refusal and proposed changes without applying them.
+Stage with `myce migrate worker-unit` and activate through a newer normal fleet
+upgrade as described below. A staged definition still refuses an install rerun
+while its running control group remains in the old slice.
+
 Staging returns and reports `unavailable`, reason
 `worker_unit_migration_staged`. Activate the staged unit through the **next
 normal `myce fleet upgrade` to a newer approved release**, below. Use its existing

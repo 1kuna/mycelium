@@ -145,3 +145,52 @@ func TestWorkerUnitMigrationRefusalKeepsServing(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
+	c, source := preserveWorkerFixture(t)
+	if err := Install(t.Context(), c, source, "synthetic", fakeInstallManager); err != nil {
+		t.Fatal(err)
+	}
+	m := migrationFixture(t)
+	m.c = c
+	legacy := strings.ReplaceAll(strings.ReplaceAll(c.ServiceText(), "Slice="+c.workerSlice(), "Slice=app.slice"), "OOMScoreAdjust=0", "OOMScoreAdjust=200")
+	legacy = strings.ReplaceAll(legacy, "KillMode=mixed", "KillMode=control-group")
+	if err := os.WriteFile(c.Service, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig, _ := os.ReadFile(c.Config)
+	c.ModelCatalog = "replacement-catalog.yaml"
+	for _, staged := range []bool{false, true} {
+		if staged {
+			if _, err := StageWorkerUnitMigration(t.Context(), c, m.command); err != nil {
+				t.Fatal(err)
+			}
+		}
+		plan, err := InstallUnitPlan(t.Context(), c, m.command)
+		if !errors.Is(err, ErrWorkerUnitMigrationRequired) || !strings.Contains(err.Error(), "myce migrate worker-unit") || !strings.Contains(err.Error(), "normal myce fleet upgrade") {
+			t.Fatal(plan, err)
+		}
+		if !staged && (!strings.Contains(plan, `Slice: "app.slice" -> "myce.slice"`) || !strings.Contains(plan, `OOMScoreAdjust: "200" -> "0"`)) {
+			t.Fatal(plan)
+		}
+		if !strings.Contains(plan, `KillMode: "control-group" -> "mixed"`) || !strings.Contains(plan, "Active ControlGroup") {
+			t.Fatal(plan)
+		}
+		if err := Install(t.Context(), c, source, "", m.command); !errors.Is(err, ErrWorkerUnitMigrationRequired) {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(c.Config); string(got) != string(beforeConfig) {
+			t.Fatal("refusal changed config")
+		}
+		if got, _ := os.ReadFile(c.Service); string(got) != legacy {
+			t.Fatal("refusal changed unit")
+		}
+		if m.group != "/user.slice/app.slice/myce-worker.service" {
+			t.Fatal("moved active worker")
+		}
+	}
+	m.group = "/user.slice/myce.slice/myce-worker.service"
+	if _, err := InstallUnitPlan(t.Context(), c, m.command); err != nil {
+		t.Fatal("activated migration remains refused", err)
+	}
+}
