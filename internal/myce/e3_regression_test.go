@@ -18,6 +18,16 @@ import (
 )
 
 func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
+	// The cases share only the enrolled dev runtime. Each installs a distinct
+	// extension and keeps its own cache, setup marker and check receipts.
+	root := t.TempDir()
+	ext := filepath.Join(root, "extensions")
+	d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	awaitTestDevDeviceFingerprints(t, d)
 	for _, legacy := range []bool{false, true} {
 		for _, action := range []string{"disable", "drain"} {
 			t.Run(fmt.Sprintf("legacy=%t/%s", legacy, action), func(t *testing.T) {
@@ -32,19 +42,12 @@ func TestExtensionCheckMaintenanceBeforeSetup(t *testing.T) {
 					e.Variants[0].Setup = setup
 					e.Variants[0].Check = []string{"sh", "-c", "exit 0"}
 				}
+				e.Name = fmt.Sprintf("maintenance-%t-%s", legacy, action)
 				e = freezeComposition(t, e)
 				root := t.TempDir()
-				ext := filepath.Join(root, "extensions")
 				if err := InstallExtension(ext, e); err != nil {
 					t.Fatal(err)
 				}
-				// This journey tests maintenance authorization, not elapsed worker loss.
-				d, err := startTestDev(t, DevConfig{EnvironmentCacheLimit: 1 << 30, Address: "127.0.0.1:0", Database: filepath.Join(root, "state", "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), ExtensionRoot: ext, HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) { q.clock = &workerFakeClock{now: q.clock.Now()} })
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer d.Close()
-				awaitTestDevDeviceFingerprints(t, d)
 				if _, err = d.Queue.ChangeHostMaintenance("local-host", HostMaintenanceRequest{Action: action}); err != nil {
 					t.Fatal(err)
 				}
