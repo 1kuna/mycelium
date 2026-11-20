@@ -148,7 +148,7 @@ func TestWorkerUnitMigrationRefusalKeepsServing(t *testing.T) {
 
 func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
 	c, source := preserveWorkerFixture(t)
-	if err := Install(t.Context(), c, source, "synthetic", fakeInstallManager); err != nil {
+	if err := Install(t.Context(), c, source, "synthetic", fakeInstallManager(c)); err != nil {
 		t.Fatal(err)
 	}
 	m := migrationFixture(t)
@@ -159,7 +159,7 @@ func TestInstallWorkerUnitLegacyCatalogPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeConfig, _ := os.ReadFile(c.Config)
-	c.ModelCatalog = "replacement-catalog.yaml"
+	c.ModelCatalog = filepath.Join(c.NAS, "replacement-catalog.yaml")
 	for _, staged := range []bool{false, true} {
 		if staged {
 			if _, err := StageWorkerUnitMigration(t.Context(), c, m.command); err != nil {

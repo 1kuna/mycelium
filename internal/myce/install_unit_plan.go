@@ -17,7 +17,7 @@ var ErrWorkerUnitMigrationRequired = errors.New("worker_unit_migration_required"
 // InstallUnitPlan compares the manager's effective properties and the complete
 // generated definition. It never reloads the manager or changes installed files.
 func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (string, error) {
-	if c.Detection.OS != "linux" {
+	if c.Detection.OS != "linux" || c.Role != "worker" {
 		return "", nil
 	}
 	if _, err := os.Stat(c.Service); errors.Is(err, os.ErrNotExist) {
@@ -65,8 +65,8 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 		}
 	}
 	path := active["FragmentPath"]
-	if path == "" {
-		return "", errors.New("worker_unit_observation_unavailable: missing FragmentPath")
+	if path != c.Service || active["ActiveState"] == "" || active["Slice"] == "" || active["OOMScoreAdjust"] == "" {
+		return "", errors.New("worker_unit_observation_unavailable: incomplete unit identity or containment properties")
 	}
 	old, err := os.ReadFile(path)
 	if err != nil {
@@ -103,6 +103,8 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 		switch property {
 		case "ExecStart", "Environment", "EnvironmentFile":
 			continue
+		case "Delegate":
+			property = "DelegateControllers"
 		case "RestartSec":
 			property = "RestartUSec"
 			want += "s"
@@ -116,6 +118,12 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 		}
 		if got, ok := active[property]; ok {
 			equal := got == want
+			if property == "DelegateControllers" {
+				a, b := strings.Fields(got), strings.Fields(want)
+				sort.Strings(a)
+				sort.Strings(b)
+				equal = strings.Join(a, " ") == strings.Join(b, " ")
+			}
 			if strings.HasSuffix(property, "USec") {
 				a, ea := systemdTimeout(got)
 				b, eb := systemdTimeout(want)
@@ -138,16 +146,17 @@ func InstallUnitPlan(ctx context.Context, c ServiceConfig, command func(context.
 		lines = append(lines, changes[key])
 	}
 	var refusal error
-	if c.Role == "worker" && active["ActiveState"] == "active" {
-		slice, score, group := active["Slice"], active["OOMScoreAdjust"], active["ControlGroup"]
-		if slice == "" || score == "" || group == "" {
-			return strings.Join(lines, "\n"), errors.New("worker_unit_observation_unavailable: incomplete containment properties")
-		}
-		_, placementErr := jointMemoryRoot(group, c.workerSlice())
-		if slice != c.workerSlice() || score != "0" || placementErr != nil {
-			lines = append(lines, fmt.Sprintf("Active ControlGroup: %q; generated Slice=%s OOMScoreAdjust=0", group, c.workerSlice()))
-			refusal = fmt.Errorf("%w: stage with myce migrate worker-unit --config INSTALLED_WORKER_CONFIG; activate through the next normal myce fleet upgrade to a newer approved release (MY-55)", ErrWorkerUnitMigrationRequired)
-		}
+	slice, score, group := active["Slice"], active["OOMScoreAdjust"], active["ControlGroup"]
+	if active["ActiveState"] == "active" && group == "" {
+		return strings.Join(lines, "\n"), errors.New("worker_unit_observation_unavailable: incomplete containment properties")
+	}
+	var placementErr error
+	if group != "" {
+		_, placementErr = jointMemoryRoot(group, c.workerSlice())
+	}
+	if slice != c.workerSlice() || score != "0" || placementErr != nil {
+		lines = append(lines, fmt.Sprintf("Active ControlGroup: %q; generated Slice=%s OOMScoreAdjust=0", group, c.workerSlice()))
+		refusal = fmt.Errorf("%w: stage with myce migrate worker-unit --config INSTALLED_WORKER_CONFIG; activate through the next normal myce fleet upgrade to a newer approved release (MY-55)", ErrWorkerUnitMigrationRequired)
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "none")

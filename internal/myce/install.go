@@ -396,10 +396,10 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err := c.ValidateInstall(); err != nil {
 		return err
 	}
-	if _, err := InstallUnitPlan(ctx, c, command); err != nil {
+	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
 		return err
 	}
-	if err := EnsureXPUHealthAccess(ctx, c, command); err != nil {
+	if _, err := InstallUnitPlan(ctx, c, command); err != nil {
 		return err
 	}
 	c.Version = 1

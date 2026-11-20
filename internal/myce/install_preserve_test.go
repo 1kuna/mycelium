@@ -33,7 +33,18 @@ func preserveWorkerFixture(t *testing.T) (ServiceConfig, string) {
 	}
 	return c, source
 }
-func fakeInstallManager(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+func fakeInstallManager(c ServiceConfig) func(context.Context, string, ...string) ([]byte, error) {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+			return installUnitObservation(c), nil
+		}
+		return nil, nil
+	}
+}
+
+func installUnitObservation(c ServiceConfig) []byte {
+	return []byte("FragmentPath=" + c.Service + "\nDropInPaths=\nActiveState=active\nSlice=" + c.workerSlice() + "\nOOMScoreAdjust=0\nControlGroup=/user.slice/" + c.workerSlice() + "/" + filepath.Base(c.Service) + "\n")
+}
 
 func TestInstallJoiningAddressRepairSurvivesInterruption(t *testing.T) {
 	// Use the same saved-config/--queue overlay for the interrupted attempt and
@@ -53,7 +64,7 @@ func TestInstallJoiningAddressRepairSurvivesInterruption(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return installWithFiles(context.Background(), c, source, "", fakeInstallManager, files)
+		return installWithFiles(context.Background(), c, source, "", fakeInstallManager(c), files)
 	}
 	if path := os.Getenv("MYCE_TEST_REPAIR_CONFIG"); path != "" {
 		c, err := ReadServiceConfig(path)
@@ -90,7 +101,7 @@ func TestInstallJoiningAddressRepairSurvivesInterruption(t *testing.T) {
 	if err := WriteInvitation(c.JoiningFile, authority); err != nil {
 		t.Fatal(err)
 	}
-	if err := Install(context.Background(), c, source, "", fakeInstallManager); err != nil {
+	if err := Install(context.Background(), c, source, "", fakeInstallManager(c)); err != nil {
 		t.Fatal(err)
 	}
 	c, err := ReadServiceConfig(c.Config)
@@ -160,7 +171,7 @@ func TestInstallManagerRollback(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+					if err := Install(context.Background(), c, source, "fixture", fakeInstallManager(c)); err != nil {
 						t.Fatal(err)
 					}
 					paths := []string{c.Binary, c.Config, c.Service}
@@ -176,6 +187,9 @@ func TestInstallManagerRollback(t *testing.T) {
 					currentActive, fired, reloads := active, false, 0
 					injected := errors.New("injected manager failure")
 					manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+						if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+							return installUnitObservation(c), nil
+						}
 						call := strings.Join(args, " ")
 						if call == "--user is-active --quiet "+unit {
 							if currentActive {
@@ -208,7 +222,7 @@ func TestInstallManagerRollback(t *testing.T) {
 							}
 							currentActive = call == "--user restart "+unit
 						}
-						return fakeInstallManager(ctx, name, args...)
+						return fakeInstallManager(c)(ctx, name, args...)
 					}
 					c.Heartbeat = 2 * time.Second
 					if err := Install(context.Background(), c, source, "", manager); !errors.Is(err, injected) || !fired {
@@ -233,7 +247,7 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 	for _, failure := range []string{"reload", "restart", "canceled"} {
 		t.Run(failure, func(t *testing.T) {
 			c, source := preserveWorkerFixture(t)
-			if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+			if err := Install(context.Background(), c, source, "fixture", fakeInstallManager(c)); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithCancel(context.Background())
@@ -241,6 +255,9 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 			injected, recoveryFailure := errors.New("registration failed"), errors.New("recovery failed")
 			failed, stopped, recovered := false, false, false
 			manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+				if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+					return installUnitObservation(c), nil
+				}
 				call := strings.Join(args, " ")
 				if call == "--user enable --now myce-worker.service" {
 					failed = true
@@ -257,7 +274,7 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 					stopped = stopped || call == "--user stop myce-worker.service"
 					recovered = recovered || call == "--user restart myce-worker.service"
 				}
-				return fakeInstallManager(ctx, name, args...)
+				return fakeInstallManager(c)(ctx, name, args...)
 			}
 			c.Heartbeat = 2 * time.Second
 			err := Install(ctx, c, source, "", manager)
@@ -282,7 +299,7 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			// Deliberately separate runtime artifacts, durable config/state and units.
 			c.Binary = filepath.Join(t.TempDir(), "runtime-myce")
 			c.Service = filepath.Join(t.TempDir(), "myce-worker.service")
-			if err := Install(context.Background(), c, source, "synthetic-fixture", fakeInstallManager); err != nil {
+			if err := Install(context.Background(), c, source, "synthetic-fixture", fakeInstallManager(c)); err != nil {
 				t.Fatal(err)
 			}
 			paths := []string{c.Binary, c.Config, c.Service, c.GPUEnvironmentFile()}
@@ -318,6 +335,9 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			}}
 			dropInInspections := 0
 			manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+					return installUnitObservation(c), nil
+				}
 				call := strings.Join(args, " ")
 				if strings.Contains(call, "--property=DropInPaths") {
 					dropInInspections++
@@ -375,7 +395,7 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			}
 			return os.Rename(source, destination)
 		}}
-		if err := installWithFiles(context.Background(), c, source, "synthetic-fixture", fakeInstallManager, files); err != nil {
+		if err := installWithFiles(context.Background(), c, source, "synthetic-fixture", fakeInstallManager(c), files); err != nil {
 			t.Fatal(err)
 		}
 		for _, path := range []string{c.Binary, c.Config, c.Credentials, c.GPUEnvironmentFile(), c.Service} {
@@ -517,7 +537,7 @@ func TestInstallBackupsRetainOnlyPreviousInstall(t *testing.T) {
 		if err := os.WriteFile(source, []byte(fmt.Sprintf("binary-%d", version)), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+		if err := Install(context.Background(), c, source, "fixture", fakeInstallManager(c)); err != nil {
 			t.Fatal(err)
 		}
 		current, err := os.ReadFile(c.Binary)

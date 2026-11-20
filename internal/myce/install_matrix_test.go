@@ -35,6 +35,9 @@ func (m *installMatrixManager) read(path string) []byte {
 	return b
 }
 func (m *installMatrixManager) run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "systemctl" && len(args) == 3 && args[1] == "show" {
+		return installUnitObservation(m.c), nil
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
