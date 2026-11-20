@@ -3378,7 +3378,9 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	if j.DeviceFaultStartWait != nil {
 		q.resumeDeviceFaultStartBudget(j)
-	} else if (j.StartCapacityWaiting || q.launchCapacityPending(j)) && !absoluteStartBy(j) && j.Spec.StartBy != nil {
+	} else if (j.StartCapacityWaiting || q.launchCapacityPending(j) || j.Attempt == 0 && j.Spec.Priority == "production") && !absoluteStartBy(j) && j.Spec.StartBy != nil {
+		// First assignment establishes a route: give preparation the whole
+		// relative budget. Unstarted retries retain their existing cutoff.
 		deadline := q.clock.Now().Add(startCapacityBudget(j))
 		j.Spec.StartBy = &deadline
 	}

@@ -133,6 +133,53 @@ func TestToolsInventoryAndValidation(t *testing.T) {
 	}
 }
 
+func TestToolsUsabilityProbes(t *testing.T) {
+	root, later := t.TempDir(), t.TempDir()
+	write := func(dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A later healthy executable must not hide the first, broken PATH shim.
+	write(later, "xcodebuild", "exit 0\n")
+	write(root, "xcodebuild", "[ \"$1\" = -version ] || exit 9\n[ \"${MYCE_TOKEN+x}\" != x ] || exit 10\n[ \"$DEVELOPER_DIR\" = full ] || exit 1\nprintf 'Xcode test\\n'\n")
+	write(root, "xcrun", "[ \"$1\" = --version ] || exit 9\nexit 0\n")
+	write(root, "custom-tool", "exit 1\n") // Unknown CLIs have no generic safe health command.
+	t.Setenv("MYCE_TOKEN", "test-only-not-a-fleet-credential")
+	t.Setenv("PATH", root+string(os.PathListSeparator)+later)
+	for _, developer := range []string{"clt", "full"} {
+		t.Run(developer, func(t *testing.T) {
+			env := jobBaseEnvironment()
+			env["DEVELOPER_DIR"] = developer
+			inventory := environmentTools(env)
+			m := machine("worker", "cpu")
+			m.ToolInventory = map[string][]string{"": inventory}
+			j := &Job{Spec: cpuSpec(1, 1)}
+			j.Spec.Needs.Tools = []string{"xcodebuild", "xcrun"}
+			if toolsFit(j, &m) != (developer == "full") {
+				t.Fatal("placement disagrees with tool usability", inventory)
+			}
+			if !slices.Contains(inventory, "xcrun") || !slices.Contains(inventory, "custom-tool") {
+				t.Fatal("unrelated tools lost", inventory)
+			}
+			if developer == "clt" {
+				if slices.Contains(inventory, "xcodebuild") {
+					t.Fatal("CLT-only shim qualified", inventory)
+				}
+			} else if !slices.Contains(inventory, "xcodebuild") {
+				t.Fatal("usable Xcode refused", inventory)
+			}
+		})
+	}
+	// Native inventory uses the same filtered environment as jobs; an inherited
+	// DEVELOPER_DIR cannot qualify a tool whose payload would select CLT.
+	t.Setenv("DEVELOPER_DIR", "full")
+	if slices.Contains(executableTools(os.Getenv("PATH")), "xcodebuild") {
+		t.Fatal("worker-only developer selection qualified payload tools")
+	}
+}
+
 // Undeclared prerequisites inside arbitrary scripts remain the author's
 // responsibility, but conventional shell missing-command exits are actionable.
 func TestToolsPresentLaunchAndMissingCommandDiagnostic(t *testing.T) {

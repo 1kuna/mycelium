@@ -87,6 +87,10 @@ when an upload-creation response has no accepted offset.
   extension checks, CPU maintenance resumes, and waits for a finite GPU execution
   to finish. Freed capacity accumulates toward that demand; portable queued CPU
   work can use another eligible host. No fixed core reserve or GPU-host exclusion is needed.
+  Production's relative start budget renews when it expires behind a
+  `host_capacity_accumulation` fence; status may show a countdown that re-arms.
+  First assignment grants a full relative budget for preparation. An explicit
+  `start_by` still binds.
   Existing CPU work keeps its stop/checkpoint contract and may need to finish.
 - `myce COMMAND --help` is the flag reference. A field your installed queue or
   worker doesn't return is unknown, not false.
@@ -170,6 +174,17 @@ unsupported with entries. Only production entries need a target list; every fiel
   sidecars ([migration](references/submit.md#environments)).
 - **Installed tools** are the default. List what the command calls in
   `needs: {tools: [git, node]}` so placement skips machines without them.
+  Supporting workers also require `xcodebuild -version` and `xcrun --version`
+  to succeed in the worker-owned environment before advertising those tools.
+  Older workers only check executable presence. Launch still checks presence;
+  job-specific environment selection and SDK health use qualification below.
+  For **full Xcode plus the iOS Simulator SDK**, use the existing native
+  `checks.qualification` with an exact success-marker baseline: run
+  `xcodebuild -version`, then `xcrun --sdk iphonesimulator --show-sdk-path`,
+  verify that directory exists, and only then write `$MYCE_CHECK_OUTPUT`.
+  Declare exact Darwin targets and `needs: {tools: [xcodebuild, xcrun]}`;
+  avoid a fixed Xcode application path. Tool names alone do not establish SDK
+  availability. See the [complete Xcode qualification example](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md#require-full-xcode-and-the-ios-simulator-sdk).
 - **Probed software capabilities** use native `checks.qualification` and a
   bundled `baselines: {extension:ENTRY_NAME: ...}` comparison, with exact
   targets and the same environment as the payload. For software EGL, run the
@@ -683,6 +698,17 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   action on your work record and move on. Keep the same job and key; resubmitting,
   pinning or running locally only hides a hold ([waiting](references/waiting.md)).
   A native-qualification wait names the automatic check and its current hold.
+  A next-check-in promise requires a dispatchable native check offer. Preparation
+  waits do not promise a submitted check. A real failed qualification is not
+  retried automatically; a released launch-authorization refusal with exact
+  proof that no payload ran leaves qualification retryable. When all compatible
+  hosts are refused or have failed qualification, status says no eligible host and names retained check
+  verdicts. Keep the useful job queued; the installation owner investigates
+  failed check logs and restores a usable host before retrying qualification.
+  On older releases, an installation owner can run `myce extension check --gpu cpu
+  NAME@VERSION` locally on an enrolled dedicated worker to refresh its native
+  evidence. This does not pin the useful job. Consumers cannot remotely clear
+  another host's qualification cache; keep the useful job and key.
   When an unrun check's transferred estimate exceeds physical RAM, it uses the
   ordinary guarded first-run envelope to obtain a native measurement; status
   says `transferred estimate exceeds physical capacity`. Local measurements,

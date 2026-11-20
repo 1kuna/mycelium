@@ -269,8 +269,11 @@ checks never replace native qualification.
 ### Probe a software capability instead of pinning a host
 
 Use the existing native `checks.qualification` for requirements such as
-"software EGL rendering works". `needs.tools` only proves executable names are
-available; it does not test libraries, device selection or successful rendering.
+"software EGL rendering works". `needs.tools` checks executable availability
+and known launcher health probes (`xcodebuild -version`, `xcrun --version` on
+supporting workers); it does not test libraries, SDKs, device selection or
+successful rendering. Other tools have no universal safe health command and
+retain executable-presence checks.
 There is no separate `needs.capabilities` field. Name the native entry for the
 work it qualifies and bundle the probe with that entry:
 
@@ -351,6 +354,53 @@ After staging local data and qualifying approved alternatives, remove convenienc
 host/device pins from future authored submissions and resolve again. Genuine
 hardware/validation restrictions keep their `requirement_reasons`. Existing
 accepted work is not cancelled or rewritten to move it.
+
+### Require full Xcode and the iOS Simulator SDK
+
+Use the existing entry qualification contract, which also works before workers
+support tool usability probes. The `xcodebuild` executable alone can be the
+unusable Command Line Tools shim; `xcrun` alone can work without the requested SDK.
+Add these fields to the native app-build entry (with its normal source, command
+and outputs):
+
+```yaml
+targets: [{os: darwin, arch: arm64, platform: cpu}]
+needs: {platform: cpu, tools: [xcodebuild, xcrun]}
+checks:
+  qualification: [sh, '{extension}/scripts/check-xcode.sh']
+baselines:
+  extension:app-build:
+    input: probes/xcode.input
+    output: probes/xcode.ok
+    measure: exact
+    native: Full Xcode and the iOS Simulator SDK are usable
+    variation: Exact marker after developer-tool and SDK checks pass
+```
+
+Here the entry is named `app-build`. List the exact Darwin architectures the
+project supports. Bundle `probes/xcode.input` (an empty file is sufficient),
+`probes/xcode.ok` containing `xcode-ios-simulator-ok` followed by a newline,
+and `scripts/check-xcode.sh`:
+
+```sh
+set -eu
+xcodebuild -version
+sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+test -n "$sdk" && test -d "$sdk"
+printf 'xcode-ios-simulator-ok\n' > "$MYCE_CHECK_OUTPUT"
+```
+
+Use the same environment/developer selection for qualification and the payload.
+No application install path or worker name is required. This proves an installed
+SDK, not an installed simulator runtime, a bootable device, or app correctness;
+extend the application-owned probe when those are actual requirements. Failed
+checks leave that entry unqualified on the worker. On supporting workers the
+tool inventory additionally omits `xcodebuild` when `-version` fails in the
+worker-owned environment. Inventory is cached for the worker/environment;
+restart the worker through its supported lifecycle after changing installed
+tools. The launch check verifies executable presence. Authored PATH overrides
+never run health probes outside the attempt sandbox: job-specific environment
+selection and stronger software requirements use this qualification contract.
 
 ### Run, wait and fetch in one command
 

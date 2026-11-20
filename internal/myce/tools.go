@@ -1,11 +1,14 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Tools are executable basenames, not packages, version expressions or commands.
@@ -65,8 +68,40 @@ func toolMissingError(host string, missing []string) error {
 }
 
 func executableTools(path string) []string {
+	env := jobBaseEnvironment()
+	env["PATH"] = path
+	return environmentTools(env)
+}
+
+// Presence is insufficient for launcher shims: Apple's xcodebuild remains
+// executable under Command Line Tools even though it cannot run a build.
+// Probe only worker-owned inventory environments. Authored run.env/PATH must
+// never execute a probe before the attempt's sandbox and process custody exist;
+// application-specific health checks belong to native qualification.
+var toolUsabilityProbes = map[string][]string{
+	"xcodebuild": {"-version"},
+	"xcrun":      {"--version"},
+}
+
+func usableExecutable(tool, path string, env map[string]string) bool {
+	args, probe := toolUsabilityProbes[tool]
+	if !probe {
+		return true
+	}
+	// A broken tool must not stall worker registration or attempt preparation.
+	// These version queries do no build work; a hung query is not usable.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = environmentList(env) // Never inherit the worker's fleet credentials.
+	cmd.WaitDelay = time.Second
+	return cmd.Run() == nil
+}
+
+func environmentTools(env map[string]string) []string {
 	var names []string
-	for _, dir := range filepath.SplitList(path) {
+	seen := map[string]bool{}
+	for _, dir := range filepath.SplitList(env["PATH"]) {
 		// Relative PATH entries depend on the eventual job workdir and cannot be
 		// advertised as host-wide software.
 		if !filepath.IsAbs(dir) {
@@ -74,12 +109,17 @@ func executableTools(path string) []string {
 		}
 		entries, _ := os.ReadDir(dir)
 		for _, entry := range entries {
-			if !validToolName(entry.Name()) {
+			if !validToolName(entry.Name()) || seen[entry.Name()] {
 				continue
 			}
 			info, err := os.Stat(filepath.Join(dir, entry.Name()))
 			if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
-				names = append(names, entry.Name())
+				// The first executable wins PATH resolution, even when its probe
+				// fails. A healthy later executable cannot hide a broken shim.
+				seen[entry.Name()] = true
+				if usableExecutable(entry.Name(), filepath.Join(dir, entry.Name()), env) {
+					names = append(names, entry.Name())
+				}
 			}
 		}
 	}
@@ -116,7 +156,7 @@ func preparedToolInventory(cache map[string][]string, ready []string, root strin
 		if !ok {
 			env := jobBaseEnvironment()
 			bindEnvironment(env, filepath.Join(root, key))
-			names = executableTools(env["PATH"])
+			names = environmentTools(env)
 			cache[key] = names
 		}
 		out[key] = names

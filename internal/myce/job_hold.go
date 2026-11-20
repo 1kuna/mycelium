@@ -190,12 +190,15 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 			b.Detail += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
 		}
 		staleCompatible := false
+		compatible := false
+		var verdicts []string
 		for _, t := range targets {
 			if t.fit.excluded || t.m.Replacement != nil {
 				continue
 			}
 			for _, candidate := range extensionJobs(j, t.m, false) {
-				if !memorySizingTargetFits(candidate, t.m) || !q.jobAllowsMachine(candidate, t.m.ID) {
+				compatible = true
+				if !memorySizingTargetFits(candidate, t.m) || !q.structuralDemandPolicy(candidate, t.m) || !deviceAllowed(candidate, t.m) || q.diskHeadroomReason(candidate, t.m) != "" {
 					continue
 				}
 				if j.Spec.Resumable && !candidate.Extensions[0].Resumable {
@@ -205,8 +208,13 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 					staleCompatible = true
 					continue
 				}
+				progress, failed := q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
+				if failed {
+					verdicts = append(verdicts, progress)
+					continue
+				}
 				b.retag("native_qualification", "queue", "wait; nothing to do")
-				b.Reason = q.nativeCheckProgress(candidate.Extensions[0], candidate.Spec.workType(), t.m)
+				b.Reason = progress
 				b.Detail = b.Reason
 				if len(declared) > 0 {
 					b.Detail += "; declared implementation targets: " + strings.Join(placementStrings(declared), ", ")
@@ -216,6 +224,13 @@ func (q *Queue) jobHold(j *Job) (blocker *Hold) {
 		}
 		if staleCompatible {
 			b.retag("unknown_observation", "queue owner", "restore fresh observations from compatible hardware before deciding native qualification")
+		} else if compatible {
+			b.retag("no_eligible_host", "consumer and queue owner", "inspect native check verdicts and placement requirements; provide an eligible host or correct the failed qualification before retrying the check; keep this job and key")
+			b.Reason = "no eligible host can currently receive a native check for this work"
+			if len(verdicts) > 0 {
+				b.Reason += "; " + strings.Join(placementStrings(verdicts), "; ")
+			}
+			b.Detail = b.Reason
 		}
 	} else if len(targets) > 0 && !targets[0].fit.excluded && targets[0].fit.first == "production parity" {
 		b.retag("production_parity", "consumer and queue owner", variantParityAction)
@@ -276,7 +291,7 @@ func (q *Queue) portableRoomNow(j *Job, compatibleHosts map[string]bool, targets
 
 // What the queue's own native check is doing now, in one clause. The hold once
 // promised the queue ran the check while no check existed for days (gap 3).
-func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) string {
+func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) (string, bool) {
 	host := hostID(m)
 	for _, j := range q.liveJobs() {
 		r := automaticExtensionCheck(j)
@@ -285,19 +300,29 @@ func (q *Queue) nativeCheckProgress(e Extension, work string, m *Machine) string
 		}
 		switch {
 		case j.State == "running" || j.State == "stopping" || j.State == "assigned":
-			return "its native check " + ShortID(j.ID) + " is running on " + host
+			return "its native check " + ShortID(j.ID) + " is running on " + host, false
 		default:
 			// Stored live jobs need not carry the diagnostic projection's
 			// reason. Recompute the check's scheduler hold without recursing
 			// through another jobHold/nativeCheckProgress projection.
 			copy := *j
 			if h := q.waitHold(&copy); h != nil {
-				return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(h.Detail)
+				return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State + ": " + compactLine(h.Detail), false
 			}
-			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State
+			return "its native check " + ShortID(j.ID) + " on " + host + " is " + j.State, false
 		}
 	}
-	return "the queue submits its native check on " + host + " at that host's next check-in"
+	for _, r := range m.ExtensionReports {
+		if r.Work == work && matchingExtensionReport(e, m, r) && !r.Qualified && r.CheckID != "" && terminal(r.CheckState) && !q.automaticCheckRetryable(m.ID, r) {
+			return "native check " + r.CheckID + " on " + host + " is " + r.CheckState + "; no automatic retry follows a terminal verdict", true
+		}
+	}
+	for _, plan := range q.extensionQualificationPlan(m) {
+		if plan.Report.Digest == e.Digest && plan.Report.Work == work {
+			return "the queue submits its native check on " + host + " at that host's next check-in", false
+		}
+	}
+	return "native qualification on " + host + " is waiting for preparation or dispatch eligibility; no check has been submitted", false
 }
 
 // Kinds whose mechanism already says exactly why and who acts. Generic

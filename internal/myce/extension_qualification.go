@@ -37,8 +37,8 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 	return "auto-" + identityHash([2]string{machine, extensionReportIdentity(r)})
 }
 
-// A cancelled automatic check has no verdict, so it is not negative evidence.
-// Its successor gets a new immutable key derived from the cancelled one; the
+// A cancelled or proven never-executed automatic check has no native verdict.
+// Its successor gets a new immutable key derived from the previous one; the
 // queue reruns the check itself instead of waiting for an explicit retry.
 func automaticExtensionRetryCheckID(machine string, r ExtensionReport, previous string) string {
 	return "auto-" + identityHash([3]string{machine, extensionReportIdentity(r), previous})
@@ -48,8 +48,69 @@ func automaticCheckCancelled(r ExtensionReport) bool {
 	return strings.HasPrefix(r.CheckID, "auto-") && r.CheckState == "cancelled" && !r.Qualified
 }
 
-// The base key, or a successor whose every predecessor the queue recorded as
-// cancelled. Each step is one submission lookup; the chain cannot fork.
+// An accepted infrastructure refusal before execution is not a native verdict.
+// Require released custody and positive evidence for this exact attempt; a
+// missing Started timestamp alone cannot prove that a command never ran.
+func automaticCheckNoVerdict(j *Job) bool {
+	if j == nil || !terminal(j.State) {
+		return false
+	}
+	if cancelled(j) {
+		return true
+	}
+	c := j.ExecutionCause
+	e := safeExecutionEvidence(j.ExecutionEvidence, j.Attempt)
+	return j.State == "failed" && j.ReleaseConfirmed && j.StartedAt == nil &&
+		c != nil && c.Operation == "launch" && c.Class == launchRefused && c.Predicate == "launch_authorization" && c.PrelaunchRefused &&
+		e != nil && e.Main == executionNotStarted && e.Sidecars == executionNotStarted
+}
+
+func (q *Queue) automaticCheckRetryable(machine string, r ExtensionReport) bool {
+	if automaticCheckCancelled(r) {
+		return true
+	}
+	if !strings.HasPrefix(r.CheckID, "auto-") || r.Qualified || r.CheckState != "failed" {
+		return false
+	}
+	record := q.s.Submissions[submissionDigest("extension-check", r.CheckID)]
+	if record == nil {
+		return false
+	}
+	j := record.Job
+	if j == nil {
+		j = q.s.Jobs[record.JobID]
+	}
+	return j != nil && j.Machine == machine && automaticCheckNoVerdict(j)
+}
+
+// Receipt projections omit cold terminal jobs. Retain only the accepted scalar
+// proof needed by current native reports, never their frozen payload or logs.
+func (q *Queue) qualificationRetryInputs() map[string]*submissionRecord {
+	inputs := map[string]*submissionRecord{}
+	for _, owner := range q.s.Machines {
+		for _, m := range q.machineTargets(owner) {
+			for _, r := range m.ExtensionReports {
+				if !q.automaticCheckRetryable(m.ID, r) || r.CheckState != "failed" {
+					continue
+				}
+				key := submissionDigest("extension-check", r.CheckID)
+				record := q.s.Submissions[key]
+				j := record.Job
+				if j == nil {
+					j = q.s.Jobs[record.JobID]
+				}
+				c := j.ExecutionCause
+				inputs[key] = &submissionRecord{JobID: j.ID, Job: &Job{ID: j.ID, Machine: j.Machine, State: j.State, Attempt: j.Attempt,
+					StartedAt: j.StartedAt, ReleaseConfirmed: j.ReleaseConfirmed, ExecutionEvidence: safeExecutionEvidence(j.ExecutionEvidence, j.Attempt),
+					ExecutionCause: &RuntimeCause{Operation: c.Operation, Class: c.Class, Predicate: c.Predicate, PrelaunchRefused: c.PrelaunchRefused}}}
+			}
+		}
+	}
+	return inputs
+}
+
+// The base key, or a successor whose every predecessor has no native verdict.
+// Each step is one accepted submission lookup; the chain cannot fork.
 func (q *Queue) automaticCheckKeyValid(machine string, r ExtensionReport) bool {
 	id := automaticExtensionCheckID(machine, r)
 	for range len(q.s.Submissions) + 1 {
@@ -64,7 +125,7 @@ func (q *Queue) automaticCheckKeyValid(machine string, r ExtensionReport) bool {
 		if j == nil {
 			j = record.Job
 		}
-		if j == nil || !terminal(j.State) || !cancelled(j) {
+		if !automaticCheckNoVerdict(j) {
 			return false
 		}
 		id = automaticExtensionRetryCheckID(machine, r, id)
@@ -123,7 +184,7 @@ func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[s
 // ran. The check, once submitted, still passes every admission hold itself.
 // Dead-end judgements use the same view: a busy host is still a host.
 func (q *Queue) structuralDemandPolicy(j *Job, m *Machine) bool {
-	if q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
+	if q.sharedHostAdmissionRefusal(j, m) != "" || q.variantParityHold(j, m) != nil || !dependencyReady(j) || m.Recovering || cancelled(j) || q.maintenanceBlocked(hostID(m)) || !logPolicyFits(j.Spec.Logs, m) || availabilityBlocked(m) || !q.jobAllowsMachine(j, m.ID) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok && (!logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID)) {
@@ -155,7 +216,7 @@ func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationP
 				if r.Work != work || !r.Setup || !matchingExtensionReport(e, m, r) {
 					continue
 				}
-				retry := automaticCheckCancelled(r)
+				retry := q.automaticCheckRetryable(m.ID, r)
 				if r.Qualified || r.CheckID != "" && (!strings.HasPrefix(r.CheckID, "auto-") || terminal(r.CheckState)) && !retry {
 					break // Warm success or a failed verdict; manual check can retry.
 				}
@@ -351,7 +412,9 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 				return ErrStale
 			}
 			index = i
-			successor := automaticCheckCancelled(old) && r.CheckID == automaticExtensionRetryCheckID(w.Machine.ID, r, old.CheckID)
+			// Only the queue can offer a successor to an infrastructure failure:
+			// submit validates its accepted predecessor and no-execution proof.
+			successor := strings.HasPrefix(old.CheckID, "auto-") && !old.Qualified && (old.CheckState == "cancelled" || old.CheckState == "failed") && r.CheckID == automaticExtensionRetryCheckID(w.Machine.ID, r, old.CheckID)
 			keyValid = keyValid || successor || old.CheckID == r.CheckID
 			if old.CheckID != "" && !successor {
 				if old.CheckID != r.CheckID || terminal(old.CheckState) || old.Qualified {
@@ -399,6 +462,9 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 	if terminal(j.State) && (j.ReleaseConfirmed || j.Attempt == 0) {
 		report.Qualified = j.State == "succeeded" && !cancelled(&j) && j.Machine == plan.Machine && automaticExtensionCheck(&j) != nil && extensionReportIdentity(*automaticExtensionCheck(&j)) == extensionReportIdentity(r)
 		report.Reason = "native check " + j.State + "; explicit check required to retry"
+		if automaticCheckNoVerdict(&j) {
+			report.Reason = "native check did not execute; queue retries after dispatch eligibility is restored"
+		}
 		if report.Qualified {
 			report.Reason = extensionQualificationReason(e, *report, &w.Machine)
 			report.Qualified = report.Reason == ""
@@ -552,7 +618,7 @@ func (q *Queue) qualificationDeadEnd(j *Job, e Extension, m, owner *Machine) str
 			continue
 		}
 		auto := strings.HasPrefix(r.CheckID, "auto-")
-		if auto && r.CheckState == "failed" || !auto && r.CheckID != "" && strings.HasPrefix(r.Reason, "check failed") {
+		if auto && r.CheckState == "failed" && !q.automaticCheckRetryable(m.ID, r) || !auto && r.CheckID != "" && strings.HasPrefix(r.Reason, "check failed") {
 			return fmt.Sprintf("dead end: the native check for %s failed on %s (%s); action: fix the implementation or its check, register a new version and resubmit", label, hostID(m), r.Reason)
 		}
 		return ""

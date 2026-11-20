@@ -357,7 +357,8 @@ func readLogs(t *testing.T, ctx context.Context, c myce.Client, id string) strin
 func TestDevModelEndToEnd(t *testing.T) {
 	dir := currentTestStateRoot(t)
 	binary := devTestBinary(t)
-	cmd := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--model-idle", "1s")
+	// Model loading and idle release still run for real; only check-ins are faster.
+	cmd := exec.Command(binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(dir, "db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--workers", "1", "--model-idle", "1s")
 	cmd.Env = append(os.Environ(), "MYCE_TOKEN=model-test-token")
 	stdout, e := cmd.StdoutPipe()
 	if e != nil {

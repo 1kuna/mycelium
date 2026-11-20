@@ -235,7 +235,14 @@ func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+	// Successful long polls replace the client pause. Model that hold on the
+	// fake clock, bounded by the current deadline rather than rounded seconds.
+	var transportDeadline atomic.Int64
+	transportDeadline.Store(clock.Now().Add(5 * time.Second).UnixNano())
+	server := httptest.NewServer(waitPollingHandler(t, q, func(d time.Duration) {
+		remaining := time.Unix(0, transportDeadline.Load()).Sub(clock.Now())
+		clock.advance(min(d, max(0, remaining)))
+	}))
 	defer server.Close()
 	var delays []time.Duration
 	err := waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 5*time.Second, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error {
@@ -256,6 +263,7 @@ func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 		s.Needs.MemoryGB = 1
 		s.Needs.Platform = myce.Platform{Required: []string{"xpu"}}
 		deadline := clock.Now().Add(3 * time.Second)
+		transportDeadline.Store(deadline.UnixNano())
 		s.StartBy = &deadline
 		j, err := q.Submit(s)
 		if err != nil {
@@ -524,10 +532,10 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestWaitDeadlineGuidance(t *testing.T) {
-	q, clock, _, _ := waitQueue(t)
+func waitPollingHandler(t *testing.T, q *myce.Queue, advanceHold func(time.Duration)) http.Handler {
+	t.Helper()
 	api := myce.API{Queue: q, Token: "test-only"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/wait" {
 			var request myce.WaitRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -535,10 +543,11 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			// Model the steady-state transport hold on the injected clock;
-			// real hold/wakeup coverage lives in TestWaitIndexCommitRollbackAndUnlockedReads.
-			if len(request.After) > 0 {
-				clock.advance(time.Duration(request.Seconds) * time.Second)
+			// Return immediately; a supplied callback can model the transport hold
+			// on the fixture clock, including timeout fixtures with bounded holds.
+			// Real hold/wakeup coverage stays in TestWaitIndexCommitRollbackAndUnlockedReads.
+			if len(request.After) > 0 && advanceHold != nil {
+				advanceHold(time.Duration(request.Seconds) * time.Second)
 			}
 			request.Seconds = 0
 			body, err := json.Marshal(request)
@@ -551,7 +560,12 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 			r.ContentLength = int64(len(body))
 		}
 		api.ServeHTTP(w, r)
-	}))
+	})
+}
+
+func TestWaitDeadlineGuidance(t *testing.T) {
+	q, clock, _, _ := waitQueue(t)
+	server := httptest.NewServer(waitPollingHandler(t, q, clock.advance))
 	defer server.Close()
 	client := myce.Client{URL: server.URL, Token: "test-only"}
 	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}

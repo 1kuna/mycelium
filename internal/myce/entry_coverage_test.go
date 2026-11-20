@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -142,12 +143,128 @@ func TestEntryCoverageFailureEverywhereIsTheJobsFailure(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "failed" || !strings.HasPrefix(got.Reason, "command failed") {
 		t.Fatalf("%s %s", got.State, got.Reason)
 	}
-	if _, kept := q.s.EntryCoverage[j.EntryCoverage.Key]; kept {
+	if _, kept := q.s.EntryCoverage[entryCoverageKey(j.EntryCoverage)]; kept {
 		t.Fatal("skips kept for a recipe that never succeeded")
 	}
 	next := submit(t, q, coverageEntrySpec("broken", "recipe", "fixed-source"))
 	if got := check(t, q, preferred, nil).Job; got == nil || got.ID != next.ID {
 		t.Fatal("cleared type still skipped", got)
+	}
+}
+
+// #1841: live recipes of the same entry must not reopen each other's failed
+// targets. Both commands fail deterministically, so each must fail normally
+// after exploring the two available types once.
+func TestEntryCoverageConcurrentRecipesFailOncePerTarget(t *testing.T) {
+	q, clock := fixture(t)
+	coverageStore(t, q, t.TempDir())
+	preferred, other := coverageMachines()
+	check(t, q, preferred, nil)
+	check(t, q, other, nil)
+	a := submit(t, q, coverageEntrySpec("broken", "recipe-a", "a"))
+	firstA := check(t, q, preferred, nil).Job
+	b := submit(t, q, coverageEntrySpec("broken", "recipe-b", "b"))
+	if a.EntryCoverage.Key != b.EntryCoverage.Key || a.EntryCoverage.Recipe == b.EntryCoverage.Recipe {
+		t.Fatal("fixture must share an entry with distinct immutable recipes")
+	}
+	firstB := check(t, q, other, nil).Job
+	if firstA == nil || firstB == nil || firstA.ID != a.ID || firstB.ID != b.ID {
+		t.Fatal("both recipes must run concurrently", firstA, firstB)
+	}
+	clock.Advance(time.Second)
+	finish(t, q, firstA, false)
+	clock.Advance(time.Second)
+	finish(t, q, firstB, false)
+	requireState(t, q, a.ID, "queued")
+	requireState(t, q, b.ID, "queued")
+	secondB, secondA := check(t, q, preferred, nil).Job, check(t, q, other, nil).Job
+	if secondA == nil || secondB == nil || secondA.ID != a.ID || secondB.ID != b.ID {
+		t.Fatal("recipes revisited failed targets instead of swapping types", secondA, secondB)
+	}
+	clock.Advance(time.Second)
+	finish(t, q, secondA, false)
+	clock.Advance(time.Second)
+	finish(t, q, secondB, false)
+	for _, id := range []string{a.ID, b.ID} {
+		got := job(t, q, id)
+		if got.State != "failed" || !strings.HasPrefix(got.Reason, "command failed") || got.Attempt != 2 || len(got.EntryCoverage.Findings) != 2 {
+			t.Fatalf("recipe did not terminate after each type: state=%s attempt=%d reason=%s coverage=%+v", got.State, got.Attempt, got.Reason, got.EntryCoverage)
+		}
+		seen := map[ExecutionTarget]bool{}
+		for _, f := range got.EntryCoverage.Findings {
+			if seen[f.Target] || f.At.After(clock.Now()) || f.At.IsZero() {
+				t.Fatal("repeated target or invalid finding time", f)
+			}
+			seen[f.Target] = true
+		}
+	}
+	if len(q.s.EntryCoverage) != 0 {
+		t.Fatal("skips kept for recipes that never succeeded", q.s.EntryCoverage)
+	}
+}
+
+// Old entry-keyed records must keep both their skips and proven successes
+// through another recipe's writes, migration, and queue restarts.
+func TestEntryCoverageLegacyRecordSurvivesConcurrentRecipeAndRestart(t *testing.T) {
+	q, clock := fixture(t)
+	store := t.TempDir()
+	coverageStore(t, q, store)
+	preferred, other := coverageMachines()
+	check(t, q, preferred, nil)
+	check(t, q, other, nil)
+	a := submit(t, q, coverageEntrySpec("test", "recipe-a", "a"))
+	// Decode the previous release's record shape, stored at the plain entry key.
+	var legacy entryCoverageRecord
+	if err := json.Unmarshal([]byte(`{"recipe":"`+a.EntryCoverage.Recipe+`","succeeded":[{"os":"linux","arch":"amd64","platform":"cpu"}],"skipped":[{"target":{"os":"darwin","arch":"arm64","platform":"cpu"},"job":"previous","attempt":1,"at":"2026-10-08T11:00:00Z","action":"repair the entry"}]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.update(func() error {
+		q.s.EntryCoverage = map[string]entryCoverageRecord{a.EntryCoverage.Key: legacy}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopen := func() {
+		t.Helper()
+		path, root := q.dbPathForTest(t), q.root
+		if err := q.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		q, err = Open(path, root, clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopened := q
+		t.Cleanup(func() { reopened.Close() })
+		fakeCheckpointAvailability(t, q, true)
+		coverageStore(t, q, store)
+	}
+	reopen()
+	for i, key := range []string{"b-before", "b-after"} {
+		b := submit(t, q, coverageEntrySpec("test", "recipe-b", key))
+		run := check(t, q, preferred, nil).Job
+		if run == nil || run.ID != b.ID {
+			t.Fatal("other recipe inherited the skip", run)
+		}
+		finish(t, q, run, true)
+		if run := check(t, q, preferred, nil).Job; run != nil {
+			t.Fatal("other recipe erased the skip", run.ID)
+		}
+		run = check(t, q, other, nil).Job
+		if run == nil || run.ID != a.ID {
+			t.Fatal("proven target not assigned", run)
+		}
+		finish(t, q, run, i == 0)
+		if i == 0 {
+			if _, kept := q.s.EntryCoverage[a.EntryCoverage.Key]; kept {
+				t.Fatal("legacy record not migrated on write")
+			}
+			reopen()
+			a = submit(t, q, coverageEntrySpec("test", "recipe-a", "a-proven"))
+		} else if got := job(t, q, a.ID); got.State != "failed" || len(got.EntryCoverage.Findings) != 0 {
+			t.Fatal("other recipe erased the proven success", got.State, got.EntryCoverage)
+		}
 	}
 }
 
