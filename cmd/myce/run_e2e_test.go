@@ -25,7 +25,8 @@ func TestRunDevEndToEnd(t *testing.T) {
 	defer cancel()
 	const token = "run-dev-fixture-token"
 	environment := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
-	dev := exec.Command(binary, "dev", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", "cpu")
+	// This journey checks commands and receipts, not the default health cadence.
+	dev := exec.Command(binary, "dev", "--heartbeat", "50ms", "--environment-cache-bytes", "1073741824", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", "cpu")
 	dev.Dir, dev.Env = root, environment
 	stdout, err := dev.StdoutPipe()
 	if err != nil {
