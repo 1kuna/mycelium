@@ -17,6 +17,9 @@ SUPPLEMENTAL_CONSUMERS = {
                    'memory_observation_identity', 'queue')
 }
 
+# Compatibility guidance is exercised through the existing shared hold fixtures.
+SUPPLEMENTAL_CONSUMERS['internal/myce/compatibility_hold.go'] = ('job_hold_test.go',)
+
 # The owned-session sampler is shared by Darwin and foreground Linux dev.
 SUPPLEMENTAL_CONSUMERS['internal/myce/process_memory_owned.go'] = (
     'rss_guard_native_test.go', 'process_memory_libproc_darwin_test.go')
