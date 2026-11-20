@@ -272,3 +272,57 @@ func TestFileCapacityDiagnosticsReclamation(t *testing.T) {
 		t.Fatal("reclamation overwrote original refusal")
 	}
 }
+
+// Real folder finalization used to discard the HTTP error in outputLimitError.
+// Keep its fail-once verdict and still preserve the original capacity decision.
+func TestFileCapacityDiagnosticsFolderFinalization(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, predicate string
+		limit, reserve         int64
+	}{
+		{"backing", "experiment", fileCapacityBacking, 10, 0},
+		{"production_backing", "production", fileCapacityBacking, 10, 8},
+		{"reserve", "experiment", fileCapacityProduction, 20, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			c := retentionClient(t, q)
+			_, input := retentionUpload(t, c, "fixture")
+			s := spec(tc.class)
+			s.Resumable = false
+			s.Files = FileManifest{"input": input}
+			s.Outputs = map[string]string{"folder/": "results"}
+			submitted := submit(t, q, s)
+			m := machine("worker", "fake")
+			check(t, q, m, nil)
+			j := check(t, q, m, nil).Job
+			if j == nil || j.ID != submitted.ID {
+				t.Fatal("no assignment")
+			}
+			j.Spec.Run.Workdir = t.TempDir()
+			if err := os.Mkdir(filepath.Join(j.Spec.Run.Workdir, "folder"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "folder", "out.txt"), []byte("four"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			q.files.limit = tc.limit
+			q.fileStoreProductionReserve = tc.reserve
+			finished, err := (Worker{Client: c}).finishFileResult(*j, result(j, true), t.TempDir())
+			if err != nil || finished.Success || finished.ExecutionCause == nil || finished.ExecutionCause.Predicate != tc.predicate || finished.ExecutionCause.FileCapacity == nil || finished.ExecutionCause.FileCapacity.JobID != j.ID {
+				t.Fatalf("worker cause: %+v %v", finished, err)
+			}
+			if err := q.Complete(finished); err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.GetJob(context.Background(), j.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertFinalization(t, got, "output_preflight", "limit_exceeded", "")
+			if got.ExecutionCause.FileCapacity == nil || got.ExecutionCause.Predicate != tc.predicate || got.ExecutionCause.Finalization.HTTPStatus != 507 {
+				t.Fatalf("folder cause lost: %+v", got.ExecutionCause)
+			}
+		})
+	}
+}

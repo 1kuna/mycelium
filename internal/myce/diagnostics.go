@@ -384,7 +384,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	}
 	out.FileCapacity = nil
 	out.Predicate, out.Reason = "", ""
-	if e := safeFileCapacity(c); e != nil && c.Operation == "outputs" && c.Class == "http_error" {
+	if e := safeFileCapacity(c); e != nil && c.Operation == "outputs" && (c.Class == "http_error" || c.Class == "limit_exceeded") {
 		out.FileCapacity, out.Predicate = e, c.Predicate
 	}
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {

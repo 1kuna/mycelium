@@ -61,7 +61,7 @@ func safeFinalization(d *FinalizationDetail) *FinalizationDetail {
 	if !safeRelative(out.Destination) {
 		out.Destination = ""
 	}
-	if out.HTTPStatus < 400 || out.HTTPStatus > 599 || out.Error != "http_error" {
+	if out.HTTPStatus < 400 || out.HTTPStatus > 599 || (out.Error != "http_error" && out.Error != "limit_exceeded") {
 		out.HTTPStatus = 0
 	}
 	if out.CommandExitCode != nil {
@@ -138,8 +138,18 @@ func finalizationErrorFor(step, output string, err error) error {
 		d.Error = "wrong_type"
 	}
 	var response *HTTPError
-	if errors.As(err, &response) {
-		d.Error, d.HTTPStatus = "http_error", response.Status
+	responseError := err
+	// Folder preflight deliberately keeps limit_exceeded as its terminal class.
+	// Its wrapper retains the HTTP refusal locally without implementing Unwrap.
+	var limit outputLimitError
+	if errors.As(err, &limit) {
+		responseError = limit.cause
+	}
+	if errors.As(responseError, &response) {
+		if d.Error != "limit_exceeded" {
+			d.Error = "http_error"
+		}
+		d.HTTPStatus = response.Status
 		if response.Code == "file_store_capacity" {
 			if e := safeFileCapacity(response.Cause); e != nil {
 				c.FileCapacity, c.Predicate = e, response.Cause.Predicate

@@ -138,6 +138,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-faultevidence"></a>**FaultEvidence** | `event`: string; `kind`: string; `device`: string; `kernel_at`: timestamp; `captured_at`: timestamp; `capture_ns`: number; `replaced?`: number; `device_attribution`: string; `attempts`: array of [FaultAttempt](#fields-faultattempt); `host`: map of string; `omitted_attempts?`: number; `unavailable?`: array of string |
 | <a id="fields-faultlibrary"></a>**FaultLibrary** | `name`: string; `address`: string; `offset`: string; `device`: string; `inode`: string |
 | <a id="fields-filecheckpoint"></a>**FileCheckpoint** | `generation`: number; `files`: map of [FileRef](#fields-fileref) |
+| <a id="fields-filecapacityevidence"></a>**FileCapacityEvidence** | `bound?`: string; `store_limit_bytes?`: number; `stored_bytes?`: number; `observed_at`: timestamp; `job_id?`: string; `attempt`: number; `request_id`: string; `production`: boolean; `identified?`: boolean; `need_bytes`: number; `growth_bytes`: number; `available_bytes`: number; `free_bytes`: number; `output_commitment_bytes`: number; `upload_commitment_bytes?`: number; `store_free_bytes?`: number; `volume_free_bytes?`: number; `disk_free_bytes?`: number; `disk_floor_bytes?`: number; `production_reserve_bytes`: number; `production_committed_bytes`: number; `production_withheld_bytes`: number; `project_withheld_bytes`: number |
 | <a id="fields-filecollectionstatus"></a>**FileCollectionStatus** | `passes`: number; `yielded_passes`: number; `deferred_passes`: number; `reclaimed_blobs`: number; `reclaimed_bytes`: number; `pending_candidates`: number; `last_reclaim_at?`: string |
 | <a id="fields-filereclamation"></a>**FileReclamation** | `pending?`: array of string |
 | <a id="fields-fileref"></a>**FileRef** | `sha256`: string; `size_bytes`: number |
@@ -261,7 +262,7 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-retentioncapacity"></a>**RetentionCapacity** | `memory_available_bytes`: number; `disk_available_bytes`: number |
 | <a id="fields-runspec"></a>**RunSpec** | `memory_gb?`: number; `command`: array of string; `workdir?`: string; `env?`: map of string; `sidecars?`: array of [NativeSidecar](#fields-nativesidecar); `docker?`: boolean; `docker_network?`: string; `docker_memory_gb?`: number; `docker_memory_swap?`: number; `docker_sidecars?`: array of JSON value |
 | <a id="fields-runningrelease"></a>**RunningRelease** | `version`: string; `commit`: string |
-| <a id="fields-runtimecause"></a>**RuntimeCause** | `checkpoint_storage?`: [CheckpointStorageEvidence](#fields-checkpointstorageevidence); `finalization?`: [FinalizationDetail](#fields-finalizationdetail); `linkage?`: [MachOLinkage](#fields-macholinkage); `rss_limit?`: [RSSLimitEvidence](#fields-rsslimitevidence); `missing_tools?`: array of string; `host?`: string; `staging?`: [StagingCause](#fields-stagingcause); `path_diagnostic?`: [PathDiagnostic](#fields-pathdiagnostic); `admission?`: [AdmissionDetail](#fields-admissiondetail); `prelaunch_refused?`: boolean; `operation`: string; `class`: string; `exit_code?`: number; `predicate?`: string; `reason?`: string |
+| <a id="fields-runtimecause"></a>**RuntimeCause** | `file_capacity?`: [FileCapacityEvidence](#fields-filecapacityevidence); `checkpoint_storage?`: [CheckpointStorageEvidence](#fields-checkpointstorageevidence); `finalization?`: [FinalizationDetail](#fields-finalizationdetail); `linkage?`: [MachOLinkage](#fields-macholinkage); `rss_limit?`: [RSSLimitEvidence](#fields-rsslimitevidence); `missing_tools?`: array of string; `host?`: string; `staging?`: [StagingCause](#fields-stagingcause); `path_diagnostic?`: [PathDiagnostic](#fields-pathdiagnostic); `admission?`: [AdmissionDetail](#fields-admissiondetail); `prelaunch_refused?`: boolean; `operation`: string; `class`: string; `exit_code?`: number; `predicate?`: string; `reason?`: string |
 | <a id="fields-scarcehostyield"></a>**ScarceHostYield** | `cause`: string; `demand`: string; `victim`: string; `attempt`: number; `machine`: string; `session`: string; `destination`: string; `destination_device`: string; `destination_target`: [ExecutionTarget](#fields-executiontarget); `generation`: number; `authorized`: boolean; `final_received`: boolean; `hold?`: string |
 | <a id="fields-scarceyieldprojection"></a>**ScarceYieldProjection** | `host?`: string; `requirements?`: array of string; `victims?`: array of [ScarceHostYield](#fields-scarcehostyield); `reason`: string |
 | <a id="fields-sharedcpuobservation"></a>**SharedCPUObservation** | `attempt`: number; `machine`: string; `session`: string; `elapsed_seconds`: number; `usage_seconds`: number; `peak_cores`: number |
@@ -454,7 +455,9 @@ for its explanation; add field names to the types, rather than this index.
 
 HTTP 507 keeps the public `code: file_store_capacity`. Supporting queues add
 `cause`, an ordinary `RuntimeCause` with `operation: outputs`, `class: http_error`,
-a stable `predicate`, and `file_capacity` evidence. The same cause is journalled
+a stable `predicate`, and `file_capacity` evidence.
+Folder/glob preflight preserves its terminal `limit_exceeded` class while
+retaining the same predicate, evidence and HTTP status. The same cause is journalled
 as `event=file_store_capacity cause=...` and retained by worker finalization in
 `execution_cause` (or `cleanup_cause` when execution already failed). Job JSON,
 attempt diagnostics and `myce status` preserve it. Older queues/clients may omit
