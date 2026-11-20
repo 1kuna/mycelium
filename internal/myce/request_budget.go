@@ -215,6 +215,9 @@ func (q *Queue) withRequestBudget(w http.ResponseWriter, r *http.Request) (*http
 	if err != nil {
 		return r, func() {}, err
 	}
+	if n <= 0 {
+		return r, func() {}, &HTTPError{Status: 503, Code: "request_capacity_unavailable", Message: "queue has no measured request memory capacity; fitting wire bytes=0; retry after headroom recovers"}
+	}
 	if r.Header.Get("X-Myce-Request-Budgets") == requestBudgetProtocol && r.Header.Get("X-Myce-Max-Response-Bytes") != "" {
 		peer, parseErr := strconv.ParseInt(r.Header.Get("X-Myce-Max-Response-Bytes"), 10, 64)
 		if parseErr != nil || peer <= 0 {

@@ -222,6 +222,34 @@ func TestRequestBudgetSharedCapacityAndRecovery(t *testing.T) {
 	if large != 1000*small {
 		t.Fatal("capacity did not follow host pressure", small, large)
 	}
+	// Startup/GC pressure can leave zero measured capacity on any installation.
+	// Refuse before reading the body, then accept the same request after recovery.
+	q, _ := fixture(t)
+	for _, endpoint := range []struct{ method, path string }{
+		{"POST", "/api/wait"}, {"POST", "/api/jobs"}, {"GET", "/api/status"},
+	} {
+		budgetHost(q, 0, 1)
+		r := httptest.NewRequest(endpoint.method, endpoint.path, nil)
+		r.Header.Set("Authorization", "Bearer test")
+		r.Body = unreadBody{}
+		r.ContentLength = 1
+		w := httptest.NewRecorder()
+		API{q, "test"}.Handler().ServeHTTP(w, r)
+		if w.Code != 503 || !strings.Contains(w.Body.String(), `"code":"request_capacity_unavailable"`) {
+			t.Fatalf("zero capacity misreported for %s: %d %s", endpoint.path, w.Code, w.Body.String())
+		}
+		if q.requestBudgets.held != 0 {
+			t.Fatal("capacity refusal leaked an allocation")
+		}
+	}
+	budgetHost(q, 64<<20, 1)
+	r := httptest.NewRequest("GET", "/api/status", nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+	API{q, "test"}.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatal("capacity recovery did not restore service", w.Code, w.Body.String())
+	}
 }
 
 func TestRequestBudgetBatchAndNegotiatedDeadline(t *testing.T) {

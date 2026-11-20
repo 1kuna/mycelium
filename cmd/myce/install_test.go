@@ -275,6 +275,18 @@ func TestInstalledQueueServiceProcess(t *testing.T) {
 
 func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 	home := t.TempDir()
+	// A short path also fits Darwin's smaller sockaddr_un limit.
+	notifyDir, err := os.MkdirTemp("/tmp", "myce-ready-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(notifyDir)
+	notifyPath := filepath.Join(notifyDir, "notify")
+	notify, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: notifyPath, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notify.Close()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +304,7 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
 		if strings.Join(a, " ") == "--user enable --now myce-queue.service" {
 			child = exec.Command(c.Binary, "-test.run=^TestInstalledQueueServiceProcess$")
-			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=")
+			child.Env = append(os.Environ(), "MYCE_TEST_INSTALLED_SERVICE="+c.Config, "INVOCATION_ID=", "NOTIFY_SOCKET="+notifyPath)
 			return nil, child.Start()
 		}
 		return nil, nil
@@ -310,19 +322,20 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 					t.Error("queue shutdown", err)
 				}
 			}()
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				var snapshot myce.Snapshot
-				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-				err = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
-				cancel()
-				if err == nil {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("installed queue did not report", err)
-				}
-				time.Sleep(10 * time.Millisecond)
+			if err := notify.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			message := make([]byte, 128)
+			n, _, err := notify.ReadFromUnix(message)
+			if err != nil || string(message[:n]) != "READY=1" {
+				t.Fatalf("queue readiness: %q %v", message[:n], err)
+			}
+			var snapshot myce.Snapshot
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			err = client.WithoutRetries().Call(ctx, "GET", "/api/status", nil, &snapshot)
+			cancel()
+			if err != nil {
+				t.Fatal("queue signaled ready before serving the API", err)
 			}
 			c, err = myce.ReadServiceConfig(c.Config)
 			if err != nil || c.DiscoveryListen == "" {

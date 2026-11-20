@@ -77,6 +77,9 @@ Status reads, waits and keyed submissions ride through a queue restart within
 the caller's timeout or cancellation budget. Keep the same submission key when
 retrying an uncertain write; an unkeyed write cannot be safely replayed. TLS
 identity refusals still stop immediately.
+Temporary zero request-memory headroom returns `503 request_capacity_unavailable`;
+safe reads, waits and keyed submissions retry within the same caller budget.
+A positive fitting size exceeded by a request remains `413 request_too_large`.
 
 ## 3. A reusable entry
 

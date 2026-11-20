@@ -325,6 +325,10 @@ func (c ServiceConfig) ServiceText() string {
 			settings += "EnvironmentFile=" + unitConditionPath(c.EnvironmentFile) + "\n"
 		}
 		if c.Role == "queue" {
+			// Retained-state startup has exceeded systemd's usual 90-second
+			// default. Readiness must not introduce a kill during a valid load;
+			// the installer retains explicit caller cancellation.
+			settings += "Type=notify\nNotifyAccess=main\nTimeoutStartSec=infinity\n"
 			yesno := func(v bool) string {
 				if v {
 					return "yes"
