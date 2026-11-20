@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +67,21 @@ func TestCancelExitsZeroOnlyWhenConfirmed(t *testing.T) {
 	interrupted := func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	if _, err := cancelAndConfirm(ctx, client, send(&pending), true, interrupted); exitCode(err) != cancelUnconfirmedExit {
 		t.Fatalf("interrupted --wait: %v", err)
+	}
+
+	expired, stop := context.WithTimeout(context.Background(), 0)
+	defer stop()
+	var out bytes.Buffer
+	a, err := cancelAndConfirm(expired, client, send(&pending), true, interrupted)
+	err = printCancelAck(&out, a, err)
+	if exitCode(err) != cancelUnconfirmedExit || !strings.Contains(err.Error(), "timed out") || !strings.Contains(out.String(), `"release":"pending"`) {
+		t.Fatalf("timed out after acknowledgement: exit %d, %v, receipt=%s", exitCode(err), err, &out)
+	}
+	out.Reset()
+	a, err = cancelAndConfirm(expired, client, func(ctx context.Context) (myce.Cancellation, error) {
+		return myce.Cancellation{}, ctx.Err()
+	}, true, interrupted)
+	if err = printCancelAck(&out, a, err); !errors.Is(err, context.DeadlineExceeded) || out.Len() != 0 {
+		t.Fatalf("timed out before acknowledgement: %v, receipt=%s", err, &out)
 	}
 }

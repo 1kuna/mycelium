@@ -695,8 +695,11 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   retained proof main did not start but lost the cause; give the queue owner
   the job ID and attempt for lifecycle/result inspection. It is not proof of
   a payload failure or of a particular maintenance/shutdown cause.
-- **Waiting:** read `myce status JOB_ID` once. Its line gives one reason and one
-  `next:` action (`--history` adds the evidence). On releases with staging phase
+- **Waiting:** read `myce status JOB_ID` once. Job rows show the project and
+  optional submission key. Use the job ID to inspect a grouped paused job.
+  For a catalog rollout, `myce status --json` reports each worker's last known
+  `hyphas[].model_config_hash` when available. Check worker freshness with the
+  hash. The waiting job's line gives one reason and one `next:` action (`--history` adds the evidence). On releases with staging phase
   telemetry, `myce status JOB_ID --history --json` retains `staging_timings` per
   attempt: cache hits/misses and phase calls/seconds/failures. Phases nest and
   can overlap; do not sum them or label assignment-to-staged as transfer time. Fix what you authored, or record the owner and
@@ -763,9 +766,11 @@ memory. Ordinary status stays compact; use one job's status for diagnosis.
   environments are filtered when the upgraded observer adopts their registrations
   ([operator recovery](https://github.com/1kuna/mycelium/blob/main/docs/reference/completion-observer.md)).
 - **Stopping:** `myce cancel --wait JOB_ID` exits 0 once the job won't run and
-  its resources are released (75 while release is pending); `command_started:
-  false` means no command began. `myce pause JOB_ID --reason TEXT` holds your
-  own queued job, and `myce resume JOB_ID` keeps its place. To return your
+  its resources are released. Add `--timeout 30s` to bound the call and wait.
+  If release is pending at the deadline, exit 75 includes the last acknowledgement.
+  If the deadline comes before acknowledgement, the outcome is uncertain.
+  Retry with the same job ID or project and key. `command_started: false` means
+  no command began. `myce pause JOB_ID --reason TEXT` holds your own queued job, and `myce resume JOB_ID` keeps its place. To return your
   running resumable job to the queue and hold it, use
   `myce pause JOB_ID --yield --project NAME --reason TEXT`. It sends TERM
   through the planned maintenance stop, allows its checkpoint grace, retains

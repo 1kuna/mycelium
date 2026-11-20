@@ -33,6 +33,7 @@ type CompactStatus struct {
 	Freshness     *SnapshotFreshness   `json:"freshness,omitempty"`
 }
 type CompactHypha struct {
+	ModelConfigHash   string             `json:"model_config_hash,omitempty"`
 	MemoryContainment *MemoryContainment `json:"memory_containment,omitempty"`
 	ID                string             `json:"id"`
 	GPU               string             `json:"gpu"`
@@ -49,15 +50,16 @@ type CompactHypha struct {
 	ResultPublications []ResultPublication `json:"result_publications,omitempty"`
 }
 type CompactJob struct {
-	ID      string     `json:"id"`
-	Name    string     `json:"name"`
-	Project string     `json:"project"`
-	Class   string     `json:"class,omitempty"`
-	State   string     `json:"state"`
-	Attempt int        `json:"attempt,omitempty"`
-	Machine string     `json:"machine,omitempty"`
-	Since   *time.Time `json:"since,omitempty"`
-	Reason  string     `json:"reason,omitempty"`
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	Project       string     `json:"project"`
+	SubmissionKey string     `json:"submission_key,omitempty"`
+	Class         string     `json:"class,omitempty"`
+	State         string     `json:"state"`
+	Attempt       int        `json:"attempt,omitempty"`
+	Machine       string     `json:"machine,omitempty"`
+	Since         *time.Time `json:"since,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
 	// Next is the waiting or paused job's one next action, from its hold.
 	Next     string `json:"next,omitempty"`
 	Delivery string `json:"delivery,omitempty"`
@@ -123,7 +125,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		}
 	}
 	for _, m := range s.Machines {
-		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID]}
+		h := CompactHypha{ID: m.ID, GPU: m.GPU, FreeMemoryGB: m.FreeMemoryGB, Availability: HyphaAvailability(m), Running: running[m.ID], ModelConfigHash: m.ModelConfigHash}
 		h.MemoryContainment = m.MemoryContainment
 		h.ResultPublications = m.ResultPublications
 		if m.HostMemoryMeasured {
@@ -168,7 +170,7 @@ func NewCompactStatus(s Snapshot) CompactStatus {
 		if reason == "running now" {
 			reason = ""
 		}
-		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Next: next, Finding: j.Finding, CommandStarted: commandStarted(j)}
+		row := CompactJob{ID: j.ID, Name: j.Spec.Name, Project: j.Spec.Project, SubmissionKey: j.Spec.SubmissionKey, Class: j.Spec.Class, State: j.State, Attempt: j.Attempt, Machine: j.Machine, Reason: reason, Next: next, Finding: j.Finding, CommandStarted: commandStarted(j)}
 		if j.State == "queued" {
 			since := j.WaitingSince
 			if since.IsZero() {
@@ -254,6 +256,9 @@ func (c CompactStatus) Lines(full bool) []string {
 		}
 		if j.Reason != "" {
 			line += "; " + compactLine(j.Reason)
+		}
+		if j.SubmissionKey != "" {
+			line += fmt.Sprintf("; submission_key=%q", j.SubmissionKey)
 		}
 		out = append(out, line)
 		if j.Next != "" {

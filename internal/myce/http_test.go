@@ -226,8 +226,15 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if err := c.Call(context.Background(), "GET", "/api/status", nil, &compact); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(compact), `"hyphas"`) || strings.Contains(string(compact), "private-token") || strings.Contains(string(compact), "private-input") || strings.Contains(string(compact), "projection-test") {
-		t.Fatalf("default compact status leaked payload or changed shape: %s", compact)
+	var compactStatus CompactStatus
+	if err := json.Unmarshal(compact, &compactStatus); err != nil {
+		t.Fatal(err)
+	}
+	if len(compactStatus.Jobs) != 1 || compactStatus.Jobs[0].Project != s.Project || compactStatus.Jobs[0].SubmissionKey != s.SubmissionKey {
+		t.Fatal("default compact status lost job ownership")
+	}
+	if strings.Contains(string(compact), "private-token") || strings.Contains(string(compact), "private-input") {
+		t.Fatal("default compact status disclosed execution payload")
 	}
 	var status Snapshot
 	if err := c.Call(context.Background(), "GET", "/api/status?view=snapshot", nil, &status); err != nil {
@@ -239,8 +246,8 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if a := status.Jobs[0].Advanced; a == nil || a.Resident == nil || a.Resident.Model != "authored-model" || a.Resident.Engine != nil {
 		t.Fatalf("status must show resident opt-in without the execution snapshot: %s", wireJSON(t, a))
 	}
-	if !slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != "" {
-		t.Error("status must declare submission_key omitted")
+	if slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != s.SubmissionKey {
+		t.Error("status must retain submission_key without declaring it omitted")
 	}
 	if status.Jobs[0].Spec.Logs != "keep" || slices.Contains(status.Jobs[0].SpecProjection.Omitted, "logs") {
 		t.Error("status must retain logs policy without declaring it omitted")

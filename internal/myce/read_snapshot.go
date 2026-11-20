@@ -240,7 +240,6 @@ func (r *readRecord) decode(key string) (any, error) {
 			if r.err == nil && !r.mutable {
 				j := r.value.(*Job)
 				input := statusJobInputs(j)
-				input.Spec.SubmissionKey = j.Spec.SubmissionKey
 				r.history = statusHistoryEntry{source: j, inputs: &input, dependency: statusDependencyJob(j)}
 			}
 		case "state":

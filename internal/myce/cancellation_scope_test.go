@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -95,12 +94,17 @@ func TestCancellationScopeFanOut(t *testing.T) {
 				}
 				assertCancellationScope(t, got, first, second, wave, ready, blocked, consumer, "pending")
 				var status Snapshot
-				if err := client.Call(ctx, "GET", "/api/status", nil, &status); err != nil {
+				if err := client.Call(ctx, "GET", "/api/status?detail=full", nil, &status); err != nil {
 					t.Fatal(err)
 				}
-				statusJSON, _ := json.Marshal(status)
-				if strings.Contains(string(statusJSON), s.SubmissionKey) {
-					t.Fatal("status disclosed submission key")
+				found := false
+				for _, row := range status.Jobs {
+					if row.ID == parent.ID {
+						found = row.Spec.SubmissionKey == s.SubmissionKey
+					}
+				}
+				if !found {
+					t.Fatal("status lost parent submission key")
 				}
 				if got.Cancellation.SubmissionKey == nil || *got.Cancellation.SubmissionKey != s.SubmissionKey {
 					t.Fatal("GET lost cancellation key echo")

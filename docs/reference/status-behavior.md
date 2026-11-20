@@ -629,7 +629,7 @@ The projection strips these entire fields: `after`, `args`, `diagnostics`,
 `extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
 `output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
 `reason`, `require_target`, `requirement_reasons`, `run`, `shared_inputs`, `size_hint`, and `targets`.
-Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
+Within `program`, it strips `args` and `file`, retaining only
 `type`. Within `extension_check`, it strips `automatic`, `directory` and
 `reserve`, retaining only `work` and `timeout`. Some stripped fields encode
 empty or zero placeholders because of their JSON types; those placeholders do
@@ -1124,13 +1124,15 @@ backoff. Lost workers retain the existing session/loss and cleanup fences.
 The page and CLI use the queue's decisions. Reading status does not choose where
 to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint
-paths. `GET /api/status`, the browser page, CLI `status` (including
-`status JOB`), and Python `Client.list()` also omit `spec.submission_key`. This list redaction does not
-apply to Job replies: `POST /api/jobs` and `GET /api/jobs/{id}` echo
-`spec.project` and `spec.submission_key` exactly. Go `Submit`, `GetJob`, `Wait`
-and Python `submit`, `get`, `wait` return these Job replies. GET replies keep
-the status view's payload and diagnostic redaction, except for the key echo;
-POST replies retain the submitted spec. Unkeyed jobs omit the optional key.
+paths. The authenticated status API includes the project and optional submission
+key in each job row (under `spec` in detailed job objects). This applies to CLI
+status and the snapshot returned by Python `Client.list()`. The browser page
+and compact paused groups summarize jobs without displaying keys.
+`POST /api/jobs` and `GET /api/jobs/{id}` echo `spec.project` and
+`spec.submission_key` exactly. Go `Submit`, `GetJob`, `Wait` and Python
+`submit`, `get`, `wait` return these Job replies. GET replies keep the status
+view's payload and diagnostic redaction. POST replies retain the submitted
+spec. Unkeyed jobs omit the optional key.
 Use the existing job output and log commands when you need their results.
 
 `myce wait` resolves full IDs and unique prefixes through authenticated
