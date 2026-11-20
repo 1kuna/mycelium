@@ -450,13 +450,13 @@ func TestWorkerReplayRetriesIdenticalChunkAfterLostAck(t *testing.T) {
 	}))
 	defer server.Close()
 	w.Client.URL = server.URL
-	if err = w.replay(context.Background(), s); err == nil {
+	if err = w.replay(context.Background(), s, nil); err == nil {
 		t.Fatal("missing replay failure")
 	}
 	f, _ := os.OpenFile(filepath.Join(s.dir, s.state.Log), os.O_APPEND|os.O_WRONLY, 0600)
 	io.WriteString(f, "second")
 	f.Close()
-	if err = w.replay(context.Background(), s); err != nil {
+	if err = w.replay(context.Background(), s, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(chunks) != 3 || chunks[0].Text != "first" || chunks[1].Text != "first" || chunks[1].Offset != chunks[0].Offset || chunks[2].Offset != 6 {
