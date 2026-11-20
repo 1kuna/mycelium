@@ -2501,6 +2501,11 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 				j.Delivery = &OutputDelivery{State: "pending", Execution: r.Execution, Machine: r.Machine, Session: r.Session, DestinationID: deliveryRootID(q.deliveryRoot), ManifestSHA256: deliveryDigest(*j), PendingAt: now, Bytes: manifestDiskBytes(r.OutputRefs)}
 			}
 		}
+		// A verified completion supersedes a prior retryable publication failure.
+		// Keep unrelated success annotations, such as frozen isolation policy.
+		if strings.HasPrefix(j.Reason, "finalization pending:") {
+			j.Reason = ""
+		}
 		q.recordAttemptLearning(j, r)
 		q.recordModelUse(j.Spec.Needs.Model)
 		q.recordEntryCoverageSuccess(j, r.Machine)
