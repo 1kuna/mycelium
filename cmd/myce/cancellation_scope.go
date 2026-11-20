@@ -70,6 +70,9 @@ func cancelAndConfirm(ctx context.Context, c myce.Client, send func(context.Cont
 		if ack.Release != nil {
 			release = *ack.Release
 		}
+		if errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ack, &exitError{cancelUnconfirmedExit, fmt.Errorf("cancel acknowledged but timed out waiting for release: release=%s; run myce cancel --wait", release)}
+		}
 		return ack, &exitError{cancelUnconfirmedExit, fmt.Errorf("cancel acknowledged but not confirmed: release=%s; run myce cancel --wait", release)}
 	}
 	return ack, nil

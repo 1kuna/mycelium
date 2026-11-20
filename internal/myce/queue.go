@@ -2906,7 +2906,6 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 		if j.State == "paused" {
 			j.Hold = pauseHold(j)
 		}
-		key := j.Spec.SubmissionKey
 		lock := j.EnvironmentLock
 		// Status projection owns a fully detached view. Redaction can reuse
 		// its fields without another JSON round-trip for every job.
@@ -2922,10 +2921,6 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 				copied.SHA256 = maps.Clone(lock.SHA256)
 				j.EnvironmentLock = &copied
 			}
-			j.Spec.SubmissionKey = key
-			j.SpecProjection.Omitted = slices.DeleteFunc(j.SpecProjection.Omitted, func(path string) bool {
-				return path == "submission_key"
-			})
 		}
 	}
 }

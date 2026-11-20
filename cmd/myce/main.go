@@ -256,9 +256,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	var clientConfig string
 	var projectFlag, cancelKey string
 	var cancelWait bool
+	var cancelTimeout time.Duration
 	if args[0] == "cancel" {
 		f.StringVar(&projectFlag, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
+		f.DurationVar(&cancelTimeout, "timeout", 0, "maximum time for cancel --wait (e.g. 30s)")
 		f.BoolVar(&cancelWait, "wait", false, "wait until release is confirmed (exit 0); otherwise exit 75 while unconfirmed")
 	}
 	if args[0] == "efficiency" {
@@ -896,11 +898,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if err != nil {
 				return err
 			}
-			// Status list views never echo submission keys, including job selectors.
-			j.Spec.SubmissionKey = ""
-			if j.Cancellation != nil {
-				j.Cancellation.SubmissionKey = nil
-			}
 			s = myce.Snapshot{Now: time.Now(), Jobs: []*myce.Job{j}}
 			if *statusJSON {
 				return json.NewEncoder(os.Stdout).Encode(j)
@@ -1027,7 +1024,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		printStatus(s, *full)
 		return nil
 	case "cancel":
-		const usage = "usage: myce cancel <id> | --project PROJECT --key KEY [--wait]"
+		const usage = "usage: myce cancel (<id> | --project PROJECT --key KEY) [--wait [--timeout DURATION]]"
+		explicitTimeout := false
+		f.Visit(func(option *flag.Flag) {
+			explicitTimeout = explicitTimeout || option.Name == "timeout"
+		})
+		if explicitTimeout && (!cancelWait || cancelTimeout <= 0) {
+			return &exitError{2, errors.New("--timeout requires --wait and a positive duration")}
+		}
 		var send func(context.Context) (myce.Cancellation, error)
 		if projectFlag != "" || cancelKey != "" {
 			if projectFlag == "" || cancelKey == "" || f.NArg() != 0 {
@@ -1041,6 +1045,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return &exitError{2, errors.New(usage)}
 			}
 			send = func(ctx context.Context) (myce.Cancellation, error) { return client.Cancel(ctx, f.Arg(0)) }
+		}
+		if cancelTimeout > 0 {
+			waitCtx, stop := context.WithTimeout(ctx, cancelTimeout)
+			defer stop()
+			ctx = waitCtx
 		}
 		ack, err := cancelAndConfirm(ctx, client, send, cancelWait, waitPause)
 		return printCancelAck(os.Stdout, ack, err)
@@ -1339,7 +1348,11 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 			policy = "keep"
 		}
 		fmt.Printf("tier=%s selector=%s policy_revision=%d ", j.PriorityPolicy.Tier, j.PriorityPolicy.Selector, j.PriorityPolicy.Revision)
-		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, reason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
+		fmt.Printf("%s %s [%s/%s] %s hypha=%s logs=%s %s %s; %s", id, j.Spec.Name, j.Spec.Project, j.Spec.Class, myce.JobState(j), j.Machine, policy, reason(j), myce.JobAge(j, s.Now), myce.JobWork(j)+"; "+myce.JobTiming(j))
+		if j.Spec.SubmissionKey != "" {
+			fmt.Printf("; submission_key=%q", j.Spec.SubmissionKey)
+		}
+		fmt.Println()
 		fmt.Printf("  authoring origin: %s\n", j.Spec.Origin())
 		if !detail {
 			continue

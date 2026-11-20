@@ -73,9 +73,10 @@ func TestClientJobIdentityEcho(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/status?detail=full", nil, &status); err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Jobs) != 1 || status.Jobs[0].Spec.SubmissionKey != "" {
-		t.Fatal("status list exposed submission key")
+	if len(status.Jobs) != 1 {
+		t.Fatalf("status jobs = %d, want 1", len(status.Jobs))
 	}
+	assertIdentity(status.Jobs[0], nil)
 }
 
 func TestClientKeyedRetryAfterLostSubmitResponse(t *testing.T) {

@@ -34,6 +34,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	for i, id := range []string{"gpu-a", "gpu-b", "mac-a", "mac-b", "mac-c"} {
 		m := &myce.Machine{ID: id, GPU: "cuda", FreeMemoryGB: 30, Release: &release, HostMemoryMeasured: true, FreeHostMemoryGB: 8}
 		if i == 0 {
+			m.ModelConfigHash = "fixture-model-catalog-hash"
 			m.MemoryContainment = &myce.MemoryContainment{State: "unavailable", Reason: "worker unit is outside the configured slice", Next: "migrate the worker unit into the configured slice; see #1771"}
 		}
 		if i == 4 {
@@ -43,7 +44,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	}
 	started := now.Add(-29 * time.Minute)
 	for i := range 3 {
-		s.Jobs = append(s.Jobs, &myce.Job{ID: fmt.Sprintf("run%05d-full-id", i), State: "running", Attempt: 1, Machine: "gpu-a", StartedAt: &started, Spec: myce.Spec{Name: "train", Project: "a", Class: "experiment"}})
+		s.Jobs = append(s.Jobs, &myce.Job{ID: fmt.Sprintf("run%05d-full-id", i), State: "running", Attempt: 1, Machine: "gpu-a", StartedAt: &started, Spec: myce.Spec{Name: "train", Project: "a", SubmissionKey: fmt.Sprintf("train-%d", i), Class: "experiment"}})
 	}
 	s.Jobs = append(s.Jobs, &myce.Job{ID: "wait0000-full-id", State: "queued", Queued: now.Add(-64 * time.Hour), Reason: "memory_capacity: free memory insufficient for declared needs", Spec: myce.Spec{Name: "viewer", Project: "b", Class: "experiment"}})
 	s.Jobs = append(s.Jobs, &myce.Job{ID: "wait0001-full-id", State: "queued", Queued: now.Add(-77 * time.Hour), Spec: myce.Spec{Name: "naming", Project: "c", Class: "experiment"}})
@@ -69,7 +70,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		"hypha gpu-a: cuda, 30.0 GiB free, hardware capability profile unavailable; host RAM 8.0 GiB for admission; running 3",
 		"memory_containment: unavailable (worker unit is outside the configured slice); next: migrate the worker unit into the configured slice; see #1771",
 		"hypha mac-c: cuda, 30.0 GiB free, disabled by operator; host RAM 8.0 GiB for admission; release v3.1.0-test.1",
-		"run00000 train [a/experiment] running · attempt 1 on gpu-a running for 29m0s\n",
+		"run00000 train [a/experiment] running · attempt 1 on gpu-a running for 29m0s; submission_key=\"train-0\"\n",
 		"wait0000 viewer [b/experiment] queued waited 64h0m0s; memory_capacity: free memory insufficient for declared needs",
 		"wait0001 naming [c/experiment] queued waited 77h0m0s; waiting for a hypha to take this job",
 		"paused 55 b: paused: latest tail-first priority\n  next: myce resume JOB_ID when it should run\n",
@@ -110,6 +111,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(data) > 10<<10 || len(view.Jobs) != 5 || len(view.Hyphas) != 5 || len(view.Alerts) != 3 || view.Counts["paused"] != 62 ||
+		view.Hyphas[0].ModelConfigHash != "fixture-model-catalog-hash" || view.Jobs[0].SubmissionKey != "train-0" ||
 		len(view.Paused) != 2 || len(view.Paused[0].IDs) != 55 || view.Paused[0].IDs[0] != "pause000-full-id" || view.Jobs[3].ID != "wait0000-full-id" || view.Jobs[3].Since == nil ||
 		!strings.Contains(view.Paused[1].Reason, strings.Repeat("x", 300)) || view.Paused[0].Next != "myce resume JOB_ID when it should run" || view.Paused[1].Next != view.Paused[0].Next || strings.Contains(string(data), `"spec"`) || strings.Contains(string(data), "capability_profile") {
 		t.Fatalf("compact JSON (%d bytes): %s", len(data), data)

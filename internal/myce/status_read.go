@@ -328,7 +328,6 @@ func (q *Queue) indexStatusHistory(id string, j *Job) {
 		q.records.statusHistory = map[string]statusHistoryEntry{}
 	}
 	inputs := statusJobInputs(j)
-	inputs.Spec.SubmissionKey = j.Spec.SubmissionKey
 	q.records.statusHistory[id] = statusHistoryEntry{
 		source:     j,
 		inputs:     copyObservationValue(reflect.ValueOf(&inputs)).Interface().(*Job),
@@ -408,7 +407,6 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	if err == nil {
 		if minimal {
 			copy := statusJobInputs(selected)
-			copy.Spec.SubmissionKey = selected.Spec.SubmissionKey
 			copy.Resources = jobResources(selected) // Before redaction drops disk and inputs.
 			s = state{PriorityPolicy: q.s.PriorityPolicy, Jobs: map[string]*Job{id: &copy}}
 			if !terminal(selected.State) {
@@ -437,7 +435,6 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 							continue
 						}
 						copy := statusJobInputs(j)
-						copy.Spec.SubmissionKey = j.Spec.SubmissionKey
 						s.Jobs[key] = &copy
 					} else {
 						if id != "" && key != id && j.AdmissionWait != nil {

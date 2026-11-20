@@ -6,6 +6,24 @@ for full job and machine diagnostics, `--jobs all` for a history page
 (`StatusJobsPage`), or `--history` for retained state (`Snapshot`).
 For one job use `myce status JOB_ID`, `myce wait JOB_ID` and `myce logs JOB_ID`.
 
+Job rows include the project and the optional submission key. Compact JSON
+places them at `jobs[].project` and `jobs[].submission_key`; detailed views
+and single-job JSON put them under `spec`. The compact view groups paused
+jobs. Use a detailed view or select a paused job by ID to see its key.
+Submission keys identify work within a project. Keep credentials out of keys.
+
+To verify a model catalog rollout, check `hyphas[].model_config_hash` in
+`myce status --json` or `machines[].model_config_hash` in
+`myce status --sections machines --json`. This is the last hash reported by
+that worker. Check its availability and freshness before treating the hash
+as current. An omitted hash means no hash was reported.
+
+Use `myce cancel JOB_ID --wait --timeout 30s` to bound the cancellation call
+and release wait. A deadline after acknowledgement returns the last
+acknowledgement and exits 75 if release still needs confirmation. A deadline
+before acknowledgement leaves the outcome uncertain. Retry with the same job
+ID or project and key.
+
 The inventory below comes from the Go types. Behavior, freshness, redaction,
 units, compatibility and interpretation live in the [status behavior reference](reference/status-behavior.md).
 Declared fields are not a promise that every view exposes their values.
@@ -79,8 +97,8 @@ maps link to their element types; timestamps are JSON time strings.
 | <a id="fields-checkpointorigin"></a>**CheckpointOrigin** | `target`: [ExecutionTarget](#fields-executiontarget); `generation`: number; `attempt`: number |
 | <a id="fields-checkpointstorageevidence"></a>**CheckpointStorageEvidence** | `at`: timestamp; `reason`: string; `operation_age_seconds?`: number; `operation?`: string; `errno?`: number |
 | <a id="fields-commanddiscovery"></a>**CommandDiscovery** | `targets`: array of [ExecutionTarget](#fields-executiontarget) |
-| <a id="fields-compacthypha"></a>**CompactHypha** | `memory_containment?`: [MemoryContainment](#fields-memorycontainment); `id`: string; `gpu`: string; `free_memory_gb`: number; `availability`: string; `host_ram_for_admission_gb?`: number; `free_cpu_cores?`: number; `cpu_cores?`: number; `running?`: number; `release?`: string; `preparing?`: array of string; `copying?`: array of string; `result_publications?`: array of [ResultPublication](#fields-resultpublication) |
-| <a id="fields-compactjob"></a>**CompactJob** | `id`: string; `name`: string; `project`: string; `class?`: string; `state`: string; `attempt?`: number; `machine?`: string; `since?`: string; `reason?`: string; `next?`: string; `delivery?`: string; `command_started`: boolean; `finding?`: [JobFinding](#fields-jobfinding) |
+| <a id="fields-compacthypha"></a>**CompactHypha** | `model_config_hash?`: string; `memory_containment?`: [MemoryContainment](#fields-memorycontainment); `id`: string; `gpu`: string; `free_memory_gb`: number; `availability`: string; `host_ram_for_admission_gb?`: number; `free_cpu_cores?`: number; `cpu_cores?`: number; `running?`: number; `release?`: string; `preparing?`: array of string; `copying?`: array of string; `result_publications?`: array of [ResultPublication](#fields-resultpublication) |
+| <a id="fields-compactjob"></a>**CompactJob** | `id`: string; `name`: string; `project`: string; `submission_key?`: string; `class?`: string; `state`: string; `attempt?`: number; `machine?`: string; `since?`: string; `reason?`: string; `next?`: string; `delivery?`: string; `command_started`: boolean; `finding?`: [JobFinding](#fields-jobfinding) |
 | <a id="fields-compactpaused"></a>**CompactPaused** | `project`: string; `reason`: string; `next?`: string; `count`: number; `ids`: array of string |
 | <a id="fields-compactstatus"></a>**CompactStatus** | `now`: timestamp; `queue_release`: [RunningRelease](#fields-runningrelease); `retained_jobs`: number; `counts`: map of number; `alert_groups?`: array of [StatusAlertGroup](#fields-statusalertgroup); `production_leases?`: array of [StatusLease](#fields-statuslease); `not_quiescent?`: array of [StatusQuiescence](#fields-statusquiescence); `health_alert_delivery?`: [HealthAlertDelivery](#fields-healthalertdelivery); `fleet_upgrade?`: array of string; `host_states?`: map of string; `holds?`: array of [Hold](#fields-hold); `warning?`: string; `hyphas`: array of [CompactHypha](#fields-compacthypha); `models?`: array of string; `jobs?`: array of [CompactJob](#fields-compactjob); `paused?`: array of [CompactPaused](#fields-compactpaused); `detail`: string; `freshness?`: [SnapshotFreshness](#fields-snapshotfreshness) |
 | <a id="fields-completionstate"></a>**CompletionState** | `collected_at?`: string; `superseded_by?`: string; `delivery_id?`: string; `delivered_at?`: string |
