@@ -316,29 +316,81 @@ func TestBlobGCImportStartedBeforeRecipePublication(t *testing.T) {
 	}
 }
 
+// #1767 supersedes the upload-age floor when an expired input is the only
+// recorded owner. A frozen local recipe value is not durable custody: actual
+// job, sidecar, extension, catalog and keyed-answer references still pin bytes.
 func TestBlobGCExpiredInputCannotShortenRecipeRetention(t *testing.T) {
-	q, clock := fixture(t)
-	r := gcRecipe(t, q, "shared with old expired input")
-	if err := q.update(func() error {
-		ended := clock.Now().Add(-testFileRetention)
-		q.putJob("expired", &Job{ID: "expired", State: "succeeded", ReleaseConfirmed: true, FinishedAt: &ended, Spec: Spec{Files: FileManifest{"input": *r.FilesRef}}})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(filePublicationGrace + time.Nanosecond)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.files.verify(context.Background(), *r.FilesRef); err != nil {
-		t.Fatal("expired input shortened internal retention", err)
-	}
-	clock.Advance(testFileRetention)
-	if err := q.Tick(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(q.files.blob(*r.FilesRef)); !os.IsNotExist(err) {
-		t.Fatal("expired shared recipe leaked", err)
+	for _, owner := range []string{"unreferenced", "job_recipe", "sidecar_recipe", "job_extension_recipe", "environment_catalog", "extension_catalog_recipe", "retained_answer"} {
+		t.Run(owner, func(t *testing.T) {
+			q, clock := fixture(t)
+			r := gcRecipe(t, q, "shared with old expired input")
+			if err := q.update(func() error {
+				ended := clock.Now().Add(-testFileRetention)
+				q.putJob("expired", &Job{ID: "expired", State: "succeeded", ReleaseConfirmed: true, FinishedAt: &ended, Spec: Spec{Project: "owner", Files: FileManifest{"input": *r.FilesRef}}})
+				kept := &Job{ID: "recipe-owner", State: "queued", Spec: spec("experiment")}
+				extension := Extension{Variants: []ExtensionVariant{{Environments: map[string]EnvironmentRecipe{"fake": r}}}}
+				switch owner {
+				case "job_recipe":
+					kept.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": r}
+					q.putJob(kept.ID, kept)
+				case "sidecar_recipe":
+					kept.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{"helper": {"fake": r}}
+					q.putJob(kept.ID, kept)
+				case "job_extension_recipe":
+					kept.Extensions = []Extension{extension}
+					q.putJob(kept.ID, kept)
+				case "environment_catalog":
+					q.environments.Environments = map[string]map[string]EnvironmentRecipe{"tools": {"fake": r}}
+				case "extension_catalog_recipe":
+					q.touchCatalog("extensions/kept")
+					q.s.Extensions = map[string]Extension{"kept": extension}
+				case "retained_answer":
+					kept.State, kept.FilesExpired = "succeeded", true
+					kept.EnvironmentRecipes = map[string]EnvironmentRecipe{"fake": r}
+					q.putSubmission("answer", &submissionRecord{Kind: submissionBinding, JobID: kept.ID, Job: kept})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			readRecipe := func() {
+				t.Helper()
+				copy := r
+				if err := q.files.hydrateRecipe(&copy); err != nil {
+					t.Fatal("recipe cannot be delivered by its stored reference", err)
+				}
+				if string(copy.Files["requirements.txt"]) != "shared with old expired input" {
+					t.Fatal("recipe payload changed", copy.Files)
+				}
+			}
+			clock.Advance(filePublicationGrace - time.Nanosecond)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			readRecipe() // Even unclaimed bytes survive in-flight publication.
+			clock.Advance(time.Nanosecond)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if owner == "unreferenced" {
+				if _, err := os.Stat(q.files.blob(*r.FilesRef)); !os.IsNotExist(err) {
+					t.Fatal("expired otherwise-unreferenced recipe retained past publication grace", err)
+				}
+			} else {
+				readRecipe()
+			}
+			clock.Advance(testFileRetention)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if owner == "unreferenced" {
+				if _, err := os.Stat(q.files.blob(*r.FilesRef)); !os.IsNotExist(err) {
+					t.Fatal("expired shared recipe leaked", err)
+				}
+			} else {
+				readRecipe() // Durable custody also outlasts the orphan window.
+			}
+		})
 	}
 }
 
