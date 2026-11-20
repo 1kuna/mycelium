@@ -161,6 +161,14 @@ func TestDetachedModelBridgeSurvivesWorkerReplacement(t *testing.T) {
 	if first, err := stream.ReadString('\n'); err != nil || first != "first\n" {
 		t.Fatal("stream did not begin", first, err)
 	}
+	// Staging placement must preserve the resident engine and its open stream;
+	// replacement below reuses MY-55 adoption rather than another Load.
+	migration := migrationFixture(t)
+	for range 2 {
+		if _, err := StageWorkerUnitMigration(t.Context(), migration.c, migration.command); err != nil {
+			t.Fatal(err)
+		}
+	}
 	await(t, func() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.read() == nil && g.last.Report.InFlight == 1 })
 	before := g.last
 	if before.OOMScore != 1000 {

@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mycelium/internal/probeguard"
 	"net/http"
@@ -139,6 +140,8 @@ func TestCustodianNativeWorkerReplacement(t *testing.T) {
 }
 
 func custodianNativeReplacement(t *testing.T, next, mode string) {
+	migration := strings.HasPrefix(mode, "migration")
+	modelMode := mode == "model" || mode == "migration-model"
 	q, _ := fixture(t)
 	q.clock = RealClock{}
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
@@ -167,6 +170,17 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	dir := t.TempDir()
 
 	c := nativeCustodianServiceConfig(dir, server.URL)
+	if migration {
+		if runtime.GOOS != "linux" {
+			t.Skip("systemd migration native tier")
+		}
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if !filepath.IsAbs(runtimeDir) {
+			t.Fatal("native fixture requires user manager runtime directory")
+		}
+		c.Service = filepath.Join(runtimeDir, "systemd", "user", c.Service)
+		c.Role, c.Detection = "worker", Detection{OS: "linux"}
+	}
 	if err := checkNativeFixtureSlice(c); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +212,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			}
 		})
 	}
-	if mode == "model" {
+	if modelMode {
 		configureNativeModel(t, q, &c)
 	}
 	if err := os.MkdirAll(c.State, 0700); err != nil {
@@ -241,10 +255,79 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	manager := installManager{os: runtime.GOOS, command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}}
+	if migration {
+		if err := os.MkdirAll(filepath.Dir(c.Service), 0700); err != nil {
+			t.Fatal(err)
+		}
+		text := "[Service]\nExecStart=" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + "\nSlice=app.slice\nOOMScoreAdjust=200\nDelegate=yes\nKillMode=mixed\nStandardOutput=append:" + filepath.Join(dir, "worker.log") + "\nStandardError=inherit\n"
+		f, err := os.OpenFile(c.Service, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.WriteString(text)
+		err = errors.Join(err, f.Close())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			// Exact unique fixture files only; no installed unit or shared slice.
+			// Also cover a failure during initial startup or migration staging,
+			// before the ordinary stop defer can complete.
+			cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if out, err := manager.command(cleanup, "systemctl", "--user", "stop", filepath.Base(c.Service)); err != nil {
+				t.Errorf("stop owned migration fixture: %v: %s", err, out)
+			}
+			for _, path := range []string{filepath.Join(c.Service+".d", workerUnitMigrationDropIn), c.Service + ".d", c.Service} {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Error(err)
+				}
+			}
+			command("systemctl", "--user", "daemon-reload")
+		})
+		command("systemctl", "--user", "daemon-reload")
+	}
 	unit := installUnit{path: plist, label: label}
+	starts := 0
 	start := func() {
 		t.Helper()
-		if runtime.GOOS == "darwin" {
+		if migration {
+			command("systemctl", "--user", "start", filepath.Base(c.Service))
+			want := "unavailable"
+			if starts > 0 {
+				want = "available"
+			}
+			await(t, func() bool {
+				q.mu.Lock()
+				defer q.mu.Unlock()
+				m := q.s.Machines[c.Name]
+				return m != nil && m.MemoryContainment != nil && m.MemoryContainment.State == want
+			})
+			if starts > 0 {
+				out, err := manager.command(t.Context(), "systemctl", "--user", "show", c.workerSlice(), "--property=MemoryMax", "--value")
+				if err != nil || strings.TrimSpace(string(out)) == "infinity" || strings.TrimSpace(string(out)) == "" {
+					t.Fatalf("joint limit missing: %q %v", out, err)
+				}
+				t.Logf("migrated fixture reports available; slice MemoryMax=%s", strings.TrimSpace(string(out)))
+				pid, err := os.ReadFile(filepath.Join(c.State, "worker-pid"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				score, err := os.ReadFile("/proc/" + strings.TrimSpace(string(pid)) + "/oom_score_adj")
+				if err != nil {
+					t.Fatal(err)
+				}
+				setting, err := manager.command(t.Context(), "systemctl", "--user", "show", filepath.Base(c.Service), "--property=OOMScoreAdjust", "--value")
+				if err != nil || strings.TrimSpace(string(setting)) != "0" {
+					t.Fatalf("replacement unit OOM setting: %q %v", setting, err)
+				}
+				// A user manager can retain a privileged inherited minimum (100
+				// on the native qualification host). setAttemptOOMScore handles
+				// that bound; a unit's requested zero is not proof of process zero.
+				t.Logf("replacement unit requests OOMScoreAdjust=0; observed worker score=%s", strings.TrimSpace(string(score)))
+			}
+			starts++
+		} else if runtime.GOOS == "darwin" {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			if err := manager.registration(ctx, unit, installUnitState{loaded: true}); err != nil {
@@ -252,14 +335,37 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 			}
 		} else {
 			args := nativeCustodianStartArgs(c)
-			if mode == "model" {
+			if modelMode {
 				args = append(args, "--property=StandardOutput=append:"+filepath.Join(dir, "worker.log"), "--property=StandardError=inherit")
 			}
 			command(append(args, c.Binary, "service", "--config", c.Config)...)
 		}
 	}
+	staged := false
 	stop := func() {
 		t.Helper()
+		if migration && !staged {
+			pid, err := os.ReadFile(filepath.Join(c.State, "worker-pid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			membership := "/proc/" + strings.TrimSpace(string(pid)) + "/cgroup"
+			before, err := os.ReadFile(membership)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				status, err := StageWorkerUnitMigration(t.Context(), c, manager.command)
+				if err != nil || status.Reason != "worker_unit_migration_staged" {
+					t.Fatalf("stage fixture migration: %+v %v", status, err)
+				}
+			}
+			if after, err := os.ReadFile(membership); err != nil || string(after) != string(before) {
+				t.Fatalf("staging moved live worker: %q %v", after, err)
+			}
+			staged = true
+			t.Log("staged migration twice while running; no service stop or scope move")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if err := manager.stop(ctx, installUnit{path: c.Service, label: label}); err != nil {
@@ -308,7 +414,7 @@ func custodianNativeReplacement(t *testing.T, next, mode string) {
 	}()
 	start()
 	defer stop()
-	if mode == "model" {
+	if modelMode {
 		custodianNativeModelReplacement(t, q, c, server.URL, next, start, stop, writeImage)
 		return
 	}
