@@ -1173,6 +1173,9 @@ func printStatusDetail(s myce.Snapshot, full, detail bool) {
 		if m.HostMemoryError != "" {
 			state += "; host RAM unavailable: " + m.HostMemoryError
 		}
+		if m.MemoryContainment != nil {
+			state += "; " + m.MemoryContainment.String()
+		}
 		if m.MemoryEnforcement != "" {
 			state += "; " + m.MemoryEnforcement
 		}

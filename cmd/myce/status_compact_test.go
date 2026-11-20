@@ -33,6 +33,9 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 	}
 	for i, id := range []string{"gpu-a", "gpu-b", "mac-a", "mac-b", "mac-c"} {
 		m := &myce.Machine{ID: id, GPU: "cuda", FreeMemoryGB: 30, Release: &release, HostMemoryMeasured: true, FreeHostMemoryGB: 8}
+		if i == 0 {
+			m.MemoryContainment = &myce.MemoryContainment{State: "unavailable", Reason: "worker unit is outside the configured slice", Next: "migrate the worker unit into the configured slice; see #1771"}
+		}
 		if i == 4 {
 			m.Disabled, m.Release = "operator", &myce.RunningRelease{Version: "v3.1.0-test.1"}
 		}
@@ -64,6 +67,7 @@ func TestCompactStatusIsSmallAndKeepsWhatMatters(t *testing.T) {
 		"host gpu-b: degraded",
 		`hold host=mac-c: components are excluded from placement (set by operator; reason="storage faults"); next: myce exclude remove host=mac-c when the components should run work`,
 		"hypha gpu-a: cuda, 30.0 GiB free, hardware capability profile unavailable; host RAM 8.0 GiB for admission; running 3",
+		"memory_containment: unavailable (worker unit is outside the configured slice); next: migrate the worker unit into the configured slice; see #1771",
 		"hypha mac-c: cuda, 30.0 GiB free, disabled by operator; host RAM 8.0 GiB for admission; release v3.1.0-test.1",
 		"run00000 train [a/experiment] running · attempt 1 on gpu-a running for 29m0s\n",
 		"wait0000 viewer [b/experiment] queued waited 64h0m0s; memory_capacity: free memory insufficient for declared needs",

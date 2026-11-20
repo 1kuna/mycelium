@@ -100,6 +100,7 @@ type Worker struct {
 	JobFileRoot             string
 	extensionFingerprint    string
 	RequireMemoryCeilings   bool
+	jointMemoryCommand      func(context.Context, ...string) error // Test seam for the native manager.
 	memoryCeilings          *memoryCeilings
 	sharedExecutionCeilings *memoryCeilings
 	sharedCPUDev            bool

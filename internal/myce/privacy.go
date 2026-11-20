@@ -75,6 +75,17 @@ func publicStatusValue(s Snapshot) Snapshot {
 		for i := range m.EnvironmentReports {
 			m.EnvironmentReports[i].Key = statusEnvironmentName(m.EnvironmentReports[i].Key)
 		}
+		if c := m.MemoryContainment; c != nil {
+			// Status diagnostics never echo arbitrary worker-supplied text.
+			switch c.State {
+			case "unavailable":
+				m.MemoryContainment = unmigratedMemoryContainment()
+			case "available":
+				m.MemoryContainment = &MemoryContainment{State: "available"}
+			default:
+				m.MemoryContainment = nil
+			}
+		}
 		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
 		m.CPUIsolation = cpuIsolationDiagnostic(m.CPUIsolation)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")

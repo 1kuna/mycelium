@@ -74,6 +74,29 @@ type memoryAttempt struct {
 
 const jointMemoryCapability = "joint_memory_v1"
 
+// MemoryContainment reports the joint slice cap separately from per-attempt
+// enforcement. An omitted value means the worker has not reported this status.
+type MemoryContainment struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	Next   string `json:"next,omitempty"`
+}
+
+func unmigratedMemoryContainment() *MemoryContainment {
+	return &MemoryContainment{State: "unavailable", Reason: "worker unit is outside the configured slice", Next: "migrate the worker unit into the configured slice; see #1771"}
+}
+
+func (m MemoryContainment) String() string {
+	text := "memory_containment: " + m.State
+	if m.Reason != "" {
+		text += " (" + m.Reason + ")"
+	}
+	if m.Next != "" {
+		text += "; next: " + m.Next
+	}
+	return text
+}
+
 var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")
 
 func delegateMemory(fs memoryFS, root string, pid int) (*memoryCeilings, error) {
@@ -476,12 +499,12 @@ const oomPriorityUnavailable = "oom_priority_unavailable"
 // Apply the existing queue allowance before consuming assignments, including
 // changes returned during rolling upgrades. systemd owns the slice controls;
 // never try to delegate or relocate another owner's running processes.
-func (w Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBudget) error {
+func (w *Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBudget) error {
 	c := w.memoryCeilings
-	if runtime.GOOS != "linux" || c == nil || w.Custodian != "" || !ValidWorkerUnit(w.Unit) {
+	if c == nil || w.Custodian != "" || !ValidWorkerUnit(w.Unit) || runtime.GOOS != "linux" && w.jointMemoryCommand == nil {
 		return nil
 	}
-	if _, real := c.fs.(osMemoryFS); !real {
+	if _, real := c.fs.(osMemoryFS); !real && w.jointMemoryCommand == nil {
 		return nil
 	}
 	config := ServiceConfig{}
@@ -493,16 +516,29 @@ func (w Worker) syncJointMemoryCeiling(ctx context.Context, budget HostMemoryBud
 	}
 	root, err := jointMemoryRoot(c.root, config.workerSlice())
 	if err != nil {
+		// Binary upgrades preserve older service units. Keep their per-attempt
+		// controls and serving behavior; only the common slice cap is unavailable.
+		w.Machine.MemoryContainment = unmigratedMemoryContainment()
+		return nil
+	}
+	command := w.jointMemoryCommand
+	if command == nil {
+		command = func(ctx context.Context, args ...string) error {
+			cmd := exec.CommandContext(ctx, "systemctl", args...)
+			cmd.Env = withoutMyceToken(os.Environ())
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("configure joint memory ceiling: %w", err)
+			}
+			return nil
+		}
+	}
+	// Never keep an earlier successful status after a failed refresh.
+	w.Machine.MemoryContainment = nil
+	if err := c.setJointMemoryLimit(ctx, root, budget, w.MemorySwapMaxBytes, command); err != nil {
 		return err
 	}
-	return c.setJointMemoryLimit(ctx, root, budget, w.MemorySwapMaxBytes, func(ctx context.Context, args ...string) error {
-		cmd := exec.CommandContext(ctx, "systemctl", args...)
-		cmd.Env = withoutMyceToken(os.Environ())
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("configure joint memory ceiling: %w", err)
-		}
-		return nil
-	})
+	w.Machine.MemoryContainment = &MemoryContainment{State: "available"}
+	return nil
 }
 
 func jointMemoryRoot(root, slice string) (string, error) {

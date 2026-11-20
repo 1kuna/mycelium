@@ -169,6 +169,19 @@ func TestMemoryCeilingDelegationAndOOM(t *testing.T) {
 }
 
 func TestMemoryCeilingJointAllowance(t *testing.T) {
+	t.Run("unmigrated worker", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("production Linux membership regression")
+		}
+		c := fakeCeilings(t)
+		// Use real local files, but never a real cgroup or service manager.
+		// A legacy app.slice unit has no configured slice in its ancestry.
+		c.fs = osMemoryFS{}
+		w := Worker{Unit: "myce-worker.service", memoryCeilings: c}
+		if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 5}); err != nil {
+			t.Fatalf("unmigrated worker refused assignments: %v", err)
+		}
+	})
 	for _, slice := range []string{"myce.slice", "mycetest0123456789abcdef0123456789abcdef.slice"} {
 		t.Run(slice, func(t *testing.T) {
 			c := fakeCeilings(t)
@@ -195,14 +208,28 @@ func TestMemoryCeilingJointAllowance(t *testing.T) {
 				}
 				return nil
 			}
+			c.root = filepath.Join(root, "myce-worker.service")
+			w := Worker{Unit: "myce-worker.service", ServiceConfig: &ServiceConfig{Slice: slice}, memoryCeilings: c, jointMemoryCommand: command}
 			for _, gb := range []float64{5, 5, 3, 0} {
-				if err := c.setJointMemoryLimit(context.Background(), root, HostMemoryBudget{GiB: gb}, 0, command); err != nil {
+				if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: gb}); err != nil {
 					t.Fatal(err)
+				}
+				if st := w.Machine.MemoryContainment; st == nil || st.State != "available" {
+					t.Fatalf("migrated worker status: %+v", st)
 				}
 			}
 			if calls != 3 {
 				t.Fatal("unchanged allowance rewrote systemd", calls)
 			}
+			w.jointMemoryCommand = func(context.Context, ...string) error { return os.ErrPermission }
+			if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 7}); !errors.Is(err, os.ErrPermission) || w.Machine.MemoryContainment != nil {
+				t.Fatalf("migrated manager failure bypassed: status=%+v err=%v", w.Machine.MemoryContainment, err)
+			}
+			w.ServiceConfig.Slice = "invalid/path.slice"
+			if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 5}); err == nil {
+				t.Fatal("invalid configuration degraded instead of refusing")
+			}
+
 			if _, err := jointMemoryRoot(filepath.Join(root, "jobs.slice", "attempt.scope"), slice); err != nil {
 				t.Fatal(err)
 			}
@@ -252,6 +279,22 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 				fs := &inheritedOOMMemoryFS{minimum: 200, refuseRaise: tier == "refused raise", refusePromotion: tier == "refused promotion", scores: map[string]int{}}
 				c := fakeCeilings(t)
 				c.fs = fs
+				w := recoveryWorker(t)
+				w.Unit, w.memoryCeilings = "myce-worker.service", c
+				w.jointMemoryCommand = func(context.Context, ...string) error {
+					t.Fatal("unmigrated worker changed a slice")
+					return nil
+				}
+				w.initMemoryCeilings()
+				if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 5}); err != nil {
+					t.Fatal(err)
+				}
+				if st := w.Machine.MemoryContainment; st == nil || st.State != "unavailable" || st.Reason == "" || !strings.Contains(st.Next, "#1771") {
+					t.Fatalf("unmigrated worker status: %+v", st)
+				}
+				if w.memoryCeilings != c || w.Machine.MemoryEnforcement != cgroupMemoryEnforcement {
+					t.Fatal("per-attempt enforcement lost")
+				}
 				class, want := "test", "1000"
 				if tier == "highest" || tier == "refused promotion" {
 					class, want = "production", "200"
@@ -260,8 +303,6 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 				var err error
 				var update func(int) error
 				if kind == "batch" {
-					w := recoveryWorker(t)
-					w.memoryCeilings = c
 					w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
 					store, e := w.openStore()
 					if e != nil {
@@ -332,6 +373,26 @@ func TestMemoryCeilingTierScores(t *testing.T) {
 				if err != nil {
 					t.Fatal("unprivileged inherited-score launch failed:", err)
 				}
+				entries, err := os.ReadDir(c.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, entry := range entries {
+					if !entry.IsDir() || entry.Name() == "worker" {
+						continue
+					}
+					found = true
+					for name, want := range map[string]string{"memory.max": "1073741824", "memory.swap.max": "0", "memory.oom.group": "1", "cgroup.procs": strconv.Itoa(pid)} {
+						b, err := fs.ReadFile(filepath.Join(c.root, entry.Name(), name))
+						if err != nil || string(b) != want {
+							t.Fatalf("retained %s=%s want=%s err=%v", name, b, want, err)
+						}
+					}
+				}
+				if !found {
+					t.Fatal("per-attempt memory cgroup missing")
+				}
 				got, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "oom_score_adj"))
 				if err != nil || string(got) != want || fs.refused != 0 {
 					t.Fatalf("score=%s want=%s refused=%d err=%v", got, want, fs.refused, err)
@@ -358,6 +419,37 @@ func TestMemoryCeilingUnavailableIsExplicit(t *testing.T) {
 	w.initMemoryCeilings()
 	if !strings.Contains(w.Machine.MemoryEnforcement, "memory ceiling not enforced on this host (") {
 		t.Fatal(w.Machine.MemoryEnforcement)
+	}
+	w.Unit, w.memoryCeilings = "myce-worker.service", fakeCeilings(t)
+	w.jointMemoryCommand = func(context.Context, ...string) error {
+		t.Fatal("legacy unit must not set slice properties")
+		return nil
+	}
+	if err := w.syncJointMemoryCeiling(t.Context(), HostMemoryBudget{GiB: 5}); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := fixture(t)
+	check(t, q, w.Machine, nil)
+	s, err := q.publicSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Machines) != 1 || s.Machines[0].MemoryContainment == nil || s.Machines[0].MemoryContainment.State != "unavailable" {
+		t.Fatalf("worker status lost containment condition: %+v", s.Machines)
+	}
+	compact := NewCompactStatus(s)
+	data, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"memory_containment":{"state":"unavailable"`) {
+		t.Fatal(string(data))
+	}
+	text := strings.Join(compact.Lines(false), "\n")
+	for _, want := range []string{"memory_containment: unavailable", "outside the configured slice", "migrate the worker unit", "#1771"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -507,6 +599,27 @@ func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 		valid := slice == "" || strings.HasPrefix(slice, "mycetest")
 		if valid && (err != nil || restored.workerSlice() != c.workerSlice()) || !valid && err == nil {
 			t.Fatalf("slice config round trip: %q %+v %v", slice, restored, err)
+		}
+		if slice == "" {
+			if strings.Contains(string(data), `"slice"`) {
+				t.Fatal("legacy config should omit slice")
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields["slice"] = json.RawMessage(`""`)
+			data, err = json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(config, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			restored, err = ReadServiceConfig(config)
+			if err != nil || restored.workerSlice() != "myce.slice" {
+				t.Fatalf("explicit empty legacy slice: %+v %v", restored, err)
+			}
 		}
 	}
 }
@@ -755,13 +868,14 @@ func TestMemoryCeilingPrivacyAndValidation(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("worker", "fake")
 	m.MemoryEnforcement = "synthetic-secret"
+	m.MemoryContainment = &MemoryContainment{State: "unavailable", Reason: "synthetic-secret", Next: "synthetic-secret"}
 	check(t, q, m, nil)
 	s, err := q.publicSnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, report := range s.Machines {
-		if strings.Contains(report.MemoryEnforcement, "synthetic-secret") {
+		if strings.Contains(report.MemoryEnforcement, "synthetic-secret") || report.MemoryContainment == nil || strings.Contains(report.MemoryContainment.String(), "synthetic-secret") {
 			t.Fatal("unsafe capability diagnostic")
 		}
 	}
