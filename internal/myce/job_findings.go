@@ -247,7 +247,7 @@ func resourceStopFinding(j *Job, c *RuntimeCause) *JobFinding {
 		if e := c.RSSLimit; e != nil {
 			if d := safeMemoryRoom(e.MemoryRoom); d != nil {
 				return &JobFinding{"memory_capacity", findingOwnerMycelium,
-					fmt.Sprintf("Mycelium stopped exploratory work at its measured memory-room bound: %g GiB room, %g GiB capacity from %s, %g GiB other charges and %g GiB pending growth.", d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB),
+					fmt.Sprintf("Mycelium stopped exploratory work at its %s capacity bound: %g GiB computed room, %g GiB capacity from %s, %g GiB other charges and %g GiB pending growth.", gib(float64(e.LimitBytes)), d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB),
 					"keep the same job and key; Mycelium retries with the measured demand when capacity is available."}
 			}
 			what = fmt.Sprintf("Mycelium stopped your command because its sampled memory reached %s, above the %s limit resolved from your declaration.", gib(float64(e.ObservedBytes)), gib(float64(e.LimitBytes)))

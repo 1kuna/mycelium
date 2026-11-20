@@ -75,7 +75,6 @@ type firstRunFloorRoom struct {
 	at              time.Time
 	used, available float64
 	charge, pending float64
-	ledgerKnown     bool
 	decision        *MemoryRoomDecision
 }
 
@@ -201,7 +200,7 @@ func (r *firstRunFloorRoom) limitBytes(now time.Time, bytes uint64, host *gpuHos
 	charge, pending := r.others()
 	failed := !validMemoryValue(charge) || !validMemoryValue(pending)
 	if !failed {
-		r.charge, r.pending, r.ledgerKnown = charge, pending, true
+		r.charge, r.pending = charge, pending
 	}
 	// A failed read is not a full-allowance charge. Retain the admitted ledger
 	// while the physical-room and hard guards keep running during replacement.
@@ -223,6 +222,6 @@ func (r *firstRunFloorRoom) limitBytes(now time.Time, bytes uint64, host *gpuHos
 
 func (r *firstRunFloorRoom) reset() {
 	if r != nil {
-		*r = firstRunFloorRoom{others: r.others, charge: r.charge, pending: r.pending, ledgerKnown: r.ledgerKnown, decision: r.decision}
+		*r = firstRunFloorRoom{others: r.others, charge: r.charge, pending: r.pending, decision: r.decision}
 	}
 }

@@ -36,7 +36,7 @@ func safeRSSLimit(e *RSSLimitEvidence) *RSSLimitEvidence {
 
 func (e *RSSLimitEvidence) String() string {
 	if d := e.MemoryRoom; d != nil {
-		return fmt.Sprintf("sampled memory %d bytes exceeded measured room %g GiB (capacity %g GiB from %s; charges %g GiB; pending %g GiB)", e.ObservedBytes, d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB)
+		return fmt.Sprintf("sampled memory %d bytes exceeded capacity bound %d bytes (computed room %g GiB; capacity %g GiB from %s; charges %g GiB; pending %g GiB)", e.ObservedBytes, e.LimitBytes, d.RoomGB, d.CapacityGB, d.CapacitySource, d.ChargeGB, d.PendingGB)
 	}
 	if e.Quality == "cgroup_current" {
 		return fmt.Sprintf("sampled cgroup memory %d bytes exceeded resolved limit %d bytes (%s)", e.ObservedBytes, e.LimitBytes, e.Quality)

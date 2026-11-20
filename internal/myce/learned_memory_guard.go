@@ -156,7 +156,7 @@ func (w Worker) learnedGuard(j Job) learnedMemoryGuard {
 			d = &copy
 		}
 		g.room.decision = d
-		g.room.charge, g.room.pending, g.room.ledgerKnown = d.ChargeGB, d.PendingGB, w.firstRunAdmission != nil
+		g.room.charge, g.room.pending = d.ChargeGB, d.PendingGB
 	} else if floorCharged(j.MemoryEnvelope) {
 		g.limit = 0 // A missed launch refusal must never become a strict floor guard.
 	}
