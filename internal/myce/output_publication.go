@@ -201,9 +201,15 @@ func openOutputConfirmations(root string, files FileManifest) (*os.File, map[str
 }
 
 func (w Worker) publishOutputFiles(ctx context.Context, j Job, parent string, step, outputName *string) (FileManifest, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	root := filepath.Join(attemptPublicationRoot(j, parent), "outputs")
 	p, terminal, err := w.outputPublication(ctx, j, root, step, outputName)
 	if err != nil {
+		if ctx.Err() != nil {
+			terminal = false
+		}
 		return nil, terminal, err
 	}
 	// Persist newly created managed ancestors too, before any acknowledgement
@@ -295,7 +301,7 @@ func (w Worker) publishOutputFiles(ctx context.Context, j Job, parent string, st
 	}
 	*step, *outputName = "output_validation", ""
 	if err := p.check(ctx); err != nil {
-		return nil, true, err
+		return nil, ctx.Err() == nil, err
 	}
 	return p.Files, false, nil
 }
