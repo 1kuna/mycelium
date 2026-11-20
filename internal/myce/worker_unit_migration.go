@@ -12,7 +12,7 @@ const workerUnitMigrationFile = "worker-unit-migration.json"
 const workerUnitMigrationDropIn = "50-myce-memory-containment.conf"
 
 func (c ServiceConfig) workerContainmentSettings() string {
-	return "Slice=" + c.workerSlice() + "\nOOMScoreAdjust=0\n"
+	return "OOMScoreAdjust=0\nSlice=" + c.workerSlice() + "\n"
 }
 
 // StageWorkerUnitMigration changes only the next invocation's placement. It
