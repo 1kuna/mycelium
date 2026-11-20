@@ -35,6 +35,8 @@ func TestSpecCheck(t *testing.T) {
 		{"yaml", validJobYAML, ""},
 		{"json", `{"name":"offline","project":"example","run":{"command":["echo","ok"]},"needs":{"cpu_cores":1,"memory_gb":1}}`, ""},
 		{"extension", validExtensionYAML, ""},
+		{"resident extension pieces", validExtensionYAML + "advanced: {resident: {model: speech-engine}}\nworkload: {input_shape: fixture, units: 1}\nfan_out: {max_concurrency: 1, pieces: [{key: a, args: [a]}, {key: b, args: [b]}, {key: c, args: [c]}]}\n", ""},
+		{"resident plain pieces wire form", validJobYAML + "advanced: {resident: {model: speech-engine}}\nfan_out: {pieces: [{key: a, args: [a]}, {key: b, args: [b]}, {key: c, args: [c]}]}\n", ""},
 		{"unknown", validJobYAML + "typo: true\n", "field typo not found"},
 		{"nested unknown", validJobYAML + "environment: {typo: true}\n", "unknown environment field"},
 		{"json unknown", `{"name":"offline","typo":true}`, "field typo not found"},

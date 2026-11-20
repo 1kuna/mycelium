@@ -222,7 +222,13 @@ and opt the entry in:
 ```
 
 Declare the input, supported platform and the client's staging/CPU memory as
-usual. `pieces` still gives one independently accepted result per input. The
+usual. Plain-command `pieces:` and extension `fan_out` each give one independently
+accepted result per input. Children inherit the parent's frozen engine binding;
+per-piece arguments and inputs do not change it. Set `max_concurrency: 1` on
+extension fan-out for serial back-to-back use of one warm copy when capacity
+remains available. Plain-command pieces omit that cap and are placed independently.
+Resident jobs and their children must be non-resumable and single-device,
+without CPU fallback. A failed piece leaves accepted siblings accepted. The
 catalog server's measured budget covers model/runtime plus one request peak;
 Mycelium charges it once per host/card and serializes calls to that copy.
 The stage command is a client; move model loading into the server, whose exact

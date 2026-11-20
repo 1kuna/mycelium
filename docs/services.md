@@ -36,7 +36,24 @@ entries:
 
 Submit with `myce run --entry infer --out accepted`.
 Use `pieces` for many inputs; each piece remains a separate durable job and
-publishes its own verified outputs. Existing ordinary-producer and per-piece
+publishes its own verified outputs. All children inherit the parent's frozen
+resident binding before per-piece arguments and inputs are applied. For an
+extension entry or registered extension, declare serial pieces with:
+
+```yaml
+advanced: {resident: {model: speech-engine}} # Omit if the extension declares resident.
+workload: {input_shape: audio, units: 1}
+fan_out:
+  max_concurrency: 1
+  pieces: [{key: a, args: [a]}, {key: b, args: [b]}, {key: c, args: [c]}]
+```
+
+This runs one child at a time, back-to-back on one warm copy when capacity
+remains available. Plain-command entries use `pieces:` with per-piece `inputs`
+and `args`, without `max_concurrency`; their jobs are placed independently and
+calls serialize within each host/card's engine copy. Resident jobs and their
+children must be non-resumable and single-device, without CPU fallback.
+Existing ordinary-producer and per-piece
 `after` dependencies become ready only after exact-attempt output acceptance.
 Keep production target declarations and MY-19 parity checks for the client and
 server contract. This example's CUDA requirement is illustrative; select the
@@ -72,7 +89,9 @@ pressure and higher-priority demand can reclaim it earlier; memory remains
 charged until exact engine unload acknowledgement. Only the engine survives:
 work directories, accepted results, cancellation, retries and release custody
 remain attempt-specific. A failed input does not invalidate accepted siblings;
-engine death interrupts calls without silently replaying their request.
+plain pieces let other siblings settle, while extension fan-out retains its
+fail-fast policy for unfinished work. Engine death interrupts calls without
+silently replaying their request.
 
 `worker_data: ephemeral` remains unsupported with resident engines and receives
 `job_worker_data_unsupported`: request spools and shared server memory are outside
