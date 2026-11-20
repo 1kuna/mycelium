@@ -819,6 +819,9 @@ In an existing project, Mycelium now does these; delete your own:
 When finished work fills the file store, use `myce file release plan --project
 NAME JOB_ID...`, inspect the plan, then `myce file release apply --accept-expiry
 PLAN_FILE`. Include every finished owner whose queue recovery you can give up.
+For `physical_custody`, inspect each job's `custody_blockers`: blocker job ID,
+state and relationship `path` (for example, `after` evaluation then `after`
+serving). `other_project: true` means another project's job, with details hidden.
 Code bundles held as inputs follow explicit release and the project's
 `file_retention`; they do not wait another queue-wide window from upload.
 `bundle_tracked` alone does not mean protected: `reclaimable_bytes` counts released
