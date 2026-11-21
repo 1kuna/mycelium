@@ -491,7 +491,8 @@ def downgrade(previous, candidate, scratch, tools):
         saved = json.loads(saved_bytes)
         command(install_command, env=env, timeout=30)
         restored = json.loads(config_path.read_bytes())
-        assert all(restored[field] == saved[field] for field in ("file_retention", "log_retention")), "downgrade changed explicit retention"
+        for field in ("environment_cache_bytes", "file_retention", "log_retention"):
+            assert restored[field] == saved[field], f"downgrade changed {field}"
         with process(previous[0], "worker", root / "worker", queue=url, config=config, tools=tools):
             await_file(root / "queue/receipts.json", queue, lambda value: len(json.loads(value)) >= 2)
             rows = json.loads((root / "queue/receipts.json").read_text())
