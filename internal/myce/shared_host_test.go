@@ -506,7 +506,9 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		}
 	})
 	c := d.Client()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	// The background parent also services the fixture queue. Give the whole
+	// journey the same I/O budget as its awaits under contention.
+	ctx, cancel := context.WithTimeout(t.Context(), testWaitTimeout)
 	defer cancel()
 	path := "/api/hosts/dev-host/maintenance"
 	var status HostMaintenanceStatus
