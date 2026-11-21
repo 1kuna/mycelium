@@ -53,12 +53,28 @@ func (a API) registerCacheReferences(mux *requestMux) {
 // Read only the existing queue manifests/capacity hints. This does not grant
 // placement, release unique data or inspect worker files under the mutex.
 func (q *Queue) workerDiskDemand(ctx context.Context, request workerDiskDemandRequest) []workerDiskDemand {
-	unlock := requestReadLock(ctx, &q.mu)
-	defer unlock()
-	m := q.s.Machines[request.Machine]
-	if m == nil || m.Session != request.Session {
+	index := q.publishedReads.Load()
+	base, err := index.diskDemandBase()
+	if err != nil {
 		return nil
 	}
+	m := base.Machines[request.Machine]
+	if m == nil || m.Gone || request.Session == "" || m.Session != request.Session || len(m.DiskVolumes) == 0 {
+		return nil
+	}
+	source, err := index.diskDemandQueue(ctx, base, q.clock, true)
+	if err != nil {
+		return nil
+	}
+	out := source.pendingDiskDemand(m)
+	latest := q.publishedReads.Load()
+	if latest.capture.generation != index.capture.generation || ctx.Err() != nil {
+		return nil
+	}
+	return out
+}
+
+func (q *Queue) pendingDiskDemand(m *Machine) []workerDiskDemand {
 	var out []workerDiskDemand
 	for _, volume := range m.DiskVolumes {
 		floor := diskFreeFloor(volume.TotalBytes)
@@ -97,10 +113,12 @@ func (w Worker) reclaimPendingDisk(ctx context.Context) {
 		return
 	}
 	var compilerVolume string
+	var writeSlack uint64
 	path := "/api/workers/disk-demand"
 	if w.compilerCache != nil {
 		if disk, err := w.diskBudget.probe(w.compilerCache.cache.Root); err == nil && disk.Volume != "" {
 			compilerVolume = disk.Volume
+			writeSlack = w.diskBudget.measureFileStoreWrites(disk)
 			path += "?" + url.Values{"compiler_volume": {diskVolumeID(hostID(&w.Machine), compilerVolume)}}.Encode()
 		}
 	}
@@ -122,7 +140,7 @@ func (w Worker) reclaimPendingDisk(ctx context.Context) {
 	}
 	for _, demand := range demands {
 		if demand.FileStore != nil && compilerVolume != "" {
-			w.diskBudget.trimForFileStore(ctx, w.compilerCache, compilerVolume, *demand.FileStore)
+			w.diskBudget.trimForFileStore(ctx, w.compilerCache, compilerVolume, *demand.FileStore, writeSlack)
 			continue
 		}
 		for _, role := range demand.Roots {

@@ -195,7 +195,7 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
 	} else if store != nil {
-		store.noteBlockedWrite(ctx, files, "", err)
+		store.noteBlockedWrite(ctx, files, "", status.diskVolume, err)
 	}
 	return ordinary, err
 }
@@ -250,7 +250,7 @@ func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapsho
 	if err == nil {
 		q.recordStorageWritePressure(ctx, status, payloads, files, growth, false, "")
 	} else {
-		s.noteBlockedWrite(ctx, files, "", err)
+		s.noteBlockedWrite(ctx, files, "", status.diskVolume, err)
 	}
 	return ordinary, err
 }

@@ -64,7 +64,7 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 		if measured && (err == nil || errors.As(err, &refusal) && fileCapacityCode(refusal.Code)) {
 			attemptCtx := context.WithValue(ctx, fileStoreAttemptKey{}, fileStoreAttempt{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 			q.recordStorageWritePressure(attemptCtx, pressureStatus, pressurePayloads, r.OutputRefs, pressureGrowth, err != nil, r.ID)
-			pressureStore.noteBlockedWrite(attemptCtx, r.OutputRefs, r.ID, err)
+			pressureStore.noteBlockedWrite(attemptCtx, r.OutputRefs, r.ID, pressureStatus.diskVolume, err)
 		}
 	}()
 	if err := r.OutputRefs.validate(); err != nil {

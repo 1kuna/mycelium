@@ -43,6 +43,8 @@ type workerHygieneCollector struct {
 	nextPressureAt time.Time // Only accessed by the serialized retention lane.
 }
 
+const workerHygieneMinInterval = time.Minute
+
 func (c *workerHygieneCollector) snapshot() *WorkerHygieneCollection {
 	if c == nil {
 		return nil
@@ -66,7 +68,7 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 			c.w.reclaimPendingDisk(ctx)
 			c.w.diskBudget.reclaimPressure(ctx)
 			ended := c.w.Clock.Now()
-			c.nextPressureAt = ended.Add(max(time.Minute, ended.Sub(started)*10))
+			c.nextPressureAt = ended.Add(max(workerHygieneMinInterval, ended.Sub(started)*10))
 		}
 		return
 	}
@@ -106,8 +108,8 @@ func (c *workerHygieneCollector) collect(ctx context.Context) {
 	}
 	// A measured expensive sweep backs off instead of continuously scanning a
 	// large cache. The tenfold period budgets at most 10% of time for hygiene.
-	r.NextAt = c.w.Clock.Now().Add(max(time.Minute, c.w.Clock.Now().Sub(started)*10))
-	c.nextPressureAt = c.w.Clock.Now().Add(time.Minute)
+	r.NextAt = c.w.Clock.Now().Add(max(workerHygieneMinInterval, c.w.Clock.Now().Sub(started)*10))
+	c.nextPressureAt = c.w.Clock.Now().Add(workerHygieneMinInterval)
 	c.mu.Lock()
 	c.report = r
 	c.mu.Unlock()
