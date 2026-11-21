@@ -61,9 +61,9 @@ func (q *Queue) markBundleUpload(hash string) {
 	q.s.BundleUploads[hash] = q.clock.Now()
 }
 
-// Creation and publication callers hold fileLifecycle.RLock. Only newly
-// created job-input identities acquire eligibility; reusing an unmarked import
-// never makes it collectible. A generic import permanently releases the marker.
+// Callers hold the file lifecycle fence. Creation records new job-input
+// identities and interrupted-upload recovery restores verified legacy markers.
+// Reusing an unmarked import never enrolls it for published-blob collection.
 func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 	if purpose == attemptOutputUploadPurpose {
@@ -126,7 +126,7 @@ func (q *Queue) releaseFileUploadMarkers() {
 	if len(q.s.JobInputUploads) == 0 {
 		return
 	}
-	_, _, referenced := q.fileReferences(false, q.touchedJobs())
+	_, _, referenced := q.collectDurableFileReferences(false, nil, nil, q.touchedJobs())
 	q.records.referenceAdds = referenced
 	for hash := range q.s.JobInputUploads {
 		if referenced[hash] || q.records.references[hash] {
@@ -139,6 +139,8 @@ func (q *Queue) ConfigureFileRetention(age time.Duration) error {
 	if age < 0 {
 		return errors.New("file-retention must be nonnegative")
 	}
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.fileRetention = age
@@ -320,6 +322,23 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 // The release planner uses the collector itself, treating only eligible selected
 // jobs as expired. Explanations therefore follow the same protection decisions.
 func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]bool, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
+	expired, keep, referenced = q.collectDurableFileReferences(pendingOnly, releasing, report, subset...)
+	for _, claim := range q.s.FileInputClaims {
+		if claim.SettledAt.IsZero() {
+			hash := claim.File.SHA256
+			keep[hash], referenced[hash] = true, true
+			if report != nil {
+				report(claim.File, FileKeepingReference{Kind: "input_claim", Name: claim.ID, Project: claim.Project})
+			}
+		}
+	}
+	return expired, keep, referenced
+}
+
+// An unsettled input claim keeps a published blob. It does not retire the
+// cleanup marker or give an interrupted transfer the custody of a job, catalog
+// asset or other committed reference.
+func (q *Queue) collectDurableFileReferences(pendingOnly bool, releasing map[string]bool, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if len(subset) == 0 {
 		for hash := range q.s.RetiredJobFiles {
@@ -337,13 +356,6 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 			}
 		}
 	}
-	for _, claim := range q.s.FileInputClaims {
-		if claim.SettledAt.IsZero() {
-			owner = FileKeepingReference{Project: claim.Project}
-			keepFiles("input_claim", FileManifest{claim.ID: claim.File})
-		}
-	}
-	owner = FileKeepingReference{}
 	for hash := range q.bundleReferences(subset...) {
 		keepFiles("extension_environment_bundle", FileManifest{"bundle": {SHA256: hash}})
 	}

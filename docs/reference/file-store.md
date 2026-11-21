@@ -92,10 +92,18 @@ job reference clears the marker; terminal-job retention then applies. Unmarked
 imports (`myce file put`, Go `UploadFile`, models and older clients) are never
 orphan-swept, even if no model catalog is loaded or an entry is removed. Reusing an
 unmarked import as a job input cannot mark it; a generic import clears any marker.
-Marked interrupted tus uploads are reclaimed after an idle retention window and
-the publication grace. POST/HEAD/PATCH refresh their durable idle timestamp using
-the queue Clock; active requests and all protected references survive collection.
-Unmarked imports and unknown files remain for explicit inspection.
+Interrupted job-input uploads with unsettled claims are reclaimable after the
+queue-wide `--file-retention` idle window (72h by default). Collection removes the
+partial data and its unwritten reservation, and retires the claim. For older
+transfers missing the cleanup marker, the queue requires both the original
+job-input tus metadata and an exact matching allocated claim. Successful upload
+POST/HEAD/PATCH requests refresh the durable idle timestamp using the queue clock.
+Active requests and committed references are fenced against collection. Rerun
+the upload to obtain a fresh claim and start at offset zero after collection.
+Published inputs still keep their unsettled-claim protection. A retention of `0`
+disables idle collection. Interrupted uploads without claims still use the
+retention window and publication grace. Unknown files and uploads created as
+unmarked imports remain for explicit inspection.
 
 `myce status` and `/api/status.file_store` report the queue-file-store's payload
 `used_bytes`, admission `free_bytes`, and currently `reclaimable_bytes`. Free space

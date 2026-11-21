@@ -117,6 +117,12 @@ shortage. Wait for the binding shortage to clear before retrying; a new key does
 not relieve it. Successful finalization clears the pending diagnostic. See the
 [capacity status fields](https://github.com/1kuna/mycelium/blob/main/docs/status.md#file-store-capacity-refusals).
 
+The queue can reclaim an interrupted job-input upload and retire its claim after
+the configured `--file-retention` idle window (72h by default). If the upload
+session or its claim is gone, rerun the upload from the original input to get a
+fresh claim and start at offset zero. Published inputs with unsettled claims
+stay available for submission.
+
 Temporary zero request-memory headroom returns `503 request_capacity_unavailable`;
 safe reads, waits and keyed submissions retry within the same caller budget.
 A positive fitting size exceeded by a request remains `413 request_too_large`.

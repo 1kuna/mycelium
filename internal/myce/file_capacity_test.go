@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func capacityPartial(t *testing.T, c Client, content, purpose string) FileRef {
+func capacityPartial(t *testing.T, c Client, content, purpose string, contexts ...context.Context) FileRef {
 	t.Helper()
+	ctx := requestContext(contexts)
 	path := filepath.Join(t.TempDir(), "input")
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
@@ -27,14 +29,14 @@ func capacityPartial(t *testing.T, c Client, content, purpose string) FileRef {
 	if purpose != "" {
 		metadata += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
 	}
-	res, err := c.fileRequest(context.Background(), "POST", "/api/files/uploads/", nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": metadata}, 0)
+	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": metadata}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fileResponse(res, 201); err != nil {
 		t.Fatal(err)
 	}
-	res, err = c.fileRequest(context.Background(), "PATCH", "/api/files/uploads/"+ref.SHA256, strings.NewReader(content[:2]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"}, 0)
+	res, err = c.fileRequest(ctx, "PATCH", "/api/files/uploads/"+ref.SHA256, strings.NewReader(content[:2]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,53 +46,176 @@ func capacityPartial(t *testing.T, c Client, content, purpose string) FileRef {
 	return ref
 }
 
-func TestFileCapacityUnsubmittedClaimsProtectCollection(t *testing.T) {
-	for _, interrupted := range []bool{false, true} {
-		t.Run(strconv.FormatBool(interrupted), func(t *testing.T) {
+func TestFileCapacityUnsubmittedClaimsProtectPublishedInputs(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	path, ref := policyInput(t, "claimed input without any job reference")
+	owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
+	if err := c.UploadJobInput(owner, path, ref); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != 0 {
+		t.Fatal("claimed bytes reported reclaimable", status)
+	}
+	s := spec("experiment")
+	s.Project = "owner"
+	s.Files = FileManifest{"input": ref}
+	submit(t, q, s)
+}
+
+func claimedCapacityPartial(t *testing.T, q *Queue, c Client, content, purpose string) (FileInputClaim, context.Context) {
+	t.Helper()
+	ref := creationRef(content)
+	owner := Spec{Project: "owner", Class: "experiment"}
+	claim, err := q.claimFileInput(context.Background(), owner, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(WithFileStoreSubmission(context.Background(), owner), fileInputClaimKey{}, claim.ID)
+	capacityPartial(t, c, content, purpose, ctx)
+	// The HTTP response can reach the client before the durable idle refresh.
+	q.fileLifecycle.Lock()
+	q.fileLifecycle.Unlock()
+	return claim, ctx
+}
+
+func TestFileCapacityAbandonedClaimedUploadSweep(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(strconv.FormatBool(legacy), func(t *testing.T) {
 			q, clock := fixture(t)
 			c := retentionClient(t, q)
-			q.fileRetention = testFileRetention
-			const content = "claimed input without any job reference"
-			path, ref := policyInput(t, content)
-			if interrupted {
-				ref = capacityPartial(t, c, content, jobInputUploadPurpose)
-			} else if err := c.UploadJobInput(context.Background(), path, ref); err != nil {
+			const idle = time.Hour // Shorter than the seeded publication grace.
+			if err := q.ConfigureFileRetention(idle); err != nil {
 				t.Fatal(err)
 			}
-			owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
-			claim, err := q.claimFileInput(owner, Spec{Project: "owner"}, ref)
-			if err != nil {
-				t.Fatal(err)
+			abandoned, ctx := claimedCapacityPartial(t, q, c, "abandoned claimed input", jobInputUploadPurpose)
+			imported, _ := claimedCapacityPartial(t, q, c, "claimed unknown import", "")
+			if legacy {
+				if err := q.update(func() error { delete(q.s.JobInputUploads, abandoned.File.SHA256); return nil }); err != nil {
+					t.Fatal(err)
+				}
+			} else if at, marked := q.s.JobInputUploads[abandoned.File.SHA256]; !marked || !at.IsZero() {
+				t.Fatal("unsettled claim lost the interrupted-upload marker")
 			}
-			ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
-			clock.Advance(testFileRetention + filePublicationGrace + time.Second)
-			// Collect before HEAD can refresh the upload's modification time.
+			path := filepath.Join(q.files.root, "uploads", abandoned.File.SHA256)
+			allocated, err := storageAllocation(ctx, path, false, map[[2]uint64]bool{})
+			if err != nil || allocated == 0 {
+				t.Fatalf("partial upload did not allocate blocks: %d, %v", allocated, err)
+			}
+			clock.Advance(idle - time.Nanosecond)
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != 0 {
-				t.Fatal("claimed bytes reported reclaimable", status)
+			before := q.fileStoreStatus(ctx)
+			if before.Error != "" || before.UsedBytes != 4 || before.Physical.RemainingUploadBytes != uint64(abandoned.File.SizeBytes+imported.File.SizeBytes-4) {
+				t.Fatalf("early collection or missing upload commitment: %+v", before)
 			}
-			if interrupted {
-				res, err := c.fileRequest(ctx, "HEAD", "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0"}, ref.SizeBytes)
-				if err != nil {
+			clock.Advance(2 * time.Nanosecond)
+			if status := q.fileStoreStatus(ctx); status.ReclaimableBytes != 2 {
+				t.Fatalf("idle claimed bytes missing from reclaimable accounting: %+v", status)
+			}
+			if legacy {
+				syncDir := q.files.syncDir
+				q.files.syncDir = func(string) error { return errors.New("test interrupted cleanup sync") }
+				if err := q.reclaimInterruptedUploads(); err != nil {
 					t.Fatal(err)
 				}
-				if err := fileResponse(res, 200); err != nil {
-					t.Fatal("claimed resumable upload collected", err)
+				q.files.syncDir = syncDir
+				if _, marked := q.s.JobInputUploads[abandoned.File.SHA256]; !marked {
+					t.Fatal("failed cleanup lost legacy ownership after unlink")
 				}
-			} else if err := c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
-				t.Fatal("claimed published input collected", err)
+				if _, ok := q.s.FileInputClaims[abandoned.ID]; !ok {
+					t.Fatal("claim released before cleanup completed")
+				}
 			}
+			if err := c.PreflightFileStore(context.Background(), FileManifest{"new": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}); err != nil {
+				t.Fatal(err)
+			}
+			after := q.fileStoreStatus(ctx)
+			if after.Error != "" || after.UsedBytes != 2 || after.Physical.RemainingUploadBytes != uint64(imported.File.SizeBytes-2) {
+				t.Fatalf("abandoned upload retained bytes or commitment: %+v", after)
+			}
+			for _, suffix := range []string{"", ".info"} {
+				if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+					t.Errorf("abandoned upload retained %q: %v", suffix, err)
+				}
+			}
+			allocated, err = storageAllocation(ctx, path, true, map[[2]uint64]bool{})
+			if err != nil || allocated != 0 {
+				t.Fatalf("reclaimed upload still allocates blocks: %d, %v", allocated, err)
+			}
+			if _, ok := q.s.FileInputClaims[abandoned.ID]; ok {
+				t.Error("abandoned upload's claim survived collection")
+			}
+			if _, ok := q.s.FileInputClaims[imported.ID]; !ok {
+				t.Error("import lost its claim")
+			}
+			owner := WithFileStoreSubmission(context.Background(), Spec{Project: abandoned.Project, Class: abandoned.Class})
+			path, ref := policyInput(t, "abandoned claimed input")
 			if err := c.UploadJobInput(owner, path, ref); err != nil {
-				t.Fatal("claimed input cannot finish publication", err)
+				t.Fatal("cannot restart after collection", err)
 			}
-			s := spec("experiment")
-			s.Project = "owner"
-			s.Files = FileManifest{"input": ref}
-			submit(t, q, s)
 		})
 	}
+}
+
+func TestFileCapacityClaimedResumeAtIdleBoundary(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	const content = "claimed input resumed across collection"
+	claim, ctx := claimedCapacityPartial(t, q, c, content, jobInputUploadPurpose)
+	entered, unblock := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	defer release()
+	inputClaim := q.files.inputClaim
+	var pause sync.Once
+	q.files.inputClaim = func(ctx context.Context, ref FileRef, allocate bool) (context.Context, error) {
+		pause.Do(func() { close(entered); <-unblock })
+		return inputClaim(ctx, ref, allocate)
+	}
+	endpoint := "/api/files/uploads/" + claim.File.SHA256
+	done := make(chan error, 1)
+	go func() {
+		res, err := c.fileRequest(ctx, http.MethodHead, endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"})
+		if err == nil {
+			if res.Header.Get("Upload-Offset") != "2" {
+				err = errors.New("resume lost the accepted offset")
+				res.Body.Close()
+			} else {
+				err = fileResponse(res, http.StatusOK)
+			}
+		}
+		done <- err
+	}()
+	submitVerificationWait(t, "claimed resume in lifecycle fence", entered)
+	clock.Advance(testFileRetention)
+	if err := q.reclaimInterruptedUploads(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := submitVerificationWait(t, "claimed resume response", done); err != nil {
+		t.Fatal(err)
+	}
+	q.fileLifecycle.Lock()
+	q.fileLifecycle.Unlock()
+	if err := q.reclaimInterruptedUploads(); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.fileRequest(ctx, http.MethodPatch, endpoint, strings.NewReader(content[2:]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileResponse(res, http.StatusNoContent); err != nil {
+		t.Fatal("valid resume did not refresh the idle window", err)
+	}
+	s := spec("experiment")
+	s.Project = claim.Project
+	s.Files = FileManifest{"input": claim.File}
+	submit(t, q, s)
 }
 
 func TestFileCapacityAutomaticOrphansAreNotReclaimable(t *testing.T) {
@@ -98,7 +223,8 @@ func TestFileCapacityAutomaticOrphansAreNotReclaimable(t *testing.T) {
 	c := retentionClient(t, q)
 	q.fileRetention = 0
 	_, complete := retentionJobInput(t, c, "unsubmitted published input")
-	partial := capacityPartial(t, c, "unsubmitted interrupted input", jobInputUploadPurpose)
+	claim, _ := claimedCapacityPartial(t, q, c, "unsubmitted interrupted input", jobInputUploadPurpose)
+	partial := claim.File
 	clock.Advance(testFileRetention + filePublicationGrace + time.Second)
 	if status := q.fileStoreStatus(context.Background()); status.ReclaimableBytes != 0 {
 		t.Errorf("automatic retention overstates reclaimable bytes: %d", status.ReclaimableBytes)
