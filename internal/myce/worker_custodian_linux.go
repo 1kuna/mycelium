@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+func launchAttemptCustodian(ctx context.Context, c ServiceConfig, dir, id string, _ Execution) error {
+	return launchCustodian(ctx, c, dir, id)
+}
+
 func launchCustodian(ctx context.Context, c ServiceConfig, dir, id string) error {
 	if err := c.validateWorkerSlice(); err != nil {
 		return err
@@ -77,3 +81,5 @@ func verifyCustodianIsolation(id string, pid int, cgroup string) error {
 }
 
 func retireCustodian(string) {}
+
+func retireAttemptCustodian(string, string, Result) bool { return false }

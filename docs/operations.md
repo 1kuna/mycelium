@@ -1600,6 +1600,14 @@ worker or deleting its request does not repair a startup refusal. Older failed
 launches without a positive refusal receipt remain unresolved custody; upgrading
 alone does not prove their release.
 
+On Darwin, read the private `custodian-ID.startup.json` in the worker spool's
+sibling custody directory after a startup failure. It correlates the execution
+with the launchd bootstrap result, observed registration and exit or signal
+when available, snapshot status, and up to 8 KiB of stderr. The
+worker collects these before removing the launchd job and retains the receipt
+after release cleanup. Missing process status leaves the exit unknown. Keep
+the receipt private and remove it after the investigation no longer needs it.
+
 ### Recover the legacy pre-entry refusal
 
 `resolve-native` cannot resolve an old detached launch without a finished result.

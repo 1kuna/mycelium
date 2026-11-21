@@ -651,6 +651,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 				preparation := s.state.Preparation
 				custodian := s.state.Custodian
+				result := s.state.Result
 				s.state.Job, s.state.Result, s.state.Preparation = nil, nil, ""
 				// This branch requires confirmed release and queue acknowledgement.
 				// Failed launches may still carry intent or a previously reaped PID.
@@ -660,7 +661,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					return
 				}
 				if custodian != "" {
-					cleanupCustodian(custodianDir(s.dir), custodian)
+					cleanupCustodian(custodianDir(s.dir), custodian, *result)
 				}
 				if preparation != "" {
 					if e := os.Remove(filepath.Join(s.dir, preparation)); e != nil && !errors.Is(e, os.ErrNotExist) {
