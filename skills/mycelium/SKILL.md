@@ -302,6 +302,12 @@ the released interval after unload and match the response’s
 source, coverage, constraint and unavailability labels before qualifying a
 budget. See the [engine memory contract](https://github.com/1kuna/mycelium/blob/main/docs/reference/models.md#resident-engine-memory-peaks).
 
+For cross-version sizing, supporting queues use peaks for a resident client
+only from predecessor extensions that declare the same catalog engine. A
+switch from standalone to resident work can leave the new client without
+comparable peaks. Its first probe uses measured room left after protecting
+the engine budget.
+
 If native qualification holds a resident job, inspect the queue-owned check
 ID with `myce status --json CHECK_ID`. Supporting queues size cold probes
 after reserving the engine and report resident device, host or core refusals
