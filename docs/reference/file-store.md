@@ -344,9 +344,13 @@ private project or file names. The API equivalents are
 `{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
 read-only snapshot, not a reservation. Its digest identifies the reviewed
 custody, references and stored content; it is not a signature or an
-authorization token. Content aging out of publication grace raises
-`reclaimable_bytes` in a new plan but leaves the digest unchanged, so a reviewed
-plan stays valid; a new publication or HEAD refresh of selected content does not.
+authorization token. The digest binds presence and size for every selected blob.
+It binds the publication time only for blobs that are `collection_eligible`
+after the proposed release. Republishing or HEAD-refreshing shared blobs with
+keeping references updates their displayed publication time without invalidating
+the plan. When publication grace elapses, a new plan can show more
+`reclaimable_bytes` under the same digest. Regenerate unapplied plans saved before
+the queue upgraded to this digest rule.
 
 The plan lists each job's state, release/retention state, original expiry deadline,
 input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
@@ -388,6 +392,9 @@ HTTP 409 `file_release_protected` means a selected job is live, has unresolved
 physical custody or lacks required verified delivery. Include only eligible jobs
 in the next plan. Other projects' retained references can block physical removal
 without blocking expiry of your selected job references.
+HTTP 400 `file_release_invalid` gives the failed check, such as an unavailable
+selection, unconfigured store, or unreadable stored metadata. The response gives
+the same selection error for an unknown job and a job outside the project.
 
 A successful apply returns `collection: scheduled`: it durably sets the existing
 job file-expiry/reclamation state, preserving identities, manifests and a small

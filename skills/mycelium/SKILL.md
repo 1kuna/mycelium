@@ -976,7 +976,9 @@ Code bundles held as inputs follow explicit release and the project's
 `bundle_tracked` alone does not mean protected: `reclaimable_bytes` counts released
 bundles after publication grace when no keeping reference remains. Live, queued,
 unexpired or other projects' retained jobs still protect shared bytes, as do
-checkpoint, model, extension and environment custody. Apply schedules collection;
+checkpoint, model, extension and environment custody. Publication or HEAD refresh
+of a blob with keeping references leaves the reviewed plan valid. If apply reports
+`file_release_stale`, generate and review a new plan. Apply schedules collection;
 check status to confirm space was freed. A positive `pending_candidates` count
 can include files still in measured publication grace. Use `reclaimable_bytes`
 to see which bytes can be collected now. See the

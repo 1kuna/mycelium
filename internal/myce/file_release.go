@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"slices"
@@ -132,12 +131,16 @@ func fileReleaseError(code, message string) error {
 	return &HTTPError{Status: http.StatusConflict, Code: code, Message: message}
 }
 
+func fileReleaseInvalid(message string) error {
+	return &HTTPError{Status: http.StatusBadRequest, Code: "file_release_invalid", Message: message}
+}
+
 func normalizeFileRelease(s FileReleaseSelection) (FileReleaseSelection, error) {
 	s.Jobs = slices.Clone(s.Jobs)
 	slices.Sort(s.Jobs)
 	s.Jobs = slices.Compact(s.Jobs)
 	if s.Project == "" || len(s.Jobs) == 0 || slices.Contains(s.Jobs, "") {
-		return s, errors.New("release requires a project and explicit job IDs")
+		return s, fileReleaseInvalid("release requires a project and explicit job IDs")
 	}
 	return s, nil
 }
@@ -148,6 +151,20 @@ func fileReleaseDigest(v any) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Takes the metadata-only snapshot before inspecting stored content. The
+// separate bundle window and tracking cannot affect collection of a blob that
+// the selection leaves ineligible. Keep them in the displayed plan.
+func fileReleaseMetadataDigest(plan FileReleasePlan) string {
+	plan.Blobs = slices.Clone(plan.Blobs)
+	for i := range plan.Blobs {
+		b := &plan.Blobs[i]
+		if !b.CollectionEligible {
+			b.BundleTracked, b.BundleProtected = false, false
+		}
+	}
+	return fileReleaseDigest(plan)
+}
+
 // q.mu held. Only metadata work here; no blob reads, stats or NAS access.
 func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileReleasePlan, error) {
 	plan := FileReleasePlan{Selection: selection, Jobs: []FileReleaseJob{}, Blobs: []FileReleaseBlob{}}
@@ -156,7 +173,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 	for _, id := range selection.Jobs {
 		j := q.retainedJob(id)
 		if j == nil || j.Spec.Project != selection.Project {
-			return plan, errors.New("selected job is unavailable or belongs to another project")
+			return plan, fileReleaseInvalid("selected job is unavailable or belongs to another project")
 		}
 		item := FileReleaseJob{ID: j.ID, Project: j.Spec.Project, State: j.State, Release: q.observedRelease(j), FilesExpired: j.FilesExpired, Files: []FileReleaseFile{}, Blockers: []string{}}
 		item.CustodySHA256 = fileReleaseDigest(struct {
@@ -236,7 +253,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 	})
 	for hash := range hashes {
 		if (FileRef{SHA256: hash}).validate() != nil {
-			return plan, errors.New("invalid retained content identity")
+			return plan, fileReleaseInvalid("invalid retained content identity")
 		}
 		r := refs[hash]
 		slices.SortFunc(r, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
@@ -262,16 +279,16 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 	plan, err := q.fileReleaseMetadata(selection)
 	store, age := q.files, q.filePublicationAge(q.clock.Now())
 	unlock()
-	metadata := fileReleaseDigest(plan)
 	if err != nil {
-		return plan, metadata, store, err
+		return plan, "", store, err
 	}
 	if store == nil {
-		return plan, metadata, store, errors.New("queue file store is not configured")
+		return plan, "", store, fileReleaseInvalid("queue file store is not configured")
 	}
-	// The ID binds custody, references and stored content, including a fresh
-	// publication's mtime. Grace flags and reclaimable bytes are clock-derived and
-	// collection enforces them again, so aging out of grace must not stale a plan.
+	metadata := fileReleaseMetadataDigest(plan)
+	// Bind presence and size for every selected identity. Bind publication time
+	// only for collection candidates, before applying the time-dependent grace
+	// calculation. The collector rechecks grace and keeping references.
 	type storedContent struct {
 		SHA256     string
 		Present    bool
@@ -289,11 +306,17 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		if os.IsNotExist(err) {
 			continue
 		}
-		if err != nil || !st.Mode().IsRegular() {
-			return plan, metadata, store, errors.New("cannot inspect release content")
+		if err != nil {
+			return plan, metadata, store, fileReleaseInvalid("cannot read stored release content metadata")
+		}
+		if !st.Mode().IsRegular() {
+			return plan, metadata, store, fileReleaseInvalid("stored release content is not a regular file")
 		}
 		b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
-		stored[i].Present, stored[i].SizeBytes, stored[i].ModifiedAt = true, st.Size(), st.ModTime()
+		stored[i].Present, stored[i].SizeBytes = b.Present, b.SizeBytes
+		if b.CollectionEligible {
+			stored[i].ModifiedAt = b.ModifiedAt
+		}
 		b.PublicationProtected = age.protects(st.ModTime(), !b.BundleTracked)
 		b.BundleProtected = b.BundleProtected || b.BundleTracked && !b.CollectionEligible && st.ModTime().After(age.now.Add(-age.retention))
 		if b.CollectionEligible && !b.BundleProtected && age.payloadEligible(st, b.BundleTracked, b.CollectionEligible) {
@@ -327,7 +350,7 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 		return result, err
 	}
 	if !req.AcceptExpiry || req.PlanID == "" {
-		return result, errors.New("review a plan and explicitly accept expiry before applying")
+		return result, fileReleaseInvalid("review a plan and explicitly accept expiry before applying")
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -356,7 +379,7 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 			return nil
 		}
 		current, e := q.fileReleaseMetadata(selection)
-		if e != nil || q.files != store || fileReleaseDigest(current) != metadata {
+		if e != nil || q.files != store || fileReleaseMetadataDigest(current) != metadata {
 			return fileReleaseError("file_release_stale", "release references or custody changed; generate a new plan")
 		}
 		for _, id := range selection.Jobs {
@@ -376,7 +399,7 @@ func (a API) registerFileRelease(mux *requestMux) {
 			return
 		}
 		plan, err := a.Queue.PlanFileRelease(r.Context(), s)
-		respondOperation(w, plan, err, "file_release_invalid")
+		respond(w, plan, err)
 	})
 	mux.HandleFunc("POST /api/files/release/apply", func(w http.ResponseWriter, r *http.Request) {
 		var req FileReleaseApply
