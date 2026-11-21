@@ -1436,7 +1436,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == ephemeralCapability || c == ephemeralLegacyCapability || c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
-			if w.checkEphemeralSupport() == nil {
+			refusal, supportErr := w.checkEphemeralSupport()
+			if supportErr == nil {
 				// Keep accepting the older queue's plain-command contract during
 				// a rolling upgrade; v2 queues require the expanded contract.
 				m.Capabilities = append(m.Capabilities, ephemeralLegacyCapability, ephemeralCapability)
@@ -1504,7 +1505,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.SharedHostPressure = pressureProbe.snapshot(w.Machine.SharedHost != nil)
 			w.Machine.SharedHostPressure = m.SharedHostPressure
 			heartbeatStarted := w.Clock.Now()
-			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(observeCtx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, fleetProofIssue: w.fleet.proofIssue(), ephemeralRefusal: refusal, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			health.noteHeartbeat(w.Clock.Now().Sub(heartbeatStarted))
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {

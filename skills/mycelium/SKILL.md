@@ -350,7 +350,12 @@ pending cleanup is not a satisfied policy, even if the result succeeded. Retries
 restage inputs; startup recovers process custody and cleanup. Supporting Linux
 namespace workers with file core routing or the qualified Mycelium core router
 advertising `worker_data_ephemeral_v2` are required; v1 workers cannot run the
-expanded scope. Resumability, custom workdirs (including extension workdirs),
+expanded scope. A refusal or queued-job status naming `worker_data_ephemeral_v2`
+means the worker lacks ephemeral qualification. The reason identifies the
+missing namespace or core requirement when the worker has reported it. For a
+host-policy namespace refusal, see the
+[optional administrator action](https://github.com/1kuna/mycelium/blob/main/docs/native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces).
+Resumability, custom workdirs (including extension workdirs),
 program jobs, extension checks, model servers/snapshots, resident model runtimes, diagnostics,
 `keep_on_failure` and alternate output delivery remain refused with
 `job_worker_data_unsupported`. Environment recipes, extension source/assets and
